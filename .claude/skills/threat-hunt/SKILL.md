@@ -110,8 +110,10 @@ Guidance:
 
 After setup, use the repository’s native workflow instead of the old standalone skill flow:
 - operator guidance: `agent/CLAUDE.md` and `agent/AGENTS.md`
+- engagement methodology: `agent/references/runtime-guides/engagement-methodology.md`
 - orchestrator backend/frontend: `orchestrator/`
 - runtime helpers: `docker/` and `agent/scripts/lib/container.sh`
 - assessment ledger and coverage APIs: `orchestrator/backend/app/services/assessment.py`
+- optional Athena log review: `agent/skills/athena-log-investigation/SKILL.md`
 
 If detailed methodology is needed during the engagement, use the repo’s integrated agent prompts, skills, and references rather than resurrecting the old standalone threat-hunt templates.

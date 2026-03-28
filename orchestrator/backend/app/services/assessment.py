@@ -50,6 +50,15 @@ PHASE_WORKER_MATRIX = [
         ],
     },
     {
+        "phase": "athena",
+        "title": "Athena / Log Investigation",
+        "workers": [
+            {"agent": "osint-analyst", "responsibility": "telemetry pivots and historical activity review"},
+            {"agent": "operator", "responsibility": "map findings and payloads into log queries"},
+            {"agent": "report-writer", "responsibility": "capture exploitation-history conclusions"},
+        ],
+    },
+    {
         "phase": "report",
         "title": "Report / Review",
         "workers": [
