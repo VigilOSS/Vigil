@@ -1,15 +1,6 @@
 # AI Threat Hunting
 
-Hybrid red-team and threat-hunting platform built around:
-
-- a primary Kali MCP runtime with request and response transforms
-- RedteamAgent’s multi-agent workflow and attack-content library
-- a durable orchestrator ledger for targets, services, request variants, probes, and surfaces
-- shared Claude and Codex support, with Claude-friendly teammate workflows layered on top
-
 The operating model assumes a fully authorized realistic lab environment that mirrors real public and enterprise behavior closely enough for transferable methodology and tooling decisions.
-
-This repository is the new home for the combined project. The old `security-research` Docker work is now the runtime foundation, and the RedteamAgent orchestration, prompts, scripts, and UI live here as first-class code.
 
 ## Repository Layout
 
@@ -48,7 +39,7 @@ cd agent && ./scripts/init_engagement.sh https://target.example
 
 To switch clients, stop using the current engagement, install the other client into a different directory, and start a new engagement there.
 
-### 1. Primary Kali MCP runtime
+### 1. Kali MCP proxy
 
 Build the primary full image:
 
@@ -56,7 +47,7 @@ Build the primary full image:
 docker build -t security-research:latest .
 ```
 
-Run it with the capabilities needed by raw-packet tooling:
+Start the runtime with a durable host-mounted proxy data directory:
 
 ```bash
 mkdir -p .runtime-data
@@ -76,11 +67,7 @@ claude mcp add kali -s user -- docker exec -i security-research mcp-server
 codex mcp add kali -- docker exec -i security-research mcp-server
 ```
 
-### 1a. Configure request, response, and IP transforms
-
-The MCP proxy applies configured string replacement on tool inputs and outputs, then aliases any public IPv4 addresses found in tool responses to stable private IPv4 addresses.
-
-Run the container with transform env vars as needed:
+Configure string transforms as needed:
 
 ```bash
 docker run -d \
@@ -95,7 +82,7 @@ docker run -d \
   security-research:latest
 ```
 
-Relevant env vars:
+Proxy behavior:
 
 - `MCP_TRANSFORM_OUTBOUND_FIND` / `MCP_TRANSFORM_OUTBOUND_REPLACE`
   replace strings before the Kali MCP tool call is executed
@@ -107,6 +94,14 @@ Relevant env vars:
 Public IPv4 aliasing is automatic on inbound tool output. If `dig`, `whois`, `curl`, or any other Kali MCP tool returns `8.8.8.8`, the client will receive a private RFC1918 address instead, and the same public IP will keep the same private alias on later calls.
 
 Keep `/data` mounted from the host if you want the alias map to survive container restarts, image rebuilds, and host reboots. With the default example above, the durable host file is `.runtime-data/mcp-public-ip-map.json`.
+
+Quick verification:
+
+```bash
+docker exec security-research cat /data/mcp-public-ip-map.json
+```
+
+That file is the durable proxy state. It will populate as public IPv4s are seen in MCP tool results.
 
 ### 2. Orchestrator backend
 
