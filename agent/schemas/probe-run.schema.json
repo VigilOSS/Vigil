@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/probe-run.schema.json",
+  "title": "Assessment Probe Run",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "auth_context",
+    "input_slot",
+    "attack_family",
+    "tool_name",
+    "result_status"
+  ],
+  "properties": {
+    "request_variant_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "service_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "coverage_item_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "auth_context": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "input_slot": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "attack_family": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "payload_family": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "payload_value": {
+      "type": "string",
+      "maxLength": 16384
+    },
+    "tool_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "agent_name": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "result_status": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "observed_http_status": {
+      "type": "integer"
+    },
+    "signal_type": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "evidence_ref": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 4096
+    }
+  }
+}

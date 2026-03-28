@@ -82,10 +82,18 @@ This runtime and its MCP transform proxy are shared infrastructure, not per-enga
 Initialize a run with:
 
 ```bash
-./scripts/init_engagement.sh <target-url-or-host> [--auto] [--parallel N]
+./scripts/init_engagement.sh <target-url-or-host> \
+  [--auto] \
+  [--scope-mode host_only|explicit_hosts|wildcard] \
+  [--scope-hosts host1,host2,...] \
+  [--out-of-scope-hosts host1,host2,...] \
+  [--scan-intensity stealth|normal|aggressive] \
+  [--auth-mode none|auth_json|manual] \
+  [--exploit-policy pause|full_send|selected] \
+  [--engagement-name LABEL]
 ```
 
-This creates the engagement directory, readable artifacts, and the transient local work buffer used for batching worker tasks, and updates `engagements/.active`.
+This creates the engagement directory, readable artifacts, session workspace, explicit scope metadata, and the transient local work buffer used for batching worker tasks, and updates `engagements/.active`.
 
 Rules:
 - Do not delegate initialization to a general subagent.
@@ -93,6 +101,8 @@ Rules:
 - Before initialization completes, do not read `scope.json`, `log.md`, `findings.md`, `intel.md`, `auth.json`, or `cases.db`.
 - Use `./scripts/init_engagement.sh` directly. Do not rewrite initialization in `python`, `python3`, `node`, or ad hoc shell blocks.
 - The core loop starts only after initialization completes successfully.
+- Scope defaults are conservative: host-only, no auth, `exploit_policy=pause`.
+- Discovered subdomains are not automatically in scope unless the explicit scope mode allows them.
 
 ## Subagent Dispatch
 
@@ -120,7 +130,11 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
    If it fails, do not advance. Resolve each remaining discovered surface by selecting a representative validation path and marking it `covered`, `deferred`, or `not_applicable`.
    High-risk surfaces `account_recovery`, `dynamic_render`, `object_reference`, and `privileged_write`
    may NOT remain `deferred` when moving to Exploit/Report. They must be `covered` or `not_applicable`.
-4. **EXPLOIT** → dispatch osint-analyst + exploit-developer in parallel. After osint: read intel.md, HIGH value → durable finding update + exploit 2nd round.
+4. **EXPLOIT** → respect `exploit_policy` from `scope.json`.
+   - `pause`: stop, run `./scripts/review_exploit_candidates.sh "$DIR"`, then wait for the human to approve with `./scripts/approve_exploitation.sh`.
+   - `selected`: exploit only the approved finding slugs recorded in scope metadata.
+   - `full_send`: dispatch osint-analyst + exploit-developer in parallel.
+   After osint: read intel.md, HIGH value → durable finding update + exploit 2nd round.
 5. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `skills/athena-log-investigation/SKILL.md`.
 6. **REPORT** → dispatch report-writer
 
@@ -251,6 +265,23 @@ fuzzer→work-buffer+vuln-analyst, exploit→durable findings+auth, osint→inte
 If logs are available, do not close the engagement immediately after exploit work.
 Run the optional Athena/log-investigation phase to determine whether the most important attack paths
 show signs of prior exploitation in the available telemetry window.
+
+## Manual Worker Sessions
+
+When exploit work should be split across multiple Codex sessions, the coordinator stays manual.
+
+1. Approve exploit scope first with `./scripts/approve_exploitation.sh`.
+2. Create a worker session with:
+```bash
+./scripts/launch_exploit_session.sh "$DIR" <session-id> <finding-slug> [finding-slug...]
+```
+3. In the worker session, use the generated `sessions/<session-id>/prompt.md`.
+4. Workers must only write proposals under `sessions/<session-id>/proposals/` via `./scripts/record_session_proposal.sh`.
+5. Workers must not edit root `findings.md`, `report.md`, or `scope.json`.
+6. The coordinator merges approved proposals into canonical backend state with:
+```bash
+./scripts/merge_exploit_session.sh "$DIR" <session-id>
+```
 
 ## Tool Promotion Workflow
 
