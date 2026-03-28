@@ -5,7 +5,7 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/processes.sh"
 
 REDTEAM_IMAGE="${REDTEAM_IMAGE:-security-research:latest}"
-PROXY_IMAGE="${PROXY_IMAGE:-redteam-proxy:latest}"
+PROXY_IMAGE="${PROXY_IMAGE:-security-research-proxy:latest}"
 KATANA_IMAGE="${KATANA_IMAGE:-$REDTEAM_IMAGE}"
 MITMPROXY_BIN="${MITMPROXY_BIN:-mitmdump}"
 KATANA_LOCAL_BIN="${KATANA_LOCAL_BIN:-katana}"
@@ -16,10 +16,6 @@ if [ -n "${REDTEAM_DOCKER_CAPS_RAW:-}" ]; then
 else
     REDTEAM_DOCKER_CAPS=(--cap-add=NET_RAW --cap-add=NET_ADMIN)
 fi
-
-runtime_mode() {
-    echo "${REDTEAM_RUNTIME_MODE:-docker}"
-}
 
 # Resolve ENGAGEMENT_DIR to absolute path (Docker requires absolute paths for -v mounts)
 # Usage: _resolve_engagement_dir
@@ -45,13 +41,13 @@ _engagement_slug() {
 _proxy_container_name() {
     local slug
     slug="$(_engagement_slug)" || return 1
-    echo "redteam-proxy-${slug}"
+    echo "security-research-proxy-${slug}"
 }
 
 _katana_container_name() {
     local slug
     slug="$(_engagement_slug)" || return 1
-    echo "redteam-katana-${slug}"
+    echo "security-research-katana-${slug}"
 }
 
 _auth_header_args() {
@@ -144,43 +140,6 @@ _stop_local_process() {
     local pid_dir
     pid_dir="$(_engagement_pid_dir)" || return 1
     stop_managed_process "$pid_dir" "$name"
-}
-
-# Run a one-shot tool in the primary full runtime container
-# Usage: run_tool <tool> [args...]
-# Requires: ENGAGEMENT_DIR env var set
-run_tool() {
-    local tool="$1"; shift
-    _resolve_engagement_dir || return 1
-    if [ "$(runtime_mode)" = "local" ]; then
-        (
-            cd "$ENGAGEMENT_DIR_ABS"
-            export ENGAGEMENT_DIR="$ENGAGEMENT_DIR_ABS"
-            _load_engagement_env
-            if [[ "$tool" == "curl" && -x "${ENGAGEMENT_DIR_ABS}/tools/rtcurl" ]]; then
-                "${ENGAGEMENT_DIR_ABS}/tools/rtcurl" "$@"
-            else
-                "$tool" "$@"
-            fi
-        )
-        return
-    fi
-    # Build docker args array to avoid word-splitting issues
-    local docker_args=(--rm --network host -v "${ENGAGEMENT_DIR_ABS}:/engagement" -w /engagement)
-    if [ ${#REDTEAM_DOCKER_CAPS[@]} -gt 0 ]; then
-        docker_args+=("${REDTEAM_DOCKER_CAPS[@]}")
-    fi
-    # Mount .env file if it exists (provides API keys for subfinder, nuclei, etc.)
-    if [ -f "${ENGAGEMENT_DIR_ABS}/.env" ]; then
-        docker_args+=(--env-file "${ENGAGEMENT_DIR_ABS}/.env")
-    elif [ -f "$(pwd)/.env" ]; then
-        docker_args+=(--env-file "$(pwd)/.env")
-    fi
-    if [[ "$tool" == "curl" && -x "${ENGAGEMENT_DIR_ABS}/tools/rtcurl" ]]; then
-        docker run "${docker_args[@]}" "$REDTEAM_IMAGE" /engagement/tools/rtcurl "$@"
-        return
-    fi
-    docker run "${docker_args[@]}" "$REDTEAM_IMAGE" "$tool" "$@"
 }
 
 # Start the mitmproxy container (persistent)

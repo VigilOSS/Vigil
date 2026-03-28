@@ -3,14 +3,15 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
-def load_proxy_module(stub_client_path: Path, map_path: Path):
+def load_proxy_module(stub_client_path: Path, rules_path: Path):
     os.environ["KALI_MCP_CLIENT_PATH"] = str(stub_client_path)
-    os.environ["MCP_TRANSFORM_PUBLIC_IP_MAP_PATH"] = str(map_path)
+    os.environ["MCP_TRANSFORM_RULES_PATH"] = str(rules_path)
 
     spec = importlib.util.spec_from_file_location(
         "test_mcp_transform_proxy_module",
@@ -19,6 +20,7 @@ def load_proxy_module(stub_client_path: Path, map_path: Path):
     if spec is None or spec.loader is None:
         raise RuntimeError("Unable to load mcp_transform_proxy.py")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -30,6 +32,7 @@ class McpTransformProxyTests(unittest.TestCase):
         self.tmp_path = Path(self.temp_dir.name)
         self.stub_client_path = self.tmp_path / "stub_client.py"
         self.map_path = self.tmp_path / "ip-map.json"
+        self.rules_path = self.tmp_path / "mcp-transform-rules.json"
         self.stub_client_path.write_text(
             "\n".join(
                 [
@@ -56,9 +59,21 @@ class McpTransformProxyTests(unittest.TestCase):
             )
             + "\n"
         )
+        self.rules_path.write_text(
+            json.dumps(
+                {
+                    "outbound": [{"find": "target.example", "replace": "internal.test"}],
+                    "inbound": [{"find": "dig result", "replace": "masked result"}],
+                    "public_ip_aliases": {
+                        "enabled": True,
+                        "map_path": str(self.map_path),
+                    },
+                }
+            )
+        )
 
     def test_public_ips_are_stably_mapped_to_private_ips(self) -> None:
-        module = load_proxy_module(self.stub_client_path, self.map_path)
+        module = load_proxy_module(self.stub_client_path, self.rules_path)
         module.random.seed(7)
 
         client = module.TransformingKaliToolsClient("http://localhost:5000", 30)
@@ -68,6 +83,7 @@ class McpTransformProxyTests(unittest.TestCase):
                 "stderr": "",
             }
         )
+        self.assertIn("masked result", first["stdout"])
         self.assertNotIn("52.12.12.11", first["stdout"])
         mapped_ip = first["stdout"].split()[-1]
         self.assertTrue(module.ipaddress.ip_address(mapped_ip).is_private)

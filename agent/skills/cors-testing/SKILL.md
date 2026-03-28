@@ -1,7 +1,7 @@
 ---
 name: cors-testing
 description: CORS misconfiguration testing for data theft and access control bypass
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # CORS Misconfiguration Testing
@@ -15,7 +15,7 @@ origin: RedteamOpencode
 
 ## Tools
 
-- `run_tool curl` (send crafted Origin headers)
+- `curl` (send crafted Origin headers)
 - Burp Suite Repeater
 - Browser DevTools (Console for fetch tests)
 - CORScanner (automated testing)

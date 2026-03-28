@@ -2,21 +2,19 @@
 
 **Purpose:** HTTP request crafting and testing
 
-For live target requests during an engagement, prefer `run_tool curl` instead of raw host `curl`.
-`run_tool curl` routes through the engagement-scoped `rtcurl` wrapper, which automatically applies
-in-scope auth and the fixed engagement User-Agent. Use raw host `curl` only for external OSINT or
-non-target internet resources.
+For live target requests during an engagement, execute `curl` through the Kali MCP command-execution tool.
+`curl` examples in this file are intended to be executed through the Kali MCP command-execution tool. Provide auth or cookie headers explicitly when the current task requires them.
 
-For the current engagement target, use plain `run_tool curl` first. Only add explicit
+For the current engagement target, use plain `curl` first. Only add explicit
 `Cookie:` or `Authorization:` headers when intentionally testing alternate identities,
 session confusion, or auth override behavior.
 
-**Basic GET:** `run_tool curl -v https://target/`
-**Headers only:** `run_tool curl -I https://target/`
-**POST with data:** `run_tool curl -X POST -d "param=value" https://target/api`
-**JSON POST:** `run_tool curl -X POST -H "Content-Type: application/json" -d '{"key":"value"}' https://target/api`
-**Follow redirects:** `run_tool curl -L https://target/`
-**Explicit cookie override:** `run_tool curl -H "Cookie: session=alternate-user" https://target/`
-**Explicit auth override:** `run_tool curl -H "Authorization: Bearer override-token" https://target/api`
+**Basic GET:** `curl -v https://target/`
+**Headers only:** `curl -I https://target/`
+**POST with data:** `curl -X POST -d "param=value" https://target/api`
+**JSON POST:** `curl -X POST -H "Content-Type: application/json" -d '{"key":"value"}' https://target/api`
+**Follow redirects:** `curl -L https://target/`
+**Explicit cookie override:** `curl -H "Cookie: session=alternate-user" https://target/`
+**Explicit auth override:** `curl -H "Authorization: Bearer override-token" https://target/api`
 **Save output:** `-o output.html`
 **Proxy through Burp:** `-x http://127.0.0.1:8080`

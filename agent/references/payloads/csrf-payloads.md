@@ -158,19 +158,19 @@ If the app checks that a cookie value matches a form parameter:
 ## Useful Curl for Testing
 
 ```bash
-# For live testing, current-engagement auth should normally come from auth.json/rtcurl.
+# For live testing, provide the current auth context through the Kali MCP command-execution tool when needed.
 # Keep explicit Cookie overrides only when replaying a victim session on purpose.
 # Check if endpoint accepts requests without CSRF token
-run_tool curl -s -X POST http://target.example/api/action \
+curl -s -X POST http://target.example/api/action \
   -H "Cookie: session=VICTIM_SESSION" \
   -d "email=test@test.com"
 
 # Check if endpoint accepts GET instead of POST
-run_tool curl -s "http://target.example/api/action?email=test@test.com" \
+curl -s "http://target.example/api/action?email=test@test.com" \
   -H "Cookie: session=VICTIM_SESSION"
 
 # Check Referer validation
-run_tool curl -s -X POST http://target.example/api/action \
+curl -s -X POST http://target.example/api/action \
   -H "Cookie: session=VICTIM_SESSION" \
   -H "Referer: https://evil.example/" \
   -d "email=test@test.com"

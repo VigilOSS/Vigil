@@ -1,7 +1,7 @@
 ---
 name: command-injection
 description: OS command injection detection, exploitation, and filter bypass
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # OS Command Injection Testing
@@ -14,7 +14,7 @@ origin: RedteamOpencode
 
 ## Tools
 
-- `run_tool curl` / `run_tool wget` (manual requests)
+- `curl` / `wget` (manual requests)
 - Burp Suite Repeater + Intruder
 - Commix (automated command injection)
 - Custom wordlists for injection payloads

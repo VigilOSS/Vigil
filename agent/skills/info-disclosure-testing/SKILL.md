@@ -1,7 +1,7 @@
 ---
 name: info-disclosure-testing
 description: Information disclosure detection — error messages, files, headers, debug endpoints
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Information Disclosure Testing
@@ -15,9 +15,9 @@ origin: RedteamOpencode
 
 ## Tools
 
-- `run_tool curl` (header inspection, file probing)
+- `curl` (header inspection, file probing)
 - Burp Suite (passive scanning, response analysis)
-- `run_tool gobuster` / `run_tool ffuf` (file and directory brute-force)
+- `gobuster` / `ffuf` (file and directory brute-force)
 - GitTools (extract .git repositories)
 - trufflehog / gitleaks (secret scanning)
 

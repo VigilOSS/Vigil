@@ -1,7 +1,7 @@
 ---
 name: idor-testing
 description: Insecure direct object reference testing for broken access control
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # IDOR Testing (Insecure Direct Object Reference)
@@ -14,7 +14,7 @@ origin: RedteamOpencode
 
 ## Tools
 
-- run_tool curl with multiple auth tokens
+- curl with multiple auth tokens
 - Burp Suite Repeater + Autorize extension
 - Two or more test accounts (different privilege levels)
 - Burp Comparer for response diffing

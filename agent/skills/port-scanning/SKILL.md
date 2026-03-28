@@ -1,7 +1,7 @@
 ---
 name: port-scanning
 description: Discover open ports, running services, and their versions on a target
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Port Scanning
@@ -13,52 +13,52 @@ origin: RedteamOpencode
 
 ## Tools
 
-`run_tool nmap` (primary), `run_tool nc` (quick checks/banner grab)
+`nmap` (primary), `nc` (quick checks/banner grab)
 
 ## Methodology
 
 ### 1. Quick Initial Scan
 ```bash
-run_tool nmap -sV -sC -T4 TARGET -oA /engagement/scans/nmap_initial
+nmap -sV -sC -T4 TARGET -oA /engagement/scans/nmap_initial
 ```
 
 ### 2. Full TCP Scan
 ```bash
-run_tool nmap -sV -sC -T4 -p- TARGET -oN /engagement/scans/nmap_full_tcp.txt
+nmap -sV -sC -T4 -p- TARGET -oN /engagement/scans/nmap_full_tcp.txt
 # Speed optimization: discover ports first, then deep scan
-run_tool nmap -sS -T4 -p- --min-rate 1000 TARGET -oG /engagement/scans/ports_only.txt
+nmap -sS -T4 -p- --min-rate 1000 TARGET -oG /engagement/scans/ports_only.txt
 PORTS=$(grep -oP '\d+/open' /engagement/scans/ports_only.txt | cut -d/ -f1 | tr '\n' ',' | sed 's/,$//')
-run_tool nmap -sV -sC -p "$PORTS" TARGET -oN /engagement/scans/nmap_targeted.txt
+nmap -sV -sC -p "$PORTS" TARGET -oN /engagement/scans/nmap_targeted.txt
 ```
 
 ### 3. Service Detection
 ```bash
-run_tool nmap -sV --version-intensity 5 -p PORT1,PORT2 TARGET
-run_tool nc -nv TARGET PORT <<< "" 2>&1 | head -5    # Banner grab
-printf '\n' | run_tool nc -w 3 TARGET PORT
+nmap -sV --version-intensity 5 -p PORT1,PORT2 TARGET
+nc -nv TARGET PORT <<< "" 2>&1 | head -5    # Banner grab
+printf '\n' | nc -w 3 TARGET PORT
 ```
 
 ### 4. Script Scanning
 ```bash
-run_tool nmap --script=vuln -p PORT TARGET
-run_tool nmap --script=http-enum -p 80,443 TARGET
-run_tool nmap --script=smb-enum-shares,smb-enum-users -p 445 TARGET
-run_tool nmap --script=ftp-anon -p 21 TARGET
-run_tool nmap --script=ssh-auth-methods -p 22 TARGET
+nmap --script=vuln -p PORT TARGET
+nmap --script=http-enum -p 80,443 TARGET
+nmap --script=smb-enum-shares,smb-enum-users -p 445 TARGET
+nmap --script=ftp-anon -p 21 TARGET
+nmap --script=ssh-auth-methods -p 22 TARGET
 ```
 
 ### 5. UDP Scan
 ```bash
-run_tool nmap -sU --top-ports 50 -T4 TARGET -oN /engagement/scans/nmap_udp.txt
-run_tool nmap -sU -p 53,67,68,69,123,161,162,500,514,1900 TARGET
+nmap -sU --top-ports 50 -T4 TARGET -oN /engagement/scans/nmap_udp.txt
+nmap -sU -p 53,67,68,69,123,161,162,500,514,1900 TARGET
 ```
 
 ### 6. Firewall Evasion (when standard scans blocked)
 ```bash
-run_tool nmap -f -sV -p PORT TARGET                    # Fragment packets
-run_tool nmap -D RND:5 -sV -p PORT TARGET              # Decoy scan
-run_tool nmap -sV -T2 -p PORT TARGET                   # Slow scan
-run_tool nmap --source-port 53 -sV -p PORT TARGET      # Source port trick
+nmap -f -sV -p PORT TARGET                    # Fragment packets
+nmap -D RND:5 -sV -p PORT TARGET              # Decoy scan
+nmap -sV -T2 -p PORT TARGET                   # Slow scan
+nmap --source-port 53 -sV -p PORT TARGET      # Source port trick
 ```
 
 ### 7. Output Parsing

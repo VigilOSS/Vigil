@@ -32,8 +32,8 @@ export function LoginPage({ onLogin, onRegister }: LoginPageProps) {
   return (
     <main className="shell auth-shell">
       <section className="hero-card">
-        <p className="eyebrow">Redteam Orchestrator</p>
-        <h1>Multi-user red team control plane</h1>
+        <p className="eyebrow">AI Threat Hunting Orchestrator</p>
+        <h1>Multi-user AI threat hunting control plane</h1>
         <p className="lead">
           Sign in to manage isolated projects, follow live workflow phases, and inspect every
           engagement artifact without leaving the browser.

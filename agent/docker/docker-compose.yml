@@ -2,7 +2,7 @@ services:
   runtime-full:
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: agent/docker/runtime-full/Dockerfile
     image: security-research:latest
     cap_add:
       - NET_RAW
@@ -12,7 +12,7 @@ services:
     profiles: ["lightweight"]
     build:
       context: ../..
-      dockerfile: agent/docker/kali-redteam-lightweight/Dockerfile
+      dockerfile: agent/docker/runtime-lightweight/Dockerfile
     image: security-research-lightweight:latest
     cap_add:
       - NET_RAW
@@ -22,12 +22,12 @@ services:
     build:
       context: ..
       dockerfile: docker/mitmproxy/Dockerfile
-    image: redteam-proxy:latest
+    image: security-research-proxy:latest
 
   metasploit:
     build:
       context: ./metasploit
-    image: redteam-metasploit:latest
+    image: security-research-metasploit:latest
     environment:
       MSF_USER: ${MSF_USER:-msf}
       MSF_PASSWORD: ${MSF_PASSWORD:-msf}

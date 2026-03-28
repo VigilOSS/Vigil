@@ -1,7 +1,7 @@
 ---
 name: ssrf-testing
 description: Detect and exploit server-side request forgery to access internal resources and cloud metadata
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # SSRF Testing

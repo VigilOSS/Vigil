@@ -13,11 +13,12 @@ After engagement initialization completes, repeat until all attack paths exhaust
 3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work.
 4. **PRESENT OR PROCEED** — INTERACTIVE or `confirm_mode=manual`: use NUMBERED choices (single digits) and wait for input. AUTO-CONFIRM (default): auto-proceed after first Phase 1 approval. AUTONOMOUS (`--auto` at initialization): never wait; announce the next action and continue.
 5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide deeper rationale and payload knowledge.
-6. **DISPATCH** — ALWAYS dispatch to subagent. Do NOT test directly (no curl probes, no payloads). Your job: coordination. Allowed direct: read files, inspect orchestrator state, use the transient dispatcher work buffer, and write synchronized artifacts.
-7. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/record_finding.sh` or the assessment API so findings.md remains a synchronized export, not the authoritative store. `append_finding.sh` now rejects markdown and points to `schemas/finding-record.schema.json`.
-8. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/append_surface.sh` so the backend and readable export stay in sync.
-9. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
-10. **LOOP** — Back to step 1.
+6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Do not use host Bash, `docker run`, `docker exec`, repo-local execution helpers, or ad hoc wrappers for in-scope target work.
+7. **DISPATCH** — ALWAYS dispatch to subagent. Do NOT test directly with host-side commands. Your job: coordination. Allowed direct: read files, inspect orchestrator state, use the transient dispatcher work buffer, and write synchronized artifacts.
+8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/record_finding.sh` or the assessment API so findings.md remains a synchronized export, not the authoritative store. `append_finding.sh` now rejects markdown and points to `schemas/finding-record.schema.json`.
+9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/append_surface.sh` so the backend and readable export stay in sync.
+10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
+11. **LOOP** — Back to step 1.
 
 ## Investigation Priorities
 
@@ -28,6 +29,16 @@ After engagement initialization completes, repeat until all attack paths exhaust
 - Read between the lines: infer backend frameworks, proxies, auth boundaries, and deployment shape from subtle indicators, not only explicit banners.
 - When full exploitation fails, validate partial signals in stages: sleep, DNS/OOB, env leakage, version leakage, file read, then RCE where appropriate.
 - Prefer realistic attack paths that transfer to real environments; do not assume puzzle-box hidden steps.
+
+## Shared Kali MCP Runtime
+
+Before initializing any engagement, ensure the shared Kali MCP runtime is running:
+
+```bash
+./scripts/start_kali_mcp_runtime.sh
+```
+
+This runtime and its MCP transform proxy are shared infrastructure, not per-engagement state. Configure proxy behavior in the install-root `mcp-transform-rules.json` before starting it. Multiple engagement directories may exist, but within a single install the repo still tracks one active engagement through `engagements/.active`.
 
 ## Engagement Initialization
 
@@ -41,6 +52,7 @@ This creates the engagement directory, readable artifacts, and the transient loc
 
 Rules:
 - Do not delegate initialization to a general subagent.
+- Do not initialize an engagement until the shared Kali MCP runtime is up and attached.
 - Before initialization completes, do not read `scope.json`, `log.md`, `findings.md`, `intel.md`, `auth.json`, or `cases.db`.
 - Use `./scripts/init_engagement.sh` directly. Do not rewrite initialization in `python`, `python3`, `node`, or ad hoc shell blocks.
 - The core loop starts only after initialization completes successfully.
@@ -89,20 +101,15 @@ When ANY agent discovers credentials:
 3. Trigger POST-AUTH RE-COLLECTION (restart Katana with auth)
 4. Dispatch exploit-developer to test authenticated access
 
-## Containerized Tool Execution
+## Kali MCP Execution
 
-ALL pentest tools run in Docker:
-```bash
-source scripts/lib/container.sh
-export ENGAGEMENT_DIR="$DIR"
-run_tool nmap -sV -sC target
-```
+All target-facing work must go through the attached Kali MCP runtime.
 
-Target HTTP requests must use `run_tool curl`, not raw host `curl`. The engagement-scoped
-`rtcurl` wrapper automatically applies in-scope auth and the fixed engagement User-Agent.
-Only use host `curl` for external OSINT or non-target internet resources. Host-allowed:
-jq, sqlite3, dig, whois, python3, grep/rg, sed, awk, base64, openssl. Everything else
-target-facing → `run_tool`. If Docker fails, log error, fallback to host with note in log.md.
+- Use MCP tool discovery to inspect the currently available Kali tools instead of assuming a fixed tool inventory in the prompt.
+- When you need arbitrary shell execution inside the Kali runtime, use the Kali MCP command-execution tool.
+- Treat host Bash as out-of-bounds for in-scope target work even if the same binary exists locally.
+- Host-side commands are limited to coordination, local file work, backend interaction, and non-target support tasks such as `jq`, `sqlite3`, `python3`, `grep`/`rg`, `sed`, `awk`, `base64`, and `openssl`.
+- If a required target-facing tool is missing from the active Kali MCP session, say so explicitly and stop to resolve the runtime gap rather than falling back to host or Docker-side execution paths.
 
 ## Finding Format
 

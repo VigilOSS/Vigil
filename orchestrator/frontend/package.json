@@ -1,5 +1,5 @@
 {
-  "name": "redteam-orchestrator-frontend",
+  "name": "security-research-orchestrator-frontend",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -20,4 +20,3 @@
     "vite": "^7.1.4"
   }
 }
-

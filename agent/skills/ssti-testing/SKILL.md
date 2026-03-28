@@ -1,7 +1,7 @@
 ---
 name: ssti-testing
 description: Server-side template injection detection, engine identification, and RCE
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Server-Side Template Injection (SSTI) Testing
@@ -14,7 +14,7 @@ origin: RedteamOpencode
 
 ## Tools
 
-- run_tool curl / Burp Suite Repeater
+- curl / Burp Suite Repeater
 - tplmap (automated SSTI exploitation)
 - SSTImap
 - Custom polyglot payloads

@@ -1,7 +1,7 @@
 ---
 name: report-generation
 description: Engagement report structure and formatting guidelines
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Report Generation

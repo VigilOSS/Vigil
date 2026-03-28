@@ -1,7 +1,7 @@
 ---
 name: graphql-testing
 description: GraphQL security testing — introspection, injection, auth bypass, DoS
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # GraphQL Security Testing
@@ -14,7 +14,7 @@ origin: RedteamOpencode
 
 ## Tools
 
-- `run_tool curl` / Burp Suite Repeater
+- `curl` / Burp Suite Repeater
 - Altair GraphQL Client
 - InQL (Burp extension for GraphQL)
 - graphql-voyager (schema visualization)

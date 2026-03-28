@@ -171,7 +171,4 @@ awk '
   }
 ' "$SCRIPT_DIR/templates/user-agents.txt" > "$DIR/user-agent.txt"
 
-cp "$SCRIPT_DIR/templates/rtcurl.sh" "$DIR/tools/rtcurl"
-chmod +x "$DIR/tools/rtcurl"
-
 printf '%s\n' "$DIR"

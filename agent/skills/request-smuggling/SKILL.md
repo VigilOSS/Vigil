@@ -1,7 +1,7 @@
 ---
 name: request-smuggling
 description: HTTP request smuggling via CL.TE/TE.CL desync and cache poisoning
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # HTTP Request Smuggling Testing
@@ -14,7 +14,7 @@ origin: RedteamOpencode
 
 ## Tools
 
-- `run_tool curl` (raw request crafting)
+- `curl` (raw request crafting)
 - Burp Suite Repeater (disable auto content-length update)
 - smuggler.py (automated detection)
 - HTTP Request Smuggler (Burp extension)

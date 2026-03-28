@@ -1,7 +1,7 @@
 ---
 name: directory-fuzzing
 description: Discover hidden directories, files, and endpoints on a web server
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Directory Fuzzing
@@ -14,25 +14,25 @@ origin: RedteamOpencode
 
 ## Tools
 
-`run_tool ffuf` (primary), `run_tool gobuster` (fallback), `run_tool curl` (verification)
+`ffuf` (primary), `gobuster` (fallback), `curl` (verification)
 
 ## Methodology
 
 ### 1. Baseline Response
 ```bash
-run_tool curl -s -o /dev/null -w "Code: %{http_code}, Size: %{size_download}" https://TARGET/nonexistent12345
+curl -s -o /dev/null -w "Code: %{http_code}, Size: %{size_download}" https://TARGET/nonexistent12345
 ```
 
 ### 2. Common Path Discovery
 ```bash
-run_tool ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt -fc 404
-run_tool ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt -ac  # Auto-calibrate
-run_tool gobuster dir -u https://TARGET -w /usr/share/wordlists/dirb/common.txt -t 50  # Fallback
+ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt -fc 404
+ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt -ac  # Auto-calibrate
+gobuster dir -u https://TARGET -w /usr/share/wordlists/dirb/common.txt -t 50  # Fallback
 ```
 
 ### 3. Extension Fuzzing
 ```bash
-run_tool ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt \
+ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt \
   -e .php,.html,.js,.txt,.bak,.old,.conf,.xml,.json,.yml,.env,.log,.sql,.zip,.tar.gz
 # Tech-specific: PHP(.phps,.phtml,.inc) ASP(.aspx,.config) Java(.jsp,.do,.action)
 ```
@@ -47,8 +47,8 @@ run_tool ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt \
 
 ### 5. Recursive Discovery
 ```bash
-run_tool ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt -ac -recursion -recursion-depth 2
-run_tool ffuf -u https://TARGET/admin/FUZZ -w /usr/share/wordlists/dirb/common.txt -ac
+ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt -ac -recursion -recursion-depth 2
+ffuf -u https://TARGET/admin/FUZZ -w /usr/share/wordlists/dirb/common.txt -ac
 ```
 
 ### 6. Wordlist Escalation
@@ -62,24 +62,24 @@ run_tool ffuf -u https://TARGET/admin/FUZZ -w /usr/share/wordlists/dirb/common.t
 
 ### 7. Backup and Sensitive Files
 ```bash
-run_tool ffuf -u https://TARGET/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt \
+ffuf -u https://TARGET/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt \
   -e .bak,.old,.orig,.save,.swp,.tmp,~,.copy
 for f in .env .git/config .htaccess web.config wp-config.php .DS_Store; do
-  code=$(run_tool curl -s -o /dev/null -w "%{http_code}" "https://TARGET/$f")
+  code=$(curl -s -o /dev/null -w "%{http_code}" "https://TARGET/$f")
   [ "$code" != "404" ] && echo "$f -> $code"
 done
-run_tool curl -s https://TARGET/.git/HEAD
-run_tool curl -s https://TARGET/.svn/entries | head -5
+curl -s https://TARGET/.git/HEAD
+curl -s https://TARGET/.svn/entries | head -5
 ```
 
 ### 8. Virtual Host / Subdomain
 ```bash
-run_tool ffuf -u https://TARGET -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
+ffuf -u https://TARGET -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
   -H "Host: FUZZ.TARGET" -ac
 ```
 
 ### 9. Output
 ```bash
-run_tool ffuf -u https://TARGET/FUZZ -w wordlist.txt -ac -o /engagement/scans/dir_fuzz_results.json -of json
-run_tool curl -sI https://TARGET/discovered_path  # Verify
+ffuf -u https://TARGET/FUZZ -w wordlist.txt -ac -o /engagement/scans/dir_fuzz_results.json -of json
+curl -sI https://TARGET/discovered_path  # Verify
 ```

@@ -27,8 +27,8 @@ DRY_RUN=false
 FORCE_REBUILD=false
 PRODUCT=""
 TARGET_DIR=""
-SKIP_PREREQ_CHECKS="${REDTEAM_SKIP_PREREQ_CHECKS:-0}"
-SKIP_DOCKER_IMAGE_CHECKS="${REDTEAM_SKIP_DOCKER_IMAGE_CHECKS:-0}"
+SKIP_PREREQ_CHECKS="${AI_THREAT_HUNTING_SKIP_PREREQ_CHECKS:-${REDTEAM_SKIP_PREREQ_CHECKS:-0}}"
+SKIP_DOCKER_IMAGE_CHECKS="${AI_THREAT_HUNTING_SKIP_DOCKER_IMAGE_CHECKS:-${REDTEAM_SKIP_DOCKER_IMAGE_CHECKS:-0}}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -45,7 +45,7 @@ if [ -z "$PRODUCT" ]; then
   exit 1
 fi
 
-INSTALL_DIR="${TARGET_DIR:-${REDTEAM_DIR:-$HOME/security-research}}"
+INSTALL_DIR="${TARGET_DIR:-${AI_THREAT_HUNTING_DIR:-${REDTEAM_DIR:-$HOME/security-research}}}"
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_ROOT="$SOURCE_ROOT/agent"
 
@@ -92,7 +92,7 @@ echo "Step 1: Checking prerequisites..."
 echo ""
 
 if [ "$SKIP_PREREQ_CHECKS" = "1" ]; then
-  warn "Skipping prerequisite checks (REDTEAM_SKIP_PREREQ_CHECKS=1)"
+  warn "Skipping prerequisite checks (AI_THREAT_HUNTING_SKIP_PREREQ_CHECKS=1)"
 else
   for tool in docker git python3; do
     if command -v "$tool" >/dev/null 2>&1; then
@@ -140,7 +140,7 @@ else
       [ -e "$INSTALL_DIR/$keep" ] && mv "$INSTALL_DIR/$keep" "/tmp/security-research-preserve-$keep" 2>/dev/null
     done
     rm -rf "$INSTALL_DIR/.claude" "$INSTALL_DIR/.codex" "$INSTALL_DIR/agent" "$INSTALL_DIR/docker" \
-           "$INSTALL_DIR/orchestrator" "$INSTALL_DIR/tests" "$INSTALL_DIR/Dockerfile" \
+           "$INSTALL_DIR/orchestrator" "$INSTALL_DIR/tests" \
            "$INSTALL_DIR/README.md" "$INSTALL_DIR/install.sh"
     for keep in engagements .env auth.json workspace runtime-home; do
       [ -e "/tmp/security-research-preserve-$keep" ] && mv "/tmp/security-research-preserve-$keep" "$INSTALL_DIR/$keep" 2>/dev/null
@@ -158,7 +158,7 @@ else
       ;;
   esac
 
-  for path in Dockerfile README.md docker orchestrator tests agent install.sh; do
+  for path in README.md docker orchestrator tests agent install.sh mcp-transform-rules.json; do
     copy_if_exists "$SOURCE_ROOT/$path" "$INSTALL_DIR/$path"
   done
 
@@ -191,12 +191,12 @@ echo ""
 if $DRY_RUN; then
   info "[DRY RUN] Would build or verify the primary security-research image"
 elif [ "$SKIP_DOCKER_IMAGE_CHECKS" = "1" ]; then
-  warn "Skipping Docker image build/verification (REDTEAM_SKIP_DOCKER_IMAGE_CHECKS=1)"
+  warn "Skipping Docker image build/verification (AI_THREAT_HUNTING_SKIP_DOCKER_IMAGE_CHECKS=1)"
 else
   cd "$INSTALL_DIR"
   if $FORCE_REBUILD || ! docker image inspect security-research:latest >/dev/null 2>&1; then
     info "Building security-research runtime image..."
-    if docker build -t security-research:latest .; then
+    if docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .; then
       ok "security-research image ready"
     else
       fail "Failed to build security-research image"
@@ -214,16 +214,17 @@ echo ""
 echo "  Installed to: $INSTALL_DIR"
 echo ""
 echo "  Next steps:"
-echo "    Use only against fully authorized realistic lab environments."
-echo "    docker run -d --name security-research --cap-add=NET_RAW --cap-add=NET_ADMIN security-research"
+echo "    Use only against fully authorized environments."
+echo "    Configure shared runtime env in $INSTALL_DIR/.env as needed"
+echo "    Edit transform rules in $INSTALL_DIR/mcp-transform-rules.json"
+echo "    cd $INSTALL_DIR"
+echo "    ./agent/scripts/start_kali_mcp_runtime.sh"
 case "$PRODUCT" in
   claude)
-    echo "    cd $INSTALL_DIR"
     echo "    claude mcp add kali -s user -- docker exec -i security-research mcp-server"
     echo "    claude"
     ;;
   codex)
-    echo "    cd $INSTALL_DIR"
     echo "    codex mcp add kali -- docker exec -i security-research mcp-server"
     echo "    codex"
     ;;

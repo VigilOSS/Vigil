@@ -1,7 +1,7 @@
 ---
 name: xxe-testing
 description: XML external entity injection for file read, SSRF, and DoS
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # XXE Testing (XML External Entity Injection)
@@ -14,7 +14,7 @@ origin: RedteamOpencode
 
 ## Tools
 
-- `run_tool curl` (send crafted XML)
+- `curl` (send crafted XML)
 - Burp Suite Repeater
 - XXEinjector
 - Out-of-band server (Burp Collaborator, interactsh)

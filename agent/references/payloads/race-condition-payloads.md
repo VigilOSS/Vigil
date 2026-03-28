@@ -122,7 +122,7 @@ Thread 3: POST /api/transfer         (also sends $1000 — balance not yet updat
 # Use explicit Cookie/Auth headers here only when replaying a second session on purpose.
 # Simple parallel requests
 for i in $(seq 1 20); do
-  run_tool curl -s -X POST http://target/api/redeem \
+  curl -s -X POST http://target/api/redeem \
     -H "Cookie: session=xxx" \
     -d '{"code":"COUPON"}' &
 done
@@ -131,7 +131,7 @@ wait
 
 ```bash
 # Using GNU parallel
-seq 1 50 | parallel -j50 run_tool curl -s -X POST http://target/api/transfer \
+seq 1 50 | parallel -j50 curl -s -X POST http://target/api/transfer \
   -H "Cookie: session=xxx" \
   -d "'{"amount":100}'"
 ```
