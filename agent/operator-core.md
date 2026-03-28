@@ -30,6 +30,16 @@ After engagement initialization completes, repeat until all attack paths exhaust
 - When full exploitation fails, validate partial signals in stages: sleep, DNS/OOB, env leakage, version leakage, file read, then RCE where appropriate.
 - Prefer realistic attack paths that transfer to real environments; do not assume puzzle-box hidden steps.
 
+## Shared Kali MCP Runtime
+
+Before initializing any engagement, ensure the shared Kali MCP runtime is running:
+
+```bash
+./scripts/start_kali_mcp_runtime.sh
+```
+
+This runtime and its MCP transform proxy are shared infrastructure, not per-engagement state. Configure proxy behavior in the install-root `mcp-transform-rules.json` before starting it. Multiple engagement directories may exist, but within a single install the repo still tracks one active engagement through `engagements/.active`.
+
 ## Engagement Initialization
 
 Initialize a run with:
@@ -42,6 +52,7 @@ This creates the engagement directory, readable artifacts, and the transient loc
 
 Rules:
 - Do not delegate initialization to a general subagent.
+- Do not initialize an engagement until the shared Kali MCP runtime is up and attached.
 - Before initialization completes, do not read `scope.json`, `log.md`, `findings.md`, `intel.md`, `auth.json`, or `cases.db`.
 - Use `./scripts/init_engagement.sh` directly. Do not rewrite initialization in `python`, `python3`, `node`, or ad hoc shell blocks.
 - The core loop starts only after initialization completes successfully.

@@ -158,7 +158,7 @@ else
       ;;
   esac
 
-  for path in README.md docker orchestrator tests agent install.sh; do
+  for path in README.md docker orchestrator tests agent install.sh mcp-transform-rules.json; do
     copy_if_exists "$SOURCE_ROOT/$path" "$INSTALL_DIR/$path"
   done
 
@@ -214,16 +214,17 @@ echo ""
 echo "  Installed to: $INSTALL_DIR"
 echo ""
 echo "  Next steps:"
-echo "    Use only against fully authorized realistic lab environments."
-echo "    docker run -d --name security-research --cap-add=NET_RAW --cap-add=NET_ADMIN security-research:latest"
+echo "    Use only against fully authorized environments."
+echo "    Configure shared runtime env in $INSTALL_DIR/.env as needed"
+echo "    Edit transform rules in $INSTALL_DIR/mcp-transform-rules.json"
+echo "    cd $INSTALL_DIR"
+echo "    ./agent/scripts/start_kali_mcp_runtime.sh"
 case "$PRODUCT" in
   claude)
-    echo "    cd $INSTALL_DIR"
     echo "    claude mcp add kali -s user -- docker exec -i security-research mcp-server"
     echo "    claude"
     ;;
   codex)
-    echo "    cd $INSTALL_DIR"
     echo "    codex mcp add kali -- docker exec -i security-research mcp-server"
     echo "    codex"
     ;;
