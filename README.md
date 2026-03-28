@@ -93,6 +93,10 @@ cd agent
 ./scripts/init_engagement.sh https://target.example
 ```
 
+Methodology now lives in:
+- [engagement-methodology.md](/path/to/vigil)
+- [athena-log-investigation](/path/to/vigil)
+
 ## Optional Tool Activation
 
 These tools are intentionally present but not always started automatically.
@@ -199,6 +203,8 @@ The combined project keeps the RedteamAgent phase model, but the state is now du
   coverage-driven validation, fuzzing, and retest tracking
 - `exploit`
   exploit development, credential/access chaining, pivots, and callback-driven validation
+- `athena`
+  optional final log-investigation phase to determine whether important findings show prior exploitation in Athena-accessible logs
 - `report`
   findings synthesis and coverage review
 

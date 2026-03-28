@@ -188,5 +188,6 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 
 | File | Purpose |
 |------|---------|
+| `engagement-methodology.md` | Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase |
 | `handoff-protocols.md` | Agent-to-agent handoff rules and expected downstream actions |
 | `wildcard-mode.md` | Wildcard target enumeration, prioritization, and sliding-window execution rules |

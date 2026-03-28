@@ -4,7 +4,6 @@
 # Usage:
 #   ./install.sh claude [target_dir]
 #   ./install.sh codex [target_dir]
-#   ./install.sh docker [target_dir]
 #   ./install.sh --dry-run claude
 #
 # Supported platforms: macOS and Linux only.
@@ -12,15 +11,14 @@ set -euo pipefail
 
 show_help() {
   cat <<'EOF'
-Usage: ./install.sh [--dry-run] [--force] <claude|codex|docker> [target_dir]
+Usage: ./install.sh [--dry-run] [--force] <claude|codex> [target_dir]
 
   claude  Install the Claude Code workflow files
   codex   Install the Codex workflow files
-  docker  Install the Docker runtime bundle
 
 Options:
   --dry-run  Validate the install without writing files
-  --force    Rebuild Docker images during runtime install
+  --force    Rebuild the shared Kali MCP runtime image during install
   -h, --help Show this help
 EOF
 }
@@ -37,7 +35,7 @@ for arg in "$@"; do
     --dry-run) DRY_RUN=true ;;
     --force) FORCE_REBUILD=true ;;
     -h|--help) show_help; exit 0 ;;
-    claude|codex|docker) PRODUCT="$arg" ;;
+    claude|codex) PRODUCT="$arg" ;;
     *) [ -z "$TARGET_DIR" ] && TARGET_DIR="$arg" ;;
   esac
 done
@@ -114,13 +112,11 @@ else
     ERRORS=$((ERRORS + 1))
   fi
 
-  if [ "$PRODUCT" = "docker" ] || [ "$PRODUCT" = "claude" ] || [ "$PRODUCT" = "codex" ]; then
-    if docker info >/dev/null 2>&1; then
-      ok "Docker daemon is running"
-    else
-      fail "Docker daemon is not running"
-      ERRORS=$((ERRORS + 1))
-    fi
+  if docker info >/dev/null 2>&1; then
+    ok "Docker daemon is running"
+  else
+    fail "Docker daemon is not running"
+    ERRORS=$((ERRORS + 1))
   fi
 
   if [ $ERRORS -gt 0 ]; then
@@ -159,9 +155,6 @@ else
     codex)
       copy_if_exists "$AGENT_ROOT/.codex" "$INSTALL_DIR/.codex"
       copy_if_exists "$AGENT_ROOT/AGENTS.md" "$INSTALL_DIR/AGENTS.md"
-      ;;
-    docker)
-      :
       ;;
   esac
 
@@ -210,6 +203,7 @@ echo ""
 echo "  Installed to: $INSTALL_DIR"
 echo ""
 echo "  Next steps:"
+echo "    docker run -d --name security-research --cap-add=NET_RAW --cap-add=NET_ADMIN security-research"
 case "$PRODUCT" in
   claude)
     echo "    cd $INSTALL_DIR"
@@ -220,10 +214,6 @@ case "$PRODUCT" in
     echo "    cd $INSTALL_DIR"
     echo "    codex mcp add kali -- docker exec -i security-research mcp-server"
     echo "    codex"
-    ;;
-  docker)
-    echo "    cd $INSTALL_DIR"
-    echo "    docker run -d --name security-research --cap-add=NET_RAW --cap-add=NET_ADMIN security-research"
     ;;
 esac
 echo "    cd agent && ./scripts/init_engagement.sh https://target.example"
