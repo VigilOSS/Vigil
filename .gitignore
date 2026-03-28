@@ -1,1 +1,13 @@
 **/__pycache__/*
+**/.pytest_cache/
+**/.venv/
+**/node_modules/
+**/dist/
+**/data/
+*.sqlite3
+*.db
+.env
+workspace/
+opencode-home/
+agent/engagements/*
+!agent/engagements/.gitkeep
