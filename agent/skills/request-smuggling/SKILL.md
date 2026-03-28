@@ -1,7 +1,7 @@
 ---
 name: request-smuggling
 description: HTTP request smuggling via CL.TE/TE.CL desync and cache poisoning
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # HTTP Request Smuggling Testing

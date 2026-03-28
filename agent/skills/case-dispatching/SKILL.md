@@ -1,7 +1,7 @@
 ---
 name: case-dispatching
 description: Guide operator through the transient work-buffer consumption loop for security testing
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Case Dispatching

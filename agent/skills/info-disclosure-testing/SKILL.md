@@ -1,7 +1,7 @@
 ---
 name: info-disclosure-testing
 description: Information disclosure detection — error messages, files, headers, debug endpoints
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Information Disclosure Testing

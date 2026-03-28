@@ -4,8 +4,8 @@ The operating model assumes a fully authorized realistic lab environment that mi
 
 ## Repository Layout
 
-- `Dockerfile`
-  Primary Kali MCP image. This is the default runtime for tool execution.
+- `agent/docker/runtime-full/Dockerfile`
+  Primary full Kali MCP image. This is the default runtime for tool execution.
 - `docker/kali-mcp-runtime/`
   MCP wrapper, transform proxy, and patched Kali API server.
 - `agent/`
@@ -23,17 +23,23 @@ Keep Claude and Codex in separate installs and separate engagement trees. Do not
 
 - Codex install:
 ```bash
+# Only needed once, and not again for future engagments
 ./install.sh codex ~/security-research-codex
 cd ~/security-research-codex
 codex mcp add kali -- docker exec -i security-research mcp-server
+
+# Per engagement
 cd agent && ./scripts/init_engagement.sh https://target.example
 ```
 
 - Claude install:
 ```bash
+# Only needed once, and not again for future engagments
 ./install.sh claude ~/security-research-claude
 cd ~/security-research-claude
 claude mcp add kali -s user -- docker exec -i security-research mcp-server
+
+# Per engagement
 cd agent && ./scripts/init_engagement.sh https://target.example
 ```
 
@@ -44,7 +50,7 @@ To switch clients, stop using the current engagement, install the other client i
 Build the primary full image:
 
 ```bash
-docker build -t security-research:latest .
+docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .
 ```
 
 Start the runtime with a durable host-mounted proxy data directory:
@@ -130,7 +136,7 @@ npm run dev
 
 ### Primary runtime
 
-The root `Dockerfile` is the main full runtime image and now includes:
+`agent/docker/runtime-full/Dockerfile` is the main full runtime image and now includes:
 
 - Kali MCP server plus the transform proxy
 - Katana and Chromium for authenticated crawling
@@ -139,8 +145,8 @@ The root `Dockerfile` is the main full runtime image and now includes:
 - an optional callback listener and ngrok bridge for listener-driven testing
 
 An explicitly optional lightweight runtime also exists at
-`agent/docker/kali-redteam-lightweight/Dockerfile`. It is only for faster local iteration and
-validation. The default workflow, docs, scripts, and agent runtime all target the root `Dockerfile`.
+`agent/docker/runtime-lightweight/Dockerfile`. It is only for faster local iteration and
+validation. The default workflow, docs, scripts, and agent runtime all target `agent/docker/runtime-full/Dockerfile`.
 
 The MCP entrypoint is the wrapper in [docker/kali-mcp-runtime/mcp-server-wrapper.sh](/path/to/vigil), which starts the Kali API first and then runs the Python transform proxy.
 
@@ -251,7 +257,7 @@ For reverse shells or richer callback workflows, use the same runtime plus the b
 
 ## Multi-Agent Workflow
 
-The combined project keeps the RedteamAgent phase model, but the state is now durable in the orchestrator:
+The combined project keeps the inherited multi-agent phase model, but the state is now durable in the orchestrator:
 
 - `recon`
   network and service enumeration, source inspection, and OSINT enrichment
@@ -300,7 +306,7 @@ The queue in `agent/scripts/schema.sql` remains useful as a transient work buffe
 - Backend Python is `>=3.11`; use `uv`, not ad hoc `pip` installs.
 - Frontend uses Vite and React under `orchestrator/frontend/`.
 - This repository is Claude/Codex-only. Legacy third-client prompt, command, and runtime paths have been removed.
-- The main runtime design is now the root `Dockerfile`, not the optional lightweight image.
+- The main runtime design is now `agent/docker/runtime-full/Dockerfile`, not the optional lightweight image.
 
 ## Verification Commands
 
@@ -321,6 +327,6 @@ npm run build
 Runtime:
 
 ```bash
-docker build -t security-research:latest .
+docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .
 docker exec -i security-research mcp-server
 ```

@@ -1,7 +1,7 @@
 ---
 name: user-enumeration
 description: Discover any interface (HTTP, WebSocket, GraphQL, gRPC, or other) that distinguishes between existing and non-existing users through any observable difference
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # User Enumeration

@@ -1,7 +1,7 @@
 ---
 name: open-redirect-testing
 description: Test for unvalidated redirects — URL parameters, login flows, OAuth callbacks that redirect to attacker-controlled domains
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Open Redirect Testing

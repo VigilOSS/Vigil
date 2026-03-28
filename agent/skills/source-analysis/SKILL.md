@@ -1,7 +1,7 @@
 ---
 name: source-analysis
 description: Frontend source code analysis for hidden routes, API endpoints, and secrets
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Source Code Analysis

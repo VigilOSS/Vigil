@@ -1,7 +1,7 @@
 ---
 name: subdomain-enumeration
 description: Subdomain discovery via subfinder, DNS brute-force, and passive sources
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Subdomain Enumeration

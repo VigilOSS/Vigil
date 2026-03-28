@@ -1,7 +1,7 @@
 ---
 name: csrf-testing
 description: Cross-site request forgery testing for state-changing operations
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # CSRF Testing (Cross-Site Request Forgery)

@@ -1,7 +1,7 @@
 ---
 name: idor-testing
 description: Insecure direct object reference testing for broken access control
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # IDOR Testing (Insecure Direct Object Reference)

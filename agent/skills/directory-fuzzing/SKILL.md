@@ -1,7 +1,7 @@
 ---
 name: directory-fuzzing
 description: Discover hidden directories, files, and endpoints on a web server
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Directory Fuzzing

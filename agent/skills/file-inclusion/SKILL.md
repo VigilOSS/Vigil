@@ -1,7 +1,7 @@
 ---
 name: file-inclusion
 description: Detect and exploit local and remote file inclusion vulnerabilities for sensitive data access and code execution
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # File Inclusion Testing

@@ -1,4 +1,4 @@
-# RedTeam Agent
+# AI Threat Hunting
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
@@ -16,7 +16,7 @@
 ```
 
 When a session starts, display the banner above and then:
-"[operator] RedTeam Agent ready. Use `./scripts/init_engagement.sh <target_url>` to start a new engagement."
+"[operator] AI Threat Hunting ready. Use `./scripts/init_engagement.sh <target_url>` to start a new engagement."
 
 ---
 

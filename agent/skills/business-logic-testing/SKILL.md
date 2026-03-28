@@ -1,7 +1,7 @@
 ---
 name: business-logic-testing
 description: Business logic vulnerability detection — workflow bypass, price manipulation, state abuse, and application-specific flaws
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Business Logic Testing

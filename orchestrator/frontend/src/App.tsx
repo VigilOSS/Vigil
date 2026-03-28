@@ -16,7 +16,7 @@ type RunRoute = {
   runId: number;
 };
 
-const SESSION_STORAGE_KEY = "redteam-orchestrator-session";
+const SESSION_STORAGE_KEY = "security-research-orchestrator-session";
 
 function currentRoute(): string {
   const hashRoute = window.location.hash.replace(/^#/, "");

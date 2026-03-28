@@ -1,7 +1,7 @@
 ---
 name: port-scanning
 description: Discover open ports, running services, and their versions on a target
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Port Scanning

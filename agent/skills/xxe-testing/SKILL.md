@@ -1,7 +1,7 @@
 ---
 name: xxe-testing
 description: XML external entity injection for file read, SSRF, and DoS
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # XXE Testing (XML External Entity Injection)
