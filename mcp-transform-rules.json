@@ -1,0 +1,26 @@
+{
+  "outbound": [
+    {
+      "find": "identity.acme.example",
+      "replace": "acme-identity.local"
+    },
+    {
+      "find": "product.acme.example",
+      "replace": "acme-product.local"
+    }
+  ],
+  "inbound": [
+    {
+      "find": "identity.acme.example",
+      "replace": "acme-identity.local"
+    },
+    {
+      "find": "product.acme.example",
+      "replace": "acme-product.local"
+    }
+  ],
+  "public_ip_aliases": {
+    "enabled": true,
+    "map_path": "/data/mcp-public-ip-map.json"
+  }
+}

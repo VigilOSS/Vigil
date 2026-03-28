@@ -21,26 +21,20 @@ The operating model assumes a fully authorized realistic lab environment that mi
 
 Keep Claude and Codex in separate installs and separate engagement trees. Do not run both clients against the same `engagements/` directory.
 
+The shared Kali MCP runtime is not per-engagement. Start it once, configure its proxy behavior once, and then attach one or more client installs to the same `docker exec -i security-research mcp-server` endpoint. Within a single install, the repo still tracks one active engagement via `engagements/.active`.
+
 - Codex install:
 ```bash
-# Only needed once, and not again for future engagments
+# Only needed once, and not again for future engagements
 ./install.sh codex ~/security-research-codex
 cd ~/security-research-codex
-codex mcp add kali -- docker exec -i security-research mcp-server
-
-# Per engagement
-cd agent && ./scripts/init_engagement.sh https://target.example
 ```
 
 - Claude install:
 ```bash
-# Only needed once, and not again for future engagments
+# Only needed once, and not again for future engagements
 ./install.sh claude ~/security-research-claude
 cd ~/security-research-claude
-claude mcp add kali -s user -- docker exec -i security-research mcp-server
-
-# Per engagement
-cd agent && ./scripts/init_engagement.sh https://target.example
 ```
 
 To switch clients, stop using the current engagement, install the other client into a different directory, and start a new engagement there.
@@ -53,24 +47,26 @@ Build the primary full image:
 docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .
 ```
 
-Start the runtime with a durable host-mounted proxy data directory:
+Edit `mcp-transform-rules.json` for your ordered find/replace rules, then start the shared runtime:
 
 ```bash
-mkdir -p .runtime-data
-
-docker run -d \
-  --name security-research \
-  --cap-add=NET_RAW \
-  --cap-add=NET_ADMIN \
-  -v "$PWD/.runtime-data:/data" \
-  security-research:latest
+./agent/scripts/start_kali_mcp_runtime.sh
 ```
 
-Attach Claude Code or Codex over stdio:
+This starts one shared container named `security-research`, mounts durable proxy state at `.runtime-data/`, mounts the install-root `mcp-transform-rules.json` into the runtime, and passes the root `.env` file into the runtime when present.
+
+Attach Claude Code or Codex over stdio after the runtime is up:
 
 ```bash
 claude mcp add kali -s user -- docker exec -i security-research mcp-server
 codex mcp add kali -- docker exec -i security-research mcp-server
+```
+
+Then create an engagement inside the chosen install:
+
+```bash
+cd agent
+./scripts/init_engagement.sh https://target.example
 ```
 
 Policy:
@@ -80,33 +76,16 @@ Policy:
 - Use MCP tool discovery to inspect the currently available Kali tools.
 - When you need to run an arbitrary binary or shell pipeline inside the runtime, use the Kali MCP command-execution tool rather than a repo-local wrapper.
 
-Configure string transforms as needed:
+Proxy config lives in the install-root [mcp-transform-rules.json](/path/to/vigil). It contains:
 
-```bash
-docker run -d \
-  --name security-research \
-  --cap-add=NET_RAW \
-  --cap-add=NET_ADMIN \
-  -v "$PWD/.runtime-data:/data" \
-  -e MCP_TRANSFORM_OUTBOUND_FIND=researcher.example \
-  -e MCP_TRANSFORM_OUTBOUND_REPLACE=internal.test \
-  -e MCP_TRANSFORM_INBOUND_FIND=Parameno \
-  -e MCP_TRANSFORM_INBOUND_REPLACE=Redacted \
-  security-research:latest
-```
-
-Proxy behavior:
-
-- `MCP_TRANSFORM_OUTBOUND_FIND` / `MCP_TRANSFORM_OUTBOUND_REPLACE`
-  replace strings before the Kali MCP tool call is executed
-- `MCP_TRANSFORM_INBOUND_FIND` / `MCP_TRANSFORM_INBOUND_REPLACE`
-  replace strings in the returned tool result
-- `MCP_TRANSFORM_PUBLIC_IP_MAP_PATH`
-  JSON file storing public IPv4 to private IPv4 aliases; defaults to `/data/mcp-public-ip-map.json`
+- ordered `outbound` replace rules
+- ordered `inbound` replace rules
+- `public_ip_aliases.enabled`
+- `public_ip_aliases.map_path`
 
 Public IPv4 aliasing is automatic on inbound tool output. If `dig`, `whois`, `curl`, or any other Kali MCP tool returns `8.8.8.8`, the client will receive a private RFC1918 address instead, and the same public IP will keep the same private alias on later calls.
 
-Keep `/data` mounted from the host if you want the alias map to survive container restarts, image rebuilds, and host reboots. With the default example above, the durable host file is `.runtime-data/mcp-public-ip-map.json`.
+Keep `/data` mounted from the host if you want the alias map to survive container restarts, image rebuilds, and host reboots. With the default helper above, the durable host file is `.runtime-data/mcp-public-ip-map.json`.
 
 Quick verification:
 

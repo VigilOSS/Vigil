@@ -10,6 +10,7 @@ import os
 import random
 import re
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ UPSTREAM_CLIENT_PATH = Path(
     os.environ.get("KALI_MCP_CLIENT_PATH", "/usr/share/mcp-kali-server/client.py")
 )
 IPV4_CANDIDATE_RE = re.compile(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)")
+RULES_PATH = Path(os.environ.get("MCP_TRANSFORM_RULES_PATH", "/config/mcp-transform-rules.json"))
 
 
 def load_upstream():
@@ -37,25 +39,72 @@ def env_string(primary: str, fallback: str, default: str) -> str:
     return os.environ.get(primary) or os.environ.get(fallback, default)
 
 
-OUTBOUND_FIND = env_string("MCP_TRANSFORM_OUTBOUND_FIND", "REDTEAM_MCP_OUTBOUND_FIND", "")
-OUTBOUND_REPLACE = env_string(
-    "MCP_TRANSFORM_OUTBOUND_REPLACE",
-    "REDTEAM_MCP_OUTBOUND_REPLACE",
-    "",
-)
-INBOUND_FIND = env_string("MCP_TRANSFORM_INBOUND_FIND", "REDTEAM_MCP_INBOUND_FIND", "")
-INBOUND_REPLACE = env_string(
-    "MCP_TRANSFORM_INBOUND_REPLACE",
-    "REDTEAM_MCP_INBOUND_REPLACE",
-    "",
-)
-PUBLIC_IP_MAP_PATH = Path(
-    env_string(
-        "MCP_TRANSFORM_PUBLIC_IP_MAP_PATH",
-        "REDTEAM_MCP_PUBLIC_IP_MAP_PATH",
-        "/data/mcp-public-ip-map.json",
+@dataclass(frozen=True)
+class ReplaceRule:
+    find: str
+    replace: str
+
+
+@dataclass(frozen=True)
+class TransformConfig:
+    outbound_rules: tuple[ReplaceRule, ...]
+    inbound_rules: tuple[ReplaceRule, ...]
+    public_ip_aliasing_enabled: bool
+    public_ip_map_path: Path
+
+
+def load_transform_config(path: Path) -> TransformConfig:
+    if not path.exists():
+        raise RuntimeError(f"Transform rules file not found: {path}")
+
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Unable to load transform rules file {path}: {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise RuntimeError(f"Transform rules file must contain a JSON object: {path}")
+
+    def parse_rules(key: str) -> tuple[ReplaceRule, ...]:
+        value = raw.get(key, [])
+        if value is None:
+            return ()
+        if not isinstance(value, list):
+            raise RuntimeError(f"Transform rules field '{key}' must be a list in {path}")
+
+        rules: list[ReplaceRule] = []
+        for idx, item in enumerate(value):
+            if not isinstance(item, dict):
+                raise RuntimeError(f"Transform rule {key}[{idx}] must be an object in {path}")
+            find = item.get("find")
+            replace = item.get("replace")
+            if not isinstance(find, str) or not find:
+                raise RuntimeError(f"Transform rule {key}[{idx}].find must be a non-empty string")
+            if not isinstance(replace, str):
+                raise RuntimeError(f"Transform rule {key}[{idx}].replace must be a string")
+            rules.append(ReplaceRule(find=find, replace=replace))
+        return tuple(rules)
+
+    public_ip_aliases = raw.get("public_ip_aliases", {})
+    if public_ip_aliases is None:
+        public_ip_aliases = {}
+    if not isinstance(public_ip_aliases, dict):
+        raise RuntimeError(f"Transform rules field 'public_ip_aliases' must be an object in {path}")
+
+    enabled = public_ip_aliases.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise RuntimeError(f"Transform rules field 'public_ip_aliases.enabled' must be a boolean in {path}")
+
+    map_path_value = public_ip_aliases.get("map_path", "/data/mcp-public-ip-map.json")
+    if not isinstance(map_path_value, str) or not map_path_value:
+        raise RuntimeError(f"Transform rules field 'public_ip_aliases.map_path' must be a non-empty string in {path}")
+
+    return TransformConfig(
+        outbound_rules=parse_rules("outbound"),
+        inbound_rules=parse_rules("inbound"),
+        public_ip_aliasing_enabled=enabled,
+        public_ip_map_path=Path(map_path_value),
     )
-)
 
 
 def is_public_ipv4(candidate: str) -> bool:
@@ -70,6 +119,13 @@ def replace_string(value: str, source: str, target: str) -> str:
     if not source:
         return value
     return value.replace(source, target)
+
+
+def apply_rules(value: str, rules: tuple[ReplaceRule, ...]) -> str:
+    transformed = value
+    for rule in rules:
+        transformed = replace_string(transformed, rule.find, rule.replace)
+    return transformed
 
 
 def transform_strings(value: Any, transformer) -> Any:
@@ -155,14 +211,17 @@ class PublicIpAliasMap:
         return IPV4_CANDIDATE_RE.sub(replace_match, value)
 
 
-PUBLIC_IP_ALIAS_MAP = PublicIpAliasMap(PUBLIC_IP_MAP_PATH)
+CONFIG = load_transform_config(RULES_PATH)
+PUBLIC_IP_ALIAS_MAP = (
+    PublicIpAliasMap(CONFIG.public_ip_map_path) if CONFIG.public_ip_aliasing_enabled else None
+)
 
 
 class TransformingKaliToolsClient(upstream.KaliToolsClient):
     def transform_outbound(self, payload: Any) -> Any:
         transformed = transform_strings(
             payload,
-            lambda text: replace_string(text, OUTBOUND_FIND, OUTBOUND_REPLACE),
+            lambda text: apply_rules(text, CONFIG.outbound_rules),
         )
         if transformed != payload:
             logger.info("Transformed outbound payload")
@@ -171,8 +230,10 @@ class TransformingKaliToolsClient(upstream.KaliToolsClient):
     def transform_inbound(self, payload: Any) -> Any:
         transformed = transform_strings(
             payload,
-            lambda text: PUBLIC_IP_ALIAS_MAP.remap_text(
-                replace_string(text, INBOUND_FIND, INBOUND_REPLACE)
+            lambda text: (
+                PUBLIC_IP_ALIAS_MAP.remap_text(apply_rules(text, CONFIG.inbound_rules))
+                if PUBLIC_IP_ALIAS_MAP is not None
+                else apply_rules(text, CONFIG.inbound_rules)
             ),
         )
         if transformed != payload:
