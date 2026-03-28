@@ -14,7 +14,7 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `run_tool curl` (manual request replay)
+- `curl` (manual request replay)
 - Burp Suite (generate CSRF PoC)
 - Browser DevTools (inspect cookies, headers)
 - Custom HTML PoC pages

@@ -138,8 +138,8 @@ PARAMS="redirect url next return goto dest redir redirect_url return_to"
 TARGET="http://target.example"
 
 for p in $PARAMS; do
-  CODE=$(run_tool curl -s -o /dev/null -w "%{http_code}" "$TARGET/?$p=https://evil.example")
-  LOCATION=$(run_tool curl -s -I "$TARGET/?$p=https://evil.example" | grep -i "location:")
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET/?$p=https://evil.example")
+  LOCATION=$(curl -s -I "$TARGET/?$p=https://evil.example" | grep -i "location:")
   echo "$p -> $CODE $LOCATION"
 done
 ```

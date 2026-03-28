@@ -15,7 +15,7 @@ origin: AI Threat Hunting
 
 ## Tools
 
-`run_tool curl`, `grep`/`sed`/`awk`, `jq`
+`curl`, `grep`/`sed`/`awk`, `jq`
 
 ## Division of Labor
 
@@ -40,7 +40,7 @@ HTML comments, meta tags (canonical, CSRF, API base), inline config (`window.__C
 
 ### 3. JavaScript Analysis
 ```bash
-run_tool curl -sL <js-url> | grep -oE '["'"'"'](/[a-zA-Z0-9_/\-\.]+)["'"'"']' | sort -u
+curl -sL <js-url> | grep -oE '["'"'"'](/[a-zA-Z0-9_/\-\.]+)["'"'"']' | sort -u
 ```
 - API calls: fetch(), axios, XHR, $.ajax patterns
 - SPA routes: React `path="/..."`, Vue `{ path: }`, Angular `{ path: }`
@@ -60,7 +60,7 @@ The local queue can still be populated as a transient batching aid, but the oper
 the backend ledger:
 
 ```bash
-run_tool curl -sL "https://TARGET/openapi.json" -o /engagement/scans/openapi.json
+curl -sL "https://TARGET/openapi.json" -o /engagement/scans/openapi.json
 ./scripts/spec_ingest.sh "$ENGAGEMENT_DIR/cases.db" "$ENGAGEMENT_DIR/scans/openapi.json"
 ./scripts/dispatcher.sh "$ENGAGEMENT_DIR/cases.db" stats
 ```

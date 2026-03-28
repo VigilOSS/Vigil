@@ -17,15 +17,15 @@ origin: AI Threat Hunting
 ## Tools
 
 - Burp Suite Turbo Intruder
-- `run_tool curl --parallel` (HTTP/2 multiplexing)
+- `curl --parallel` (HTTP/2 multiplexing)
 - Custom Python scripts (asyncio + aiohttp)
 - Burp Repeater (send group in parallel)
 - GNU parallel
 
-For current-engagement target requests, use plain `run_tool curl` by default and let
-`rtcurl` load `auth.json` automatically. Only add explicit `Cookie:` or
-`Authorization:` headers when intentionally testing alternate-user races or session
-override behavior.
+For current-engagement target requests, execute `curl` through the Kali MCP
+command-execution tool. Add explicit `Cookie:` or `Authorization:` headers
+only when intentionally testing alternate-user races or session override
+behavior.
 
 ## Methodology
 
@@ -45,7 +45,7 @@ override behavior.
 - [ ] Prepare N identical requests
 - [ ] Send all in a single TCP packet using HTTP/2 multiplexing:
       ```bash
-      run_tool curl --parallel --parallel-max 50 \
+      curl --parallel --parallel-max 50 \
         -X POST https://target/redeem-coupon \
         -d "code=DISCOUNT50" \
         # Add explicit Cookie/Auth only when testing a second session or override path
@@ -112,7 +112,7 @@ override behavior.
 - Endpoint and action with race condition
 - Number of parallel requests sent
 - Number of successful duplicate executions
-- Technique used (single-packet, Turbo Intruder, run_tool curl --parallel)
+- Technique used (single-packet, Turbo Intruder, curl --parallel)
 - Business impact (financial loss, integrity violation, privilege escalation)
 - Timing window observed
 - Severity: High (financial) to Medium (logic bypass)

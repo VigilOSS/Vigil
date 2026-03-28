@@ -5,7 +5,7 @@ The operating model assumes a fully authorized realistic lab environment that mi
 ## Repository Layout
 
 - `agent/docker/runtime-full/Dockerfile`
-  Primary full Kali MCP image. This is the default runtime for tool execution.
+  Primary full Kali MCP image. This is the only supported runtime for target-facing execution.
 - `docker/kali-mcp-runtime/`
   MCP wrapper, transform proxy, and patched Kali API server.
 - `agent/`
@@ -72,6 +72,13 @@ Attach Claude Code or Codex over stdio:
 claude mcp add kali -s user -- docker exec -i security-research mcp-server
 codex mcp add kali -- docker exec -i security-research mcp-server
 ```
+
+Policy:
+
+- All in-scope target-facing work must go through the attached Kali MCP session.
+- Do not run target probes, crawlers, fuzzers, scanners, or exploits from host Bash or ad hoc Docker commands.
+- Use MCP tool discovery to inspect the currently available Kali tools.
+- When you need to run an arbitrary binary or shell pipeline inside the runtime, use the Kali MCP command-execution tool rather than a repo-local wrapper.
 
 Configure string transforms as needed:
 
@@ -150,6 +157,14 @@ validation. The default workflow, docs, scripts, and agent runtime all target `a
 
 The MCP entrypoint is the wrapper in [docker/kali-mcp-runtime/mcp-server-wrapper.sh](/path/to/vigil), which starts the Kali API first and then runs the Python transform proxy.
 
+## Using Tools Through Kali MCP
+
+The runtime image still contains a broad toolset, but the supported way to use it is through the attached Kali MCP session.
+
+- Use MCP tool discovery to see the current tool surface instead of relying on a hardcoded tool list in prompts or docs.
+- For arbitrary shell commands inside the runtime, use the Kali MCP command-execution tool.
+- Treat direct `docker exec ... <tool>` examples as unsupported for in-scope target work, even if they would technically function.
+
 Initialize an engagement in the repo-managed workspace with:
 
 ```bash
@@ -163,49 +178,21 @@ Methodology now lives in:
 
 ## Optional Tool Activation
 
-These tools are intentionally present but not always started automatically.
+These capabilities are intentionally present but not always started automatically.
 
 ### Katana
 
 Katana is built into the main runtime. The agent-side container helpers default to the same image for crawling, so there is no separate Katana image requirement anymore.
-
-Manual example:
-
-```bash
-docker exec -it security-research katana \
-  -u https://target.example \
-  -hl -jc -system-chrome -system-chrome-path /usr/bin/chromium \
-  -headless-options --no-sandbox,--disable-dev-shm-usage,--disable-gpu \
-  -d 3 -jsonl -silent
-```
+Use the Kali MCP command-execution tool to run `katana ...` inside the attached runtime when crawling is required.
 
 ### MITM proxy
 
-MITM remains optional. Use the agent command path or the helper directly:
-
-```bash
-docker compose -f agent/docker/docker-compose.yml up -d mitmproxy
-```
-
-The proxy image still lives under `agent/docker/mitmproxy/`.
+MITM remains optional. Start it through the runtime environment or the attached Kali MCP session when the workflow requires interception. The proxy image still lives under `agent/docker/mitmproxy/`.
 
 ### Metasploit
 
 Metasploit is not assumed to be always-on. Start it only when exploit chaining or module validation warrants it.
-
-Manual path:
-
-```bash
-docker compose -f agent/docker/docker-compose.yml up -d metasploit
-```
-
-Readiness helper:
-
-```bash
-agent/scripts/check_metasploit_runtime.sh --ensure --probe-port
-```
-
-This is the script the agent uses to verify or start the RPC service before trying the optional Metasploit path.
+Start and inspect it through the attached Kali MCP session when needed. Repo-local helper scripts are no longer the supported target-facing path.
 
 ## Callback and Listener Handling
 
@@ -307,6 +294,7 @@ The queue in `agent/scripts/schema.sql` remains useful as a transient work buffe
 - Frontend uses Vite and React under `orchestrator/frontend/`.
 - This repository is Claude/Codex-only. Legacy third-client prompt, command, and runtime paths have been removed.
 - The main runtime design is now `agent/docker/runtime-full/Dockerfile`, not the optional lightweight image.
+- Repo-local target execution helpers are removed. Use Kali MCP for all in-scope testing.
 
 ## Verification Commands
 

