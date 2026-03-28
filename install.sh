@@ -194,7 +194,7 @@ elif [ "$SKIP_DOCKER_IMAGE_CHECKS" = "1" ]; then
   warn "Skipping Docker image build/verification (AI_THREAT_HUNTING_SKIP_DOCKER_IMAGE_CHECKS=1)"
 else
   cd "$INSTALL_DIR"
-  if $FORCE_REBUILD || ! docker image inspect security-research:latest >/dev/null 2>&1; then
+  if $FORCE_REBUILD || ! docker inspect --type image security-research:latest >/dev/null 2>&1; then
     info "Building security-research runtime image..."
     if docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .; then
       ok "security-research image ready"
@@ -214,7 +214,7 @@ echo ""
 echo "  Installed to: $INSTALL_DIR"
 echo ""
 echo "  Next steps:"
-echo "    Use only against fully authorized environments."
+echo "    Use only against fully authorized realistic lab environments."
 echo "    Configure shared runtime env in $INSTALL_DIR/.env as needed"
 echo "    Edit transform rules in $INSTALL_DIR/mcp-transform-rules.json"
 echo "    cd $INSTALL_DIR"

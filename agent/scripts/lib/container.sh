@@ -294,7 +294,7 @@ check_images() {
         required_images+=("$KATANA_IMAGE")
     fi
     for img in "${required_images[@]}"; do
-        if docker image inspect "$img" >/dev/null 2>&1; then
+        if docker inspect --type image "$img" >/dev/null 2>&1; then
             echo "[OK] $img"
         else
             echo "[MISSING] $img"
