@@ -52,6 +52,98 @@ export type AssessmentPhaseWorker = {
   active_agents: string[];
 };
 
+export type AssessmentFinding = {
+  slug: string;
+  title: string;
+  severity: string;
+  status: string;
+  canonical_location: string;
+  summary: string;
+  source_name: string;
+  updated_at: string;
+};
+
+export type AssessmentFindingDetail = AssessmentFinding & {
+  id: number;
+  evidence_ref: string;
+  notes: string;
+  defect_family: string;
+  root_cause_key: string;
+  auth_context: string;
+  merged_into_slug?: string | null;
+};
+
+export type AssessmentFindingLink = {
+  id: number;
+  finding_slug: string;
+  link_kind: string;
+  target_kind: string;
+  target_ref: string;
+  notes: string;
+  updated_at: string;
+};
+
+export type AssessmentProbe = {
+  result_status: string;
+  attack_family: string;
+  signal_type: string;
+  agent_name: string;
+  evidence_ref: string;
+  created_at: string;
+};
+
+export type AssessmentProbeDetail = AssessmentProbe & {
+  id: number;
+  auth_context: string;
+  input_slot: string;
+  payload_family: string;
+  tool_name: string;
+  notes: string;
+  observed_http_status?: number | null;
+};
+
+export type AssessmentCoverageGap = {
+  status: string;
+  input_slot: string;
+  attack_family: string;
+  auth_context: string;
+  updated_at: string;
+  method?: string;
+  canonical_url?: string;
+  service_endpoint?: string;
+};
+
+export type AssessmentAttackChain = {
+  chain_key: string;
+  title: string;
+  status: string;
+  severity: string;
+  narrative: string;
+  updated_at: string;
+};
+
+export type AssessmentAttackChainDetail = AssessmentAttackChain & {
+  id: number;
+  evidence_ref: string;
+};
+
+export type AssessmentAttackChainLink = {
+  id: number;
+  chain_key: string;
+  relation: string;
+  entity_kind: string;
+  entity_ref: string;
+  notes: string;
+  updated_at: string;
+};
+
+export type AssessmentServiceGap = {
+  endpoint: string;
+  service: string;
+  coverage_status: string;
+  updated_at: string;
+};
+
 export type AssessmentSummary = {
   target_count: number;
   service_count: number;
@@ -61,8 +153,20 @@ export type AssessmentSummary = {
   probe_count: number;
   finding_count: number;
   open_surface_count: number;
+  credential_count: number;
+  access_count: number;
+  pivot_count: number;
+  tunnel_count: number;
+  blocked_technique_count: number;
+  attack_chain_count: number;
   coverage_statuses: Record<string, number>;
+  finding_statuses: Record<string, number>;
   top_surfaces: AssessmentSurface[];
+  top_findings: AssessmentFinding[];
+  recent_probes: AssessmentProbe[];
+  open_coverage_items: AssessmentCoverageGap[];
+  attack_chains: AssessmentAttackChain[];
+  service_coverage_gaps: AssessmentServiceGap[];
   phase_workers: AssessmentPhaseWorker[];
 };
 
@@ -201,6 +305,26 @@ export function getAssessmentSummary(token: string, projectId: number, runId: nu
 
 export function listAssessmentSurfaces(token: string, projectId: number, runId: number) {
   return request<AssessmentSurface[]>(`/projects/${projectId}/runs/${runId}/assessment/surfaces`, {}, token);
+}
+
+export function listAssessmentFindings(token: string, projectId: number, runId: number) {
+  return request<AssessmentFindingDetail[]>(`/projects/${projectId}/runs/${runId}/assessment/findings`, {}, token);
+}
+
+export function listAssessmentFindingLinks(token: string, projectId: number, runId: number) {
+  return request<AssessmentFindingLink[]>(`/projects/${projectId}/runs/${runId}/assessment/finding-links`, {}, token);
+}
+
+export function listAssessmentProbes(token: string, projectId: number, runId: number) {
+  return request<AssessmentProbeDetail[]>(`/projects/${projectId}/runs/${runId}/assessment/probe-runs`, {}, token);
+}
+
+export function listAssessmentAttackChains(token: string, projectId: number, runId: number) {
+  return request<AssessmentAttackChainDetail[]>(`/projects/${projectId}/runs/${runId}/assessment/attack-chains`, {}, token);
+}
+
+export function listAssessmentAttackChainLinks(token: string, projectId: number, runId: number) {
+  return request<AssessmentAttackChainLink[]>(`/projects/${projectId}/runs/${runId}/assessment/attack-chain-links`, {}, token);
 }
 
 export function listArtifacts(token: string, projectId: number, runId: number) {

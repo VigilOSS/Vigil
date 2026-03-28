@@ -2,6 +2,9 @@
 # db.sh — Database helper library for the case collection pipeline.
 # Usage: source scripts/lib/db.sh
 
+DB_HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DB_SCHEMA_FILE="$DB_HELPER_DIR/../schema.sql"
+
 # Escape single quotes for safe SQL string interpolation.
 # Replaces ' with '' per SQL standard.
 _db_escape() {
@@ -23,6 +26,7 @@ db_init() {
         return 1
     fi
 
+    sqlite3 "$db_path" < "$DB_SCHEMA_FILE" >/dev/null 2>&1
     sqlite3 "$db_path" "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;" >/dev/null
 }
 
@@ -58,7 +62,8 @@ db_exec() {
 #   <path_params> <cookie_params> <headers> <body> <content_type> <content_length>
 #   <response_status> <response_headers> <response_size> <response_snippet>
 #   <type> <source> <params_key_sig>
-# Insert a case with INSERT OR IGNORE for dedup.
+# Insert a transient work item with INSERT OR IGNORE for dedup.
+# When backend ids are available, the work buffer keys off those canonical identities.
 # Auto-sets status to 'skipped' for non-consumable types (image, video, font, archive).
 db_insert_case() {
     local db_path="$1"
@@ -80,6 +85,11 @@ db_insert_case() {
     local type="${17}"
     local source="${18}"
     local params_key_sig="${19}"
+    local queue_key="${DB_QUEUE_KEY:-}"
+    local request_variant_id="${DB_REQUEST_VARIANT_ID:-}"
+    local service_id="${DB_SERVICE_ID:-}"
+    local coverage_item_id="${DB_COVERAGE_ITEM_ID:-}"
+    local auth_context="${DB_AUTH_CONTEXT:-anonymous}"
 
     if [[ -z "$db_path" ]]; then
         echo "db_insert_case: db_path is required" >&2
@@ -114,7 +124,7 @@ db_insert_case() {
     # Escape all string values for SQL
     local e_method e_url e_url_path e_query_params e_body_params e_path_params
     local e_cookie_params e_headers e_body e_content_type e_response_headers
-    local e_response_snippet e_type e_source e_params_key_sig
+    local e_response_snippet e_type e_source e_params_key_sig e_queue_key e_auth_context
 
     e_method=$(_db_escape "$method")
     e_url=$(_db_escape "$url")
@@ -131,14 +141,43 @@ db_insert_case() {
     e_type=$(_db_escape "$type")
     e_source=$(_db_escape "$source")
     e_params_key_sig=$(_db_escape "$params_key_sig")
+    e_auth_context=$(_db_escape "$auth_context")
 
-    local sql="INSERT OR IGNORE INTO cases (
+    if [[ -z "$queue_key" ]]; then
+        if [[ -n "$request_variant_id" ]]; then
+            queue_key="variant:${request_variant_id}:${type}"
+        elif [[ -n "$service_id" ]]; then
+            queue_key="service:${service_id}:${type}"
+        elif [[ -n "$coverage_item_id" ]]; then
+            queue_key="coverage:${coverage_item_id}:${type}"
+        else
+            queue_key="legacy:${auth_context}:${method}:${url}:${params_key_sig}:${type}"
+        fi
+    fi
+    e_queue_key=$(_db_escape "$queue_key")
+
+    local request_variant_sql="NULL"
+    local service_sql="NULL"
+    local coverage_item_sql="NULL"
+    if [[ -n "$request_variant_id" && "$request_variant_id" =~ ^[0-9]+$ ]]; then
+        request_variant_sql="$request_variant_id"
+    fi
+    if [[ -n "$service_id" && "$service_id" =~ ^[0-9]+$ ]]; then
+        service_sql="$service_id"
+    fi
+    if [[ -n "$coverage_item_id" && "$coverage_item_id" =~ ^[0-9]+$ ]]; then
+        coverage_item_sql="$coverage_item_id"
+    fi
+
+    local sql="INSERT OR IGNORE INTO work_items (
+    queue_key, request_variant_id, service_id, coverage_item_id, auth_context,
     method, url, url_path,
     query_params, body_params, path_params, cookie_params,
     headers, body, content_type, content_length,
     response_status, response_headers, response_size, response_snippet,
     type, source, status, params_key_sig
 ) VALUES (
+    '${e_queue_key}', ${request_variant_sql}, ${service_sql}, ${coverage_item_sql}, '${e_auth_context}',
     '${e_method}', '${e_url}', '${e_url_path}',
     '${e_query_params}', '${e_body_params}', '${e_path_params}', '${e_cookie_params}',
     '${e_headers}', '${e_body}', '${e_content_type}', ${content_length:-0},

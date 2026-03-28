@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# spec_ingest.sh — Parse OpenAPI 3.x / Swagger 2.0 spec and generate test cases.
+# spec_ingest.sh — Parse OpenAPI 3.x / Swagger 2.0 spec and generate durable coverage records.
+# The local SQLite queue remains available only as a transient batching buffer.
 # Usage: ./scripts/spec_ingest.sh <db_path> <spec_file_or_url>
 
 set -euo pipefail
@@ -8,6 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/params.sh"
 source "$SCRIPT_DIR/lib/classify.sh"
 source "$SCRIPT_DIR/lib/db.sh"
+POST_ASSESSMENT_RECORD="$SCRIPT_DIR/post_assessment_record.sh"
+ASSESSMENT_AUTH_CONTEXT="${ASSESSMENT_AUTH_CONTEXT:-anonymous}"
 
 download_spec() {
     local spec_url="$1"
@@ -169,17 +172,76 @@ while IFS= read -r endpoint; do
     # Generate dedup signature
     params_sig=$(generate_params_sig "$query_params" "$body_params")
 
-    # Insert into DB
-    db_insert_case "$DB_PATH" \
-        "$method" "$url_with_query" "$url_path" \
-        "$query_params" "$body_params" "$path_params" "{}" \
-        "" "" "" "0" \
-        "0" "" "0" "" \
-        "$case_type" "api-spec" "$params_sig"
+    payload=""
+    if [[ "$url_with_query" =~ ^https?:// ]]; then
+        payload="$(python3 - <<'PY' "$url_with_query" "$method" "$query_params" "$body_params" "$path_params" "$ASSESSMENT_AUTH_CONTEXT"
+import json
+import sys
+from urllib.parse import urlparse
+
+url, method, query_params, body_params, path_params, auth_context = sys.argv[1:]
+parsed = urlparse(url)
+print(json.dumps({
+    "url": url,
+    "method": method,
+    "auth_context": auth_context,
+    "content_type_family": "spec-derived",
+    "query_schema": json.loads(query_params),
+    "body_schema": json.loads(body_params),
+    "path_schema": json.loads(path_params),
+    "cookie_schema": {},
+    "header_schema": {},
+    "path_template": parsed.path or "",
+    "discovery_source": "api-spec",
+    "notes": "Derived from accessible API specification.",
+    "response_status": None,
+    "evidence_ref": "",
+    "observation_payload": {"source": "api-spec"},
+    "target_identity": parsed.hostname or "",
+    "target_kind": "host",
+    "target_notes": "",
+    "target_ip_address": None,
+    "target_hostname": parsed.hostname,
+    "banner": "",
+    "coverage_candidates": [],
+    "auto_generate_coverage": True,
+}, ensure_ascii=True))
+PY
+)"
+    fi
+
+    if [[ -n "$payload" ]]; then
+        assessment_response="$(bash "$POST_ASSESSMENT_RECORD" "request-observations" "$payload")"
+        request_variant_id="$(printf '%s' "$assessment_response" | jq -r '.request_variant.id // empty' 2>/dev/null)"
+        service_id="$(printf '%s' "$assessment_response" | jq -r '.service.id // empty' 2>/dev/null)"
+        if [[ -z "$request_variant_id" && -z "$service_id" ]]; then
+            echo "spec_ingest.sh: backend response missing request_variant.id/service.id for $url_with_query" >&2
+            exit 1
+        fi
+        queue_key=""
+        if [[ -n "$request_variant_id" ]]; then
+            queue_key="variant:${request_variant_id}:${case_type}"
+        elif [[ -n "$service_id" ]]; then
+            queue_key="service:${service_id}:${case_type}"
+        fi
+        DB_AUTH_CONTEXT="$ASSESSMENT_AUTH_CONTEXT" \
+        DB_QUEUE_KEY="$queue_key" \
+        DB_REQUEST_VARIANT_ID="${request_variant_id:-}" \
+        DB_SERVICE_ID="${service_id:-}" \
+        db_insert_case "$DB_PATH" \
+            "$method" "$url_with_query" "$url_path" \
+            "$query_params" "$body_params" "$path_params" "{}" \
+            "" "" "" "0" \
+            "0" "" "0" "" \
+            "$case_type" "api-spec" "$params_sig"
+    else
+        echo "spec_ingest.sh: endpoint $url_with_query is missing an absolute http(s) URL for backend ingestion" >&2
+        exit 1
+    fi
 
     count=$((count + 1))
 done <<< "$ENDPOINTS"
 
 # Downloaded spec file is kept in scans/ for reference (not cleaned up)
 
-echo "[spec_ingest] Ingested $count cases from spec (version $SPEC_VERSION)"
+echo "[spec_ingest] Ingested $count endpoints from spec (version $SPEC_VERSION)"

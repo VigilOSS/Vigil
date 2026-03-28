@@ -1,9 +1,19 @@
 services:
-  kali-redteam:
+  runtime-full:
     build:
       context: ../..
-      dockerfile: agent/docker/kali-redteam/Dockerfile
-    image: kali-redteam:latest
+      dockerfile: Dockerfile
+    image: security-research:latest
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+
+  runtime-lightweight:
+    profiles: ["lightweight"]
+    build:
+      context: ../..
+      dockerfile: agent/docker/kali-redteam-lightweight/Dockerfile
+    image: security-research-lightweight:latest
     cap_add:
       - NET_RAW
       - NET_ADMIN

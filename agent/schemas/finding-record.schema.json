@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/finding-record.schema.json",
+  "title": "Assessment Finding Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "severity",
+    "status",
+    "defect_family",
+    "root_cause_key",
+    "auth_context",
+    "canonical_location",
+    "summary",
+    "evidence_ref",
+    "notes",
+    "details"
+  ],
+  "properties": {
+    "slug": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["info", "low", "medium", "high", "critical"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "confirmed", "exploited", "blocked", "merged", "reported"]
+    },
+    "defect_family": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "root_cause_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "auth_context": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "canonical_location": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "evidence_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "notes": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20000
+    },
+    "source_name": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "details": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["evidence", "impact"],
+      "properties": {
+        "discovered_by": {
+          "type": "string"
+        },
+        "owasp_category": {
+          "type": "string"
+        },
+        "parameter": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1
+        },
+        "impact": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "request_variant_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "service_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "surface_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target_kind"],
+        "properties": {
+          "link_kind": {
+            "type": "string",
+            "default": "related"
+          },
+          "target_kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "target_ref": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  }
+}

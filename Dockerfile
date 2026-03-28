@@ -100,6 +100,7 @@ COPY docker/kali-mcp-runtime/mcp-server-wrapper.sh /usr/bin/mcp-server
 RUN chmod +x /usr/bin/mcp-server
 
 RUN mkdir -p /opt/mcp-tools
+RUN mkdir -p /data
 COPY docker/kali-mcp-runtime/patched_kali_server.py /opt/mcp-tools/patched_kali_server.py
 COPY docker/kali-mcp-runtime/mcp_transform_proxy.py /opt/mcp-tools/mcp_transform_proxy.py
 COPY docker/callback_listener.py /opt/mcp-tools/callback_listener.py

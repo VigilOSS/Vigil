@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 
 import {
+  AssessmentAttackChainDetail,
+  AssessmentAttackChainLink,
+  AssessmentFindingDetail,
+  AssessmentFindingLink,
+  AssessmentProbeDetail,
   AssessmentSummary,
   AssessmentSurface,
   Artifact,
@@ -8,6 +13,11 @@ import {
   EventRecord,
   Run,
   createWebSocketTicket,
+  listAssessmentAttackChainLinks,
+  listAssessmentAttackChains,
+  listAssessmentFindingLinks,
+  listAssessmentFindings,
+  listAssessmentProbes,
   getAssessmentSummary,
   listArtifacts,
   listAssessmentSurfaces,
@@ -34,6 +44,11 @@ export function RunPage({ token, projectId, runId, onBack, onDeleteRun }: RunPag
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [assessmentSummary, setAssessmentSummary] = useState<AssessmentSummary | null>(null);
   const [assessmentSurfaces, setAssessmentSurfaces] = useState<AssessmentSurface[]>([]);
+  const [assessmentFindings, setAssessmentFindings] = useState<AssessmentFindingDetail[]>([]);
+  const [assessmentFindingLinks, setAssessmentFindingLinks] = useState<AssessmentFindingLink[]>([]);
+  const [assessmentProbes, setAssessmentProbes] = useState<AssessmentProbeDetail[]>([]);
+  const [assessmentChains, setAssessmentChains] = useState<AssessmentAttackChainDetail[]>([]);
+  const [assessmentChainLinks, setAssessmentChainLinks] = useState<AssessmentAttackChainLink[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactContent | null>(null);
 
@@ -68,6 +83,11 @@ export function RunPage({ token, projectId, runId, onBack, onDeleteRun }: RunPag
   function refreshAssessment() {
     getAssessmentSummary(token, projectId, runId).then(setAssessmentSummary);
     listAssessmentSurfaces(token, projectId, runId).then(setAssessmentSurfaces);
+    listAssessmentFindings(token, projectId, runId).then(setAssessmentFindings);
+    listAssessmentFindingLinks(token, projectId, runId).then(setAssessmentFindingLinks);
+    listAssessmentProbes(token, projectId, runId).then(setAssessmentProbes);
+    listAssessmentAttackChains(token, projectId, runId).then(setAssessmentChains);
+    listAssessmentAttackChainLinks(token, projectId, runId).then(setAssessmentChainLinks);
   }
 
   useEffect(() => {
@@ -137,6 +157,24 @@ export function RunPage({ token, projectId, runId, onBack, onDeleteRun }: RunPag
   }, [projectId, runId, selectedName, token]);
 
   const latestSummary = useMemo(() => events.at(-1)?.summary ?? "Waiting for events", [events]);
+  const findingLinksBySlug = useMemo(() => {
+    const groups = new Map<string, AssessmentFindingLink[]>();
+    assessmentFindingLinks.forEach((link) => {
+      const current = groups.get(link.finding_slug) ?? [];
+      current.push(link);
+      groups.set(link.finding_slug, current);
+    });
+    return groups;
+  }, [assessmentFindingLinks]);
+  const chainLinksByKey = useMemo(() => {
+    const groups = new Map<string, AssessmentAttackChainLink[]>();
+    assessmentChainLinks.forEach((link) => {
+      const current = groups.get(link.chain_key) ?? [];
+      current.push(link);
+      groups.set(link.chain_key, current);
+    });
+    return groups;
+  }, [assessmentChainLinks]);
 
   async function handleDeleteRun() {
     if (!window.confirm("Delete this run and all of its files?")) {
@@ -202,6 +240,30 @@ export function RunPage({ token, projectId, runId, onBack, onDeleteRun }: RunPag
             <span className="stat-value">{assessmentSummary?.open_surface_count ?? 0}</span>
             <span className="meta-text">Open surfaces</span>
           </article>
+          <article className="stat-card">
+            <span className="stat-value">{assessmentSummary?.credential_count ?? 0}</span>
+            <span className="meta-text">Credentials</span>
+          </article>
+          <article className="stat-card">
+            <span className="stat-value">{assessmentSummary?.access_count ?? 0}</span>
+            <span className="meta-text">Access records</span>
+          </article>
+          <article className="stat-card">
+            <span className="stat-value">{assessmentSummary?.pivot_count ?? 0}</span>
+            <span className="meta-text">Pivots</span>
+          </article>
+          <article className="stat-card">
+            <span className="stat-value">{assessmentSummary?.tunnel_count ?? 0}</span>
+            <span className="meta-text">Tunnels</span>
+          </article>
+          <article className="stat-card">
+            <span className="stat-value">{assessmentSummary?.blocked_technique_count ?? 0}</span>
+            <span className="meta-text">Blocked techniques</span>
+          </article>
+          <article className="stat-card">
+            <span className="stat-value">{assessmentSummary?.attack_chain_count ?? 0}</span>
+            <span className="meta-text">Attack chains</span>
+          </article>
         </div>
         <div className="run-grid">
           <article className="panel">
@@ -230,6 +292,167 @@ export function RunPage({ token, projectId, runId, onBack, onDeleteRun }: RunPag
             {!assessmentSurfaces.length && !(assessmentSummary?.top_surfaces.length) && (
               <p className="meta-text">No structured surfaces recorded yet.</p>
             )}
+          </article>
+        </div>
+        <div className="run-grid">
+          <article className="panel">
+            <p className="eyebrow">Live findings</p>
+            {(assessmentSummary?.top_findings ?? []).map((finding) => (
+              <div key={finding.slug} style={{ marginBottom: "1rem" }}>
+                <strong>{finding.title}</strong>
+                <p className="meta-text">
+                  {finding.status} · {finding.severity}
+                  {finding.source_name ? ` · ${finding.source_name}` : ""}
+                </p>
+                <p className="meta-text">{finding.canonical_location || finding.summary || "No location recorded yet."}</p>
+              </div>
+            ))}
+            {!(assessmentSummary?.top_findings.length) && <p className="meta-text">No durable findings recorded yet.</p>}
+          </article>
+          <article className="panel">
+            <p className="eyebrow">Exploit activity</p>
+            {(assessmentSummary?.recent_probes ?? []).map((probe, index) => (
+              <div key={`${probe.created_at}-${probe.attack_family}-${index}`} style={{ marginBottom: "1rem" }}>
+                <strong>{probe.attack_family}</strong>
+                <p className="meta-text">
+                  {probe.result_status}
+                  {probe.signal_type ? ` · ${probe.signal_type}` : ""}
+                  {probe.agent_name ? ` · ${probe.agent_name}` : ""}
+                </p>
+                <p className="meta-text">{probe.evidence_ref || "No evidence artifact recorded."}</p>
+              </div>
+            ))}
+            {!(assessmentSummary?.recent_probes.length) && <p className="meta-text">No exploit or validation probes recorded yet.</p>}
+          </article>
+        </div>
+        <div className="run-grid">
+          <article className="panel">
+            <p className="eyebrow">Attack chains</p>
+            {(assessmentSummary?.attack_chains ?? []).map((chain) => (
+              <div key={chain.chain_key} style={{ marginBottom: "1rem" }}>
+                <strong>{chain.title}</strong>
+                <p className="meta-text">
+                  {chain.status} · {chain.severity}
+                </p>
+                <p className="meta-text">{chain.narrative || "No narrative recorded yet."}</p>
+              </div>
+            ))}
+            {!(assessmentSummary?.attack_chains.length) && <p className="meta-text">No attack chains linked yet.</p>}
+          </article>
+          <article className="panel">
+            <p className="eyebrow">Coverage gaps</p>
+            {(assessmentSummary?.open_coverage_items ?? []).map((item, index) => (
+              <div key={`${item.updated_at}-${item.input_slot}-${index}`} style={{ marginBottom: "1rem" }}>
+                <strong>{item.attack_family}</strong>
+                <p className="meta-text">
+                  {item.status} · {item.input_slot} · {item.auth_context}
+                </p>
+                <p className="meta-text">{item.canonical_url || item.service_endpoint || "No target descriptor recorded."}</p>
+              </div>
+            ))}
+            {!(assessmentSummary?.open_coverage_items.length) && <p className="meta-text">No open request or service coverage gaps.</p>}
+          </article>
+        </div>
+        <div className="run-grid">
+          <article className="panel">
+            <p className="eyebrow">Service coverage</p>
+            {(assessmentSummary?.service_coverage_gaps ?? []).map((service) => (
+              <div key={service.endpoint} style={{ marginBottom: "1rem" }}>
+                <strong>{service.endpoint}</strong>
+                <p className="meta-text">
+                  {service.service || "unknown"} · {service.coverage_status}
+                </p>
+              </div>
+            ))}
+            {!(assessmentSummary?.service_coverage_gaps.length) && <p className="meta-text">No open service-level coverage gaps.</p>}
+          </article>
+          <article className="panel">
+            <p className="eyebrow">Finding lifecycle</p>
+            {Object.entries(assessmentSummary?.finding_statuses ?? {}).map(([findingStatus, total]) => (
+              <div key={findingStatus} style={{ marginBottom: "0.75rem" }}>
+                <strong>{findingStatus}</strong>
+                <p className="meta-text">{total} finding(s)</p>
+              </div>
+            ))}
+            {!Object.keys(assessmentSummary?.finding_statuses ?? {}).length && (
+              <p className="meta-text">No finding states recorded yet.</p>
+            )}
+          </article>
+        </div>
+        <div className="run-grid">
+          <article className="panel">
+            <p className="eyebrow">Findings ledger</p>
+            {assessmentFindings.map((finding) => (
+              <div key={finding.slug} style={{ marginBottom: "1rem" }}>
+                <strong>{finding.title}</strong>
+                <p className="meta-text">
+                  {finding.slug} · {finding.status} · {finding.severity} · {finding.auth_context}
+                </p>
+                <p className="meta-text">{finding.canonical_location || finding.summary || "No location recorded yet."}</p>
+                <p className="meta-text">
+                  {finding.defect_family || "unknown family"}
+                  {finding.merged_into_slug ? ` · merged into ${finding.merged_into_slug}` : ""}
+                </p>
+                <p className="meta-text">{finding.evidence_ref || "No primary evidence ref recorded."}</p>
+              </div>
+            ))}
+            {!assessmentFindings.length && <p className="meta-text">No detailed findings available yet.</p>}
+          </article>
+          <article className="panel">
+            <p className="eyebrow">Evidence and related links</p>
+            {assessmentFindings.map((finding) => {
+              const links = findingLinksBySlug.get(finding.slug) ?? [];
+              if (!links.length) {
+                return null;
+              }
+              return (
+                <div key={finding.slug} style={{ marginBottom: "1rem" }}>
+                  <strong>{finding.slug}</strong>
+                  {links.slice(0, 6).map((link) => (
+                    <p className="meta-text" key={link.id}>
+                      {link.link_kind} · {link.target_kind} · {link.target_ref || "id-backed link"}
+                    </p>
+                  ))}
+                </div>
+              );
+            })}
+            {!assessmentFindingLinks.length && <p className="meta-text">No finding links recorded yet.</p>}
+          </article>
+        </div>
+        <div className="run-grid">
+          <article className="panel">
+            <p className="eyebrow">Chain inspection</p>
+            {assessmentChains.map((chain) => (
+              <div key={chain.chain_key} style={{ marginBottom: "1rem" }}>
+                <strong>{chain.title}</strong>
+                <p className="meta-text">
+                  {chain.chain_key} · {chain.status} · {chain.severity}
+                </p>
+                <p className="meta-text">{chain.narrative || "No narrative recorded yet."}</p>
+                {(chainLinksByKey.get(chain.chain_key) ?? []).slice(0, 6).map((link) => (
+                  <p className="meta-text" key={link.id}>
+                    {link.relation} · {link.entity_kind} · {link.entity_ref || "id-backed relation"}
+                  </p>
+                ))}
+              </div>
+            ))}
+            {!assessmentChains.length && <p className="meta-text">No detailed attack chains available yet.</p>}
+          </article>
+          <article className="panel">
+            <p className="eyebrow">Probe history</p>
+            {assessmentProbes.slice(0, 12).map((probe) => (
+              <div key={probe.id} style={{ marginBottom: "1rem" }}>
+                <strong>{probe.attack_family}</strong>
+                <p className="meta-text">
+                  {probe.result_status} · {probe.input_slot} · {probe.auth_context}
+                </p>
+                <p className="meta-text">
+                  {probe.payload_family || "no payload family"} · {probe.tool_name || "unknown tool"}
+                </p>
+                <p className="meta-text">{probe.evidence_ref || probe.notes || "No evidence or notes recorded."}</p>
+              </div>
+            ))}
+            {!assessmentProbes.length && <p className="meta-text">No detailed probe history available yet.</p>}
           </article>
         </div>
       </section>
