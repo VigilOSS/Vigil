@@ -66,8 +66,15 @@ Then create an engagement inside the chosen install:
 
 ```bash
 cd agent
-./scripts/init_engagement.sh https://target.example
+./scripts/init_engagement.sh https://target.example \
+  --scope-mode host_only \
+  --scan-intensity normal \
+  --auth-mode none \
+  --exploit-policy pause \
+  --engagement-name target-example
 ```
+
+If you omit those flags and run in a TTY, `init_engagement.sh` now prompts for scope, scan intensity, auth mode, exploit policy, and the engagement label. In non-interactive runs, the safe defaults are `host_only`, `normal`, `none`, and `pause`.
 
 Policy:
 
@@ -148,8 +155,25 @@ Initialize an engagement in the repo-managed workspace with:
 
 ```bash
 cd agent
-./scripts/init_engagement.sh https://target.example
+./scripts/init_engagement.sh https://target.example \
+  --scope-mode host_only \
+  --scan-intensity normal \
+  --auth-mode none \
+  --exploit-policy pause
 ```
+
+`scope.json` is now explicit about in-scope hosts, out-of-scope hosts, auth mode, and exploit policy. Discovered subdomains are recorded but not automatically tested unless scope allows them.
+
+When an engagement reaches exploit review with `--exploit-policy pause` or `selected`, the operator reviews and approves exploit work manually:
+
+```bash
+./scripts/review_exploit_candidates.sh "$ENG_DIR"
+./scripts/approve_exploitation.sh "$ENG_DIR" selected FINDING-VA-001 FINDING-EX-003
+./scripts/launch_exploit_session.sh "$ENG_DIR" session-a FINDING-VA-001
+./scripts/merge_exploit_session.sh "$ENG_DIR" session-a
+```
+
+Worker sessions write proposal files under `sessions/<session-id>/`; the coordinator merges approved proposals back into canonical backend state.
 
 Methodology now lives in:
 - [engagement-methodology.md](/path/to/vigil)

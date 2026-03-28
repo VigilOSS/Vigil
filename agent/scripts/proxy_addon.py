@@ -83,6 +83,7 @@ class CaseCollector:
     def __init__(self):
         self.db: sqlite3.Connection | None = None
         self.scope: list[str] = []
+        self.out_of_scope: list[str] = []
         self.engagement_dir: str = ""
         self.orchestrator_base_url = os.getenv("ORCHESTRATOR_BASE_URL", "").rstrip("/")
         self.orchestrator_token = os.getenv("ORCHESTRATOR_TOKEN", "")
@@ -156,18 +157,30 @@ class CaseCollector:
         try:
             with open(scope_path, "r") as fh:
                 data = json.load(fh)
-            # scope.json is expected to be a list of hostname patterns
-            # e.g. ["example.com", "*.example.com"]
             if isinstance(data, list):
                 self.scope = data
-            elif isinstance(data, dict) and "scope" in data:
-                self.scope = data["scope"]
+                self.out_of_scope = []
+            elif isinstance(data, dict):
+                raw_scope = []
+                raw_scope.extend([data.get("hostname", "")])
+                raw_scope.extend(data.get("scope_hosts", []) or [])
+                raw_scope.extend(data.get("scope", []) or [])
+                if data.get("scope_mode") == "wildcard" and data.get("hostname"):
+                    raw_scope.append(f"*.{data['hostname']}")
+                self.scope = [item for item in raw_scope if isinstance(item, str) and item]
+                self.out_of_scope = [
+                    item
+                    for item in (data.get("out_of_scope_hosts", []) or [])
+                    if isinstance(item, str) and item
+                ]
             else:
                 self.scope = []
+                self.out_of_scope = []
             ctx.log.info(f"proxy_addon: loaded {len(self.scope)} scope entries")
         except (FileNotFoundError, json.JSONDecodeError) as exc:
             ctx.log.warn(f"proxy_addon: cannot load scope — {exc}")
             self.scope = []
+            self.out_of_scope = []
 
     def _backend_configured(self) -> bool:
         return bool(
@@ -189,7 +202,7 @@ class CaseCollector:
 
     def _is_in_scope(self, hostname: str) -> bool:
         if not self.scope:
-            return True  # no scope file ⇒ allow all
+            return False
         hostname = hostname.lower()
         for pattern in self.scope:
             pattern = pattern.lower()
@@ -199,6 +212,18 @@ class CaseCollector:
                     return True
             else:
                 if hostname == pattern:
+                    return True
+        return False
+
+    def _is_explicitly_out_of_scope(self, hostname: str) -> bool:
+        hostname = hostname.lower()
+        for pattern in self.out_of_scope:
+            pattern = pattern.lower()
+            if hostname == pattern:
+                return True
+            if pattern.startswith("*."):
+                suffix = pattern[1:]
+                if hostname == pattern[2:] or hostname.endswith(suffix):
                     return True
         return False
 
@@ -601,7 +626,7 @@ class CaseCollector:
         path = parsed.path or "/"
 
         # Scope check
-        if not self._is_in_scope(hostname):
+        if self._is_explicitly_out_of_scope(hostname) or not self._is_in_scope(hostname):
             return
 
         # Noise filter
