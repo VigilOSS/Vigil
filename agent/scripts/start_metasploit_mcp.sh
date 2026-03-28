@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-MCP_DIR="$ROOT_DIR/.opencode/vendor/MetasploitMCP"
-VENV_DIR="$ROOT_DIR/.opencode/vendor/metasploitmcp-venv"
+MCP_DIR="$ROOT_DIR/.vendor/MetasploitMCP"
+VENV_DIR="$ROOT_DIR/.vendor/metasploitmcp-venv"
 ENV_FILE="$ROOT_DIR/.env"
 RUNTIME_CHECK="$ROOT_DIR/scripts/check_metasploit_runtime.sh"
 
@@ -16,7 +16,7 @@ fi
 export LOG_LEVEL="${LOG_LEVEL:-${METASPLOIT_MCP_LOG_LEVEL:-info}}"
 
 if [ ! -x "$VENV_DIR/bin/python" ] || [ ! -f "$MCP_DIR/MetasploitMCP.py" ]; then
-  echo "MetasploitMCP runtime is not installed. Re-run ./install.sh opencode or scripts/install_metasploit_mcp.sh ." >&2
+  echo "MetasploitMCP runtime is not installed. Run scripts/install_metasploit_mcp.sh ." >&2
   exit 1
 fi
 

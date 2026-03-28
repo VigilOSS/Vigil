@@ -3,14 +3,11 @@ from pathlib import Path
 from types import SimpleNamespace
 import subprocess
 
-from fastapi.testclient import TestClient
-
 from app import db
 from app.config import settings
-from app.main import app
 
 
-def register_and_login(client: TestClient, username: str) -> str:
+def register_and_login(client, username: str) -> str:
     client.post("/auth/register", json={"username": username, "password": "secret-password"})
     login_response = client.post(
         "/auth/login",
@@ -40,8 +37,7 @@ def create_run(client: TestClient, token: str, project_id: int, target: str = "h
     return response.json()
 
 
-def test_create_run_prepares_isolated_runtime_directories():
-    client = TestClient(app)
+def test_create_run_prepares_isolated_runtime_directories(client):
     token = register_and_login(client, "alice")
     project = create_project(client, token)
     run = create_run(client, token, project["id"])
@@ -50,7 +46,7 @@ def test_create_run_prepares_isolated_runtime_directories():
     assert run_root.exists()
     assert (run_root / "runtime").is_dir()
     assert (run_root / "workspace").is_dir()
-    assert (run_root / "opencode-home").is_dir()
+    assert (run_root / "runtime-home").is_dir()
 
     metadata = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
     assert metadata["run_id"] == run["id"]
@@ -58,8 +54,7 @@ def test_create_run_prepares_isolated_runtime_directories():
     assert metadata["engagement_root"] == run["engagement_root"]
 
 
-def test_each_run_gets_its_own_runtime_root():
-    client = TestClient(app)
+def test_each_run_gets_its_own_runtime_root(client):
     token = register_and_login(client, "alice")
     project = create_project(client, token)
 
@@ -71,42 +66,48 @@ def test_each_run_gets_its_own_runtime_root():
     assert Path(second_run["engagement_root"], "run.json").exists()
 
 
-def test_create_run_can_auto_launch_when_enabled(monkeypatch):
-    client = TestClient(app)
+def test_create_run_can_auto_launch_when_enabled(client, monkeypatch):
     token = register_and_login(client, "alice")
     project = create_project(client, token)
 
     class FakeProcess:
+        pid = 4242
+
         def wait(self):
             return 0
 
     monkeypatch.setattr("app.services.launcher.subprocess.run", lambda *args, **kwargs: None)
     monkeypatch.setattr("app.services.launcher.subprocess.Popen", lambda *args, **kwargs: FakeProcess())
-    monkeypatch.setattr("app.services.launcher.Thread", lambda *args, **kwargs: SimpleNamespace(start=lambda: None))
+    monkeypatch.setattr(
+        "app.services.launcher.Thread",
+        lambda *args, **kwargs: SimpleNamespace(start=lambda: kwargs["args"][2].close()),
+    )
     object.__setattr__(settings, "auto_launch_runs", True)
+    object.__setattr__(settings, "runtime_launch_command", "printf 'runtime for {target}\\n'")
 
     try:
         run = create_run(client, token, project["id"], "https://launched.example")
     finally:
         object.__setattr__(settings, "auto_launch_runs", False)
+        object.__setattr__(settings, "runtime_launch_command", "")
 
     assert run["status"] == "running"
     assert Path(run["engagement_root"], "runtime", "process.log").exists()
 
 
-def test_auto_launch_emits_runtime_heartbeat_when_process_is_still_running(monkeypatch):
-    client = TestClient(app)
+def test_auto_launch_emits_runtime_heartbeat_when_process_is_still_running(client, monkeypatch):
     token = register_and_login(client, "alice")
     project = create_project(client, token)
 
     class FakeProcess:
         def __init__(self):
+            self.pid = 4343
             self.wait_calls = 0
 
         def wait(self, timeout=None):
             self.wait_calls += 1
             if self.wait_calls == 1:
-                raise subprocess.TimeoutExpired(cmd="opencode", timeout=timeout)
+                raise subprocess.TimeoutExpired(cmd="runtime", timeout=timeout)
             return 0
 
     class ImmediateThread:
@@ -120,11 +121,13 @@ def test_auto_launch_emits_runtime_heartbeat_when_process_is_still_running(monke
     monkeypatch.setattr("app.services.launcher.subprocess.Popen", lambda *args, **kwargs: FakeProcess())
     monkeypatch.setattr("app.services.launcher.Thread", ImmediateThread)
     object.__setattr__(settings, "auto_launch_runs", True)
+    object.__setattr__(settings, "runtime_launch_command", "printf 'runtime for {target}\\n'")
 
     try:
         run = create_run(client, token, project["id"], "https://launched.example")
     finally:
         object.__setattr__(settings, "auto_launch_runs", False)
+        object.__setattr__(settings, "runtime_launch_command", "")
 
     events = db.list_events_for_run(run["id"])
     assert any(event.event_type == "run.heartbeat" for event in events)

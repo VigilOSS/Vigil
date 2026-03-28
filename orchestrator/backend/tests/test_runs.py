@@ -1,12 +1,10 @@
 import json
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from app import db
-from app.main import app
+from app.services.runs import list_runs_for_project
 
-def register_and_login(client: TestClient, username: str) -> str:
+def register_and_login(client, username: str) -> str:
     client.post("/auth/register", json={"username": username, "password": "secret-password"})
     login_response = client.post(
         "/auth/login",
@@ -16,7 +14,7 @@ def register_and_login(client: TestClient, username: str) -> str:
     return login_response.json()["access_token"]
 
 
-def create_project(client: TestClient, token: str, name: str = "Alpha") -> dict:
+def create_project(client, token: str, name: str = "Alpha") -> dict:
     response = client.post(
         "/projects",
         headers={"Authorization": f"Bearer {token}"},
@@ -26,9 +24,7 @@ def create_project(client: TestClient, token: str, name: str = "Alpha") -> dict:
     return response.json()
 
 
-def test_create_run_and_list_project_runs(isolate_data_dir):
-    client = TestClient(app)
-
+def test_create_run_and_list_project_runs(client, isolate_data_dir):
     token = register_and_login(client, "alice")
     project = create_project(client, token)
 
@@ -54,9 +50,7 @@ def test_create_run_and_list_project_runs(isolate_data_dir):
     assert runs_response.json() == [run_payload]
 
 
-def test_run_status_transitions_require_project_ownership():
-    client = TestClient(app)
-
+def test_run_status_transitions_require_project_ownership(client):
     alice_token = register_and_login(client, "alice")
     bob_token = register_and_login(client, "bob")
     project = create_project(client, alice_token)
@@ -92,8 +86,7 @@ def test_run_status_transitions_require_project_ownership():
     assert completed.json()["status"] == "completed"
 
 
-def test_list_runs_marks_stale_running_process_as_failed():
-    client = TestClient(app)
+def test_list_runs_marks_stale_running_process_as_failed(client):
     token = register_and_login(client, "alice")
     project = create_project(client, token)
 
@@ -109,21 +102,18 @@ def test_list_runs_marks_stale_running_process_as_failed():
     runtime_dir = run_root / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     (runtime_dir / "process.json").write_text(
-        json.dumps({"pid": 999999, "command": "opencode run", "started_at": "2026-03-25T00:00:00Z"}),
+        json.dumps({"pid": 999999, "command": "runtime launch", "started_at": "2026-03-25T00:00:00Z"}),
         encoding="utf-8",
     )
     db.update_run_status(run["id"], "running")
 
-    runs_response = client.get(
-        f"/projects/{project['id']}/runs",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert runs_response.status_code == 200
-    assert runs_response.json()[0]["status"] == "failed"
+    user = db.get_user_by_username("alice")
+    assert user is not None
+    runs = list_runs_for_project(project["id"], user)
+    assert runs[0].status == "failed"
 
 
-def test_delete_run_removes_runtime_files_and_db_records():
-    client = TestClient(app)
+def test_delete_run_removes_runtime_files_and_db_records(client):
     token = register_and_login(client, "alice")
     project = create_project(client, token)
 
@@ -139,7 +129,7 @@ def test_delete_run_removes_runtime_files_and_db_records():
     runtime_dir = run_root / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     (runtime_dir / "process.json").write_text(
-        json.dumps({"pid": 999999, "command": "opencode run", "started_at": "2026-03-25T00:00:00Z"}),
+        json.dumps({"pid": 999999, "command": "runtime launch", "started_at": "2026-03-25T00:00:00Z"}),
         encoding="utf-8",
     )
     db.create_event(run["id"], "run.started", "unknown", "runtime", "launcher", "started")

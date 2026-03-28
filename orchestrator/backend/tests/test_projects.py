@@ -1,12 +1,9 @@
 import json
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from app import db
-from app.main import app
 
-def register_and_login(client: TestClient, username: str) -> str:
+def register_and_login(client, username: str) -> str:
     register_response = client.post(
         "/auth/register",
         json={"username": username, "password": "secret-password"},
@@ -21,9 +18,7 @@ def register_and_login(client: TestClient, username: str) -> str:
     return login_response.json()["access_token"]
 
 
-def test_create_project_and_list_only_owner_projects(isolate_data_dir):
-    client = TestClient(app)
-
+def test_create_project_and_list_only_owner_projects(client, isolate_data_dir):
     alice_token = register_and_login(client, "alice")
     bob_token = register_and_login(client, "bob")
 
@@ -54,9 +49,7 @@ def test_create_project_and_list_only_owner_projects(isolate_data_dir):
     assert bob_projects.json() == []
 
 
-def test_project_roots_are_isolated_per_user_and_slug_conflict_is_rejected(isolate_data_dir):
-    client = TestClient(app)
-
+def test_project_roots_are_isolated_per_user_and_slug_conflict_is_rejected(client, isolate_data_dir):
     alice_token = register_and_login(client, "alice")
     bob_token = register_and_login(client, "bob")
 
@@ -83,8 +76,7 @@ def test_project_roots_are_isolated_per_user_and_slug_conflict_is_rejected(isola
     assert duplicate_for_alice.status_code == 400
 
 
-def test_delete_project_cascades_runs_and_removes_project_root():
-    client = TestClient(app)
+def test_delete_project_cascades_runs_and_removes_project_root(client):
     token = register_and_login(client, "alice")
 
     project_response = client.post(
@@ -107,7 +99,7 @@ def test_delete_project_cascades_runs_and_removes_project_root():
     runtime_dir = run_root / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     (runtime_dir / "process.json").write_text(
-        json.dumps({"pid": 999999, "command": "opencode run", "started_at": "2026-03-25T00:00:00Z"}),
+        json.dumps({"pid": 999999, "command": "runtime launch", "started_at": "2026-03-25T00:00:00Z"}),
         encoding="utf-8",
     )
     db.create_event(run["id"], "run.started", "unknown", "runtime", "launcher", "started")

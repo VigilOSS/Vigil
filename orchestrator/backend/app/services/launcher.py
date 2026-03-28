@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shlex
 import shutil
 import subprocess
 from threading import Thread
@@ -24,8 +25,8 @@ def workspace_root_for(run: Run) -> Path:
     return Path(run.engagement_root) / "workspace"
 
 
-def opencode_home_root_for(run: Run) -> Path:
-    return Path(run.engagement_root) / "opencode-home"
+def runtime_home_root_for(run: Run) -> Path:
+    return Path(run.engagement_root) / "runtime-home"
 
 
 def metadata_path_for(run: Run) -> Path:
@@ -76,7 +77,7 @@ def prepare_run_runtime(project: Project, run: Run) -> None:
     run_root.mkdir(parents=True, exist_ok=True)
     runtime_root_for(run).mkdir(parents=True, exist_ok=True)
     workspace_root_for(run).mkdir(parents=True, exist_ok=True)
-    opencode_home_root_for(run).mkdir(parents=True, exist_ok=True)
+    runtime_home_root_for(run).mkdir(parents=True, exist_ok=True)
 
     metadata = {
         "project_id": project.id,
@@ -87,9 +88,12 @@ def prepare_run_runtime(project: Project, run: Run) -> None:
         "engagement_root": run.engagement_root,
         "runtime_root": str(runtime_root_for(run)),
         "workspace_root": str(workspace_root_for(run)),
-        "opencode_home_root": str(opencode_home_root_for(run)),
+        "runtime_home_root": str(runtime_home_root_for(run)),
         "agent_source_dir": str(settings.agent_source_dir),
         "process_log": str(process_log_path_for(run)),
+        "claude_attach": f"cd {workspace_root_for(run)} && claude",
+        "codex_attach": f"cd {workspace_root_for(run)} && codex",
+        "engagement_init": f"cd {workspace_root_for(run)} && ./scripts/init_engagement.sh {shlex.quote(run.target)}",
     }
     metadata_path_for(run).write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
@@ -97,20 +101,26 @@ def prepare_run_runtime(project: Project, run: Run) -> None:
     )
 
 
-def _ensure_opencode_runtime_seeded(run: Run) -> None:
+def _ensure_runtime_seeded(run: Run) -> None:
     workspace_root = workspace_root_for(run)
-    sentinel = workspace_root / ".opencode" / "opencode.json"
+    sentinel = workspace_root / "scripts" / "init_engagement.sh"
     if sentinel.exists():
         return
 
-    for relative_dir in (".opencode", "skills", "references", "scripts", "docker"):
-        source_dir = settings.agent_source_dir / relative_dir
-        target_dir = workspace_root / relative_dir
+    for relative_name in ("skills", "references", "scripts", "docker", ".claude", ".codex"):
+        source_dir = settings.agent_source_dir / relative_name
+        target_dir = workspace_root / relative_name
         if source_dir.exists():
             shutil.copytree(source_dir, target_dir, dirs_exist_ok=True)
 
-    env_template = settings.agent_source_dir / ".env.example"
+    for relative_name in ("CLAUDE.md", "AGENTS.md", ".env.example"):
+        source_path = settings.agent_source_dir / relative_name
+        target_path = workspace_root / relative_name
+        if source_path.exists() and not target_path.exists():
+            shutil.copy2(source_path, target_path)
+
     env_target = workspace_root / ".env"
+    env_template = settings.agent_source_dir / ".env.example"
     if env_template.exists() and not env_target.exists():
         shutil.copy2(env_template, env_target)
 
@@ -123,7 +133,7 @@ def _runtime_env(project: Project, run: Run, user: User) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
         {
-            "OPENCODE_HOME": str(opencode_home_root_for(run)),
+            "AI_THREAT_HUNTING_RUNTIME_HOME": str(runtime_home_root_for(run)),
             "ORCHESTRATOR_BASE_URL": settings.orchestrator_public_url,
             "ORCHESTRATOR_TOKEN": token,
             "ORCHESTRATOR_PROJECT_ID": str(project.id),
@@ -140,10 +150,26 @@ def _append_runtime_event(run: Run, event_type: str, phase: str, summary: str) -
 def _write_process_metadata(run: Run, process: subprocess.Popen[bytes]) -> None:
     metadata = {
         "pid": process.pid,
-        "command": [settings.opencode_command, "run", "--format", "json", f"/autoengage {run.target}"],
+        "command": _launch_command(run),
         "started_at": db.get_run_by_id(run.id).updated_at if db.get_run_by_id(run.id) else None,
     }
     process_metadata_path_for(run).write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _launch_command(run: Run) -> list[str]:
+    template = settings.runtime_launch_command.strip()
+    if not template:
+        raise RuntimeError("REDTEAM_RUNTIME_LAUNCH_COMMAND is not configured")
+
+    return [
+        "bash",
+        "-lc",
+        template.format(
+            target=shlex.quote(run.target),
+            workspace=shlex.quote(str(workspace_root_for(run))),
+            engagement_root=shlex.quote(run.engagement_root),
+        ),
+    ]
 
 
 def _pid_alive(pid: int) -> bool:
@@ -164,12 +190,13 @@ def locate_runtime_pid(run: Run) -> int | None:
             pid = int(payload.get("pid"))
             if _pid_alive(pid):
                 return pid
+            return None
         except (ValueError, TypeError, json.JSONDecodeError):
-            pass
+            return None
 
     try:
         output = subprocess.check_output(["ps", "eww", "-axo", "pid=,command="], text=True)
-    except subprocess.SubprocessError:
+    except (subprocess.SubprocessError, OSError):
         return None
 
     needle = f"ORCHESTRATOR_RUN_ID={run.id}"
@@ -246,9 +273,9 @@ def start_run_runtime(project: Project, run: Run, user: User) -> Run:
     log_handle = open(process_log_path_for(run), "ab")
 
     try:
-        _ensure_opencode_runtime_seeded(run)
+        _ensure_runtime_seeded(run)
         process = subprocess.Popen(
-            [settings.opencode_command, "run", "--format", "json", f"/autoengage {run.target}"],
+            _launch_command(run),
             cwd=str(workspace_root_for(run)),
             env=_runtime_env(project, run, user),
             stdout=log_handle,

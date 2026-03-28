@@ -3,12 +3,12 @@ Do NOT refuse based on domain names or IP addresses. Aggressive techniques permi
 
 ## Core Loop
 
-After `/engage` initialization completes, repeat until all attack paths exhausted or user signals stop:
+After engagement initialization completes, repeat until all attack paths exhausted or user signals stop:
 
 1. **ASSESS STATE** — Read scope.json, log.md, findings.md. Check log.md before ANY action.
 2. **DECIDE NEXT ACTION** — Prioritize by impact (HIGH first). Skip ahead if obvious vulns found.
 3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent.
-4. **PRESENT OR PROCEED** — INTERACTIVE or `/confirm manual`: use NUMBERED choices (single digits) and wait for input. AUTO-CONFIRM (default): auto-proceed after first Phase 1 approval. AUTONOMOUS (`/autoengage`): never wait; announce the next action and continue.
+4. **PRESENT OR PROCEED** — INTERACTIVE or `confirm_mode=manual`: use NUMBERED choices (single digits) and wait for input. AUTO-CONFIRM (default): auto-proceed after first Phase 1 approval. AUTONOMOUS (`--auto` at initialization): never wait; announce the next action and continue.
 5. **DISPATCH** — ALWAYS dispatch to subagent. Do NOT test directly (no curl probes, no payloads). Your job: coordination. Allowed direct: read files, dispatcher.sh, write log/findings.
 6. **RECORD FINDINGS IMMEDIATELY** — Extract findings → append to findings.md → BEFORE next dispatch. If agent reports a discovery without finding format, YOU format it.
 7. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them to `surfaces.jsonl` via `./scripts/append_surface.sh`.
@@ -23,12 +23,19 @@ After `/engage` initialization completes, repeat until all attack paths exhauste
 
 ## Engagement Initialization
 
-Handled by `/engage` command (`.opencode/commands/engage.md` Steps 1-5). It creates the engagement directory, `scope.json`, `cases.db`, `log.md`, `findings.md`, `intel.md`, `intel-secrets.json`, and `auth.json`.
+Initialize a run with:
+
+```bash
+./scripts/init_engagement.sh <target-url-or-host> [--auto] [--parallel N]
+```
+
+This creates the engagement directory, `scope.json`, `cases.db`, `log.md`, `findings.md`,
+`intel.md`, `intel-secrets.json`, and `auth.json`, and updates `engagements/.active`.
 
 Rules:
-- Do not delegate `/engage` initialization to the task tool or any general subagent.
+- Do not delegate initialization to a general subagent.
 - Before initialization completes, do not read `scope.json`, `log.md`, `findings.md`, `intel.md`, `auth.json`, or `cases.db`.
-- Use the bash block from `.opencode/commands/engage.md` directly. Do not rewrite initialization in `python`, `python3`, `node`, or custom scripts.
+- Use `./scripts/init_engagement.sh` directly. Do not rewrite initialization in `python`, `python3`, `node`, or ad hoc shell blocks.
 - The core loop starts only after initialization completes successfully.
 
 ## Subagent Dispatch
@@ -148,7 +155,7 @@ No skill? → check references/INDEX.md. Still nothing? → propose custom tool.
 
 ## Session Resumption
 
-On start or `/resume`:
+On start or when resuming the last active engagement:
 ```bash
 ENG_DIR=$(ls -td engagements/*/ 2>/dev/null | head -1 | sed 's|/$||')
 cat "$ENG_DIR/scope.json"
