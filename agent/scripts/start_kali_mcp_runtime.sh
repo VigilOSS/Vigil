@@ -4,6 +4,14 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 AGENT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 ROOT_DIR=$(cd "$AGENT_DIR/.." && pwd)
+ENV_FILE="$ROOT_DIR/.env"
+
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
 
 IMAGE="${REDTEAM_IMAGE:-security-research:latest}"
 CONTAINER_NAME="${KALI_MCP_CONTAINER_NAME:-security-research}"
@@ -25,7 +33,9 @@ Environment:
   KALI_MCP_RULES_FILE         Host rules file mounted into the runtime config path
   MCP_TRANSFORM_RULES_PATH    In-container rules path (default: /config/mcp-transform-rules.json)
 
-The root .env file is passed to docker with --env-file when present.
+The root .env file is sourced before startup so shell-side defaults apply, then
+passed to docker with --env-file so the same values are available inside the
+runtime container.
 EOF
 }
 
@@ -47,7 +57,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+if ! docker inspect --type image "$IMAGE" >/dev/null 2>&1; then
   echo "[runtime] Missing image: $IMAGE" >&2
   echo "[runtime] Build it first, for example:" >&2
   echo "  docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile ." >&2

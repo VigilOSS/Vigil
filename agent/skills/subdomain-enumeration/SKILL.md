@@ -49,7 +49,9 @@ SUBFINDER_VIRUSTOTAL_API_KEY=...
 SUBFINDER_SECURITYTRAILS_API_KEY=...
 SUBFINDER_SHODAN_API_KEY=...
 ```
-These are mounted into the container automatically via the .env volume mount.
+When the Kali MCP runtime is started from a repo root that has `.env`, these
+variables are injected into the runtime container and are then read by
+`subfinder` when it is executed through Kali MCP.
 
 ### 2. DNS Brute-Force with ffuf
 
