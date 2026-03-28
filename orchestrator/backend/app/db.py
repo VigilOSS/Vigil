@@ -22,7 +22,7 @@ def database_path() -> Path:
 
 def init_db() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(database_path()) as connection:
+    with sqlite3.connect(str(database_path())) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """
@@ -275,22 +275,241 @@ def init_db() -> None:
                 title TEXT NOT NULL,
                 severity TEXT NOT NULL DEFAULT 'info',
                 status TEXT NOT NULL DEFAULT 'draft',
+                defect_family TEXT NOT NULL DEFAULT '',
+                root_cause_key TEXT NOT NULL DEFAULT '',
+                auth_context TEXT NOT NULL DEFAULT 'anonymous',
+                canonical_location TEXT NOT NULL DEFAULT '',
+                source_name TEXT NOT NULL DEFAULT '',
+                summary TEXT NOT NULL DEFAULT '',
                 evidence_ref TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
+                details_json TEXT NOT NULL DEFAULT '{}',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                merged_into_finding_id INTEGER,
+                last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(run_id, slug),
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+                FOREIGN KEY(merged_into_finding_id) REFERENCES assessment_findings(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_finding_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                finding_id INTEGER NOT NULL,
+                link_kind TEXT NOT NULL,
+                target_kind TEXT NOT NULL,
+                target_id INTEGER,
+                target_ref TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+                FOREIGN KEY(finding_id) REFERENCES assessment_findings(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_attack_chains (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                chain_key TEXT NOT NULL,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft',
+                severity TEXT NOT NULL DEFAULT 'info',
+                narrative TEXT NOT NULL DEFAULT '',
+                evidence_ref TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(run_id, chain_key),
                 FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_attack_chain_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                chain_id INTEGER NOT NULL,
+                relation TEXT NOT NULL,
+                entity_kind TEXT NOT NULL,
+                entity_id INTEGER,
+                entity_ref TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+                FOREIGN KEY(chain_id) REFERENCES assessment_attack_chains(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                credential_key TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'password',
+                principal TEXT NOT NULL DEFAULT '',
+                secret_locator TEXT NOT NULL DEFAULT '',
+                source_name TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'discovered',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(run_id, credential_key),
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_credential_tests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                credential_id INTEGER NOT NULL,
+                service_id INTEGER,
+                target_ref TEXT NOT NULL DEFAULT '',
+                auth_context TEXT NOT NULL DEFAULT 'anonymous',
+                outcome TEXT NOT NULL DEFAULT 'untested',
+                evidence_ref TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+                FOREIGN KEY(credential_id) REFERENCES assessment_credentials(id) ON DELETE CASCADE,
+                FOREIGN KEY(service_id) REFERENCES assessment_services(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_access_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                access_key TEXT NOT NULL,
+                credential_id INTEGER,
+                service_id INTEGER,
+                principal TEXT NOT NULL DEFAULT '',
+                access_level TEXT NOT NULL DEFAULT '',
+                target_ref TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                evidence_ref TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(run_id, access_key),
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+                FOREIGN KEY(credential_id) REFERENCES assessment_credentials(id) ON DELETE SET NULL,
+                FOREIGN KEY(service_id) REFERENCES assessment_services(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_pivots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                pivot_key TEXT NOT NULL,
+                access_record_id INTEGER,
+                source_ref TEXT NOT NULL DEFAULT '',
+                destination_ref TEXT NOT NULL DEFAULT '',
+                technique TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                evidence_ref TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(run_id, pivot_key),
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+                FOREIGN KEY(access_record_id) REFERENCES assessment_access_records(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_tunnels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                tunnel_key TEXT NOT NULL,
+                pivot_id INTEGER,
+                tunnel_type TEXT NOT NULL DEFAULT '',
+                source_endpoint TEXT NOT NULL DEFAULT '',
+                destination_endpoint TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                evidence_ref TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(run_id, tunnel_key),
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+                FOREIGN KEY(pivot_id) REFERENCES assessment_pivots(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_blocked_techniques (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                technique_key TEXT NOT NULL,
+                technique TEXT NOT NULL,
+                target_kind TEXT NOT NULL DEFAULT '',
+                target_ref TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL DEFAULT '',
+                retry_state TEXT NOT NULL DEFAULT 'pending',
+                evidence_ref TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(run_id, technique_key),
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+            )
+            """
+        )
+        finding_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_findings)").fetchall()}
+        finding_column_defaults = {
+            "defect_family": "TEXT NOT NULL DEFAULT ''",
+            "root_cause_key": "TEXT NOT NULL DEFAULT ''",
+            "auth_context": "TEXT NOT NULL DEFAULT 'anonymous'",
+            "canonical_location": "TEXT NOT NULL DEFAULT ''",
+            "source_name": "TEXT NOT NULL DEFAULT ''",
+            "summary": "TEXT NOT NULL DEFAULT ''",
+            "details_json": "TEXT NOT NULL DEFAULT '{}'",
+            "provenance_json": "TEXT NOT NULL DEFAULT '{}'",
+            "merged_into_finding_id": "INTEGER",
+            "last_seen_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        }
+        for column_name, definition in finding_column_defaults.items():
+            if column_name not in finding_columns:
+                connection.execute(f"ALTER TABLE assessment_findings ADD COLUMN {column_name} {definition}")
         connection.commit()
 
 
 @contextmanager
 def get_connection() -> Iterator[sqlite3.Connection]:
     init_db()
-    connection = sqlite3.connect(database_path())
+    db_path = database_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        connection = sqlite3.connect(str(db_path))
+    except sqlite3.OperationalError:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(str(db_path))
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     try:

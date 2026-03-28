@@ -2,45 +2,47 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=/dev/null
-source "$SCRIPT_DIR/lib/findings.sh"
-EMIT_RUNTIME_EVENT="$SCRIPT_DIR/emit_runtime_event.sh"
+RECORD_FINDING="$SCRIPT_DIR/record_finding.sh"
+SCHEMA_FILE="$SCRIPT_DIR/../schemas/finding-record.schema.json"
 
 ENG_DIR="${1:?usage: append_finding.sh <engagement_dir> <agent-name> <finding-body-file>}"
 AGENT_NAME="${2:?usage: append_finding.sh <engagement_dir> <agent-name> <finding-body-file>}"
 BODY_FILE="${3:?usage: append_finding.sh <engagement_dir> <agent-name> <finding-body-file>}"
-FINDINGS_FILE="$ENG_DIR/findings.md"
 
-[[ -f "$FINDINGS_FILE" ]] || { echo "findings.md not found in $ENG_DIR" >&2; exit 1; }
 [[ -f "$BODY_FILE" ]] || { echo "finding body file not found: $BODY_FILE" >&2; exit 1; }
+[[ -f "$RECORD_FINDING" ]] || { echo "record_finding.sh not found" >&2; exit 1; }
+[[ -f "$SCHEMA_FILE" ]] || { echo "finding schema not found: $SCHEMA_FILE" >&2; exit 1; }
 
-lock_dir="$(acquire_finding_lock "$ENG_DIR")"
-trap 'release_finding_lock "$lock_dir"' EXIT
-
-finding_id="$(next_finding_id "$ENG_DIR" "$AGENT_NAME")"
-tmp_file="$(mktemp "${TMPDIR:-/tmp}/finding-append.XXXXXX")"
-
-if ! replace_finding_placeholder "$BODY_FILE" "$finding_id" "$tmp_file"; then
-    rm -f "$tmp_file"
-    echo "finding body must contain a heading with [FINDING-ID] placeholder or existing finding id" >&2
-    exit 1
+if jq -e . "$BODY_FILE" >/dev/null 2>&1; then
+    bash "$RECORD_FINDING" "$ENG_DIR" "$AGENT_NAME" "$BODY_FILE"
+    exit 0
 fi
 
+cat >&2 <<EOF
+append_finding.sh no longer converts markdown findings into canonical backend state.
+Provide a structured JSON finding document and call:
+  ./scripts/record_finding.sh "$ENG_DIR" "$AGENT_NAME" <finding-json-file>
+
+Expected schema file:
+  $SCHEMA_FILE
+
+Minimal example:
 {
-    printf '\n'
-    cat "$tmp_file"
-    printf '\n'
-} >>"$FINDINGS_FILE"
+  "title": "Blind SQL injection in search",
+  "severity": "high",
+  "status": "confirmed",
+  "defect_family": "sql-injection",
+  "root_cause_key": "search-id-sqli",
+  "auth_context": "anonymous",
+  "canonical_location": "https://target.example/search?q",
+  "summary": "Boolean-blind SQL injection on the search endpoint",
+  "evidence_ref": "scans/sqlmap.txt",
+  "notes": "Payloads AND 1=1 and AND 1=2 caused consistent divergence.",
+  "details": {
+    "evidence": "Replayable request/response pair in scans/sqlmap.txt",
+    "impact": "Attackers can extract data from the backing store"
+  }
+}
+EOF
 
-update_finding_count "$FINDINGS_FILE"
-
-rm -f "$tmp_file"
-if [[ -f "$EMIT_RUNTIME_EVENT" ]]; then
-    bash "$EMIT_RUNTIME_EVENT" \
-        "finding.created" \
-        "${ORCHESTRATOR_PHASE:-unknown}" \
-        "$finding_id" \
-        "$AGENT_NAME" \
-        "Added $finding_id"
-fi
-printf '%s\n' "$finding_id"
+exit 1

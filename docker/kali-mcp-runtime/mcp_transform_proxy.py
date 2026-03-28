@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import ipaddress
+import json
 import logging
 import os
+import random
+import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +17,7 @@ from typing import Any
 UPSTREAM_CLIENT_PATH = Path(
     os.environ.get("KALI_MCP_CLIENT_PATH", "/usr/share/mcp-kali-server/client.py")
 )
+IPV4_CANDIDATE_RE = re.compile(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)")
 
 
 def load_upstream():
@@ -43,31 +49,132 @@ INBOUND_REPLACE = env_string(
     "REDTEAM_MCP_INBOUND_REPLACE",
     "",
 )
+PUBLIC_IP_MAP_PATH = Path(
+    env_string(
+        "MCP_TRANSFORM_PUBLIC_IP_MAP_PATH",
+        "REDTEAM_MCP_PUBLIC_IP_MAP_PATH",
+        "/data/mcp-public-ip-map.json",
+    )
+)
 
 
-def transform_value(value: Any, source: str, target: str) -> Any:
+def is_public_ipv4(candidate: str) -> bool:
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    return address.version == 4 and address.is_global
+
+
+def replace_string(value: str, source: str, target: str) -> str:
     if not source:
         return value
+    return value.replace(source, target)
+
+
+def transform_strings(value: Any, transformer) -> Any:
     if isinstance(value, str):
-        return value.replace(source, target)
+        return transformer(value)
     if isinstance(value, list):
-        return [transform_value(item, source, target) for item in value]
+        return [transform_strings(item, transformer) for item in value]
     if isinstance(value, tuple):
-        return tuple(transform_value(item, source, target) for item in value)
+        return tuple(transform_strings(item, transformer) for item in value)
     if isinstance(value, dict):
-        return {key: transform_value(item, source, target) for key, item in value.items()}
+        return {key: transform_strings(item, transformer) for key, item in value.items()}
     return value
+
+
+class PublicIpAliasMap:
+    def __init__(self, path: Path):
+        self.path = path
+        self._lock = threading.Lock()
+        self._mappings = self._load()
+
+    def _load(self) -> dict[str, str]:
+        if not self.path.exists():
+            return {}
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Failed to load IP alias map from %s, starting fresh", self.path)
+            return {}
+        if not isinstance(data, dict):
+            logger.warning("Ignoring malformed IP alias map in %s", self.path)
+            return {}
+        mappings: dict[str, str] = {}
+        for public_ip, private_ip in data.items():
+            if isinstance(public_ip, str) and isinstance(private_ip, str):
+                if is_public_ipv4(public_ip) and self._is_private_ipv4(private_ip):
+                    mappings[public_ip] = private_ip
+        return mappings
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
+        tmp_path.write_text(json.dumps(self._mappings, indent=2, sort_keys=True) + "\n")
+        tmp_path.replace(self.path)
+
+    def _is_private_ipv4(self, candidate: str) -> bool:
+        try:
+            address = ipaddress.ip_address(candidate)
+        except ValueError:
+            return False
+        return address.version == 4 and address.is_private
+
+    def _generate_private_ip(self) -> str:
+        assigned = set(self._mappings.values())
+        while True:
+            choice = random.choice(
+                (
+                    f"10.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(1, 254)}",
+                    f"172.{random.randint(16, 31)}.{random.randint(0, 255)}.{random.randint(1, 254)}",
+                    f"192.168.{random.randint(0, 255)}.{random.randint(1, 254)}",
+                )
+            )
+            if choice not in assigned:
+                return choice
+
+    def alias_for(self, public_ip: str) -> str:
+        with self._lock:
+            existing = self._mappings.get(public_ip)
+            if existing:
+                return existing
+            private_ip = self._generate_private_ip()
+            self._mappings[public_ip] = private_ip
+            self._save()
+            logger.info("Mapped public IP %s to private IP %s", public_ip, private_ip)
+            return private_ip
+
+    def remap_text(self, value: str) -> str:
+        def replace_match(match: re.Match[str]) -> str:
+            candidate = match.group(0)
+            if not is_public_ipv4(candidate):
+                return candidate
+            return self.alias_for(candidate)
+
+        return IPV4_CANDIDATE_RE.sub(replace_match, value)
+
+
+PUBLIC_IP_ALIAS_MAP = PublicIpAliasMap(PUBLIC_IP_MAP_PATH)
 
 
 class TransformingKaliToolsClient(upstream.KaliToolsClient):
     def transform_outbound(self, payload: Any) -> Any:
-        transformed = transform_value(payload, OUTBOUND_FIND, OUTBOUND_REPLACE)
+        transformed = transform_strings(
+            payload,
+            lambda text: replace_string(text, OUTBOUND_FIND, OUTBOUND_REPLACE),
+        )
         if transformed != payload:
             logger.info("Transformed outbound payload")
         return transformed
 
     def transform_inbound(self, payload: Any) -> Any:
-        transformed = transform_value(payload, INBOUND_FIND, INBOUND_REPLACE)
+        transformed = transform_strings(
+            payload,
+            lambda text: PUBLIC_IP_ALIAS_MAP.remap_text(
+                replace_string(text, INBOUND_FIND, INBOUND_REPLACE)
+            ),
+        )
         if transformed != payload:
             logger.info("Transformed inbound payload")
         return transformed

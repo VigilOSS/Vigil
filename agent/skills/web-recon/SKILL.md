@@ -16,13 +16,18 @@ origin: RedteamOpencode
 
 ## Methodology
 
+Treat each fingerprint as a hypothesis, not a trophy. Infer proxy layers, framework choices,
+auth boundaries, and likely privileged workflows from small signals, then hand those
+hypotheses to the next skill or phase for validation.
+
 ### 1. HTTP Header Analysis
 ```bash
 run_tool curl -sI -L https://TARGET
 run_tool curl -sI https://TARGET | grep -iE "^(server|x-powered-by|x-aspnet|x-frame|content-security|strict-transport|set-cookie|www-authenticate)"
 run_tool curl -sI -X OPTIONS https://TARGET
 ```
-Note: Server, X-Powered-By, Set-Cookie flags, CSP, missing security headers.
+Note: compare headers across unauthenticated, error, and alternate routes. Differences often
+expose reverse proxies, app servers, framework routing, and auth enforcement boundaries.
 
 ### 2. Technology Fingerprinting
 ```bash
@@ -80,3 +85,10 @@ run_tool curl -sL https://TARGET | grep -oiE '[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{
 run_tool curl -sL https://TARGET | grep -i 'type="hidden"'                         # Hidden fields
 run_tool curl -sL https://TARGET | grep -oE 'href="[^"]*"' | sed 's/href="//;s/"//' | sort -u  # Links
 ```
+
+### 8. Recon-to-Hypothesis Conversion
+
+- Reverse-proxy plus framework leakage: test for route normalization, cache confusion, and trust-boundary mistakes.
+- Auth-protected admin or internal-looking routes: treat them as realistic escalation paths, not dead ends.
+- Error traces, version strings, or verbose debug hints: validate in stages before attempting full exploitation.
+- Reused cookie scope, shared API prefixes, or odd host routing: look for cross-app chains and auth-context drift.

@@ -10,7 +10,8 @@ source "$SCRIPT_DIR/lib/classify.sh"
 source "$SCRIPT_DIR/lib/db.sh"
 source "$SCRIPT_DIR/lib/container.sh"
 source "$SCRIPT_DIR/lib/noise.sh"
-EMIT_ASSESSMENT_RECORD="$SCRIPT_DIR/emit_assessment_record.sh"
+POST_ASSESSMENT_RECORD="$SCRIPT_DIR/post_assessment_record.sh"
+ASSESSMENT_AUTH_CONTEXT="${ASSESSMENT_AUTH_CONTEXT:-anonymous}"
 
 # --- Validate arguments ---
 if [[ $# -lt 1 ]]; then
@@ -111,20 +112,13 @@ while IFS= read -r line; do
     # Generate dedup signature
     params_sig=$(generate_params_sig "$query_params" "$body_params")
 
-    # Insert into DB
-    db_insert_case "$DB_PATH" \
-        "$method" "$url" "$url_path" \
-        "$query_params" "$body_params" "$path_params" "$cookie_params" \
-        "" "" "$content_type" "0" \
-        "$resp_status" "" "0" "" \
-        "$case_type" "katana" "$params_sig"
-
-    if [[ -f "$EMIT_ASSESSMENT_RECORD" ]]; then
-        payload="$(python3 - <<'PY' "$url" "$method" "$content_type" "$query_params" "$body_params" "$path_params" "$cookie_params" "$resp_status" "$line"
+    payload="$(python3 - <<'PY' "$url" "$method" "$content_type" "$query_params" "$body_params" "$path_params" "$cookie_params" "$resp_status" "$line" "$ASSESSMENT_AUTH_CONTEXT"
 import json
 import sys
+from urllib.parse import urlparse
 
-url, method, content_type, query_params, body_params, path_params, cookie_params, response_status, raw_line = sys.argv[1:]
+url, method, content_type, query_params, body_params, path_params, cookie_params, response_status, raw_line, auth_context = sys.argv[1:]
+parsed = urlparse(url)
 content_family = "html"
 if "json" in content_type.lower():
     content_family = "json"
@@ -137,7 +131,7 @@ elif "text/" in content_type.lower():
 print(json.dumps({
     "url": url,
     "method": method,
-    "auth_context": "anonymous",
+    "auth_context": auth_context,
     "content_type_family": content_family,
     "query_schema": json.loads(query_params),
     "body_schema": json.loads(body_params),
@@ -150,16 +144,46 @@ print(json.dumps({
     "response_status": int(response_status) if response_status else None,
     "evidence_ref": "scans/katana_output.jsonl",
     "observation_payload": json.loads(raw_line),
+    "target_identity": parsed.hostname or "",
+    "target_kind": "host",
+    "target_notes": "",
+    "target_ip_address": None,
+    "target_hostname": parsed.hostname,
+    "banner": "",
+    "coverage_candidates": [],
+    "auto_generate_coverage": True,
 }, ensure_ascii=True))
 PY
 )"
-        bash "$EMIT_ASSESSMENT_RECORD" "request-variants" "$payload"
+
+    assessment_response="$(bash "$POST_ASSESSMENT_RECORD" "request-observations" "$payload")"
+    request_variant_id="$(printf '%s' "$assessment_response" | jq -r '.request_variant.id // empty' 2>/dev/null)"
+    service_id="$(printf '%s' "$assessment_response" | jq -r '.service.id // empty' 2>/dev/null)"
+    if [[ -z "$request_variant_id" && -z "$service_id" ]]; then
+        echo "katana_ingest.sh: backend response missing request_variant.id/service.id for $url" >&2
+        exit 1
     fi
+    queue_key=""
+    if [[ -n "$request_variant_id" ]]; then
+        queue_key="variant:${request_variant_id}:${case_type}"
+    elif [[ -n "$service_id" ]]; then
+        queue_key="service:${service_id}:${case_type}"
+    fi
+    DB_AUTH_CONTEXT="$ASSESSMENT_AUTH_CONTEXT" \
+    DB_QUEUE_KEY="$queue_key" \
+    DB_REQUEST_VARIANT_ID="${request_variant_id:-}" \
+    DB_SERVICE_ID="${service_id:-}" \
+    db_insert_case "$DB_PATH" \
+        "$method" "$url" "$url_path" \
+        "$query_params" "$body_params" "$path_params" "$cookie_params" \
+        "" "" "$content_type" "0" \
+        "$resp_status" "" "0" "" \
+        "$case_type" "katana" "$params_sig"
 
     count=$((count + 1))
     if (( count % 50 == 0 )); then
-        echo "[katana_ingest] Ingested $count cases so far..."
+        echo "[katana_ingest] Ingested $count work items so far..."
     fi
 done < <(tail -f "$KATANA_OUTPUT" 2>/dev/null)
 
-echo "[katana_ingest] Ingested $count total cases from $TARGET"
+echo "[katana_ingest] Ingested $count total work items from $TARGET"

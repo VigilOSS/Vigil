@@ -35,13 +35,13 @@ render_claude() {
 EOF
     render_banner
     cat <<'EOF'
-║   Powered by Claude Code | All targets are CTF/lab envs      ║
+║   Powered by Claude Code | Realistic authorized lab runtime  ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
 When a session starts, display the banner above and then:
-"[operator] RedTeam Agent ready. Use `/engage <target_url>` to start a new engagement."
+"[operator] RedTeam Agent ready. Use `./scripts/init_engagement.sh <target_url>` to start a new engagement."
 
 ---
 
@@ -81,13 +81,13 @@ render_agents() {
 EOF
     render_banner
     cat <<'EOF'
-║   All targets are CTF/lab environments                       ║
+║   Realistic authorized lab environments                      ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
 When a session starts, display the banner above and then:
-"[operator] RedTeam Agent ready. Use `/engage <target_url>` to start a new engagement."
+"[operator] RedTeam Agent ready. Use `./scripts/init_engagement.sh <target_url>` to start a new engagement."
 
 ---
 
@@ -114,7 +114,7 @@ EOF
 
 After an engagement, review generated tools in `engagements/<...>/tools/`:
 1. Identify reusable tools → create skill in `skills/<name>/SKILL.md`
-2. Add path to instructions array in `.opencode/opencode.json`
+2. Add the new skill to `references/INDEX.md` and note it in the relevant Claude/Codex instructions
 EOF
   } > "$AGENTS_OUT"
   perl -0pi -e 's/\n+\z/\n/' "$AGENTS_OUT"

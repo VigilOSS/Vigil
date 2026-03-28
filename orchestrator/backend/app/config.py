@@ -7,6 +7,13 @@ REPO_ROOT = BACKEND_ROOT.parents[1]
 DEFAULT_PROJECTS_DIR = Path.home() / ".redteam-orchestrator" / "projects"
 
 
+def env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str = "Redteam Orchestrator"
@@ -16,9 +23,9 @@ class Settings:
     session_ttl_hours: int = 24
     agent_source_dir: Path = REPO_ROOT / "agent"
     install_script_path: Path = REPO_ROOT / "install.sh"
-    opencode_command: str = "opencode"
+    runtime_launch_command: str = os.environ.get("REDTEAM_RUNTIME_LAUNCH_COMMAND", "")
     orchestrator_public_url: str = os.environ.get("ORCHESTRATOR_PUBLIC_URL", "http://127.0.0.1:18000")
-    auto_launch_runs: bool = True
+    auto_launch_runs: bool = env_flag("REDTEAM_AUTO_LAUNCH_RUNS", False)
 
 
 settings = Settings()

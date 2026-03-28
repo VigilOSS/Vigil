@@ -18,6 +18,9 @@ waybackurls, curl, jq
 
 ## Methodology
 
+Treat OSINT as a hypothesis generator for realistic attack paths, not a passive appendix.
+Prioritize intel that changes exploit decisions, auth testing, chain construction, or log review.
+
 ### 1. CVE & Exploit Lookup
 
 From intel.md Technology Stack — for each component+version:
@@ -120,8 +123,11 @@ From intel.md People & Organizations:
 
 ## Output Integration
 
-ALL output goes to intel.md ONLY. osint-analyst does NOT write to findings.md.
+Raw OSINT collection goes to `intel.md`. Promote actionable intel through the durable backend
+finding/state path when it becomes testable or chain-relevant; do not treat `findings.md` as the
+canonical destination.
 - CVE matches → intel.md CVE table + Intelligence Assessment
 - Breached credentials → intel.md Breach table + Intelligence Assessment
-- Historical URLs → intel.md DNS table (operator decides whether to requeue)
+- Historical URLs → intel.md DNS table, then ingest confirmed or high-value paths into backend coverage state
 - Social/org intel → intel.md Social table
+- For each meaningful lead, record the hypothesis it supports: vulnerable component, reachable hidden surface, reusable credential, or escalation path

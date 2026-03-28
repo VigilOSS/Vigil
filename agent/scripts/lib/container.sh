@@ -4,7 +4,7 @@
 
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/processes.sh"
 
-REDTEAM_IMAGE="${REDTEAM_IMAGE:-kali-redteam:latest}"
+REDTEAM_IMAGE="${REDTEAM_IMAGE:-security-research:latest}"
 PROXY_IMAGE="${PROXY_IMAGE:-redteam-proxy:latest}"
 KATANA_IMAGE="${KATANA_IMAGE:-$REDTEAM_IMAGE}"
 MITMPROXY_BIN="${MITMPROXY_BIN:-mitmdump}"
@@ -146,7 +146,7 @@ _stop_local_process() {
     stop_managed_process "$pid_dir" "$name"
 }
 
-# Run a one-shot tool in the kali-redteam container
+# Run a one-shot tool in the primary full runtime container
 # Usage: run_tool <tool> [args...]
 # Requires: ENGAGEMENT_DIR env var set
 run_tool() {
@@ -202,9 +202,23 @@ start_proxy() {
     if docker ps -a --format '{{.Names}}' | grep -q "^${container_name}\$"; then
         docker rm -f "$container_name" >/dev/null 2>&1 || true
     fi
+    local proxy_env_args=()
+    if [ -n "${ORCHESTRATOR_BASE_URL:-}" ]; then
+        proxy_env_args+=(-e "ORCHESTRATOR_BASE_URL=${ORCHESTRATOR_BASE_URL}")
+    fi
+    if [ -n "${ORCHESTRATOR_TOKEN:-}" ]; then
+        proxy_env_args+=(-e "ORCHESTRATOR_TOKEN=${ORCHESTRATOR_TOKEN}")
+    fi
+    if [ -n "${ORCHESTRATOR_PROJECT_ID:-}" ]; then
+        proxy_env_args+=(-e "ORCHESTRATOR_PROJECT_ID=${ORCHESTRATOR_PROJECT_ID}")
+    fi
+    if [ -n "${ORCHESTRATOR_RUN_ID:-}" ]; then
+        proxy_env_args+=(-e "ORCHESTRATOR_RUN_ID=${ORCHESTRATOR_RUN_ID}")
+    fi
     docker run -d --name "$container_name" \
         --network host \
         -v "${ENGAGEMENT_DIR_ABS}:/engagement" \
+        "${proxy_env_args[@]}" \
         "$PROXY_IMAGE" \
         --set engagement_dir=/engagement "$@"
     echo "[proxy] Started on port 8080"
@@ -330,7 +344,7 @@ check_images() {
     done
     if [ "$all_ok" = false ]; then
         echo ""
-        echo "Build missing images: cd docker && docker compose build"
+        echo "Build missing images: docker compose -f agent/docker/docker-compose.yml build runtime-full mitmproxy"
         return 1
     fi
     return 0

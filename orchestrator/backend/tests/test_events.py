@@ -1,8 +1,4 @@
-from fastapi.testclient import TestClient
-
-from app.main import app
-
-def register_and_login(client: TestClient, username: str) -> str:
+def register_and_login(client, username: str) -> str:
     client.post("/auth/register", json={"username": username, "password": "secret-password"})
     login_response = client.post(
         "/auth/login",
@@ -12,7 +8,7 @@ def register_and_login(client: TestClient, username: str) -> str:
     return login_response.json()["access_token"]
 
 
-def create_project(client: TestClient, token: str, name: str = "Alpha") -> dict:
+def create_project(client, token: str, name: str = "Alpha") -> dict:
     response = client.post(
         "/projects",
         headers={"Authorization": f"Bearer {token}"},
@@ -22,7 +18,7 @@ def create_project(client: TestClient, token: str, name: str = "Alpha") -> dict:
     return response.json()
 
 
-def create_run(client: TestClient, token: str, project_id: int, target: str = "https://example.com") -> dict:
+def create_run(client, token: str, project_id: int, target: str = "https://example.com") -> dict:
     response = client.post(
         f"/projects/{project_id}/runs",
         headers={"Authorization": f"Bearer {token}"},
@@ -32,9 +28,7 @@ def create_run(client: TestClient, token: str, project_id: int, target: str = "h
     return response.json()
 
 
-def test_persist_events_and_list_them_by_run():
-    client = TestClient(app)
-
+def test_persist_events_and_list_them_by_run(client):
     token = register_and_login(client, "alice")
     project = create_project(client, token)
     run = create_run(client, token, project["id"])
@@ -63,9 +57,7 @@ def test_persist_events_and_list_them_by_run():
     assert list_events.json()[0]["summary"] == "Recon phase started"
 
 
-def test_latest_phase_and_task_state_summary():
-    client = TestClient(app)
-
+def test_latest_phase_and_task_state_summary(client):
     token = register_and_login(client, "alice")
     project = create_project(client, token)
     run = create_run(client, token, project["id"])
@@ -129,9 +121,7 @@ def test_latest_phase_and_task_state_summary():
     }
 
 
-def test_log_artifact_events_are_projected_into_phase_and_task_timeline():
-    client = TestClient(app)
-
+def test_log_artifact_events_are_projected_into_phase_and_task_timeline(client):
     token = register_and_login(client, "alice")
     project = create_project(client, token)
     run = create_run(client, token, project["id"])
