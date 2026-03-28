@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # spec_ingest.sh — Parse OpenAPI 3.x / Swagger 2.0 spec and generate durable coverage records.
 # The local SQLite queue remains available only as a transient batching buffer.
-# Usage: ./scripts/spec_ingest.sh <db_path> <spec_file_or_url>
+# Usage: ./scripts/spec_ingest.sh <db_path> <local_spec_file>
 
 set -euo pipefail
 
@@ -12,28 +12,9 @@ source "$SCRIPT_DIR/lib/db.sh"
 POST_ASSESSMENT_RECORD="$SCRIPT_DIR/post_assessment_record.sh"
 ASSESSMENT_AUTH_CONTEXT="${ASSESSMENT_AUTH_CONTEXT:-anonymous}"
 
-download_spec() {
-    local spec_url="$1"
-    local output_file="$2"
-    local db_dir rtcurl_path
-
-    db_dir="$(dirname "$DB_PATH")"
-    rtcurl_path="$db_dir/tools/rtcurl"
-
-    if [[ -x "$rtcurl_path" ]]; then
-        RTCURL_AUTH_FILE="$db_dir/auth.json" \
-        RTCURL_SCOPE_FILE="$db_dir/scope.json" \
-        RTCURL_USER_AGENT_FILE="$db_dir/user-agent.txt" \
-        "$rtcurl_path" -sS "$spec_url" -o "$output_file"
-        return
-    fi
-
-    curl -sS "$spec_url" -o "$output_file"
-}
-
 # --- Validate arguments ---
 if [[ $# -lt 2 ]]; then
-    echo "Usage: $0 <db_path> <spec_file_or_url>" >&2
+    echo "Usage: $0 <db_path> <local_spec_file>" >&2
     exit 1
 fi
 
@@ -47,14 +28,12 @@ fi
 
 db_init "$DB_PATH"
 
-# --- Fetch spec if URL ---
 SPEC_FILE="$SPEC_INPUT"
+
 if [[ "$SPEC_INPUT" == http* ]]; then
-    # Download to engagement scans dir, not /tmp
-    DB_DIR=$(dirname "$DB_PATH")
-    mkdir -p "$DB_DIR/scans"
-    SPEC_FILE="$DB_DIR/scans/spec_download.json"
-    download_spec "$SPEC_INPUT" "$SPEC_FILE"
+    echo "ERROR: spec_ingest.sh no longer fetches target URLs directly." >&2
+    echo "Fetch the spec through the Kali MCP command-execution tool first, save it locally, then rerun spec_ingest.sh with the saved file." >&2
+    exit 1
 fi
 
 if [[ ! -f "$SPEC_FILE" ]]; then

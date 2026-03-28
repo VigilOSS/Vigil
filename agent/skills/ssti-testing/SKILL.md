@@ -14,7 +14,7 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- run_tool curl / Burp Suite Repeater
+- curl / Burp Suite Repeater
 - tplmap (automated SSTI exploitation)
 - SSTImap
 - Custom polyglot payloads

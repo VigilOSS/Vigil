@@ -180,10 +180,10 @@ echo "$RESPONSE" | jq -r '[paths(scalars)] | .[] | join(".")' | \
 
 ```bash
 # Check response headers for leaked info
-run_tool curl -sI "$TARGET_URL" | rg -i '(x-user|x-customer|x-employee|x-account|x-session|x-token|x-debug|x-internal|x-forwarded-for|x-real-ip)'
+curl -sI "$TARGET_URL" | rg -i '(x-user|x-customer|x-employee|x-account|x-session|x-token|x-debug|x-internal|x-forwarded-for|x-real-ip)'
 
 # Decode and inspect cookies
-run_tool curl -s -c - "$TARGET_URL" | while read -r line; do
+curl -s -c - "$TARGET_URL" | while read -r line; do
   cookie_val=$(echo "$line" | awk '{print $NF}')
   # Try base64 decode
   decoded=$(echo "$cookie_val" | base64 -d 2>/dev/null)

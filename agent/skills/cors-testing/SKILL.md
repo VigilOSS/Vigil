@@ -15,7 +15,7 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `run_tool curl` (send crafted Origin headers)
+- `curl` (send crafted Origin headers)
 - Burp Suite Repeater
 - Browser DevTools (Console for fetch tests)
 - CORScanner (automated testing)

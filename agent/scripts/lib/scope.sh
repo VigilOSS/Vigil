@@ -44,9 +44,6 @@ host_in_scope() {
 command_uses_raw_curl() {
     local command="${1:-}"
 
-    [[ "$command" == *"run_tool curl"* ]] && return 1
-    [[ "$command" == *"/engagement/tools/rtcurl"* ]] && return 1
-
     printf '%s\n' "$command" | grep -Eq '(^|[[:space:];|&(])(/usr/bin/curl|curl)([[:space:]]|$)'
 }
 

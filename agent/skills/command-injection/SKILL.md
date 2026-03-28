@@ -14,7 +14,7 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `run_tool curl` / `run_tool wget` (manual requests)
+- `curl` / `wget` (manual requests)
 - Burp Suite Repeater + Intruder
 - Commix (automated command injection)
 - Custom wordlists for injection payloads

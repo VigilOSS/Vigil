@@ -16,8 +16,8 @@ origin: AI Threat Hunting
 ## Tools
 
 - `subfinder` — passive subdomain enumeration (multiple sources, API keys optional)
-- `run_tool ffuf` — DNS brute-force via vhost fuzzing
-- `run_tool curl` / `run_tool nmap` — verify discovered subdomains are live
+- `ffuf` — DNS brute-force via vhost fuzzing
+- `curl` / `nmap` — verify discovered subdomains are live
 
 ## Methodology
 
@@ -28,19 +28,19 @@ without sending traffic to the target.
 
 ```bash
 # Basic enumeration
-run_tool subfinder -d target.example -silent
+subfinder -d target.example -silent
 
 # With all sources (uses API keys from /engagement/.env if mounted)
-run_tool subfinder -d target.example -all -silent -o /engagement/scans/subdomains.txt
+subfinder -d target.example -all -silent -o /engagement/scans/subdomains.txt
 
 # Multiple domains
-run_tool subfinder -dL /engagement/scans/domains.txt -silent -o /engagement/scans/subdomains.txt
+subfinder -dL /engagement/scans/domains.txt -silent -o /engagement/scans/subdomains.txt
 
 # JSON output for detailed source info
-run_tool subfinder -d target.example -all -json -o /engagement/scans/subdomains.json
+subfinder -d target.example -all -json -o /engagement/scans/subdomains.json
 
 # Resolve IPs while enumerating
-run_tool subfinder -d target.example -all -silent -nW -oI -o /engagement/scans/subdomains_ips.txt
+subfinder -d target.example -all -silent -nW -oI -o /engagement/scans/subdomains_ips.txt
 ```
 
 **API keys** enhance results significantly. Configure in `$ENGAGEMENT_DIR/.env`:
@@ -57,16 +57,16 @@ Active brute-force for subdomains not found by passive sources:
 
 ```bash
 # First, baseline — get response size for non-existent subdomain
-run_tool curl -s -o /dev/null -w "%{size_download}" -H "Host: nonexistent-xyz.target.example" http://TARGET_IP
+curl -s -o /dev/null -w "%{size_download}" -H "Host: nonexistent-xyz.target.example" http://TARGET_IP
 
 # Brute-force with vhost fuzzing
-run_tool ffuf -u http://TARGET_IP -H "Host: FUZZ.target.example" \
+ffuf -u http://TARGET_IP -H "Host: FUZZ.target.example" \
   -w /seclists/Discovery/DNS/subdomains-top1million-5000.txt \
   -fs <baseline_size> -t 50 \
   -o /engagement/scans/vhost_fuzz.json -of json
 
 # Larger wordlist if initial results are sparse
-run_tool ffuf -u http://TARGET_IP -H "Host: FUZZ.target.example" \
+ffuf -u http://TARGET_IP -H "Host: FUZZ.target.example" \
   -w /seclists/Discovery/DNS/subdomains-top1million-20000.txt \
   -fs <baseline_size> -t 50 \
   -o /engagement/scans/vhost_fuzz_20k.json -of json
@@ -95,7 +95,7 @@ echo "Resolved: $(wc -l < $ENGAGEMENT_DIR/scans/subdomains_resolved.txt) / $(wc 
 while IFS= read -r sub; do
   live=""
   for proto_port in "http://$sub" "https://$sub" "http://$sub:8080" "https://$sub:8443"; do
-    code=$(run_tool curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 -k "$proto_port" 2>/dev/null)
+    code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 -k "$proto_port" 2>/dev/null)
     if [ "$code" != "000" ] && [ -n "$code" ]; then
       echo "$sub $proto_port $code" >> "$ENGAGEMENT_DIR/scans/subdomains_live.txt"
       live="yes"
@@ -111,7 +111,7 @@ echo "subdomain|url|status|server|title|size|notes" > "$ENGAGEMENT_DIR/scans/sub
 TMPDIR_FINGERPRINT=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_FINGERPRINT"' EXIT
 while IFS=' ' read -r sub url code; do
-  resp=$(run_tool curl -s -o "$TMPDIR_FINGERPRINT/sub_resp.html" -w "%{size_download}" \
+  resp=$(curl -s -o "$TMPDIR_FINGERPRINT/sub_resp.html" -w "%{size_download}" \
     -D "$TMPDIR_FINGERPRINT/sub_headers.txt" --connect-timeout 5 -k "$url" 2>/dev/null)
   size="$resp"
   server=$(grep -i "^server:" "$TMPDIR_FINGERPRINT/sub_headers.txt" 2>/dev/null | head -1 | cut -d: -f2- | tr -d '\r')
@@ -147,7 +147,7 @@ If new subdomains are found, enumerate their subdomains too:
 
 ```bash
 # Feed discovered subdomains back for deeper enumeration
-run_tool subfinder -dL /engagement/scans/subdomains.txt -all -silent \
+subfinder -dL /engagement/scans/subdomains.txt -all -silent \
   -o /engagement/scans/subdomains_recursive.txt
 ```
 

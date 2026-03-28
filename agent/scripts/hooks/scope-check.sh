@@ -1,7 +1,7 @@
 #!/bin/bash
 # scope-check.sh — Claude Code PreToolUse hook
-# Reads hook JSON from stdin, extracts hostnames from bash command,
-# validates against scope.json. Exits 2 to block if out-of-scope.
+# Reads hook JSON from stdin and blocks host-side target-facing commands.
+# In-scope target work must go through the Kali MCP session rather than Bash.
 # Hook format: {"tool_name":"Bash","tool_input":{"command":"..."}}
 #
 # Exit codes: 0 = allow, 2 = block
@@ -23,6 +23,20 @@ TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
 [ -z "$COMMAND" ] && exit 0
 
+# Block common target-facing host-side execution paths even if the target is indirect
+# via environment variables, scope.json, or helper scripts.
+if printf '%s\n' "$COMMAND" | grep -Eq '(^|[[:space:];|&(])((/usr/bin/)?curl|nmap|ffuf|wfuzz|gobuster|dirb|sqlmap|nikto|whatweb|hydra|katana|arjun|subfinder|httpx|nc|netcat|msfconsole|msfrpcd)([[:space:]]|$)'; then
+  echo "BLOCKED: Host-side target-facing tool execution is not allowed. Use the attached Kali MCP tools for in-scope work." >&2
+  exit 2
+fi
+
+case "$COMMAND" in
+  *run_tool*|*rtcurl*|*container.sh*|*katana_ingest.sh*|*check_metasploit_runtime.sh*)
+    echo "BLOCKED: Deprecated host-side execution helper detected. Use the attached Kali MCP tools for in-scope work." >&2
+    exit 2
+    ;;
+esac
+
 # Skip local-only commands (no network traffic)
 # Match first token of command (handles VAR=val && cmd, compound commands)
 FIRST_TOKEN=$(echo "$COMMAND" | grep -oE '^[A-Za-z_][A-Za-z0-9_]*' 2>/dev/null || true)
@@ -33,7 +47,7 @@ esac
 
 # Also skip by first non-variable command in compound statements
 case "$COMMAND" in
-  *dispatcher.sh*|*ingest.sh*|*container.sh*|*schema.sql*) exit 0 ;;
+  *dispatcher.sh*|*schema.sql*) exit 0 ;;
   *"cat "*|*"mkdir "*|*"jq "*|*"sqlite3 "*|*"grep "*|*"sed "*) exit 0 ;;
 esac
 
@@ -51,12 +65,15 @@ mapfile -t HOST_LIST < <(extract_command_hosts "$COMMAND")
 
 # Check each host against scope
 for HOST in "${HOST_LIST[@]}"; do
-  if ! host_in_scope "$HOST" "${SCOPE_LIST[@]}"; then
-    AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "operator"' 2>/dev/null || echo "unknown")
-    echo "BLOCKED: Host '$HOST' is not in scope. (agent: $AGENT_TYPE)" >&2
-    echo "Allowed scope: ${SCOPE_LIST[*]}" >&2
+  AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "operator"' 2>/dev/null || echo "unknown")
+  if host_in_scope "$HOST" "${SCOPE_LIST[@]}"; then
+    echo "BLOCKED: Host-side Bash command targets in-scope host '$HOST'. Use the attached Kali MCP tools instead. (agent: $AGENT_TYPE)" >&2
     exit 2
   fi
+
+  echo "BLOCKED: Host '$HOST' is not in scope. (agent: $AGENT_TYPE)" >&2
+  echo "Allowed scope: ${SCOPE_LIST[*]}" >&2
+  exit 2
 done
 
 exit 0

@@ -32,6 +32,38 @@ def test_operator_prompt_outputs_require_realistic_lab_wording_and_skill_first_b
     assert "realistic lab" in agents_prompt.lower()
 
 
+def test_docs_and_skills_drop_run_tool_and_rtcurl_examples():
+    repo_root = Path(__file__).resolve().parents[3]
+    paths = [
+        repo_root / "README.md",
+        *sorted((repo_root / "agent" / "skills").rglob("*.md")),
+        *sorted((repo_root / "agent" / "references").rglob("*.md")),
+    ]
+
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        assert "run_tool " not in text, f"run_tool reference remained in {path}"
+        assert "rtcurl" not in text, f"rtcurl reference remained in {path}"
+
+
+def test_operator_prompt_outputs_require_kali_mcp_for_target_facing_work():
+    repo_root = Path(__file__).resolve().parents[3]
+    files = [
+        repo_root / "agent" / "operator-core.md",
+        repo_root / "agent" / "AGENTS.md",
+        repo_root / "agent" / "CLAUDE.md",
+        repo_root / "README.md",
+    ]
+
+    for path in files:
+        text = path.read_text(encoding="utf-8").lower()
+        assert "kali mcp" in text
+
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8").lower()
+    assert "command-execution" in operator_core
+    assert "target-facing" in operator_core
+
+
 def test_phase_two_methodology_guidance_is_present_in_skills_and_references():
     repo_root = Path(__file__).resolve().parents[3]
 

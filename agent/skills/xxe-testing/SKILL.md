@@ -14,7 +14,7 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `run_tool curl` (send crafted XML)
+- `curl` (send crafted XML)
 - Burp Suite Repeater
 - XXEinjector
 - Out-of-band server (Burp Collaborator, interactsh)

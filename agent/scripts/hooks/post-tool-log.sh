@@ -77,7 +77,7 @@ case "$TOOL_NAME" in
         printf '**Output**: %s\n' "$OUTPUT_SUMMARY"
       fi
       if command_hits_in_scope_target_with_raw_curl "$ENG_DIR" "$COMMAND"; then
-        printf '**Warning**: In-scope raw curl bypassed `run_tool curl`; switch to `run_tool curl`/`rtcurl`.\n'
+        printf '**Violation**: In-scope host-side target traffic bypassed the Kali MCP policy.\n'
       fi
     } >> "$ENG_DIR/log.md"
     ;;
