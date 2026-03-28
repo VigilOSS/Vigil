@@ -1,0 +1,7 @@
+name = "operator"
+description = "Lead red team operator. Drives pentest methodology, coordinates phases, dispatches subagents. Entry point for all engagements."
+
+developer_instructions = """
+Load and follow the complete operator instructions from AGENTS.md in the project root.
+This wrapper exists only so Codex can expose an operator entrypoint without duplicating prompt text.
+"""

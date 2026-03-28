@@ -28,16 +28,20 @@ logger = logging.getLogger("mcp_transform_proxy")
 
 
 def env_string(primary: str, fallback: str, default: str) -> str:
-    return os.environ.get(primary, default)
+    return os.environ.get(primary) or os.environ.get(fallback, default)
 
 
-OUTBOUND_FIND = env_string("MCP_TRANSFORM_OUTBOUND_FIND", "", "abc/")
+OUTBOUND_FIND = env_string("MCP_TRANSFORM_OUTBOUND_FIND", "REDTEAM_MCP_OUTBOUND_FIND", "")
 OUTBOUND_REPLACE = env_string(
-    "MCP_TRANSFORM_OUTBOUND_REPLACE", "", "changed-abc/"
+    "MCP_TRANSFORM_OUTBOUND_REPLACE",
+    "REDTEAM_MCP_OUTBOUND_REPLACE",
+    "",
 )
-INBOUND_FIND = env_string("MCP_TRANSFORM_INBOUND_FIND", "", "abc/")
+INBOUND_FIND = env_string("MCP_TRANSFORM_INBOUND_FIND", "REDTEAM_MCP_INBOUND_FIND", "")
 INBOUND_REPLACE = env_string(
-    "MCP_TRANSFORM_INBOUND_REPLACE", "", "changed-abc/"
+    "MCP_TRANSFORM_INBOUND_REPLACE",
+    "REDTEAM_MCP_INBOUND_REPLACE",
+    "",
 )
 
 
