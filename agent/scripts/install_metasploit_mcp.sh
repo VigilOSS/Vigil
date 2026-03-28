@@ -8,8 +8,8 @@ if [ -z "$TARGET_DIR" ]; then
 fi
 
 MCP_REPO_URL="https://github.com/GH05TCREW/MetasploitMCP.git"
-MCP_DIR="$TARGET_DIR/.opencode/vendor/MetasploitMCP"
-VENV_DIR="$TARGET_DIR/.opencode/vendor/metasploitmcp-venv"
+MCP_DIR="$TARGET_DIR/.vendor/MetasploitMCP"
+VENV_DIR="$TARGET_DIR/.vendor/metasploitmcp-venv"
 
 rm -rf "$MCP_DIR" "$VENV_DIR"
 mkdir -p "$(dirname "$MCP_DIR")"

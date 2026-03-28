@@ -1,9 +1,4 @@
-from fastapi.testclient import TestClient
-
-from app.main import app
-
-
-def register_and_login(client: TestClient, username: str) -> str:
+def register_and_login(client, username: str) -> str:
     client.post("/auth/register", json={"username": username, "password": "secret-password"})
     login_response = client.post(
         "/auth/login",
@@ -13,7 +8,7 @@ def register_and_login(client: TestClient, username: str) -> str:
     return login_response.json()["access_token"]
 
 
-def create_project(client: TestClient, token: str, name: str = "Alpha") -> dict:
+def create_project(client, token: str, name: str = "Alpha") -> dict:
     response = client.post(
         "/projects",
         headers={"Authorization": f"Bearer {token}"},
@@ -23,7 +18,7 @@ def create_project(client: TestClient, token: str, name: str = "Alpha") -> dict:
     return response.json()
 
 
-def create_run(client: TestClient, token: str, project_id: int, target: str = "https://example.com") -> dict:
+def create_run(client, token: str, project_id: int, target: str = "https://example.com") -> dict:
     response = client.post(
         f"/projects/{project_id}/runs",
         headers={"Authorization": f"Bearer {token}"},
@@ -33,9 +28,7 @@ def create_run(client: TestClient, token: str, project_id: int, target: str = "h
     return response.json()
 
 
-def test_assessment_summary_counts_structured_records():
-    client = TestClient(app)
-
+def test_assessment_summary_counts_structured_records(client):
     token = register_and_login(client, "alice")
     project = create_project(client, token)
     run = create_run(client, token, project["id"])

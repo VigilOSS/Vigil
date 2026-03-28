@@ -15,8 +15,6 @@ This repository is the new home for the combined project. The old `security-rese
   Primary Kali MCP image. This is the default runtime for tool execution.
 - `docker/kali-mcp-runtime/`
   MCP wrapper, transform proxy, and patched Kali API server.
-- `docker/redteam-allinone/`
-  Optional all-in-one CLI runtime with OpenCode and the bundled toolchain.
 - `agent/`
   Prompts, CLI integrations, attack skills, queueing scripts, and runtime helpers.
 - `orchestrator/`
@@ -44,10 +42,11 @@ docker run -d \
   security-research
 ```
 
-Attach your agent over stdio:
+Attach Claude Code or Codex over stdio:
 
 ```bash
-docker exec -i security-research mcp-server
+claude mcp add kali -s user -- docker exec -i security-research mcp-server
+codex mcp add kali -- docker exec -i security-research mcp-server
 ```
 
 ### 2. Orchestrator backend
@@ -87,22 +86,11 @@ The root `Dockerfile` is the main runtime image and now includes:
 
 The MCP entrypoint is the wrapper in [docker/kali-mcp-runtime/mcp-server-wrapper.sh](/path/to/vigil), which starts the Kali API first and then runs the Python transform proxy.
 
-### Optional all-in-one CLI runtime
-
-If you want the CLI tools, prompts, and bundled workspace in one container, use:
+Initialize an engagement in the repo-managed workspace with:
 
 ```bash
-docker build -t redteam-allinone -f docker/redteam-allinone/Dockerfile .
-```
-
-Then run:
-
-```bash
-docker run --rm -it \
-  --cap-add=NET_RAW \
-  --cap-add=NET_ADMIN \
-  -v "$PWD/workspace:/workspace" \
-  redteam-allinone
+cd agent
+./scripts/init_engagement.sh https://target.example
 ```
 
 ## Optional Tool Activation
@@ -128,14 +116,8 @@ docker exec -it security-research katana \
 MITM remains optional. Use the agent command path or the helper directly:
 
 ```bash
-cd agent
-./scripts/lib/container.sh
+docker compose -f agent/docker/docker-compose.yml up -d mitmproxy
 ```
-
-From the CLI workflow:
-
-- `/proxy start` starts mitmproxy
-- `/proxy stop` stops it
 
 The proxy image still lives under `agent/docker/mitmproxy/`.
 
@@ -188,6 +170,10 @@ This does two things:
 2. opens an ngrok HTTP tunnel to it
 
 The ngrok token is no longer baked into the image. Supply it at runtime.
+
+Claude Code and Codex can use this path once the Kali MCP runtime is attached. The listener is not limited to manual shell use. If the token is available in the container environment, the agent can start ngrok-backed callbacks itself during an engagement. If the token is not present, provide it before starting the callback path.
+
+The token is not part of mandatory repo initialization. Treat it as an optional engagement input that you pass only when external callback routing is needed.
 
 ### Why this matters
 
@@ -244,7 +230,7 @@ The queue in `agent/scripts/schema.sql` remains useful as a transient work buffe
 
 - Backend Python is `>=3.11`; use `uv`, not ad hoc `pip` installs.
 - Frontend uses Vite and React under `orchestrator/frontend/`.
-- The `agent/` directory still contains the Claude, Codex, and OpenCode prompt/install paths.
+- This repository is Claude/Codex-only. Legacy third-client prompt, command, and runtime paths have been removed.
 - The main runtime design is now the root `Dockerfile`, not a separate sidecar-only experiment.
 
 ## Verification Commands

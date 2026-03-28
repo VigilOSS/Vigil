@@ -10,7 +10,7 @@ Guides consumption of the case queue — fetching batches from `cases.db`, routi
 
 ## When to Activate
 
-- After `/engage` when `cases.db` is created
+- After `./scripts/init_engagement.sh ...` when `cases.db` is created
 - When pending cases exist in queue
 - When a producer has added new cases
 

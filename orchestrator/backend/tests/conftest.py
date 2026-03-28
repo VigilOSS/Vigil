@@ -2,12 +2,14 @@ import sys
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 repo_root = Path(__file__).resolve().parents[3]
 backend_root = repo_root / "orchestrator" / "backend"
 sys.path.insert(0, str(backend_root))
 
 from app.config import settings
+from app.main import app
 
 
 @pytest.fixture(autouse=True)
@@ -27,3 +29,12 @@ def isolate_data_dir(tmp_path):
         object.__setattr__(settings, "projects_dir", original_projects_dir)
         object.__setattr__(settings, "auto_launch_runs", original_auto_launch_runs)
         object.__setattr__(settings, "frontend_dist_dir", original_frontend_dist_dir)
+
+
+@pytest.fixture
+def client():
+    test_client = TestClient(app)
+    try:
+        yield test_client
+    finally:
+        test_client.close()
