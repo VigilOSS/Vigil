@@ -28,6 +28,9 @@ origin: RedteamOpencode
 
 ## Methodology
 
+Do not stop at inventory. Convert routes, config fragments, and client logic into hypotheses
+about backend behavior, trust boundaries, auth assumptions, and reachable follow-on attack paths.
+
 ### 1. Identify Source Files
 List `<script src>`, `<link stylesheet href>`, inline `<script>` blocks, source map refs.
 
@@ -43,6 +46,8 @@ run_tool curl -sL <js-url> | grep -oE '["'"'"'](/[a-zA-Z0-9_/\-\.]+)["'"'"']' | 
 - SPA routes: React `path="/..."`, Vue `{ path: }`, Angular `{ path: }`
 - Secrets: api_key, token, secret, password assignments; AWS `AKIA[A-Z0-9]{16}`; JWT `eyJ...`
 - Webpack: chunk manifest, chunk URLs, `window.__INITIAL_STATE__`
+- Infer more than strings: auth role checks, feature flags, internal-only branches, tenant IDs,
+  object naming patterns, callback routes, proxy base paths, and debugging toggles.
 
 ### 4. CSS Analysis
 Extract `url()` refs, `@import` paths, source map refs.
@@ -50,8 +55,9 @@ Extract `url()` refs, `@import` paths, source map refs.
 ### 5. API Schema Discovery
 Probe: /swagger.json, /openapi.json, /api-docs, /graphql (introspection), /application.wadl
 
-If an OpenAPI / Swagger spec is accessible, ingest it into the queue instead of leaving it as
-a passive note:
+If an OpenAPI / Swagger spec is accessible, ingest it into the canonical backend assessment state.
+The local queue can still be populated as a transient batching aid, but the operator contract is
+the backend ledger:
 
 ```bash
 run_tool curl -sL "https://TARGET/openapi.json" -o /engagement/scans/openapi.json
@@ -59,10 +65,18 @@ run_tool curl -sL "https://TARGET/openapi.json" -o /engagement/scans/openapi.jso
 ./scripts/dispatcher.sh "$ENGAGEMENT_DIR/cases.db" stats
 ```
 
-This creates `api-spec` cases that should be routed to `vulnerability-analyst`.
+This creates durable request/service coverage candidates and, when the local buffer is in use,
+`api-spec` work items that should be routed to `vulnerability-analyst`.
 
 ### 6. Source Map Analysis
 Fetch .map → extract `sources` array → reconstruct original source for analysis.
+
+### 7. Hypothesis Promotion
+
+- Hidden admin or support routes: verify whether they sit behind a weaker trust boundary than the main app.
+- Role checks in frontend only: test for direct API access before assuming server-side enforcement exists.
+- Config and environment leakage: stage proof from low-noise disclosure toward decisive impact.
+- Multiple API bases or internal hostnames: look for chainable pivots into different services or auth realms.
 
 ## Priority Order
 

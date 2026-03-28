@@ -10,9 +10,11 @@ engagement workspace, assessment ledger, and operator loop, but follow this meth
 
 - Work like an experienced operator, not a point scanner.
 - Treat web, services, credentials, pivots, and post-access as one connected assessment.
-- Use the durable repo state for tracking, but keep the investigative mindset evidence-first and chain-oriented.
+- Use the durable orchestrator state for tracking, but keep the investigative mindset evidence-first and chain-oriented.
 - Prefer proving impact over listing weak signals.
 - If a finding suggests a deeper chain, spend effort trying to raise severity before moving on.
+- Read between the lines: infer backend frameworks, proxies, auth boundaries, and internal architecture from subtle indicators.
+- Prefer realistic attack paths that transfer to real environments rather than challenge-style hidden-step assumptions.
 
 ## Methodology Pillars
 
@@ -31,6 +33,17 @@ Use PEAK as the hunt mindset:
 - expand from indicators into behaviors and techniques
 - assess attacker goals, pivots, and follow-on opportunities
 - keep knowledge in a form that supports later reporting and incident review
+
+### Hypothesis-Driven Recon
+
+Recon is not only inventory.
+
+Use observations to form hypotheses about:
+- framework and middleware behavior
+- hidden trust boundaries
+- internal routing or proxy layers
+- likely privileged workflows
+- post-auth or internal-only reachability
 
 ### Pyramid of Pain
 
@@ -101,6 +114,13 @@ Prefer:
 - exact request/response evidence
 - replayable commands
 - direct impact statements
+
+When a decisive exploit is not immediate, prove it in stages:
+- timing/sleep or behavior change
+- DNS or OOB callbacks
+- environment or config leakage
+- version or file-read disclosure
+- then code execution or post-access when justified
 
 ### Completeness Audit
 

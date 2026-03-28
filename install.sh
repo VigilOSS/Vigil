@@ -158,9 +158,20 @@ else
       ;;
   esac
 
-  for path in Dockerfile README.md docker orchestrator tests agent .claude install.sh; do
+  for path in Dockerfile README.md docker orchestrator tests agent install.sh; do
     copy_if_exists "$SOURCE_ROOT/$path" "$INSTALL_DIR/$path"
   done
+
+  case "$PRODUCT" in
+    claude)
+      rm -rf "$INSTALL_DIR/agent/.codex"
+      rm -f "$INSTALL_DIR/agent/AGENTS.md"
+      ;;
+    codex)
+      rm -rf "$INSTALL_DIR/agent/.claude"
+      rm -f "$INSTALL_DIR/agent/CLAUDE.md"
+      ;;
+  esac
 
   if [ -f "$AGENT_ROOT/.env.example" ] && [ ! -f "$INSTALL_DIR/.env" ]; then
     cp "$AGENT_ROOT/.env.example" "$INSTALL_DIR/.env"
@@ -203,6 +214,7 @@ echo ""
 echo "  Installed to: $INSTALL_DIR"
 echo ""
 echo "  Next steps:"
+echo "    Use only against fully authorized realistic lab environments."
 echo "    docker run -d --name security-research --cap-add=NET_RAW --cap-add=NET_ADMIN security-research"
 case "$PRODUCT" in
   claude)

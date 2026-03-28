@@ -1,46 +1,47 @@
 #!/bin/bash
 set -euo pipefail
 
-# dispatcher.sh — Zero-token queue consumption engine
-# Manages the SQLite case queue without consuming LLM tokens.
+# dispatcher.sh — Zero-token transient work-buffer consumption engine
+# Manages the SQLite work_items buffer without consuming LLM tokens.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/params.sh"
+source "$SCRIPT_DIR/lib/db.sh"
 
 DB="${1:-}"
 ACTION="${2:-}"
+TABLE="work_items"
 
 if [[ -z "$DB" || -z "$ACTION" ]]; then
   echo "Usage: $0 <db_path> <action> [args...]"
   echo ""
   echo "Actions:"
-  echo "  stats                          Show queue statistics"
+  echo "  stats                          Show work-buffer statistics"
   echo "  fetch <type> <limit> <agent>   Atomic consume batch (JSON output)"
   echo "  done <id_list>                 Mark comma-separated IDs as done"
   echo "  error <id_list>                Mark comma-separated IDs as error"
-  echo "  reset-stale <minutes>          Recover stuck processing cases"
-  echo "  retry-errors [max_retries]     Retry error cases (default max: 2)"
-  echo "  migrate                        Add retry_count column if missing"
+  echo "  reset-stale <minutes>          Recover stuck processing work items"
+  echo "  retry-errors [max_retries]     Retry error work items (default max: 2)"
+  echo "  migrate                        Ensure work-buffer schema exists"
   echo "  requeue                        Read JSON lines from stdin, insert as pending"
   exit 1
 fi
+
+db_init "$DB"
 
 sql() {
   sqlite3 "$DB" ".timeout 5000" "$1"
 }
 
-# Auto-migrate: add retry_count column if missing
-sql "ALTER TABLE cases ADD COLUMN retry_count INTEGER DEFAULT 0;" 2>/dev/null || true
-
 case "$ACTION" in
   stats)
-    echo "--- Queue Statistics ---"
-    sql "SELECT status, type, COUNT(*) as count FROM cases GROUP BY status, type ORDER BY status, type;"
+    echo "--- Work Buffer Statistics ---"
+    sql "SELECT status, type, COUNT(*) as count FROM ${TABLE} GROUP BY status, type ORDER BY status, type;"
     echo ""
     echo "--- Summary ---"
-    sql "SELECT status, COUNT(*) as count FROM cases GROUP BY status ORDER BY status;"
+    sql "SELECT status, COUNT(*) as count FROM ${TABLE} GROUP BY status ORDER BY status;"
     echo ""
-    sql "SELECT 'TOTAL', COUNT(*) FROM cases;"
+    sql "SELECT 'TOTAL', COUNT(*) FROM ${TABLE};"
     ;;
 
   fetch)
@@ -48,22 +49,20 @@ case "$ACTION" in
     LIMIT="${4:?Missing limit argument}"
     AGENT="${5:?Missing agent argument}"
 
-    # Escape single quotes for SQL safety
     TYPE="${TYPE//\'/\'\'}"
     AGENT="${AGENT//\'/\'\'}"
-    # Validate LIMIT is numeric
     if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
       echo "ERROR: limit must be a positive integer" >&2
       exit 1
     fi
 
     sqlite3 "$DB" ".timeout 5000" -json "
-      UPDATE cases
+      UPDATE ${TABLE}
       SET status = 'processing',
           assigned_agent = '${AGENT}',
           consumed_at = datetime('now')
       WHERE id IN (
-        SELECT id FROM cases
+        SELECT id FROM ${TABLE}
         WHERE status = 'pending' AND type = '${TYPE}'
         LIMIT ${LIMIT}
       )
@@ -73,28 +72,26 @@ case "$ACTION" in
 
   done)
     ID_LIST="${3:?Missing id_list argument}"
-    # Validate ID_LIST contains only digits and commas
     if ! [[ "$ID_LIST" =~ ^[0-9,]+$ ]]; then
       echo "ERROR: id_list must contain only numeric IDs separated by commas" >&2
       exit 1
     fi
-    sql "UPDATE cases SET status='done' WHERE id IN (${ID_LIST});"
+    sql "UPDATE ${TABLE} SET status='done' WHERE id IN (${ID_LIST});"
     echo "Marked done: ${ID_LIST}"
     ;;
 
   error)
     ID_LIST="${3:?Missing id_list argument}"
-    # Validate ID_LIST contains only digits and commas
     if ! [[ "$ID_LIST" =~ ^[0-9,]+$ ]]; then
       echo "ERROR: id_list must contain only numeric IDs separated by commas" >&2
       exit 1
     fi
-    sql "UPDATE cases SET status='error', retry_count = COALESCE(retry_count,0) + 1 WHERE id IN (${ID_LIST});"
+    sql "UPDATE ${TABLE} SET status='error', retry_count = COALESCE(retry_count,0) + 1 WHERE id IN (${ID_LIST});"
     echo "Marked error: ${ID_LIST}"
     ;;
 
   migrate)
-    sql "ALTER TABLE cases ADD COLUMN retry_count INTEGER DEFAULT 0;" 2>/dev/null || true
+    db_init "$DB"
     ;;
 
   retry-errors)
@@ -103,21 +100,20 @@ case "$ACTION" in
       echo "ERROR: max_retries must be a positive integer" >&2
       exit 1
     fi
-    BEFORE=$(sql "SELECT COUNT(*) FROM cases WHERE status='error' AND COALESCE(retry_count,0) < ${MAX_RETRIES};")
-    sql "UPDATE cases SET status='pending', assigned_agent=NULL, consumed_at=NULL WHERE status='error' AND COALESCE(retry_count,0) < ${MAX_RETRIES};"
-    echo "Retried ${BEFORE} error case(s) (max retries: ${MAX_RETRIES})"
+    BEFORE=$(sql "SELECT COUNT(*) FROM ${TABLE} WHERE status='error' AND COALESCE(retry_count,0) < ${MAX_RETRIES};")
+    sql "UPDATE ${TABLE} SET status='pending', assigned_agent=NULL, consumed_at=NULL WHERE status='error' AND COALESCE(retry_count,0) < ${MAX_RETRIES};"
+    echo "Retried ${BEFORE} error work item(s) (max retries: ${MAX_RETRIES})"
     ;;
 
   reset-stale)
     MINUTES="${3:?Missing minutes argument}"
-    # Validate MINUTES is numeric
     if ! [[ "$MINUTES" =~ ^[0-9]+$ ]]; then
       echo "ERROR: minutes must be a positive integer" >&2
       exit 1
     fi
-    BEFORE=$(sql "SELECT COUNT(*) FROM cases WHERE status='processing' AND consumed_at < datetime('now', '-${MINUTES} minutes');")
-    sql "UPDATE cases SET status='pending', assigned_agent=NULL, consumed_at=NULL WHERE status='processing' AND consumed_at < datetime('now', '-${MINUTES} minutes');"
-    echo "Reset ${BEFORE} stale case(s) (stuck > ${MINUTES} min)"
+    BEFORE=$(sql "SELECT COUNT(*) FROM ${TABLE} WHERE status='processing' AND consumed_at < datetime('now', '-${MINUTES} minutes');")
+    sql "UPDATE ${TABLE} SET status='pending', assigned_agent=NULL, consumed_at=NULL WHERE status='processing' AND consumed_at < datetime('now', '-${MINUTES} minutes');"
+    echo "Reset ${BEFORE} stale work item(s) (stuck > ${MINUTES} min)"
     ;;
 
   requeue)
@@ -143,11 +139,17 @@ case "$ACTION" in
       RESPONSE_SIZE=$(echo "$line" | jq -r '.response_size // 0')
       RESPONSE_SNIPPET=$(echo "$line" | jq -r '.response_snippet // ""')
       PARAMS_KEY_SIG=$(echo "$line" | jq -r '.params_key_sig // empty')
+      AUTH_CONTEXT=$(echo "$line" | jq -r '.auth_context // "anonymous"')
+      REQUEST_VARIANT_ID=$(echo "$line" | jq -r '.request_variant_id // empty')
+      SERVICE_ID=$(echo "$line" | jq -r '.service_id // empty')
+      COVERAGE_ITEM_ID=$(echo "$line" | jq -r '.coverage_item_id // empty')
+      QUEUE_KEY=$(echo "$line" | jq -r '.queue_key // empty')
 
       [[ "$METHOD" == "null" || -z "$METHOD" ]] && METHOD="GET"
       [[ "$URL" == "null" ]] && URL=""
       [[ "$TYPE" == "null" || -z "$TYPE" ]] && TYPE="unknown"
       [[ "$SOURCE" == "null" || -z "$SOURCE" ]] && SOURCE="requeue"
+      [[ "$AUTH_CONTEXT" == "null" || -z "$AUTH_CONTEXT" ]] && AUTH_CONTEXT="anonymous"
       [[ -z "$URL_PATH" ]] && URL_PATH="$(extract_url_path "$URL")"
       [[ -z "$QUERY_PARAMS" ]] && QUERY_PARAMS="$(extract_query_params "$URL" | jq -c '.')"
       [[ -z "$BODY_PARAMS" ]] && BODY_PARAMS="{}"
@@ -156,6 +158,18 @@ case "$ACTION" in
       [[ -z "$HEADERS" ]] && HEADERS="{}"
       [[ -z "$RESPONSE_HEADERS" ]] && RESPONSE_HEADERS="{}"
       [[ -z "$PARAMS_KEY_SIG" ]] && PARAMS_KEY_SIG="$(generate_params_sig "$QUERY_PARAMS" "$BODY_PARAMS")"
+
+      if [[ -z "$QUEUE_KEY" || "$QUEUE_KEY" == "null" ]]; then
+        if [[ -n "$REQUEST_VARIANT_ID" && "$REQUEST_VARIANT_ID" != "null" ]]; then
+          QUEUE_KEY="variant:${REQUEST_VARIANT_ID}:${TYPE}"
+        elif [[ -n "$SERVICE_ID" && "$SERVICE_ID" != "null" ]]; then
+          QUEUE_KEY="service:${SERVICE_ID}:${TYPE}"
+        elif [[ -n "$COVERAGE_ITEM_ID" && "$COVERAGE_ITEM_ID" != "null" ]]; then
+          QUEUE_KEY="coverage:${COVERAGE_ITEM_ID}:${TYPE}"
+        else
+          QUEUE_KEY="legacy:${AUTH_CONTEXT}:${METHOD}:${URL}:${PARAMS_KEY_SIG}:${TYPE}"
+        fi
+      fi
 
       if [[ -z "$URL" || -z "$URL_PATH" ]]; then
         echo "ERROR: requeue line missing usable url/url_path" >&2
@@ -166,7 +180,6 @@ case "$ACTION" in
       [[ "$RESPONSE_STATUS" =~ ^-?[0-9]+$ ]] || RESPONSE_STATUS=0
       [[ "$RESPONSE_SIZE" =~ ^-?[0-9]+$ ]] || RESPONSE_SIZE=0
 
-      # Escape single quotes for SQLite
       METHOD="${METHOD//\'/\'\'}"
       URL="${URL//\'/\'\'}"
       URL_PATH="${URL_PATH//\'/\'\'}"
@@ -182,8 +195,18 @@ case "$ACTION" in
       RESPONSE_HEADERS="${RESPONSE_HEADERS//\'/\'\'}"
       RESPONSE_SNIPPET="${RESPONSE_SNIPPET//\'/\'\'}"
       PARAMS_KEY_SIG="${PARAMS_KEY_SIG//\'/\'\'}"
+      AUTH_CONTEXT="${AUTH_CONTEXT//\'/\'\'}"
+      QUEUE_KEY="${QUEUE_KEY//\'/\'\'}"
 
-      RESULT=$(sql "INSERT OR IGNORE INTO cases (
+      REQUEST_VARIANT_SQL="NULL"
+      SERVICE_SQL="NULL"
+      COVERAGE_ITEM_SQL="NULL"
+      [[ "$REQUEST_VARIANT_ID" =~ ^[0-9]+$ ]] && REQUEST_VARIANT_SQL="$REQUEST_VARIANT_ID"
+      [[ "$SERVICE_ID" =~ ^[0-9]+$ ]] && SERVICE_SQL="$SERVICE_ID"
+      [[ "$COVERAGE_ITEM_ID" =~ ^[0-9]+$ ]] && COVERAGE_ITEM_SQL="$COVERAGE_ITEM_ID"
+
+      RESULT=$(sql "INSERT OR IGNORE INTO ${TABLE} (
+          queue_key, request_variant_id, service_id, coverage_item_id, auth_context,
           method, url, url_path,
           query_params, body_params, path_params, cookie_params,
           headers, body, content_type, content_length,
@@ -191,6 +214,7 @@ case "$ACTION" in
           type, source, status, params_key_sig,
           assigned_agent, consumed_at
         ) VALUES (
+          '${QUEUE_KEY}', ${REQUEST_VARIANT_SQL}, ${SERVICE_SQL}, ${COVERAGE_ITEM_SQL}, '${AUTH_CONTEXT}',
           '${METHOD}', '${URL}', '${URL_PATH}',
           '${QUERY_PARAMS}', '${BODY_PARAMS}', '${PATH_PARAMS}', '${COOKIE_PARAMS}',
           '${HEADERS}', '${BODY}', '${CONTENT_TYPE}', ${CONTENT_LENGTH},
@@ -198,12 +222,12 @@ case "$ACTION" in
           '${TYPE}', '${SOURCE}', 'pending', '${PARAMS_KEY_SIG}',
           NULL, NULL
         );
-        SELECT changes();" )
+        SELECT changes();")
 
       COUNT=$((COUNT + RESULT))
     done
 
-    echo "Requeued ${COUNT} new case(s)"
+    echo "Requeued ${COUNT} new work item(s)"
     ;;
 
   *)

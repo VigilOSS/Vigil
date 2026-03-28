@@ -136,6 +136,11 @@ Fingerprint signals for prioritization:
 - **Small response size**: minimal app or API → less hardened
 - **Non-standard server**: unusual tech, potentially unpatched
 
+Translate those signals into explicit hypotheses:
+- auth-protected admin panels may expose reusable identity or trust-boundary mistakes
+- unusual infrastructure may indicate separate ownership, weaker controls, or stale deployments
+- verbose errors plus unusual headers often justify staged validation before heavier exploitation
+
 ### 4. Recursive Enumeration
 
 If new subdomains are found, enumerate their subdomains too:
@@ -148,7 +153,8 @@ run_tool subfinder -dL /engagement/scans/subdomains.txt -all -silent \
 
 ### 5. Feed Results into Pipeline
 
-Import discovered subdomains as cases for testing:
+Import discovered subdomains into canonical backend state for coverage tracking. The local queue
+can still be used as a transient batching buffer for follow-up testing:
 
 ```bash
 # Only import verified live web entries. subdomains_live.txt is: "<subdomain> <url> <status>"
@@ -166,3 +172,4 @@ done | \
 - **Services** running on non-standard ports
 - **Source** of each subdomain (subfinder source, brute-force, JS reference)
 - Any subdomain pointing to **different infrastructure** (cloud, CDN, third-party)
+- The hypothesis each interesting subdomain suggests: auth bypass, stale deployment, separate trust zone, or chain opportunity

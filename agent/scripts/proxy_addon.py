@@ -1,4 +1,4 @@
-"""mitmproxy addon — intercepts HTTP traffic and queues cases into SQLite.
+"""mitmproxy addon — intercepts HTTP traffic and queues transient work items into SQLite.
 
 Load with:
     mitmdump -p 8080 -s scripts/proxy_addon.py --set engagement_dir=engagements/<date>/
@@ -9,8 +9,8 @@ import hashlib
 import sqlite3
 import os
 import re
-from datetime import datetime, timezone
-from urllib.parse import urlparse, parse_qs, unquote_plus
+from urllib.parse import urlparse, parse_qs
+from urllib.request import Request, urlopen
 
 from mitmproxy import http, ctx
 
@@ -78,12 +78,17 @@ _DYNAMIC_RE = re.compile(
 
 
 class CaseCollector:
-    """Collects HTTP request/response pairs and stores them in cases.db."""
+    """Collects HTTP request/response pairs and stores them in the transient work buffer."""
 
     def __init__(self):
         self.db: sqlite3.Connection | None = None
         self.scope: list[str] = []
         self.engagement_dir: str = ""
+        self.orchestrator_base_url = os.getenv("ORCHESTRATOR_BASE_URL", "").rstrip("/")
+        self.orchestrator_token = os.getenv("ORCHESTRATOR_TOKEN", "")
+        self.orchestrator_project_id = os.getenv("ORCHESTRATOR_PROJECT_ID", "")
+        self.orchestrator_run_id = os.getenv("ORCHESTRATOR_RUN_ID", "")
+        self.backend_warning_emitted = False
 
     # -- mitmproxy lifecycle ------------------------------------------------
 
@@ -107,6 +112,40 @@ class CaseCollector:
             self.db = sqlite3.connect(db_path, check_same_thread=False)
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA busy_timeout=5000")
+            self.db.execute(
+                """CREATE TABLE IF NOT EXISTS work_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    queue_key TEXT NOT NULL,
+                    request_variant_id INTEGER,
+                    service_id INTEGER,
+                    coverage_item_id INTEGER,
+                    auth_context TEXT NOT NULL DEFAULT 'anonymous',
+                    method TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    url_path TEXT NOT NULL,
+                    query_params TEXT,
+                    body_params TEXT,
+                    path_params TEXT,
+                    cookie_params TEXT,
+                    headers TEXT,
+                    body TEXT,
+                    content_type TEXT,
+                    content_length INTEGER,
+                    response_status INTEGER,
+                    response_headers TEXT,
+                    response_size INTEGER,
+                    response_snippet TEXT,
+                    type TEXT NOT NULL DEFAULT 'unknown',
+                    source TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    assigned_agent TEXT,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    consumed_at TEXT,
+                    params_key_sig TEXT,
+                    UNIQUE(queue_key)
+                )"""
+            )
             ctx.log.info(f"proxy_addon: connected to {db_path}")
         except sqlite3.OperationalError as exc:
             ctx.log.error(f"proxy_addon: cannot open DB — {exc}")
@@ -129,6 +168,22 @@ class CaseCollector:
         except (FileNotFoundError, json.JSONDecodeError) as exc:
             ctx.log.warn(f"proxy_addon: cannot load scope — {exc}")
             self.scope = []
+
+    def _backend_configured(self) -> bool:
+        return bool(
+            self.orchestrator_base_url
+            and self.orchestrator_token
+            and self.orchestrator_project_id
+            and self.orchestrator_run_id
+        )
+
+    def _warn_backend_unavailable(self):
+        if not self.backend_warning_emitted:
+            ctx.log.error(
+                "proxy_addon: orchestrator assessment backend is not configured; "
+                "captured traffic will not be queued"
+            )
+            self.backend_warning_emitted = True
 
     # -- checks -------------------------------------------------------------
 
@@ -307,6 +362,83 @@ class CaseCollector:
         text = body[:BODY_TRUNCATE].decode("utf-8", errors="replace")
         return text
 
+    def _post_request_observation(
+        self,
+        *,
+        url: str,
+        method: str,
+        content_type: str,
+        params: dict,
+        response_status: int,
+        evidence_ref: str,
+        observation_payload: dict,
+    ) -> dict | None:
+        if not self._backend_configured():
+            self._warn_backend_unavailable()
+            return None
+
+        parsed = urlparse(url)
+        ct_lower = (content_type or "").lower()
+        content_family = "unknown"
+        if "json" in ct_lower:
+            content_family = "json"
+        elif "javascript" in ct_lower:
+            content_family = "javascript"
+        elif "xml" in ct_lower:
+            content_family = "xml"
+        elif "text/" in ct_lower:
+            content_family = "text"
+        elif "html" in ct_lower:
+            content_family = "html"
+
+        payload = {
+            "url": url,
+            "method": method,
+            "auth_context": "anonymous",
+            "content_type_family": content_family,
+            "query_schema": json.loads(params.get("query_params") or "{}"),
+            "body_schema": json.loads(params.get("body_params") or "{}"),
+            "path_schema": json.loads(params.get("path_params") or "{}"),
+            "cookie_schema": json.loads(params.get("cookie_params") or "{}"),
+            "header_schema": {},
+            "path_template": parsed.path or "",
+            "discovery_source": "proxy",
+            "notes": "",
+            "response_status": response_status,
+            "evidence_ref": evidence_ref,
+            "observation_payload": observation_payload,
+            "target_identity": parsed.hostname or "",
+            "target_kind": "host",
+            "target_notes": "",
+            "target_ip_address": None,
+            "target_hostname": parsed.hostname,
+            "banner": "",
+            "coverage_candidates": [],
+            "auto_generate_coverage": True,
+        }
+        request = Request(
+            f"{self.orchestrator_base_url}/projects/{self.orchestrator_project_id}/runs/{self.orchestrator_run_id}/assessment/request-observations",
+            data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.orchestrator_token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=10) as response:
+                response_body = response.read().decode("utf-8")
+            data = json.loads(response_body)
+        except Exception as exc:
+            ctx.log.error(f"proxy_addon: backend write failed for {url} — {exc}")
+            return None
+
+        request_variant = data.get("request_variant") if isinstance(data, dict) else None
+        if not isinstance(request_variant, dict) or not request_variant.get("id"):
+            ctx.log.error(f"proxy_addon: backend response missing request_variant.id for {url}")
+            return None
+        return data
+
     # -- login detection ----------------------------------------------------
 
     def _detect_login(self, flow: http.HTTPFlow):
@@ -384,6 +516,10 @@ class CaseCollector:
 
     def _insert_case(
         self,
+        queue_key: str,
+        request_variant_id: int | None,
+        service_id: int | None,
+        auth_context: str,
         method: str,
         url: str,
         url_path: str,
@@ -404,13 +540,15 @@ class CaseCollector:
             return
         try:
             self.db.execute(
-                """INSERT OR IGNORE INTO cases (
+                """INSERT OR IGNORE INTO work_items (
+                    queue_key, request_variant_id, service_id, coverage_item_id, auth_context,
                     method, url, url_path,
                     query_params, body_params, path_params, cookie_params,
                     headers, body, content_type, content_length,
                     response_status, response_headers, response_size, response_snippet,
                     type, source, status, params_key_sig
                 ) VALUES (
+                    ?, ?, ?, NULL, ?,
                     ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
@@ -418,6 +556,10 @@ class CaseCollector:
                     ?, 'proxy', ?, ?
                 )""",
                 (
+                    queue_key,
+                    request_variant_id,
+                    service_id,
+                    auth_context,
                     method,
                     url,
                     url_path,
@@ -508,8 +650,32 @@ class CaseCollector:
         # Status
         status = "skipped" if case_type in SKIP_TYPES else "pending"
 
+        assessment_record = self._post_request_observation(
+            url=req.pretty_url,
+            method=req.method,
+            content_type=content_type,
+            params=params,
+            response_status=response_status,
+            evidence_ref="proxy",
+            observation_payload={
+                "request_headers": req_headers_dict,
+                "response_headers": dict(resp.headers),
+            },
+        )
+        if not assessment_record:
+            return
+
+        request_variant_id = assessment_record["request_variant"]["id"]
+        service = assessment_record.get("service") or {}
+        service_id = service.get("id")
+        queue_key = f"variant:{request_variant_id}:{case_type}"
+
         # Insert
         self._insert_case(
+            queue_key=queue_key,
+            request_variant_id=request_variant_id,
+            service_id=service_id,
+            auth_context="anonymous",
             method=req.method,
             url=req.pretty_url,
             url_path=path,

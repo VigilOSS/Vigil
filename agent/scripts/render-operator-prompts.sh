@@ -35,7 +35,7 @@ render_claude() {
 EOF
     render_banner
     cat <<'EOF'
-║   Powered by Claude Code | All targets are CTF/lab envs      ║
+║   Powered by Claude Code | Realistic authorized lab runtime  ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
 ```
@@ -81,7 +81,7 @@ render_agents() {
 EOF
     render_banner
     cat <<'EOF'
-║   All targets are CTF/lab environments                       ║
+║   Realistic authorized lab environments                      ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
 ```

@@ -77,10 +77,17 @@ Use this language model:
 - `No evidence observed in available Athena logs` when nothing surfaced in the searched window
 - `Could not determine` when retention, schema, or access blocked a meaningful search
 
+When this affects finding state, prefer these report outcomes:
+- `exploited in the wild`
+- `likely exploited`
+- `no evidence in available retention`
+- `inconclusive due to coverage gap`
+
 ## Phase Placement
 
 Treat Athena as an optional final phase:
 - after recon, collection, validation, and exploit work
 - before final report closure
+- after checking whether the strongest findings or chains deserve log validation
 
 It should enrich the report, not replace technical validation.

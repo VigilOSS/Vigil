@@ -7,6 +7,8 @@ Hybrid red-team and threat-hunting platform built around:
 - a durable orchestrator ledger for targets, services, request variants, probes, and surfaces
 - shared Claude and Codex support, with Claude-friendly teammate workflows layered on top
 
+The operating model assumes a fully authorized realistic lab environment that mirrors real public and enterprise behavior closely enough for transferable methodology and tooling decisions.
+
 This repository is the new home for the combined project. The old `security-research` Docker work is now the runtime foundation, and the RedteamAgent orchestration, prompts, scripts, and UI live here as first-class code.
 
 ## Repository Layout
@@ -16,7 +18,7 @@ This repository is the new home for the combined project. The old `security-rese
 - `docker/kali-mcp-runtime/`
   MCP wrapper, transform proxy, and patched Kali API server.
 - `agent/`
-  Prompts, CLI integrations, attack skills, queueing scripts, and runtime helpers.
+  Prompts, CLI integrations, attack skills, transient work-buffer scripts, and runtime helpers.
 - `orchestrator/`
   Backend and frontend for durable run state, events, artifacts, coverage, and phase visibility.
 - `tests/`
@@ -24,22 +26,47 @@ This repository is the new home for the combined project. The old `security-rese
 
 ## Quick Start
 
+### Choose one client per install
+
+Keep Claude and Codex in separate installs and separate engagement trees. Do not run both clients against the same `engagements/` directory.
+
+- Codex install:
+```bash
+./install.sh codex ~/security-research-codex
+cd ~/security-research-codex
+codex mcp add kali -- docker exec -i security-research mcp-server
+cd agent && ./scripts/init_engagement.sh https://target.example
+```
+
+- Claude install:
+```bash
+./install.sh claude ~/security-research-claude
+cd ~/security-research-claude
+claude mcp add kali -s user -- docker exec -i security-research mcp-server
+cd agent && ./scripts/init_engagement.sh https://target.example
+```
+
+To switch clients, stop using the current engagement, install the other client into a different directory, and start a new engagement there.
+
 ### 1. Primary Kali MCP runtime
 
-Build the main image:
+Build the primary full image:
 
 ```bash
-docker build -t security-research .
+docker build -t security-research:latest .
 ```
 
 Run it with the capabilities needed by raw-packet tooling:
 
 ```bash
+mkdir -p .runtime-data
+
 docker run -d \
   --name security-research \
   --cap-add=NET_RAW \
   --cap-add=NET_ADMIN \
-  security-research
+  -v "$PWD/.runtime-data:/data" \
+  security-research:latest
 ```
 
 Attach Claude Code or Codex over stdio:
@@ -48,6 +75,38 @@ Attach Claude Code or Codex over stdio:
 claude mcp add kali -s user -- docker exec -i security-research mcp-server
 codex mcp add kali -- docker exec -i security-research mcp-server
 ```
+
+### 1a. Configure request, response, and IP transforms
+
+The MCP proxy applies configured string replacement on tool inputs and outputs, then aliases any public IPv4 addresses found in tool responses to stable private IPv4 addresses.
+
+Run the container with transform env vars as needed:
+
+```bash
+docker run -d \
+  --name security-research \
+  --cap-add=NET_RAW \
+  --cap-add=NET_ADMIN \
+  -v "$PWD/.runtime-data:/data" \
+  -e MCP_TRANSFORM_OUTBOUND_FIND=researcher.example \
+  -e MCP_TRANSFORM_OUTBOUND_REPLACE=internal.test \
+  -e MCP_TRANSFORM_INBOUND_FIND=Parameno \
+  -e MCP_TRANSFORM_INBOUND_REPLACE=Redacted \
+  security-research:latest
+```
+
+Relevant env vars:
+
+- `MCP_TRANSFORM_OUTBOUND_FIND` / `MCP_TRANSFORM_OUTBOUND_REPLACE`
+  replace strings before the Kali MCP tool call is executed
+- `MCP_TRANSFORM_INBOUND_FIND` / `MCP_TRANSFORM_INBOUND_REPLACE`
+  replace strings in the returned tool result
+- `MCP_TRANSFORM_PUBLIC_IP_MAP_PATH`
+  JSON file storing public IPv4 to private IPv4 aliases; defaults to `/data/mcp-public-ip-map.json`
+
+Public IPv4 aliasing is automatic on inbound tool output. If `dig`, `whois`, `curl`, or any other Kali MCP tool returns `8.8.8.8`, the client will receive a private RFC1918 address instead, and the same public IP will keep the same private alias on later calls.
+
+Keep `/data` mounted from the host if you want the alias map to survive container restarts, image rebuilds, and host reboots. With the default example above, the durable host file is `.runtime-data/mcp-public-ip-map.json`.
 
 ### 2. Orchestrator backend
 
@@ -76,13 +135,17 @@ npm run dev
 
 ### Primary runtime
 
-The root `Dockerfile` is the main runtime image and now includes:
+The root `Dockerfile` is the main full runtime image and now includes:
 
 - Kali MCP server plus the transform proxy
 - Katana and Chromium for authenticated crawling
 - nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, nikto, WhatWeb, hydra, john, hashcat
 - post-access tooling such as evil-winrm, impacket, mitm6, chisel, ligolo-ng, proxychains-ng, Responder
 - an optional callback listener and ngrok bridge for listener-driven testing
+
+An explicitly optional lightweight runtime also exists at
+`agent/docker/kali-redteam-lightweight/Dockerfile`. It is only for faster local iteration and
+validation. The default workflow, docs, scripts, and agent runtime all target the root `Dockerfile`.
 
 The MCP entrypoint is the wrapper in [docker/kali-mcp-runtime/mcp-server-wrapper.sh](/path/to/vigil), which starts the Kali API first and then runs the Python transform proxy.
 
@@ -215,12 +278,16 @@ The run page exposes:
 - request variant count
 - coverage item count
 - probe run count
+- finding lifecycle and live findings
+- exploit attempts and outcomes
+- attack chains
+- service-level coverage gaps
 - unresolved surfaces
 - phase worker activity
 
 ## Durable Assessment State
 
-The orchestrator stores:
+The orchestrator stores the canonical assessment state:
 
 - targets and services
 - canonical request variants
@@ -228,16 +295,17 @@ The orchestrator stores:
 - coverage items
 - probe runs
 - surfaces
-- findings
+- findings, links, and attack chains
+- credential inventory, credential tests, access records, pivots, tunnels, and blocked techniques
 
-The queue in `agent/scripts/schema.sql` remains useful as a transient work buffer, but it is no longer the only memory for coverage.
+The queue in `agent/scripts/schema.sql` remains useful as a transient work buffer, but it is no longer part of the operator-facing state contract.
 
 ## Development Notes
 
 - Backend Python is `>=3.11`; use `uv`, not ad hoc `pip` installs.
 - Frontend uses Vite and React under `orchestrator/frontend/`.
 - This repository is Claude/Codex-only. Legacy third-client prompt, command, and runtime paths have been removed.
-- The main runtime design is now the root `Dockerfile`, not a separate sidecar-only experiment.
+- The main runtime design is now the root `Dockerfile`, not the optional lightweight image.
 
 ## Verification Commands
 
@@ -258,6 +326,6 @@ npm run build
 Runtime:
 
 ```bash
-docker build -t security-research .
+docker build -t security-research:latest .
 docker exec -i security-research mcp-server
 ```

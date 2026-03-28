@@ -52,3 +52,59 @@ CREATE TABLE IF NOT EXISTS cases (
 CREATE INDEX IF NOT EXISTS idx_consume ON cases(status, type);
 CREATE INDEX IF NOT EXISTS idx_source ON cases(source);
 CREATE INDEX IF NOT EXISTS idx_created ON cases(created_at);
+
+CREATE TABLE IF NOT EXISTS work_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    -- Canonical backend identity when available
+    queue_key TEXT NOT NULL,
+    request_variant_id INTEGER,
+    service_id INTEGER,
+    coverage_item_id INTEGER,
+    auth_context TEXT NOT NULL DEFAULT 'anonymous',
+
+    -- Request identity and replay context
+    method TEXT NOT NULL,
+    url TEXT NOT NULL,
+    url_path TEXT NOT NULL,
+
+    -- Structured parameters (pre-extracted by producers)
+    query_params TEXT,
+    body_params TEXT,
+    path_params TEXT,
+    cookie_params TEXT,
+
+    -- Request content
+    headers TEXT,
+    body TEXT,
+    content_type TEXT,
+    content_length INTEGER,
+
+    -- Response summary
+    response_status INTEGER,
+    response_headers TEXT,
+    response_size INTEGER,
+    response_snippet TEXT,
+
+    -- Classification and routing
+    type TEXT NOT NULL DEFAULT 'unknown',
+    source TEXT NOT NULL,
+
+    -- Transient buffer state only
+    status TEXT NOT NULL DEFAULT 'pending',
+    assigned_agent TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+
+    -- Timestamps
+    created_at TEXT DEFAULT (datetime('now')),
+    consumed_at TEXT,
+
+    -- Legacy helper fields kept for compatibility/debugging
+    params_key_sig TEXT,
+
+    UNIQUE(queue_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_items_consume ON work_items(status, type);
+CREATE INDEX IF NOT EXISTS idx_work_items_source ON work_items(source);
+CREATE INDEX IF NOT EXISTS idx_work_items_created ON work_items(created_at);

@@ -11,6 +11,7 @@ from fastapi import HTTPException, status
 from ..db import get_connection
 from ..models.user import User
 from .events import _run_or_404, list_events_for_run
+from . import state_manager as canonical_state
 
 PHASE_WORKER_MATRIX = [
     {
@@ -479,62 +480,12 @@ def record_surface(
 
 
 def list_surfaces(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
-    with get_connection() as connection:
-        rows = connection.execute(
-            """
-            SELECT *
-            FROM assessment_surfaces
-            WHERE run_id = ?
-            ORDER BY updated_at DESC, id DESC
-            """,
-            (run.id,),
-        ).fetchall()
-    return [dict(row) for row in rows]
+    return canonical_state.list_surfaces(project_id, run_id, user)
 
 
 def assessment_summary(project_id: int, run_id: int, user: User) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
-    with get_connection() as connection:
-        target_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_targets WHERE run_id = ?", (run.id,))
-        service_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_services WHERE run_id = ?", (run.id,))
-        request_variant_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_request_variants WHERE run_id = ?", (run.id,))
-        request_observation_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_request_observations WHERE run_id = ?", (run.id,))
-        coverage_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_coverage_items WHERE run_id = ?", (run.id,))
-        probe_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_probe_runs WHERE run_id = ?", (run.id,))
-        finding_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_findings WHERE run_id = ?", (run.id,))
-        open_surface_count = _scalar_row(
-            connection,
-            "SELECT COUNT(*) FROM assessment_surfaces WHERE run_id = ? AND status IN ('discovered', 'deferred')",
-            (run.id,),
-        )
-        coverage_rows = connection.execute(
-            """
-            SELECT status, COUNT(*) AS total
-            FROM assessment_coverage_items
-            WHERE run_id = ?
-            GROUP BY status
-            ORDER BY status ASC
-            """,
-            (run.id,),
-        ).fetchall()
-        top_surfaces = connection.execute(
-            """
-            SELECT surface_type, target_descriptor, source_name, status, updated_at
-            FROM assessment_surfaces
-            WHERE run_id = ?
-            ORDER BY
-                CASE status
-                    WHEN 'discovered' THEN 0
-                    WHEN 'deferred' THEN 1
-                    WHEN 'covered' THEN 2
-                    ELSE 3
-                END,
-                updated_at DESC
-            LIMIT 8
-            """,
-            (run.id,),
-        ).fetchall()
+    payload = canonical_state.assessment_summary(project_id, run_id, user)
+    _run_or_404(project_id, run_id, user)
     events = list_events_for_run(project_id, run_id, user)
     active_by_phase: dict[str, set[str]] = defaultdict(set)
     for event in events[-100:]:
@@ -549,16 +500,5 @@ def assessment_summary(project_id: int, run_id: int, user: User) -> dict[str, An
                 "active_agents": sorted(active_by_phase.get(item["phase"], set())),
             }
         )
-    return {
-        "target_count": target_count,
-        "service_count": service_count,
-        "request_variant_count": request_variant_count,
-        "request_observation_count": request_observation_count,
-        "coverage_count": coverage_count,
-        "probe_count": probe_count,
-        "finding_count": finding_count,
-        "open_surface_count": open_surface_count,
-        "coverage_statuses": {row["status"]: int(row["total"]) for row in coverage_rows},
-        "top_surfaces": [dict(row) for row in top_surfaces],
-        "phase_workers": phase_workers,
-    }
+    payload["phase_workers"] = phase_workers
+    return payload
