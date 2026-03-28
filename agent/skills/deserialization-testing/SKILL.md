@@ -1,7 +1,7 @@
 ---
 name: deserialization-testing
 description: Insecure deserialization detection and gadget chain exploitation
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Insecure Deserialization Testing

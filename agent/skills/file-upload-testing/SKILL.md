@@ -1,7 +1,7 @@
 ---
 name: file-upload-testing
 description: File upload vulnerability testing — webshells, bypass, path traversal
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # File Upload Vulnerability Testing

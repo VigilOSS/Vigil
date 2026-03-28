@@ -31,8 +31,8 @@ def test_orchestrator_backend_import_and_healthz():
     finally:
         sys.path.remove(str(backend_root))
 
-    assert app.title == "Redteam Orchestrator"
-    assert healthz() == {"status": "ok", "app": "Redteam Orchestrator"}
+    assert app.title == "AI Threat Hunting Orchestrator"
+    assert healthz() == {"status": "ok", "app": "AI Threat Hunting Orchestrator"}
 
 
 def test_backend_serves_frontend_build_when_present(isolate_data_dir):

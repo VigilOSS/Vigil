@@ -6,8 +6,6 @@ ARG PRELOADED_TOOLS=0
 ENV PATH="/opt/Responder:${PATH}"
 ENV KALI_MCP_CLIENT_PATH=/usr/share/mcp-kali-server/client.py
 
-# Install the MCP runtime dependencies.
-# In PRELOADED_TOOLS=1 mode, only install packages that are actually missing from the base image.
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update -y; \
@@ -26,7 +24,6 @@ RUN set -eux; \
     fi; \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install additional threat-hunting tools not included in kali-linux-default
 RUN DEBIAN_FRONTEND=noninteractive apt-get update -y && \
     if [ "$PRELOADED_TOOLS" != "1" ]; then apt-get install -y \
     subfinder \
@@ -52,7 +49,6 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update -y && \
     tcpdump \
     ; fi && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install nuclei, Katana, and optional tooling not in Kali repos.
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       python3 -m venv /opt/mitmproxy-venv && \
       /opt/mitmproxy-venv/bin/pip install --no-cache-dir --upgrade pip && \
@@ -75,27 +71,23 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       rm -rf /root/go; \
     fi
 
-# Pre-download amass data to avoid ~800MB download timeout on first run
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       mkdir -p /root/.config/amass && \
       timeout 120 amass enum --list 2>/dev/null; exit 0; \
     fi
 
-# Seclists
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       wget -c https://github.com/danielmiessler/SecLists/archive/master.zip -O SecList.zip && \
       unzip SecList.zip && rm -f SecList.zip && \
       mv SecLists-master /usr/share/wordlists/SecLists; \
     fi
 
-# NGROK is optional for callbacks; configure it with NGROK_AUTHTOKEN at runtime.
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null && \
       echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | tee /etc/apt/sources.list.d/ngrok.list && \
       apt update && apt install -y ngrok; \
     fi
 
-# Fix mcp-server to start the Kali API server before the MCP server.
 COPY docker/kali-mcp-runtime/mcp-server-wrapper.sh /usr/bin/mcp-server
 RUN chmod +x /usr/bin/mcp-server
 
@@ -106,19 +98,6 @@ COPY docker/kali-mcp-runtime/mcp_transform_proxy.py /opt/mcp-tools/mcp_transform
 COPY docker/callback_listener.py /opt/mcp-tools/callback_listener.py
 COPY docker/start-callback.sh /usr/local/bin/start-callback
 RUN chmod +x /usr/local/bin/start-callback
-
-# =============================================================================
-# IMPORTANT: nmap requires NET_RAW and NET_ADMIN capabilities to perform
-# SYN scans, OS detection, and raw packet operations. Run this container with:
-#
-#   docker run -it --cap-add=NET_RAW --cap-add=NET_ADMIN <image>
-#
-# Without these flags, nmap will fail with "Operation not permitted".
-# For full nmap functionality (OS detection, traceroute), you can also use:
-#
-#   docker run -it --privileged <image>
-#
-# =============================================================================
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD command -v mcp-server >/dev/null && command -v katana >/dev/null && test -f /opt/mcp-tools/mcp_transform_proxy.py || exit 1

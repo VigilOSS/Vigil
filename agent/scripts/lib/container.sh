@@ -5,7 +5,7 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/processes.sh"
 
 REDTEAM_IMAGE="${REDTEAM_IMAGE:-security-research:latest}"
-PROXY_IMAGE="${PROXY_IMAGE:-redteam-proxy:latest}"
+PROXY_IMAGE="${PROXY_IMAGE:-security-research-proxy:latest}"
 KATANA_IMAGE="${KATANA_IMAGE:-$REDTEAM_IMAGE}"
 MITMPROXY_BIN="${MITMPROXY_BIN:-mitmdump}"
 KATANA_LOCAL_BIN="${KATANA_LOCAL_BIN:-katana}"
@@ -45,13 +45,13 @@ _engagement_slug() {
 _proxy_container_name() {
     local slug
     slug="$(_engagement_slug)" || return 1
-    echo "redteam-proxy-${slug}"
+    echo "security-research-proxy-${slug}"
 }
 
 _katana_container_name() {
     local slug
     slug="$(_engagement_slug)" || return 1
-    echo "redteam-katana-${slug}"
+    echo "security-research-katana-${slug}"
 }
 
 _auth_header_args() {

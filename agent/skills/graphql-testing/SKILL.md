@@ -1,7 +1,7 @@
 ---
 name: graphql-testing
 description: GraphQL security testing — introspection, injection, auth bypass, DoS
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # GraphQL Security Testing

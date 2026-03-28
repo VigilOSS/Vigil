@@ -1,7 +1,7 @@
 ---
 name: sensitive-data-detection
 description: Detect PII, credentials, and corporate sensitive data in API responses, source code, files, headers, and database extracts
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Sensitive Data Detection

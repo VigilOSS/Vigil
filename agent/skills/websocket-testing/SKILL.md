@@ -1,7 +1,7 @@
 ---
 name: websocket-testing
 description: WebSocket security testing — injection, auth bypass, hijacking
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # WebSocket Security Testing

@@ -1,7 +1,7 @@
 ---
 name: osint-recon
 description: Open-source intelligence gathering — CVE lookup, breach search, DNS history, social profiling
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # OSINT Reconnaissance

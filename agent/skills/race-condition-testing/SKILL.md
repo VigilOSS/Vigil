@@ -1,7 +1,7 @@
 ---
 name: race-condition-testing
 description: Race condition and TOCTOU exploitation — parallel request attacks
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # Race Condition / TOCTOU Testing

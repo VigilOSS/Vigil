@@ -19,7 +19,7 @@ Use this skill only to:
 Build the runtime image from the repo root:
 
 ```bash
-docker build -t security-research:latest .
+docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .
 ```
 
 Run the container with the capabilities needed by raw network tools:
@@ -36,10 +36,10 @@ Optional lightweight local-validation image:
 
 ```bash
 docker build -t security-research-lightweight:latest \
-  -f agent/docker/kali-redteam-lightweight/Dockerfile .
+  -f agent/docker/runtime-lightweight/Dockerfile .
 ```
 
-Use the lightweight image only for faster local iteration. The primary workflow uses the root `Dockerfile`.
+Use the lightweight image only for faster local iteration. The primary workflow uses `agent/docker/runtime-full/Dockerfile`.
 
 ## MCP Registration
 

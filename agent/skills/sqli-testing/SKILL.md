@@ -1,7 +1,7 @@
 ---
 name: sqli-testing
 description: Detect and exploit SQL injection vulnerabilities in web application parameters
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # SQL Injection Testing

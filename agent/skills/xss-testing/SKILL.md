@@ -1,7 +1,7 @@
 ---
 name: xss-testing
 description: Detect and exploit cross-site scripting vulnerabilities in web applications
-origin: RedteamOpencode
+origin: AI Threat Hunting
 ---
 
 # XSS Testing
