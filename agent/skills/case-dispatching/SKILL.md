@@ -1,12 +1,14 @@
 ---
 name: case-dispatching
-description: Guide operator through the transient work-buffer consumption loop for security testing
+description: Guide operator through the transient work-buffer coordination loop for security testing
 origin: AI Threat Hunting
 ---
 
 # Case Dispatching
 
 Guides consumption of the transient local work buffer in `cases.db` for batching worker tasks. The orchestrator backend remains canonical for findings, coverage, services, request variants, and chains, and the work buffer should mirror canonical backend identities rather than inventing its own request identity.
+
+This skill is coordination-only. Use it to inspect the work buffer, route batches, mark completion or errors, and requeue canonical work items. Do not use host-side shell commands from this skill to probe, crawl, fuzz, or exploit targets directly. All target-facing execution must happen through the attached Kali MCP tools.
 
 ## When to Activate
 
@@ -72,11 +74,12 @@ sqlite3 "$DB" ".timeout 5000" "
 ## Key Rules
 
 - ALWAYS use `./scripts/dispatcher.sh` for work-buffer ops (never read cases.db directly)
+- Treat this skill as host-side coordination only. All real target testing stays in Kali MCP.
 - Record findings in backend state immediately and keep findings.md synchronized
 - Re-ingest new endpoints through backend-first producers; let the work buffer mirror the resulting canonical ids
 - Use reset-stale at start of each iteration
 - **DO NOT STOP EARLY** — loop until pending=0 for all consumable types
-- On subagent error: mark cases `error`, log, CONTINUE (don't halt loop)
+- On subagent error: mark work items `error`, log, CONTINUE (don't halt loop)
 - Only stop on: pending=0 everywhere, or user /stop
 
 ## Dispatcher Quick Reference
@@ -89,4 +92,5 @@ DB="<engagement_dir>/cases.db"
 ./scripts/dispatcher.sh "$DB" error "id1,id2,id3"
 ./scripts/dispatcher.sh "$DB" reset-stale <minutes>
 echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | ./scripts/dispatcher.sh "$DB" requeue
+echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | ./scripts/dispatcher.sh "$DB" requeue
 ```

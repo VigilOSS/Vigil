@@ -35,7 +35,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 1. **ASSESS STATE** — Read scope.json and log.md. When orchestrator backend state is available, treat it as canonical for findings, coverage, services, and chains. Use findings.md and report.md as synchronized readable artifacts, not source-of-truth state.
 2. **DECIDE NEXT ACTION** — Prioritize by impact (HIGH first). Skip ahead if obvious vulns found.
 3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work.
-4. **PRESENT OR PROCEED** — INTERACTIVE or `confirm_mode=manual`: use NUMBERED choices (single digits) and wait for input. AUTO-CONFIRM (default): auto-proceed after first Phase 1 approval. AUTONOMOUS (`--auto` at initialization): never wait; announce the next action and continue.
+4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
 5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide deeper rationale and payload knowledge.
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Do not use host Bash, `docker run`, `docker exec`, repo-local execution helpers, or ad hoc wrappers for in-scope target work.
 7. **DISPATCH** — ALWAYS dispatch to subagent. Do NOT test directly with host-side commands. Your job: coordination. Allowed direct: read files, inspect orchestrator state, use the transient dispatcher work buffer, and write synchronized artifacts.
@@ -70,17 +70,14 @@ Initialize a run with:
 
 ```bash
 ./scripts/init_engagement.sh <target-url-or-host> \
-  [--auto] \
   [--scope-mode host_only|explicit_hosts|wildcard] \
   [--scope-hosts host1,host2,...] \
   [--out-of-scope-hosts host1,host2,...] \
-  [--scan-intensity stealth|normal|aggressive] \
   [--auth-mode none|auth_json|manual] \
-  [--exploit-policy pause|full_send|selected] \
-  [--engagement-name LABEL]
+  [--exploit-policy pause|full_send|selected]
 ```
 
-This creates the engagement directory, readable artifacts, session workspace, explicit scope metadata, and the transient local work buffer used for batching worker tasks, and updates `engagements/.active`.
+This creates the engagement directory, readable artifacts, session workspace, explicit scope metadata, an `auth.json` scaffold, and the transient local work buffer used for batching worker tasks, and updates `engagements/.active`.
 
 Rules:
 - Do not delegate initialization to a general subagent.
@@ -90,6 +87,7 @@ Rules:
 - The core loop starts only after initialization completes successfully.
 - Scope defaults are conservative: host-only, no auth, `exploit_policy=pause`.
 - Discovered subdomains are not automatically in scope unless the explicit scope mode allows them.
+- `auth_mode` is implemented through `auth.json`, not as dead scope metadata. The workflow uses auth only when `auth.json` is populated and marked for request use.
 
 ## Subagent Dispatch
 
@@ -127,7 +125,7 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
 
 After each phase update scope.json:
 ```bash
-jq '.phases_completed += ["<phase>"] | .current_phase = "<next>"' \
+jq '.current_phase = "<next>"' \
     "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
 ```
 
@@ -138,6 +136,13 @@ When ANY agent discovers credentials:
 2. Try login, save token
 3. Trigger POST-AUTH RE-COLLECTION (restart Katana with auth)
 4. Dispatch exploit-developer to test authenticated access
+
+Auth handling rules:
+- auth.json is the live auth contract.
+- `auth.json` is the live auth contract. It may contain cookies, headers, `auth_context`, `use_for_requests`, and optional `expires_at`.
+- If `auth.json` is present and usable, Katana and ingestion should use its auth context automatically.
+- If `auth.json` is missing material or marked expired, warn and continue anonymously rather than halting the engagement.
+- The human may update `auth.json` directly or use mitmproxy-assisted login capture to refresh it.
 
 ## Kali MCP Execution
 
@@ -224,7 +229,7 @@ cat "$ENG_DIR/scope.json"
 ./scripts/dispatcher.sh "$ENG_DIR/cases.db" stats 2>/dev/null
 ```
 
-If status=in_progress: read scope/log state, inspect orchestrator coverage and findings state when available, recover stale work-buffer cases, and resume from the correct phase.
+If status=in_progress: read scope/log state, inspect orchestrator coverage and findings state when available, recover stale work-buffer items, and resume from the correct phase.
 The orchestrator backend is canonical. `cases.db` is only a transient local batching buffer: pending=not done, done=completed, processing=interrupted.
 
 ## Communication

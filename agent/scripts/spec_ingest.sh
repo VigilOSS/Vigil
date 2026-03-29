@@ -9,8 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/params.sh"
 source "$SCRIPT_DIR/lib/classify.sh"
 source "$SCRIPT_DIR/lib/db.sh"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/auth.sh"
 POST_ASSESSMENT_RECORD="$SCRIPT_DIR/post_assessment_record.sh"
-ASSESSMENT_AUTH_CONTEXT="${ASSESSMENT_AUTH_CONTEXT:-anonymous}"
 
 # --- Validate arguments ---
 if [[ $# -lt 2 ]]; then
@@ -20,6 +21,8 @@ fi
 
 DB_PATH="$1"
 SPEC_INPUT="$2"
+ENGAGEMENT_DIR="$(cd "$(dirname "$DB_PATH")" && pwd)"
+ASSESSMENT_AUTH_CONTEXT="${ASSESSMENT_AUTH_CONTEXT:-$(auth_active_context "$ENGAGEMENT_DIR")}"
 
 if [[ ! -f "$DB_PATH" ]]; then
     echo "ERROR: database not found: $DB_PATH" >&2

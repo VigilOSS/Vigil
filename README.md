@@ -68,13 +68,11 @@ Then create an engagement inside the chosen install:
 cd agent
 ./scripts/init_engagement.sh https://target.example \
   --scope-mode host_only \
-  --scan-intensity normal \
   --auth-mode none \
-  --exploit-policy pause \
-  --engagement-name target-example
+  --exploit-policy pause
 ```
 
-If you omit those flags and run in a TTY, `init_engagement.sh` now prompts for scope, scan intensity, auth mode, exploit policy, and the engagement label. In non-interactive runs, the safe defaults are `host_only`, `normal`, `none`, and `pause`.
+If you omit those flags and run in a TTY, `init_engagement.sh` now prompts for scope, auth mode, and exploit policy. In non-interactive runs, the safe defaults are `host_only`, `none`, and `pause`.
 
 Policy:
 
@@ -138,12 +136,21 @@ Initialize an engagement in the repo-managed workspace with:
 cd agent
 ./scripts/init_engagement.sh https://target.example \
   --scope-mode host_only \
-  --scan-intensity normal \
   --auth-mode none \
   --exploit-policy pause
 ```
 
-`scope.json` is now explicit about in-scope hosts, out-of-scope hosts, auth mode, and exploit policy. Discovered subdomains are recorded but not automatically tested unless scope allows them.
+`scope.json` is now limited to live scope and exploit-control fields. `auth.json` is the live auth contract for the engagement. Discovered subdomains are recorded but not automatically tested unless scope allows them.
+
+`auth.json` supports:
+
+- `mode`: `none`, `manual`, `auth_json`, or `proxy_capture`
+- `use_for_requests`: whether crawling/recollection should apply the stored auth
+- `auth_context`: the label used for authenticated request variants
+- `expires_at`: optional ISO8601 expiry timestamp
+- `cookies` and `headers`
+
+If auth is expired or missing, the workflow warns and continues anonymously. The human can refresh `auth.json` directly or let mitmproxy capture a fresh login and update it.
 
 When an engagement reaches exploit review with `--exploit-policy pause` or `selected`, the operator reviews and approves exploit work manually:
 

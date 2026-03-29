@@ -3,17 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/auth.sh"
 
-AUTO_MODE=0
-PARALLELISM=3
 TARGET=""
 SCOPE_MODE=""
 SCOPE_HOSTS_RAW=""
 OUT_OF_SCOPE_RAW=""
-SCAN_INTENSITY=""
 AUTH_MODE=""
 EXPLOIT_POLICY=""
-ENGAGEMENT_NAME=""
 
 normalize_target() {
   local raw="$1"
@@ -29,20 +27,16 @@ usage() {
 Usage: ./scripts/init_engagement.sh <target-url-or-host> [options]
 
 Options:
-  --auto
-  --parallel N
   --scope-mode host_only|explicit_hosts|wildcard
   --scope-hosts host1,host2,...
   --out-of-scope-hosts host1,host2,...
-  --scan-intensity stealth|normal|aggressive
-  --auth-mode none|auth_json|manual
+  --auth-mode none|auth_json|manual|proxy_capture
   --exploit-policy pause|full_send|selected
-  --engagement-name LABEL
 
 Examples:
   ./scripts/init_engagement.sh https://example.com
-  ./scripts/init_engagement.sh app.example.com --scope-mode host_only --scan-intensity normal --auth-mode none --exploit-policy pause --engagement-name app-review
-  ./scripts/init_engagement.sh https://api.example.com --scope-mode explicit_hosts --scope-hosts api.example.com,admin.example.com --scan-intensity aggressive --auth-mode auth_json --exploit-policy selected --engagement-name api-deep-dive
+  ./scripts/init_engagement.sh app.example.com --scope-mode host_only --auth-mode none --exploit-policy pause
+  ./scripts/init_engagement.sh https://api.example.com --scope-mode explicit_hosts --scope-hosts api.example.com,admin.example.com --auth-mode proxy_capture --exploit-policy selected
 EOF
 }
 
@@ -159,15 +153,6 @@ require_interactive_or_die() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --auto)
-      AUTO_MODE=1
-      shift
-      ;;
-    --parallel)
-      PARALLELISM="${2:-}"
-      [[ -n "$PARALLELISM" ]] || { echo "--parallel requires a value" >&2; exit 1; }
-      shift 2
-      ;;
     --scope-mode)
       SCOPE_MODE="${2:-}"
       [[ -n "$SCOPE_MODE" ]] || { echo "--scope-mode requires a value" >&2; exit 1; }
@@ -183,11 +168,6 @@ while [[ $# -gt 0 ]]; do
       [[ -n "${2:-}" ]] || { echo "--out-of-scope-hosts requires a value" >&2; exit 1; }
       shift 2
       ;;
-    --scan-intensity)
-      SCAN_INTENSITY="${2:-}"
-      [[ -n "$SCAN_INTENSITY" ]] || { echo "--scan-intensity requires a value" >&2; exit 1; }
-      shift 2
-      ;;
     --auth-mode)
       AUTH_MODE="${2:-}"
       [[ -n "$AUTH_MODE" ]] || { echo "--auth-mode requires a value" >&2; exit 1; }
@@ -196,11 +176,6 @@ while [[ $# -gt 0 ]]; do
     --exploit-policy)
       EXPLOIT_POLICY="${2:-}"
       [[ -n "$EXPLOIT_POLICY" ]] || { echo "--exploit-policy requires a value" >&2; exit 1; }
-      shift 2
-      ;;
-    --engagement-name)
-      ENGAGEMENT_NAME="${2:-}"
-      [[ -n "$ENGAGEMENT_NAME" ]] || { echo "--engagement-name requires a value" >&2; exit 1; }
       shift 2
       ;;
     -h|--help)
@@ -223,11 +198,6 @@ if [[ -z "$TARGET" ]]; then
   TARGET="$(prompt_text "Target URL or host")"
 fi
 
-if ! [[ "$PARALLELISM" =~ ^[0-9]+$ ]] || [[ "$PARALLELISM" -lt 1 ]]; then
-  echo "--parallel must be a positive integer" >&2
-  exit 1
-fi
-
 if [[ -z "$SCOPE_MODE" ]]; then
   if [[ -t 0 ]]; then
     SCOPE_MODE="$(prompt_choice "Scope mode" "host_only" "host_only" "explicit_hosts" "wildcard")"
@@ -248,32 +218,17 @@ if [[ "$SCOPE_MODE" == "explicit_hosts" && -z "$SCOPE_HOSTS_RAW" ]]; then
   SCOPE_HOSTS_RAW="$(prompt_text "Comma-separated in-scope hosts")"
 fi
 
-if [[ -z "$SCAN_INTENSITY" ]]; then
-  if [[ -t 0 ]]; then
-    SCAN_INTENSITY="$(prompt_choice "Scan intensity" "normal" "stealth" "normal" "aggressive")"
-  else
-    SCAN_INTENSITY="normal"
-  fi
-fi
-case "$SCAN_INTENSITY" in
-  stealth|normal|aggressive) ;;
-  *)
-    echo "--scan-intensity must be one of: stealth, normal, aggressive" >&2
-    exit 1
-    ;;
-esac
-
 if [[ -z "$AUTH_MODE" ]]; then
   if [[ -t 0 ]]; then
-    AUTH_MODE="$(prompt_choice "Auth mode" "none" "none" "auth_json" "manual")"
+    AUTH_MODE="$(prompt_choice "Auth mode" "none" "none" "auth_json" "manual" "proxy_capture")"
   else
     AUTH_MODE="none"
   fi
 fi
 case "$AUTH_MODE" in
-  none|auth_json|manual) ;;
+  none|auth_json|manual|proxy_capture) ;;
   *)
-    echo "--auth-mode must be one of: none, auth_json, manual" >&2
+    echo "--auth-mode must be one of: none, auth_json, manual, proxy_capture" >&2
     exit 1
     ;;
 esac
@@ -309,22 +264,6 @@ print(parsed.hostname or target)
 PY
 )
 
-PORT=$(
-  TARGET="$TARGET_NORMALIZED" python3 - <<'PY'
-import os
-from urllib.parse import urlparse
-
-target = os.environ["TARGET"]
-parsed = urlparse(target)
-if parsed.port:
-    print(parsed.port)
-elif parsed.scheme == "http":
-    print(80)
-else:
-    print(443)
-PY
-)
-
 if [[ -z "$OUT_OF_SCOPE_RAW" && -t 0 ]]; then
   OUT_OF_SCOPE_RAW="$(prompt_text "Optional comma-separated out-of-scope hosts" "")"
 fi
@@ -332,19 +271,6 @@ fi
 DATE=$(date +%Y-%m-%d)
 TIME=$(date +%H%M%S)
 START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-CONFIRM_MODE="auto"
-if [[ "$AUTO_MODE" -eq 0 ]]; then
-  CONFIRM_MODE="manual"
-fi
-
-DEFAULT_ENGAGEMENT_NAME="$(printf '%s-%s' "$HOSTNAME_RAW" "$DATE" | tr '.:' '-' | tr -cd '[:alnum:]-')"
-if [[ -z "$ENGAGEMENT_NAME" ]]; then
-  if [[ -t 0 ]]; then
-    ENGAGEMENT_NAME="$(prompt_text "Engagement name" "$DEFAULT_ENGAGEMENT_NAME")"
-  else
-    ENGAGEMENT_NAME="$DEFAULT_ENGAGEMENT_NAME"
-  fi
-fi
 
 HOSTNAME_CLEAN=$(printf '%s' "$HOSTNAME_RAW" | tr '.:' '-' | tr -cd '[:alnum:]-')
 DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${HOSTNAME_CLEAN}"
@@ -356,25 +282,16 @@ OUT_OF_SCOPE_JSON="$(csv_to_json_array "$OUT_OF_SCOPE_RAW")"
 
 cat > "$DIR/scope.json" <<EOF
 {
-  "target": "${TARGET_NORMALIZED}",
   "hostname": "${HOSTNAME_RAW}",
-  "port": ${PORT},
   "scope_mode": "${SCOPE_MODE}",
   "scope_hosts": ${SCOPE_HOSTS_JSON},
   "scope": ${SCOPE_HOSTS_JSON},
   "out_of_scope_hosts": ${OUT_OF_SCOPE_JSON},
-  "scan_intensity": "${SCAN_INTENSITY}",
-  "auth_mode": "${AUTH_MODE}",
   "exploit_policy": "${EXPLOIT_POLICY}",
   "exploit_review_state": "pending",
   "approved_findings": [],
-  "engagement_name": "${ENGAGEMENT_NAME}",
   "status": "in_progress",
-  "start_time": "${START_TIME}",
-  "phases_completed": [],
-  "current_phase": "recon",
-  "confirm_mode": "${CONFIRM_MODE}",
-  "parallelism": ${PARALLELISM}
+  "current_phase": "recon"
 }
 EOF
 
@@ -382,11 +299,9 @@ cat > "$DIR/log.md" <<EOF
 # Engagement Log
 
 - **Target**: ${TARGET_NORMALIZED}
-- **Engagement Name**: ${ENGAGEMENT_NAME}
 - **Date**: ${DATE}
 - **Status**: In Progress
 - **Scope Mode**: ${SCOPE_MODE}
-- **Scan Intensity**: ${SCAN_INTENSITY}
 - **Auth Mode**: ${AUTH_MODE}
 - **Exploit Policy**: ${EXPLOIT_POLICY}
 
@@ -405,7 +320,7 @@ EOF
 
 : > "$DIR/surfaces.jsonl"
 printf '[]\n' > "$DIR/intel-secrets.json"
-printf '{}\n' > "$DIR/auth.json"
+write_auth_scaffold "$DIR" "$AUTH_MODE" "$START_TIME"
 printf '[]\n' > "$DIR/sessions/index.json"
 
 sqlite3 "$DIR/cases.db" < "$SCRIPT_DIR/schema.sql" >/dev/null

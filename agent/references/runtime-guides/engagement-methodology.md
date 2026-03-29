@@ -2,10 +2,6 @@
 
 Primary engagement style and investigation mindset for `security-research`.
 
-This guide preserves the useful parts of the original standalone `threat-hunt` skill without
-bringing back its separate `state.md` / `assets.json` execution model. Use the repo-native
-engagement workspace, assessment ledger, and operator loop, but follow this methodology.
-
 ## Engagement Style
 
 - Work like an experienced operator, not a point scanner.
