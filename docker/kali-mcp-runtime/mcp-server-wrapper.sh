@@ -13,4 +13,8 @@ if ! curl -s http://localhost:5000/health >/dev/null 2>&1; then
   done
 fi
 
+if [ "${1:-}" != "" ] && [ "${1#-}" = "$1" ]; then
+  shift
+fi
+
 exec python3 "$UPSTREAM_CLIENT_PATH" "$@"
