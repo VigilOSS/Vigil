@@ -73,7 +73,7 @@ Initialize a run with:
   [--scope-mode host_only|explicit_hosts|wildcard] \
   [--scope-hosts host1,host2,...] \
   [--out-of-scope-hosts host1,host2,...] \
-  [--auth-mode none|auth_json|manual] \
+  [--auth-mode none|auth_json|manual|proxy_capture] \
   [--exploit-policy pause|full_send|selected]
 ```
 
