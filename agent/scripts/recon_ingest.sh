@@ -26,6 +26,7 @@ fi
 DB_PATH="$1"
 SOURCE="$2"
 ENGAGEMENT_DIR="$(cd "$(dirname "$DB_PATH")" && pwd)"
+export ENGAGEMENT_DIR
 ASSESSMENT_AUTH_CONTEXT="${ASSESSMENT_AUTH_CONTEXT:-$(auth_active_context "$ENGAGEMENT_DIR")}"
 
 if [[ ! -f "$DB_PATH" ]]; then

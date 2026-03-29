@@ -81,9 +81,10 @@ If you omit those flags and run in a TTY, `init_engagement.sh` prompts for scope
 
 After `init_engagement.sh` finishes, it prints the full path to the new engagement directory and updates `engagements/.active`.
 
-1. `cd` into that printed engagement directory, run `export ENG_DIR="$PWD"`, confirm the seeded files are present, and start `codex`.
-2. Switch Codex to `high`, then tell it: `Run this engagement using the operator workflow. Start by reading scope.json and log.md, tell me the current phase, and show the next numbered actions.`
-3. Expect Codex to assess the current state, usually start in `recon` for a new run, route target-facing work through the attached Kali MCP runtime, and keep `log.md`, `findings.md`, `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses.
+1. `cd` into that printed engagement directory, run `export ENG_DIR="$PWD"`, confirm the seeded files are present, and start `codex` or `claude`. Each engagement now seeds local `AGENTS.md` and `CLAUDE.md` wrappers so a client started from the engagement folder can still find the workspace-root prompts, skills, references, and scripts.
+2. Prefer `gpt-5.4` with `high` reasoning for Codex and `Opus 4.6` for Claude. Drop to `gpt-5.4-mini` or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
+3. Tell the operator: `Run this engagement using the operator workflow. Start by reading scope.json and log.md, tell me the current phase, and show the next numbered actions.`
+4. Expect the operator to assess the current state, usually start in `recon` for a new run, route target-facing work through the attached Kali MCP runtime, use relevant skills before improvising, and keep `log.md`, `findings.md`, `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. If the run was launched by the orchestrator, the engagement directory also carries a local `.orchestrator.env` so backend-sync scripts can keep working when the interactive shell itself does not expose `ORCHESTRATOR_*`.
 
 During the engagement, expect short operator updates, numbered next-step choices when a decision matters, and a manual approval checkpoint before exploit work continues when `exploit_policy` is `pause` or `selected`.
 
@@ -184,11 +185,7 @@ This does two things:
 1. starts the local callback listener
 2. opens an ngrok HTTP tunnel to it
 
-The ngrok token is not baked into the image. Supply it at runtime.
-
 Claude Code and Codex can use this path once the Kali MCP runtime is attached. The listener is not limited to manual shell use. If the token is available in the container environment, the agent can start ngrok-backed callbacks itself during an engagement. If the token is not present, provide it before starting the callback path.
-
-The token is not part of mandatory repo initialization. Treat it as an optional engagement input that you pass only when external callback routing is needed.
 
 ### Why this matters
 
