@@ -9,6 +9,7 @@ import hashlib
 import sqlite3
 import os
 import re
+from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
 from urllib.request import Request, urlopen
 
@@ -392,6 +393,7 @@ class CaseCollector:
         *,
         url: str,
         method: str,
+        auth_context: str,
         content_type: str,
         params: dict,
         response_status: int,
@@ -419,7 +421,7 @@ class CaseCollector:
         payload = {
             "url": url,
             "method": method,
-            "auth_context": "anonymous",
+            "auth_context": auth_context,
             "content_type_family": content_family,
             "query_schema": json.loads(params.get("query_params") or "{}"),
             "body_schema": json.loads(params.get("body_params") or "{}"),
@@ -464,6 +466,34 @@ class CaseCollector:
             return None
         return data
 
+    def _load_auth_state(self) -> dict:
+        auth_path = os.path.join(self.engagement_dir, "auth.json")
+        if not os.path.exists(auth_path):
+            return {}
+        try:
+            with open(auth_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _request_auth_context(self, req_headers_dict: dict, params: dict) -> str:
+        auth_state = self._load_auth_state()
+        configured_context = str(auth_state.get("auth_context") or "").strip()
+        has_authorization = bool(req_headers_dict.get("authorization") or req_headers_dict.get("Authorization"))
+        cookie_values = params.get("cookie_params") or "{}"
+        has_cookies = False
+        try:
+            has_cookies = bool(json.loads(cookie_values))
+        except (TypeError, json.JSONDecodeError):
+            has_cookies = False
+
+        if has_authorization or has_cookies:
+            if configured_context and configured_context != "anonymous":
+                return configured_context
+            return "authenticated"
+        return "anonymous"
+
     # -- login detection ----------------------------------------------------
 
     def _detect_login(self, flow: http.HTTPFlow):
@@ -486,6 +516,12 @@ class CaseCollector:
                     auth_data = json.load(fh)
             except (json.JSONDecodeError, OSError):
                 auth_data = {}
+
+        auth_data.setdefault("mode", "proxy_capture")
+        auth_data.setdefault("use_for_requests", True)
+        auth_data.setdefault("auth_context", "authenticated")
+        auth_data.setdefault("headers", {})
+        auth_data.setdefault("cookies", {})
 
         updated = False
 
@@ -531,6 +567,8 @@ class CaseCollector:
 
         if updated:
             try:
+                auth_data["state"] = "available"
+                auth_data["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 with open(auth_path, "w") as fh:
                     json.dump(auth_data, fh, indent=2)
                 ctx.log.info("proxy_addon: updated auth.json")
@@ -642,6 +680,7 @@ class CaseCollector:
         # Request headers as JSON
         req_headers_dict = dict(req.headers)
         req_headers_json = json.dumps(req_headers_dict)
+        auth_context = self._request_auth_context(req_headers_dict, params)
 
         # Prefer response content type for classification/storage. Request content
         # type is often empty for GETs and would misclassify normal pages as unknown.
@@ -678,6 +717,7 @@ class CaseCollector:
         assessment_record = self._post_request_observation(
             url=req.pretty_url,
             method=req.method,
+            auth_context=auth_context,
             content_type=content_type,
             params=params,
             response_status=response_status,
@@ -700,7 +740,7 @@ class CaseCollector:
             queue_key=queue_key,
             request_variant_id=request_variant_id,
             service_id=service_id,
-            auth_context="anonymous",
+            auth_context=auth_context,
             method=req.method,
             url=req.pretty_url,
             url_path=path,

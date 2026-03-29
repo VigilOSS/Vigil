@@ -34,4 +34,5 @@ Before starting each child target, run a WAF gate check and skip targets that re
 
 ## Final Report
 
-Merge child `findings.md` files into the parent `report.md`.
+Merge child findings through canonical backend state first, then synchronize the
+parent `report.md` and any readable `findings.md` exports from that state.
