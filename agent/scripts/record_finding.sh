@@ -12,6 +12,7 @@ ENG_DIR="${1:?usage: record_finding.sh <engagement_dir> <agent-name> <finding-js
 AGENT_NAME="${2:?usage: record_finding.sh <engagement_dir> <agent-name> <finding-json-file>}"
 FINDING_JSON_FILE="${3:?usage: record_finding.sh <engagement_dir> <agent-name> <finding-json-file>}"
 FINDINGS_FILE="$ENG_DIR/findings.md"
+export ENGAGEMENT_DIR="$ENG_DIR"
 
 [[ -f "$FINDINGS_FILE" ]] || { echo "findings.md not found in $ENG_DIR" >&2; exit 1; }
 [[ -f "$FINDING_JSON_FILE" ]] || { echo "finding json file not found: $FINDING_JSON_FILE" >&2; exit 1; }

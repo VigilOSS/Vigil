@@ -3,6 +3,12 @@ set -euo pipefail
 
 ENDPOINT="${1:?usage: fetch_assessment_record.sh <endpoint>}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/orchestrator_env.sh"
+
+load_orchestrator_env "${ENGAGEMENT_DIR:-}" || true
+
 if [[ -z "${ORCHESTRATOR_BASE_URL:-}" || -z "${ORCHESTRATOR_TOKEN:-}" || -z "${ORCHESTRATOR_PROJECT_ID:-}" || -z "${ORCHESTRATOR_RUN_ID:-}" ]]; then
     echo "fetch_assessment_record.sh: orchestrator runtime variables are required" >&2
     exit 1

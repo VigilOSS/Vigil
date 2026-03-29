@@ -29,6 +29,10 @@ def runtime_home_root_for(run: Run) -> Path:
     return Path(run.engagement_root) / "runtime-home"
 
 
+def runtime_env_path_for(run: Run) -> Path:
+    return workspace_root_for(run) / ".orchestrator.env"
+
+
 def metadata_path_for(run: Run) -> Path:
     return Path(run.engagement_root) / "run.json"
 
@@ -91,6 +95,7 @@ def prepare_run_runtime(project: Project, run: Run) -> None:
         "runtime_home_root": str(runtime_home_root_for(run)),
         "agent_source_dir": str(settings.agent_source_dir),
         "process_log": str(process_log_path_for(run)),
+        "orchestrator_env": str(runtime_env_path_for(run)),
         "claude_attach": f"cd {workspace_root_for(run)} && claude",
         "codex_attach": f"cd {workspace_root_for(run)} && codex",
         "engagement_init": f"cd {workspace_root_for(run)} && ./scripts/init_engagement.sh {shlex.quote(run.target)}",
@@ -141,6 +146,17 @@ def _runtime_env(project: Project, run: Run, user: User) -> dict[str, str]:
         }
     )
     return env
+
+
+def _write_runtime_env_file(run: Run, env: dict[str, str]) -> None:
+    keys = (
+        "ORCHESTRATOR_BASE_URL",
+        "ORCHESTRATOR_TOKEN",
+        "ORCHESTRATOR_PROJECT_ID",
+        "ORCHESTRATOR_RUN_ID",
+    )
+    lines = [f"{key}={shlex.quote(str(env[key]))}" for key in keys if env.get(key)]
+    runtime_env_path_for(run).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _append_runtime_event(run: Run, event_type: str, phase: str, summary: str) -> None:
@@ -274,10 +290,12 @@ def start_run_runtime(project: Project, run: Run, user: User) -> Run:
 
     try:
         _ensure_runtime_seeded(run)
+        env = _runtime_env(project, run, user)
+        _write_runtime_env_file(run, env)
         process = subprocess.Popen(
             _launch_command(run),
             cwd=str(workspace_root_for(run)),
-            env=_runtime_env(project, run, user),
+            env=env,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
         )

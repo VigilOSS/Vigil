@@ -4,6 +4,12 @@ set -euo pipefail
 ENDPOINT="${1:?usage: post_assessment_record.sh <endpoint> <json-payload>}"
 PAYLOAD="${2:?usage: post_assessment_record.sh <endpoint> <json-payload>}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/orchestrator_env.sh"
+
+load_orchestrator_env "${ENGAGEMENT_DIR:-}" || true
+
 if [[ -z "${ORCHESTRATOR_BASE_URL:-}" || -z "${ORCHESTRATOR_TOKEN:-}" || -z "${ORCHESTRATOR_PROJECT_ID:-}" || -z "${ORCHESTRATOR_RUN_ID:-}" ]]; then
     exit 1
 fi

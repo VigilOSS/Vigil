@@ -77,19 +77,6 @@ done
 [[ -f "$PORT_FILE" ]] || { echo "mock server failed to start" >&2; exit 1; }
 
 PORT="$(cat "$PORT_FILE")"
-export ORCHESTRATOR_BASE_URL="http://127.0.0.1:$PORT"
-export ORCHESTRATOR_TOKEN="test-token"
-export ORCHESTRATOR_PROJECT_ID="11"
-export ORCHESTRATOR_RUN_ID="22"
-export ORCHESTRATOR_PHASE="recon"
-
-bash "$REPO_ROOT/agent/scripts/emit_runtime_event.sh" \
-  "phase.started" \
-  "recon" \
-  "operator" \
-  "operator" \
-  "Recon started"
-
 ENG_DIR="$TMP_DIR/engagement"
 mkdir -p "$ENG_DIR"
 cat >"$ENG_DIR/log.md" <<'EOF'
@@ -101,6 +88,22 @@ cat >"$ENG_DIR/findings.md" <<'EOF'
 - **Finding Count**: 0
 EOF
 touch "$ENG_DIR/surfaces.jsonl"
+cat >"$ENG_DIR/.orchestrator.env" <<EOF
+ORCHESTRATOR_BASE_URL=http://127.0.0.1:$PORT
+ORCHESTRATOR_TOKEN=test-token
+ORCHESTRATOR_PROJECT_ID=11
+ORCHESTRATOR_RUN_ID=22
+EOF
+
+(
+  cd "$ENG_DIR"
+  bash "$REPO_ROOT/agent/scripts/emit_runtime_event.sh" \
+    "phase.started" \
+    "recon" \
+    "operator" \
+    "operator" \
+    "Recon started"
+)
 
 BODY_FILE="$TMP_DIR/finding.json"
 cat >"$BODY_FILE" <<'EOF'
