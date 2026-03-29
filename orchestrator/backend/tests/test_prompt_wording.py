@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 
 def test_operator_prompt_outputs_drop_old_ctf_and_cases_db_authority_language():
@@ -38,6 +39,44 @@ def test_operator_prompt_outputs_require_realistic_lab_wording_and_skill_first_b
     assert "mitmproxy-assisted login capture" in operator_core.lower()
     assert "confirm_mode=manual" not in operator_core.lower()
     assert "realistic lab" in agents_prompt.lower()
+
+
+def test_operator_prompt_outputs_define_default_model_policy():
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8").lower()
+    agents_prompt = (repo_root / "agent" / "AGENTS.md").read_text(encoding="utf-8").lower()
+    claude_prompt = (repo_root / "agent" / "CLAUDE.md").read_text(encoding="utf-8").lower()
+
+    for text in (operator_core, agents_prompt, claude_prompt):
+        assert "gpt-5.4" in text
+        assert "high" in text
+        assert "opus 4.6" in text
+        assert "sonnet 4.6" in text
+
+
+def test_rendered_operator_prompts_match_operator_core():
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "agent" / "scripts" / "render-operator-prompts.sh"
+
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        subprocess.run(
+            ["bash", str(script), "repo", str(tmp_path)],
+            check=True,
+            cwd=repo_root / "agent",
+        )
+
+        expected_outputs = {
+            repo_root / "agent" / "AGENTS.md": tmp_path / "AGENTS.md",
+            repo_root / "agent" / "CLAUDE.md": tmp_path / "CLAUDE.md",
+            repo_root / "agent" / ".codex" / "agents" / "operator.toml": tmp_path / ".codex" / "agents" / "operator.toml",
+            repo_root / "agent" / ".claude" / "agents" / "operator.md": tmp_path / ".claude" / "agents" / "operator.md",
+        }
+
+        for committed_path, rendered_path in expected_outputs.items():
+            assert committed_path.read_text(encoding="utf-8") == rendered_path.read_text(encoding="utf-8")
 
 
 def test_docs_and_skills_drop_run_tool_and_rtcurl_examples():

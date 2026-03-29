@@ -39,6 +39,7 @@ fi
   echo "could not resolve engagement directory" >&2
   exit 1
 }
+export ENGAGEMENT_DIR="$ENG_DIR"
 
 LOG_FILE="$ENG_DIR/log.md"
 LOCK_FILE="$ENG_DIR/.log.lock"

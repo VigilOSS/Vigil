@@ -106,6 +106,45 @@ print(json.dumps(items, ensure_ascii=True))
 PY
 }
 
+write_engagement_prompt_wrappers() {
+  local eng_dir="${1:?engagement dir required}"
+  cat > "$eng_dir/AGENTS.md" <<EOF
+# Engagement Workspace
+
+Load and follow the workspace operator instructions from:
+- ${ROOT_DIR}/AGENTS.md
+
+This engagement directory is only the run-artifact root. When you start Codex here, use these workspace locations before concluding that a skill, reference, or script is unavailable:
+- Workspace root: ${ROOT_DIR}
+- Skills: ${ROOT_DIR}/skills
+- References: ${ROOT_DIR}/references
+- Scripts: ${ROOT_DIR}/scripts
+- Operator wrapper: ${ROOT_DIR}/.codex/agents/operator.toml
+
+Artifact sync:
+- Use ${ROOT_DIR}/scripts/record_finding.sh and ${ROOT_DIR}/scripts/append_surface.sh
+- If ${eng_dir}/.orchestrator.env exists and ORCHESTRATOR_* is unset, load it before backend-sync scripts or let the scripts auto-load it
+EOF
+
+  cat > "$eng_dir/CLAUDE.md" <<EOF
+# Engagement Workspace
+
+Load and follow the workspace operator instructions from:
+- ${ROOT_DIR}/CLAUDE.md
+
+This engagement directory is only the run-artifact root. When you start Claude here, use these workspace locations before concluding that a skill, reference, or script is unavailable:
+- Workspace root: ${ROOT_DIR}
+- Skills: ${ROOT_DIR}/skills
+- References: ${ROOT_DIR}/references
+- Scripts: ${ROOT_DIR}/scripts
+- Operator wrapper: ${ROOT_DIR}/.claude/agents/operator.md
+
+Artifact sync:
+- Use ${ROOT_DIR}/scripts/record_finding.sh and ${ROOT_DIR}/scripts/append_surface.sh
+- If ${eng_dir}/.orchestrator.env exists and ORCHESTRATOR_* is unset, load it before backend-sync scripts or let the scripts auto-load it
+EOF
+}
+
 derive_scope_hosts_json() {
   local hostname="${1:?hostname required}"
   local scope_mode="${2:?scope_mode required}"
@@ -323,6 +362,15 @@ printf '[]\n' > "$DIR/intel-secrets.json"
 write_auth_scaffold "$DIR" "$AUTH_MODE" "$START_TIME"
 printf '[]\n' > "$DIR/sessions/index.json"
 
+if [[ -n "${ORCHESTRATOR_BASE_URL:-}" && -n "${ORCHESTRATOR_TOKEN:-}" && -n "${ORCHESTRATOR_PROJECT_ID:-}" && -n "${ORCHESTRATOR_RUN_ID:-}" ]]; then
+  printf 'ORCHESTRATOR_BASE_URL=%q\n' "$ORCHESTRATOR_BASE_URL" > "$DIR/.orchestrator.env"
+  printf 'ORCHESTRATOR_TOKEN=%q\n' "$ORCHESTRATOR_TOKEN" >> "$DIR/.orchestrator.env"
+  printf 'ORCHESTRATOR_PROJECT_ID=%q\n' "$ORCHESTRATOR_PROJECT_ID" >> "$DIR/.orchestrator.env"
+  printf 'ORCHESTRATOR_RUN_ID=%q\n' "$ORCHESTRATOR_RUN_ID" >> "$DIR/.orchestrator.env"
+elif [[ -f "$ROOT_DIR/.orchestrator.env" ]]; then
+  cp "$ROOT_DIR/.orchestrator.env" "$DIR/.orchestrator.env"
+fi
+
 sqlite3 "$DIR/cases.db" < "$SCRIPT_DIR/schema.sql" >/dev/null
 
 if [[ -f "$SCRIPT_DIR/templates/intel.md" ]]; then
@@ -330,5 +378,7 @@ if [[ -f "$SCRIPT_DIR/templates/intel.md" ]]; then
 else
   printf '# Intelligence Collection\n' > "$DIR/intel.md"
 fi
+
+write_engagement_prompt_wrappers "$DIR"
 
 printf '%s\n' "$DIR"
