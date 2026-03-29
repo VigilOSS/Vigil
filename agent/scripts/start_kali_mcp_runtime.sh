@@ -16,22 +16,18 @@ fi
 IMAGE="${REDTEAM_IMAGE:-security-research:latest}"
 CONTAINER_NAME="${KALI_MCP_CONTAINER_NAME:-security-research}"
 DATA_DIR="${KALI_MCP_DATA_DIR:-$ROOT_DIR/.runtime-data}"
-RULES_FILE="${KALI_MCP_RULES_FILE:-$ROOT_DIR/mcp-transform-rules.json}"
-CONTAINER_RULES_PATH="${MCP_TRANSFORM_RULES_PATH:-/config/mcp-transform-rules.json}"
 RECREATE=0
 
 usage() {
   cat <<'EOF'
 Usage: ./scripts/start_kali_mcp_runtime.sh [--recreate]
 
-Starts the shared Kali MCP runtime and MCP transform proxy container.
+Starts the shared Kali MCP runtime container.
 
 Environment:
   REDTEAM_IMAGE               Runtime image to start (default: security-research:latest)
   KALI_MCP_CONTAINER_NAME     Container name (default: security-research)
   KALI_MCP_DATA_DIR           Host path mounted to /data (default: ../.runtime-data)
-  KALI_MCP_RULES_FILE         Host rules file mounted into the runtime config path
-  MCP_TRANSFORM_RULES_PATH    In-container rules path (default: /config/mcp-transform-rules.json)
 
 The root .env file is sourced before startup so shell-side defaults apply, then
 passed to docker with --env-file so the same values are available inside the
@@ -66,15 +62,10 @@ fi
 
 mkdir -p "$DATA_DIR"
 
-if [[ ! -f "$RULES_FILE" ]]; then
-  echo "[runtime] Missing transform rules file: $RULES_FILE" >&2
-  exit 1
-fi
-
 if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
   if [[ "$RECREATE" -eq 0 ]]; then
     echo "[runtime] Shared Kali MCP runtime already running: $CONTAINER_NAME"
-    echo "[runtime] Durable proxy data: $DATA_DIR"
+    echo "[runtime] Shared data mount: $DATA_DIR"
     exit 0
   fi
 fi
@@ -90,8 +81,6 @@ docker_args=(
   --cap-add=NET_RAW
   --cap-add=NET_ADMIN
   -v "$DATA_DIR:/data"
-  -v "$RULES_FILE:$CONTAINER_RULES_PATH:ro"
-  -e "MCP_TRANSFORM_RULES_PATH=$CONTAINER_RULES_PATH"
 )
 
 if [[ -f "$ROOT_DIR/.env" ]]; then
@@ -103,5 +92,5 @@ docker_args+=("$IMAGE")
 docker "${docker_args[@]}" >/dev/null
 
 echo "[runtime] Shared Kali MCP runtime started: $CONTAINER_NAME"
-echo "[runtime] Durable proxy data: $DATA_DIR"
+echo "[runtime] Shared data mount: $DATA_DIR"
 echo "[runtime] Attach client MCP to: docker exec -i $CONTAINER_NAME mcp-server"

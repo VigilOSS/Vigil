@@ -7,7 +7,7 @@ The operating model assumes a fully authorized realistic lab environment that mi
 - `agent/docker/runtime-full/Dockerfile`
   Primary full Kali MCP image. This is the only supported runtime for target-facing execution.
 - `docker/kali-mcp-runtime/`
-  MCP wrapper, transform proxy, and patched Kali API server.
+  MCP wrapper and patched Kali API server.
 - `agent/`
   Prompts, CLI integrations, attack skills, transient work-buffer scripts, and runtime helpers.
 - `orchestrator/`
@@ -21,7 +21,7 @@ The operating model assumes a fully authorized realistic lab environment that mi
 
 Keep Claude and Codex in separate installs and separate engagement trees. Do not run both clients against the same `engagements/` directory.
 
-The shared Kali MCP runtime is not per-engagement. Start it once, configure its proxy behavior once, and then attach one or more client installs to the same `docker exec -i security-research mcp-server` endpoint. Within a single install, the repo still tracks one active engagement via `engagements/.active`.
+The shared Kali MCP runtime is not per-engagement. Start it once and then attach one or more client installs to the same `docker exec -i security-research mcp-server` endpoint. Within a single install, the repo still tracks one active engagement via `engagements/.active`.
 
 - Codex install:
 ```bash
@@ -39,7 +39,7 @@ cd ~/security-research-claude
 
 To switch clients, stop using the current engagement, install the other client into a different directory, and start a new engagement there.
 
-### 1. Kali MCP proxy
+### 1. Kali MCP runtime
 
 Build the primary full image:
 
@@ -47,13 +47,13 @@ Build the primary full image:
 docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .
 ```
 
-Edit `mcp-transform-rules.json` for your ordered find/replace rules, then start the shared runtime:
+Start the shared runtime:
 
 ```bash
 ./agent/scripts/start_kali_mcp_runtime.sh
 ```
 
-This starts one shared container named `security-research`, mounts durable proxy state at `.runtime-data/`, mounts the install-root `mcp-transform-rules.json` into the runtime, and passes the root `.env` file into the runtime when present.
+This starts one shared container named `security-research`, mounts shared runtime data at `.runtime-data/`, and passes the root `.env` file into the runtime when present.
 
 Attach Claude Code or Codex over stdio after the runtime is up:
 
@@ -82,25 +82,6 @@ Policy:
 - Do not run target probes, crawlers, fuzzers, scanners, or exploits from host Bash or ad hoc Docker commands.
 - Use MCP tool discovery to inspect the currently available Kali tools.
 - When you need to run an arbitrary binary or shell pipeline inside the runtime, use the Kali MCP command-execution tool rather than a repo-local wrapper.
-
-Proxy config lives in the install-root [mcp-transform-rules.json](/path/to/vigil). It contains:
-
-- ordered `outbound` replace rules
-- ordered `inbound` replace rules
-- `public_ip_aliases.enabled`
-- `public_ip_aliases.map_path`
-
-Public IPv4 aliasing is automatic on inbound tool output. If `dig`, `whois`, `curl`, or any other Kali MCP tool returns `8.8.8.8`, the client will receive a private RFC1918 address instead, and the same public IP will keep the same private alias on later calls.
-
-Keep `/data` mounted from the host if you want the alias map to survive container restarts, image rebuilds, and host reboots. With the default helper above, the durable host file is `.runtime-data/mcp-public-ip-map.json`.
-
-Quick verification:
-
-```bash
-docker exec security-research cat /data/mcp-public-ip-map.json
-```
-
-That file is the durable proxy state. It will populate as public IPv4s are seen in MCP tool results.
 
 ### 2. Orchestrator backend
 
@@ -131,7 +112,7 @@ npm run dev
 
 `agent/docker/runtime-full/Dockerfile` is the main full runtime image and now includes:
 
-- Kali MCP server plus the transform proxy
+- Kali MCP server
 - Katana and Chromium for authenticated crawling
 - nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, nikto, WhatWeb, hydra, john, hashcat
 - post-access tooling such as evil-winrm, impacket, mitm6, chisel, ligolo-ng, proxychains-ng, Responder
@@ -141,7 +122,7 @@ An explicitly optional lightweight runtime also exists at
 `agent/docker/runtime-lightweight/Dockerfile`. It is only for faster local iteration and
 validation. The default workflow, docs, scripts, and agent runtime all target `agent/docker/runtime-full/Dockerfile`.
 
-The MCP entrypoint is the wrapper in [docker/kali-mcp-runtime/mcp-server-wrapper.sh](/path/to/vigil), which starts the Kali API first and then runs the Python transform proxy.
+The MCP entrypoint is the wrapper in [docker/kali-mcp-runtime/mcp-server-wrapper.sh](/path/to/vigil), which starts the Kali API first and then runs the upstream Kali MCP client.
 
 ## Using Tools Through Kali MCP
 
