@@ -2,6 +2,8 @@
 
 The operating model assumes a fully authorized realistic lab environment that mirrors real public and enterprise behavior closely enough for transferable methodology and tooling decisions.
 
+This repository contains the operator prompts, Kali MCP runtime, engagement scaffolding, and orchestrator services used to run those engagements.
+
 ## Repository Layout
 
 - `agent/docker/runtime-full/Dockerfile`
@@ -21,7 +23,7 @@ The operating model assumes a fully authorized realistic lab environment that mi
 
 Keep Claude and Codex in separate installs and separate engagement trees. Do not run both clients against the same `engagements/` directory.
 
-The shared Kali MCP runtime is not per-engagement. Start it once and then attach one or more client installs to the same `docker exec -i security-research mcp-server` endpoint. Within a single install, the repo still tracks one active engagement via `engagements/.active`.
+The shared Kali MCP runtime is not per-engagement. Start it once and then attach one or more client installs to the same `docker exec -i security-research mcp-server` endpoint. Within a single install, the repo tracks one active engagement via `engagements/.active`.
 
 - Codex install:
 ```bash
@@ -72,85 +74,18 @@ cd agent
   --exploit-policy pause
 ```
 
-If you omit those flags and run in a TTY, `init_engagement.sh` now prompts for scope, auth mode, and exploit policy. In non-interactive runs, the safe defaults are `host_only`, `none`, and `pause`.
+If you omit those flags and run in a TTY, `init_engagement.sh` prompts for scope, auth mode, and exploit policy. In non-interactive runs, the safe defaults are `host_only`, `none`, and `pause`.
 
-Policy:
 
-- All in-scope target-facing work must go through the attached Kali MCP session.
-- Do not run target probes, crawlers, fuzzers, scanners, or exploits from host Bash or ad hoc Docker commands.
-- Use MCP tool discovery to inspect the currently available Kali tools.
-- When you need to run an arbitrary binary or shell pipeline inside the runtime, use the Kali MCP command-execution tool rather than a repo-local wrapper.
+### Starting an engagement
 
-### 2. Orchestrator backend
+After `init_engagement.sh` finishes, it prints the full path to the new engagement directory and updates `engagements/.active`.
 
-The backend is Python 3.11+ and `uv`-first:
+1. `cd` into that printed engagement directory, run `export ENG_DIR="$PWD"`, confirm the seeded files are present, and start `codex`.
+2. Switch Codex to `high`, then tell it: `Run this engagement using the operator workflow. Start by reading scope.json and log.md, tell me the current phase, and show the next numbered actions.`
+3. Expect Codex to assess the current state, usually start in `recon` for a new run, route target-facing work through the attached Kali MCP runtime, and keep `log.md`, `findings.md`, `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses.
 
-```bash
-uv sync --directory orchestrator/backend --extra dev
-uv run --directory orchestrator/backend uvicorn app.main:app --reload
-```
-
-Run the backend tests with `uv`:
-
-```bash
-uv run --directory orchestrator/backend pytest
-```
-
-### 3. Orchestrator frontend
-
-```bash
-cd orchestrator/frontend
-npm install
-npm run dev
-```
-
-## Runtime Model
-
-### Primary runtime
-
-`agent/docker/runtime-full/Dockerfile` is the main full runtime image and now includes:
-
-- Kali MCP server
-- Katana and Chromium for authenticated crawling
-- nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, nikto, WhatWeb, hydra, john, hashcat
-- post-access tooling such as evil-winrm, impacket, mitm6, chisel, ligolo-ng, proxychains-ng, Responder
-- an optional callback listener and ngrok bridge for listener-driven testing
-
-An explicitly optional lightweight runtime also exists at
-`agent/docker/runtime-lightweight/Dockerfile`. It is only for faster local iteration and
-validation. The default workflow, docs, scripts, and agent runtime all target `agent/docker/runtime-full/Dockerfile`.
-
-The MCP entrypoint is the wrapper in [docker/kali-mcp-runtime/mcp-server-wrapper.sh](/path/to/vigil), which starts the Kali API first and then runs the upstream Kali MCP client.
-
-## Using Tools Through Kali MCP
-
-The runtime image still contains a broad toolset, but the supported way to use it is through the attached Kali MCP session.
-
-- Use MCP tool discovery to see the current tool surface instead of relying on a hardcoded tool list in prompts or docs.
-- For arbitrary shell commands inside the runtime, use the Kali MCP command-execution tool.
-- Treat direct `docker exec ... <tool>` examples as unsupported for in-scope target work, even if they would technically function.
-
-Initialize an engagement in the repo-managed workspace with:
-
-```bash
-cd agent
-./scripts/init_engagement.sh https://target.example \
-  --scope-mode host_only \
-  --auth-mode none \
-  --exploit-policy pause
-```
-
-`scope.json` is now limited to live scope and exploit-control fields. `auth.json` is the live auth contract for the engagement. Discovered subdomains are recorded but not automatically tested unless scope allows them.
-
-`auth.json` supports:
-
-- `mode`: `none`, `manual`, `auth_json`, or `proxy_capture`
-- `use_for_requests`: whether crawling/recollection should apply the stored auth
-- `auth_context`: the label used for authenticated request variants
-- `expires_at`: optional ISO8601 expiry timestamp
-- `cookies` and `headers`
-
-If auth is expired or missing, the workflow warns and continues anonymously. The human can refresh `auth.json` directly or let mitmproxy capture a fresh login and update it.
+During the engagement, expect short operator updates, numbered next-step choices when a decision matters, and a manual approval checkpoint before exploit work continues when `exploit_policy` is `pause` or `selected`.
 
 When an engagement reaches exploit review with `--exploit-policy pause` or `selected`, the operator reviews and approves exploit work manually:
 
@@ -163,27 +98,61 @@ When an engagement reaches exploit review with `--exploit-policy pause` or `sele
 
 Worker sessions write proposal files under `sessions/<session-id>/`; the coordinator merges approved proposals back into canonical backend state.
 
-Methodology now lives in:
+Methodology references:
 - [engagement-methodology.md](/path/to/vigil)
 - [athena-log-investigation](/path/to/vigil)
+
+## Runtime Model
+
+### Primary runtime
+
+`agent/docker/runtime-full/Dockerfile` is the main full runtime image and includes:
+
+- Kali MCP server
+- Katana and Chromium for authenticated crawling
+- nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, nikto, WhatWeb, hydra, john, hashcat
+- post-access tooling such as evil-winrm, impacket, mitm6, chisel, ligolo-ng, proxychains-ng, Responder
+- an optional callback listener and ngrok bridge for listener-driven testing
+
+A lightweight runtime also exists at `agent/docker/runtime-lightweight/Dockerfile`. It is only for faster local iteration and validation. The default workflow, docs, scripts, and agent runtime all target `agent/docker/runtime-full/Dockerfile`.
+
+The MCP entrypoint is the wrapper in [docker/kali-mcp-runtime/mcp-server-wrapper.sh](/path/to/vigil), which starts the Kali API first and then runs the upstream Kali MCP client.
+
+
+### Authentication
+
+`auth.json` supports:
+
+- `mode`: `none`, `manual`, `auth_json`, or `proxy_capture`
+- `use_for_requests`: whether crawling/recollection should apply the stored auth
+- `auth_context`: the label used for authenticated request variants
+- `expires_at`: optional ISO8601 expiry timestamp
+- `cookies` and `headers`
+
+If auth is expired or missing, the workflow warns and continues anonymously. The human can refresh `auth.json` directly or let mitmproxy capture a fresh login and update it.
 
 ## Optional Tool Activation
 
 These capabilities are intentionally present but not always started automatically.
 
-### Katana
-
-Katana is built into the main runtime. The agent-side container helpers default to the same image for crawling, so there is no separate Katana image requirement anymore.
-Use the Kali MCP command-execution tool to run `katana ...` inside the attached runtime when crawling is required.
-
 ### MITM proxy
 
-MITM remains optional. Start it through the runtime environment or the attached Kali MCP session when the workflow requires interception. The proxy image still lives under `agent/docker/mitmproxy/`.
+MITM remains optional. Use it when the engagement needs login capture, authenticated browsing through a live session, or a refresh of expired auth material.
+
+From the install root, you can recover the active engagement directory at any time with `ENG_DIR="$(cat agent/engagements/.active)"`.
+
+1. Build the proxy image once if needed: `docker compose -f agent/docker/docker-compose.yml build mitmproxy`
+2. Start the proxy against the active engagement: `docker run --rm -it -p 8080:8080 -v "$ENG_DIR:/engagement" security-research-proxy:latest`
+3. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow, then confirm that `auth.json` was refreshed and continue the engagement with authenticated recollection and testing.
+
+If you need HTTPS interception, install the mitmproxy CA certificate in the browser or device before logging in.
+
+In the engagement flow, this usually happens during `recon` or `collect` when anonymous coverage is insufficient, or later when a previously working authenticated session has expired.
 
 ### Metasploit
 
 Metasploit is not assumed to be always-on. Start it only when exploit chaining or module validation warrants it.
-Start and inspect it through the attached Kali MCP session when needed. Repo-local helper scripts are no longer the supported target-facing path.
+Start and inspect it through the attached Kali MCP session when needed. Repo-local helper scripts are not the supported target-facing path.
 
 ## Callback and Listener Handling
 
@@ -215,7 +184,7 @@ This does two things:
 1. starts the local callback listener
 2. opens an ngrok HTTP tunnel to it
 
-The ngrok token is no longer baked into the image. Supply it at runtime.
+The ngrok token is not baked into the image. Supply it at runtime.
 
 Claude Code and Codex can use this path once the Kali MCP runtime is attached. The listener is not limited to manual shell use. If the token is available in the container environment, the agent can start ngrok-backed callbacks itself during an engagement. If the token is not present, provide it before starting the callback path.
 
@@ -235,7 +204,7 @@ For reverse shells or richer callback workflows, use the same runtime plus the b
 
 ## Multi-Agent Workflow
 
-The combined project keeps the inherited multi-agent phase model, but the state is now durable in the orchestrator:
+The project uses a multi-agent phase model, with durable state stored in the orchestrator:
 
 - `recon`
   network and service enumeration, source inspection, and OSINT enrichment
@@ -277,15 +246,11 @@ The orchestrator stores the canonical assessment state:
 - findings, links, and attack chains
 - credential inventory, credential tests, access records, pivots, tunnels, and blocked techniques
 
-The queue in `agent/scripts/schema.sql` remains useful as a transient work buffer, but it is no longer part of the operator-facing state contract.
+The queue in `agent/scripts/schema.sql` is a transient work buffer and is not part of the operator-facing state contract.
 
-## Development Notes
+## Development
 
-- Backend Python is `>=3.11`; use `uv`, not ad hoc `pip` installs.
-- Frontend uses Vite and React under `orchestrator/frontend/`.
-- This repository is Claude/Codex-only. Legacy third-client prompt, command, and runtime paths have been removed.
-- The main runtime design is now `agent/docker/runtime-full/Dockerfile`, not the optional lightweight image.
-- Repo-local target execution helpers are removed. Use Kali MCP for all in-scope testing.
+For repo-local development conventions used by Codex, see the root `AGENTS.md`.
 
 ## Verification Commands
 
