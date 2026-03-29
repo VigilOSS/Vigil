@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/session-proposal.schema.json",
+  "title": "Exploit Session Proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "payload"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": ["finding_record", "probe_run"]
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}

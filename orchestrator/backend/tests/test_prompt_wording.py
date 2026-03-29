@@ -29,6 +29,14 @@ def test_operator_prompt_outputs_require_realistic_lab_wording_and_skill_first_b
     assert "append_finding.sh" in operator_core
     assert "rejects markdown" in operator_core.lower()
     assert "schemas/finding-record.schema.json" in operator_core
+    assert "exploit_policy=pause" in operator_core.lower()
+    assert "approve_exploitation.sh" in operator_core
+    assert "launch_exploit_session.sh" in operator_core
+    assert "record_session_proposal.sh" in operator_core
+    assert "merge_exploit_session.sh" in operator_core
+    assert "auth.json is the live auth contract" in operator_core.lower()
+    assert "mitmproxy-assisted login capture" in operator_core.lower()
+    assert "confirm_mode=manual" not in operator_core.lower()
     assert "realistic lab" in agents_prompt.lower()
 
 

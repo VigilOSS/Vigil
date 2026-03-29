@@ -48,7 +48,7 @@ def test_scope_check_blocks_in_scope_host_side_target_command(tmp_path: Path) ->
         encoding="utf-8",
     )
 
-    result = _run_scope_check("curl -I https://target.example/admin", engagement_dir)
+    result = _run_scope_check('python3 -c "print(1)" https://target.example/admin', engagement_dir)
 
     assert result.returncode == 2
     assert "kali mcp" in result.stderr.lower()
@@ -66,3 +66,34 @@ def test_scope_check_blocks_removed_host_side_helper_path(tmp_path: Path) -> Non
 
     assert result.returncode == 2
     assert "kali mcp" in result.stderr.lower()
+
+
+def test_scope_check_blocks_when_scope_metadata_is_missing(tmp_path: Path) -> None:
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+
+    result = _run_scope_check('python3 -c "print(1)" https://target.example/admin', engagement_dir)
+
+    assert result.returncode == 2
+    assert "scope metadata is missing" in result.stderr.lower()
+
+
+def test_scope_check_blocks_explicitly_out_of_scope_host(tmp_path: Path) -> None:
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text(
+        json.dumps(
+            {
+                "hostname": "target.example",
+                "scope_mode": "wildcard",
+                "scope_hosts": ["target.example", "*.target.example"],
+                "out_of_scope_hosts": ["admin.target.example"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_scope_check('python3 -c "print(1)" https://admin.target.example/panel', engagement_dir)
+
+    assert result.returncode == 2
+    assert "explicitly out of scope" in result.stderr.lower()

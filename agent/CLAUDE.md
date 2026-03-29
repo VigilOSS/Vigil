@@ -35,7 +35,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 1. **ASSESS STATE** — Read scope.json and log.md. When orchestrator backend state is available, treat it as canonical for findings, coverage, services, and chains. Use findings.md and report.md as synchronized readable artifacts, not source-of-truth state.
 2. **DECIDE NEXT ACTION** — Prioritize by impact (HIGH first). Skip ahead if obvious vulns found.
 3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work.
-4. **PRESENT OR PROCEED** — INTERACTIVE or `confirm_mode=manual`: use NUMBERED choices (single digits) and wait for input. AUTO-CONFIRM (default): auto-proceed after first Phase 1 approval. AUTONOMOUS (`--auto` at initialization): never wait; announce the next action and continue.
+4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
 5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide deeper rationale and payload knowledge.
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Do not use host Bash, `docker run`, `docker exec`, repo-local execution helpers, or ad hoc wrappers for in-scope target work.
 7. **DISPATCH** — ALWAYS dispatch to subagent. Do NOT test directly with host-side commands. Your job: coordination. Allowed direct: read files, inspect orchestrator state, use the transient dispatcher work buffer, and write synchronized artifacts.
@@ -62,17 +62,22 @@ Before initializing any engagement, ensure the shared Kali MCP runtime is runnin
 ./scripts/start_kali_mcp_runtime.sh
 ```
 
-This runtime and its MCP transform proxy are shared infrastructure, not per-engagement state. Configure proxy behavior in the install-root `mcp-transform-rules.json` before starting it. Multiple engagement directories may exist, but within a single install the repo still tracks one active engagement through `engagements/.active`.
+This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist, but within a single install the repo still tracks one active engagement through `engagements/.active`.
 
 ## Engagement Initialization
 
 Initialize a run with:
 
 ```bash
-./scripts/init_engagement.sh <target-url-or-host> [--auto] [--parallel N]
+./scripts/init_engagement.sh <target-url-or-host> \
+  [--scope-mode host_only|explicit_hosts|wildcard] \
+  [--scope-hosts host1,host2,...] \
+  [--out-of-scope-hosts host1,host2,...] \
+  [--auth-mode none|auth_json|manual] \
+  [--exploit-policy pause|full_send|selected]
 ```
 
-This creates the engagement directory, readable artifacts, and the transient local work buffer used for batching worker tasks, and updates `engagements/.active`.
+This creates the engagement directory, readable artifacts, session workspace, explicit scope metadata, an `auth.json` scaffold, and the transient local work buffer used for batching worker tasks, and updates `engagements/.active`.
 
 Rules:
 - Do not delegate initialization to a general subagent.
@@ -80,6 +85,9 @@ Rules:
 - Before initialization completes, do not read `scope.json`, `log.md`, `findings.md`, `intel.md`, `auth.json`, or `cases.db`.
 - Use `./scripts/init_engagement.sh` directly. Do not rewrite initialization in `python`, `python3`, `node`, or ad hoc shell blocks.
 - The core loop starts only after initialization completes successfully.
+- Scope defaults are conservative: host-only, no auth, `exploit_policy=pause`.
+- Discovered subdomains are not automatically in scope unless the explicit scope mode allows them.
+- `auth_mode` is implemented through `auth.json`, not as dead scope metadata. The workflow uses auth only when `auth.json` is populated and marked for request use.
 
 ## Subagent Dispatch
 
@@ -107,13 +115,17 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
    If it fails, do not advance. Resolve each remaining discovered surface by selecting a representative validation path and marking it `covered`, `deferred`, or `not_applicable`.
    High-risk surfaces `account_recovery`, `dynamic_render`, `object_reference`, and `privileged_write`
    may NOT remain `deferred` when moving to Exploit/Report. They must be `covered` or `not_applicable`.
-4. **EXPLOIT** → dispatch osint-analyst + exploit-developer in parallel. After osint: read intel.md, HIGH value → durable finding update + exploit 2nd round.
+4. **EXPLOIT** → respect `exploit_policy` from `scope.json`.
+   - `pause`: stop, run `./scripts/review_exploit_candidates.sh "$DIR"`, then wait for the human to approve with `./scripts/approve_exploitation.sh`.
+   - `selected`: exploit only the approved finding slugs recorded in scope metadata.
+   - `full_send`: dispatch osint-analyst + exploit-developer in parallel.
+   After osint: read intel.md, HIGH value → durable finding update + exploit 2nd round.
 5. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `skills/athena-log-investigation/SKILL.md`.
 6. **REPORT** → dispatch report-writer
 
 After each phase update scope.json:
 ```bash
-jq '.phases_completed += ["<phase>"] | .current_phase = "<next>"' \
+jq '.current_phase = "<next>"' \
     "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
 ```
 
@@ -124,6 +136,13 @@ When ANY agent discovers credentials:
 2. Try login, save token
 3. Trigger POST-AUTH RE-COLLECTION (restart Katana with auth)
 4. Dispatch exploit-developer to test authenticated access
+
+Auth handling rules:
+- auth.json is the live auth contract.
+- `auth.json` is the live auth contract. It may contain cookies, headers, `auth_context`, `use_for_requests`, and optional `expires_at`.
+- If `auth.json` is present and usable, Katana and ingestion should use its auth context automatically.
+- If `auth.json` is missing material or marked expired, warn and continue anonymously rather than halting the engagement.
+- The human may update `auth.json` directly or use mitmproxy-assisted login capture to refresh it.
 
 ## Kali MCP Execution
 
@@ -210,7 +229,7 @@ cat "$ENG_DIR/scope.json"
 ./scripts/dispatcher.sh "$ENG_DIR/cases.db" stats 2>/dev/null
 ```
 
-If status=in_progress: read scope/log state, inspect orchestrator coverage and findings state when available, recover stale work-buffer cases, and resume from the correct phase.
+If status=in_progress: read scope/log state, inspect orchestrator coverage and findings state when available, recover stale work-buffer items, and resume from the correct phase.
 The orchestrator backend is canonical. `cases.db` is only a transient local batching buffer: pending=not done, done=completed, processing=interrupted.
 
 ## Communication
@@ -238,6 +257,23 @@ fuzzer→work-buffer+vuln-analyst, exploit→durable findings+auth, osint→inte
 If logs are available, do not close the engagement immediately after exploit work.
 Run the optional Athena/log-investigation phase to determine whether the most important attack paths
 show signs of prior exploitation in the available telemetry window.
+
+## Manual Worker Sessions
+
+When exploit work should be split across multiple Codex sessions, the coordinator stays manual.
+
+1. Approve exploit scope first with `./scripts/approve_exploitation.sh`.
+2. Create a worker session with:
+```bash
+./scripts/launch_exploit_session.sh "$DIR" <session-id> <finding-slug> [finding-slug...]
+```
+3. In the worker session, use the generated `sessions/<session-id>/prompt.md`.
+4. Workers must only write proposals under `sessions/<session-id>/proposals/` via `./scripts/record_session_proposal.sh`.
+5. Workers must not edit root `findings.md`, `report.md`, or `scope.json`.
+6. The coordinator merges approved proposals into canonical backend state with:
+```bash
+./scripts/merge_exploit_session.sh "$DIR" <session-id>
+```
 
 ## Claude Dispatch Syntax
 

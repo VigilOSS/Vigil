@@ -1,6 +1,8 @@
 #!/usr/bin/env sh
 set -e
 
+UPSTREAM_CLIENT_PATH="${KALI_MCP_CLIENT_PATH:-/usr/share/mcp-kali-server/client.py}"
+
 cd /usr/share/mcp-kali-server/
 if ! curl -s http://localhost:5000/health >/dev/null 2>&1; then
   python3 /opt/mcp-tools/patched_kali_server.py >&2 2>&1 &
@@ -11,4 +13,4 @@ if ! curl -s http://localhost:5000/health >/dev/null 2>&1; then
   done
 fi
 
-exec python3 /opt/mcp-tools/mcp_transform_proxy.py "$@"
+exec python3 "$UPSTREAM_CLIENT_PATH" "$@"

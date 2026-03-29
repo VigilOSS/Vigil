@@ -75,7 +75,6 @@ RUN ln -sf /usr/share/wordlists /wordlists && \
 
 COPY docker/kali-mcp-runtime/mcp-server-wrapper.sh /usr/bin/mcp-server
 COPY docker/kali-mcp-runtime/patched_kali_server.py /opt/mcp-tools/patched_kali_server.py
-COPY docker/kali-mcp-runtime/mcp_transform_proxy.py /opt/mcp-tools/mcp_transform_proxy.py
 RUN chmod +x /usr/bin/mcp-server && mkdir -p /opt/mcp-tools
 
 WORKDIR /engagement
