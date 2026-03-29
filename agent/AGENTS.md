@@ -75,7 +75,7 @@ Before initializing any engagement, ensure the shared Kali MCP runtime is runnin
 ./scripts/start_kali_mcp_runtime.sh
 ```
 
-This runtime and its MCP transform proxy are shared infrastructure, not per-engagement state. Configure proxy behavior in the install-root `mcp-transform-rules.json` before starting it. Multiple engagement directories may exist, but within a single install the repo still tracks one active engagement through `engagements/.active`.
+This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist, but within a single install the repo still tracks one active engagement through `engagements/.active`.
 
 ## Engagement Initialization
 
