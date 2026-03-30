@@ -647,6 +647,17 @@ def delete_engagement(engagement_id: int) -> None:
         )
 
 
+def delete_engagement_session(engagement_id: int, session_id: str) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            DELETE FROM engagement_sessions
+            WHERE engagement_id = ? AND session_id = ?
+            """,
+            (engagement_id, session_id),
+        )
+
+
 def update_engagement_status(engagement_id: int, status: str) -> Engagement:
     with get_connection() as connection:
         connection.execute(

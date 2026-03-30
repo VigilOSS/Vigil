@@ -110,9 +110,35 @@ default_orchestrator_base_url() {
   printf '%s\n' "http://127.0.0.1:18000"
 }
 
+install_client_kind() {
+  local has_codex=0
+  local has_claude=0
+
+  [[ -f "$ROOT_DIR/AGENTS.md" && -d "$ROOT_DIR/.codex" ]] && has_codex=1
+  [[ -f "$ROOT_DIR/CLAUDE.md" && -d "$ROOT_DIR/.claude" ]] && has_claude=1
+
+  case "${AI_THREAT_HUNTING_CLIENT:-}" in
+    codex|claude)
+      printf '%s\n' "$AI_THREAT_HUNTING_CLIENT"
+      return 0
+      ;;
+  esac
+
+  if [[ "$has_codex" -eq 1 && "$has_claude" -eq 0 ]]; then
+    printf '%s\n' "codex"
+  elif [[ "$has_codex" -eq 0 && "$has_claude" -eq 1 ]]; then
+    printf '%s\n' "claude"
+  else
+    printf '%s\n' "both"
+  fi
+}
+
 write_engagement_prompt_wrappers() {
   local eng_dir="${1:?engagement dir required}"
-  cat > "$eng_dir/AGENTS.md" <<EOF
+  local client_kind="${2:?client kind required}"
+
+  if [[ "$client_kind" == "codex" || "$client_kind" == "both" ]]; then
+    cat > "$eng_dir/AGENTS.md" <<EOF
 # Engagement Workspace
 
 Load and follow the workspace operator instructions from:
@@ -136,8 +162,10 @@ Artifact sync:
 - Start Codex for this engagement with ${eng_dir}/start_codex.sh so ENGAGEMENT_DIR is exported automatically
 - The local ${eng_dir}/.orchestrator.env provides the default orchestrator base URL for backend-sync scripts; install-root .env can override it
 EOF
+  fi
 
-  cat > "$eng_dir/CLAUDE.md" <<EOF
+  if [[ "$client_kind" == "claude" || "$client_kind" == "both" ]]; then
+    cat > "$eng_dir/CLAUDE.md" <<EOF
 # Engagement Workspace
 
 Load and follow the workspace operator instructions from:
@@ -161,12 +189,15 @@ Artifact sync:
 - Start Claude for this engagement with ${eng_dir}/start_claude.sh so ENGAGEMENT_DIR is exported automatically
 - The local ${eng_dir}/.orchestrator.env provides the default orchestrator base URL for backend-sync scripts; install-root .env can override it
 EOF
+  fi
 }
 
 write_engagement_launchers() {
   local eng_dir="${1:?engagement dir required}"
+  local client_kind="${2:?client kind required}"
 
-  cat > "$eng_dir/start_codex.sh" <<'EOF'
+  if [[ "$client_kind" == "codex" || "$client_kind" == "both" ]]; then
+    cat > "$eng_dir/start_codex.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -182,8 +213,10 @@ fi
 
 exec codex "$@"
 EOF
+  fi
 
-  cat > "$eng_dir/start_claude.sh" <<'EOF'
+  if [[ "$client_kind" == "claude" || "$client_kind" == "both" ]]; then
+    cat > "$eng_dir/start_claude.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -199,8 +232,14 @@ fi
 
 exec claude "$@"
 EOF
+  fi
 
-  chmod +x "$eng_dir/start_codex.sh" "$eng_dir/start_claude.sh"
+  if [[ "$client_kind" == "codex" || "$client_kind" == "both" ]]; then
+    chmod +x "$eng_dir/start_codex.sh"
+  fi
+  if [[ "$client_kind" == "claude" || "$client_kind" == "both" ]]; then
+    chmod +x "$eng_dir/start_claude.sh"
+  fi
 }
 
 derive_scope_hosts_json() {
@@ -373,7 +412,6 @@ HOSTNAME_CLEAN=$(printf '%s' "$HOSTNAME_RAW" | tr '.:' '-' | tr -cd '[:alnum:]-'
 DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${HOSTNAME_CLEAN}"
 ENGAGEMENT_KEY="$(basename "$DIR")"
 mkdir -p "$DIR/tools" "$DIR/downloads" "$DIR/scans" "$DIR/pids" "$DIR/sessions"
-printf '%s\n' "$ENGAGEMENT_KEY" > engagements/.active
 
 SCOPE_HOSTS_JSON="$(derive_scope_hosts_json "$HOSTNAME_RAW" "$SCOPE_MODE" "$SCOPE_HOSTS_RAW")"
 OUT_OF_SCOPE_JSON="$(csv_to_json_array "$OUT_OF_SCOPE_RAW")"
@@ -440,7 +478,8 @@ else
   printf '# Intelligence Collection\n' > "$DIR/intel.md"
 fi
 
-write_engagement_prompt_wrappers "$DIR"
-write_engagement_launchers "$DIR"
+CLIENT_KIND="$(install_client_kind)"
+write_engagement_prompt_wrappers "$DIR" "$CLIENT_KIND"
+write_engagement_launchers "$DIR" "$CLIENT_KIND"
 
 printf '%s\n' "$DIR"

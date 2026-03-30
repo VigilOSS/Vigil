@@ -26,7 +26,6 @@ class EngagementResponse(BaseModel):
     exploit_policy: str
     exploit_review_state: str
     approved_findings: list[str]
-    active: bool
     created_at: str
     updated_at: str
     session_count: int
@@ -55,7 +54,6 @@ def _engagement_response(engagement: EngagementView) -> EngagementResponse:
         exploit_policy=engagement.exploit_policy,
         exploit_review_state=engagement.exploit_review_state,
         approved_findings=engagement.approved_findings,
-        active=engagement.active,
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
         session_count=engagement.session_count,

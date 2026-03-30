@@ -64,7 +64,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 
 1. **ASSESS STATE** — Read scope.json and log.md. When orchestrator backend state is available, treat it as canonical for findings, coverage, services, and chains. Use findings.md and report.md as synchronized readable artifacts, not source-of-truth state.
 2. **DECIDE NEXT ACTION** — Prioritize by impact (HIGH first). Skip ahead if obvious vulns found.
-3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.4` with `high` reasoning, and Claude operator and substantial Claude workers should use `Opus 4.6`. Only drop to `gpt-5.4-mini` or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
+3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.4` with `high` reasoning, and Claude operator and substantial Claude workers should use `Opus 4.6`. Only drop to `gpt-5.4` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
 5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide deeper rationale and payload knowledge. For Phase 1, `recon-specialist` should load `agent/skills/web-recon/SKILL.md` and `source-analyzer` should load `agent/skills/source-analysis/SKILL.md` before running target work. If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, agents, rules, skill index, skills, references, and scripts before claiming no suitable skill exists.
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Do not use host Bash, `docker run`, `docker exec`, repo-local execution helpers, or ad hoc wrappers for in-scope target work. If Kali MCP has a runtime or reachability gap, stop target-facing work there and debug the runtime from the host without sending HTTP, DNS, or raw TCP traffic from the host to scoped targets.
@@ -92,7 +92,7 @@ Before initializing any engagement, ensure the shared Kali MCP runtime is runnin
 ./scripts/start_kali_mcp_runtime.sh
 ```
 
-This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install. `engagements/.active` is only a convenience pointer to the current engagement.
+This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install.
 
 ## Engagement Initialization
 
@@ -107,7 +107,7 @@ Initialize a run with:
   [--exploit-policy pause|full_send|selected]
 ```
 
-This creates the engagement directory, readable artifacts, session workspace, explicit scope metadata, an `auth.json` scaffold, engagement-local `AGENTS.md`/`CLAUDE.md` wrappers that point back to the workspace-root prompts and skills, the transient local work buffer used for batching worker tasks, an `engagement.json` manifest, and updates `engagements/.active`.
+This creates the engagement directory, readable artifacts, session workspace, explicit scope metadata, an `auth.json` scaffold, engagement-local `AGENTS.md`/`CLAUDE.md` wrappers that point back to the workspace-root prompts and skills, the transient local work buffer used for batching worker tasks, and an `engagement.json` manifest.
 
 Rules:
 - Do not delegate initialization to a general subagent.
@@ -254,14 +254,14 @@ If no suitable skill exists, check `agent/SKILL.md` and then `agent/references/I
 
 ## Session Resumption
 
-On start or when resuming the last active engagement:
+On start or when resuming inside an engagement:
 ```bash
 if [[ -f "./scope.json" ]]; then
   ENGAGEMENT_DIR="$(pwd)"
   AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
 else
-  AGENT_ROOT="$(pwd)"
-  ENGAGEMENT_DIR="$AGENT_ROOT/engagements/$(cat "$AGENT_ROOT/engagements/.active")"
+  echo "Set ENGAGEMENT_DIR explicitly or start from inside an engagement directory." >&2
+  exit 1
 fi
 export ENGAGEMENT_DIR
 cat "$ENGAGEMENT_DIR/scope.json"

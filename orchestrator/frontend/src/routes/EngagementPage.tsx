@@ -40,6 +40,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const [engagement, setEngagement] = useState<Engagement | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<EngagementSession[]>([]);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [assessmentSummary, setAssessmentSummary] = useState<AssessmentSummary | null>(null);
@@ -52,6 +53,24 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactContent | null>(null);
   const activeEngagement = engagement?.key === engagementKey ? engagement : null;
+
+  useEffect(() => {
+    setEngagement(null);
+    setLoadError(null);
+    setSessions([]);
+    setSessionsOpen(false);
+    setEvents([]);
+    setArtifacts([]);
+    setAssessmentSummary(null);
+    setAssessmentSurfaces([]);
+    setAssessmentFindings([]);
+    setAssessmentFindingLinks([]);
+    setAssessmentProbes([]);
+    setAssessmentChains([]);
+    setAssessmentChainLinks([]);
+    setSelectedName(null);
+    setSelectedArtifact(null);
+  }, [engagementKey]);
 
   function refreshArtifacts() {
     return listArtifacts(engagementKey).then((nextArtifacts) => {
@@ -209,27 +228,16 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
     () => (activeEngagement ? events.at(-1)?.summary ?? "Waiting for events" : "Waiting for events"),
     [activeEngagement, events],
   );
-  const findingLinksBySlug = useMemo(() => {
-    const groups = new Map<string, AssessmentFindingLink[]>();
-    assessmentFindingLinks.forEach((link) => {
-      const current = groups.get(link.finding_slug) ?? [];
-      current.push(link);
-      groups.set(link.finding_slug, current);
-    });
-    return groups;
-  }, [assessmentFindingLinks]);
-  const chainLinksByKey = useMemo(() => {
-    const groups = new Map<string, AssessmentAttackChainLink[]>();
-    assessmentChainLinks.forEach((link) => {
-      const current = groups.get(link.chain_key) ?? [];
-      current.push(link);
-      groups.set(link.chain_key, current);
-    });
-    return groups;
-  }, [assessmentChainLinks]);
+
+  const findings = assessmentFindings.length > 0 ? assessmentFindings : (assessmentSummary?.top_findings ?? []);
+  const surfaces = assessmentSurfaces.length > 0 ? assessmentSurfaces : (assessmentSummary?.top_surfaces ?? []);
+  const probes = assessmentProbes.length > 0 ? assessmentProbes : (assessmentSummary?.recent_probes ?? []);
+  const chains = assessmentChains.length > 0 ? assessmentChains : (assessmentSummary?.attack_chains ?? []);
+  const showNotFound = !activeEngagement && Boolean(loadError);
 
   return (
     <main className="shell engagement-shell">
+      {/* ── Header ─────────────────────────────────────────────── */}
       <section className="dashboard-header">
         <div>
           <p className="eyebrow">Engagement detail</p>
@@ -243,173 +251,184 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
         </div>
       </section>
 
+      {/* ── Overview ───────────────────────────────────────────── */}
       <section className="engagement-overview panel">
-        <div>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
           <span className={`status-pill status-${engagement?.status ?? "queued"}`}>
             {activeEngagement?.status ?? "queued"}
           </span>
-          <p className="meta-text">{activeEngagement?.engagement_root ?? "Pending engagement root"}</p>
-          <p className="meta-text">
-            Phase: {activeEngagement?.current_phase ?? "unknown"} | Exploit policy:{" "}
-            {activeEngagement?.exploit_policy ?? "pause"} | Review: {activeEngagement?.exploit_review_state ?? "pending"}
-          </p>
-          {loadError ? <p className="error-text">{loadError}</p> : null}
+          <span className="meta-text">Phase: {activeEngagement?.current_phase ?? "unknown"}</span>
+          {loadError ? <span className="error-text">{loadError}</span> : null}
         </div>
       </section>
 
-      {!activeEngagement ? null : (
-        <>
+      {showNotFound ? (
+        <section className="panel empty-state">Engagement not found.</section>
+      ) : null}
 
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Sessions</p>
-            <h2>AI session state</h2>
-          </div>
-        </div>
-        <div className="timeline">
-          {sessions.map((session) => (
-            <article key={session.id} className="timeline-row">
-              <div className="timeline-pill">{session.merge_state}</div>
-              <div className="timeline-body">
-                <div className="timeline-title-row">
-                  <strong>{session.session_id}</strong>
-                  <span className="meta-text">{session.status}</span>
-                </div>
-                <p>{session.assigned_findings.length > 0 ? session.assigned_findings.join(", ") : "No assigned findings recorded."}</p>
-                <p className="meta-text">{session.session_path}</p>
+      {!activeEngagement || showNotFound ? null : (
+        <>
+          {/* ── Phase waterfall ────────────────────────────────── */}
+          <PhaseWaterfall events={events} />
+
+          {/* ── Findings + Attack chains ───────────────────────── */}
+          <section className="engagement-grid">
+            <article className="panel">
+              <p className="eyebrow">Findings</p>
+              <div style={{ display: "grid", gap: "12px", marginTop: "8px" }}>
+                {findings.map((finding) => (
+                  <div key={finding.slug} style={{ display: "grid", gap: "4px" }}>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" }}>
+                      <strong>{finding.title}</strong>
+                      <span className={`badge severity-${finding.severity}`}>{finding.severity}</span>
+                    </div>
+                    <p className="meta-text">
+                      {finding.status}
+                      {finding.source_name ? ` · ${finding.source_name}` : ""}
+                    </p>
+                    {(finding.canonical_location || finding.summary) && (
+                      <p className="meta-text">{finding.canonical_location || finding.summary}</p>
+                    )}
+                  </div>
+                ))}
+                {findings.length === 0 && (
+                  <p className="meta-text">No findings recorded yet.</p>
+                )}
               </div>
             </article>
-          ))}
-          {sessions.length === 0 ? <p className="empty-state">No sessions recorded yet.</p> : null}
-        </div>
-      </section>
 
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Assessment state</p>
-            <h2>Coverage ledger</h2>
-          </div>
-        </div>
-        <div className="stats-grid">
-          <article className="stat-card">
-            <span className="stat-value">{assessmentSummary?.target_count ?? 0}</span>
-            <span className="meta-text">Targets</span>
-          </article>
-          <article className="stat-card">
-            <span className="stat-value">{assessmentSummary?.service_count ?? 0}</span>
-            <span className="meta-text">Services</span>
-          </article>
-          <article className="stat-card">
-            <span className="stat-value">{assessmentSummary?.request_variant_count ?? 0}</span>
-            <span className="meta-text">Request variants</span>
-          </article>
-          <article className="stat-card">
-            <span className="stat-value">{assessmentSummary?.coverage_count ?? 0}</span>
-            <span className="meta-text">Coverage items</span>
-          </article>
-          <article className="stat-card">
-            <span className="stat-value">{assessmentSummary?.probe_count ?? 0}</span>
-            <span className="meta-text">Probe runs</span>
-          </article>
-          <article className="stat-card">
-            <span className="stat-value">{assessmentSummary?.attack_chain_count ?? 0}</span>
-            <span className="meta-text">Attack chains</span>
-          </article>
-        </div>
-      </section>
+            <article className="panel">
+              <p className="eyebrow">Attack chains</p>
+              <div style={{ display: "grid", gap: "12px", marginTop: "8px" }}>
+                {chains.map((chain) => (
+                  <div key={chain.chain_key} style={{ display: "grid", gap: "4px" }}>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" }}>
+                      <strong>{chain.title}</strong>
+                      <span className={`badge severity-${chain.severity}`}>{chain.severity}</span>
+                    </div>
+                    <p className="meta-text">{chain.status}</p>
+                    {chain.narrative && <p className="meta-text">{chain.narrative}</p>}
+                  </div>
+                ))}
+                {chains.length === 0 && (
+                  <p className="meta-text">No attack chains linked yet.</p>
+                )}
+              </div>
+            </article>
+          </section>
 
-      <PhaseWaterfall events={events} />
-      <TaskTimeline events={events} />
-
-      <section className="engagement-grid">
-        <article className="panel">
-          <p className="eyebrow">Priority surfaces</p>
-          {(assessmentSurfaces.length > 0 ? assessmentSurfaces : assessmentSummary?.top_surfaces ?? []).map((surface) => (
-            <div key={`${surface.surface_type}:${surface.target_descriptor}`} style={{ marginBottom: "1rem" }}>
-              <strong>{surface.surface_type}</strong>
-              <p className="meta-text">{surface.target_descriptor}</p>
-              <p className="meta-text">{surface.status} via {surface.source_name || "unknown source"}</p>
+          {/* ── Coverage stats ─────────────────────────────────── */}
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Assessment state</p>
+                <h2>Coverage</h2>
+              </div>
             </div>
-          ))}
-          {!assessmentSurfaces.length && !(assessmentSummary?.top_surfaces.length) && (
-            <p className="meta-text">No structured surfaces recorded yet.</p>
-          )}
-        </article>
-        <article className="panel">
-          <p className="eyebrow">Live findings</p>
-          {(assessmentFindings.length > 0 ? assessmentFindings : assessmentSummary?.top_findings ?? []).map((finding) => (
-            <div key={finding.slug} style={{ marginBottom: "1rem" }}>
-              <strong>{finding.title}</strong>
-              <p className="meta-text">
-                {finding.status} · {finding.severity}
-                {finding.source_name ? ` · ${finding.source_name}` : ""}
-              </p>
-              <p className="meta-text">{finding.canonical_location || finding.summary || "No location recorded yet."}</p>
-              {(findingLinksBySlug.get(finding.slug) ?? []).length > 0 ? (
-                <p className="meta-text">
-                  {(findingLinksBySlug.get(finding.slug) ?? [])
-                    .map((link) => `${link.link_kind}:${link.target_kind}`)
-                    .join(" | ")}
-                </p>
-              ) : null}
+            <div className="stats-grid">
+              <article className="stat-card">
+                <span className="stat-value">{assessmentSummary?.finding_count ?? 0}</span>
+                <span className="meta-text">Findings</span>
+              </article>
+              <article className="stat-card">
+                <span className="stat-value">{assessmentSummary?.attack_chain_count ?? 0}</span>
+                <span className="meta-text">Attack chains</span>
+              </article>
+              <article className="stat-card">
+                <span className="stat-value">{assessmentSummary?.probe_count ?? 0}</span>
+                <span className="meta-text">Probe runs</span>
+              </article>
+              <article className="stat-card">
+                <span className="stat-value">{assessmentSummary?.target_count ?? 0}</span>
+                <span className="meta-text">Targets</span>
+              </article>
             </div>
-          ))}
-          {!(assessmentFindings.length || assessmentSummary?.top_findings.length) && (
-            <p className="meta-text">No durable findings recorded yet.</p>
-          )}
-        </article>
-      </section>
+          </section>
 
-      <section className="engagement-grid">
-        <article className="panel">
-          <p className="eyebrow">Exploit activity</p>
-          {(assessmentProbes.length > 0 ? assessmentProbes : assessmentSummary?.recent_probes ?? []).map((probe, index) => (
-            <div key={`${probe.created_at}-${probe.attack_family}-${index}`} style={{ marginBottom: "1rem" }}>
-              <strong>{probe.attack_family}</strong>
-              <p className="meta-text">
-                {probe.result_status}
-                {probe.signal_type ? ` · ${probe.signal_type}` : ""}
-                {probe.agent_name ? ` · ${probe.agent_name}` : ""}
-              </p>
-              <p className="meta-text">{probe.evidence_ref || "No evidence artifact recorded."}</p>
-            </div>
-          ))}
-          {!(assessmentProbes.length || assessmentSummary?.recent_probes.length) && (
-            <p className="meta-text">No exploit or validation probes recorded yet.</p>
-          )}
-        </article>
-        <article className="panel">
-          <p className="eyebrow">Attack chains</p>
-          {(assessmentChains.length > 0 ? assessmentChains : assessmentSummary?.attack_chains ?? []).map((chain) => (
-            <div key={chain.chain_key} style={{ marginBottom: "1rem" }}>
-              <strong>{chain.title}</strong>
-              <p className="meta-text">
-                {chain.status} · {chain.severity}
-              </p>
-              <p className="meta-text">{chain.narrative || "No narrative recorded yet."}</p>
-              {(chainLinksByKey.get(chain.chain_key) ?? []).length > 0 ? (
-                <p className="meta-text">
-                  {(chainLinksByKey.get(chain.chain_key) ?? [])
-                    .map((link) => `${link.relation}:${link.entity_kind}`)
-                    .join(" | ")}
-                </p>
-              ) : null}
-            </div>
-          ))}
-          {!(assessmentChains.length || assessmentSummary?.attack_chains.length) && (
-            <p className="meta-text">No attack chains linked yet.</p>
-          )}
-        </article>
-      </section>
+          {/* ── Surfaces + Probe runs ──────────────────────────── */}
+          <section className="engagement-grid">
+            <article className="panel">
+              <p className="eyebrow">Priority surfaces</p>
+              <div style={{ display: "grid", gap: "12px", marginTop: "8px" }}>
+                {surfaces.map((surface) => (
+                  <div key={`${surface.surface_type}:${surface.target_descriptor}`} style={{ display: "grid", gap: "4px" }}>
+                    <strong>{surface.surface_type}</strong>
+                    <p className="meta-text">{surface.target_descriptor}</p>
+                    <p className="meta-text">
+                      {surface.status}
+                      {surface.source_name ? ` · ${surface.source_name}` : ""}
+                    </p>
+                  </div>
+                ))}
+                {surfaces.length === 0 && (
+                  <p className="meta-text">No surfaces recorded yet.</p>
+                )}
+              </div>
+            </article>
 
-      <ArtifactViewer
-        artifacts={artifacts}
-        selectedName={selectedName}
-        selectedArtifact={selectedArtifact}
-        onSelect={setSelectedName}
-      />
+            <article className="panel">
+              <p className="eyebrow">Probe runs</p>
+              <div style={{ display: "grid", gap: "12px", marginTop: "8px" }}>
+                {probes.map((probe, index) => (
+                  <div key={`${probe.created_at}-${probe.attack_family}-${index}`} style={{ display: "grid", gap: "4px" }}>
+                    <strong>{probe.attack_family}</strong>
+                    <p className="meta-text">
+                      {probe.result_status}
+                      {probe.signal_type ? ` · ${probe.signal_type}` : ""}
+                      {probe.agent_name ? ` · ${probe.agent_name}` : ""}
+                    </p>
+                  </div>
+                ))}
+                {probes.length === 0 && (
+                  <p className="meta-text">No probe runs recorded yet.</p>
+                )}
+              </div>
+            </article>
+          </section>
+
+          {/* ── Activity log ───────────────────────────────────── */}
+          <TaskTimeline events={events} />
+
+          {/* ── Sessions (collapsible) ─────────────────────────── */}
+          <section className="panel">
+            <button
+              type="button"
+              className="sessions-toggle"
+              onClick={() => setSessionsOpen((o) => !o)}
+              aria-expanded={sessionsOpen}
+            >
+              <span>Sessions</span>
+              <span className="sessions-count">{sessions.length}</span>
+              <span>{sessionsOpen ? "▴" : "▾"}</span>
+            </button>
+            {sessionsOpen && (
+              <div className="timeline" style={{ marginTop: "14px" }}>
+                {sessions.map((session) => (
+                  <article key={session.id} className="timeline-row">
+                    <div className="timeline-pill">{session.merge_state}</div>
+                    <div className="timeline-body">
+                      <div className="timeline-title-row">
+                        <strong>{session.session_id}</strong>
+                        <span className="meta-text">{session.status}</span>
+                      </div>
+                      {session.assigned_findings.length > 0 && (
+                        <p className="meta-text">{session.assigned_findings.join(", ")}</p>
+                      )}
+                    </div>
+                  </article>
+                ))}
+                {sessions.length === 0 && <p className="empty-state">No sessions recorded yet.</p>}
+              </div>
+            )}
+          </section>
+
+          {/* ── Artifacts ──────────────────────────────────────── */}
+          <ArtifactViewer
+            artifacts={artifacts}
+            selectedName={selectedName}
+            selectedArtifact={selectedArtifact}
+            onSelect={setSelectedName}
+          />
         </>
       )}
     </main>
