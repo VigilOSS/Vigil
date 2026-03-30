@@ -1,7 +1,26 @@
 #!/usr/bin/env bash
 
 orchestrator_env_ready() {
-    [[ -n "${ORCHESTRATOR_BASE_URL:-}" && -n "${ORCHESTRATOR_TOKEN:-}" && -n "${ORCHESTRATOR_PROJECT_ID:-}" && -n "${ORCHESTRATOR_RUN_ID:-}" ]]
+    [[ -n "${ORCHESTRATOR_BASE_URL:-}" ]]
+}
+
+current_engagement_key() {
+    local preferred_engagement_dir="${1:-${ENGAGEMENT_DIR:-}}"
+    if [[ -n "$preferred_engagement_dir" ]]; then
+        basename "$preferred_engagement_dir"
+        return 0
+    fi
+
+    local lib_dir root_dir engagement_dir
+    lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    root_dir="$(cd "$lib_dir/../.." && pwd)"
+
+    # shellcheck source=/dev/null
+    source "$lib_dir/engagement.sh"
+    engagement_dir="$(resolve_engagement_dir "$root_dir" 2>/dev/null || true)"
+    if [[ -n "$engagement_dir" ]]; then
+        basename "$engagement_dir"
+    fi
 }
 
 load_orchestrator_env() {

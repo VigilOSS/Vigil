@@ -313,8 +313,9 @@ START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 HOSTNAME_CLEAN=$(printf '%s' "$HOSTNAME_RAW" | tr '.:' '-' | tr -cd '[:alnum:]-')
 DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${HOSTNAME_CLEAN}"
+ENGAGEMENT_KEY="$(basename "$DIR")"
 mkdir -p "$DIR/tools" "$DIR/downloads" "$DIR/scans" "$DIR/pids" "$DIR/sessions"
-printf '%s\n' "$DIR" > engagements/.active
+printf '%s\n' "$ENGAGEMENT_KEY" > engagements/.active
 
 SCOPE_HOSTS_JSON="$(derive_scope_hosts_json "$HOSTNAME_RAW" "$SCOPE_MODE" "$SCOPE_HOSTS_RAW")"
 OUT_OF_SCOPE_JSON="$(csv_to_json_array "$OUT_OF_SCOPE_RAW")"
@@ -362,11 +363,17 @@ printf '[]\n' > "$DIR/intel-secrets.json"
 write_auth_scaffold "$DIR" "$AUTH_MODE" "$START_TIME"
 printf '[]\n' > "$DIR/sessions/index.json"
 
-if [[ -n "${ORCHESTRATOR_BASE_URL:-}" && -n "${ORCHESTRATOR_TOKEN:-}" && -n "${ORCHESTRATOR_PROJECT_ID:-}" && -n "${ORCHESTRATOR_RUN_ID:-}" ]]; then
+cat > "$DIR/engagement.json" <<EOF
+{
+  "key": "${ENGAGEMENT_KEY}",
+  "target": "${TARGET_NORMALIZED}",
+  "hostname": "${HOSTNAME_RAW}",
+  "created_at": "${START_TIME}"
+}
+EOF
+
+if [[ -n "${ORCHESTRATOR_BASE_URL:-}" ]]; then
   printf 'ORCHESTRATOR_BASE_URL=%q\n' "$ORCHESTRATOR_BASE_URL" > "$DIR/.orchestrator.env"
-  printf 'ORCHESTRATOR_TOKEN=%q\n' "$ORCHESTRATOR_TOKEN" >> "$DIR/.orchestrator.env"
-  printf 'ORCHESTRATOR_PROJECT_ID=%q\n' "$ORCHESTRATOR_PROJECT_ID" >> "$DIR/.orchestrator.env"
-  printf 'ORCHESTRATOR_RUN_ID=%q\n' "$ORCHESTRATOR_RUN_ID" >> "$DIR/.orchestrator.env"
 elif [[ -f "$ROOT_DIR/.orchestrator.env" ]]; then
   cp "$ROOT_DIR/.orchestrator.env" "$DIR/.orchestrator.env"
 fi

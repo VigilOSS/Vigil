@@ -6,8 +6,8 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      "/auth": "http://127.0.0.1:18000",
-      "/projects": "http://127.0.0.1:18000",
+      "/engagements": "http://127.0.0.1:18000",
+      "/artifacts": "http://127.0.0.1:18000",
       "/ws": {
         target: "ws://127.0.0.1:18000",
         ws: true,

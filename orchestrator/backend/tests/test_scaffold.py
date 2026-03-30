@@ -35,7 +35,7 @@ def test_orchestrator_backend_import_and_healthz():
     assert healthz() == {"status": "ok", "app": "AI Threat Hunting Orchestrator"}
 
 
-def test_backend_serves_frontend_build_when_present(isolate_data_dir):
+def test_backend_serves_frontend_build_when_present(isolate_settings):
     repo_root = Path(__file__).resolve().parents[3]
     backend_root = repo_root / "orchestrator" / "backend"
     sys.path.insert(0, str(backend_root))

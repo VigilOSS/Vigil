@@ -4,22 +4,17 @@ from fastapi import HTTPException, status
 
 from .. import db
 from ..models.event import Event
-from ..models.user import User
-from .runs import _project_or_404
 
 
-def _run_or_404(project_id: int, run_id: int, user: User):
-    project = _project_or_404(project_id, user)
-    run = db.get_run_by_id(run_id)
-    if run is None or run.project_id != project.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    return run
+def _engagement_or_404(engagement_id: int):
+    engagement = db.get_engagement_by_id(engagement_id)
+    if engagement is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Engagement not found")
+    return engagement
 
 
-def create_event_for_run(
-    project_id: int,
-    run_id: int,
-    user: User,
+def create_event_for_engagement(
+    engagement_id: int,
     *,
     event_type: str,
     phase: str,
@@ -27,8 +22,8 @@ def create_event_for_run(
     agent_name: str,
     summary: str,
 ) -> Event:
-    run = _run_or_404(project_id, run_id, user)
-    return db.create_event(run.id, event_type, phase, task_name, agent_name, summary)
+    engagement = _engagement_or_404(engagement_id)
+    return db.create_event(engagement.id, event_type, phase, task_name, agent_name, summary)
 
 
 def _phase_for_event(event: Event) -> str:
@@ -66,7 +61,7 @@ def _project_timeline_events(events: list[Event]) -> list[Event]:
             projected.append(
                 Event(
                     id=next_id,
-                    run_id=event.run_id,
+                    engagement_id=event.engagement_id,
                     event_type="phase.started",
                     phase=phase,
                     task_name=phase,
@@ -85,7 +80,7 @@ def _project_timeline_events(events: list[Event]) -> list[Event]:
             projected.append(
                 Event(
                     id=next_id,
-                    run_id=event.run_id,
+                    engagement_id=event.engagement_id,
                     event_type="task.started",
                     phase=phase,
                     task_name=event.agent_name,
@@ -99,7 +94,7 @@ def _project_timeline_events(events: list[Event]) -> list[Event]:
             projected.append(
                 Event(
                     id=next_id,
-                    run_id=event.run_id,
+                    engagement_id=event.engagement_id,
                     event_type="task.completed",
                     phase=phase,
                     task_name=event.agent_name,
@@ -110,17 +105,16 @@ def _project_timeline_events(events: list[Event]) -> list[Event]:
             )
             next_id -= 1
 
-    merged = sorted([*events, *projected], key=lambda item: (item.created_at, item.id))
-    return merged
+    return sorted([*events, *projected], key=lambda item: (item.created_at, item.id))
 
 
-def list_events_for_run(project_id: int, run_id: int, user: User) -> list[Event]:
-    run = _run_or_404(project_id, run_id, user)
-    return _project_timeline_events(db.list_events_for_run(run.id))
+def list_events_for_engagement(engagement_id: int) -> list[Event]:
+    engagement = _engagement_or_404(engagement_id)
+    return _project_timeline_events(db.list_events_for_engagement(engagement.id))
 
 
-def summarize_events_for_run(project_id: int, run_id: int, user: User) -> dict[str, dict[str, str] | None]:
-    events = list_events_for_run(project_id, run_id, user)
+def summarize_events_for_engagement(engagement_id: int) -> dict[str, dict[str, str] | None]:
+    events = list_events_for_engagement(engagement_id)
     latest_phase = next((event for event in reversed(events) if event.event_type.startswith("phase.")), None)
     latest_task = next((event for event in reversed(events) if event.event_type.startswith("task.")), None)
 
