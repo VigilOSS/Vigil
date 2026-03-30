@@ -8,7 +8,6 @@ export type Engagement = {
   exploit_policy: string;
   exploit_review_state: string;
   approved_findings: string[];
-  active: boolean;
   created_at: string;
   updated_at: string;
   session_count: number;

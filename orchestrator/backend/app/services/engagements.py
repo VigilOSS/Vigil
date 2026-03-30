@@ -24,7 +24,6 @@ class EngagementView:
     exploit_policy: str
     exploit_review_state: str
     approved_findings: list[str]
-    active: bool
     created_at: str
     updated_at: str
     session_count: int
@@ -76,15 +75,13 @@ def _session_payload(index_row: dict[str, Any], session_dir: Path) -> dict[str, 
 def sync_engagements() -> None:
     root = engagements_root()
     root.mkdir(parents=True, exist_ok=True)
-    active_key = ""
-    active_file = root / ".active"
-    if active_file.exists():
-        active_key = active_file.read_text(encoding="utf-8").strip()
 
+    discovered_keys: set[str] = set()
     for engagement_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         if not (engagement_dir / "scope.json").exists():
             continue
         manifest = _manifest_for(engagement_dir)
+        discovered_keys.add(manifest["key"])
         engagement = db.get_engagement_by_key(manifest["key"])
         if engagement is None:
             engagement = db.create_engagement(manifest["key"], manifest["target"], manifest["status"], str(engagement_dir))
@@ -94,22 +91,32 @@ def sync_engagements() -> None:
             assert engagement is not None
 
         index_path = engagement_dir / "sessions" / "index.json"
+        seen_session_ids: set[str] = set()
         if not index_path.exists():
-            continue
-        try:
-            index_rows = json.loads(index_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(index_rows, list):
-            continue
-        for index_row in index_rows:
-            if not isinstance(index_row, dict):
-                continue
-            session_id = str(index_row.get("session_id") or "").strip()
-            if not session_id:
-                continue
-            session_dir = engagement_dir / "sessions" / session_id
-            db.upsert_engagement_session(engagement.id, session_id, **_session_payload(index_row, session_dir))
+            index_rows = []
+        else:
+            try:
+                index_rows = json.loads(index_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                index_rows = []
+        if isinstance(index_rows, list):
+            for index_row in index_rows:
+                if not isinstance(index_row, dict):
+                    continue
+                session_id = str(index_row.get("session_id") or "").strip()
+                if not session_id:
+                    continue
+                seen_session_ids.add(session_id)
+                session_dir = engagement_dir / "sessions" / session_id
+                db.upsert_engagement_session(engagement.id, session_id, **_session_payload(index_row, session_dir))
+
+        for session in db.list_engagement_sessions_for_engagement(engagement.id):
+            if session.session_id not in seen_session_ids:
+                db.delete_engagement_session(engagement.id, session.session_id)
+
+    for engagement in db.list_engagements():
+        if engagement.key not in discovered_keys:
+            db.delete_engagement(engagement.id)
 
 
 def _scope_details(engagement_root: Path) -> tuple[str, str, str, list[str]]:
@@ -123,7 +130,7 @@ def _scope_details(engagement_root: Path) -> tuple[str, str, str, list[str]]:
     return current_phase, exploit_policy, exploit_review_state, [str(item) for item in approved_findings]
 
 
-def _view_for(engagement: Engagement, *, active_key: str) -> EngagementView:
+def _view_for(engagement: Engagement) -> EngagementView:
     current_phase, exploit_policy, exploit_review_state, approved_findings = _scope_details(Path(engagement.engagement_root))
     return EngagementView(
         id=engagement.id,
@@ -135,7 +142,6 @@ def _view_for(engagement: Engagement, *, active_key: str) -> EngagementView:
         exploit_policy=exploit_policy,
         exploit_review_state=exploit_review_state,
         approved_findings=approved_findings,
-        active=engagement.key == active_key,
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
         session_count=len(db.list_engagement_sessions_for_engagement(engagement.id)),
@@ -144,12 +150,7 @@ def _view_for(engagement: Engagement, *, active_key: str) -> EngagementView:
 
 def list_engagements() -> list[EngagementView]:
     sync_engagements()
-    root = engagements_root()
-    active_key = ""
-    active_file = root / ".active"
-    if active_file.exists():
-        active_key = active_file.read_text(encoding="utf-8").strip()
-    return [_view_for(engagement, active_key=active_key) for engagement in db.list_engagements()]
+    return [_view_for(engagement) for engagement in db.list_engagements()]
 
 
 def get_engagement_or_404(engagement_key: str) -> Engagement:
@@ -161,13 +162,8 @@ def get_engagement_or_404(engagement_key: str) -> Engagement:
 
 
 def get_engagement_view_or_404(engagement_key: str) -> EngagementView:
-    root = engagements_root()
-    active_key = ""
-    active_file = root / ".active"
-    if active_file.exists():
-        active_key = active_file.read_text(encoding="utf-8").strip()
     engagement = get_engagement_or_404(engagement_key)
-    return _view_for(engagement, active_key=active_key)
+    return _view_for(engagement)
 
 
 def list_sessions_for_engagement(engagement_key: str) -> list[EngagementSession]:

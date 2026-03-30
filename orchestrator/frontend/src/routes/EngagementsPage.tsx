@@ -27,14 +27,11 @@ export function EngagementsPage({ engagements, onOpenEngagement }: EngagementsPa
                 <p className="meta-text">{engagement.key}</p>
               </div>
               <div className="engagement-actions">
-                {engagement.active ? <span className="badge">Active</span> : null}
                 <span className={`status-pill status-${engagement.status}`}>{engagement.status}</span>
               </div>
             </div>
-            <p className="path-text">{engagement.engagement_root}</p>
             <p className="meta-text">
-              Phase: {engagement.current_phase} | Sessions: {engagement.session_count} | Exploit review:{" "}
-              {engagement.exploit_review_state}
+              Phase: {engagement.current_phase} &middot; {engagement.session_count} session{engagement.session_count !== 1 ? "s" : ""}
             </p>
             <button
               className="secondary-button"

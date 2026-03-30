@@ -40,6 +40,7 @@ def test_operator_prompt_outputs_require_realistic_lab_wording_and_skill_first_b
     assert "auth.json is the live auth contract" in operator_core.lower()
     assert "mitmproxy-assisted login capture" in operator_core.lower()
     assert "confirm_mode=manual" not in operator_core.lower()
+    assert ".active" not in operator_core
     assert "realistic lab" in agents_prompt.lower()
     assert "agent/skill.md" in agents_prompt.lower()
     assert "agent/rules/hunting.md" in agents_prompt.lower()
