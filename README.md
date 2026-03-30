@@ -43,12 +43,6 @@ To switch clients, stop using the current engagement, install the other client i
 
 ### 1. Kali MCP runtime
 
-Build the primary full image:
-
-```bash
-docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .
-```
-
 Start the shared runtime:
 
 ```bash
@@ -68,7 +62,7 @@ codex mcp add kali -- docker exec -i security-research mcp-server
 
 The orchestrator frontend/backend is a separate local service. It is not part of the Kali runtime image and it is not started by `start_kali_mcp_runtime.sh`.
 
-Start it from the install root with:
+Start it from the install root in a second terminal:
 
 ```bash
 ./orchestrator/start_local.sh
@@ -93,10 +87,18 @@ If you omit those flags and run in a TTY, `init_engagement.sh` prompts for scope
 
 After `init_engagement.sh` finishes, it prints the full path to the new engagement directory and updates `engagements/.active`.
 
-1. `cd` into that printed engagement directory, run `export ENGAGEMENT_DIR="$PWD"`, confirm the seeded files are present, and start `codex` or `claude`. Each engagement seeds local `AGENTS.md` and `CLAUDE.md` wrappers so a client started from the engagement folder can still find the workspace-root prompts, skills, references, and scripts.
+1. `cd` into that printed engagement directory, run `export ENGAGEMENT_DIR="$PWD"`, confirm the seeded files are present, and start `codex` or `claude`. Start the client from inside the engagement directory, not from the install root. Each engagement seeds local `AGENTS.md` and `CLAUDE.md` wrappers so a client started from the engagement folder can still find the workspace-root prompts, skills, references, and scripts.
 2. Prefer `gpt-5.4` with `high` reasoning for Codex and `Opus 4.6` for Claude. Drop to `gpt-5.4-mini` or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
 3. Tell the operator: `Run this engagement using the operator workflow. Start by reading scope.json and log.md, tell me the current phase, and show the next numbered actions.`
 4. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through the attached Kali MCP runtime, use relevant skills before improvising, and keep `log.md`, `findings.md`, `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements also carry a local `.orchestrator.env` so backend-sync scripts can keep working from inside the engagement directory.
+
+Example:
+
+```bash
+cd /path/to/printed/engagement
+export ENGAGEMENT_DIR="$PWD"
+codex
+```
 
 During the engagement, expect short operator updates, numbered next-step choices when a decision matters, and a manual approval checkpoint before exploit work continues when `exploit_policy` is `pause` or `selected`.
 

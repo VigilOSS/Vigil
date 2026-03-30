@@ -219,19 +219,35 @@ echo ""
 echo "  Installed to: $INSTALL_DIR"
 echo ""
 echo "  Next steps:"
-echo "    Use only against fully authorized realistic lab environments."
+echo "    Use only against fully authorized realistic lab environments"
 echo "    Configure shared runtime env in $INSTALL_DIR/.env as needed"
 echo "    cd $INSTALL_DIR"
 echo "    ./agent/scripts/start_kali_mcp_runtime.sh"
 case "$PRODUCT" in
   claude)
     echo "    claude mcp add kali -s user -- docker exec -i security-research mcp-server"
-    echo "    claude"
     ;;
   codex)
     echo "    codex mcp add kali -- docker exec -i security-research mcp-server"
-    echo "    codex"
     ;;
 esac
-echo "    cd agent && ./scripts/init_engagement.sh https://target.example"
+echo ""
+echo "    # in another terminal"
+echo "    cd $INSTALL_DIR"
+echo "    ./orchestrator/start_local.sh"
+echo ""
+echo "    # create an engagement"
+echo "    cd $INSTALL_DIR/agent"
+echo "    ./scripts/init_engagement.sh https://target.example --scope-mode host_only --auth-mode none --exploit-policy pause"
+echo ""
+echo "    # then enter the printed engagement directory"
+echo "    export ENGAGEMENT_DIR=\"/path/to/engagement\""
+case "$PRODUCT" in
+  claude)
+    echo "    cd \"\$ENGAGEMENT_DIR\" && claude"
+    ;;
+  codex)
+    echo "    cd \"\$ENGAGEMENT_DIR\" && codex"
+    ;;
+esac
 echo ""
