@@ -9,7 +9,6 @@ def test_websocket_receives_new_event_payload(client, isolate_settings):
     key = "2026-03-30-121500-example"
     engagement_dir = engagements_dir / key
     engagement_dir.mkdir(parents=True, exist_ok=True)
-    (engagements_dir / ".active").write_text(f"{key}\n", encoding="utf-8")
     (engagement_dir / "engagement.json").write_text(
         json.dumps({"key": key, "target": "https://example.com", "hostname": "example.com"}),
         encoding="utf-8",

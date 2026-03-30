@@ -8,7 +8,6 @@ export type Engagement = {
   exploit_policy: string;
   exploit_review_state: string;
   approved_findings: string[];
-  active: boolean;
   created_at: string;
   updated_at: string;
   session_count: number;
@@ -283,5 +282,7 @@ export function readArtifact(engagementKey: string, artifactName: string) {
 }
 
 export function engagementWebSocketUrl(engagementKey: string): string {
-  return new URL(`ws/engagements/${encodeURIComponent(engagementKey)}`, appBaseUrl()).toString();
+  const url = new URL(`ws/engagements/${encodeURIComponent(engagementKey)}`, appBaseUrl());
+  url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
 }

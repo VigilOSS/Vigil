@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 
 def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-example") -> Path:
     engagement_dir = engagements_dir / key
     (engagement_dir / "sessions" / "session-a" / "proposals").mkdir(parents=True, exist_ok=True)
-    (engagements_dir / ".active").write_text(f"{key}\n", encoding="utf-8")
     (engagement_dir / "engagement.json").write_text(
         json.dumps(
             {
@@ -62,7 +62,6 @@ def test_list_engagements_discovers_filesystem_engagements(client, isolate_setti
     payload = response.json()
     assert len(payload) == 1
     assert payload[0]["key"] == "2026-03-30-120000-example"
-    assert payload[0]["active"] is True
     assert payload[0]["current_phase"] == "exploit"
     assert payload[0]["session_count"] == 1
 
@@ -140,3 +139,80 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
     assert summary.status_code == 200
     assert summary.json()["finding_count"] == 1
+
+
+def test_incompatible_local_database_is_reset(client, isolate_settings):
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    with sqlite3.connect(str(db_path)) as connection:
+        connection.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+        connection.execute(
+            """
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE assessment_attack_chains (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                chain_key TEXT NOT NULL
+            )
+            """
+        )
+        connection.commit()
+
+    write_engagement(isolate_settings["engagements_dir"])
+
+    response = client.get("/engagements")
+    assert response.status_code == 200
+    assert response.json()[0]["key"] == "2026-03-30-120000-example"
+
+    with sqlite3.connect(str(db_path)) as connection:
+        table_names = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        assert "runs" not in table_names
+        event_columns = {row[1] for row in connection.execute("PRAGMA table_info(events)").fetchall()}
+        chain_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_attack_chains)").fetchall()}
+        assert "engagement_id" in event_columns
+        assert "engagement_id" in chain_columns
+        assert "run_id" not in event_columns
+        assert "run_id" not in chain_columns
+
+
+def test_deleted_filesystem_engagement_is_pruned_from_database(client, isolate_settings):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+
+    response = client.get("/engagements")
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+
+    for path in sorted(engagement_dir.rglob("*"), reverse=True):
+        if path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            path.rmdir()
+    engagement_dir.rmdir()
+
+    response = client.get("/engagements")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_deleted_session_is_pruned_from_database(client, isolate_settings):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+
+    response = client.get("/engagements/2026-03-30-120000-example/sessions")
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+
+    (engagement_dir / "sessions" / "index.json").write_text("[]\n", encoding="utf-8")
+
+    response = client.get("/engagements/2026-03-30-120000-example/sessions")
+    assert response.status_code == 200
+    assert response.json() == []

@@ -1,5 +1,5 @@
 # jujutsu VCS
-git commands will corrupt data, see ~/.codex/skills/jujutsu/SKILL.md
+git commands will corrupt data, see ~/.codex/skills/jujutsu/SKILL.md always use jujustu before new changes.
 
 # Repo conventions
 

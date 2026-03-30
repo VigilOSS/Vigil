@@ -1,17 +1,35 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
+
+
+def _copy_init_fixture_tree(agent_root: Path, sandbox_root: Path, *, client: str) -> None:
+    shutil.copytree(agent_root / "scripts", sandbox_root / "scripts")
+    shutil.copytree(agent_root / "schemas", sandbox_root / "schemas")
+    shutil.copytree(agent_root / "agents", sandbox_root / "agents")
+    shutil.copytree(agent_root / "rules", sandbox_root / "rules")
+    shutil.copytree(agent_root / "skills", sandbox_root / "skills")
+    shutil.copytree(agent_root / "references", sandbox_root / "references")
+    if client == "codex":
+        shutil.copytree(agent_root / ".codex", sandbox_root / ".codex")
+        shutil.copy2(agent_root / "AGENTS.md", sandbox_root / "AGENTS.md")
+    elif client == "claude":
+        shutil.copytree(agent_root / ".claude", sandbox_root / ".claude")
+        shutil.copy2(agent_root / "CLAUDE.md", sandbox_root / "CLAUDE.md")
+    else:
+        raise ValueError(f"unsupported client fixture: {client}")
+    shutil.copy2(agent_root / "SKILL.md", sandbox_root / "SKILL.md")
 
 
 def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     agent_root = repo_root / "agent"
     sandbox_root = tmp_path / "agent"
-    shutil.copytree(agent_root / "scripts", sandbox_root / "scripts")
-    shutil.copytree(agent_root / "schemas", sandbox_root / "schemas")
+    _copy_init_fixture_tree(agent_root, sandbox_root, client="codex")
 
     templates_target = sandbox_root / "scripts" / "templates"
     templates_target.mkdir(parents=True, exist_ok=True)
@@ -43,7 +61,8 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
     scope = json.loads((engagement_dir / "scope.json").read_text(encoding="utf-8"))
     auth = json.loads((engagement_dir / "auth.json").read_text(encoding="utf-8"))
     manifest = json.loads((engagement_dir / "engagement.json").read_text(encoding="utf-8"))
-    active_key = (sandbox_root / "engagements" / ".active").read_text(encoding="utf-8").strip()
+    orchestrator_env = (engagement_dir / ".orchestrator.env").read_text(encoding="utf-8")
+    agents_wrapper = (engagement_dir / "AGENTS.md").read_text(encoding="utf-8")
 
     assert scope["scope_mode"] == "explicit_hosts"
     assert scope["scope_hosts"] == ["app.example.com", "admin.example.com"]
@@ -65,17 +84,32 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
     assert auth["use_for_requests"] is True
     assert auth["auth_context"] == "authenticated"
     assert (engagement_dir / "sessions" / "index.json").exists()
+    assert (engagement_dir / "start_codex.sh").exists()
+    assert not (engagement_dir / "start_claude.sh").exists()
+    assert not (engagement_dir / "CLAUDE.md").exists()
     assert manifest["key"] == engagement_dir.name
     assert manifest["target"] == "https://app.example.com"
-    assert active_key == engagement_dir.name
+    assert "ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000" in orchestrator_env
 
+    expected_codex_paths = [
+        sandbox_root / "AGENTS.md",
+        sandbox_root / ".codex" / "agents",
+        sandbox_root / "agents",
+        sandbox_root / "rules",
+        sandbox_root / "SKILL.md",
+        sandbox_root / "skills",
+        sandbox_root / "references",
+        sandbox_root / "scripts",
+    ]
+    for path in expected_codex_paths:
+        assert str(path) in agents_wrapper
+        assert path.exists(), f"expected wrapper path to exist: {path}"
 
 def test_init_engagement_uses_safe_defaults_in_noninteractive_mode(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     agent_root = repo_root / "agent"
     sandbox_root = tmp_path / "agent"
-    shutil.copytree(agent_root / "scripts", sandbox_root / "scripts")
-    shutil.copytree(agent_root / "schemas", sandbox_root / "schemas")
+    _copy_init_fixture_tree(agent_root, sandbox_root, client="codex")
 
     result = subprocess.run(
         [
@@ -92,7 +126,7 @@ def test_init_engagement_uses_safe_defaults_in_noninteractive_mode(tmp_path: Pat
     engagement_dir = Path(result.stdout.strip())
     scope = json.loads((engagement_dir / "scope.json").read_text(encoding="utf-8"))
     auth = json.loads((engagement_dir / "auth.json").read_text(encoding="utf-8"))
-    active_key = (sandbox_root / "engagements" / ".active").read_text(encoding="utf-8").strip()
+    orchestrator_env = (engagement_dir / ".orchestrator.env").read_text(encoding="utf-8")
 
     assert scope["scope_mode"] == "host_only"
     assert scope["scope_hosts"] == ["app.example.com"]
@@ -106,15 +140,14 @@ def test_init_engagement_uses_safe_defaults_in_noninteractive_mode(tmp_path: Pat
     assert auth["state"] == "none"
     assert auth["use_for_requests"] is False
     assert auth["auth_context"] == "anonymous"
-    assert active_key == engagement_dir.name
+    assert "ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000" in orchestrator_env
 
 
 def test_init_engagement_accepts_proxy_capture_auth_mode(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     agent_root = repo_root / "agent"
     sandbox_root = tmp_path / "agent"
-    shutil.copytree(agent_root / "scripts", sandbox_root / "scripts")
-    shutil.copytree(agent_root / "schemas", sandbox_root / "schemas")
+    _copy_init_fixture_tree(agent_root, sandbox_root, client="codex")
 
     result = subprocess.run(
         [
@@ -137,3 +170,141 @@ def test_init_engagement_accepts_proxy_capture_auth_mode(tmp_path: Path) -> None
     assert auth["state"] == "missing"
     assert auth["use_for_requests"] is True
     assert auth["auth_context"] == "authenticated"
+
+
+def test_init_engagement_uses_install_root_env_override_for_orchestrator_url(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    agent_root = repo_root / "agent"
+    install_root = tmp_path / "install-root"
+    sandbox_root = install_root / "agent"
+    _copy_init_fixture_tree(agent_root, sandbox_root, client="codex")
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=https://orchestrator.example.test\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(sandbox_root / "scripts" / "init_engagement.sh"),
+            "https://app.example.com",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=str(sandbox_root),
+    )
+
+    engagement_dir = Path(result.stdout.strip())
+    orchestrator_env = (engagement_dir / ".orchestrator.env").read_text(encoding="utf-8")
+    start_codex = (engagement_dir / "start_codex.sh").read_text(encoding="utf-8")
+
+    assert "ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000" in orchestrator_env
+    assert "load_orchestrator_env" in start_codex
+
+
+def test_orchestrator_env_loader_prefers_install_root_env_over_engagement_default(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    agent_root = repo_root / "agent"
+    install_root = tmp_path / "install-root"
+    sandbox_root = install_root / "agent"
+    _copy_init_fixture_tree(agent_root, sandbox_root, client="codex")
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=https://orchestrator.example.test\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(sandbox_root / "scripts" / "init_engagement.sh"),
+            "https://app.example.com",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=str(sandbox_root),
+    )
+
+    engagement_dir = Path(result.stdout.strip())
+    resolved = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            (
+                f'source "{sandbox_root / "scripts" / "lib" / "orchestrator_env.sh"}"; '
+                f'load_orchestrator_env "{engagement_dir}"; '
+                'printf "%s" "$ORCHESTRATOR_BASE_URL"'
+            ),
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=str(engagement_dir),
+    )
+
+    assert resolved.stdout.strip() == "https://orchestrator.example.test"
+
+
+def test_init_engagement_writes_claude_only_launchers_for_claude_install(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    agent_root = repo_root / "agent"
+    sandbox_root = tmp_path / "agent"
+    _copy_init_fixture_tree(agent_root, sandbox_root, client="claude")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(sandbox_root / "scripts" / "init_engagement.sh"),
+            "https://app.example.com",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=str(sandbox_root),
+    )
+
+    engagement_dir = Path(result.stdout.strip())
+    claude_wrapper = (engagement_dir / "CLAUDE.md").read_text(encoding="utf-8")
+
+    assert (engagement_dir / "start_claude.sh").exists()
+    assert not (engagement_dir / "start_codex.sh").exists()
+    assert (engagement_dir / "CLAUDE.md").exists()
+    assert not (engagement_dir / "AGENTS.md").exists()
+    assert str(sandbox_root / "CLAUDE.md") in claude_wrapper
+
+
+def test_install_upgrade_preserves_agent_engagements(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    install_script = repo_root / "install.sh"
+    install_root = tmp_path / "install-root"
+    env = {
+        **os.environ,
+        "AI_THREAT_HUNTING_SKIP_PREREQ_CHECKS": "1",
+        "AI_THREAT_HUNTING_SKIP_DOCKER_IMAGE_CHECKS": "1",
+    }
+
+    subprocess.run(
+        ["bash", str(install_script), "codex", str(install_root)],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=repo_root,
+        env=env,
+    )
+
+    engagement_dir = install_root / "agent" / "engagements" / "existing-engagement"
+    engagement_dir.mkdir(parents=True)
+    marker = engagement_dir / "scope.json"
+    marker.write_text('{"target":"https://app.example.com"}\n', encoding="utf-8")
+
+    subprocess.run(
+        ["bash", str(install_script), "codex", str(install_root)],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=repo_root,
+        env=env,
+    )
+
+    assert marker.exists()

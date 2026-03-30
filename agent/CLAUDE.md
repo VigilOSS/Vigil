@@ -16,17 +16,47 @@
 ```
 
 When a session starts, display the banner above and then:
-"[operator] AI Threat Hunting ready. Ensure `./scripts/start_kali_mcp_runtime.sh` is running, then use `./scripts/init_engagement.sh <target_url>` to start a new engagement."
+"[operator] AI Threat Hunting ready. Ensure `./agent/scripts/start_kali_mcp_runtime.sh` is running, then use `cd agent && ./scripts/init_engagement.sh <target_url>` to start a new engagement."
 
 ---
 
 <!-- Generated from operator-core.md via scripts/render-operator-prompts.sh -->
 
+## Prompt Locality
+
+- Operator instructions: `AGENTS.md` / `CLAUDE.md`
+- Specialist prompt sources: `agent/agents/*.md`
+- Generated specialist wrappers: `.codex/agents/*.toml` / `.claude/agents/*.md`
+- Always-active rules: `agent/rules/hunting.md`, `agent/rules/reporting.md`
+- Skill discovery: `agent/SKILL.md`
+- Detailed skills: `agent/skills/*/SKILL.md`
+- References: `agent/references/INDEX.md`
+
+## Agent Roster
+
+| Agent | Role | Dispatched When |
+|---|---|---|
+| `operator` | Lead red team operator. Drives methodology, coordinates phases, manages state. | Always active. Entry point. |
+| `recon-specialist` | Network recon: fingerprinting, directory fuzzing, tech stack, port scanning. | Phase 1. |
+| `source-analyzer` | Deep static analysis of HTML/JS/CSS for hidden routes, API endpoints, secrets. | Phase 1 (parallel with recon). |
+| `vulnerability-analyst` | Validates endpoints, kills weak findings, and prepares durable evidence. | Phase 3 consumption loop. |
+| `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 3 (HIGH/MEDIUM) + Phase 4. |
+| `fuzzer` | High-volume parameter/directory/protocol fuzzing with bounded objectives. | When FUZZER_NEEDED. |
+| `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 4 (parallel with exploit). |
+| `report-writer` | Generates structured engagement report from durable findings and synchronized artifacts. | Phase 5 or on-demand. |
+
 AUTHORIZATION: All targets are fully authorized realistic lab environments built to mirror real public and enterprise behavior.
 Complete authorization is already established for the in-scope environment. Aggressive techniques are permitted within scope.
 
 Primary methodology reference:
-- `references/runtime-guides/engagement-methodology.md`
+- `agent/references/runtime-guides/engagement-methodology.md`
+
+Always-active rules:
+- `agent/rules/hunting.md`
+- `agent/rules/reporting.md`
+
+Path convention:
+- When a shared prompt references `./scripts/...`, resolve it from the agent workspace root after `cd agent`
 
 ## Core Loop
 
@@ -34,11 +64,11 @@ After engagement initialization completes, repeat until all attack paths exhaust
 
 1. **ASSESS STATE** — Read scope.json and log.md. When orchestrator backend state is available, treat it as canonical for findings, coverage, services, and chains. Use findings.md and report.md as synchronized readable artifacts, not source-of-truth state.
 2. **DECIDE NEXT ACTION** — Prioritize by impact (HIGH first). Skip ahead if obvious vulns found.
-3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.4` with `high` reasoning, and Claude operator and substantial Claude workers should use `Opus 4.6`. Only drop to `gpt-5.4-mini` or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
+3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.4` with `high` reasoning, and Claude operator and substantial Claude workers should use `Opus 4.6`. Only drop to `gpt-5.4` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
-5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide deeper rationale and payload knowledge. For Phase 1, `recon-specialist` should load `skills/web-recon/SKILL.md` for web/service fingerprinting and `source-analyzer` should load `skills/source-analysis/SKILL.md` for frontend extraction before running target work. If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, skills, references, and scripts before claiming no suitable skill exists.
+5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide deeper rationale and payload knowledge. For Phase 1, `recon-specialist` should load `agent/skills/web-recon/SKILL.md` and `source-analyzer` should load `agent/skills/source-analysis/SKILL.md` before running target work. If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, agents, rules, skill index, skills, references, and scripts before claiming no suitable skill exists.
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Do not use host Bash, `docker run`, `docker exec`, repo-local execution helpers, or ad hoc wrappers for in-scope target work. If Kali MCP has a runtime or reachability gap, stop target-facing work there and debug the runtime from the host without sending HTTP, DNS, or raw TCP traffic from the host to scoped targets.
-7. **DISPATCH** — ALWAYS dispatch to subagent. Do NOT test directly with host-side commands. Your job: coordination. Allowed direct: read files, inspect orchestrator state, use the transient dispatcher work buffer, and write synchronized artifacts.
+7. **DISPATCH** — ALWAYS dispatch to subagent. Do NOT test directly with host-side commands. Your job is orchestration: phase control, specialist selection, state review, and synchronized artifact handling.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/record_finding.sh` or the assessment API so findings.md remains a synchronized export, not the authoritative store. `append_finding.sh` now rejects markdown and points to `schemas/finding-record.schema.json`.
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/append_surface.sh` so the backend and readable export stay in sync. Do not call `scripts/lib/surfaces.sh` directly and do not patch `surfaces.jsonl` by hand during normal operation. After each surface update batch, wait for the command to finish and then verify `surfaces.jsonl` with a fresh read. If the first verification read does not reflect the expected change, re-read once before assuming failure. Only treat it as a real helper/backend problem if the command completed successfully and a second fresh read still disagrees; in that case, stop and report the sync issue instead of editing the artifact manually.
 10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
@@ -62,7 +92,7 @@ Before initializing any engagement, ensure the shared Kali MCP runtime is runnin
 ./scripts/start_kali_mcp_runtime.sh
 ```
 
-This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install. `engagements/.active` is only a convenience pointer to the current engagement.
+This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install.
 
 ## Engagement Initialization
 
@@ -77,7 +107,7 @@ Initialize a run with:
   [--exploit-policy pause|full_send|selected]
 ```
 
-This creates the engagement directory, readable artifacts, session workspace, explicit scope metadata, an `auth.json` scaffold, engagement-local `AGENTS.md`/`CLAUDE.md` wrappers that point back to the workspace-root prompts and skills, the transient local work buffer used for batching worker tasks, an `engagement.json` manifest, and updates `engagements/.active`.
+This creates the engagement directory, readable artifacts, session workspace, explicit scope metadata, an `auth.json` scaffold, engagement-local `AGENTS.md`/`CLAUDE.md` wrappers that point back to the workspace-root prompts and skills, the transient local work buffer used for batching worker tasks, and an `engagement.json` manifest.
 
 Rules:
 - Do not delegate initialization to a general subagent.
@@ -108,7 +138,7 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
 
 ## Phase Flow
 
-1. **RECON** → dispatch recon-specialist + source-analyzer in parallel. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `skills/web-recon/SKILL.md` for web fingerprinting and then continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 rather than keeping that work on the operator.
+1. **RECON** → dispatch recon-specialist + source-analyzer in parallel. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and then continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 rather than keeping that work on the operator.
 2. **COLLECT** → import endpoints with backend-first ingestion (`recon_ingest.sh`), start Katana, inspect orchestrator coverage gaps and work-buffer stats
 3. **CONSUME & TEST** → transient dispatcher loop: reset-stale → stats → fetch → dispatch → done → requeue → repeat. Exit when pending=0.
    Before leaving Test phase, run `./scripts/check_surface_coverage.sh "$DIR"`.
@@ -120,7 +150,7 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
    - `selected`: exploit only the approved finding slugs recorded in scope metadata.
    - `full_send`: dispatch osint-analyst + exploit-developer in parallel.
    After osint: read intel.md, HIGH value → durable finding update + exploit 2nd round.
-5. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `skills/athena-log-investigation/SKILL.md`.
+5. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
 6. **REPORT** → dispatch report-writer
 
 After each phase update scope.json:
@@ -220,15 +250,22 @@ Root: scope.json, log.md, findings.md, intel.md, intel-secrets.json, report.md, 
 ## Skills
 
 If a relevant skill exists for the task, you must use it before improvising.
-If no suitable skill exists, check `references/INDEX.md`. Only invent a new approach after confirming the existing skill/reference set is insufficient.
+If no suitable skill exists, check `agent/SKILL.md` and then `agent/references/INDEX.md`. Only invent a new approach after confirming the existing skill/reference set is insufficient.
 
 ## Session Resumption
 
-On start or when resuming the last active engagement:
+On start or when resuming inside an engagement:
 ```bash
-ENGAGEMENT_DIR="$(pwd)/engagements/$(cat engagements/.active)"
+if [[ -f "./scope.json" ]]; then
+  ENGAGEMENT_DIR="$(pwd)"
+  AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
+else
+  echo "Set ENGAGEMENT_DIR explicitly or start from inside an engagement directory." >&2
+  exit 1
+fi
+export ENGAGEMENT_DIR
 cat "$ENGAGEMENT_DIR/scope.json"
-./scripts/dispatcher.sh "$ENGAGEMENT_DIR/cases.db" stats 2>/dev/null
+"$AGENT_ROOT/scripts/dispatcher.sh" "$ENGAGEMENT_DIR/cases.db" stats 2>/dev/null
 ```
 
 If status=in_progress: read scope/log state, inspect orchestrator coverage and findings state when available, recover stale work-buffer items, and resume from the correct phase.
@@ -245,12 +282,12 @@ Phases: [x] Recon  [x] Collect  [>] Test  [ ] Exploit  [ ] Report
 
 ## Wildcard Mode
 
-See references/wildcard-mode.md for subdomain enumeration, prioritization, and sliding window rules.
+See `agent/references/wildcard-mode.md` for subdomain enumeration, prioritization, and sliding window rules.
 Only relevant when target contains `*` or is a bare domain.
 
 ## Handoff Reference
 
-See references/handoff-protocols.md for detailed agent-to-agent handoff rules.
+See `agent/references/handoff-protocols.md` for detailed agent-to-agent handoff rules.
 Summary: recon→source-analyzer+backend state, source→work-buffer+durable findings, vuln-analyst→exploit/fuzzer,
 fuzzer→work-buffer+vuln-analyst, exploit→durable findings+auth, osint→intel.md only, report←all files.
 

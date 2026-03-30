@@ -4,6 +4,10 @@ orchestrator_env_ready() {
     [[ -n "${ORCHESTRATOR_BASE_URL:-}" ]]
 }
 
+default_orchestrator_base_url() {
+    printf '%s\n' "http://127.0.0.1:18000"
+}
+
 current_engagement_key() {
     local preferred_engagement_dir="${1:-${ENGAGEMENT_DIR:-}}"
     if [[ -n "$preferred_engagement_dir" ]]; then
@@ -11,9 +15,10 @@ current_engagement_key() {
         return 0
     fi
 
-    local lib_dir root_dir engagement_dir
+    local lib_dir root_dir install_root engagement_dir
     lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     root_dir="$(cd "$lib_dir/../.." && pwd)"
+    install_root="$(cd "$root_dir/.." && pwd)"
 
     # shellcheck source=/dev/null
     source "$lib_dir/engagement.sh"
@@ -29,14 +34,18 @@ load_orchestrator_env() {
         return 0
     fi
 
-    local lib_dir root_dir engagement_dir
+    local lib_dir root_dir install_root engagement_dir
     lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     root_dir="$(cd "$lib_dir/../.." && pwd)"
+    install_root="$(cd "$root_dir/.." && pwd)"
 
     # shellcheck source=/dev/null
     source "$lib_dir/engagement.sh"
 
     local candidate_files=()
+    candidate_files+=("$install_root/.env")
+    candidate_files+=("$install_root/.orchestrator.env")
+
     if [[ -n "$preferred_engagement_dir" ]]; then
         candidate_files+=("$preferred_engagement_dir/.orchestrator.env")
     fi
@@ -50,8 +59,6 @@ load_orchestrator_env() {
         candidate_files+=("$engagement_dir/.orchestrator.env")
     fi
 
-    candidate_files+=("$root_dir/.orchestrator.env")
-
     local env_file
     for env_file in "${candidate_files[@]}"; do
         [[ -f "$env_file" ]] || continue
@@ -64,5 +71,6 @@ load_orchestrator_env() {
         fi
     done
 
-    return 1
+    export ORCHESTRATOR_BASE_URL="$(default_orchestrator_base_url)"
+    return 0
 }
