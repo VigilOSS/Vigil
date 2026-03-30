@@ -10,15 +10,16 @@ source "$SCRIPT_DIR/lib/orchestrator_env.sh"
 
 load_orchestrator_env "${ENGAGEMENT_DIR:-}" || true
 
-if [[ -z "${ORCHESTRATOR_BASE_URL:-}" || -z "${ORCHESTRATOR_TOKEN:-}" || -z "${ORCHESTRATOR_PROJECT_ID:-}" || -z "${ORCHESTRATOR_RUN_ID:-}" ]]; then
+ENGAGEMENT_KEY="$(current_engagement_key "${ENGAGEMENT_DIR:-}")"
+
+if [[ -z "${ORCHESTRATOR_BASE_URL:-}" || -z "$ENGAGEMENT_KEY" ]]; then
     exit 1
 fi
 
 curl -fsS \
     --connect-timeout 2 \
     --max-time 10 \
-    -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
     -H "Content-Type: application/json" \
     -X POST \
     --data "$PAYLOAD" \
-    "${ORCHESTRATOR_BASE_URL%/}/projects/${ORCHESTRATOR_PROJECT_ID}/runs/${ORCHESTRATOR_RUN_ID}/assessment/${ENDPOINT}"
+    "${ORCHESTRATOR_BASE_URL%/}/engagements/${ENGAGEMENT_KEY}/assessment/${ENDPOINT}"

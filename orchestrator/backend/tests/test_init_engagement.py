@@ -42,6 +42,8 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
     engagement_dir = Path(result.stdout.strip())
     scope = json.loads((engagement_dir / "scope.json").read_text(encoding="utf-8"))
     auth = json.loads((engagement_dir / "auth.json").read_text(encoding="utf-8"))
+    manifest = json.loads((engagement_dir / "engagement.json").read_text(encoding="utf-8"))
+    active_key = (sandbox_root / "engagements" / ".active").read_text(encoding="utf-8").strip()
 
     assert scope["scope_mode"] == "explicit_hosts"
     assert scope["scope_hosts"] == ["app.example.com", "admin.example.com"]
@@ -63,6 +65,9 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
     assert auth["use_for_requests"] is True
     assert auth["auth_context"] == "authenticated"
     assert (engagement_dir / "sessions" / "index.json").exists()
+    assert manifest["key"] == engagement_dir.name
+    assert manifest["target"] == "https://app.example.com"
+    assert active_key == engagement_dir.name
 
 
 def test_init_engagement_uses_safe_defaults_in_noninteractive_mode(tmp_path: Path) -> None:
@@ -87,6 +92,7 @@ def test_init_engagement_uses_safe_defaults_in_noninteractive_mode(tmp_path: Pat
     engagement_dir = Path(result.stdout.strip())
     scope = json.loads((engagement_dir / "scope.json").read_text(encoding="utf-8"))
     auth = json.loads((engagement_dir / "auth.json").read_text(encoding="utf-8"))
+    active_key = (sandbox_root / "engagements" / ".active").read_text(encoding="utf-8").strip()
 
     assert scope["scope_mode"] == "host_only"
     assert scope["scope_hosts"] == ["app.example.com"]
@@ -100,6 +106,7 @@ def test_init_engagement_uses_safe_defaults_in_noninteractive_mode(tmp_path: Pat
     assert auth["state"] == "none"
     assert auth["use_for_requests"] is False
     assert auth["auth_context"] == "anonymous"
+    assert active_key == engagement_dir.name
 
 
 def test_init_engagement_accepts_proxy_capture_auth_mode(tmp_path: Path) -> None:

@@ -78,6 +78,7 @@ done
 
 PORT="$(cat "$PORT_FILE")"
 ENG_DIR="$TMP_DIR/engagement"
+export ENGAGEMENT_DIR="$ENG_DIR"
 mkdir -p "$ENG_DIR"
 cat >"$ENG_DIR/log.md" <<'EOF'
 # Engagement Log
@@ -90,9 +91,6 @@ EOF
 touch "$ENG_DIR/surfaces.jsonl"
 cat >"$ENG_DIR/.orchestrator.env" <<EOF
 ORCHESTRATOR_BASE_URL=http://127.0.0.1:$PORT
-ORCHESTRATOR_TOKEN=test-token
-ORCHESTRATOR_PROJECT_ID=11
-ORCHESTRATOR_RUN_ID=22
 EOF
 
 (

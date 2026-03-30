@@ -5,9 +5,9 @@ from sqlite3 import Row
 
 
 @dataclass(frozen=True, slots=True)
-class Run:
+class Engagement:
     id: int
-    project_id: int
+    key: str
     target: str
     status: str
     engagement_root: str
@@ -15,10 +15,10 @@ class Run:
     updated_at: str
 
     @classmethod
-    def from_row(cls, row: Row) -> "Run":
+    def from_row(cls, row: Row) -> "Engagement":
         return cls(
             id=row["id"],
-            project_id=row["project_id"],
+            key=row["key"],
             target=row["target"],
             status=row["status"],
             engagement_root=row["engagement_root"],

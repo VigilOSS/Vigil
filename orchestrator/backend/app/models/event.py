@@ -7,7 +7,7 @@ from sqlite3 import Row
 @dataclass(frozen=True, slots=True)
 class Event:
     id: int
-    run_id: int
+    engagement_id: int
     event_type: str
     phase: str
     task_name: str
@@ -19,7 +19,7 @@ class Event:
     def from_row(cls, row: Row) -> "Event":
         return cls(
             id=row["id"],
-            run_id=row["run_id"],
+            engagement_id=row["engagement_id"],
             event_type=row["event_type"],
             phase=row["phase"],
             task_name=row["task_name"],

@@ -4,11 +4,11 @@ from fastapi import APIRouter, status
 from pydantic import BaseModel, Field
 
 from ..models.event import Event
-from ..security import CurrentUser
-from ..services.events import create_event_for_run, list_events_for_run, summarize_events_for_run
+from ..services.engagements import get_engagement_or_404
+from ..services.events import create_event_for_engagement, list_events_for_engagement, summarize_events_for_engagement
 from ..ws import broadcaster
 
-router = APIRouter(prefix="/projects/{project_id}/runs/{run_id}/events", tags=["events"])
+router = APIRouter(prefix="/engagements/{engagement_key}/events", tags=["events"])
 
 
 class CreateEventRequest(BaseModel):
@@ -42,16 +42,10 @@ def _event_response(event: Event) -> EventResponse:
 
 
 @router.post("", response_model=EventResponse, status_code=status.HTTP_201_CREATED)
-async def create_event(
-    project_id: int,
-    run_id: int,
-    request: CreateEventRequest,
-    current_user: CurrentUser,
-) -> EventResponse:
-    event = create_event_for_run(
-        project_id,
-        run_id,
-        current_user,
+async def create_event(engagement_key: str, request: CreateEventRequest) -> EventResponse:
+    engagement = get_engagement_or_404(engagement_key)
+    event = create_event_for_engagement(
+        engagement.id,
         event_type=request.event_type,
         phase=request.phase,
         task_name=request.task_name,
@@ -60,12 +54,10 @@ async def create_event(
     )
     response = _event_response(event)
     await broadcaster.publish(
-        project_id,
-        run_id,
+        engagement.key,
         {
             "type": "event.created",
-            "project_id": project_id,
-            "run_id": run_id,
+            "engagement_key": engagement.key,
             "event": response.model_dump(),
         },
     )
@@ -73,10 +65,12 @@ async def create_event(
 
 
 @router.get("", response_model=list[EventResponse])
-def list_events(project_id: int, run_id: int, current_user: CurrentUser) -> list[EventResponse]:
-    return [_event_response(event) for event in list_events_for_run(project_id, run_id, current_user)]
+def list_events(engagement_key: str) -> list[EventResponse]:
+    engagement = get_engagement_or_404(engagement_key)
+    return [_event_response(event) for event in list_events_for_engagement(engagement.id)]
 
 
 @router.get("/summary")
-def summarize_events(project_id: int, run_id: int, current_user: CurrentUser) -> dict[str, dict[str, str] | None]:
-    return summarize_events_for_run(project_id, run_id, current_user)
+def summarize_events(engagement_key: str) -> dict[str, dict[str, str] | None]:
+    engagement = get_engagement_or_404(engagement_key)
+    return summarize_events_for_engagement(engagement.id)
