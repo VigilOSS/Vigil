@@ -123,38 +123,45 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
 
   useEffect(() => {
     let cancelled = false;
+    let refreshing = false;
 
     async function refreshPage() {
-      try {
-        await refreshEngagement();
-      } catch (error) {
-        if (cancelled) return;
-        const message = error instanceof Error ? error.message : "Failed to load engagement";
-        setLoadError(message);
-        setEngagement(null);
-        setSessions([]);
-        setEvents([]);
-        setArtifacts([]);
-        setAssessmentSummary(null);
-        setAssessmentSurfaces([]);
-        setAssessmentFindings([]);
-        setAssessmentFindingLinks([]);
-        setAssessmentProbes([]);
-        setAssessmentChains([]);
-        setAssessmentChainLinks([]);
-        setSelectedName(null);
-        setSelectedArtifact(null);
+      if (refreshing) {
         return;
       }
-
-      if (cancelled) return;
-
+      refreshing = true;
       try {
+        try {
+          await refreshEngagement();
+        } catch (error) {
+          if (cancelled) return;
+          const message = error instanceof Error ? error.message : "Failed to load engagement";
+          setLoadError(message);
+          setEngagement(null);
+          setSessions([]);
+          setEvents([]);
+          setArtifacts([]);
+          setAssessmentSummary(null);
+          setAssessmentSurfaces([]);
+          setAssessmentFindings([]);
+          setAssessmentFindingLinks([]);
+          setAssessmentProbes([]);
+          setAssessmentChains([]);
+          setAssessmentChainLinks([]);
+          setSelectedName(null);
+          setSelectedArtifact(null);
+          return;
+        }
+
+        if (cancelled) return;
+
         await Promise.all([refreshSessions(), refreshEvents(), refreshArtifacts(), refreshAssessment()]);
       } catch (error) {
         if (cancelled) return;
         const message = error instanceof Error ? error.message : "Failed to load engagement details";
         setLoadError(message);
+      } finally {
+        refreshing = false;
       }
     }
 
@@ -206,20 +213,27 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
       return;
     }
 
+    let refreshing = false;
     const interval = window.setInterval(() => {
+      if (refreshing) {
+        return;
+      }
+      refreshing = true;
       void refreshEngagement()
-        .then(() =>
-          Promise.all([refreshSessions(), refreshEvents(), refreshArtifacts(), refreshAssessment()]).then(() => {
-            if (selectedName) {
-              refreshSelectedArtifact(selectedName);
-            }
-          }),
-        )
+        .then(() => Promise.all([refreshSessions(), refreshEvents(), refreshArtifacts(), refreshAssessment()]))
+        .then(() => {
+          if (selectedName) {
+            refreshSelectedArtifact(selectedName);
+          }
+        })
         .catch((error) => {
           const message = error instanceof Error ? error.message : "Failed to refresh engagement";
           setLoadError(message);
+        })
+        .finally(() => {
+          refreshing = false;
         });
-    }, 3000);
+    }, 5000);
 
     return () => window.clearInterval(interval);
   }, [activeEngagement, engagementKey, selectedName]);

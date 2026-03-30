@@ -10,7 +10,7 @@
 ║   ██   ██ ███████ ██████     ██    ███████ ██   ██ ██      ██║
 ║                                                              ║
 ║   Autonomous Red Team Simulation Agent                       ║
-║   Powered by Claude Code | Realistic authorized lab runtime  ║
+║   Powered by Claude Code  ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
 ```
