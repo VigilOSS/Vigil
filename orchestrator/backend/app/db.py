@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -520,10 +521,10 @@ def get_connection() -> Iterator[sqlite3.Connection]:
     db_path = database_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        connection = sqlite3.connect(str(db_path))
+        connection = sqlite3.connect(str(db_path), cached_statements=0)
     except sqlite3.OperationalError:
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(db_path))
+        connection = sqlite3.connect(str(db_path), cached_statements=0)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     try:
@@ -531,6 +532,7 @@ def get_connection() -> Iterator[sqlite3.Connection]:
         connection.commit()
     finally:
         connection.close()
+        gc.collect()
 
 
 def create_engagement(key: str, target: str, status: str, engagement_root: str) -> Engagement:
