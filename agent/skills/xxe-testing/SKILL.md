@@ -104,3 +104,8 @@ origin: AI Threat Hunting
 - Internal resources accessed (files, metadata, services)
 - Severity: Critical (file read/SSRF) or High (blind confirmed)
 - Remediation: disable DTD processing, disable external entities, use JSON
+
+## Extended Resources
+
+- `agent/references/payloads/xxe-payloads.md` — file read, OOB/blind XXE, DoS, context-specific (SOAP, SVG, DOCX)
+- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist

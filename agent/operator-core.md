@@ -15,11 +15,17 @@ Path convention:
 
 After engagement initialization completes, repeat until all attack paths exhausted or user signals stop:
 
-1. **ASSESS STATE** — Read scope.json and log.md. When orchestrator backend state is available, treat it as canonical for findings, coverage, services, and chains. Use findings.md and report.md as synchronized readable artifacts, not source-of-truth state.
-2. **DECIDE NEXT ACTION** — Prioritize by impact (HIGH first). Skip ahead if obvious vulns found.
+1. **ASSESS STATE** — Read scope.json and log.md. When orchestrator backend state is available, treat it as canonical for findings, coverage, services, and chains. Use findings.md as a synchronized readable export, not source-of-truth state. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
+2. **DECIDE NEXT ACTION** — Prioritize by current phase first. In Phase 1-2, prioritize breadth of surface coverage. In Phase 3, prioritize risk class: object references, auth boundaries, and privileged writes before low-risk surfaces. Once confirmed findings exist, drive HIGH findings to exploitation before investing in medium/low. Skip ahead only when an obviously actionable path is already in hand.
 3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.4` with `high` reasoning, and Claude operator and substantial Claude workers should use `Opus 4.6`. Only drop to `gpt-5.4` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
-5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide deeper rationale and payload knowledge. For Phase 1, `recon-specialist` should load `agent/skills/web-recon/SKILL.md` and `source-analyzer` should load `agent/skills/source-analysis/SKILL.md` before running target work. If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, agents, rules, skill index, skills, references, and scripts before claiming no suitable skill exists.
+5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide the payload libraries and checklists that make skills actionable. Always check `agent/SKILL.md` for the right skill, then check `agent/references/INDEX.md` for payload and checklist depth — references are not a fallback, they are the methodology library.
+   - **Phase 1 (Recon):** `recon-specialist` → `agent/skills/web-recon/SKILL.md`; `source-analyzer` → `agent/skills/source-analysis/SKILL.md`
+   - **Phase 2 (Collect):** operator → `agent/skills/case-dispatching/SKILL.md` for work-buffer coordination
+   - **Phase 3 (Test):** `vulnerability-analyst` → load the vuln-class skill from `agent/SKILL.md` matching the candidate (e.g., `sqli-testing`, `idor-testing`, `xss-testing`); `fuzzer` → `agent/skills/directory-fuzzing/SKILL.md` or `agent/skills/parameter-fuzzing/SKILL.md`
+   - **Phase 4 (Exploit):** `exploit-developer` → load the skill matching the confirmed finding class from `agent/SKILL.md` using the "Use when:" criteria; `osint-analyst` → `agent/skills/osint-recon/SKILL.md`
+   - **Phase 5 (Report):** `report-writer` → `agent/skills/report-generation/SKILL.md`
+   If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, agents, rules, skill index, skills, references, and scripts before claiming no suitable skill exists.
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Do not use host Bash, `docker run`, `docker exec`, repo-local execution helpers, or ad hoc wrappers for in-scope target work. If Kali MCP has a runtime or reachability gap, stop target-facing work there and debug the runtime from the host without sending HTTP, DNS, or raw TCP traffic from the host to scoped targets.
 7. **DISPATCH** — ALWAYS dispatch to subagent. Do NOT test directly with host-side commands. Your job is orchestration: phase control, specialist selection, state review, and synchronized artifact handling.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/record_finding.sh` or the assessment API so findings.md remains a synchronized export, not the authoritative store. `append_finding.sh` now rejects markdown and points to `schemas/finding-record.schema.json`.
@@ -84,7 +90,16 @@ Rules:
 | osint-analyst | CVE/breach/DNS/social research from intel.md | Phase 4 (parallel with exploit) |
 | report-writer | Final or interim report | Phase 5 |
 
-Context on every dispatch: agent identity, target URL, current phase, prior findings, specific task.
+### Dispatch Context Template
+
+Every dispatch must include:
+- **Agent identity** and **target URL**
+- **Current phase** and **specific task objective**
+- **Which skill to load** (from `agent/SKILL.md` using "Use when:" criteria)
+- **Prior findings relevant to this dispatch:**
+  - For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, and the specific hypothesis to test
+  - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `fetch_assessment_record.sh` — do not pre-filter B candidates for it
+  - For `report-writer`: no finding context needed — the agent queries the `report-findings` endpoint directly
 
 DEDUP: Check log.md before dispatch. Never dispatch same agent for same objective twice.
 PARALLEL: Independent tasks → parallel. Dependent → sequential.
@@ -92,8 +107,16 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
 ## Phase Flow
 
 1. **RECON** → dispatch recon-specialist + source-analyzer in parallel. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and then continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 rather than keeping that work on the operator.
-2. **COLLECT** → import endpoints with backend-first ingestion (`recon_ingest.sh`), start Katana, inspect orchestrator coverage gaps and work-buffer stats
-3. **CONSUME & TEST** → transient dispatcher loop: reset-stale → stats → fetch → dispatch → done → requeue → repeat. Exit when pending=0.
+2. **COLLECT** → operator-orchestrated. Steps in order:
+   a. Ingest all endpoints from Phase 1 into the backend: `cat endpoints.txt | ./scripts/recon_ingest.sh "$DIR/cases.db" recon`
+   b. Run Katana via Kali MCP to crawl from live targets (Katana is installed in the runtime container — invoke it through the MCP command-execution tool, not host-side):
+      `katana -u https://target.example -d 3 -jc -kf all -o /tmp/katana_output.txt`
+      If `auth.json` has `active_use=true`, pass cookies/headers: `katana -u URL -H "Cookie: ..." -H "Authorization: ..." ...`
+   c. Ingest Katana output into backend: `cat /tmp/katana_output.txt | ./scripts/recon_ingest.sh "$DIR/cases.db" katana`
+   d. Inspect work-buffer stats: `./scripts/dispatcher.sh "$DIR/cases.db" stats`
+   e. Inspect coverage gaps: `./scripts/fetch_assessment_record.sh summary`
+   Update scope.json phase to `consume-test` when ingestion is complete.
+3. **CONSUME & TEST** → load `agent/skills/case-dispatching/SKILL.md` for the work-buffer loop: reset-stale → stats → fetch → dispatch → done → requeue → repeat. Exit when pending=0.
    Before leaving Test phase, run `./scripts/check_surface_coverage.sh "$DIR"`.
    If it fails, do not advance. Resolve each remaining discovered surface by selecting a representative validation path and marking it `covered`, `deferred`, or `not_applicable`.
    High-risk surfaces `account_recovery`, `dynamic_render`, `object_reference`, and `privileged_write`
@@ -104,7 +127,7 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
    - `full_send`: dispatch osint-analyst + exploit-developer in parallel.
    After osint: read intel.md, HIGH value → durable finding update + exploit 2nd round.
 5. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
-6. **REPORT** → dispatch report-writer
+6. **REPORT** → dispatch report-writer with `agent/skills/report-generation/SKILL.md`. Report-writer queries the backend directly for `report-findings`, `attack-chains`, `surfaces`, and `summary` — do not manually assemble findings context. After report-writer completes, update scope.json phase to `complete`.
 
 After each phase update scope.json:
 ```bash
@@ -114,14 +137,14 @@ jq '.current_phase = "<next>"' \
 
 ## Credential Auto-Use
 
-When ANY agent discovers credentials:
-1. Write to auth.json immediately
-2. Try login, save token
-3. Trigger POST-AUTH RE-COLLECTION (restart Katana with auth)
-4. Dispatch exploit-developer to test authenticated access
+When ANY agent discovers credentials, the operator coordinates these steps (do not perform target-facing work directly — dispatch to subagents):
+
+1. **Operator writes to auth.json** — populate cookies, headers, or token fields. Set `state` to `available` and `use_for_requests` to `true`. This is local file work, not target-facing.
+2. **Dispatch exploit-developer to validate credentials** — the agent logs in via Kali MCP, confirms what access the credentials grant, and records findings with `auth_context: authenticated`. If login fails, update auth.json `state` to `invalid` and continue anonymously.
+3. **Operator re-runs Collect** — re-invoke Katana via Kali MCP with auth headers to discover authenticated-only endpoints. Re-ingest through `recon_ingest.sh` with the new auth context. This is the POST-AUTH RE-COLLECTION step.
+4. **Dispatch exploit-developer again** — test authenticated surfaces discovered in step 3.
 
 Auth handling rules:
-- auth.json is the live auth contract.
 - `auth.json` is the live auth contract. It may contain cookies, headers, `auth_context`, `use_for_requests`, and optional `expires_at`.
 - If `auth.json` is present and usable, Katana and ingestion should use its auth context automatically.
 - If `auth.json` is missing material or marked expired, warn and continue anonymously rather than halting the engagement.
@@ -168,18 +191,29 @@ This allocates or reuses the canonical slug under a lock, writes backend state f
   "canonical_location": "https://target.example/search?q",
   "summary": "Boolean-blind SQL injection on the search endpoint",
   "evidence_ref": "scans/sqlmap.txt",
-  "notes": "Payloads `AND 1=1` and `AND 1=2` caused consistent behavioral divergence.",
+  "notes": "Payloads AND 1=1 and AND 1=2 caused consistent behavioral divergence.",
   "details": {
     "owasp_category": "A03:2021 Injection",
+    "cwe_id": "CWE-89",
+    "request_method": "GET",
     "evidence": "Replayable request/response pair in scans/sqlmap.txt",
-    "impact": "Authenticated or anonymous attackers can extract data from the backing store"
+    "impact": "Anonymous attackers can extract arbitrary data from the backing store",
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "cvss_score": 7.5,
+    "remediation": "Use parameterized queries for all search input",
+    "steps_to_reproduce": [
+      "Send GET /search?q=test'+AND+1=1--+-",
+      "Observe normal search results returned",
+      "Send GET /search?q=test'+AND+1=2--+-",
+      "Observe empty results — confirms boolean-blind SQLi"
+    ]
   }
 }
 ```
 
 If an agent only produced markdown, stop and convert it into the JSON shape required by `schemas/finding-record.schema.json`. `./scripts/append_finding.sh` is only a guardrail: it rejects markdown, prints the schema path, and exits nonzero.
 
-report-writer renumbers to sequential FINDING-001~N in final report.
+report-writer uses the `report-findings` backend endpoint which assigns sequential `FINDING-001~N` report IDs automatically. Each report finding includes both the `report_id` and the original `slug` for cross-referencing.
 
 OWASP Quick Ref: A01=Access Control, A02=Crypto, A03=Injection, A04=Insecure Design, A05=Misconfig, A08=Data Integrity.
 
@@ -200,10 +234,22 @@ After receiving agent output with `#### Intelligence` section:
 
 Root: scope.json, log.md, findings.md, intel.md, intel-secrets.json, report.md, auth.json, and the transient worker buffer only.
 
-## Skills
+## Skills and References
 
 If a relevant skill exists for the task, you must use it before improvising.
 If no suitable skill exists, check `agent/SKILL.md` and then `agent/references/INDEX.md`. Only invent a new approach after confirming the existing skill/reference set is insufficient.
+
+**References are not optional depth.** The `agent/references/` library contains 20+ payload files, OWASP Top 10:2025 checklists, API Security Top 10:2023 checklists, red team TTPs, and CLI tool cheatsheets. When a skill's "Extended Resources" footer lists reference files, those are required reading for that test class.
+
+## Key Rule Reminders
+
+- **No theoretical findings** — if an attacker cannot do it right now with real harm, it is not a finding yet
+- **Kill weak leads fast** — theory without a real request, stacked fragile preconditions, or unproved chains → kill
+- **Severity follows proved impact** — CVEs and recon hints do not inflate severity
+- **No speculative language** — `could potentially`, `may allow`, `might be possible` are banned
+- **Sibling rule** — when one route is vulnerable, check its siblings before moving on
+- **Credentials require proof** — show what leaked tokens actually grant before recording a finding
+- **Validate before writing** — no report drafting before a lead is reproducible and evidence-backed
 
 ## Session Resumption
 
@@ -241,8 +287,9 @@ Only relevant when target contains `*` or is a bare domain.
 ## Handoff Reference
 
 See `agent/references/handoff-protocols.md` for detailed agent-to-agent handoff rules.
-Summary: recon→source-analyzer+backend state, source→work-buffer+durable findings, vuln-analyst→exploit/fuzzer,
-fuzzer→work-buffer+vuln-analyst, exploit→durable findings+auth, osint→intel.md only, report←all files.
+
+Each agent's Handoffs section specifies **which skill to bring** when passing work downstream.
+Summary: recon→source-analyzer (bring source-analysis skill) + vuln-analyst (bring matching vuln-class skill), source→vuln-analyst+fuzzer (bring matching skill), vuln-analyst→exploit-developer (bring matching finding-class skill) / fuzzer (bring fuzzing skill), exploit→report-writer (bring report-generation skill) / osint-analyst (bring osint-recon skill), osint→exploit-developer (bring matching skill), report←backend API (self-service via report-findings endpoint).
 
 ## Optional Final Validation
 

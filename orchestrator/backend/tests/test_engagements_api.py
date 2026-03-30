@@ -124,7 +124,21 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
             "evidence_ref": "findings.md",
             "notes": "Confirmed with adjacent object ids.",
             "source_name": "exploit-developer",
-            "details": {"impact": "cross-tenant access"},
+            "details": {
+                "evidence": "GET /orders/7 returns order for user B when authenticated as user A",
+                "impact": "cross-tenant access",
+                "owasp_category": "A01:2021 Broken Access Control",
+                "cwe_id": "CWE-639",
+                "request_method": "GET",
+                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+                "cvss_score": 6.5,
+                "remediation": "Enforce server-side ownership checks on order retrieval",
+                "steps_to_reproduce": [
+                    "Authenticate as user A",
+                    "GET /orders/7 (belongs to user B)",
+                    "Observe full order data returned"
+                ]
+            },
             "provenance": {"agent_name": "exploit-developer"},
             "links": [],
         },
