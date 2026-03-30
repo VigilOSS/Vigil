@@ -23,7 +23,7 @@ class EngagementBroadcaster:
         for websocket in self._connections.get(engagement_key, set()):
             try:
                 await websocket.send_json(payload)
-            except EngagementtimeError:
+            except Exception:
                 stale.append(websocket)
         for websocket in stale:
             self.disconnect(engagement_key, websocket)

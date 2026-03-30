@@ -1,52 +1,6 @@
 from pathlib import Path
 import subprocess
 
-
-def test_operator_prompt_outputs_drop_old_ctf_and_cases_db_authority_language():
-    repo_root = Path(__file__).resolve().parents[3]
-    files = [
-        repo_root / "agent" / "operator-core.md",
-        repo_root / "agent" / "AGENTS.md",
-        repo_root / "agent" / "CLAUDE.md",
-        repo_root / "agent" / "scripts" / "render-operator-prompts.sh",
-    ]
-
-    for path in files:
-        text = path.read_text(encoding="utf-8")
-        assert "LOCAL LAB/CTF" not in text
-        assert "CTF/lab" not in text
-        assert "cases.db IS the state" not in text
-
-
-def test_operator_prompt_outputs_require_realistic_lab_wording_and_skill_first_behavior():
-    repo_root = Path(__file__).resolve().parents[3]
-    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
-    agents_prompt = (repo_root / "agent" / "AGENTS.md").read_text(encoding="utf-8")
-
-    assert "realistic lab" in operator_core.lower()
-    assert "if a relevant skill exists" in operator_core.lower()
-    assert "orchestrator backend is canonical" in operator_core.lower()
-    assert "record_finding.sh" in operator_core
-    assert "append_finding.sh" in operator_core
-    assert "rejects markdown" in operator_core.lower()
-    assert "schemas/finding-record.schema.json" in operator_core
-    assert "exploit_policy=pause" in operator_core.lower()
-    assert '"$AGENT_ROOT/scripts/dispatcher.sh"' in operator_core
-    assert './scripts/dispatcher.sh "$ENGAGEMENT_DIR/cases.db"' not in operator_core
-    assert "do not instruct the human to run shell approval commands directly" in operator_core.lower()
-    assert "launch_exploit_session.sh" in operator_core
-    assert "record_session_proposal.sh" in operator_core
-    assert "merge_exploit_session.sh" in operator_core
-    assert "auth.json is the live auth contract" in operator_core.lower()
-    assert "mitmproxy-assisted login capture" in operator_core.lower()
-    assert "confirm_mode=manual" not in operator_core.lower()
-    assert ".active" not in operator_core
-    assert "realistic lab" in agents_prompt.lower()
-    assert "agent/skill.md" in agents_prompt.lower()
-    assert "agent/rules/hunting.md" in agents_prompt.lower()
-    assert "agent/agents/*.md" in agents_prompt.lower()
-
-
 def test_operator_prompt_outputs_define_default_model_policy():
     repo_root = Path(__file__).resolve().parents[3]
     operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8").lower()

@@ -25,6 +25,7 @@ function navigate(route: string) {
 export default function App() {
   const [route, setRoute] = useState(currentRoute());
   const [engagements, setEngagements] = useState<Engagement[]>([]);
+  const engagementRoute = useMemo(() => parseEngagementRoute(route), [route]);
 
   useEffect(() => {
     const handler = () => setRoute(currentRoute());
@@ -34,25 +35,37 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    let refreshing = false;
 
     async function refreshEngagements() {
-      const nextEngagements = await listEngagements();
-      if (cancelled) return;
-      setEngagements(nextEngagements);
+      if (refreshing) {
+        return;
+      }
+      refreshing = true;
+      try {
+        const nextEngagements = await listEngagements();
+        if (!cancelled) {
+          setEngagements(nextEngagements);
+        }
+      } finally {
+        refreshing = false;
+      }
     }
 
     void refreshEngagements();
-    const interval = window.setInterval(() => {
-      void refreshEngagements();
-    }, 5000);
+    const interval = engagementRoute
+      ? null
+      : window.setInterval(() => {
+          void refreshEngagements();
+        }, 5000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      if (interval !== null) {
+        window.clearInterval(interval);
+      }
     };
-  }, []);
-
-  const engagementRoute = useMemo(() => parseEngagementRoute(route), [route]);
+  }, [engagementRoute]);
 
   if (engagementRoute) {
     return <EngagementPage engagementKey={engagementRoute} onBack={() => navigate("/engagements")} />;

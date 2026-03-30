@@ -20,7 +20,14 @@ export function EngagementsPage({ engagements, onOpenEngagement }: EngagementsPa
 
       <section className="engagement-column">
         {engagements.map((engagement) => (
-          <article className="panel engagement-card" key={engagement.key}>
+          <article
+            className="panel engagement-card engagement-card-clickable"
+            key={engagement.key}
+            onClick={() => onOpenEngagement(engagement.key)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => { if (e.key === "Enter") onOpenEngagement(engagement.key); }}
+          >
             <div className="engagement-heading">
               <div>
                 <h2>{engagement.target}</h2>
@@ -33,13 +40,6 @@ export function EngagementsPage({ engagements, onOpenEngagement }: EngagementsPa
             <p className="meta-text">
               Phase: {engagement.current_phase} &middot; {engagement.session_count} session{engagement.session_count !== 1 ? "s" : ""}
             </p>
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={() => onOpenEngagement(engagement.key)}
-            >
-              Open engagement
-            </button>
           </article>
         ))}
         {engagements.length === 0 ? (

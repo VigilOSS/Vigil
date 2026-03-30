@@ -281,6 +281,66 @@ export function readArtifact(engagementKey: string, artifactName: string) {
   return request<ArtifactContent>(`/engagements/${engagementKey}/artifacts/${artifactName}`);
 }
 
+// ── Coverage & discovery types ──────────────────────────
+
+export type AssessmentTarget = {
+  id: number;
+  identity: string;
+  kind: string;
+  host: string;
+  ip_address: string | null;
+  hostname: string | null;
+  notes: string;
+  discovered_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AssessmentService = {
+  id: number;
+  target_id: number;
+  endpoint: string;
+  port: number | null;
+  protocol: string;
+  service: string;
+  state: string;
+  coverage_status: string;
+  banner: string;
+  notes: string;
+  discovered_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AssessmentCoverageItem = {
+  id: number;
+  request_variant_id: number | null;
+  service_id: number | null;
+  auth_context: string;
+  input_slot: string;
+  attack_family: string;
+  status: string;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+  method: string | null;
+  canonical_url: string | null;
+  service_endpoint: string | null;
+  service_name: string | null;
+};
+
+export function listAssessmentTargets(engagementKey: string) {
+  return request<AssessmentTarget[]>(`/engagements/${engagementKey}/assessment/targets`);
+}
+
+export function listAssessmentServices(engagementKey: string) {
+  return request<AssessmentService[]>(`/engagements/${engagementKey}/assessment/services`);
+}
+
+export function listAssessmentCoverageItems(engagementKey: string) {
+  return request<AssessmentCoverageItem[]>(`/engagements/${engagementKey}/assessment/coverage-items`);
+}
+
 export function engagementWebSocketUrl(engagementKey: string): string {
   const url = new URL(`ws/engagements/${encodeURIComponent(engagementKey)}`, appBaseUrl());
   url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
