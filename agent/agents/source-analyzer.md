@@ -52,6 +52,12 @@ Return concise structured output with these sections when relevant:
 
 Use `#### Surface Candidates` when the operator should sync new durable attack surface.
 
+## Finding Recording
+
+**MANDATORY:** If source analysis produces findings (e.g., leaked secrets, exposed API keys),
+record each via `./scripts/record_finding.sh "$DIR" source-analyzer <finding-json-file>`
+before your task completes. Do not defer recording to the operator. Unrecorded findings are lost data.
+
 ## Handoffs
 
 - To `vulnerability-analyst`: API routes, object references, mutation paths, auth assumptions, feature flags — bring the vuln-class skill from `agent/SKILL.md` matching the candidate (e.g., `idor-testing` for object refs, `sqli-testing` for query params)

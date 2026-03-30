@@ -37,6 +37,12 @@ Return concise structured output with these sections when relevant:
 - `#### Findings`
 - `#### Recommended Next Actions`
 
+## Finding Recording
+
+**MANDATORY:** If fuzzing produces confirmed findings, record each via
+`./scripts/record_finding.sh "$DIR" fuzzer <finding-json-file>` before your task completes.
+Do not defer recording to the operator. Unrecorded findings are lost data.
+
 ## Handoffs
 
 - To `vulnerability-analyst`: anomalous responses and high-confidence candidate paths

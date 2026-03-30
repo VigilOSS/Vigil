@@ -64,7 +64,11 @@ Only improvise after confirming the existing skill and reference set is genuinel
 
 ## 4. Finding IDs and Recording
 
-**Never hand-allocate finding IDs.** Always use the record script to get a canonical slug.
+**MANDATORY: Every finding MUST be recorded via `record_finding.sh`.** Never hand-allocate
+finding IDs. Never write findings only to markdown. Never skip the recording step. If you
+produce a finding in any output section, you MUST also call `record_finding.sh` before your
+task is complete. Findings that exist only in your output text and were not recorded via the
+script are considered lost data.
 
 | Agent | Prefix | Example |
 |-------|--------|---------|
@@ -98,6 +102,10 @@ Do not produce markdown findings — convert to JSON before recording.
 ```
 
 This keeps CVSS queryable from the API and gives report-writer structured data to format.
+
+**Failure to use `record_finding.sh` is the single most common subagent defect.** If you
+produce `#### Findings` output, each finding payload in that section must have been recorded
+via `record_finding.sh` during your session. Do not defer recording to the operator.
 
 ---
 
@@ -160,3 +168,14 @@ Full rule sets: `agent/rules/hunting.md`, `agent/rules/reporting.md`
 
 Full checklists: `agent/references/vuln-checklists/`
 API security: `agent/references/api-security/`
+
+---
+
+## 9. Script Path Convention
+
+All script references (`record_finding.sh`, `append_surface.sh`, `merge_finding.sh`,
+`emit_runtime_event.sh`, `fetch_assessment_record.sh`, etc.) resolve from the agent workspace
+root: `$AGENT_ROOT/scripts/<script-name>` or `./scripts/<script-name>` after `cd agent`.
+
+Do not hardcode absolute paths. Do not assume scripts are in the current working directory.
+Set `ENGAGEMENT_DIR` before calling any script that depends on it.

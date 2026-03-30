@@ -30,6 +30,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 7. **DISPATCH** — ALWAYS dispatch to subagent. Do NOT test directly with host-side commands. Your job is orchestration: phase control, specialist selection, state review, and synchronized artifact handling.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/record_finding.sh` or the assessment API so findings.md remains a synchronized export, not the authoritative store. `append_finding.sh` now rejects markdown and points to `schemas/finding-record.schema.json`.
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/append_surface.sh` so the backend and readable export stay in sync. Do not call `scripts/lib/surfaces.sh` directly and do not patch `surfaces.jsonl` by hand during normal operation. After each surface update batch, wait for the command to finish and then verify `surfaces.jsonl` with a fresh read. If the first verification read does not reflect the expected change, re-read once before assuming failure. Only treat it as a real helper/backend problem if the command completed successfully and a second fresh read still disagrees; in that case, stop and report the sync issue instead of editing the artifact manually.
+   If surface recording fails with a connection error, verify the orchestrator backend is running and that `ORCHESTRATOR_BASE_URL` and the engagement key are set correctly (check `engagement.json` and `.orchestrator.env` in the engagement directory).
 10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
 11. **LOOP** — Back to step 1.
 
@@ -101,6 +102,17 @@ Every dispatch must include:
   - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `fetch_assessment_record.sh` — do not pre-filter B candidates for it
   - For `report-writer`: no finding context needed — the agent queries the `report-findings` endpoint directly
 
+### Pre-Dispatch Checklist
+
+Before every dispatch, verify:
+
+- [ ] Agent identity named and target URL specified
+- [ ] Current phase stated with specific task objective (not just "test this")
+- [ ] Skill to load identified from `agent/SKILL.md`
+- [ ] Prior relevant findings or existing finding slugs included (so the agent can reference them instead of creating duplicates)
+- [ ] log.md checked for duplicate dispatch (DEDUP rule)
+- [ ] Parallelism decision made (independent → parallel, dependent → sequential)
+
 DEDUP: Check log.md before dispatch. Never dispatch same agent for same objective twice.
 PARALLEL: Independent tasks → parallel. Dependent → sequential.
 
@@ -110,8 +122,9 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
 2. **COLLECT** → operator-orchestrated. Steps in order:
    a. Ingest all endpoints from Phase 1 into the backend: `cat endpoints.txt | ./scripts/recon_ingest.sh "$DIR/cases.db" recon`
    b. Run Katana via Kali MCP to crawl from live targets (Katana is installed in the runtime container — invoke it through the MCP command-execution tool, not host-side):
-      `katana -u https://target.example -d 3 -jc -kf all -o /tmp/katana_output.txt`
-      If `auth.json` has `active_use=true`, pass cookies/headers: `katana -u URL -H "Cookie: ..." -H "Authorization: ..." ...`
+      `katana -u https://target.example -d 3 -jc -kf all -tlsv -o /tmp/katana_output.txt`
+      Use `-tlsv` to skip TLS verification for targets with expired, self-signed, or mismatched certificates. Without it, Katana will bail on invalid certs and produce minimal output.
+      If `auth.json` has `use_for_requests` set to `true` and `state` set to `available`, pass cookies/headers: `katana -u URL -H "Cookie: ..." -H "Authorization: ..." ...`
    c. Ingest Katana output into backend: `cat /tmp/katana_output.txt | ./scripts/recon_ingest.sh "$DIR/cases.db" katana`
    d. Inspect work-buffer stats: `./scripts/dispatcher.sh "$DIR/cases.db" stats`
    e. Inspect coverage gaps: `./scripts/fetch_assessment_record.sh summary`
@@ -127,7 +140,9 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
    - `full_send`: dispatch osint-analyst + exploit-developer in parallel.
    After osint: read intel.md, HIGH value → durable finding update + exploit 2nd round.
 5. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
-6. **REPORT** → dispatch report-writer with `agent/skills/report-generation/SKILL.md`. Report-writer queries the backend directly for `report-findings`, `attack-chains`, `surfaces`, and `summary` — do not manually assemble findings context. After report-writer completes, update scope.json phase to `complete`.
+6. **REPORT** → **Before dispatching report-writer**, merge duplicate findings so the `report-findings` endpoint returns a clean deduplicated set. Check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker finding into the stronger one:
+   `./scripts/merge_finding.sh "$DIR" <source-slug> <target-slug> "<reason>"`
+   Then dispatch report-writer with `agent/skills/report-generation/SKILL.md`. Report-writer queries the backend directly for `report-findings`, `attack-chains`, `surfaces`, and `summary` — do not manually assemble findings context. After report-writer completes, update scope.json phase to `complete`.
 
 After each phase update scope.json:
 ```bash
@@ -162,6 +177,19 @@ All target-facing work must go through the attached Kali MCP runtime.
 - If a required target-facing tool is missing from the active Kali MCP session, say so explicitly and stop to resolve the runtime gap rather than falling back to host or Docker-side execution paths.
 - Host-side runtime diagnosis may inspect local files, container metadata, mounts, and environment, but may not send scoped HTTP, DNS, or raw TCP probes from the host.
 
+### Kali MCP Troubleshooting
+
+If Kali MCP tools are not available or MCP tool discovery returns no tools:
+
+1. Verify the runtime container is running: `docker ps --filter name=security-research`
+2. Verify the MCP server process inside the container: `docker exec security-research pgrep -f mcp-server`
+3. Check MCP client registration: `claude mcp list` (Claude) or `codex mcp list` (Codex)
+4. If the MCP server is not registered, register it: `claude mcp add kali -s user -- docker exec -i security-research mcp-server`
+5. **MCP tools load at session startup.** If you registered the MCP server during this session, restart the session for tools to become available.
+6. Restart the runtime if unhealthy: `./scripts/start_kali_mcp_runtime.sh`
+
+Do not fall back to `docker exec` for target-facing work. Host-side `docker` commands are permitted only for diagnostic inspection (container status, logs, process lists).
+
 ## Finding Format
 
 Agents use PREFIXED IDs:
@@ -174,6 +202,8 @@ Agents use PREFIXED IDs:
 | recon-specialist | RE | FINDING-RE-001 |
 | fuzzer | FZ | FINDING-FZ-001 |
 | osint-analyst | OS | FINDING-OS-001 |
+
+Prefix mnemonics: EX=exploit, VA=vuln-analyst, SA=source-analyzer, RE=recon, FZ=fuzzer, OS=osint. The prefix is the agent mnemonic assigned by `record_finding.sh`, not the initials of the full agent name.
 
 Never hand-allocate finding IDs. Create a structured finding payload, then record it via:
 `./scripts/record_finding.sh "$DIR" <agent-name> <finding-json-file>`
