@@ -240,7 +240,6 @@ echo "════════════════════════�
 echo -e "${GREEN}Installation complete! (${PRODUCT})${NC}"
 echo ""
 echo "  Installed to: $INSTALL_DIR"
-echo "  Use only against authorized realistic lab environments."
 echo ""
 echo "  Next steps:"
 echo "    Configure shared runtime env in $INSTALL_DIR/.env as needed"

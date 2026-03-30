@@ -39,6 +39,25 @@ if missing:
 unknown = sorted(set(payload.keys()) - set(properties.keys()))
 if unknown:
     raise SystemExit(f"finding payload has unsupported fields: {', '.join(unknown)}")
+
+def check_nested(obj, obj_schema, path):
+    if not isinstance(obj, dict) or obj_schema.get("type") != "object":
+        return
+    nested_props = obj_schema.get("properties", {})
+    if not obj_schema.get("additionalProperties", True) and nested_props:
+        bad = sorted(set(obj.keys()) - set(nested_props.keys()))
+        if bad:
+            raise SystemExit(f"{path} has unsupported fields: {', '.join(bad)}")
+    nested_required = obj_schema.get("required", [])
+    missing_nested = [k for k in nested_required if k not in obj]
+    if missing_nested:
+        raise SystemExit(f"{path} missing required fields: {', '.join(missing_nested)}")
+
+if "details" in payload and isinstance(payload["details"], dict):
+    check_nested(payload["details"], properties.get("details", {}), "details")
+
+if "provenance" in payload and isinstance(payload["provenance"], dict):
+    check_nested(payload["provenance"], properties.get("provenance", {}), "provenance")
 PY
 
 lock_dir="$(acquire_finding_lock "$ENG_DIR")"
@@ -117,6 +136,13 @@ location = finding.get("canonical_location") or details.get("parameter") or ""
 auth_context = finding.get("auth_context") or "anonymous"
 evidence = details.get("evidence") or finding.get("evidence_ref") or ""
 impact = details.get("impact") or finding.get("summary") or ""
+owasp_category = details.get("owasp_category") or ""
+cwe_id = details.get("cwe_id") or ""
+request_method = details.get("request_method") or ""
+cvss_vector = details.get("cvss_vector") or ""
+cvss_score = details.get("cvss_score")
+remediation = details.get("remediation") or ""
+steps = details.get("steps_to_reproduce") or []
 notes = (finding.get("notes") or "").strip()
 
 lines = [
@@ -127,14 +153,29 @@ lines = [
 ]
 if defect_family:
     lines.append(f"- **Type**: {defect_family}")
+if owasp_category:
+    lines.append(f"- **OWASP**: {owasp_category}")
+if cwe_id:
+    lines.append(f"- **CWE**: {cwe_id}")
 if location:
-    lines.append(f"- **Location**: {location}")
+    loc = f"{request_method} {location}" if request_method else location
+    lines.append(f"- **Location**: {loc}")
 if auth_context:
     lines.append(f"- **Auth Context**: {auth_context}")
+if cvss_vector:
+    score_str = f" ({cvss_score})" if cvss_score is not None else ""
+    lines.append(f"- **CVSS**: {cvss_vector}{score_str}")
 if evidence:
     lines.append(f"- **Evidence**: {evidence}")
 if impact:
     lines.append(f"- **Impact**: {impact}")
+if remediation:
+    lines.append(f"- **Remediation**: {remediation}")
+if steps:
+    lines.append("")
+    lines.append("**Steps to Reproduce:**")
+    for i, step in enumerate(steps, 1):
+        lines.append(f"{i}. {step}")
 
 block = "\n".join(lines).rstrip()
 if notes:

@@ -189,3 +189,8 @@ curl -s -X POST "http://target/api/payment" \
   - HIGH: financial loss, unauthorized transactions, data manipulation
   - MEDIUM: workflow bypass, feature abuse, state corruption
   - LOW: minor logic inconsistency, informational leak via logic
+
+## Extended Resources
+
+- `agent/references/payloads/business-logic-payloads.md` — negative quantity, coupon abuse, payment bypass, mass assignment
+- `agent/references/vuln-checklists/A06-insecure-design.md` — OWASP Top 10:2025 insecure design checklist

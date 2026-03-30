@@ -161,6 +161,20 @@ def get_findings(engagement_key: str) -> list[dict[str, Any]]:
     return state_manager.list_findings(engagement.id)
 
 
+@router.get("/report-findings")
+def get_report_findings(engagement_key: str) -> list[dict[str, Any]]:
+    """Findings formatted for report generation.
+
+    Sorted by severity (critical first), excludes merged findings, and extracts
+    CVSS, remediation, CWE, and steps-to-reproduce from the details blob.
+    Each finding includes a ``report_id`` (e.g. ``FINDING-001``) for sequential
+    report numbering and a ``slug`` field so the original backend ID remains
+    available for cross-referencing.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_report_findings(engagement.id)
+
+
 @router.get("/finding-links")
 def get_finding_links(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)

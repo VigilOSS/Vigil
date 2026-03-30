@@ -38,37 +38,30 @@
     },
     "defect_family": {
       "type": "string",
-      "minLength": 1,
       "maxLength": 128
     },
     "root_cause_key": {
       "type": "string",
-      "minLength": 1,
       "maxLength": 256
     },
     "auth_context": {
       "type": "string",
-      "minLength": 1,
       "maxLength": 128
     },
     "canonical_location": {
       "type": "string",
-      "minLength": 1,
       "maxLength": 1024
     },
     "summary": {
       "type": "string",
-      "minLength": 1,
       "maxLength": 4096
     },
     "evidence_ref": {
       "type": "string",
-      "minLength": 1,
       "maxLength": 1024
     },
     "notes": {
       "type": "string",
-      "minLength": 1,
       "maxLength": 20000
     },
     "source_name": {
@@ -77,31 +70,73 @@
     },
     "details": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "required": ["evidence", "impact"],
       "properties": {
         "discovered_by": {
-          "type": "string"
+          "type": "string",
+          "description": "Agent name that first identified this finding"
         },
         "owasp_category": {
-          "type": "string"
+          "type": "string",
+          "description": "OWASP Top 10 category (e.g., A03:2021 Injection)"
+        },
+        "cwe_id": {
+          "type": "string",
+          "description": "CWE identifier (e.g., CWE-89 for SQL injection)"
         },
         "parameter": {
-          "type": "string"
+          "type": "string",
+          "description": "Affected parameter name or input vector"
+        },
+        "request_method": {
+          "type": "string",
+          "description": "HTTP method or triggering action (e.g., GET, POST, PUT, DELETE)"
         },
         "evidence": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Exact response excerpt, artifact reference, or replayable proof"
         },
         "impact": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Concrete attacker outcome and affected scope"
+        },
+        "cvss_vector": {
+          "type": "string",
+          "description": "CVSS 3.1 vector string (e.g., CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N)"
+        },
+        "cvss_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Numeric CVSS 3.1 base score"
+        },
+        "remediation": {
+          "type": "string",
+          "description": "Recommended fix or the control that failed"
+        },
+        "steps_to_reproduce": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ordered reproduction steps, one string per step"
         }
       }
     },
     "provenance": {
       "type": "object",
-      "additionalProperties": true
+      "additionalProperties": false,
+      "properties": {
+        "agent_name": {
+          "type": "string",
+          "description": "Name of the agent that produced this finding"
+        },
+        "artifact": {
+          "type": "string",
+          "description": "Artifact path where this finding is synchronized (e.g., findings.md)"
+        }
+      }
     },
     "request_variant_id": {
       "type": "integer",
@@ -142,7 +177,10 @@
           },
           "provenance": {
             "type": "object",
-            "additionalProperties": true
+            "additionalProperties": false,
+            "properties": {
+              "agent_name": { "type": "string" }
+            }
           }
         }
       }

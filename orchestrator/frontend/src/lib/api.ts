@@ -67,6 +67,20 @@ export type AssessmentFinding = {
   updated_at: string;
 };
 
+export type FindingDetails = {
+  discovered_by?: string;
+  owasp_category?: string;
+  cwe_id?: string;
+  parameter?: string;
+  request_method?: string;
+  evidence?: string;
+  impact?: string;
+  cvss_vector?: string;
+  cvss_score?: number;
+  remediation?: string;
+  steps_to_reproduce?: string[];
+};
+
 export type AssessmentFindingDetail = AssessmentFinding & {
   id: number;
   evidence_ref: string;
@@ -74,6 +88,7 @@ export type AssessmentFindingDetail = AssessmentFinding & {
   defect_family: string;
   root_cause_key: string;
   auth_context: string;
+  details_json: string;
   merged_into_slug?: string | null;
 };
 

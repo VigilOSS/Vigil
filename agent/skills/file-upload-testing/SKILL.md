@@ -96,3 +96,8 @@ origin: AI Threat Hunting
 - Path traversal success and file overwritten
 - Severity: Critical (RCE via webshell) or High (XSS, file overwrite)
 - Remediation: allowlist extensions, validate content, rename files, store outside webroot
+
+## Extended Resources
+
+- `agent/references/payloads/upload-payloads.md` — extension bypass, Content-Type bypass, magic bytes, SVG XSS, zip slip
+- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist

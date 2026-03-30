@@ -85,3 +85,8 @@ origin: AI Threat Hunting
 - Filter/WAF bypass technique required
 - Severity: Critical (RCE achieved) or High (blind confirmed)
 - Remediation: use allowlists, parameterized APIs, avoid shell calls
+
+## Extended Resources
+
+- `agent/references/payloads/command-injection-payloads.md` — blind detection, filter bypass, Linux/Windows, argument injection
+- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist

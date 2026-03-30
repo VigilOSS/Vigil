@@ -102,3 +102,8 @@ origin: AI Threat Hunting
 - DoS threshold (depth/complexity before failure)
 - Severity based on impact (data leak, RCE, DoS)
 - Remediation: disable introspection in prod, enforce depth/complexity limits, field-level authz
+
+## Extended Resources
+
+- `agent/references/payloads/graphql-payloads.md` — introspection, batching, field suggestion, injection in variables
+- `agent/references/api-security/API05-broken-function-authz.md` — OWASP API Security: function-level authorization checklist

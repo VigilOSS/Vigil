@@ -105,3 +105,8 @@ http://127.0.0.1:2375/containers/json  # Docker API
 http://127.0.0.1:8500/v1/kv/?recurse   # Consul
 https://127.0.0.1:10250/pods/          # Kubelet
 ```
+
+## Extended Resources
+
+- `agent/references/payloads/ssrf-payloads.md` — URL schemas, IP bypass, cloud metadata (AWS/GCP/Azure)
+- `agent/references/api-security/API07-ssrf.md` — OWASP API Security Top 10:2023 SSRF checklist

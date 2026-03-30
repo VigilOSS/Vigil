@@ -454,6 +454,16 @@ cat > "$DIR/findings.md" <<EOF
 ---
 EOF
 
+cat > "$DIR/report.md" <<EOF
+# Engagement Report
+
+- **Target**: ${TARGET_NORMALIZED}
+- **Engagement Date**: ${DATE}
+- **Status**: Pending — report not yet generated
+
+---
+EOF
+
 : > "$DIR/surfaces.jsonl"
 printf '[]\n' > "$DIR/intel-secrets.json"
 write_auth_scaffold "$DIR" "$AUTH_MODE" "$START_TIME"
