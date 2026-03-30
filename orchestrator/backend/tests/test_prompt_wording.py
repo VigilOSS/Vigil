@@ -31,7 +31,7 @@ def test_operator_prompt_outputs_require_realistic_lab_wording_and_skill_first_b
     assert "rejects markdown" in operator_core.lower()
     assert "schemas/finding-record.schema.json" in operator_core
     assert "exploit_policy=pause" in operator_core.lower()
-    assert "approve_exploitation.sh" in operator_core
+    assert "do not instruct the human to run shell approval commands directly" in operator_core.lower()
     assert "launch_exploit_session.sh" in operator_core
     assert "record_session_proposal.sh" in operator_core
     assert "merge_exploit_session.sh" in operator_core

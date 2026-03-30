@@ -62,7 +62,7 @@ Before initializing any engagement, ensure the shared Kali MCP runtime is runnin
 ./scripts/start_kali_mcp_runtime.sh
 ```
 
-This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist, but within a single install the repo still tracks one active engagement through `engagements/.active`.
+This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install. `engagements/.active` is only a convenience pointer to the current engagement.
 
 ## Engagement Initialization
 
@@ -77,7 +77,7 @@ Initialize a run with:
   [--exploit-policy pause|full_send|selected]
 ```
 
-This creates the engagement directory, readable artifacts, session workspace, explicit scope metadata, an `auth.json` scaffold, engagement-local `AGENTS.md`/`CLAUDE.md` wrappers that point back to the workspace-root prompts and skills, and the transient local work buffer used for batching worker tasks, and updates `engagements/.active`.
+This creates the engagement directory, readable artifacts, session workspace, explicit scope metadata, an `auth.json` scaffold, engagement-local `AGENTS.md`/`CLAUDE.md` wrappers that point back to the workspace-root prompts and skills, the transient local work buffer used for batching worker tasks, an `engagement.json` manifest, and updates `engagements/.active`.
 
 Rules:
 - Do not delegate initialization to a general subagent.
@@ -116,7 +116,7 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
    High-risk surfaces `account_recovery`, `dynamic_render`, `object_reference`, and `privileged_write`
    may NOT remain `deferred` when moving to Exploit/Report. They must be `covered` or `not_applicable`.
 4. **EXPLOIT** → respect `exploit_policy` from `scope.json`.
-   - `pause`: stop, run `./scripts/review_exploit_candidates.sh "$DIR"`, then wait for the human to approve with `./scripts/approve_exploitation.sh`.
+   - `pause`: stop and ask the human which findings are approved for exploitation. Use the local approval/session helper scripts yourself if needed, but do not instruct the human to run shell approval commands directly.
    - `selected`: exploit only the approved finding slugs recorded in scope metadata.
    - `full_send`: dispatch osint-analyst + exploit-developer in parallel.
    After osint: read intel.md, HIGH value → durable finding update + exploit 2nd round.
@@ -226,9 +226,9 @@ If no suitable skill exists, check `references/INDEX.md`. Only invent a new appr
 
 On start or when resuming the last active engagement:
 ```bash
-ENG_DIR=$(ls -td engagements/*/ 2>/dev/null | head -1 | sed 's|/$||')
-cat "$ENG_DIR/scope.json"
-./scripts/dispatcher.sh "$ENG_DIR/cases.db" stats 2>/dev/null
+ENGAGEMENT_DIR="$(pwd)/engagements/$(cat engagements/.active)"
+cat "$ENGAGEMENT_DIR/scope.json"
+./scripts/dispatcher.sh "$ENGAGEMENT_DIR/cases.db" stats 2>/dev/null
 ```
 
 If status=in_progress: read scope/log state, inspect orchestrator coverage and findings state when available, recover stale work-buffer items, and resume from the correct phase.
@@ -264,8 +264,8 @@ show signs of prior exploitation in the available telemetry window.
 
 When exploit work should be split across multiple Codex sessions, the coordinator stays manual.
 
-1. Approve exploit scope first with `./scripts/approve_exploitation.sh`.
-2. Create a worker session with:
+1. Get human approval for exploit scope inside the conversation before launching worker sessions.
+2. Create a worker session with the local helper script when needed:
 ```bash
 ./scripts/launch_exploit_session.sh "$DIR" <session-id> <finding-slug> [finding-slug...]
 ```

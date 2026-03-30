@@ -178,6 +178,11 @@ else
     warn "Created $INSTALL_DIR/.env from template — update tokens and API keys before scanning"
   fi
 
+  if [ ! -f "$INSTALL_DIR/.orchestrator.env" ]; then
+    printf 'ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000\n' > "$INSTALL_DIR/.orchestrator.env"
+    ok "Created $INSTALL_DIR/.orchestrator.env"
+  fi
+
   if [ -d "$INSTALL_DIR/agent/scripts" ]; then
     chmod +x "$INSTALL_DIR/agent/scripts/"*.sh "$INSTALL_DIR/agent/scripts/lib/"*.sh "$INSTALL_DIR/agent/scripts/hooks/"*.sh 2>/dev/null || true
     ok "Script permissions set"

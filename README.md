@@ -21,9 +21,9 @@ This repository contains the operator prompts, Kali MCP runtime, engagement scaf
 
 ### Choose one client per install
 
-Keep Claude and Codex in separate installs and separate engagement trees. Do not run both clients against the same `engagements/` directory.
+Keep Claude and Codex in separate installs and separate engagement trees. Do not run both clients against the same install directory.
 
-The shared Kali MCP runtime is not per-engagement. Start it once and then attach one or more client installs to the same `docker exec -i security-research mcp-server` endpoint. Within a single install, the repo tracks one active engagement via `engagements/.active`.
+The shared Kali MCP runtime is not per-engagement. Start it once and then attach one or more client installs to the same `docker exec -i security-research mcp-server` endpoint. Within a single install, multiple engagements may exist under `agent/engagements/`. `engagements/.active` is only a convenience pointer to the most recent active engagement.
 
 - Codex install:
 ```bash
@@ -64,6 +64,18 @@ claude mcp add kali -s user -- docker exec -i security-research mcp-server
 codex mcp add kali -- docker exec -i security-research mcp-server
 ```
 
+### 2. Orchestrator UI
+
+The orchestrator frontend/backend is a separate local service. It is not part of the Kali runtime image and it is not started by `start_kali_mcp_runtime.sh`.
+
+Start it from the install root with:
+
+```bash
+./orchestrator/start_local.sh
+```
+
+That builds the frontend, then serves the local UI from the backend at `http://127.0.0.1:18000`.
+
 Then create an engagement inside the chosen install:
 
 ```bash
@@ -81,23 +93,17 @@ If you omit those flags and run in a TTY, `init_engagement.sh` prompts for scope
 
 After `init_engagement.sh` finishes, it prints the full path to the new engagement directory and updates `engagements/.active`.
 
-1. `cd` into that printed engagement directory, run `export ENG_DIR="$PWD"`, confirm the seeded files are present, and start `codex` or `claude`. Each engagement now seeds local `AGENTS.md` and `CLAUDE.md` wrappers so a client started from the engagement folder can still find the workspace-root prompts, skills, references, and scripts.
+1. `cd` into that printed engagement directory, run `export ENGAGEMENT_DIR="$PWD"`, confirm the seeded files are present, and start `codex` or `claude`. Each engagement seeds local `AGENTS.md` and `CLAUDE.md` wrappers so a client started from the engagement folder can still find the workspace-root prompts, skills, references, and scripts.
 2. Prefer `gpt-5.4` with `high` reasoning for Codex and `Opus 4.6` for Claude. Drop to `gpt-5.4-mini` or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
 3. Tell the operator: `Run this engagement using the operator workflow. Start by reading scope.json and log.md, tell me the current phase, and show the next numbered actions.`
-4. Expect the operator to assess the current state, usually start in `recon` for a new run, route target-facing work through the attached Kali MCP runtime, use relevant skills before improvising, and keep `log.md`, `findings.md`, `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. If the run was launched by the orchestrator, the engagement directory also carries a local `.orchestrator.env` so backend-sync scripts can keep working when the interactive shell itself does not expose `ORCHESTRATOR_*`.
+4. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through the attached Kali MCP runtime, use relevant skills before improvising, and keep `log.md`, `findings.md`, `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements also carry a local `.orchestrator.env` so backend-sync scripts can keep working from inside the engagement directory.
 
 During the engagement, expect short operator updates, numbered next-step choices when a decision matters, and a manual approval checkpoint before exploit work continues when `exploit_policy` is `pause` or `selected`.
 
-When an engagement reaches exploit review with `--exploit-policy pause` or `selected`, the operator reviews and approves exploit work manually:
+Worker sessions write proposal files under `sessions/<session-id>/`; the coordinator merges approved proposals back into canonical backend state. User-facing exploit review should happen through the orchestrator UI or by telling Codex/Claude which findings are approved. Direct shell invocation of approval/session scripts is an internal maintenance path, not the primary operator workflow.
 
-```bash
-./scripts/review_exploit_candidates.sh "$ENG_DIR"
-./scripts/approve_exploitation.sh "$ENG_DIR" selected FINDING-VA-001 FINDING-EX-003
-./scripts/launch_exploit_session.sh "$ENG_DIR" session-a FINDING-VA-001
-./scripts/merge_exploit_session.sh "$ENG_DIR" session-a
-```
-
-Worker sessions write proposal files under `sessions/<session-id>/`; the coordinator merges approved proposals back into canonical backend state.
+TODO:
+- Add first-class UI actions for exploit approval, session launch, and session merge so this workflow no longer depends on internal helper scripts at all.
 
 Methodology references:
 - [engagement-methodology.md](/path/to/vigil)
@@ -140,10 +146,10 @@ These capabilities are intentionally present but not always started automaticall
 
 MITM remains optional. Use it when the engagement needs login capture, authenticated browsing through a live session, or a refresh of expired auth material.
 
-From the install root, you can recover the active engagement directory at any time with `ENG_DIR="$(cat agent/engagements/.active)"`.
+From the install root, you can recover the active engagement directory at any time with `ENGAGEMENT_DIR="$(pwd)/agent/engagements/$(cat agent/engagements/.active)"`.
 
 1. Build the proxy image once if needed: `docker compose -f agent/docker/docker-compose.yml build mitmproxy`
-2. Start the proxy against the active engagement: `docker run --rm -it -p 8080:8080 -v "$ENG_DIR:/engagement" security-research-proxy:latest`
+2. Start the proxy against the active engagement: `docker run --rm -it -p 8080:8080 -v "$ENGAGEMENT_DIR:/engagement" security-research-proxy:latest`
 3. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow, then confirm that `auth.json` was refreshed and continue the engagement with authenticated recollection and testing.
 
 If you need HTTPS interception, install the mitmproxy CA certificate in the browser or device before logging in.
@@ -201,7 +207,7 @@ For reverse shells or richer callback workflows, use the same runtime plus the b
 
 ## Multi-Agent Workflow
 
-The project uses a multi-agent phase model, with durable state stored in the orchestrator:
+The engagement workflow uses a multi-agent phase model, with durable state stored in the orchestrator:
 
 - `recon`
   network and service enumeration, source inspection, and OSINT enrichment
@@ -216,7 +222,7 @@ The project uses a multi-agent phase model, with durable state stored in the orc
 - `report`
   findings synthesis and coverage review
 
-The run page exposes:
+The engagement detail page exposes:
 
 - target count
 - service count
