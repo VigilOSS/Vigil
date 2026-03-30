@@ -92,7 +92,7 @@ render_claude() {
 EOF
     render_banner
     cat <<'EOF'
-║   Powered by Claude Code | Realistic authorized lab runtime  ║
+║   Powered by Claude Code  ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
 ```

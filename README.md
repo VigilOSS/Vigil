@@ -1,7 +1,5 @@
 # AI Threat Hunting
 
-The operating model assumes a fully authorized realistic lab environment that mirrors real public and enterprise behavior closely enough for transferable methodology and tooling decisions.
-
 This repository contains the operator prompts, Kali MCP runtime, engagement scaffolding, and orchestrator services used to run those engagements.
 
 ## Repository Layout
