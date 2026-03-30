@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 
@@ -140,3 +141,47 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
     assert summary.status_code == 200
     assert summary.json()["finding_count"] == 1
+
+
+def test_incompatible_local_database_is_reset(client, isolate_settings):
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    with sqlite3.connect(str(db_path)) as connection:
+        connection.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+        connection.execute(
+            """
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE assessment_attack_chains (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                chain_key TEXT NOT NULL
+            )
+            """
+        )
+        connection.commit()
+
+    write_engagement(isolate_settings["engagements_dir"])
+
+    response = client.get("/engagements")
+    assert response.status_code == 200
+    assert response.json()[0]["key"] == "2026-03-30-120000-example"
+
+    with sqlite3.connect(str(db_path)) as connection:
+        table_names = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        assert "runs" not in table_names
+        event_columns = {row[1] for row in connection.execute("PRAGMA table_info(events)").fetchall()}
+        chain_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_attack_chains)").fetchall()}
+        assert "engagement_id" in event_columns
+        assert "engagement_id" in chain_columns
+        assert "run_id" not in event_columns
+        assert "run_id" not in chain_columns

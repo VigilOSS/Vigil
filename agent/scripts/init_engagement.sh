@@ -106,6 +106,10 @@ print(json.dumps(items, ensure_ascii=True))
 PY
 }
 
+default_orchestrator_base_url() {
+  printf '%s\n' "http://127.0.0.1:18000"
+}
+
 write_engagement_prompt_wrappers() {
   local eng_dir="${1:?engagement dir required}"
   cat > "$eng_dir/AGENTS.md" <<EOF
@@ -114,16 +118,23 @@ write_engagement_prompt_wrappers() {
 Load and follow the workspace operator instructions from:
 - ${ROOT_DIR}/AGENTS.md
 
-This engagement directory is only the run-artifact root. When you start Codex here, use these workspace locations before concluding that a skill, reference, or script is unavailable:
-- Workspace root: ${ROOT_DIR}
+This engagement directory is only the run-artifact root. When you start Codex here, use these workspace locations before concluding that a prompt, agent, rule, skill, reference, or script is unavailable:
+- Install root: ${ROOT_DIR}/..
+- Agent workspace root: ${ROOT_DIR}
+- Operator prompt: ${ROOT_DIR}/AGENTS.md
+- Specialist wrappers: ${ROOT_DIR}/.codex/agents
+- Specialist prompt sources: ${ROOT_DIR}/agents
+- Always-active rules: ${ROOT_DIR}/rules
+- Skill index: ${ROOT_DIR}/SKILL.md
 - Skills: ${ROOT_DIR}/skills
 - References: ${ROOT_DIR}/references
 - Scripts: ${ROOT_DIR}/scripts
-- Operator wrapper: ${ROOT_DIR}/.codex/agents/operator.toml
 
 Artifact sync:
 - Use ${ROOT_DIR}/scripts/record_finding.sh and ${ROOT_DIR}/scripts/append_surface.sh
-- If ${eng_dir}/.orchestrator.env exists and ORCHESTRATOR_* is unset, load it before backend-sync scripts or let the scripts auto-load it
+- When a shared prompt references \`./scripts/...\`, resolve it against ${ROOT_DIR}/scripts from this engagement session
+- Start Codex for this engagement with ${eng_dir}/start_codex.sh so ENGAGEMENT_DIR is exported automatically
+- The local ${eng_dir}/.orchestrator.env provides the default orchestrator base URL for backend-sync scripts; install-root .env can override it
 EOF
 
   cat > "$eng_dir/CLAUDE.md" <<EOF
@@ -132,17 +143,64 @@ EOF
 Load and follow the workspace operator instructions from:
 - ${ROOT_DIR}/CLAUDE.md
 
-This engagement directory is only the run-artifact root. When you start Claude here, use these workspace locations before concluding that a skill, reference, or script is unavailable:
-- Workspace root: ${ROOT_DIR}
+This engagement directory is only the run-artifact root. When you start Claude here, use these workspace locations before concluding that a prompt, agent, rule, skill, reference, or script is unavailable:
+- Install root: ${ROOT_DIR}/..
+- Agent workspace root: ${ROOT_DIR}
+- Operator prompt: ${ROOT_DIR}/CLAUDE.md
+- Specialist wrappers: ${ROOT_DIR}/.claude/agents
+- Specialist prompt sources: ${ROOT_DIR}/agents
+- Always-active rules: ${ROOT_DIR}/rules
+- Skill index: ${ROOT_DIR}/SKILL.md
 - Skills: ${ROOT_DIR}/skills
 - References: ${ROOT_DIR}/references
 - Scripts: ${ROOT_DIR}/scripts
-- Operator wrapper: ${ROOT_DIR}/.claude/agents/operator.md
 
 Artifact sync:
 - Use ${ROOT_DIR}/scripts/record_finding.sh and ${ROOT_DIR}/scripts/append_surface.sh
-- If ${eng_dir}/.orchestrator.env exists and ORCHESTRATOR_* is unset, load it before backend-sync scripts or let the scripts auto-load it
+- When a shared prompt references \`./scripts/...\`, resolve it against ${ROOT_DIR}/scripts from this engagement session
+- Start Claude for this engagement with ${eng_dir}/start_claude.sh so ENGAGEMENT_DIR is exported automatically
+- The local ${eng_dir}/.orchestrator.env provides the default orchestrator base URL for backend-sync scripts; install-root .env can override it
 EOF
+}
+
+write_engagement_launchers() {
+  local eng_dir="${1:?engagement dir required}"
+
+  cat > "$eng_dir/start_codex.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENGAGEMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export ENGAGEMENT_DIR
+AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
+
+if [[ -f "$AGENT_ROOT/scripts/lib/orchestrator_env.sh" ]]; then
+  # shellcheck source=/dev/null
+  . "$AGENT_ROOT/scripts/lib/orchestrator_env.sh"
+  load_orchestrator_env "$ENGAGEMENT_DIR"
+fi
+
+exec codex "$@"
+EOF
+
+  cat > "$eng_dir/start_claude.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENGAGEMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export ENGAGEMENT_DIR
+AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
+
+if [[ -f "$AGENT_ROOT/scripts/lib/orchestrator_env.sh" ]]; then
+  # shellcheck source=/dev/null
+  . "$AGENT_ROOT/scripts/lib/orchestrator_env.sh"
+  load_orchestrator_env "$ENGAGEMENT_DIR"
+fi
+
+exec claude "$@"
+EOF
+
+  chmod +x "$eng_dir/start_codex.sh" "$eng_dir/start_claude.sh"
 }
 
 derive_scope_hosts_json() {
@@ -372,11 +430,7 @@ cat > "$DIR/engagement.json" <<EOF
 }
 EOF
 
-if [[ -n "${ORCHESTRATOR_BASE_URL:-}" ]]; then
-  printf 'ORCHESTRATOR_BASE_URL=%q\n' "$ORCHESTRATOR_BASE_URL" > "$DIR/.orchestrator.env"
-elif [[ -f "$ROOT_DIR/.orchestrator.env" ]]; then
-  cp "$ROOT_DIR/.orchestrator.env" "$DIR/.orchestrator.env"
-fi
+printf 'ORCHESTRATOR_BASE_URL=%q\n' "$(default_orchestrator_base_url)" > "$DIR/.orchestrator.env"
 
 sqlite3 "$DIR/cases.db" < "$SCRIPT_DIR/schema.sql" >/dev/null
 
@@ -387,5 +441,6 @@ else
 fi
 
 write_engagement_prompt_wrappers "$DIR"
+write_engagement_launchers "$DIR"
 
 printf '%s\n' "$DIR"

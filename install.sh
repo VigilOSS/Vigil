@@ -76,6 +76,32 @@ copy_if_exists() {
   fi
 }
 
+preserve_install_path() {
+  local install_dir="$1"
+  local preserve_root="$2"
+  local relative_path="$3"
+  local src="$install_dir/$relative_path"
+  local dest="$preserve_root/$relative_path"
+
+  if [ -e "$src" ]; then
+    mkdir -p "$(dirname "$dest")"
+    mv "$src" "$dest"
+  fi
+}
+
+restore_install_path() {
+  local install_dir="$1"
+  local preserve_root="$2"
+  local relative_path="$3"
+  local src="$preserve_root/$relative_path"
+  local dest="$install_dir/$relative_path"
+
+  if [ -e "$src" ]; then
+    mkdir -p "$(dirname "$dest")"
+    mv "$src" "$dest"
+  fi
+}
+
 echo ""
 if $DRY_RUN; then
   echo "╔══════════════════════════════════════════════════════════════╗"
@@ -136,15 +162,17 @@ else
 
   if [ -d "$INSTALL_DIR/.claude" ] || [ -d "$INSTALL_DIR/.codex" ] || [ -d "$INSTALL_DIR/agent" ] || [ -d "$INSTALL_DIR/docker" ] || [ -f "$INSTALL_DIR/install.sh" ]; then
     warn "Existing installation detected in $INSTALL_DIR — upgrading"
-    for keep in engagements .env auth.json workspace runtime-home; do
-      [ -e "$INSTALL_DIR/$keep" ] && mv "$INSTALL_DIR/$keep" "/tmp/security-research-preserve-$keep" 2>/dev/null
+    PRESERVE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/security-research-preserve.XXXXXX")"
+    for keep in agent/engagements .env workspace runtime-home; do
+      preserve_install_path "$INSTALL_DIR" "$PRESERVE_ROOT" "$keep"
     done
     rm -rf "$INSTALL_DIR/.claude" "$INSTALL_DIR/.codex" "$INSTALL_DIR/agent" "$INSTALL_DIR/docker" \
            "$INSTALL_DIR/orchestrator" "$INSTALL_DIR/tests" \
            "$INSTALL_DIR/README.md" "$INSTALL_DIR/install.sh"
-    for keep in engagements .env auth.json workspace runtime-home; do
-      [ -e "/tmp/security-research-preserve-$keep" ] && mv "/tmp/security-research-preserve-$keep" "$INSTALL_DIR/$keep" 2>/dev/null
+    for keep in agent/engagements .env workspace runtime-home; do
+      restore_install_path "$INSTALL_DIR" "$PRESERVE_ROOT" "$keep"
     done
+    rm -rf "$PRESERVE_ROOT"
   fi
 
   case "$PRODUCT" in
@@ -176,11 +204,6 @@ else
   if [ -f "$AGENT_ROOT/.env.example" ] && [ ! -f "$INSTALL_DIR/.env" ]; then
     cp "$AGENT_ROOT/.env.example" "$INSTALL_DIR/.env"
     warn "Created $INSTALL_DIR/.env from template — update tokens and API keys before scanning"
-  fi
-
-  if [ ! -f "$INSTALL_DIR/.orchestrator.env" ]; then
-    printf 'ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000\n' > "$INSTALL_DIR/.orchestrator.env"
-    ok "Created $INSTALL_DIR/.orchestrator.env"
   fi
 
   if [ -d "$INSTALL_DIR/agent/scripts" ]; then
@@ -241,13 +264,12 @@ echo "    cd $INSTALL_DIR/agent"
 echo "    ./scripts/init_engagement.sh https://target.example --scope-mode host_only --auth-mode none --exploit-policy pause"
 echo ""
 echo "    # then enter the printed engagement directory"
-echo "    export ENGAGEMENT_DIR=\"/path/to/engagement\""
 case "$PRODUCT" in
   claude)
-    echo "    cd \"\$ENGAGEMENT_DIR\" && claude"
+    echo "    cd /path/to/engagement && ./start_claude.sh"
     ;;
   codex)
-    echo "    cd \"\$ENGAGEMENT_DIR\" && codex"
+    echo "    cd /path/to/engagement && ./start_codex.sh"
     ;;
 esac
 echo ""

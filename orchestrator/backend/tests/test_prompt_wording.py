@@ -31,6 +31,8 @@ def test_operator_prompt_outputs_require_realistic_lab_wording_and_skill_first_b
     assert "rejects markdown" in operator_core.lower()
     assert "schemas/finding-record.schema.json" in operator_core
     assert "exploit_policy=pause" in operator_core.lower()
+    assert '"$AGENT_ROOT/scripts/dispatcher.sh"' in operator_core
+    assert './scripts/dispatcher.sh "$ENGAGEMENT_DIR/cases.db"' not in operator_core
     assert "do not instruct the human to run shell approval commands directly" in operator_core.lower()
     assert "launch_exploit_session.sh" in operator_core
     assert "record_session_proposal.sh" in operator_core
@@ -39,6 +41,9 @@ def test_operator_prompt_outputs_require_realistic_lab_wording_and_skill_first_b
     assert "mitmproxy-assisted login capture" in operator_core.lower()
     assert "confirm_mode=manual" not in operator_core.lower()
     assert "realistic lab" in agents_prompt.lower()
+    assert "agent/skill.md" in agents_prompt.lower()
+    assert "agent/rules/hunting.md" in agents_prompt.lower()
+    assert "agent/agents/*.md" in agents_prompt.lower()
 
 
 def test_operator_prompt_outputs_define_default_model_policy():
@@ -57,6 +62,16 @@ def test_operator_prompt_outputs_define_default_model_policy():
 def test_rendered_operator_prompts_match_operator_core():
     repo_root = Path(__file__).resolve().parents[3]
     script = repo_root / "agent" / "scripts" / "render-operator-prompts.sh"
+    agent_names = [
+        "operator",
+        "recon-specialist",
+        "source-analyzer",
+        "vulnerability-analyst",
+        "exploit-developer",
+        "fuzzer",
+        "osint-analyst",
+        "report-writer",
+    ]
 
     from tempfile import TemporaryDirectory
 
@@ -71,9 +86,14 @@ def test_rendered_operator_prompts_match_operator_core():
         expected_outputs = {
             repo_root / "agent" / "AGENTS.md": tmp_path / "AGENTS.md",
             repo_root / "agent" / "CLAUDE.md": tmp_path / "CLAUDE.md",
-            repo_root / "agent" / ".codex" / "agents" / "operator.toml": tmp_path / ".codex" / "agents" / "operator.toml",
-            repo_root / "agent" / ".claude" / "agents" / "operator.md": tmp_path / ".claude" / "agents" / "operator.md",
         }
+        for agent_name in agent_names:
+            expected_outputs[repo_root / "agent" / ".codex" / "agents" / f"{agent_name}.toml"] = (
+                tmp_path / ".codex" / "agents" / f"{agent_name}.toml"
+            )
+            expected_outputs[repo_root / "agent" / ".claude" / "agents" / f"{agent_name}.md"] = (
+                tmp_path / ".claude" / "agents" / f"{agent_name}.md"
+            )
 
         for committed_path, rendered_path in expected_outputs.items():
             assert committed_path.read_text(encoding="utf-8") == rendered_path.read_text(encoding="utf-8")
@@ -83,6 +103,9 @@ def test_docs_and_skills_drop_run_tool_and_rtcurl_examples():
     repo_root = Path(__file__).resolve().parents[3]
     paths = [
         repo_root / "README.md",
+        repo_root / "agent" / "SKILL.md",
+        *sorted((repo_root / "agent" / "rules").rglob("*.md")),
+        *sorted((repo_root / "agent" / "agents").rglob("*.md")),
         *sorted((repo_root / "agent" / "skills").rglob("*.md")),
         *sorted((repo_root / "agent" / "references").rglob("*.md")),
     ]
@@ -138,3 +161,20 @@ def test_phase_two_methodology_guidance_is_present_in_skills_and_references():
     assert "optional final phase" in athena_skill.lower()
     assert "ctf scope" not in api04.lower()
     assert "authorized realistic lab" in install_script.lower()
+
+
+def test_specialist_agent_sources_exist_for_public_roster():
+    repo_root = Path(__file__).resolve().parents[3]
+    agent_dir = repo_root / "agent" / "agents"
+
+    expected = {
+        "recon-specialist.md",
+        "source-analyzer.md",
+        "vulnerability-analyst.md",
+        "exploit-developer.md",
+        "fuzzer.md",
+        "osint-analyst.md",
+        "report-writer.md",
+    }
+
+    assert expected <= {path.name for path in agent_dir.glob("*.md")}
