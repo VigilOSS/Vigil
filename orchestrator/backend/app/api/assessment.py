@@ -74,6 +74,13 @@ class FindingLinkRequest(BaseModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
 
 
+class MergeFindingsRequest(BaseModel):
+    source_slug: str = Field(min_length=1, max_length=256)
+    target_slug: str = Field(min_length=1, max_length=256)
+    reason: str = Field(min_length=1, max_length=4096)
+    source_name: str = Field(default="operator", min_length=1, max_length=128)
+
+
 class FindingRecordRequest(BaseModel):
     slug: str | None = Field(default=None, max_length=256)
     title: str = Field(min_length=1, max_length=512)
@@ -222,6 +229,25 @@ async def create_surface(engagement_key: str, request: SurfaceRecordRequest) -> 
         status_value=request.status,
     )
     await _broadcast(engagement.key, "surface", record)
+    return record
+
+
+@router.post("/findings/merge")
+async def merge_findings_endpoint(engagement_key: str, request: MergeFindingsRequest) -> dict[str, Any]:
+    """Merge a source finding into a target finding.
+
+    The source finding's status becomes 'merged' and its evidence, notes, and
+    links are folded into the target.  The stronger severity and status win.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.merge_findings(
+        engagement.id,
+        source_slug=request.source_slug,
+        target_slug=request.target_slug,
+        reason=request.reason,
+        source_name=request.source_name,
+    )
+    await _broadcast(engagement.key, "finding_merge", record)
     return record
 
 

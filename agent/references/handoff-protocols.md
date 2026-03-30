@@ -93,6 +93,22 @@ Report-writer queries the backend directly via `fetch_assessment_record.sh repor
 
 Engagement directory path with: scope.json, log.md, findings.md, intel.md, plus canonical orchestrator backend findings, coverage, services, and chain state.
 
+## Cross-Agent Finding Deduplication
+
+When multiple agents report findings against the same endpoint, defect family, or root cause:
+
+1. The operator checks for duplicate `root_cause_key` or overlapping `canonical_location` + `defect_family`
+   across all agent findings before dispatching the next phase.
+2. Use `./scripts/merge_finding.sh "$DIR" <source-slug> <target-slug> <reason>` to merge
+   the weaker finding into the stronger one. The merge preserves evidence and notes from both.
+3. Always merge duplicates before dispatching `report-writer` to ensure `report-findings` returns a clean set.
+4. The source finding's status becomes `merged` and is excluded from `report-findings`.
+
+Dedup triggers:
+- Same `root_cause_key` across different agent prefixes (e.g., FINDING-VA-001 and FINDING-EX-001)
+- Same `canonical_location` + `defect_family` combination
+- Operator judgment that two findings describe the same underlying issue
+
 ## Wildcard Mode Specifics
 
 - BACKEND-FIRST FINDING WRITE: every finding lands in canonical backend state, then synchronize child's findings.md and parent's findings.md exports

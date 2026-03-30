@@ -35,6 +35,12 @@ Return concise structured output with these sections when relevant:
 - `#### Why It Matters Here`
 - `#### Recommended Next Actions`
 
+## Finding Recording
+
+**MANDATORY:** If OSINT research produces findings with target-specific proof (not just intel),
+record each via `./scripts/record_finding.sh "$DIR" osint-analyst <finding-json-file>` before
+your task completes. Do not defer recording to the operator. Unrecorded findings are lost data.
+
 ## Handoffs
 
 - To `exploit-developer`: when the intel identifies a plausible exploit path or version-specific technique — bring the skill matching the CVE/finding class from `agent/SKILL.md`

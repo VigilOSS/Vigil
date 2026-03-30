@@ -72,6 +72,12 @@ Return concise structured output with these sections when relevant:
 `#### Surface Candidates` should be directly ingestible by the operator into durable surface state.
 `#### Recommended Next Actions` should name the next specialist and the first focus area, not just say "keep testing."
 
+## Finding Recording
+
+**MANDATORY:** If your recon produces findings (e.g., exposed admin panels, default credentials,
+information disclosure), record each via `./scripts/record_finding.sh "$DIR" recon-specialist <finding-json-file>`
+before your task completes. Do not defer recording to the operator. Unrecorded findings are lost data.
+
 ## Handoffs
 
 - To `source-analyzer`: frontend assets, scripts, routes, SPA hints, leaked config, source maps — bring `agent/skills/source-analysis/SKILL.md`
