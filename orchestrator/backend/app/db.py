@@ -11,6 +11,48 @@ from .models.engagement_session import EngagementSession
 from .models.engagement import Engagement
 
 
+def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
+    return {row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _database_requires_reset(db_path: Path) -> bool:
+    if not db_path.exists():
+        return False
+
+    try:
+        with sqlite3.connect(str(db_path)) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+            }
+
+            if {"projects", "runs", "users"} & tables:
+                return True
+
+            engagement_scoped_tables = {"engagement_sessions", "events"}
+            engagement_scoped_tables.update(
+                table_name for table_name in tables if table_name.startswith("assessment_")
+            )
+            for table_name in engagement_scoped_tables:
+                if table_name not in tables:
+                    continue
+                columns = _table_columns(connection, table_name)
+                if "run_id" in columns or "engagement_id" not in columns:
+                    return True
+    except sqlite3.DatabaseError:
+        return True
+
+    return False
+
+
+def _reset_incompatible_database(db_path: Path) -> None:
+    if not _database_requires_reset(db_path):
+        return
+
+    for suffix in ("", "-shm", "-wal"):
+        candidate = Path(f"{db_path}{suffix}")
+        if candidate.exists():
+            candidate.unlink()
 
 
 def database_path() -> Path:
@@ -19,7 +61,9 @@ def database_path() -> Path:
 
 def init_db() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(str(database_path())) as connection:
+    db_path = database_path()
+    _reset_incompatible_database(db_path)
+    with sqlite3.connect(str(db_path)) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """

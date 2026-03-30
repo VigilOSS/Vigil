@@ -17,6 +17,14 @@ This repository contains the operator prompts, Kali MCP runtime, engagement scaf
 - `tests/`
   Shell/runtime contract tests.
 
+## Prompt Locality
+
+- Root operator prompts live at `AGENTS.md` and `CLAUDE.md`.
+- Specialist prompt sources live under `agent/agents/`.
+- Generated specialist wrappers live under `.codex/agents/` and `.claude/agents/`.
+- Always-active rules live under `agent/rules/`.
+- Skill discovery starts at `agent/SKILL.md`, then drills into `agent/skills/*/SKILL.md`.
+
 ## Quick Start
 
 ### Choose one client per install
@@ -87,20 +95,21 @@ If you omit those flags and run in a TTY, `init_engagement.sh` prompts for scope
 
 After `init_engagement.sh` finishes, it prints the full path to the new engagement directory and updates `engagements/.active`.
 
-1. `cd` into that printed engagement directory, run `export ENGAGEMENT_DIR="$PWD"`, confirm the seeded files are present, and start `codex` or `claude`. Start the client from inside the engagement directory, not from the install root. Each engagement seeds local `AGENTS.md` and `CLAUDE.md` wrappers so a client started from the engagement folder can still find the workspace-root prompts, skills, references, and scripts.
+1. `cd` into that printed engagement directory, confirm the seeded files are present, and start the client with `./start_codex.sh` or `./start_claude.sh`. Those wrappers export `ENGAGEMENT_DIR` automatically before launching the client. Start the client from inside the engagement directory, not from the install root. Each engagement also seeds local `AGENTS.md` and `CLAUDE.md` wrappers so a client started from the engagement folder can still find the root operator prompts, generated specialist wrappers, source prompt files, rules, skill index, skills, references, and scripts.
 2. Prefer `gpt-5.4` with `high` reasoning for Codex and `Opus 4.6` for Claude. Drop to `gpt-5.4-mini` or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
 3. Tell the operator: `Run this engagement using the operator workflow. Start by reading scope.json and log.md, tell me the current phase, and show the next numbered actions.`
-4. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through the attached Kali MCP runtime, use relevant skills before improvising, and keep `log.md`, `findings.md`, `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements also carry a local `.orchestrator.env` so backend-sync scripts can keep working from inside the engagement directory.
+4. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through the attached Kali MCP runtime, use relevant skills before improvising, and keep `log.md`, `findings.md`, `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; by default it points at `http://127.0.0.1:18000`, and `ORCHESTRATOR_BASE_URL` in the install-root `.env` overrides that default.
 
 Example:
 
 ```bash
 cd /path/to/printed/engagement
-export ENGAGEMENT_DIR="$PWD"
-codex
+./start_codex.sh
 ```
 
 During the engagement, expect short operator updates, numbered next-step choices when a decision matters, and a manual approval checkpoint before exploit work continues when `exploit_policy` is `pause` or `selected`.
+
+The public agent roster is intentionally limited to the core roles: `operator`, `recon-specialist`, `source-analyzer`, `vulnerability-analyst`, `exploit-developer`, `fuzzer`, `osint-analyst`, and `report-writer`. Validator-, chain-, and ranker-style behaviors are folded into those roles instead of creating a larger visible roster.
 
 Worker sessions write proposal files under `sessions/<session-id>/`; the coordinator merges approved proposals back into canonical backend state. User-facing exploit review should happen through the orchestrator UI or by telling Codex/Claude which findings are approved. Direct shell invocation of approval/session scripts is an internal maintenance path, not the primary operator workflow.
 
@@ -148,7 +157,7 @@ These capabilities are intentionally present but not always started automaticall
 
 MITM remains optional. Use it when the engagement needs login capture, authenticated browsing through a live session, or a refresh of expired auth material.
 
-From the install root, you can recover the active engagement directory at any time with `ENGAGEMENT_DIR="$(pwd)/agent/engagements/$(cat agent/engagements/.active)"`.
+From the install root, you can recover the active engagement directory at any time with `ENGAGEMENT_DIR="$(pwd)/agent/engagements/$(cat agent/engagements/.active)"`. Use that only for ad hoc shell work. When starting Codex or Claude, prefer the engagement-local `./start_codex.sh` or `./start_claude.sh` wrappers so the correct engagement context is exported automatically.
 
 1. Build the proxy image once if needed: `docker compose -f agent/docker/docker-compose.yml build mitmproxy`
 2. Start the proxy against the active engagement: `docker run --rm -it -p 8080:8080 -v "$ENGAGEMENT_DIR:/engagement" security-research-proxy:latest`
@@ -256,6 +265,10 @@ The queue in `agent/scripts/schema.sql` is a transient work buffer and is not pa
 ## Development
 
 For repo-local development conventions used by Codex, see the root `AGENTS.md`.
+
+## TODO
+
+- Evaluate an optional Web3-focused workflow and agent set only after the core web/app investigation model is stable.
 
 ## Verification Commands
 

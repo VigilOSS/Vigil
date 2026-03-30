@@ -38,6 +38,7 @@ type EngagementPageProps = {
 
 export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const [engagement, setEngagement] = useState<Engagement | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<EngagementSession[]>([]);
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
@@ -50,9 +51,10 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const [assessmentChainLinks, setAssessmentChainLinks] = useState<AssessmentAttackChainLink[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactContent | null>(null);
+  const activeEngagement = engagement?.key === engagementKey ? engagement : null;
 
   function refreshArtifacts() {
-    listArtifacts(engagementKey).then((nextArtifacts) => {
+    return listArtifacts(engagementKey).then((nextArtifacts) => {
       setArtifacts(nextArtifacts);
       if (!selectedName) {
         const firstAvailable = nextArtifacts.find((artifact) => artifact.exists);
@@ -60,6 +62,10 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
           setSelectedName(firstAvailable.name);
         }
       }
+    }).catch((error: unknown) => {
+      setArtifacts([]);
+      setSelectedArtifact(null);
+      throw error;
     });
   }
 
@@ -69,42 +75,94 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
       .catch(() => setSelectedArtifact(null));
   }
 
-  function refreshEngagement() {
-    getEngagement(engagementKey).then(setEngagement);
-    listEngagementSessions(engagementKey).then(setSessions);
+  async function refreshEngagement() {
+    const nextEngagement = await getEngagement(engagementKey);
+    setEngagement(nextEngagement);
+    setLoadError(null);
+    return nextEngagement;
+  }
+
+  function refreshSessions() {
+    return listEngagementSessions(engagementKey).then(setSessions);
   }
 
   function refreshEvents() {
-    listEvents(engagementKey).then(setEvents);
+    return listEvents(engagementKey).then(setEvents);
   }
 
   function refreshAssessment() {
-    getAssessmentSummary(engagementKey).then(setAssessmentSummary);
-    listAssessmentSurfaces(engagementKey).then(setAssessmentSurfaces);
-    listAssessmentFindings(engagementKey).then(setAssessmentFindings);
-    listAssessmentFindingLinks(engagementKey).then(setAssessmentFindingLinks);
-    listAssessmentProbes(engagementKey).then(setAssessmentProbes);
-    listAssessmentAttackChains(engagementKey).then(setAssessmentChains);
-    listAssessmentAttackChainLinks(engagementKey).then(setAssessmentChainLinks);
+    return Promise.all([
+      getAssessmentSummary(engagementKey).then(setAssessmentSummary),
+      listAssessmentSurfaces(engagementKey).then(setAssessmentSurfaces),
+      listAssessmentFindings(engagementKey).then(setAssessmentFindings),
+      listAssessmentFindingLinks(engagementKey).then(setAssessmentFindingLinks),
+      listAssessmentProbes(engagementKey).then(setAssessmentProbes),
+      listAssessmentAttackChains(engagementKey).then(setAssessmentChains),
+      listAssessmentAttackChainLinks(engagementKey).then(setAssessmentChainLinks),
+    ]);
   }
 
   useEffect(() => {
-    refreshEngagement();
-    refreshEvents();
-    refreshArtifacts();
-    refreshAssessment();
+    let cancelled = false;
+
+    async function refreshPage() {
+      try {
+        await refreshEngagement();
+      } catch (error) {
+        if (cancelled) return;
+        const message = error instanceof Error ? error.message : "Failed to load engagement";
+        setLoadError(message);
+        setEngagement(null);
+        setSessions([]);
+        setEvents([]);
+        setArtifacts([]);
+        setAssessmentSummary(null);
+        setAssessmentSurfaces([]);
+        setAssessmentFindings([]);
+        setAssessmentFindingLinks([]);
+        setAssessmentProbes([]);
+        setAssessmentChains([]);
+        setAssessmentChainLinks([]);
+        setSelectedName(null);
+        setSelectedArtifact(null);
+        return;
+      }
+
+      if (cancelled) return;
+
+      try {
+        await Promise.all([refreshSessions(), refreshEvents(), refreshArtifacts(), refreshAssessment()]);
+      } catch (error) {
+        if (cancelled) return;
+        const message = error instanceof Error ? error.message : "Failed to load engagement details";
+        setLoadError(message);
+      }
+    }
+
+    void refreshPage();
+
+    return () => {
+      cancelled = true;
+    };
   }, [engagementKey]);
 
   useEffect(() => {
-    if (!selectedName) {
+    if (!activeEngagement || !selectedName) {
       setSelectedArtifact(null);
       return;
     }
     refreshSelectedArtifact(selectedName);
-  }, [engagementKey, selectedName]);
+  }, [activeEngagement, engagementKey, selectedName]);
 
   useEffect(() => {
+    if (!activeEngagement) {
+      return;
+    }
+
     const socket = new WebSocket(engagementWebSocketUrl(engagementKey));
+    socket.onerror = () => {
+      setLoadError((current) => current ?? "Live updates unavailable");
+    };
     socket.onmessage = (message) => {
       const payload = JSON.parse(message.data);
       if (payload.type === "event.created") {
@@ -114,6 +172,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
         refreshAssessment();
       }
       refreshEngagement();
+      refreshSessions();
       refreshArtifacts();
       if (selectedName) {
         refreshSelectedArtifact(selectedName);
@@ -121,23 +180,35 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
     };
 
     return () => socket.close();
-  }, [engagementKey, selectedName]);
+  }, [activeEngagement, engagementKey, selectedName]);
 
   useEffect(() => {
+    if (!activeEngagement) {
+      return;
+    }
+
     const interval = window.setInterval(() => {
-      refreshEngagement();
-      refreshEvents();
-      refreshArtifacts();
-      refreshAssessment();
-      if (selectedName) {
-        refreshSelectedArtifact(selectedName);
-      }
+      void refreshEngagement()
+        .then(() =>
+          Promise.all([refreshSessions(), refreshEvents(), refreshArtifacts(), refreshAssessment()]).then(() => {
+            if (selectedName) {
+              refreshSelectedArtifact(selectedName);
+            }
+          }),
+        )
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : "Failed to refresh engagement";
+          setLoadError(message);
+        });
     }, 3000);
 
     return () => window.clearInterval(interval);
-  }, [engagementKey, selectedName]);
+  }, [activeEngagement, engagementKey, selectedName]);
 
-  const latestSummary = useMemo(() => events.at(-1)?.summary ?? "Waiting for events", [events]);
+  const latestSummary = useMemo(
+    () => (activeEngagement ? events.at(-1)?.summary ?? "Waiting for events" : "Waiting for events"),
+    [activeEngagement, events],
+  );
   const findingLinksBySlug = useMemo(() => {
     const groups = new Map<string, AssessmentFindingLink[]>();
     assessmentFindingLinks.forEach((link) => {
@@ -162,7 +233,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
       <section className="dashboard-header">
         <div>
           <p className="eyebrow">Engagement detail</p>
-          <h1>{engagement?.target ?? engagementKey}</h1>
+          <h1>{activeEngagement?.target ?? engagementKey}</h1>
           <p className="lead">{latestSummary}</p>
         </div>
         <div className="page-actions">
@@ -175,15 +246,19 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
       <section className="engagement-overview panel">
         <div>
           <span className={`status-pill status-${engagement?.status ?? "queued"}`}>
-            {engagement?.status ?? "queued"}
+            {activeEngagement?.status ?? "queued"}
           </span>
-          <p className="meta-text">{engagement?.engagement_root ?? "Pending engagement root"}</p>
+          <p className="meta-text">{activeEngagement?.engagement_root ?? "Pending engagement root"}</p>
           <p className="meta-text">
-            Phase: {engagement?.current_phase ?? "unknown"} | Exploit policy:{" "}
-            {engagement?.exploit_policy ?? "pause"} | Review: {engagement?.exploit_review_state ?? "pending"}
+            Phase: {activeEngagement?.current_phase ?? "unknown"} | Exploit policy:{" "}
+            {activeEngagement?.exploit_policy ?? "pause"} | Review: {activeEngagement?.exploit_review_state ?? "pending"}
           </p>
+          {loadError ? <p className="error-text">{loadError}</p> : null}
         </div>
       </section>
+
+      {!activeEngagement ? null : (
+        <>
 
       <section className="panel">
         <div className="panel-header">
@@ -335,6 +410,8 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
         selectedArtifact={selectedArtifact}
         onSelect={setSelectedName}
       />
+        </>
+      )}
     </main>
   );
 }
