@@ -30,7 +30,7 @@ These generated files are committed in git and must stay in sync:
 Validate prompt wording and renderer drift with:
 
 ```bash
-uv run --directory orchestrator/backend pytest orchestrator/backend/tests/test_prompt_wording.py
+uv run --directory orchestrator/backend pytest tests/test_prompt_wording.py
 ```
 
 # Orchestrator backend
