@@ -161,25 +161,28 @@ Quick-reference per tool, organized by usage phase.
 |------|------|
 | `tools/recon/nmap.md` | Port/service discovery and enumeration |
 | `tools/recon/whatweb.md` | Web technology fingerprinting |
-| `tools/recon/nikto.md` | Web server vulnerability scanning |
+| `tools/recon/httpx.md` | HTTP probing, tech detection, live host confirmation |
+| `tools/recon/nuclei.md` | Template-based vulnerability scanning (CVEs, misconfigs, exposures) |
+| `tools/recon/wafw00f.md` | WAF identification and fingerprinting |
 | `tools/recon/curl.md` | HTTP request crafting and testing |
-| `tools/recon/nuclei.md` | Vulnerability scanning with templates |
+| `tools/recon/puredns.md` | Active DNS brute-force with wildcard filtering |
+| `tools/recon/dnsx.md` | Bulk DNS resolution and record enumeration |
+| `tools/recon/gau.md` | Historical URL discovery (Wayback, OTX, Common Crawl, URLScan) |
 
 ### tools/fuzzing/ — Used by: fuzzer, recon-specialist
 
 | File | Tool |
 |------|------|
-| `tools/fuzzing/ffuf.md` | Web fuzzing (directories, parameters, vhosts) |
-| `tools/fuzzing/gobuster.md` | Directory and DNS brute-forcing |
-| `tools/fuzzing/wfuzz.md` | Web fuzzing with advanced filtering |
-| `tools/fuzzing/dirb.md` | Web directory brute-forcing |
+| `tools/fuzzing/ffuf.md` | Web fuzzing (parameters, vhosts, targeted directory work) |
+| `tools/fuzzing/feroxbuster.md` | Recursive content discovery (primary for directory scanning) |
 
-### tools/exploitation/ — Used by: exploit-developer
+### tools/exploitation/ — Used by: exploit-developer, vulnerability-analyst
 
 | File | Tool |
 |------|------|
 | `tools/exploitation/sqlmap.md` | SQL injection detection and exploitation |
 | `tools/exploitation/hydra.md` | Online password brute-forcing |
+| `tools/exploitation/dalfox.md` | XSS scanning with parameter analysis and blind XSS |
 
 ### tools/cracking/ — Used by: exploit-developer
 

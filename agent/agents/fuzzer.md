@@ -12,7 +12,7 @@ You own bounded high-volume testing once another specialist has already identifi
 - `agent/shared-constraints.md` — scope, Kali MCP rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/SKILL.md`
-- `agent/skills/directory-fuzzing/SKILL.md` for path/directory work, or `agent/skills/parameter-fuzzing/SKILL.md` for parameter work — load both if the objective spans both surface types
+- `agent/skills/directory-fuzzing/SKILL.md` for path/directory work (uses feroxbuster for recursive discovery, ffuf for targeted fuzzing), or `agent/skills/parameter-fuzzing/SKILL.md` for parameter work — load both if the objective spans both surface types
 
 ## Responsibilities
 

@@ -17,7 +17,7 @@ origin: AI Threat Hunting
 
 - `curl` (header inspection, file probing)
 - Burp Suite (passive scanning, response analysis)
-- `gobuster` / `ffuf` (file and directory brute-force)
+- `ffuf` / `feroxbuster` (file and directory brute-force)
 - GitTools (extract .git repositories)
 - trufflehog / gitleaks (secret scanning)
 

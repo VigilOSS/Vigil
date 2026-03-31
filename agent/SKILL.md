@@ -17,11 +17,11 @@ Read `agent/shared-constraints.md` first, then select from this index.
 
 - `agent/skills/web-recon/SKILL.md`
   **Use when:** Starting Phase 1; fingerprinting hosts, ports, tech stacks, headers, web services.
-  **Paired references:** `references/tools/recon/nmap.md`, `references/tools/recon/whatweb.md`, `references/tools/recon/nikto.md`
+  **Paired references:** `references/tools/recon/nmap.md`, `references/tools/recon/whatweb.md`, `references/tools/recon/httpx.md`, `references/tools/recon/wafw00f.md`
 
 - `agent/skills/source-analysis/SKILL.md`
   **Use when:** Analyzing HTML/JS/CSS for routes, secrets, API bases, SPA bundles, source maps.
-  **Paired references:** `references/payloads/info-disclosure-probes.md`
+  **Paired references:** `references/payloads/info-disclosure-probes.md`, `references/tools/exploitation/dalfox.md` _(for JS-discovered parameterized URLs)_
 
 - `agent/skills/case-dispatching/SKILL.md`
   **Use when:** Operator needs to coordinate the Phase 2/3 work-buffer loop (reset-stale → stats → fetch → dispatch → done → requeue).
@@ -71,7 +71,7 @@ Load the relevant skill before starting validation or exploitation of a candidat
 
 - `agent/skills/directory-fuzzing/SKILL.md`
   **Use when:** Discovering hidden paths, admin panels, backup files, or undocumented endpoints via wordlist fuzzing.
-  **Paired references:** `references/tools/fuzzing/ffuf.md`, `references/tools/fuzzing/gobuster.md`
+  **Paired references:** `references/tools/fuzzing/ffuf.md`, `references/tools/fuzzing/feroxbuster.md`
 
 - `agent/skills/file-inclusion/SKILL.md`
   **Use when:** Testing LFI/RFI, path traversal, PHP wrapper abuse, or log poisoning via file-path parameters.
@@ -103,7 +103,7 @@ Load the relevant skill before starting validation or exploitation of a candidat
 
 - `agent/skills/parameter-fuzzing/SKILL.md`
   **Use when:** Fuzzing hidden or undocumented query/body parameters, header variants, or content-type mutations.
-  **Paired references:** `references/tools/fuzzing/ffuf.md`, `references/tools/fuzzing/wfuzz.md`
+  **Paired references:** `references/tools/fuzzing/ffuf.md`
 
 - `agent/skills/port-scanning/SKILL.md`
   **Use when:** Discovering open ports, service banners, and non-web services on in-scope hosts.
@@ -133,9 +133,13 @@ Load the relevant skill before starting validation or exploitation of a candidat
   **Use when:** Input is reflected inside a server-side template (Jinja2, Twig, Pug, Freemarker, ERB, Velocity, etc.).
   **Paired references:** `references/payloads/ssti-payloads.md`, `references/vuln-checklists/A05-injection.md`
 
+- `agent/skills/nuclei-scanning/SKILL.md`
+  **Use when:** Live targets identified and tech stacks known; running template-based vulnerability sweeps for CVEs, misconfigs, and exposures.
+  **Paired references:** `references/tools/recon/nuclei.md`
+
 - `agent/skills/subdomain-enumeration/SKILL.md`
   **Use when:** The `hosts` array in scope.json contains `*.domain` entries; enumerating subdomains for additional attack surface.
-  **Paired references:** `references/tools/recon/nmap.md` _(plus external OSINT sources)_
+  **Paired references:** `references/tools/recon/httpx.md`, `references/tools/recon/puredns.md`, `references/tools/recon/dnsx.md`
 
 - `agent/skills/user-enumeration/SKILL.md`
   **Use when:** Testing login, password reset, or registration flows for username/email oracle behavior.
@@ -147,7 +151,7 @@ Load the relevant skill before starting validation or exploitation of a candidat
 
 - `agent/skills/xss-testing/SKILL.md`
   **Use when:** User input is reflected in HTML/JS context (reflected, stored, or DOM-based XSS).
-  **Paired references:** `references/payloads/xss-payloads.md`, `references/vuln-checklists/A05-injection.md`
+  **Paired references:** `references/payloads/xss-payloads.md`, `references/vuln-checklists/A05-injection.md`, `references/tools/exploitation/dalfox.md`
 
 - `agent/skills/xxe-testing/SKILL.md`
   **Use when:** Application parses XML input (file upload, SOAP API, SVG, DOCX, RSS feed).

@@ -56,39 +56,32 @@ Before initializing any engagement, ensure the shared Kali MCP runtime is runnin
 
 This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install.
 
-## Listener Management
+## Listener & Callback Management
 
-Listeners (pwncat-vl, ngrok, chisel) are OPERATOR-CONTROLLED. Agents must never start them.
+Listeners (pwncat-vl, frp, chisel) and OOB callback servers are OPERATOR-CONTROLLED.
+Agents must never start them.
 
-**Why:** The Kali runtime is shared across engagements. An agent starting a listener on port 4444
-could conflict with another engagement's listener. ngrok tunnels are account-scoped — starting a
-second tunnel tears down the first. Only the operator knows the current port/tunnel allocation.
+Setup instructions and commands: `agent/references/offensive-tactics/shell-handling.md`
 
-**Workflow:**
-1. Agent output includes `# MANUAL:` playbook steps with exact listener commands
-2. Operator starts the listener (pwncat-vl in a tmux session inside the runtime)
-3. Operator optionally exposes the listener externally (ngrok or chisel)
-4. Operator resumes the agent (via SendMessage or re-dispatch)
-5. Agent verifies the shell by tailing the log file via Kali MCP
+### How agents interact with listeners
 
-**Quick reference:**
-```bash
-# Start pwncat-vl in a tmux session
-docker exec -it security-research tmux new-session -d -s shell-4444 \
-  'pwncat -l -p 4444 2>&1 | tee /data/shell-4444.log'
+**When an agent needs a reverse shell listener:**
+1. Agent outputs `# MANUAL:` playbook steps referencing `shell-handling.md`
+2. Operator checks if a listener is already running: `docker exec security-research tmux list-sessions`
+3. If not running → operator sets it up per shell-handling.md, records address in `$DIR/.listener_url`
+4. Operator resumes the agent. Agent reads `LISTENER_HOST`/`LISTENER_PORT` from `$DIR/.listener_url`.
+5. If the operator cannot provision the listener now, record a blocked technique:
+   `./scripts/post_assessment_record.sh blocked-techniques '{"technique":"reverse_shell","reason":"listener not provisioned","finding_slug":"FINDING-EX-NNN"}'`
 
-# Expose via ngrok
-docker exec -e NGROK_AUTHTOKEN="$NGROK_AUTHTOKEN" \
-  -it security-research ngrok tcp 4444
+**When an agent needs OOB (blind vuln detection):**
+1. Agent checks whether `$DIR/.oob_url` exists in its dispatch context
+2. If available → use the callback URL in blind payloads (SSRF, XXE, XSS, SQLi)
+3. If not available → fall back to time-based detection (sleep payloads) and note in output that OOB was unavailable
+4. If time-based also fails and OOB would have been decisive → stop and ask the operator to provision an OOB server per shell-handling.md § OOB Callback Servers
 
-# List active tmux sessions
-docker exec security-research tmux list-sessions
-
-# Check shell log
-docker exec security-research tail -20 /data/shell-4444.log
-```
-
-Full reference: `agent/references/offensive-tactics/shell-handling.md`
+**Files agents read (never write):**
+- `$DIR/.listener_url` — tunnel address (`host:port`) for reverse shell payloads
+- `$DIR/.oob_url` — callback URL for blind vulnerability detection
 
 ## Subagent Dispatch
 
@@ -151,22 +144,33 @@ DB="$DIR/cases.db"
       Use `-tlsv` to skip TLS verification for targets with expired, self-signed, or mismatched certificates. Without it, Katana will bail on invalid certs and produce minimal output.
       If `auth.json` has `use_for_requests` set to `true` and `state` set to `available`, pass cookies/headers: `katana -u URL -H "Cookie: ..." -H "Authorization: ..." ...`
    c. Ingest Katana output into backend: `cat /tmp/katana_output.txt | ./scripts/recon_ingest.sh "$DIR/cases.db" katana`
-   d. Inspect work-buffer stats: `./scripts/dispatcher.sh "$DIR/cases.db" stats`
-   e. Inspect coverage gaps: `./scripts/fetch_assessment_record.sh summary`
+   d. **Historical URL enrichment** via Kali MCP — run `gau` to pull known URLs from Wayback Machine, AlienVault OTX, Common Crawl, and URLScan. This catches parameterized endpoints and old routes that Katana misses because the live sitemap no longer links to them:
+      `gau TARGET_DOMAIN --threads 5 --blacklist png,jpg,gif,css,woff,svg --o /tmp/gau_output.txt`
+      Ingest: `cat /tmp/gau_output.txt | ./scripts/recon_ingest.sh "$DIR/cases.db" gau`
+   e. If Phase 1 discovered OpenAPI/Swagger specs, ingest them:
+      `./scripts/spec_ingest.sh "$DIR/cases.db" "$DIR/scans/openapi.json"`
+      This creates `api-spec` work items and durable request/service coverage candidates. source-analyzer may have saved specs to `scans/` during Phase 1; check before skipping.
+   f. Inspect work-buffer stats: `./scripts/dispatcher.sh "$DIR/cases.db" stats`
+   g. Inspect coverage gaps: `./scripts/fetch_assessment_record.sh summary`
    Update scope.json phase to `consume-test` when ingestion is complete.
 3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
-   a. Reset stale work items: `./scripts/dispatcher.sh "$DB" reset-stale 10`
-   b. Check stats: `./scripts/dispatcher.sh "$DB" stats`
-   c. Fetch and route by type — dispatch independent types in parallel:
+   a. **Nuclei sweep** (once, before the work-buffer loop) — run nuclei via Kali MCP against all live targets for a broad CVE and misconfiguration check:
+      `nuclei -l /engagement/scans/live_targets.txt -severity critical,high -tags cve,misconfig,exposure -rate-limit 100 -jsonl -o /engagement/scans/nuclei_sweep.jsonl`
+      Triage results: critical/high hits become prioritized work-buffer entries or direct findings (after manual validation). Medium/low hits are intelligence. See `agent/skills/nuclei-scanning/SKILL.md` for triage rules.
+   b. Reset stale work items: `./scripts/dispatcher.sh "$DB" reset-stale 10`
+   c. Check stats: `./scripts/dispatcher.sh "$DB" stats`
+   d. Fetch and route by type — dispatch independent types in parallel:
       - `api`, `api-spec`, `form`, `upload`, `graphql`, `websocket` → vulnerability-analyst (load matching vuln-class skill from `agent/SKILL.md`)
       - `page`, `javascript`, `stylesheet`, `data` → source-analyzer (load `source-analysis` skill)
       `./scripts/dispatcher.sh "$DB" fetch <type> 10 <agent-name>`
       Pass the raw fetched JSON rows into the dispatch context. They carry canonical ids such as `request_variant_id`, `service_id`, and sometimes `coverage_item_id`, which subagents need for durable probe and coverage writes.
-   d. On subagent return: `./scripts/dispatcher.sh "$DB" done "id1,id2,..."`
+      If `$DIR/.oob_url` exists, include the callback URL in dispatch context for agents doing blind testing.
+      If `$DIR/.listener_url` exists, include the tunnel address for agents that need a callback target.
+   e. On subagent return: `./scripts/dispatcher.sh "$DB" done "id1,id2,..."`
       Mark a batch done only after the subagent has written durable state for any findings, significant probe runs, and coverage updates its work satisfied. Verify the relevant coverage item moved out of `pending`, `queued`, or `deferred`. If the agent skipped durable recording, send it back to write the state instead of silently duplicating it from the operator. Record surfaces via `append_surface.sh`. Re-ingest new endpoints via `recon_ingest.sh`.
-   e. If vulnerability-analyst signals FUZZER_NEEDED for a parameter or directory, dispatch fuzzer with `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md` and a bounded objective (target URL, parameter name, max payloads).
-   f. Repeat a-e until pending=0 for all consumable types.
-   g. Before leaving: `./scripts/check_surface_coverage.sh "$DIR"`. If it fails, resolve each remaining surface as `covered`, `deferred`, or `not_applicable`. High-risk surfaces (`account_recovery`, `dynamic_render`, `object_reference`, `privileged_write`) may NOT remain `deferred`.
+   f. If vulnerability-analyst signals FUZZER_NEEDED for a parameter or directory, dispatch fuzzer with `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md` and a bounded objective (target URL, parameter name, max payloads).
+   g. Repeat b-f until pending=0 for all consumable types.
+   h. Before leaving: `./scripts/check_surface_coverage.sh "$DIR"`. If it fails, resolve each remaining surface as `covered`, `deferred`, or `not_applicable`. High-risk surfaces (`account_recovery`, `dynamic_render`, `object_reference`, `privileged_write`) may NOT remain `deferred`.
 4. **EXPLOIT** →
    a. Dispatch osint-analyst with `agent/skills/osint-recon/SKILL.md` — intelligence gathering is always permitted regardless of `exploit_policy`. Feed the tech stack, domains, and people data from intel.md.
    b. Respect `exploit_policy` from `scope.json` for exploit-developer dispatch:

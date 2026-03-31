@@ -18,6 +18,7 @@ not to replace target validation.
 ## Responsibilities
 
 - Gather relevant CVEs, vendor advisories, public disclosures, org exposure clues, and supporting context
+- Use gau/waymore for historical URL discovery and bbot for recursive recon intelligence
 - Map public intelligence to the current engagement state and target stack
 - Feed useful intel into `intel.md` and help the operator decide what to test next
 
