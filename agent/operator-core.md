@@ -118,6 +118,13 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
 
 ## Phase Flow
 
+For the commands below, set:
+
+```bash
+DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
+DB="$DIR/cases.db"
+```
+
 1. **RECON** → dispatch recon-specialist + source-analyzer in parallel. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and then continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 rather than keeping that work on the operator.
 2. **COLLECT** → operator-orchestrated. Steps in order:
    a. Ingest all endpoints from Phase 1 into the backend: `cat endpoints.txt | ./scripts/recon_ingest.sh "$DIR/cases.db" recon`
@@ -130,14 +137,15 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
    e. Inspect coverage gaps: `./scripts/fetch_assessment_record.sh summary`
    Update scope.json phase to `consume-test` when ingestion is complete.
 3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
-   a. Reset stale work items: `./scripts/dispatcher.sh "$DIR/cases.db" reset-stale 10`
-   b. Check stats: `./scripts/dispatcher.sh "$DIR/cases.db" stats`
+   a. Reset stale work items: `./scripts/dispatcher.sh "$DB" reset-stale 10`
+   b. Check stats: `./scripts/dispatcher.sh "$DB" stats`
    c. Fetch and route by type — dispatch independent types in parallel:
       - `api`, `api-spec`, `form`, `upload`, `graphql`, `websocket` → vulnerability-analyst (load matching vuln-class skill from `agent/SKILL.md`)
       - `page`, `javascript`, `stylesheet`, `data` → source-analyzer (load `source-analysis` skill)
-      `./scripts/dispatcher.sh "$DIR/cases.db" fetch <type> 10 <agent-name>`
-   d. On subagent return: `./scripts/dispatcher.sh "$DIR/cases.db" done "id1,id2,..."`
-      Record findings via `record_finding.sh`. Record surfaces via `append_surface.sh`. Re-ingest new endpoints via `recon_ingest.sh`.
+      `./scripts/dispatcher.sh "$DB" fetch <type> 10 <agent-name>`
+      Pass the raw fetched JSON rows into the dispatch context. They carry canonical ids such as `request_variant_id`, `service_id`, and sometimes `coverage_item_id`, which subagents need for durable probe and coverage writes.
+   d. On subagent return: `./scripts/dispatcher.sh "$DB" done "id1,id2,..."`
+      Mark a batch done only after the subagent has written durable state for any findings, significant probe runs, and coverage updates its work satisfied. Verify the relevant coverage item moved out of `pending`, `queued`, or `deferred`. If the agent skipped durable recording, send it back to write the state instead of silently duplicating it from the operator. Record surfaces via `append_surface.sh`. Re-ingest new endpoints via `recon_ingest.sh`.
    e. If vulnerability-analyst signals FUZZER_NEEDED for a parameter or directory, dispatch fuzzer with `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md` and a bounded objective (target URL, parameter name, max payloads).
    f. Repeat a-e until pending=0 for all consumable types.
    g. Before leaving: `./scripts/check_surface_coverage.sh "$DIR"`. If it fails, resolve each remaining surface as `covered`, `deferred`, or `not_applicable`. High-risk surfaces (`account_recovery`, `dynamic_render`, `object_reference`, `privileged_write`) may NOT remain `deferred`.
@@ -147,16 +155,13 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
       - `pause`: present confirmed findings to the human and ask which are approved for exploitation.
       - `selected`: exploit only the approved finding slugs recorded in scope metadata.
       - `full_send`: dispatch exploit-developer immediately.
-   c. After exploit-developer returns with chains, record them:
-      `./scripts/record_attack_chain.sh "$DIR" exploit-developer <chain-json-file>`
-   d. After exploit-developer discovers or validates credentials, record them:
-      `./scripts/post_assessment_record.sh credentials '<json>'`
-      `./scripts/post_assessment_record.sh access-records '<json>'`
+   c. Exploit-developer owns durable exploit-state recording. If it proves a chain, credential, access record, or credential test, it should write the JSON payloads under `$DIR/tools/exploit-state/` and record them before task completion with the repo scripts.
+   d. On return, verify canonical exploit state via `fetch_assessment_record.sh attack-chains`, `credentials`, `access-records`, and `credential-tests`. Do not create duplicate operator-side rows unless you are explicitly merging a proposal-based exploit session with `merge_exploit_session.sh`.
    e. After osint-analyst returns: read intel.md. If HIGH-value CVEs or credentials found, update findings and dispatch exploit-developer for a 2nd round.
 5. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
 6. **REPORT** → **Before dispatching report-writer**, merge duplicate findings so the `report-findings` endpoint returns a clean deduplicated set. Check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker finding into the stronger one:
    `./scripts/merge_finding.sh "$DIR" <source-slug> <target-slug> "<reason>"`
-   Then dispatch report-writer with `agent/skills/report-generation/SKILL.md`. Report-writer queries the backend directly for `report-findings`, `attack-chains`, `surfaces`, and `summary` — do not manually assemble findings context. After report-writer completes, update scope.json phase to `complete`.
+   Then dispatch report-writer with `agent/skills/report-generation/SKILL.md`. Report-writer queries the backend directly for `report-findings`, `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — do not manually assemble findings context. After report-writer completes, update scope.json phase to `complete`.
 
 After each phase update scope.json:
 ```bash
