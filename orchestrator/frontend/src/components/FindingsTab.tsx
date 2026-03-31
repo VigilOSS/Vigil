@@ -1,10 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
-import type { AssessmentFinding, AssessmentFindingDetail, AssessmentSummary, FindingDetails } from "../lib/api";
+import type {
+  AssessmentAttackChainDetail,
+  AssessmentAttackChainLink,
+  AssessmentFinding,
+  AssessmentFindingDetail,
+  AssessmentSummary,
+  FindingDetails,
+} from "../lib/api";
 
 type FindingsTabProps = {
   findings: (AssessmentFindingDetail | AssessmentFinding)[];
   fallbackFindings: AssessmentFinding[];
   summary: AssessmentSummary | null;
+  chains: AssessmentAttackChainDetail[];
+  chainLinks: AssessmentAttackChainLink[];
 };
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
@@ -58,7 +67,7 @@ function rowMeta(finding: AssessmentFinding | AssessmentFindingDetail) {
   return parts.join(" · ");
 }
 
-export function FindingsTab({ findings, fallbackFindings, summary }: FindingsTabProps) {
+export function FindingsTab({ findings, fallbackFindings, summary, chains, chainLinks }: FindingsTabProps) {
   const [severityFilter, setSeverityFilter] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -106,6 +115,36 @@ export function FindingsTab({ findings, fallbackFindings, summary }: FindingsTab
   const statusCounts = summary?.finding_statuses ?? {};
   const details = selectedFinding ? parseDetails(selectedFinding) : {};
   const showLifecycleBadge = selectedFinding && !["reported", "draft"].includes(selectedFinding.status);
+
+  const findingLinkMatches = useMemo(() => {
+    const findingIdToSlug = new Map<number, string>();
+    for (const f of allFindings) {
+      if (isDetail(f)) findingIdToSlug.set(f.id, f.slug);
+    }
+    return (link: { entity_kind: string; entity_ref: string; entity_id: number | null }) => {
+      if (link.entity_kind !== "finding") return null;
+      if (link.entity_ref) return link.entity_ref;
+      if (link.entity_id != null) return findingIdToSlug.get(link.entity_id) ?? null;
+      return null;
+    };
+  }, [allFindings]);
+
+  const selectedChains = useMemo(() => {
+    if (!selectedFinding) return [];
+    const linkedChainKeys = chainLinks
+      .filter((link) => findingLinkMatches(link) === selectedFinding.slug)
+      .map((link) => link.chain_key);
+    return chains.filter((chain) => linkedChainKeys.includes(chain.chain_key));
+  }, [selectedFinding, chains, chainLinks, findingLinkMatches]);
+
+  const findingChainCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const link of chainLinks) {
+      const slug = findingLinkMatches(link);
+      if (slug) counts[slug] = (counts[slug] ?? 0) + 1;
+    }
+    return counts;
+  }, [chainLinks, findingLinkMatches]);
 
   return (
     <>
@@ -155,6 +194,9 @@ export function FindingsTab({ findings, fallbackFindings, summary }: FindingsTab
                 <p className="meta-text">{rowMeta(finding) || finding.slug}</p>
               </div>
               <div className="finding-row-aside">
+                {(findingChainCounts[finding.slug] ?? 0) > 0 && (
+                  <span className="badge" title="Attack chains">{findingChainCounts[finding.slug]} chain{findingChainCounts[finding.slug] !== 1 ? "s" : ""}</span>
+                )}
                 <span className={`badge severity-${finding.severity}`}>{finding.severity}</span>
               </div>
             </button>
@@ -302,6 +344,24 @@ export function FindingsTab({ findings, fallbackFindings, summary }: FindingsTab
                       <li key={index}>{step}</li>
                     ))}
                   </ol>
+                </div>
+              )}
+
+              {selectedChains.length > 0 && (
+                <div>
+                  <p className="eyebrow">Attack chains</p>
+                  <div style={{ display: "grid", gap: "8px", marginTop: "4px" }}>
+                    {selectedChains.map((chain) => (
+                      <div key={chain.chain_key} style={{ display: "grid", gap: "2px" }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" }}>
+                          <span className={`badge severity-${chain.severity}`}>{chain.severity}</span>
+                          <strong>{chain.title}</strong>
+                          <span className="meta-text">{chain.status}</span>
+                        </div>
+                        {chain.narrative && <p className="meta-text">{chain.narrative}</p>}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 

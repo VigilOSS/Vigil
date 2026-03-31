@@ -102,39 +102,16 @@ Before initializing any engagement, ensure the shared Kali MCP runtime is runnin
 
 This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install.
 
-## Listener Management
+## Listener & Callback Management
 
-Listeners (pwncat-vl, ngrok, chisel) are OPERATOR-CONTROLLED. Agents must never start them.
+Listeners (pwncat-vl, frp, chisel) and OOB callback servers are OPERATOR-CONTROLLED.
+Agents must never start them.
 
-**Why:** The Kali runtime is shared across engagements. An agent starting a listener on port 4444
-could conflict with another engagement's listener. ngrok tunnels are account-scoped — starting a
-second tunnel tears down the first. Only the operator knows the current port/tunnel allocation.
+Setup instructions and commands: `agent/references/offensive-tactics/shell-handling.md`
 
-**Workflow:**
-1. Agent output includes `# MANUAL:` playbook steps with exact listener commands
-2. Operator starts the listener (pwncat-vl in a tmux session inside the runtime)
-3. Operator optionally exposes the listener externally (ngrok or chisel)
-4. Operator resumes the agent (via SendMessage or re-dispatch)
-5. Agent verifies the shell by tailing the log file via Kali MCP
-
-**Quick reference:**
-```bash
-# Start pwncat-vl in a tmux session
-docker exec -it security-research tmux new-session -d -s shell-4444 \
-  'pwncat -l -p 4444 2>&1 | tee /data/shell-4444.log'
-
-# Expose via ngrok
-docker exec -e NGROK_AUTHTOKEN="$NGROK_AUTHTOKEN" \
-  -it security-research ngrok tcp 4444
-
-# List active tmux sessions
-docker exec security-research tmux list-sessions
-
-# Check shell log
-docker exec security-research tail -20 /data/shell-4444.log
-```
-
-Full reference: `agent/references/offensive-tactics/shell-handling.md`
+**Files agents read (never write):**
+- `$DIR/.listener_url` — tunnel address (`host:port`) for reverse shell payloads
+- `$DIR/.oob_url` — callback URL for blind vulnerability detection
 
 ## Subagent Dispatch
 

@@ -42,7 +42,7 @@ Host-side commands are limited to coordination and non-target support only:
 
 ## 2a. Listeners Are Operator-Controlled
 
-Agents must NOT start pwncat-vl, ngrok, frp, chisel listeners, `nc -lvp`, `socat` listeners,
+Agents must NOT start pwncat-vl, frp, chisel listeners, `nc -lvp`, `socat` listeners,
 or any other network listener process. These are shared infrastructure that the operator manages.
 
 When exploitation requires a listener (reverse shell, tunnel, callback relay):

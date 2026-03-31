@@ -7,18 +7,33 @@ type TaskTimelineProps = {
   events: EventRecord[];
 };
 
+function eventTypeLabel(eventType: string): string {
+  switch (eventType) {
+    case "finding.created": return "finding";
+    case "finding.merged": return "merge";
+    case "chain.created": return "chain";
+    case "surface.updated": return "surface";
+    case "artifact.updated": return "artifact";
+    case "phase.started": return "phase";
+    case "phase.completed": return "phase";
+    case "task.started": return "task";
+    case "task.completed": return "task";
+    default: return eventType.split(".")[0] ?? eventType;
+  }
+}
+
 export function TaskTimeline({ events }: TaskTimelineProps) {
   const [showAll, setShowAll] = useState(false);
 
-  const taskEvents = events.filter((event) => event.event_type.startsWith("task."));
-  const visible = showAll ? taskEvents : taskEvents.slice(-DEFAULT_VISIBLE);
-  const hidden = taskEvents.length - DEFAULT_VISIBLE;
+  const activityEvents = events.filter((event) => event.event_type !== "artifact.updated");
+  const visible = showAll ? activityEvents : activityEvents.slice(-DEFAULT_VISIBLE);
+  const hidden = activityEvents.length - DEFAULT_VISIBLE;
 
   return (
     <section className="panel">
       <div className="panel-header">
         <h2>Activity log</h2>
-        <p className="meta-text">{taskEvents.length} task event{taskEvents.length !== 1 ? "s" : ""}</p>
+        <p className="meta-text">{activityEvents.length} event{activityEvents.length !== 1 ? "s" : ""}</p>
       </div>
       <div className="timeline" style={{ display: "flex", flexDirection: "column" }}>
         {!showAll && hidden > 0 && (
@@ -34,7 +49,10 @@ export function TaskTimeline({ events }: TaskTimelineProps) {
                 <strong>{event.task_name}</strong>
                 <span className="meta-text">{event.agent_name}</span>
               </div>
-              <p>{event.summary}</p>
+              <p>
+                <span className={`badge event-type-${eventTypeLabel(event.event_type)}`}>{eventTypeLabel(event.event_type)}</span>
+                {" "}{event.summary}
+              </p>
             </div>
           </article>
         ))}
@@ -43,7 +61,7 @@ export function TaskTimeline({ events }: TaskTimelineProps) {
             Show less
           </button>
         )}
-        {taskEvents.length === 0 ? <p className="empty-state">No task events yet.</p> : null}
+        {activityEvents.length === 0 ? <p className="empty-state">No activity yet.</p> : null}
       </div>
     </section>
   );
