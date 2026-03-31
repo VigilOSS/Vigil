@@ -73,19 +73,10 @@ done < <(scope_entries "$ENG_DIR")
   echo "BLOCKED: Scope metadata is empty; cannot validate host targets safely." >&2
   exit 2
 }
-OUT_OF_SCOPE_LIST=()
-while IFS= read -r blocked_entry; do
-  [ -n "$blocked_entry" ] && OUT_OF_SCOPE_LIST+=("$blocked_entry")
-done < <(out_of_scope_entries "$ENG_DIR")
 
 # Check each host against scope
 for HOST in "${HOST_LIST[@]}"; do
   AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "operator"' 2>/dev/null || echo "unknown")
-  if host_explicitly_out_of_scope "$HOST" "${OUT_OF_SCOPE_LIST[@]}"; then
-    echo "BLOCKED: Host '$HOST' is explicitly out of scope. (agent: $AGENT_TYPE)" >&2
-    echo "Allowed scope: ${SCOPE_LIST[*]}" >&2
-    exit 2
-  fi
   if host_in_scope "$HOST" "${SCOPE_LIST[@]}"; then
     echo "BLOCKED: Host-side Bash command targets in-scope host '$HOST'. Use the attached Kali MCP tools instead. (agent: $AGENT_TYPE)" >&2
     exit 2

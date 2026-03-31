@@ -8,7 +8,7 @@ origin: AI Threat Hunting
 
 ## When to Activate
 
-- Beginning of engagement when scope includes wildcard domains (*.target.example)
+- Beginning of engagement when the `hosts` array in scope.json includes `*.domain` entries (e.g., `*.target.example`)
 - Need to discover additional attack surface beyond the primary domain
 - Recon phase — run in parallel with other recon tasks
 - After finding references to subdomains in JS/HTML source code

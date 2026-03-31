@@ -17,7 +17,7 @@ enterprise behavior. Aggressive techniques are permitted within the declared sco
 
 Read `scope.json` before making target-facing decisions. Confirm:
 
-- In-scope hosts and scope mode (`host_only` | `explicit_hosts` | `wildcard`)
+- In-scope hosts from the `hosts` array (includes `*.domain` entries for subdomain enum)
 - `exploit_policy` value (`pause` | `selected` | `full_send`)
 - Auth state from `auth.json` — use credentials only when the file is populated and marked active
 
