@@ -155,6 +155,60 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     assert summary.json()["finding_count"] == 1
 
 
+def test_coverage_patch_normalizes_tested_to_covered_and_refreshes_service_status(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    ingest = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/request-observations",
+        json={
+            "url": "https://example.com/search?q=test",
+            "query_schema": {"q": {"type": "string"}},
+            "discovery_source": "recon",
+        },
+    )
+    assert ingest.status_code == 201
+
+    coverage_items = client.get("/engagements/2026-03-30-120000-example/assessment/coverage-items")
+    assert coverage_items.status_code == 200
+    service_coverage = next(item for item in coverage_items.json() if item["input_slot"] == "service")
+
+    patch = client.patch(
+        f"/engagements/2026-03-30-120000-example/assessment/coverage-items/{service_coverage['id']}",
+        json={"status": "tested", "notes": "Validated service reachability"},
+    )
+    assert patch.status_code == 200
+    assert patch.json()["status"] == "covered"
+
+    services = client.get("/engagements/2026-03-30-120000-example/assessment/services")
+    assert services.status_code == 200
+    assert services.json()[0]["coverage_status"] == "covered"
+
+    summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
+    assert summary.status_code == 200
+    assert summary.json()["service_coverage_gaps"] == []
+
+
+def test_coverage_patch_rejects_unknown_status_values(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    ingest = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/request-observations",
+        json={"url": "https://example.com/profile", "discovery_source": "recon"},
+    )
+    assert ingest.status_code == 201
+
+    coverage_items = client.get("/engagements/2026-03-30-120000-example/assessment/coverage-items")
+    assert coverage_items.status_code == 200
+    coverage_item_id = coverage_items.json()[0]["id"]
+
+    patch = client.patch(
+        f"/engagements/2026-03-30-120000-example/assessment/coverage-items/{coverage_item_id}",
+        json={"status": "complete-ish", "notes": "bad status"},
+    )
+    assert patch.status_code == 400
+    assert "invalid coverage status" in patch.json()["detail"]
+
+
 def test_incompatible_local_database_is_reset(client, isolate_settings):
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     with sqlite3.connect(str(db_path)) as connection:
