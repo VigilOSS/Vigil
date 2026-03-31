@@ -121,3 +121,8 @@ origin: AI Threat Hunting
 - Exploitation achieved (access bypass, cache poison, credential theft)
 - Severity: Critical (credential theft, cache poisoning) or High (access bypass)
 - Remediation: normalize CL/TE handling, use HTTP/2 end-to-end, reject ambiguous requests
+
+## Extended Resources
+
+- `agent/references/payloads/request-smuggling-payloads.md` — CL.TE, TE.CL, TE.TE obfuscation, HTTP/2 downgrade
+- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist

@@ -1432,6 +1432,62 @@ def list_findings(engagement_id: int) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def list_report_findings(engagement_id: int) -> list[dict[str, Any]]:
+    """Return findings formatted for report generation.
+
+    Excludes merged findings, orders by severity (critical first), and extracts
+    CVSS/remediation/steps_to_reproduce from the ``details_json`` blob so the
+    report-writer has structured fields without manual JSON parsing.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM assessment_findings
+            WHERE engagement_id = ?
+              AND status != 'merged'
+            ORDER BY
+                CASE severity
+                    WHEN 'critical' THEN 0
+                    WHEN 'high' THEN 1
+                    WHEN 'medium' THEN 2
+                    WHEN 'low' THEN 3
+                    WHEN 'info' THEN 4
+                    ELSE 5
+                END,
+                CASE status
+                    WHEN 'exploited' THEN 0
+                    WHEN 'confirmed' THEN 1
+                    WHEN 'reported' THEN 2
+                    WHEN 'blocked' THEN 3
+                    WHEN 'draft' THEN 4
+                    ELSE 5
+                END,
+                updated_at DESC,
+                id DESC
+            """,
+            (engagement.id,),
+        ).fetchall()
+
+    results: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows, start=1):
+        record = dict(row)
+        details = _json_object(record.get("details_json", "{}"))
+        record["report_id"] = f"FINDING-{idx:03d}"
+        record["cvss_vector"] = details.get("cvss_vector", "")
+        record["cvss_score"] = details.get("cvss_score")
+        record["remediation"] = details.get("remediation", "")
+        record["steps_to_reproduce"] = details.get("steps_to_reproduce", [])
+        record["cwe_id"] = details.get("cwe_id", "")
+        record["owasp_category"] = details.get("owasp_category", "")
+        record["impact"] = details.get("impact", record.get("summary", ""))
+        record["evidence_detail"] = details.get("evidence", "")
+        results.append(record)
+
+    return results
+
+
 def create_finding_link(
     engagement_id: int,
     *,
@@ -1895,6 +1951,32 @@ def list_blocked_techniques(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         return _fetch_all(connection, "SELECT * FROM assessment_blocked_techniques WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+
+
+def update_coverage_item_status(
+    engagement_id: int,
+    *,
+    coverage_item_id: int,
+    status_value: str,
+    notes: str,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM assessment_coverage_items WHERE id = ? AND engagement_id = ?",
+            (coverage_item_id, engagement.id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="coverage item not found")
+        connection.execute(
+            "UPDATE assessment_coverage_items SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND engagement_id = ?",
+            (status_value, _append_notes(row["notes"], notes), coverage_item_id, engagement.id),
+        )
+        updated = connection.execute(
+            "SELECT * FROM assessment_coverage_items WHERE id = ?", (coverage_item_id,)
+        ).fetchone()
+    assert updated is not None
+    return dict(updated)
 
 
 def assessment_summary(engagement_id: int) -> dict[str, Any]:

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { AssessmentFinding, AssessmentFindingDetail, AssessmentSummary } from "../lib/api";
+import type { AssessmentFinding, AssessmentFindingDetail, AssessmentSummary, FindingDetails } from "../lib/api";
 
 type FindingsTabProps = {
   findings: AssessmentFindingDetail[];
@@ -11,6 +11,14 @@ const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
 
 function isDetail(f: AssessmentFinding | AssessmentFindingDetail): f is AssessmentFindingDetail {
   return "id" in f;
+}
+
+function parseDetails(f: AssessmentFindingDetail): FindingDetails {
+  try {
+    return JSON.parse(f.details_json || "{}");
+  } catch {
+    return {};
+  }
 }
 
 export function FindingsTab({ findings, fallbackFindings, summary }: FindingsTabProps) {
@@ -157,7 +165,70 @@ export function FindingsTab({ findings, fallbackFindings, summary }: FindingsTab
                     <p>{selectedFinding.source_name}</p>
                   </div>
                 )}
+                {isDetail(selectedFinding) && (() => {
+                  const d = parseDetails(selectedFinding);
+                  return (
+                    <>
+                      {d.owasp_category && (
+                        <div>
+                          <p className="eyebrow">OWASP</p>
+                          <p>{d.owasp_category}</p>
+                        </div>
+                      )}
+                      {d.cwe_id && (
+                        <div>
+                          <p className="eyebrow">CWE</p>
+                          <p>{d.cwe_id}</p>
+                        </div>
+                      )}
+                      {d.request_method && (
+                        <div>
+                          <p className="eyebrow">Method</p>
+                          <p>{d.request_method}</p>
+                        </div>
+                      )}
+                      {d.cvss_vector && (
+                        <div>
+                          <p className="eyebrow">CVSS</p>
+                          <p style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
+                            {d.cvss_vector}{d.cvss_score != null ? ` (${d.cvss_score})` : ""}
+                          </p>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
+
+              {isDetail(selectedFinding) && (() => {
+                const d = parseDetails(selectedFinding);
+                return (
+                  <>
+                    {d.impact && (
+                      <div>
+                        <p className="eyebrow">Impact</p>
+                        <p>{d.impact}</p>
+                      </div>
+                    )}
+                    {d.remediation && (
+                      <div>
+                        <p className="eyebrow">Remediation</p>
+                        <p>{d.remediation}</p>
+                      </div>
+                    )}
+                    {d.steps_to_reproduce && d.steps_to_reproduce.length > 0 && (
+                      <div>
+                        <p className="eyebrow">Steps to reproduce</p>
+                        <ol style={{ margin: 0, paddingLeft: "20px" }}>
+                          {d.steps_to_reproduce.map((step, i) => (
+                            <li key={i} style={{ marginBottom: "4px" }}>{step}</li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
 
               {isDetail(selectedFinding) && selectedFinding.notes && (
                 <div>

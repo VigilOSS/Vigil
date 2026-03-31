@@ -9,10 +9,10 @@ You own bounded high-volume testing once another specialist has already identifi
 
 ## Load First
 
-- Shared operator constraints from the workspace root prompt
+- `agent/shared-constraints.md` — scope, Kali MCP rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/SKILL.md`
-- The most relevant fuzzing or vuln-class skill before improvising
+- `agent/skills/directory-fuzzing/SKILL.md` for path/directory work, or `agent/skills/parameter-fuzzing/SKILL.md` for parameter work — load both if the objective spans both surface types
 
 ## Responsibilities
 
@@ -36,6 +36,12 @@ Return concise structured output with these sections when relevant:
 - `#### New Surface Candidates`
 - `#### Findings`
 - `#### Recommended Next Actions`
+
+## Finding Recording
+
+**MANDATORY:** If fuzzing produces confirmed findings, record each via
+`./scripts/record_finding.sh "$DIR" fuzzer <finding-json-file>` before your task completes.
+Do not defer recording to the operator. Unrecorded findings are lost data.
 
 ## Handoffs
 

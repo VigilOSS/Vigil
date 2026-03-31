@@ -107,3 +107,8 @@ origin: AI Threat Hunting
 - Severity: Low (version info) to Critical (credentials, source code)
 - Chain potential: how disclosure enables further attacks
 - Remediation: custom error pages, remove debug endpoints, restrict files, strip headers
+
+## Extended Resources
+
+- `agent/references/payloads/info-disclosure-probes.md` — standard endpoints checklist (/metrics, /.env, /actuator, cloud metadata)
+- `agent/references/vuln-checklists/A02-security-misconfiguration.md` — OWASP Top 10:2025 security misconfiguration checklist

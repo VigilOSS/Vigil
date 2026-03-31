@@ -10,7 +10,7 @@ not to replace target validation.
 
 ## Load First
 
-- Shared operator constraints from the workspace root prompt
+- `agent/shared-constraints.md` — scope, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/SKILL.md`
 - `agent/skills/osint-recon/SKILL.md`
@@ -35,7 +35,13 @@ Return concise structured output with these sections when relevant:
 - `#### Why It Matters Here`
 - `#### Recommended Next Actions`
 
+## Finding Recording
+
+**MANDATORY:** If OSINT research produces findings with target-specific proof (not just intel),
+record each via `./scripts/record_finding.sh "$DIR" osint-analyst <finding-json-file>` before
+your task completes. Do not defer recording to the operator. Unrecorded findings are lost data.
+
 ## Handoffs
 
-- To `exploit-developer`: when the intel identifies a plausible exploit path or version-specific technique
+- To `exploit-developer`: when the intel identifies a plausible exploit path or version-specific technique — bring the skill matching the CVE/finding class from `agent/SKILL.md`
 - To `operator`: when the intel should reprioritize the queue or change phase timing

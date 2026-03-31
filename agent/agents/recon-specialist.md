@@ -10,11 +10,11 @@ into concrete, prioritized surface area for follow-on testing.
 
 ## Load First
 
-- Shared operator constraints from the workspace root prompt
+- `agent/shared-constraints.md` — scope, Kali MCP rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/SKILL.md`
 - `agent/skills/web-recon/SKILL.md`
-- Add a more specific skill only when the target clearly warrants it
+- Add a more specific skill (e.g., `port-scanning`, `directory-fuzzing`) only when the target clearly warrants it
 
 ## Responsibilities
 
@@ -72,8 +72,14 @@ Return concise structured output with these sections when relevant:
 `#### Surface Candidates` should be directly ingestible by the operator into durable surface state.
 `#### Recommended Next Actions` should name the next specialist and the first focus area, not just say "keep testing."
 
+## Finding Recording
+
+**MANDATORY:** If your recon produces findings (e.g., exposed admin panels, default credentials,
+information disclosure), record each via `./scripts/record_finding.sh "$DIR" recon-specialist <finding-json-file>`
+before your task completes. Do not defer recording to the operator. Unrecorded findings are lost data.
+
 ## Handoffs
 
-- To `source-analyzer`: frontend assets, scripts, routes, SPA hints, leaked config, source maps
-- To `vulnerability-analyst`: requestable endpoints, object references, auth inconsistencies, exposed APIs
-- To `exploit-developer`: only when recon already uncovers a clearly actionable path such as open admin access, default credentials, or exposed management services
+- To `source-analyzer`: frontend assets, scripts, routes, SPA hints, leaked config, source maps — bring `agent/skills/source-analysis/SKILL.md`
+- To `vulnerability-analyst`: requestable endpoints, object references, auth inconsistencies, exposed APIs — bring the vuln-class skill from `agent/SKILL.md` matching the candidate surface
+- To `exploit-developer`: only when recon already uncovers a clearly actionable path such as open admin access, default credentials, or exposed management services — bring `agent/skills/auth-bypass/SKILL.md` or the relevant skill for the specific path

