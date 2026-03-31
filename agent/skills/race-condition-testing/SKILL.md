@@ -117,3 +117,8 @@ behavior.
 - Timing window observed
 - Severity: High (financial) to Medium (logic bypass)
 - Remediation: database locks, idempotency keys, atomic operations, mutex
+
+## Extended Resources
+
+- `agent/references/payloads/race-condition-payloads.md` — HTTP/2 single-packet, limit overrun, multi-endpoint race
+- `agent/references/vuln-checklists/A06-insecure-design.md` — OWASP Top 10:2025 insecure design checklist

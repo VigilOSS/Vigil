@@ -72,6 +72,12 @@ Attack techniques organized by kill chain phase. Used by: operator, exploit-deve
 | `offensive-tactics/lateral-movement/rdp-lateral.md` | RDP hijacking (tscon), SharpRDP headless |
 | `offensive-tactics/lateral-movement/tunneling-relaying.md` | SSH tunneling, netcat relay, NTLM relay, port forwarding |
 
+### offensive-tactics/ (shell handling)
+
+| File | Techniques |
+|------|-----------|
+| `offensive-tactics/shell-handling.md` | pwncat-vl listeners, tmux session management, ngrok/chisel exposure, reverse shell payloads, log tailing for LLM visibility |
+
 ### offensive-tactics/persistence/
 
 | File | Techniques |
@@ -189,5 +195,6 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 | File | Purpose |
 |------|---------|
 | `engagement-methodology.md` | Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase |
+| `subagent-registry.md` | Registry schema, resume-vs-dispatch decision tree, and examples for `agent-registry.json` |
 | `handoff-protocols.md` | Agent-to-agent handoff rules and expected downstream actions |
 | `wildcard-mode.md` | Wildcard target enumeration, prioritization, and sliding-window execution rules |

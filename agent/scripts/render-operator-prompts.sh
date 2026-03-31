@@ -9,8 +9,32 @@ OUTPUT_DIR="${2:-$SOURCE_DIR}"
 CORE_FILE="$SOURCE_DIR/operator-core.md"
 CLAUDE_OUT="$OUTPUT_DIR/CLAUDE.md"
 AGENTS_OUT="$OUTPUT_DIR/AGENTS.md"
-CLAUDE_WRAPPER_OUT="$OUTPUT_DIR/.claude/agents/operator.md"
-CODEX_WRAPPER_OUT="$OUTPUT_DIR/.codex/agents/operator.toml"
+CLAUDE_AGENTS_DIR="$OUTPUT_DIR/.claude/agents"
+CODEX_AGENTS_DIR="$OUTPUT_DIR/.codex/agents"
+
+AGENT_NAMES=(
+  operator
+  recon-specialist
+  source-analyzer
+  vulnerability-analyst
+  exploit-developer
+  fuzzer
+  osint-analyst
+  report-writer
+)
+
+agent_description() {
+  case "$1" in
+    operator) printf '%s\n' "Lead red team operator. Drives methodology, coordinates phases, and manages state." ;;
+    recon-specialist) printf '%s\n' "Initial web and service reconnaissance specialist." ;;
+    source-analyzer) printf '%s\n' "Frontend and client-source analysis specialist." ;;
+    vulnerability-analyst) printf '%s\n' "Validation-focused analyst for attackability and evidence quality." ;;
+    exploit-developer) printf '%s\n' "Exploitation and chain-building specialist." ;;
+    fuzzer) printf '%s\n' "High-volume fuzzing specialist for bounded payload families." ;;
+    osint-analyst) printf '%s\n' "External intelligence specialist for CVEs, disclosures, and context." ;;
+    report-writer) printf '%s\n' "Human-first reporting specialist for concise, evidence-backed reporting." ;;
+  esac
+}
 
 render_banner() {
   cat <<'EOF'
@@ -27,6 +51,39 @@ render_banner() {
 EOF
 }
 
+render_prompt_locality() {
+  cat <<'EOF'
+## Prompt Locality
+
+- Operator instructions: `AGENTS.md` / `CLAUDE.md`
+- Specialist prompt sources: `agent/agents/*.md`
+- Generated specialist wrappers: `.codex/agents/*.toml` / `.claude/agents/*.md`
+- Always-active rules: `agent/rules/hunting.md`, `agent/rules/reporting.md`
+- Skill discovery: `agent/SKILL.md`
+- Detailed skills: `agent/skills/*/SKILL.md`
+- References: `agent/references/INDEX.md`
+
+EOF
+}
+
+render_agent_roster() {
+  cat <<'EOF'
+## Agent Roster
+
+| Agent | Role | Dispatched When |
+|---|---|---|
+| `operator` | Lead red team operator. Drives methodology, coordinates phases, manages state. | Always active. Entry point. |
+| `recon-specialist` | Network recon: fingerprinting, directory fuzzing, tech stack, port scanning. | Phase 1. |
+| `source-analyzer` | Deep static analysis of HTML/JS/CSS for hidden routes, API endpoints, secrets. | Phase 1 (parallel with recon). |
+| `vulnerability-analyst` | Validates endpoints, kills weak findings, and prepares durable evidence. | Phase 3 consumption loop. |
+| `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 3 (HIGH/MEDIUM) + Phase 4. |
+| `fuzzer` | High-volume parameter/directory/protocol fuzzing with bounded objectives. | When FUZZER_NEEDED. |
+| `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 4 (parallel with exploit). |
+| `report-writer` | Generates structured engagement report from durable findings and synchronized artifacts. | Phase 5 or on-demand. |
+
+EOF
+}
+
 render_claude() {
   {
     cat <<'EOF'
@@ -35,19 +92,21 @@ render_claude() {
 EOF
     render_banner
     cat <<'EOF'
-║   Powered by Claude Code | Realistic authorized lab runtime  ║
+║   Powered by Claude Code  ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
 When a session starts, display the banner above and then:
-"[operator] AI Threat Hunting ready. Ensure `./scripts/start_kali_mcp_runtime.sh` is running, then use `./scripts/init_engagement.sh <target_url>` to start a new engagement."
+"[operator] AI Threat Hunting ready. Ensure `./agent/scripts/start_kali_mcp_runtime.sh` is running, then use `cd agent && ./scripts/init_engagement.sh <target_url>` to start a new engagement."
 
 ---
 
 <!-- Generated from operator-core.md via scripts/render-operator-prompts.sh -->
 
 EOF
+    render_prompt_locality
+    render_agent_roster
     cat "$CORE_FILE"
     cat <<'EOF'
 
@@ -87,45 +146,40 @@ EOF
 ```
 
 When a session starts, display the banner above and then:
-"[operator] AI Threat Hunting ready. Ensure `./scripts/start_kali_mcp_runtime.sh` is running, then use `./scripts/init_engagement.sh <target_url>` to start a new engagement."
+"[operator] AI Threat Hunting ready. Ensure `./agent/scripts/start_kali_mcp_runtime.sh` is running, then use `cd agent && ./scripts/init_engagement.sh <target_url>` to start a new engagement."
 
 ---
 
 <!-- Generated from operator-core.md via scripts/render-operator-prompts.sh -->
 
-## Agent Roster
-
-| Agent | Role | Dispatched When |
-|---|---|---|
-| `operator` | Lead red team operator. Drives methodology, coordinates phases, manages state. | Always active. Entry point. |
-| `recon-specialist` | Network recon: fingerprinting, directory fuzzing, tech stack, port scanning. | Phase 1. |
-| `source-analyzer` | Deep static analysis of HTML/JS/CSS for hidden routes, API endpoints, secrets. | Phase 1 (parallel with recon). |
-| `vulnerability-analyst` | Analyzes endpoints, identifies vulnerability patterns, prioritizes attack paths. | Phase 3 consumption loop. |
-| `exploit-developer` | Crafts/executes exploits: SQLi, XSS, auth bypass, chain analysis, impact. | Phase 3 (HIGH/MEDIUM) + Phase 4. |
-| `fuzzer` | High-volume parameter/directory fuzzing, rapid iteration. | When FUZZER_NEEDED. |
-| `osint-analyst` | OSINT intelligence gathering, CVE/breach/DNS/social research. | Phase 4 (parallel with exploit). |
-| `report-writer` | Generates structured engagement report from logs and findings. | Phase 5 or on-demand. |
-
 EOF
+    render_prompt_locality
+    render_agent_roster
     cat "$CORE_FILE"
     cat <<'EOF'
 
 ## Tool Promotion Workflow
 
-After an engagement, review generated tools in `engagements/<...>/tools/`:
-1. Identify reusable tools → create skill in `skills/<name>/SKILL.md`
-2. Add the new skill to `references/INDEX.md` and note it in the relevant Claude/Codex instructions
+After an engagement, review generated tools in `agent/engagements/<...>/tools/`:
+1. Identify reusable tools -> create a skill in `agent/skills/<name>/SKILL.md`
+2. Add the new skill to `agent/references/INDEX.md` and note it in the relevant Claude/Codex instructions
 EOF
   } > "$AGENTS_OUT"
   perl -0pi -e 's/\n+\z/\n/' "$AGENTS_OUT"
 }
 
 render_claude_wrapper() {
-  mkdir -p "$(dirname "$CLAUDE_WRAPPER_OUT")"
-  cat > "$CLAUDE_WRAPPER_OUT" <<'EOF'
+  local agent_name="$1"
+  local description
+  description=$(agent_description "$agent_name")
+  local out="$CLAUDE_AGENTS_DIR/$agent_name.md"
+  mkdir -p "$(dirname "$out")"
+
+  if [[ "$agent_name" == "operator" ]]; then
+    cat > "$out" <<'EOF'
 ---
 name: operator
-description: Lead red team operator. Drives pentest methodology, coordinates phases, dispatches subagents.
+description: Lead red team operator. Drives pentest methodology, coordinates phases, and manages state.
 ---
 
 You are the lead red team operator.
@@ -133,33 +187,76 @@ You are the lead red team operator.
 Load and follow the complete operator instructions from `CLAUDE.md` in the project root.
 This wrapper exists only so Claude Code can expose an `operator` agent entrypoint without duplicating prompt text.
 EOF
+    return
+  fi
+
+  cat > "$out" <<EOF
+---
+name: $agent_name
+description: $description
+---
+
+You are $agent_name.
+
+Load and follow the shared operator and rule guidance from \`CLAUDE.md\` in the project root.
+Then load and follow your role instructions from \`agent/agents/$agent_name.md\`.
+Use \`agent/SKILL.md\` to select the most relevant skill before improvising.
+EOF
 }
 
 render_codex_wrapper() {
-  mkdir -p "$(dirname "$CODEX_WRAPPER_OUT")"
-  cat > "$CODEX_WRAPPER_OUT" <<'EOF'
+  local agent_name="$1"
+  local description
+  description=$(agent_description "$agent_name")
+  local out="$CODEX_AGENTS_DIR/$agent_name.toml"
+  mkdir -p "$(dirname "$out")"
+
+  if [[ "$agent_name" == "operator" ]]; then
+    cat > "$out" <<'EOF'
 name = "operator"
-description = "Lead red team operator. Drives pentest methodology, coordinates phases, dispatches subagents. Entry point for all engagements."
+description = "Lead red team operator. Drives methodology, coordinates phases, and manages state."
 
 developer_instructions = """
 Load and follow the complete operator instructions from AGENTS.md in the project root.
-This wrapper exists only so Codex can expose an operator entrypoint without duplicating prompt text.
+This wrapper exists only so Codex can expose an operator agent entrypoint without duplicating prompt text.
 """
 EOF
+    return
+  fi
+
+  cat > "$out" <<EOF
+name = "$agent_name"
+description = "$description"
+
+developer_instructions = """
+Load and follow the shared operator and rule guidance from AGENTS.md in the project root.
+Then load and follow your role instructions from agent/agents/$agent_name.md.
+Use agent/SKILL.md to select the most relevant skill before improvising.
+"""
+EOF
+}
+
+render_all_wrappers() {
+  local agent_name
+  for agent_name in "${AGENT_NAMES[@]}"; do
+    render_claude_wrapper "$agent_name"
+    render_codex_wrapper "$agent_name"
+  done
 }
 
 case "$MODE" in
   repo)
     render_claude
     render_agents
-    render_claude_wrapper
-    render_codex_wrapper
+    render_all_wrappers
     ;;
   claude-install)
     render_claude
+    render_all_wrappers
     ;;
   codex-install)
     render_agents
+    render_all_wrappers
     ;;
   *)
     echo "Usage: $0 [repo|claude-install|codex-install] [output-dir]" >&2

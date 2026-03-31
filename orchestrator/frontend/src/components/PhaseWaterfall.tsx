@@ -4,6 +4,7 @@ const PHASES = ["recon", "collect", "consume-test", "exploit", "report"];
 
 type PhaseWaterfallProps = {
   events: EventRecord[];
+  currentPhase: string;
 };
 
 function phaseLabel(phase: string) {
@@ -15,7 +16,7 @@ function phaseLabel(phase: string) {
   }
 }
 
-function phaseState(events: EventRecord[], phase: string) {
+function phaseState(events: EventRecord[], phase: string, currentPhase: string) {
   const relevant = events.filter((event) => event.phase === phase);
   if (relevant.some((event) => event.event_type === "phase.completed")) {
     return "completed";
@@ -23,19 +24,34 @@ function phaseState(events: EventRecord[], phase: string) {
   if (relevant.some((event) => event.event_type === "phase.started")) {
     return "active";
   }
+
+  if (currentPhase === "complete") {
+    return "completed";
+  }
+
+  const currentIndex = PHASES.indexOf(currentPhase);
+  const phaseIndex = PHASES.indexOf(phase);
+  if (currentIndex >= 0 && phaseIndex >= 0) {
+    if (phaseIndex < currentIndex) return "completed";
+    if (phaseIndex === currentIndex) return "active";
+  }
+
   return "pending";
 }
 
-export function PhaseWaterfall({ events }: PhaseWaterfallProps) {
+export function PhaseWaterfall({ events, currentPhase }: PhaseWaterfallProps) {
+  const hasStructuredEvents = events.some((event) => event.event_type.startsWith("task."));
   return (
     <section className="panel">
       <div className="panel-header">
         <h2>Phase waterfall</h2>
-        <p className="meta-text">Five-phase autonomous workflow</p>
+        <p className="meta-text">
+          {hasStructuredEvents ? "Five-phase autonomous workflow" : "Using workflow state because no structured task events were recorded"}
+        </p>
       </div>
       <div className="waterfall">
         {PHASES.map((phase) => {
-          const state = phaseState(events, phase);
+          const state = phaseState(events, phase, currentPhase);
           const taskCount = events.filter((event) => event.phase === phase && event.event_type.startsWith("task.")).length;
           return (
             <article key={phase} className={`phase-card phase-${state}`}>

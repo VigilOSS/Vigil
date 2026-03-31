@@ -62,3 +62,8 @@ curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "http://target/oauth/call
 - Redirect parameter name and endpoint
 - Which bypass technique worked
 - Whether it's an absolute redirect (to external domain) or relative only
+
+## Extended Resources
+
+- `agent/references/payloads/open-redirect-payloads.md` — URL parsing confusion, protocol-relative, unicode normalization
+- `agent/references/vuln-checklists/A01-broken-access-control.md` — OWASP Top 10:2025 access control checklist

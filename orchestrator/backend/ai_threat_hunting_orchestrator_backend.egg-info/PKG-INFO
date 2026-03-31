@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: security-research-orchestrator-backend
+Version: 0.1.0
+Summary: Local engagement orchestrator for AI Threat Hunting
+Requires-Python: >=3.11
+Requires-Dist: fastapi<1,>=0.115
+Requires-Dist: uvicorn[standard]<1,>=0.30
+Provides-Extra: dev
+Requires-Dist: httpx<1,>=0.27; extra == "dev"
+Requires-Dist: pytest<9,>=8; extra == "dev"

@@ -85,3 +85,8 @@ arjun -u "https://TARGET/endpoint" -w custom_params.txt
 curl -sv "https://TARGET/endpoint?discovered_param=test" 2>&1
 diff <(curl -s "https://TARGET/endpoint") <(curl -s "https://TARGET/endpoint?param=value")
 ```
+
+## Extended Resources
+
+- `agent/references/tools/fuzzing/ffuf.md` — ffuf flags, filter/matcher options, wordlist selection
+- `agent/references/tools/fuzzing/wfuzz.md` — wfuzz advanced filtering and payload chaining

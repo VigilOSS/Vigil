@@ -1,24 +1,28 @@
-export type AuthResponse = {
-  access_token: string;
-  token_type: string;
-  user: {
-    id: number;
-    username: string;
-  };
-};
-
-export type Project = {
+export type Engagement = {
   id: number;
-  name: string;
-  slug: string;
-  root_path: string;
-};
-
-export type Run = {
-  id: number;
+  key: string;
   target: string;
   status: string;
   engagement_root: string;
+  current_phase: string;
+  exploit_policy: string;
+  exploit_review_state: string;
+  approved_findings: string[];
+  created_at: string;
+  updated_at: string;
+  session_count: number;
+};
+
+export type EngagementSession = {
+  id: number;
+  session_id: string;
+  session_path: string;
+  status: string;
+  merge_state: string;
+  assigned_findings: string[];
+  created_at: string;
+  updated_at: string;
+  merged_at: string | null;
 };
 
 export type EventRecord = {
@@ -63,6 +67,20 @@ export type AssessmentFinding = {
   updated_at: string;
 };
 
+export type FindingDetails = {
+  discovered_by?: string;
+  owasp_category?: string;
+  cwe_id?: string;
+  parameter?: string;
+  request_method?: string;
+  evidence?: string;
+  impact?: string;
+  cvss_vector?: string;
+  cvss_score?: number;
+  remediation?: string;
+  steps_to_reproduce?: string[];
+};
+
 export type AssessmentFindingDetail = AssessmentFinding & {
   id: number;
   evidence_ref: string;
@@ -70,6 +88,7 @@ export type AssessmentFindingDetail = AssessmentFinding & {
   defect_family: string;
   root_cause_key: string;
   auth_context: string;
+  details_json: string;
   merged_into_slug?: string | null;
 };
 
@@ -182,10 +201,6 @@ export type ArtifactContent = Artifact & {
   content: string;
 };
 
-export type WebSocketTicketResponse = {
-  ticket: string;
-};
-
 function appBaseUrl(): URL {
   const pathname = window.location.pathname.endsWith("/")
     ? window.location.pathname
@@ -206,144 +221,143 @@ async function readError(response: Response): Promise<string> {
 
   try {
     const payload = JSON.parse(text) as { detail?: unknown };
-    if (Array.isArray(payload.detail) && payload.detail.length > 0) {
-      const first = payload.detail[0] as { loc?: unknown[]; msg?: string };
-      const field = Array.isArray(first.loc) ? first.loc[first.loc.length - 1] : undefined;
-      if (typeof field === "string" && typeof first.msg === "string") {
-        return `${field}: ${first.msg}`;
-      }
-      if (typeof first.msg === "string") {
-        return first.msg;
-      }
-    }
     if (typeof payload.detail === "string") {
       return payload.detail;
     }
   } catch {
-    // Fall back to the raw body below.
+    // Fall back to raw body.
   }
 
   return text;
 }
 
-async function request<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers ?? {});
   if (!headers.has("Content-Type") && init.body) {
     headers.set("Content-Type", "application/json");
   }
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
 
-  const response = await fetch(resolveAppUrl(path), {
-    ...init,
-    headers,
-  });
-
+  const response = await fetch(resolveAppUrl(path), { ...init, headers });
   if (!response.ok) {
     throw new Error(await readError(response));
   }
-
   return response.json() as Promise<T>;
 }
 
-export function login(username: string, password: string) {
-  return request<AuthResponse>("/auth/login", {
-    method: "POST",
-    body: JSON.stringify({ username, password }),
-  });
+export function listEngagements() {
+  return request<Engagement[]>("/engagements");
 }
 
-export function register(username: string, password: string) {
-  return request<{ id: number; username: string }>("/auth/register", {
-    method: "POST",
-    body: JSON.stringify({ username, password }),
-  });
+export function getEngagement(engagementKey: string) {
+  return request<Engagement>(`/engagements/${engagementKey}`);
 }
 
-export function listProjects(token: string) {
-  return request<Project[]>("/projects", {}, token);
+export function listEngagementSessions(engagementKey: string) {
+  return request<EngagementSession[]>(`/engagements/${engagementKey}/sessions`);
 }
 
-export function createProject(token: string, name: string) {
-  return request<Project>("/projects", {
-    method: "POST",
-    body: JSON.stringify({ name }),
-  }, token);
+export function listEvents(engagementKey: string) {
+  return request<EventRecord[]>(`/engagements/${engagementKey}/events`);
 }
 
-export function deleteProject(token: string, projectId: number) {
-  return request<void>(`/projects/${projectId}`, {
-    method: "DELETE",
-  }, token);
+export function getAssessmentSummary(engagementKey: string) {
+  return request<AssessmentSummary>(`/engagements/${engagementKey}/assessment/summary`);
 }
 
-export function listRuns(token: string, projectId: number) {
-  return request<Run[]>(`/projects/${projectId}/runs`, {}, token);
+export function listAssessmentSurfaces(engagementKey: string) {
+  return request<AssessmentSurface[]>(`/engagements/${engagementKey}/assessment/surfaces`);
 }
 
-export function createRun(token: string, projectId: number, target: string) {
-  return request<Run>(`/projects/${projectId}/runs`, {
-    method: "POST",
-    body: JSON.stringify({ target }),
-  }, token);
+export function listAssessmentFindings(engagementKey: string) {
+  return request<AssessmentFindingDetail[]>(`/engagements/${engagementKey}/assessment/findings`);
 }
 
-export function deleteRun(token: string, projectId: number, runId: number) {
-  return request<void>(`/projects/${projectId}/runs/${runId}`, {
-    method: "DELETE",
-  }, token);
+export function listAssessmentFindingLinks(engagementKey: string) {
+  return request<AssessmentFindingLink[]>(`/engagements/${engagementKey}/assessment/finding-links`);
 }
 
-export function listEvents(token: string, projectId: number, runId: number) {
-  return request<EventRecord[]>(`/projects/${projectId}/runs/${runId}/events`, {}, token);
+export function listAssessmentProbes(engagementKey: string) {
+  return request<AssessmentProbeDetail[]>(`/engagements/${engagementKey}/assessment/probe-runs`);
 }
 
-export function getAssessmentSummary(token: string, projectId: number, runId: number) {
-  return request<AssessmentSummary>(`/projects/${projectId}/runs/${runId}/assessment/summary`, {}, token);
+export function listAssessmentAttackChains(engagementKey: string) {
+  return request<AssessmentAttackChainDetail[]>(`/engagements/${engagementKey}/assessment/attack-chains`);
 }
 
-export function listAssessmentSurfaces(token: string, projectId: number, runId: number) {
-  return request<AssessmentSurface[]>(`/projects/${projectId}/runs/${runId}/assessment/surfaces`, {}, token);
+export function listAssessmentAttackChainLinks(engagementKey: string) {
+  return request<AssessmentAttackChainLink[]>(`/engagements/${engagementKey}/assessment/attack-chain-links`);
 }
 
-export function listAssessmentFindings(token: string, projectId: number, runId: number) {
-  return request<AssessmentFindingDetail[]>(`/projects/${projectId}/runs/${runId}/assessment/findings`, {}, token);
+export function listArtifacts(engagementKey: string) {
+  return request<Artifact[]>(`/engagements/${engagementKey}/artifacts`);
 }
 
-export function listAssessmentFindingLinks(token: string, projectId: number, runId: number) {
-  return request<AssessmentFindingLink[]>(`/projects/${projectId}/runs/${runId}/assessment/finding-links`, {}, token);
+export function readArtifact(engagementKey: string, artifactName: string) {
+  return request<ArtifactContent>(`/engagements/${engagementKey}/artifacts/${artifactName}`);
 }
 
-export function listAssessmentProbes(token: string, projectId: number, runId: number) {
-  return request<AssessmentProbeDetail[]>(`/projects/${projectId}/runs/${runId}/assessment/probe-runs`, {}, token);
+// ── Coverage & discovery types ──────────────────────────
+
+export type AssessmentTarget = {
+  id: number;
+  identity: string;
+  kind: string;
+  host: string;
+  ip_address: string | null;
+  hostname: string | null;
+  notes: string;
+  discovered_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AssessmentService = {
+  id: number;
+  target_id: number;
+  endpoint: string;
+  port: number | null;
+  protocol: string;
+  service: string;
+  state: string;
+  coverage_status: string;
+  banner: string;
+  notes: string;
+  discovered_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AssessmentCoverageItem = {
+  id: number;
+  request_variant_id: number | null;
+  service_id: number | null;
+  auth_context: string;
+  input_slot: string;
+  attack_family: string;
+  status: string;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+  method: string | null;
+  canonical_url: string | null;
+  service_endpoint: string | null;
+  service_name: string | null;
+};
+
+export function listAssessmentTargets(engagementKey: string) {
+  return request<AssessmentTarget[]>(`/engagements/${engagementKey}/assessment/targets`);
 }
 
-export function listAssessmentAttackChains(token: string, projectId: number, runId: number) {
-  return request<AssessmentAttackChainDetail[]>(`/projects/${projectId}/runs/${runId}/assessment/attack-chains`, {}, token);
+export function listAssessmentServices(engagementKey: string) {
+  return request<AssessmentService[]>(`/engagements/${engagementKey}/assessment/services`);
 }
 
-export function listAssessmentAttackChainLinks(token: string, projectId: number, runId: number) {
-  return request<AssessmentAttackChainLink[]>(`/projects/${projectId}/runs/${runId}/assessment/attack-chain-links`, {}, token);
+export function listAssessmentCoverageItems(engagementKey: string) {
+  return request<AssessmentCoverageItem[]>(`/engagements/${engagementKey}/assessment/coverage-items`);
 }
 
-export function listArtifacts(token: string, projectId: number, runId: number) {
-  return request<Artifact[]>(`/projects/${projectId}/runs/${runId}/artifacts`, {}, token);
-}
-
-export function readArtifact(token: string, projectId: number, runId: number, artifactName: string) {
-  return request<ArtifactContent>(`/projects/${projectId}/runs/${runId}/artifacts/${artifactName}`, {}, token);
-}
-
-export function createWebSocketTicket(token: string) {
-  return request<WebSocketTicketResponse>("/auth/ws-ticket", { method: "POST" }, token);
-}
-
-export function runWebSocketUrl(projectId: number, runId: number, ticket: string) {
-  const httpUrl = new URL(
-    `ws/projects/${projectId}/runs/${runId}?ticket=${encodeURIComponent(ticket)}`,
-    appBaseUrl(),
-  );
-  httpUrl.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return httpUrl.toString();
+export function engagementWebSocketUrl(engagementKey: string): string {
+  const url = new URL(`ws/engagements/${encodeURIComponent(engagementKey)}`, appBaseUrl());
+  url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
 }

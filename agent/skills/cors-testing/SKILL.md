@@ -97,3 +97,8 @@ origin: AI Threat Hunting
 - Data accessible through the misconfiguration
 - Severity: High (credentials + reflection) to Medium (wildcard, no credentials)
 - Remediation: strict Origin allowlist, avoid reflecting Origin, avoid credentials with wildcard
+
+## Extended Resources
+
+- `agent/references/payloads/cors-payloads.md` — null origin, subdomain wildcard, pre-flight bypass
+- `agent/references/vuln-checklists/A01-broken-access-control.md` — OWASP Top 10:2025 access control checklist
