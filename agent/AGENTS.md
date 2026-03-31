@@ -76,6 +76,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Do not use host Bash, `docker run`, `docker exec`, repo-local execution helpers, or ad hoc wrappers for in-scope target work. If Kali MCP has a runtime or reachability gap, stop target-facing work there and debug the runtime from the host without sending HTTP, DNS, or raw TCP traffic from the host to scoped targets.
 7. **DISPATCH** — ALWAYS dispatch to subagent. Do NOT test directly with host-side commands. Your job is orchestration: phase control, specialist selection, state review, and synchronized artifact handling.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/record_finding.sh` or the assessment API so findings.md remains a synchronized export, not the authoritative store. `append_finding.sh` now rejects markdown and points to `schemas/finding-record.schema.json`.
+   **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. They go to intel.md only. Dispatch exploit-developer to validate before recording. This reconciles "record immediately" with "no theoretical findings."
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/append_surface.sh` so the backend and readable export stay in sync. Do not call `scripts/lib/surfaces.sh` directly and do not patch `surfaces.jsonl` by hand during normal operation. After each surface update batch, wait for the command to finish and then verify `surfaces.jsonl` with a fresh read. If the first verification read does not reflect the expected change, re-read once before assuming failure. Only treat it as a real helper/backend problem if the command completed successfully and a second fresh read still disagrees; in that case, stop and report the sync issue instead of editing the artifact manually.
    If surface recording fails with a connection error, verify the orchestrator backend is running and that `ORCHESTRATOR_BASE_URL` and the engagement key are set correctly (check `engagement.json` and `.orchestrator.env` in the engagement directory).
 10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
@@ -100,6 +101,40 @@ Before initializing any engagement, ensure the shared Kali MCP runtime is runnin
 ```
 
 This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install.
+
+## Listener Management
+
+Listeners (pwncat-vl, ngrok, chisel) are OPERATOR-CONTROLLED. Agents must never start them.
+
+**Why:** The Kali runtime is shared across engagements. An agent starting a listener on port 4444
+could conflict with another engagement's listener. ngrok tunnels are account-scoped — starting a
+second tunnel tears down the first. Only the operator knows the current port/tunnel allocation.
+
+**Workflow:**
+1. Agent output includes `# MANUAL:` playbook steps with exact listener commands
+2. Operator starts the listener (pwncat-vl in a tmux session inside the runtime)
+3. Operator optionally exposes the listener externally (ngrok or chisel)
+4. Operator resumes the agent (via SendMessage or re-dispatch)
+5. Agent verifies the shell by tailing the log file via Kali MCP
+
+**Quick reference:**
+```bash
+# Start pwncat-vl in a tmux session
+docker exec -it security-research tmux new-session -d -s shell-4444 \
+  'pwncat -l -p 4444 2>&1 | tee /data/shell-4444.log'
+
+# Expose via ngrok
+docker exec -e NGROK_AUTHTOKEN="$NGROK_AUTHTOKEN" \
+  -it security-research ngrok tcp 4444
+
+# List active tmux sessions
+docker exec security-research tmux list-sessions
+
+# Check shell log
+docker exec security-research tail -20 /data/shell-4444.log
+```
+
+Full reference: `agent/references/offensive-tactics/shell-handling.md`
 
 ## Engagement Initialization
 
@@ -146,13 +181,14 @@ Every dispatch must include:
 - **Which skill to load** (from `agent/SKILL.md` using "Use when:" criteria)
 - **Prior findings relevant to this dispatch:**
   - For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, and the specific hypothesis to test
-  - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `fetch_assessment_record.sh` — do not pre-filter B candidates for it
+  - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `fetch_assessment_record.sh` — do not pre-filter B candidates (chain-target endpoints) for it
   - For `report-writer`: no finding context needed — the agent queries the `report-findings` endpoint directly
 
 ### Pre-Dispatch Checklist
 
 Before every dispatch, verify:
 
+- [ ] Agent registry checked — resume an existing agent if the criteria match (see Subagent Registry below)
 - [ ] Agent identity named and target URL specified
 - [ ] Current phase stated with specific task objective (not just "test this")
 - [ ] Skill to load identified from `agent/SKILL.md`
@@ -162,6 +198,12 @@ Before every dispatch, verify:
 
 DEDUP: Check log.md before dispatch. Never dispatch same agent for same objective twice.
 PARALLEL: Independent tasks → parallel. Dependent → sequential.
+
+### Subagent Registry
+
+Maintain `$DIR/agent-registry.json` to track subagent identities. After every dispatch that returns an agentId, append to the registry. **Always check the registry and attempt to resume a matching agent before dispatching fresh** — a resumed agent retains session tokens, cookie jars, and intermediate state. Re-dispatching from scratch is the most expensive failure mode in multi-step exploitation.
+
+Full registry schema, resume-vs-dispatch decision tree, and examples: `agent/references/runtime-guides/subagent-registry.md`
 
 ## Phase Flow
 
@@ -204,7 +246,7 @@ DB="$DIR/cases.db"
       - `full_send`: dispatch exploit-developer immediately.
    c. Exploit-developer owns durable exploit-state recording. If it proves a chain, credential, access record, or credential test, it should write the JSON payloads under `$DIR/tools/exploit-state/` and record them before task completion with the repo scripts.
    d. On return, verify canonical exploit state via `fetch_assessment_record.sh attack-chains`, `credentials`, `access-records`, and `credential-tests`. Do not create duplicate operator-side rows unless you are explicitly merging a proposal-based exploit session with `merge_exploit_session.sh`.
-   e. After osint-analyst returns: read intel.md. If HIGH-value CVEs or credentials found, update findings and dispatch exploit-developer for a 2nd round.
+   e. After osint-analyst returns: read intel.md. **Do not record CVE matches as findings yet.** If HIGH-value CVEs with public PoCs were identified, dispatch exploit-developer to validate each against the live target — backported patches, missing binaries, and disabled modules routinely invalidate version-only matches. Only record a CVE-based finding after exploit-developer confirms exploitability or proves partial signal.
 5. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
 6. **REPORT** → **Before dispatching report-writer**, merge duplicate findings so the `report-findings` endpoint returns a clean deduplicated set. Check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker finding into the stronger one:
    `./scripts/merge_finding.sh "$DIR" <source-slug> <target-slug> "<reason>"`
@@ -271,43 +313,10 @@ Agents use PREFIXED IDs:
 
 Prefix mnemonics: EX=exploit, VA=vuln-analyst, SA=source-analyzer, RE=recon, FZ=fuzzer, OS=osint. The prefix is the agent mnemonic assigned by `record_finding.sh`, not the initials of the full agent name.
 
-Never hand-allocate finding IDs. Create a structured finding payload, then record it via:
+Never hand-allocate finding IDs. Create a structured JSON finding payload matching `schemas/finding-record.schema.json`, then record it via:
 `./scripts/record_finding.sh "$DIR" <agent-name> <finding-json-file>`
 
-This allocates or reuses the canonical slug under a lock, writes backend state first, and then synchronizes the markdown export.
-
-```json
-{
-  "title": "Blind SQL injection in search",
-  "severity": "high",
-  "status": "confirmed",
-  "defect_family": "sql-injection",
-  "root_cause_key": "search-id-sqli",
-  "auth_context": "anonymous",
-  "canonical_location": "https://target.example/search?q",
-  "summary": "Boolean-blind SQL injection on the search endpoint",
-  "evidence_ref": "scans/sqlmap.txt",
-  "notes": "Payloads AND 1=1 and AND 1=2 caused consistent behavioral divergence.",
-  "details": {
-    "owasp_category": "A03:2021 Injection",
-    "cwe_id": "CWE-89",
-    "request_method": "GET",
-    "evidence": "Replayable request/response pair in scans/sqlmap.txt",
-    "impact": "Anonymous attackers can extract arbitrary data from the backing store",
-    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
-    "cvss_score": 7.5,
-    "remediation": "Use parameterized queries for all search input",
-    "steps_to_reproduce": [
-      "Send GET /search?q=test'+AND+1=1--+-",
-      "Observe normal search results returned",
-      "Send GET /search?q=test'+AND+1=2--+-",
-      "Observe empty results — confirms boolean-blind SQLi"
-    ]
-  }
-}
-```
-
-If an agent only produced markdown, stop and convert it into the JSON shape required by `schemas/finding-record.schema.json`. `./scripts/append_finding.sh` is only a guardrail: it rejects markdown, prints the schema path, and exits nonzero.
+This allocates or reuses the canonical slug under a lock, writes backend state first, and then synchronizes the markdown export. If an agent only produced markdown, stop and convert it to the required JSON shape. `./scripts/append_finding.sh` is only a guardrail: it rejects markdown, prints the schema path, and exits nonzero.
 
 report-writer uses the `report-findings` backend endpoint which assigns sequential `FINDING-001~N` report IDs automatically. Each report finding includes both the `report_id` and the original `slug` for cross-referencing.
 
@@ -317,7 +326,7 @@ OWASP Quick Ref: A01=Access Control, A02=Crypto, A03=Injection, A04=Insecure Des
 
 After receiving agent output with `#### Intelligence` section:
 - Append to corresponding intel.md table
-- Dedup: Technology→Component, People→Name, Emails→Email, Domains→Item+Type, Credentials→Type+Source
+- Dedup by: Technology table on Component, People on Name, Emails on Email, Domains on Item+Type, Credentials on Type+Source
 
 ## File Organization
 

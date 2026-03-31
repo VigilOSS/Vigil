@@ -67,6 +67,16 @@ warn() { echo -e "  ${YELLOW}[WARN]${NC} $1"; }
 info() { echo -e "  ${BLUE}[INFO]${NC} $1"; }
 
 ERRORS=0
+PRESERVE_ROOT=""
+
+cleanup_on_failure() {
+  if [ -n "$PRESERVE_ROOT" ] && [ -d "$PRESERVE_ROOT" ]; then
+    echo "" >&2
+    fail "Install failed — preserved data is at: $PRESERVE_ROOT"
+    fail "Restore it manually or re-run the installer to retry."
+  fi
+}
+trap cleanup_on_failure EXIT
 
 copy_if_exists() {
   local src="$1"
@@ -99,6 +109,7 @@ restore_install_path() {
 
   if [ -e "$src" ]; then
     mkdir -p "$(dirname "$dest")"
+    rm -rf "$dest"
     mv "$src" "$dest"
   fi
 }
@@ -164,32 +175,35 @@ else
   if [ -d "$INSTALL_DIR/.claude" ] || [ -d "$INSTALL_DIR/.codex" ] || [ -d "$INSTALL_DIR/agent" ] || [ -d "$INSTALL_DIR/docker" ] || [ -f "$INSTALL_DIR/install.sh" ]; then
     warn "Existing installation detected in $INSTALL_DIR — upgrading"
     PRESERVE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/security-research-preserve.XXXXXX")"
-    for keep in agent/engagements .env workspace runtime-home; do
+    for keep in agent/engagements orchestrator/backend/data .runtime-data .env workspace runtime-home; do
       preserve_install_path "$INSTALL_DIR" "$PRESERVE_ROOT" "$keep"
     done
     rm -rf "$INSTALL_DIR/.claude" "$INSTALL_DIR/.codex" "$INSTALL_DIR/agent" "$INSTALL_DIR/docker" \
            "$INSTALL_DIR/orchestrator" "$INSTALL_DIR/tests" \
            "$INSTALL_DIR/README.md" "$INSTALL_DIR/install.sh"
-    for keep in agent/engagements .env workspace runtime-home; do
-      restore_install_path "$INSTALL_DIR" "$PRESERVE_ROOT" "$keep"
-    done
-    rm -rf "$PRESERVE_ROOT"
   fi
 
-  case "$PRODUCT" in
-    claude)
-      copy_if_exists "$AGENT_ROOT/.claude" "$INSTALL_DIR/.claude"
-      copy_if_exists "$AGENT_ROOT/CLAUDE.md" "$INSTALL_DIR/CLAUDE.md"
-      ;;
-    codex)
-      copy_if_exists "$AGENT_ROOT/.codex" "$INSTALL_DIR/.codex"
-      copy_if_exists "$AGENT_ROOT/AGENTS.md" "$INSTALL_DIR/AGENTS.md"
-      ;;
-  esac
+  RESOLVED_SOURCE="$(cd "$SOURCE_ROOT" && pwd -P)"
+  RESOLVED_INSTALL="$(cd "$INSTALL_DIR" && pwd -P)"
 
-  for path in README.md docker orchestrator tests agent install.sh; do
-    copy_if_exists "$SOURCE_ROOT/$path" "$INSTALL_DIR/$path"
-  done
+  if [ "$RESOLVED_SOURCE" = "$RESOLVED_INSTALL" ]; then
+    info "Source and install directories are the same — skipping file copy"
+  else
+    case "$PRODUCT" in
+      claude)
+        copy_if_exists "$AGENT_ROOT/.claude" "$INSTALL_DIR/.claude"
+        copy_if_exists "$AGENT_ROOT/CLAUDE.md" "$INSTALL_DIR/CLAUDE.md"
+        ;;
+      codex)
+        copy_if_exists "$AGENT_ROOT/.codex" "$INSTALL_DIR/.codex"
+        copy_if_exists "$AGENT_ROOT/AGENTS.md" "$INSTALL_DIR/AGENTS.md"
+        ;;
+    esac
+
+    for path in README.md docker orchestrator tests agent install.sh; do
+      copy_if_exists "$SOURCE_ROOT/$path" "$INSTALL_DIR/$path"
+    done
+  fi
 
   case "$PRODUCT" in
     claude)
@@ -201,6 +215,14 @@ else
       rm -f "$INSTALL_DIR/agent/CLAUDE.md"
       ;;
   esac
+
+  if [ -n "$PRESERVE_ROOT" ] && [ -d "$PRESERVE_ROOT" ]; then
+    for keep in agent/engagements orchestrator/backend/data .runtime-data .env workspace runtime-home; do
+      restore_install_path "$INSTALL_DIR" "$PRESERVE_ROOT" "$keep"
+    done
+    rm -rf "$PRESERVE_ROOT"
+    PRESERVE_ROOT=""
+  fi
 
   if [ -f "$AGENT_ROOT/.env.example" ] && [ ! -f "$INSTALL_DIR/.env" ]; then
     cp "$AGENT_ROOT/.env.example" "$INSTALL_DIR/.env"

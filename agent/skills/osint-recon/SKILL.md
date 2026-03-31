@@ -113,21 +113,25 @@ From intel.md People & Organizations:
     curl -s "https://api.hunter.io/v2/domain-search?domain=<domain>&api_key=$HUNTER_API_KEY" \
       | jq '.data.emails[] | {value, type, confidence}'
 
+## CVE Validation Gate
+
+CVE recording rules are defined in `agent/agents/osint-analyst.md` § Finding Recording.
+In short: version-only CVE matches are intel, not findings — record in intel.md and `#### Intelligence` output only. The operator dispatches exploit-developer to validate before any CVE becomes a durable finding.
+
 ## Priority Order
 
-1. CVE + version match with public PoC (immediate exploit value)
-2. Leaked/breached credentials for target emails (direct access)
+1. CVE + version match with public PoC (immediate exploit-developer validation candidate)
+2. Leaked/breached credentials for target emails (direct access — record if target-proven)
 3. Historical endpoints not in current attack surface (hidden functionality)
 4. Organizational intel enriching social engineering context
 5. DNS/cert history revealing infrastructure changes
 
 ## Output Integration
 
-Raw OSINT collection goes to `intel.md`. Promote actionable intel through the durable backend
-finding/state path when it becomes testable or chain-relevant; do not treat `findings.md` as the
-canonical destination.
-- CVE matches → intel.md CVE table + Intelligence Assessment
-- Breached credentials → intel.md Breach table + Intelligence Assessment
+Raw OSINT collection goes to `intel.md`. CVE matches stay in intel.md until exploit-developer
+validates them. Do not treat `findings.md` as the canonical destination.
+- CVE matches → intel.md CVE table + `#### Intelligence` (NOT findings — needs validation)
+- Breached credentials → intel.md Breach table + finding only if target-specific proof exists
 - Historical URLs → intel.md DNS table, then ingest confirmed or high-value paths into backend coverage state
 - Social/org intel → intel.md Social table
 - For each meaningful lead, record the hypothesis it supports: vulnerable component, reachable hidden surface, reusable credential, or escalation path

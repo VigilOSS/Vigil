@@ -41,7 +41,7 @@ Operator does:
 vuln-analyst returns: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED blocks
 
 Operator does:
-1. HIGH/MEDIUM confidence → IMMEDIATELY dispatch exploit-developer with finding slug(s) and objective — **bring the skill matching the finding class** (e.g., `agent/skills/ssrf-testing/SKILL.md` for SSRF, `agent/skills/idor-testing/SKILL.md` for IDOR, `agent/skills/xss-testing/SKILL.md` for XSS). The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `fetch_assessment_record.sh` — do not pre-filter B candidates for it.
+1. HIGH/MEDIUM confidence → IMMEDIATELY dispatch exploit-developer with finding slug(s) and objective — **bring the skill matching the finding class** (e.g., `agent/skills/ssrf-testing/SKILL.md` for SSRF, `agent/skills/idor-testing/SKILL.md` for IDOR, `agent/skills/xss-testing/SKILL.md` for XSS). The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `fetch_assessment_record.sh` — do not pre-filter B candidates (chain-target endpoints) for it.
 2. LOW confidence → record as durable draft finding, do NOT dispatch yet
 3. FUZZER_NEEDED → dispatch fuzzer — **bring `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md`** as appropriate, feed results back through vuln-analyst
 4. Report-ready findings → dispatch report-writer (only after durable + evidenced + severity-disciplined) — **bring `agent/skills/report-generation/SKILL.md`**
@@ -83,10 +83,10 @@ osint-analyst writes intel.md only. Promote intel to findings through the durabl
 
 Operator does after completion:
 1. Read Intelligence Assessment section
-2. HIGH-value CVE + PoC match → write finding + dispatch exploit-developer — **bring the skill matching the CVE/finding class from `agent/SKILL.md`**
-3. Breached credentials → write finding + dispatch exploit-developer
+2. HIGH-value CVE + PoC match → dispatch exploit-developer to **validate** against the live target — **bring the skill matching the CVE/finding class from `agent/SKILL.md`**. Do NOT record a finding until exploit-developer confirms exploitability. Version-only CVE matches are intel, not findings (backported patches, missing binaries, and disabled modules routinely invalidate them).
+3. Breached credentials with target-specific proof → write finding + dispatch exploit-developer to test access
 4. Historical endpoints → ingest into backend coverage state, preserving provenance and auth context
-5. MEDIUM/LOW → record as INFO/draft in durable findings
+5. MEDIUM/LOW intel without target proof → keep in intel.md only, do not promote to findings
 
 ## REPORT-WRITER ← backend API (self-service)
 

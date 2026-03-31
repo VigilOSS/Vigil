@@ -40,6 +40,22 @@ Host-side commands are limited to coordination and non-target support only:
 
 ---
 
+## 2a. Listeners Are Operator-Controlled
+
+Agents must NOT start pwncat-vl, ngrok, frp, chisel listeners, `nc -lvp`, `socat` listeners,
+or any other network listener process. These are shared infrastructure that the operator manages.
+
+When exploitation requires a listener (reverse shell, tunnel, callback relay):
+1. Provide the exact listener commands in your output using `# MANUAL:` annotation
+2. Reference `agent/references/offensive-tactics/shell-handling.md` for the full command set
+3. Wait for operator confirmation before proceeding with steps that depend on the listener
+4. After the operator confirms, verify the shell by tailing the log file via Kali MCP
+
+Agents CAN read listener log files (`tail /data/shell-*.log`) via Kali MCP and verify
+that a shell connected. Agents CANNOT start, stop, or restart listener processes.
+
+---
+
 ## 3. Use Skills and References — They Are the Methodology
 
 **Step 1 — Check `agent/SKILL.md`** when you begin specialist work. It lists every available
@@ -79,6 +95,23 @@ script are considered lost data.
 | fuzzer | FZ | FINDING-FZ-001 |
 | osint-analyst | OS | FINDING-OS-001 |
 
+**Title formula:** `[Bug Class] in [endpoint] allows [attacker role] to [impact] [victim/scope]`
+Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous attacker to read any user's PII."
+
+**CVSS↔severity must match:**
+
+| Severity | CVSS range |
+|----------|------------|
+| critical | 9.0–10.0 |
+| high | 7.0–8.9 |
+| medium | 4.0–6.9 |
+| low | 0.1–3.9 |
+| info | 0.0 |
+
+If your CVSS score does not fall within the matching severity range, adjust one or the other before recording.
+
+**Deduplication:** Before recording, query existing findings via `fetch_assessment_record.sh report-findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
+
 Record every finding with:
 ```
 ./scripts/record_finding.sh "$DIR" <agent-name> <finding-json-file>
@@ -102,6 +135,13 @@ Do not produce markdown findings — convert to JSON before recording.
 ```
 
 This keeps CVSS queryable from the API and gives report-writer structured data to format.
+
+**The `notes` field must contain replayable commands** — not prose descriptions. Instead of
+"Login to phpMyAdmin with blank password," write the actual command: curl with headers, cookies,
+and POST body; sqlmap with exact flags; ysoserial with gadget chain and target; or whatever tool
+proved the finding. The field allows up to 20 KB. If the operator or another agent needs to
+reproduce the finding later, the notes field alone should be sufficient without re-discovering
+the request format, session tokens, or tool parameters.
 
 **Failure to use `record_finding.sh` is the single most common subagent defect.** If you
 produce `#### Findings` output, each finding payload in that section must have been recorded
