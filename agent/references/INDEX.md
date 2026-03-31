@@ -76,7 +76,7 @@ Attack techniques organized by kill chain phase. Used by: operator, exploit-deve
 
 | File | Techniques |
 |------|-----------|
-| `offensive-tactics/shell-handling.md` | pwncat-vl listeners, tmux session management, ngrok/chisel exposure, reverse shell payloads, log tailing for LLM visibility |
+| `offensive-tactics/shell-handling.md` | pwncat-vl listeners, tmux session management, frp/chisel exposure, reverse shell payloads, log tailing for LLM visibility |
 
 ### offensive-tactics/persistence/
 

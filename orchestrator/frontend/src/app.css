@@ -373,6 +373,38 @@ input {
   color: #5a584f;
 }
 
+/* ── Event type badges ──────────────────────────────────── */
+
+.event-type-finding {
+  background: rgba(47, 127, 82, 0.14);
+  color: var(--ok);
+}
+
+.event-type-chain {
+  background: rgba(153, 27, 27, 0.14);
+  color: #991b1b;
+}
+
+.event-type-surface {
+  background: rgba(244, 162, 89, 0.18);
+  color: var(--warn);
+}
+
+.event-type-merge {
+  background: rgba(23, 53, 76, 0.1);
+  color: var(--accent);
+}
+
+.event-type-phase {
+  background: rgba(140, 123, 98, 0.12);
+  color: var(--pending);
+}
+
+.event-type-task {
+  background: rgba(23, 53, 76, 0.08);
+  color: var(--accent);
+}
+
 /* ── Status pills ───────────────────────────────────────── */
 
 .status-queued,
@@ -512,6 +544,7 @@ input {
   display: flex;
   justify-content: flex-end;
   align-items: center;
+  gap: 6px;
 }
 
 .finding-meta-grid {

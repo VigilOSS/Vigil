@@ -84,32 +84,69 @@ instead of hardcoding tunnel addresses.
 
 ### frp (primary — supports multiple simultaneous tunnels)
 
-frp is the preferred tunnel tool. Unlike ngrok, it supports multiple concurrent tunnels
+frp is the preferred tunnel tool
 and is self-hosted (no account-scoped limitations, no data leaves your infrastructure).
 
+Three tunnels cover the standard engagement needs:
+
+| Tunnel | Local port | Purpose |
+|--------|-----------|---------|
+| `oob-https` | 8443 | HTTPS OOB callbacks (interactsh / blind vuln detection) |
+| `oob-dns` | 53 | DNS OOB callbacks |
+| `oob-rev` | 4444 | Reverse shell listener (pwncat) |
+
+#### SSH transport mode (preferred)
+
+frps accepts SSH connections directly — use the `ssh` command as the frpc transport.
+No separate frpc binary or config file needed on the client side.
+
 ```bash
-# Expose pwncat listener on port 4444 via frp
+# OOB HTTPS callback tunnel (port 8443)
+docker exec -it security-research tmux new-session -d -s frp-oob-https \
+  'ssh -o StrictHostKeyChecking=accept-new \
+    -R :8443:127.0.0.1:8443 \
+    YOUR_FRP_SSH_USER@YOUR_FRP_SERVER -p YOUR_FRP_SSH_PORT \
+    https \
+    --proxy_name oob-https \
+    --sd oob-https \ 
+    --remote_port 8443 \
+    --token YOUR_FRP_TOKEN 2>&1 | tee /data/frp-oob-https.log'
+
+# OOB DNS callback tunnel (port 53)
+docker exec -it security-research tmux new-session -d -s frp-oob-dns \
+  'ssh -o StrictHostKeyChecking=accept-new \
+    -R :53:127.0.0.1:53 \
+    YOUR_FRP_SSH_USER@YOUR_FRP_SERVER -p YOUR_FRP_SSH_PORT \
+    tcp \
+    --proxy_name oob-dns \
+    --remote_port 53 \
+    --token YOUR_FRP_TOKEN 2>&1 | tee /data/frp-oob-dns.log'
+
+# Reverse shell tunnel (port 4444)
+docker exec -it security-research tmux new-session -d -s frp-oob-rev \
+  'ssh -o StrictHostKeyChecking=accept-new \
+    -R :4444:127.0.0.1:4444 \
+    YOUR_FRP_SSH_USER@YOUR_FRP_SERVER -p YOUR_FRP_SSH_PORT \
+    tcp \
+    --proxy_name oob-rev \
+    --remote_port 4444 \
+    --token YOUR_FRP_TOKEN 2>&1 | tee /data/frp-oob-rev.log'
+
+# Record addresses
+echo "YOUR_FRP_SERVER:4444" > "$DIR/.listener_url"
+echo "YOUR_FRP_SERVER:8443" > "$DIR/.oob_url"
+```
+
+#### Direct TCP mode (alternative)
+
+If the frps server does not have SSH transport enabled, use `frpc` directly:
+
+```bash
 docker exec -it security-research tmux new-session -d -s frp-4444 \
   'frpc tcp --server_addr YOUR_FRP_SERVER:7000 --local_port 4444 --remote_port 4444 2>&1 | tee /data/frp-4444.log'
 
-# Expose a second listener simultaneously (frp handles this, ngrok cannot)
-docker exec -it security-research tmux new-session -d -s frp-4445 \
-  'frpc tcp --server_addr YOUR_FRP_SERVER:7000 --local_port 4445 --remote_port 4445 2>&1 | tee /data/frp-4445.log'
-
-# Record the public address
 echo "YOUR_FRP_SERVER:4444" > "$DIR/.listener_url"
 ```
-
-### ngrok (fallback — single tunnel limitation)
-```bash
-# Expose pwncat listener on port 4444
-docker exec -e NGROK_AUTHTOKEN="$NGROK_AUTHTOKEN" \
-  -it security-research ngrok tcp 4444
-```
-Note the public `host:port` from ngrok output and record it in `$DIR/.listener_url`.
-
-**ngrok is account-scoped.** Most free accounts allow one tunnel at a time — starting a
-second tunnel tears down the first. Use frp when multiple tunnels are needed.
 
 ### chisel / SSH tunnels / other forwarding
 
@@ -158,10 +195,10 @@ outbound DNS/HTTP/SMTP requests from the target. This is separate from reverse s
 IPs, cloud metadata tokens, and credentials — sending those to third-party infrastructure is a
 data leak.
 
-### interactsh + frp
+### interactsh
 
-interactsh runs its own DNS (port 53), HTTP (port 80/443), and SMTP (port 25) listeners —
-it covers all OOB callback types. frp exposes it to targets on different networks.
+interactsh runs DNS (port 53) and HTTPS (port 8443) listeners for OOB callback detection.
+The frp tunnels above (`oob-dns` and `oob-https`) expose these to remote targets.
 
 **Local targets (lab network — targets can reach the Kali runtime directly):**
 ```bash
@@ -173,16 +210,12 @@ docker exec -it security-research tmux new-session -d -s oob-client \
 
 **Remote targets (interactsh needs to be publicly reachable):**
 ```bash
-# interactsh-server: full self-hosted (requires a domain you control)
+# interactsh-server: self-hosted (requires a domain you control)
 docker exec -it security-research tmux new-session -d -s oob-server \
   'interactsh-server -d your-callback-domain.com 2>&1 | tee /data/oob-server.log'
-
-# Expose interactsh ports via frp
-docker exec -it security-research tmux new-session -d -s frp-oob-dns \
-  'frpc tcp --server_addr YOUR_FRP_SERVER:7000 --local_port 53 --remote_port 53'
-docker exec -it security-research tmux new-session -d -s frp-oob-http \
-  'frpc http --server_addr YOUR_FRP_SERVER:7000 --local_port 80 --custom_domain oob.yourdomain.com'
 ```
+
+Then start the frp SSH tunnels for `oob-dns` (53) and `oob-https` (8443) as shown above.
 
 After provisioning, record the callback URL:
 ```bash
@@ -206,7 +239,7 @@ when running alongside the primary Kali runtime.
 
 Agents **MUST NOT:**
 - Start `pwncat`, `nc -lvp`, `socat` as a listener, or any listening socket
-- Start `ngrok`, `frp`, or `chisel server`
+- Start `frp`, or `chisel server`
 - Kill or restart existing listener or tunnel sessions
 
 Agents **CAN:**
