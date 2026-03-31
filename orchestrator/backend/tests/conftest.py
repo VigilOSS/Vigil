@@ -1,5 +1,5 @@
-import sys
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -24,35 +24,42 @@ def test_root():
 
 
 @pytest.fixture(autouse=True)
-def isolate_data_dir(test_root):
+def isolate_settings(test_root):
     original_data_dir = settings.data_dir
-    original_projects_dir = settings.projects_dir
-    original_auto_launch_runs = settings.auto_launch_runs
     original_frontend_dist_dir = settings.frontend_dist_dir
+    original_install_dir = settings.install_dir
     data_dir = test_root / "orchestrator-data"
-    projects_dir = test_root / "projects-root"
     frontend_dist_dir = test_root / "frontend-dist"
+    install_dir = test_root / "install-root"
+    engagements_dir = install_dir / "agent" / "engagements"
+
     shutil.rmtree(data_dir, ignore_errors=True)
-    shutil.rmtree(projects_dir, ignore_errors=True)
     shutil.rmtree(frontend_dist_dir, ignore_errors=True)
+    shutil.rmtree(install_dir, ignore_errors=True)
+
     data_dir.mkdir(parents=True, exist_ok=True)
-    projects_dir.mkdir(parents=True, exist_ok=True)
     frontend_dist_dir.mkdir(parents=True, exist_ok=True)
+    engagements_dir.mkdir(parents=True, exist_ok=True)
+
     object.__setattr__(settings, "data_dir", data_dir)
-    object.__setattr__(settings, "projects_dir", projects_dir)
-    object.__setattr__(settings, "auto_launch_runs", False)
     object.__setattr__(settings, "frontend_dist_dir", frontend_dist_dir)
+    object.__setattr__(settings, "install_dir", install_dir)
+
     try:
-        yield test_root
+        yield {
+            "data_dir": data_dir,
+            "frontend_dist_dir": frontend_dist_dir,
+            "install_dir": install_dir,
+            "engagements_dir": engagements_dir,
+        }
     finally:
         object.__setattr__(settings, "data_dir", original_data_dir)
-        object.__setattr__(settings, "projects_dir", original_projects_dir)
-        object.__setattr__(settings, "auto_launch_runs", original_auto_launch_runs)
         object.__setattr__(settings, "frontend_dist_dir", original_frontend_dist_dir)
+        object.__setattr__(settings, "install_dir", original_install_dir)
 
 
 @pytest.fixture
-def client(isolate_data_dir):
+def client(isolate_settings):
     test_client = TestClient(app)
     try:
         yield test_client

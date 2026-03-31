@@ -5,25 +5,23 @@ from fastapi.responses import FileResponse
 
 from .api.artifacts import router as artifacts_router
 from .api.assessment import router as assessment_router
+from .api.engagements import router as engagements_router
 from .api.events import router as events_router
-from .api.projects import router as projects_router
-from .api.runs import router as runs_router
 from .config import settings
-from .api.auth import router as auth_router
-from .db import get_project_by_id, get_run_by_id, get_user_by_id, init_db
-from .ws import broadcaster, ws_tickets
+from .db import init_db
+from .services.engagements import get_engagement_or_404, sync_engagements
+from .ws import broadcaster
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    sync_engagements()
     yield
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
-app.include_router(auth_router)
-app.include_router(projects_router)
-app.include_router(runs_router)
+app.include_router(engagements_router)
 app.include_router(events_router)
 app.include_router(artifacts_router)
 app.include_router(assessment_router)
@@ -34,35 +32,15 @@ def healthz() -> dict[str, str]:
     return {"status": "ok", "app": settings.app_name}
 
 
-@app.websocket("/ws/projects/{project_id}/runs/{run_id}")
-async def run_stream(websocket: WebSocket, project_id: int, run_id: int) -> None:
-    ticket = websocket.query_params.get("ticket")
-    if not ticket:
-        await websocket.close(code=1008, reason="Missing websocket ticket")
-        return
-
-    user_id = ws_tickets.consume(ticket)
-    if user_id is None:
-        await websocket.close(code=1008, reason="Invalid or expired websocket ticket")
-        return
-
-    user = get_user_by_id(user_id)
-    if user is None:
-        await websocket.close(code=1008, reason="Unknown user")
-        return
-
-    project = get_project_by_id(project_id)
-    run = get_run_by_id(run_id)
-    if project is None or run is None or project.user_id != user.id or run.project_id != project.id:
-        await websocket.close(code=1008, reason="Run not found")
-        return
-
-    await broadcaster.connect(project_id, run_id, websocket)
+@app.websocket("/ws/engagements/{engagement_key}")
+async def engagement_stream(websocket: WebSocket, engagement_key: str) -> None:
+    get_engagement_or_404(engagement_key)
+    await broadcaster.connect(engagement_key, websocket)
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        broadcaster.disconnect(project_id, run_id, websocket)
+        broadcaster.disconnect(engagement_key, websocket)
 
 
 @app.get("/{full_path:path}")

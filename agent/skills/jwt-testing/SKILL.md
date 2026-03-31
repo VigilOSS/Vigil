@@ -91,3 +91,8 @@ origin: AI Threat Hunting
 - Secret recovered (if HMAC brute-force)
 - Severity: Critical (forge any user/admin token) or High (privilege escalation)
 - Remediation: strong secrets, enforce algorithm allowlist, validate all claims
+
+## Extended Resources
+
+- `agent/references/payloads/jwt-payloads.md` — alg:none, key confusion (RS256→HS256), JWK/kid injection, weak secret brute-force
+- `agent/references/vuln-checklists/A07-authentication-failures.md` — OWASP Top 10:2025 authentication failures checklist

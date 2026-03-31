@@ -14,6 +14,7 @@ SOURCE_NAME="${4:?usage: append_surface.sh <engagement_dir> <surface_type> <targ
 RATIONALE="${5:-}"
 EVIDENCE_REF="${6:-}"
 STATUS="${7:-discovered}"
+export ENGAGEMENT_DIR="$ENG_DIR"
 
 payload="$(python3 - <<'PY' "$SURFACE_TYPE" "$TARGET" "$SOURCE_NAME" "$RATIONALE" "$EVIDENCE_REF" "$STATUS"
 import json

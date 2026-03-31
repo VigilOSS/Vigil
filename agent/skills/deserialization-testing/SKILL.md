@@ -92,3 +92,8 @@ origin: AI Threat Hunting
 - Libraries enabling the chain
 - Severity: Critical (RCE) or High (data tampering)
 - Remediation: avoid native deserialization, use allowlists, sign serialized data
+
+## Extended Resources
+
+- `agent/references/payloads/deserialization-payloads.md` — Java (ysoserial), PHP, Python (pickle), Node.js, .NET
+- `agent/references/vuln-checklists/A08-integrity-failures.md` — OWASP Top 10:2025 software and data integrity failures

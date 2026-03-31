@@ -1,49 +1,66 @@
 from pathlib import Path
+import subprocess
 
-
-def test_operator_prompt_outputs_drop_old_ctf_and_cases_db_authority_language():
+def test_operator_prompt_outputs_define_default_model_policy():
     repo_root = Path(__file__).resolve().parents[3]
-    files = [
-        repo_root / "agent" / "operator-core.md",
-        repo_root / "agent" / "AGENTS.md",
-        repo_root / "agent" / "CLAUDE.md",
-        repo_root / "agent" / "scripts" / "render-operator-prompts.sh",
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8").lower()
+    agents_prompt = (repo_root / "agent" / "AGENTS.md").read_text(encoding="utf-8").lower()
+    claude_prompt = (repo_root / "agent" / "CLAUDE.md").read_text(encoding="utf-8").lower()
+
+    for text in (operator_core, agents_prompt, claude_prompt):
+        assert "gpt-5.4" in text
+        assert "high" in text
+        assert "opus 4.6" in text
+        assert "sonnet 4.6" in text
+
+
+def test_rendered_operator_prompts_match_operator_core():
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "agent" / "scripts" / "render-operator-prompts.sh"
+    agent_names = [
+        "operator",
+        "recon-specialist",
+        "source-analyzer",
+        "vulnerability-analyst",
+        "exploit-developer",
+        "fuzzer",
+        "osint-analyst",
+        "report-writer",
     ]
 
-    for path in files:
-        text = path.read_text(encoding="utf-8")
-        assert "LOCAL LAB/CTF" not in text
-        assert "CTF/lab" not in text
-        assert "cases.db IS the state" not in text
+    from tempfile import TemporaryDirectory
 
+    with TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        subprocess.run(
+            ["bash", str(script), "repo", str(tmp_path)],
+            check=True,
+            cwd=repo_root / "agent",
+        )
 
-def test_operator_prompt_outputs_require_realistic_lab_wording_and_skill_first_behavior():
-    repo_root = Path(__file__).resolve().parents[3]
-    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
-    agents_prompt = (repo_root / "agent" / "AGENTS.md").read_text(encoding="utf-8")
+        expected_outputs = {
+            repo_root / "agent" / "AGENTS.md": tmp_path / "AGENTS.md",
+            repo_root / "agent" / "CLAUDE.md": tmp_path / "CLAUDE.md",
+        }
+        for agent_name in agent_names:
+            expected_outputs[repo_root / "agent" / ".codex" / "agents" / f"{agent_name}.toml"] = (
+                tmp_path / ".codex" / "agents" / f"{agent_name}.toml"
+            )
+            expected_outputs[repo_root / "agent" / ".claude" / "agents" / f"{agent_name}.md"] = (
+                tmp_path / ".claude" / "agents" / f"{agent_name}.md"
+            )
 
-    assert "realistic lab" in operator_core.lower()
-    assert "if a relevant skill exists" in operator_core.lower()
-    assert "orchestrator backend is canonical" in operator_core.lower()
-    assert "record_finding.sh" in operator_core
-    assert "append_finding.sh" in operator_core
-    assert "rejects markdown" in operator_core.lower()
-    assert "schemas/finding-record.schema.json" in operator_core
-    assert "exploit_policy=pause" in operator_core.lower()
-    assert "approve_exploitation.sh" in operator_core
-    assert "launch_exploit_session.sh" in operator_core
-    assert "record_session_proposal.sh" in operator_core
-    assert "merge_exploit_session.sh" in operator_core
-    assert "auth.json is the live auth contract" in operator_core.lower()
-    assert "mitmproxy-assisted login capture" in operator_core.lower()
-    assert "confirm_mode=manual" not in operator_core.lower()
-    assert "realistic lab" in agents_prompt.lower()
+        for committed_path, rendered_path in expected_outputs.items():
+            assert committed_path.read_text(encoding="utf-8") == rendered_path.read_text(encoding="utf-8")
 
 
 def test_docs_and_skills_drop_run_tool_and_rtcurl_examples():
     repo_root = Path(__file__).resolve().parents[3]
     paths = [
         repo_root / "README.md",
+        repo_root / "agent" / "SKILL.md",
+        *sorted((repo_root / "agent" / "rules").rglob("*.md")),
+        *sorted((repo_root / "agent" / "agents").rglob("*.md")),
         *sorted((repo_root / "agent" / "skills").rglob("*.md")),
         *sorted((repo_root / "agent" / "references").rglob("*.md")),
     ]
@@ -99,3 +116,20 @@ def test_phase_two_methodology_guidance_is_present_in_skills_and_references():
     assert "optional final phase" in athena_skill.lower()
     assert "ctf scope" not in api04.lower()
     assert "authorized realistic lab" in install_script.lower()
+
+
+def test_specialist_agent_sources_exist_for_public_roster():
+    repo_root = Path(__file__).resolve().parents[3]
+    agent_dir = repo_root / "agent" / "agents"
+
+    expected = {
+        "recon-specialist.md",
+        "source-analyzer.md",
+        "vulnerability-analyst.md",
+        "exploit-developer.md",
+        "fuzzer.md",
+        "osint-analyst.md",
+        "report-writer.md",
+    }
+
+    assert expected <= {path.name for path in agent_dir.glob("*.md")}

@@ -85,3 +85,8 @@ origin: AI Threat Hunting
 - Request/response evidence (redact sensitive data)
 - Severity: High (data access) or Critical (data modification/deletion)
 - Remediation: enforce server-side ownership checks, indirect references
+
+## Extended Resources
+
+- `agent/references/vuln-checklists/A01-broken-access-control.md` — OWASP Top 10:2025 access control checklist
+- `agent/references/api-security/API01-broken-object-level-authz.md` — OWASP API Security Top 10:2023 BOLA checklist

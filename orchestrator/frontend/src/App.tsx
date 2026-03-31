@@ -1,34 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { createProject, createRun, deleteProject, deleteRun, listProjects, listRuns, login, register } from "./lib/api";
-import type { Project, Run } from "./lib/api";
-import { LoginPage } from "./routes/LoginPage";
-import { ProjectsPage } from "./routes/ProjectsPage";
-import { RunPage } from "./routes/RunPage";
-
-type SessionState = {
-  token: string;
-  username: string;
-};
-
-type RunRoute = {
-  projectId: number;
-  runId: number;
-};
-
-const SESSION_STORAGE_KEY = "security-research-orchestrator-session";
+import { listEngagements } from "./lib/api";
+import type { Engagement } from "./lib/api";
+import { EngagementPage } from "./routes/EngagementPage";
+import { EngagementsPage } from "./routes/EngagementsPage";
 
 function currentRoute(): string {
   const hashRoute = window.location.hash.replace(/^#/, "");
-  return hashRoute || "/projects";
+  return hashRoute || "/engagements";
 }
 
-function parseRunRoute(route: string): RunRoute | null {
-  const match = route.match(/^\/projects\/(\d+)\/runs\/(\d+)$/);
+function parseEngagementRoute(route: string): string | null {
+  const match = route.match(/^\/engagements\/(.+)$/);
   if (!match) {
     return null;
   }
-  return { projectId: Number(match[1]), runId: Number(match[2]) };
+  return decodeURIComponent(match[1]);
 }
 
 function navigate(route: string) {
@@ -36,13 +23,9 @@ function navigate(route: string) {
 }
 
 export default function App() {
-  const [session, setSession] = useState<SessionState | null>(() => {
-    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as SessionState) : null;
-  });
   const [route, setRoute] = useState(currentRoute());
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [runsByProject, setRunsByProject] = useState<Record<number, Run[]>>({});
+  const [engagements, setEngagements] = useState<Engagement[]>([]);
+  const engagementRoute = useMemo(() => parseEngagementRoute(route), [route]);
 
   useEffect(() => {
     const handler = () => setRoute(currentRoute());
@@ -51,126 +34,42 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!session) {
-      setProjects([]);
-      setRunsByProject({});
-      return;
-    }
-
     let cancelled = false;
+    let refreshing = false;
 
-    async function refreshProjects() {
-      const nextProjects = await listProjects(session.token);
-      if (cancelled) return;
-      setProjects(nextProjects);
-      const entries = await Promise.all(
-        nextProjects.map(async (project) => [project.id, await listRuns(session.token, project.id)] as const),
-      );
-      if (cancelled) return;
-      setRunsByProject(Object.fromEntries(entries));
+    async function refreshEngagements() {
+      if (refreshing) {
+        return;
+      }
+      refreshing = true;
+      try {
+        const nextEngagements = await listEngagements();
+        if (!cancelled) {
+          setEngagements(nextEngagements);
+        }
+      } finally {
+        refreshing = false;
+      }
     }
 
-    void refreshProjects();
-    const interval = window.setInterval(() => {
-      void refreshProjects();
-    }, 5000);
+    void refreshEngagements();
+    const interval = engagementRoute
+      ? null
+      : window.setInterval(() => {
+          void refreshEngagements();
+        }, 5000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      if (interval !== null) {
+        window.clearInterval(interval);
+      }
     };
-  }, [session]);
+  }, [engagementRoute]);
 
-  const runRoute = useMemo(() => parseRunRoute(route), [route]);
-
-  async function handleLogin(username: string, password: string) {
-    const response = await login(username, password);
-    const nextSession = {
-      token: response.access_token,
-      username: response.user.username,
-    };
-    window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(nextSession));
-    setSession(nextSession);
-    navigate("/projects");
+  if (engagementRoute) {
+    return <EngagementPage engagementKey={engagementRoute} onBack={() => navigate("/engagements")} />;
   }
 
-  async function handleRegister(username: string, password: string) {
-    await register(username, password);
-    await handleLogin(username, password);
-  }
-
-  async function handleCreateProject(name: string) {
-    if (!session) return;
-    const project = await createProject(session.token, name);
-    setProjects((current) => [...current, project]);
-    setRunsByProject((current) => ({ ...current, [project.id]: [] }));
-  }
-
-  async function handleCreateRun(projectId: number, target: string) {
-    if (!session) return;
-    const run = await createRun(session.token, projectId, target);
-    setRunsByProject((current) => ({
-      ...current,
-      [projectId]: [...(current[projectId] ?? []), run],
-    }));
-    navigate(`/projects/${projectId}/runs/${run.id}`);
-  }
-
-  async function handleDeleteProject(projectId: number) {
-    if (!session) return;
-    await deleteProject(session.token, projectId);
-    setProjects((current) => current.filter((project) => project.id !== projectId));
-    setRunsByProject((current) => {
-      const next = { ...current };
-      delete next[projectId];
-      return next;
-    });
-    navigate("/projects");
-  }
-
-  async function handleDeleteRun(projectId: number, runId: number) {
-    if (!session) return;
-    await deleteRun(session.token, projectId, runId);
-    setRunsByProject((current) => ({
-      ...current,
-      [projectId]: (current[projectId] ?? []).filter((run) => run.id !== runId),
-    }));
-    navigate("/projects");
-  }
-
-  function handleLogout() {
-    window.localStorage.removeItem(SESSION_STORAGE_KEY);
-    setSession(null);
-    navigate("/login");
-  }
-
-  if (!session) {
-    return <LoginPage onLogin={handleLogin} onRegister={handleRegister} />;
-  }
-
-  if (runRoute) {
-    return (
-      <RunPage
-        token={session.token}
-        projectId={runRoute.projectId}
-        runId={runRoute.runId}
-        onBack={() => navigate("/projects")}
-        onDeleteRun={handleDeleteRun}
-      />
-    );
-  }
-
-  return (
-    <ProjectsPage
-      username={session.username}
-      projects={projects}
-      runsByProject={runsByProject}
-      onCreateProject={handleCreateProject}
-      onCreateRun={handleCreateRun}
-      onDeleteProject={handleDeleteProject}
-      onDeleteRun={handleDeleteRun}
-      onOpenRun={(projectId, runId) => navigate(`/projects/${projectId}/runs/${runId}`)}
-      onLogout={handleLogout}
-    />
-  );
+  return <EngagementsPage engagements={engagements} onOpenEngagement={(engagementKey) => navigate(`/engagements/${encodeURIComponent(engagementKey)}`)} />;
 }

@@ -4,7 +4,6 @@ from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = BACKEND_ROOT.parents[1]
-DEFAULT_PROJECTS_DIR = Path.home() / ".security-research" / "projects"
 
 
 def env_flag(name: str, default: bool) -> bool:
@@ -18,19 +17,12 @@ def env_flag(name: str, default: bool) -> bool:
 class Settings:
     app_name: str = "AI Threat Hunting Orchestrator"
     data_dir: Path = Path(os.environ.get("AI_THREAT_HUNTING_DATA_DIR", os.environ.get("REDTEAM_ORCHESTRATOR_DATA_DIR", str(BACKEND_ROOT / "data"))))
-    projects_dir: Path = Path(
-        os.environ.get(
-            "AI_THREAT_HUNTING_PROJECTS_DIR",
-            os.environ.get("REDTEAM_ORCHESTRATOR_PROJECTS_DIR", str(DEFAULT_PROJECTS_DIR)),
-        )
-    )
+    install_dir: Path = Path(os.environ.get("AI_THREAT_HUNTING_INSTALL_DIR", str(REPO_ROOT)))
     frontend_dist_dir: Path = REPO_ROOT / "orchestrator" / "frontend" / "dist"
-    session_ttl_hours: int = 24
     agent_source_dir: Path = REPO_ROOT / "agent"
     install_script_path: Path = REPO_ROOT / "install.sh"
-    runtime_launch_command: str = os.environ.get("AI_THREAT_HUNTING_RUNTIME_LAUNCH_COMMAND", os.environ.get("REDTEAM_RUNTIME_LAUNCH_COMMAND", ""))
     orchestrator_public_url: str = os.environ.get("AI_THREAT_HUNTING_PUBLIC_URL", os.environ.get("ORCHESTRATOR_PUBLIC_URL", "http://127.0.0.1:18000"))
-    auto_launch_runs: bool = env_flag("AI_THREAT_HUNTING_AUTO_LAUNCH_RUNS", env_flag("REDTEAM_AUTO_LAUNCH_RUNS", False))
+    auto_refresh_seconds: int = int(os.environ.get("AI_THREAT_HUNTING_DISCOVERY_REFRESH_SECONDS", "5"))
 
 
 settings = Settings()

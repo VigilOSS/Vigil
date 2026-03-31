@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# dispatcher.sh — Zero-token transient work-buffer consumption engine
+# dispatcher.sh — transient work-buffer consumption engine
 # Manages the SQLite work_items buffer without consuming LLM tokens.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

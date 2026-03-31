@@ -56,6 +56,23 @@ unknown_payload = sorted(set(payload.keys()) - set(schema_properties.keys()))
 if unknown_payload:
     raise SystemExit(f"{proposal_type} payload has unsupported fields: {', '.join(unknown_payload)}")
 
+def check_nested(obj, obj_schema, path):
+    if not isinstance(obj, dict) or obj_schema.get("type") != "object":
+        return
+    nested_props = obj_schema.get("properties", {})
+    if not obj_schema.get("additionalProperties", True) and nested_props:
+        bad = sorted(set(obj.keys()) - set(nested_props.keys()))
+        if bad:
+            raise SystemExit(f"{path} has unsupported fields: {', '.join(bad)}")
+    nested_required = obj_schema.get("required", [])
+    missing_nested = [k for k in nested_required if k not in obj]
+    if missing_nested:
+        raise SystemExit(f"{path} missing required fields: {', '.join(missing_nested)}")
+
+for nested_key in ("details", "provenance"):
+    if nested_key in payload and isinstance(payload[nested_key], dict):
+        check_nested(payload[nested_key], schema_properties.get(nested_key, {}), f"{proposal_type}.{nested_key}")
+
 print(json.dumps(proposal, ensure_ascii=True, separators=(",", ":")))
 PY
 )"

@@ -9,8 +9,7 @@ from urllib.parse import urlparse
 from fastapi import HTTPException, status
 
 from ..db import get_connection
-from ..models.user import User
-from .events import _run_or_404
+from .events import _engagement_or_404
 
 SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 FINDING_STATUSES = {"draft", "confirmed", "exploited", "blocked", "merged", "reported"}
@@ -22,6 +21,13 @@ FINDING_STATUS_RANK = {
     "reported": 4,
     "merged": -1,
 }
+_COVERAGE_STATUS_SYNONYMS = {
+    "done": "covered",
+    "not-applicable": "not_applicable",
+    "n/a": "not_applicable",
+    "tested": "covered",
+}
+COVERAGE_STATUSES = {"pending", "queued", "deferred", "covered", "not_applicable", "blocked"}
 SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -78,6 +84,14 @@ def _normalize_finding_status(value: str) -> str:
     return status_value
 
 
+def _normalize_coverage_status(value: str) -> str:
+    status_value = (value or "pending").strip().lower()
+    status_value = _COVERAGE_STATUS_SYNONYMS.get(status_value, status_value)
+    if status_value not in COVERAGE_STATUSES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid coverage status: {value}")
+    return status_value
+
+
 def _coalesce_finding_status(existing: str, incoming: str) -> str:
     existing_normalized = _normalize_finding_status(existing)
     incoming_normalized = _normalize_finding_status(incoming)
@@ -131,19 +145,19 @@ def _fetch_all(connection, query: str, params: tuple[Any, ...]) -> list[dict[str
     return [dict(row) for row in connection.execute(query, params).fetchall()]
 
 
-def _find_target_id(connection, run_id: int, identity: str | None) -> int | None:
+def _find_target_id(connection, engagement_id: int, identity: str | None) -> int | None:
     if not identity:
         return None
     row = connection.execute(
-        "SELECT id FROM assessment_targets WHERE run_id = ? AND identity = ?",
-        (run_id, identity),
+        "SELECT id FROM assessment_targets WHERE engagement_id = ? AND identity = ?",
+        (engagement_id, identity),
     ).fetchone()
     return int(row["id"]) if row else None
 
 
 def _upsert_target(
     connection,
-    run_id: int,
+    engagement_id: int,
     *,
     identity: str,
     kind: str,
@@ -155,9 +169,9 @@ def _upsert_target(
 ) -> dict[str, Any]:
     connection.execute(
         """
-        INSERT INTO assessment_targets (run_id, identity, kind, host, ip_address, hostname, notes, discovered_by)
+        INSERT INTO assessment_targets (engagement_id, identity, kind, host, ip_address, hostname, notes, discovered_by)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(run_id, identity) DO UPDATE SET
+        ON CONFLICT(engagement_id, identity) DO UPDATE SET
             kind = excluded.kind,
             host = COALESCE(excluded.host, assessment_targets.host),
             ip_address = COALESCE(excluded.ip_address, assessment_targets.ip_address),
@@ -170,15 +184,15 @@ def _upsert_target(
             discovered_by = COALESCE(NULLIF(excluded.discovered_by, ''), assessment_targets.discovered_by),
             updated_at = CURRENT_TIMESTAMP
         """,
-        (run_id, identity, kind, host, ip_address, hostname, notes, discovered_by),
+        (engagement_id, identity, kind, host, ip_address, hostname, notes, discovered_by),
     )
     row = connection.execute(
         """
-        SELECT id, run_id, identity, kind, host, ip_address, hostname, notes, discovered_by, created_at, updated_at
+        SELECT id, engagement_id, identity, kind, host, ip_address, hostname, notes, discovered_by, created_at, updated_at
         FROM assessment_targets
-        WHERE run_id = ? AND identity = ?
+        WHERE engagement_id = ? AND identity = ?
         """,
-        (run_id, identity),
+        (engagement_id, identity),
     ).fetchone()
     assert row is not None
     return dict(row)
@@ -186,7 +200,7 @@ def _upsert_target(
 
 def _upsert_service(
     connection,
-    run_id: int,
+    engagement_id: int,
     *,
     endpoint: str,
     protocol: str,
@@ -199,14 +213,14 @@ def _upsert_service(
     discovered_by: str,
     target_identity: str | None,
 ) -> dict[str, Any]:
-    target_id = _find_target_id(connection, run_id, target_identity)
+    target_id = _find_target_id(connection, engagement_id, target_identity)
     connection.execute(
         """
         INSERT INTO assessment_services (
-            run_id, target_id, endpoint, port, protocol, service, state, coverage_status, banner, notes, discovered_by
+            engagement_id, target_id, endpoint, port, protocol, service, state, coverage_status, banner, notes, discovered_by
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(run_id, endpoint, protocol) DO UPDATE SET
+        ON CONFLICT(engagement_id, endpoint, protocol) DO UPDATE SET
             target_id = COALESCE(excluded.target_id, assessment_services.target_id),
             port = COALESCE(excluded.port, assessment_services.port),
             service = COALESCE(NULLIF(excluded.service, ''), assessment_services.service),
@@ -221,15 +235,15 @@ def _upsert_service(
             discovered_by = COALESCE(NULLIF(excluded.discovered_by, ''), assessment_services.discovered_by),
             updated_at = CURRENT_TIMESTAMP
         """,
-        (run_id, target_id, endpoint, port, protocol, service, state, coverage_status, banner, notes, discovered_by),
+        (engagement_id, target_id, endpoint, port, protocol, service, state, coverage_status, banner, notes, discovered_by),
     )
     row = connection.execute(
         """
-        SELECT id, run_id, target_id, endpoint, port, protocol, service, state, coverage_status, banner, notes, discovered_by, created_at, updated_at
+        SELECT id, engagement_id, target_id, endpoint, port, protocol, service, state, coverage_status, banner, notes, discovered_by, created_at, updated_at
         FROM assessment_services
-        WHERE run_id = ? AND endpoint = ? AND protocol = ?
+        WHERE engagement_id = ? AND endpoint = ? AND protocol = ?
         """,
-        (run_id, endpoint, protocol),
+        (engagement_id, endpoint, protocol),
     ).fetchone()
     assert row is not None
     return dict(row)
@@ -237,7 +251,7 @@ def _upsert_service(
 
 def _upsert_request_variant(
     connection,
-    run_id: int,
+    engagement_id: int,
     *,
     url: str,
     method: str,
@@ -265,13 +279,13 @@ def _upsert_request_variant(
     connection.execute(
         """
         INSERT INTO assessment_request_variants (
-            run_id, auth_context, scheme, host, port, method, normalized_path, path_template,
+            engagement_id, auth_context, scheme, host, port, method, normalized_path, path_template,
             canonical_url, content_type_family, query_schema_json, body_schema_json, path_schema_json,
             cookie_schema_json, header_schema_json, params_schema_hash, body_schema_hash, discovery_source, notes
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(
-            run_id, scheme, host, port, method, normalized_path, auth_context, params_schema_hash, body_schema_hash, content_type_family
+            engagement_id, scheme, host, port, method, normalized_path, auth_context, params_schema_hash, body_schema_hash, content_type_family
         ) DO UPDATE SET
             path_template = COALESCE(NULLIF(excluded.path_template, ''), assessment_request_variants.path_template),
             canonical_url = COALESCE(NULLIF(excluded.canonical_url, ''), assessment_request_variants.canonical_url),
@@ -289,7 +303,7 @@ def _upsert_request_variant(
             last_seen_at = CURRENT_TIMESTAMP
         """,
         (
-            run_id,
+            engagement_id,
             auth_context,
             scheme,
             host,
@@ -314,10 +328,10 @@ def _upsert_request_variant(
         """
         SELECT *
         FROM assessment_request_variants
-        WHERE run_id = ? AND scheme = ? AND host = ? AND port = ? AND method = ? AND normalized_path = ?
+        WHERE engagement_id = ? AND scheme = ? AND host = ? AND port = ? AND method = ? AND normalized_path = ?
           AND auth_context = ? AND params_schema_hash = ? AND body_schema_hash = ? AND content_type_family = ?
         """,
-        (run_id, scheme, host, port, method.upper(), normalized_path, auth_context, params_schema_hash, body_schema_hash, content_type_family),
+        (engagement_id, scheme, host, port, method.upper(), normalized_path, auth_context, params_schema_hash, body_schema_hash, content_type_family),
     ).fetchone()
     assert row is not None
     return dict(row)
@@ -325,7 +339,7 @@ def _upsert_request_variant(
 
 def _insert_request_observation(
     connection,
-    run_id: int,
+    engagement_id: int,
     *,
     request_variant_id: int,
     url: str,
@@ -337,11 +351,11 @@ def _insert_request_observation(
     cursor = connection.execute(
         """
         INSERT INTO assessment_request_observations (
-            run_id, request_variant_id, observed_url, source_name, response_status, evidence_ref, raw_payload
+            engagement_id, request_variant_id, observed_url, source_name, response_status, evidence_ref, raw_payload
         )
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (run_id, request_variant_id, url, discovery_source, response_status, evidence_ref, _json_text(observation_payload or {})),
+        (engagement_id, request_variant_id, url, discovery_source, response_status, evidence_ref, _json_text(observation_payload or {})),
     )
     row = connection.execute(
         "SELECT * FROM assessment_request_observations WHERE id = ?",
@@ -353,7 +367,7 @@ def _insert_request_observation(
 
 def _upsert_coverage_item(
     connection,
-    run_id: int,
+    engagement_id: int,
     *,
     request_variant_id: int | None,
     service_id: int | None,
@@ -363,23 +377,24 @@ def _upsert_coverage_item(
     status_value: str,
     notes: str,
 ) -> dict[str, Any]:
+    normalized_status = _normalize_coverage_status(status_value)
     row = connection.execute(
         """
         SELECT *
         FROM assessment_coverage_items
-        WHERE run_id = ? AND request_variant_id IS ? AND service_id IS ? AND auth_context = ? AND input_slot = ? AND attack_family = ?
+        WHERE engagement_id = ? AND request_variant_id IS ? AND service_id IS ? AND auth_context = ? AND input_slot = ? AND attack_family = ?
         """,
-        (run_id, request_variant_id, service_id, auth_context, input_slot, attack_family),
+        (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family),
     ).fetchone()
     if row is None:
         cursor = connection.execute(
             """
             INSERT INTO assessment_coverage_items (
-                run_id, request_variant_id, service_id, auth_context, input_slot, attack_family, status, notes
+                engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, status, notes
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (run_id, request_variant_id, service_id, auth_context, input_slot, attack_family, status_value, notes),
+            (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, normalized_status, notes),
         )
         row = connection.execute(
             "SELECT * FROM assessment_coverage_items WHERE id = ?",
@@ -392,11 +407,39 @@ def _upsert_coverage_item(
             SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (status_value, _append_notes(row["notes"], notes), row["id"]),
+            (normalized_status, _append_notes(row["notes"], notes), row["id"]),
         )
         row = connection.execute("SELECT * FROM assessment_coverage_items WHERE id = ?", (row["id"],)).fetchone()
     assert row is not None
+    if row["service_id"] is not None:
+        _refresh_service_coverage_status(connection, engagement_id, int(row["service_id"]))
     return dict(row)
+
+
+def _refresh_service_coverage_status(connection, engagement_id: int, service_id: int) -> None:
+    rows = connection.execute(
+        "SELECT status FROM assessment_coverage_items WHERE engagement_id = ? AND service_id = ?",
+        (engagement_id, service_id),
+    ).fetchall()
+    if not rows:
+        return
+    statuses = [_normalize_coverage_status(str(row["status"])) for row in rows]
+    if all(status_value in {"covered", "not_applicable"} for status_value in statuses):
+        coverage_status = "covered"
+    elif any(status_value == "blocked" for status_value in statuses):
+        coverage_status = "blocked"
+    elif any(status_value in {"covered", "not_applicable", "deferred"} for status_value in statuses):
+        coverage_status = "partial"
+    else:
+        coverage_status = "pending"
+    connection.execute(
+        """
+        UPDATE assessment_services
+        SET coverage_status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND engagement_id = ?
+        """,
+        (coverage_status, service_id, engagement_id),
+    )
 
 
 def _probe_key(
@@ -434,7 +477,7 @@ def _probe_key(
 
 def _upsert_probe_run(
     connection,
-    run_id: int,
+    engagement_id: int,
     *,
     request_variant_id: int | None,
     service_id: int | None,
@@ -466,12 +509,12 @@ def _upsert_probe_run(
     connection.execute(
         """
         INSERT INTO assessment_probe_runs (
-            run_id, request_variant_id, service_id, coverage_item_id, auth_context, input_slot, attack_family,
+            engagement_id, request_variant_id, service_id, coverage_item_id, auth_context, input_slot, attack_family,
             payload_family, payload_value_hash, probe_key, tool_name, agent_name, result_status,
             observed_http_status, signal_type, evidence_ref, notes
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(run_id, probe_key) DO UPDATE SET
+        ON CONFLICT(engagement_id, probe_key) DO UPDATE SET
             agent_name = COALESCE(NULLIF(excluded.agent_name, ''), assessment_probe_runs.agent_name),
             result_status = excluded.result_status,
             observed_http_status = COALESCE(excluded.observed_http_status, assessment_probe_runs.observed_http_status),
@@ -484,7 +527,7 @@ def _upsert_probe_run(
             END
         """,
         (
-            run_id,
+            engagement_id,
             request_variant_id,
             service_id,
             coverage_item_id,
@@ -504,8 +547,8 @@ def _upsert_probe_run(
         ),
     )
     row = connection.execute(
-        "SELECT * FROM assessment_probe_runs WHERE run_id = ? AND probe_key = ?",
-        (run_id, probe_key),
+        "SELECT * FROM assessment_probe_runs WHERE engagement_id = ? AND probe_key = ?",
+        (engagement_id, probe_key),
     ).fetchone()
     assert row is not None
     return dict(row)
@@ -513,7 +556,7 @@ def _upsert_probe_run(
 
 def _upsert_surface(
     connection,
-    run_id: int,
+    engagement_id: int,
     *,
     surface_type: str,
     target_descriptor: str,
@@ -524,9 +567,9 @@ def _upsert_surface(
 ) -> dict[str, Any]:
     connection.execute(
         """
-        INSERT INTO assessment_surfaces (run_id, surface_type, target_descriptor, source_name, rationale, evidence_ref, status)
+        INSERT INTO assessment_surfaces (engagement_id, surface_type, target_descriptor, source_name, rationale, evidence_ref, status)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(run_id, surface_type, target_descriptor) DO UPDATE SET
+        ON CONFLICT(engagement_id, surface_type, target_descriptor) DO UPDATE SET
             source_name = COALESCE(NULLIF(excluded.source_name, ''), assessment_surfaces.source_name),
             rationale = CASE
                 WHEN excluded.rationale = '' THEN assessment_surfaces.rationale
@@ -537,15 +580,15 @@ def _upsert_surface(
             status = excluded.status,
             updated_at = CURRENT_TIMESTAMP
         """,
-        (run_id, surface_type, target_descriptor, source_name, rationale, evidence_ref, status_value),
+        (engagement_id, surface_type, target_descriptor, source_name, rationale, evidence_ref, status_value),
     )
     row = connection.execute(
         """
         SELECT *
         FROM assessment_surfaces
-        WHERE run_id = ? AND surface_type = ? AND target_descriptor = ?
+        WHERE engagement_id = ? AND surface_type = ? AND target_descriptor = ?
         """,
-        (run_id, surface_type, target_descriptor),
+        (engagement_id, surface_type, target_descriptor),
     ).fetchone()
     assert row is not None
     return dict(row)
@@ -581,9 +624,7 @@ def _auto_request_coverage_candidates(
 
 
 def record_target(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     identity: str,
     kind: str,
@@ -593,11 +634,11 @@ def record_target(
     notes: str,
     discovered_by: str,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         return _upsert_target(
             connection,
-            run.id,
+            engagement.id,
             identity=identity,
             kind=kind,
             host=host,
@@ -608,16 +649,14 @@ def record_target(
         )
 
 
-def list_targets(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_targets(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_targets WHERE run_id = ? ORDER BY updated_at DESC, id DESC", (run.id,))
+        return _fetch_all(connection, "SELECT * FROM assessment_targets WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
 
 
 def record_service(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     endpoint: str,
     protocol: str,
@@ -630,11 +669,11 @@ def record_service(
     discovered_by: str,
     target_identity: str | None,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         return _upsert_service(
             connection,
-            run.id,
+            engagement.id,
             endpoint=endpoint,
             protocol=protocol,
             port=port,
@@ -648,16 +687,14 @@ def record_service(
         )
 
 
-def list_services(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_services(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_services WHERE run_id = ? ORDER BY updated_at DESC, id DESC", (run.id,))
+        return _fetch_all(connection, "SELECT * FROM assessment_services WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
 
 
 def record_request_variant(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     url: str,
     method: str,
@@ -675,11 +712,11 @@ def record_request_variant(
     evidence_ref: str,
     observation_payload: Any,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         variant = _upsert_request_variant(
             connection,
-            run.id,
+            engagement.id,
             url=url,
             method=method,
             auth_context=auth_context,
@@ -695,7 +732,7 @@ def record_request_variant(
         )
         _insert_request_observation(
             connection,
-            run.id,
+            engagement.id,
             request_variant_id=variant["id"],
             url=url,
             discovery_source=discovery_source,
@@ -706,30 +743,28 @@ def record_request_variant(
         return variant
 
 
-def list_request_variants(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_request_variants(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         return _fetch_all(
             connection,
-            "SELECT * FROM assessment_request_variants WHERE run_id = ? ORDER BY last_seen_at DESC, id DESC",
-            (run.id,),
+            "SELECT * FROM assessment_request_variants WHERE engagement_id = ? ORDER BY last_seen_at DESC, id DESC",
+            (engagement.id,),
         )
 
 
-def list_request_observations(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_request_observations(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         return _fetch_all(
             connection,
-            "SELECT * FROM assessment_request_observations WHERE run_id = ? ORDER BY created_at DESC, id DESC",
-            (run.id,),
+            "SELECT * FROM assessment_request_observations WHERE engagement_id = ? ORDER BY created_at DESC, id DESC",
+            (engagement.id,),
         )
 
 
 def ingest_request_observation(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     url: str,
     method: str,
@@ -755,7 +790,7 @@ def ingest_request_observation(
     coverage_candidates: list[dict[str, Any]] | None,
     auto_generate_coverage: bool,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     scheme, host, _, _ = _parse_url(url)
     _, endpoint, port, service_name = _service_fields_from_url(url)
     identity = target_identity or host
@@ -763,7 +798,7 @@ def ingest_request_observation(
     with get_connection() as connection:
         target = _upsert_target(
             connection,
-            run.id,
+            engagement.id,
             identity=identity,
             kind=target_kind,
             host=host,
@@ -774,7 +809,7 @@ def ingest_request_observation(
         )
         service = _upsert_service(
             connection,
-            run.id,
+            engagement.id,
             endpoint=endpoint,
             protocol=scheme,
             port=port,
@@ -788,7 +823,7 @@ def ingest_request_observation(
         )
         request_variant = _upsert_request_variant(
             connection,
-            run.id,
+            engagement.id,
             url=url,
             method=method,
             auth_context=auth_context,
@@ -804,7 +839,7 @@ def ingest_request_observation(
         )
         observation = _insert_request_observation(
             connection,
-            run.id,
+            engagement.id,
             request_variant_id=request_variant["id"],
             url=url,
             discovery_source=discovery_source,
@@ -846,7 +881,7 @@ def ingest_request_observation(
             coverage_items.append(
                 _upsert_coverage_item(
                     connection,
-                    run.id,
+                    engagement.id,
                     request_variant_id=key[0],
                     service_id=key[1],
                     auth_context=auth_context,
@@ -866,9 +901,7 @@ def ingest_request_observation(
 
 
 def record_coverage_item(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     request_variant_id: int | None,
     service_id: int | None,
@@ -878,11 +911,11 @@ def record_coverage_item(
     status_value: str,
     notes: str,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         return _upsert_coverage_item(
             connection,
-            run.id,
+            engagement.id,
             request_variant_id=request_variant_id,
             service_id=service_id,
             auth_context=auth_context,
@@ -893,8 +926,8 @@ def record_coverage_item(
         )
 
 
-def list_coverage_items(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_coverage_items(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         rows = connection.execute(
             """
@@ -909,18 +942,16 @@ def list_coverage_items(project_id: int, run_id: int, user: User) -> list[dict[s
             FROM assessment_coverage_items AS coverage
             LEFT JOIN assessment_request_variants AS request_variants ON request_variants.id = coverage.request_variant_id
             LEFT JOIN assessment_services AS services ON services.id = coverage.service_id
-            WHERE coverage.run_id = ?
+            WHERE coverage.engagement_id = ?
             ORDER BY coverage.updated_at DESC, coverage.id DESC
             """,
-            (run.id,),
+            (engagement.id,),
         ).fetchall()
     return [dict(row) for row in rows]
 
 
 def record_probe_run(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     request_variant_id: int | None,
     service_id: int | None,
@@ -938,11 +969,11 @@ def record_probe_run(
     evidence_ref: str,
     notes: str,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         return _upsert_probe_run(
             connection,
-            run.id,
+            engagement.id,
             request_variant_id=request_variant_id,
             service_id=service_id,
             coverage_item_id=coverage_item_id,
@@ -961,16 +992,14 @@ def record_probe_run(
         )
 
 
-def list_probe_runs(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_probe_runs(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_probe_runs WHERE run_id = ? ORDER BY created_at DESC, id DESC", (run.id,))
+        return _fetch_all(connection, "SELECT * FROM assessment_probe_runs WHERE engagement_id = ? ORDER BY created_at DESC, id DESC", (engagement.id,))
 
 
 def record_surface(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     surface_type: str,
     target_descriptor: str,
@@ -979,11 +1008,11 @@ def record_surface(
     evidence_ref: str,
     status_value: str,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         return _upsert_surface(
             connection,
-            run.id,
+            engagement.id,
             surface_type=surface_type,
             target_descriptor=target_descriptor,
             source_name=source_name,
@@ -993,21 +1022,21 @@ def record_surface(
         )
 
 
-def list_surfaces(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_surfaces(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_surfaces WHERE run_id = ? ORDER BY updated_at DESC, id DESC", (run.id,))
+        return _fetch_all(connection, "SELECT * FROM assessment_surfaces WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
 
 
-def _finding_slug(connection, run_id: int, slug: str | None, title: str, canonical_location: str) -> str:
+def _finding_slug(connection, engagement_id: int, slug: str | None, title: str, canonical_location: str) -> str:
     if slug:
         return slug
     base = _slugify(f"{title}-{canonical_location}")
     candidate = base
     suffix = 2
     while connection.execute(
-        "SELECT 1 FROM assessment_findings WHERE run_id = ? AND slug = ?",
-        (run_id, candidate),
+        "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+        (engagement_id, candidate),
     ).fetchone():
         candidate = f"{base}-{suffix}"
         suffix += 1
@@ -1016,7 +1045,7 @@ def _finding_slug(connection, run_id: int, slug: str | None, title: str, canonic
 
 def _semantic_finding_match(
     connection,
-    run_id: int,
+    engagement_id: int,
     *,
     slug: str | None,
     defect_family: str,
@@ -1027,8 +1056,8 @@ def _semantic_finding_match(
 ) -> dict[str, Any] | None:
     if slug:
         row = connection.execute(
-            "SELECT * FROM assessment_findings WHERE run_id = ? AND slug = ?",
-            (run_id, slug),
+            "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement_id, slug),
         ).fetchone()
         if row is not None:
             return dict(row)
@@ -1037,7 +1066,7 @@ def _semantic_finding_match(
             """
             SELECT *
             FROM assessment_findings
-            WHERE run_id = ?
+            WHERE engagement_id = ?
               AND status != 'merged'
               AND defect_family = ?
               AND root_cause_key = ?
@@ -1046,7 +1075,7 @@ def _semantic_finding_match(
             ORDER BY id ASC
             LIMIT 1
             """,
-            (run_id, defect_family, root_cause_key, auth_context, canonical_location),
+            (engagement_id, defect_family, root_cause_key, auth_context, canonical_location),
         ).fetchone()
         if row is not None:
             return dict(row)
@@ -1054,7 +1083,7 @@ def _semantic_finding_match(
         """
         SELECT *
         FROM assessment_findings
-        WHERE run_id = ?
+        WHERE engagement_id = ?
           AND status != 'merged'
           AND title = ?
           AND canonical_location = ?
@@ -1062,14 +1091,14 @@ def _semantic_finding_match(
         ORDER BY id ASC
         LIMIT 1
         """,
-        (run_id, title, canonical_location, auth_context),
+        (engagement_id, title, canonical_location, auth_context),
     ).fetchone()
     return dict(row) if row is not None else None
 
 
 def _upsert_finding_link(
     connection,
-    run_id: int,
+    engagement_id: int,
     *,
     finding_id: int,
     link_kind: str,
@@ -1083,19 +1112,19 @@ def _upsert_finding_link(
         """
         SELECT *
         FROM assessment_finding_links
-        WHERE run_id = ? AND finding_id = ? AND link_kind = ? AND target_kind = ? AND target_id IS ? AND target_ref = ?
+        WHERE engagement_id = ? AND finding_id = ? AND link_kind = ? AND target_kind = ? AND target_id IS ? AND target_ref = ?
         """,
-        (run_id, finding_id, link_kind, target_kind, target_id, target_ref),
+        (engagement_id, finding_id, link_kind, target_kind, target_id, target_ref),
     ).fetchone()
     if row is None:
         cursor = connection.execute(
             """
             INSERT INTO assessment_finding_links (
-                run_id, finding_id, link_kind, target_kind, target_id, target_ref, notes, provenance_json
+                engagement_id, finding_id, link_kind, target_kind, target_id, target_ref, notes, provenance_json
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (run_id, finding_id, link_kind, target_kind, target_id, target_ref, notes, _json_text(provenance)),
+            (engagement_id, finding_id, link_kind, target_kind, target_id, target_ref, notes, _json_text(provenance)),
         )
         row = connection.execute("SELECT * FROM assessment_finding_links WHERE id = ?", (cursor.lastrowid,)).fetchone()
     else:
@@ -1113,9 +1142,7 @@ def _upsert_finding_link(
 
 
 def create_finding(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     slug: str | None,
     title: str,
@@ -1136,13 +1163,13 @@ def create_finding(
     surface_id: int | None,
     links: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     incoming_status = _normalize_finding_status(status_value)
     incoming_severity = _normalize_severity(severity)
     with get_connection() as connection:
         existing = _semantic_finding_match(
             connection,
-            run.id,
+            engagement.id,
             slug=slug,
             defect_family=defect_family,
             root_cause_key=root_cause_key,
@@ -1151,17 +1178,17 @@ def create_finding(
             title=title,
         )
         if existing is None:
-            resolved_slug = _finding_slug(connection, run.id, slug, title, canonical_location)
+            resolved_slug = _finding_slug(connection, engagement.id, slug, title, canonical_location)
             cursor = connection.execute(
                 """
                 INSERT INTO assessment_findings (
-                    run_id, slug, title, severity, status, defect_family, root_cause_key, auth_context,
+                    engagement_id, slug, title, severity, status, defect_family, root_cause_key, auth_context,
                     canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    run.id,
+                    engagement.id,
                     resolved_slug,
                     title,
                     incoming_severity,
@@ -1233,7 +1260,7 @@ def create_finding(
         finding_links = [
             _upsert_finding_link(
                 connection,
-                run.id,
+                engagement.id,
                 finding_id=finding["id"],
                 link_kind=str(item.get("link_kind", "related")),
                 target_kind=str(item.get("target_kind", "unknown")),
@@ -1248,9 +1275,7 @@ def create_finding(
 
 
 def update_finding(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     slug: str,
     title: str,
@@ -1268,9 +1293,7 @@ def update_finding(
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
     result = create_finding(
-        project_id,
-        run_id,
-        user,
+        engagement_id,
         slug=slug,
         title=title,
         severity=severity,
@@ -1294,24 +1317,22 @@ def update_finding(
 
 
 def merge_findings(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     source_slug: str,
     target_slug: str,
     reason: str,
     source_name: str,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         source = connection.execute(
-            "SELECT * FROM assessment_findings WHERE run_id = ? AND slug = ?",
-            (run.id, source_slug),
+            "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, source_slug),
         ).fetchone()
         target = connection.execute(
-            "SELECT * FROM assessment_findings WHERE run_id = ? AND slug = ?",
-            (run.id, target_slug),
+            "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, target_slug),
         ).fetchone()
         if source is None or target is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
@@ -1334,8 +1355,8 @@ def merge_findings(
             "source_name": source_name,
         }
         source_links = connection.execute(
-            "SELECT * FROM assessment_finding_links WHERE run_id = ? AND finding_id = ?",
-            (run.id, source["id"]),
+            "SELECT * FROM assessment_finding_links WHERE engagement_id = ? AND finding_id = ?",
+            (engagement.id, source["id"]),
         ).fetchall()
         connection.execute(
             """
@@ -1398,7 +1419,7 @@ def merge_findings(
         for row in source_links:
             _upsert_finding_link(
                 connection,
-                run.id,
+                engagement.id,
                 finding_id=target["id"],
                 link_kind=row["link_kind"],
                 target_kind=row["target_kind"],
@@ -1408,12 +1429,12 @@ def merge_findings(
                 provenance=_json_object(row["provenance_json"]),
             )
         connection.execute(
-            "DELETE FROM assessment_finding_links WHERE run_id = ? AND finding_id = ?",
-            (run.id, source["id"]),
+            "DELETE FROM assessment_finding_links WHERE engagement_id = ? AND finding_id = ?",
+            (engagement.id, source["id"]),
         )
         link = _upsert_finding_link(
             connection,
-            run.id,
+            engagement.id,
             finding_id=target["id"],
             link_kind="merged_from",
             target_kind="finding",
@@ -1428,15 +1449,15 @@ def merge_findings(
     return {"source": dict(source_row), "target": dict(target_row), "link": link}
 
 
-def list_findings(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_findings(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         rows = connection.execute(
             """
             SELECT findings.*, merged.slug AS merged_into_slug
             FROM assessment_findings AS findings
             LEFT JOIN assessment_findings AS merged ON merged.id = findings.merged_into_finding_id
-            WHERE findings.run_id = ?
+            WHERE findings.engagement_id = ?
             ORDER BY
                 CASE findings.status
                     WHEN 'exploited' THEN 0
@@ -1450,15 +1471,69 @@ def list_findings(project_id: int, run_id: int, user: User) -> list[dict[str, An
                 findings.updated_at DESC,
                 findings.id DESC
             """,
-            (run.id,),
+            (engagement.id,),
         ).fetchall()
     return [dict(row) for row in rows]
 
 
+def list_report_findings(engagement_id: int) -> list[dict[str, Any]]:
+    """Return findings formatted for report generation.
+
+    Excludes merged findings, orders by severity (critical first), and extracts
+    CVSS/remediation/steps_to_reproduce from the ``details_json`` blob so the
+    report-writer has structured fields without manual JSON parsing.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM assessment_findings
+            WHERE engagement_id = ?
+              AND status != 'merged'
+            ORDER BY
+                CASE severity
+                    WHEN 'critical' THEN 0
+                    WHEN 'high' THEN 1
+                    WHEN 'medium' THEN 2
+                    WHEN 'low' THEN 3
+                    WHEN 'info' THEN 4
+                    ELSE 5
+                END,
+                CASE status
+                    WHEN 'exploited' THEN 0
+                    WHEN 'confirmed' THEN 1
+                    WHEN 'reported' THEN 2
+                    WHEN 'blocked' THEN 3
+                    WHEN 'draft' THEN 4
+                    ELSE 5
+                END,
+                updated_at DESC,
+                id DESC
+            """,
+            (engagement.id,),
+        ).fetchall()
+
+    results: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows, start=1):
+        record = dict(row)
+        details = _json_object(record.get("details_json", "{}"))
+        record["report_id"] = f"FINDING-{idx:03d}"
+        record["cvss_vector"] = details.get("cvss_vector", "")
+        record["cvss_score"] = details.get("cvss_score")
+        record["remediation"] = details.get("remediation", "")
+        record["steps_to_reproduce"] = details.get("steps_to_reproduce", [])
+        record["cwe_id"] = details.get("cwe_id", "")
+        record["owasp_category"] = details.get("owasp_category", "")
+        record["impact"] = details.get("impact", record.get("summary", ""))
+        record["evidence_detail"] = details.get("evidence", "")
+        results.append(record)
+
+    return results
+
+
 def create_finding_link(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     finding_slug: str,
     link_kind: str,
@@ -1468,17 +1543,17 @@ def create_finding_link(
     notes: str,
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         finding = connection.execute(
-            "SELECT * FROM assessment_findings WHERE run_id = ? AND slug = ?",
-            (run.id, finding_slug),
+            "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, finding_slug),
         ).fetchone()
         if finding is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
         return _upsert_finding_link(
             connection,
-            run.id,
+            engagement.id,
             finding_id=int(finding["id"]),
             link_kind=link_kind,
             target_kind=target_kind,
@@ -1489,25 +1564,25 @@ def create_finding_link(
         )
 
 
-def list_finding_links(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_finding_links(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         rows = connection.execute(
             """
             SELECT links.*, findings.slug AS finding_slug
             FROM assessment_finding_links AS links
             JOIN assessment_findings AS findings ON findings.id = links.finding_id
-            WHERE links.run_id = ?
+            WHERE links.engagement_id = ?
             ORDER BY links.updated_at DESC, links.id DESC
             """,
-            (run.id,),
+            (engagement.id,),
         ).fetchall()
     return [dict(row) for row in rows]
 
 
 def _upsert_chain_link(
     connection,
-    run_id: int,
+    engagement_id: int,
     *,
     chain_id: int,
     relation: str,
@@ -1521,19 +1596,19 @@ def _upsert_chain_link(
         """
         SELECT *
         FROM assessment_attack_chain_links
-        WHERE run_id = ? AND chain_id = ? AND relation = ? AND entity_kind = ? AND entity_id IS ? AND entity_ref = ?
+        WHERE engagement_id = ? AND chain_id = ? AND relation = ? AND entity_kind = ? AND entity_id IS ? AND entity_ref = ?
         """,
-        (run_id, chain_id, relation, entity_kind, entity_id, entity_ref),
+        (engagement_id, chain_id, relation, entity_kind, entity_id, entity_ref),
     ).fetchone()
     if row is None:
         cursor = connection.execute(
             """
             INSERT INTO assessment_attack_chain_links (
-                run_id, chain_id, relation, entity_kind, entity_id, entity_ref, notes, provenance_json
+                engagement_id, chain_id, relation, entity_kind, entity_id, entity_ref, notes, provenance_json
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (run_id, chain_id, relation, entity_kind, entity_id, entity_ref, notes, _json_text(provenance)),
+            (engagement_id, chain_id, relation, entity_kind, entity_id, entity_ref, notes, _json_text(provenance)),
         )
         row = connection.execute("SELECT * FROM assessment_attack_chain_links WHERE id = ?", (cursor.lastrowid,)).fetchone()
     else:
@@ -1551,9 +1626,7 @@ def _upsert_chain_link(
 
 
 def create_attack_chain(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     chain_key: str | None,
     title: str,
@@ -1564,16 +1637,16 @@ def create_attack_chain(
     provenance: dict[str, Any] | None,
     links: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     resolved_key = chain_key or _slugify(title)
     with get_connection() as connection:
         connection.execute(
             """
             INSERT INTO assessment_attack_chains (
-                run_id, chain_key, title, status, severity, narrative, evidence_ref, provenance_json
+                engagement_id, chain_key, title, status, severity, narrative, evidence_ref, provenance_json
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(run_id, chain_key) DO UPDATE SET
+            ON CONFLICT(engagement_id, chain_key) DO UPDATE SET
                 title = excluded.title,
                 status = excluded.status,
                 severity = excluded.severity,
@@ -1582,18 +1655,18 @@ def create_attack_chain(
                 provenance_json = excluded.provenance_json,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (run.id, resolved_key, title, status_value, _normalize_severity(severity), narrative, evidence_ref, _json_text(provenance)),
+            (engagement.id, resolved_key, title, status_value, _normalize_severity(severity), narrative, evidence_ref, _json_text(provenance)),
         )
         row = connection.execute(
-            "SELECT * FROM assessment_attack_chains WHERE run_id = ? AND chain_key = ?",
-            (run.id, resolved_key),
+            "SELECT * FROM assessment_attack_chains WHERE engagement_id = ? AND chain_key = ?",
+            (engagement.id, resolved_key),
         ).fetchone()
         assert row is not None
         chain = dict(row)
         chain_links = [
             _upsert_chain_link(
                 connection,
-                run.id,
+                engagement.id,
                 chain_id=chain["id"],
                 relation=str(item.get("relation", "step")),
                 entity_kind=str(item.get("entity_kind", "unknown")),
@@ -1608,9 +1681,7 @@ def create_attack_chain(
 
 
 def create_attack_chain_link(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     chain_key: str,
     relation: str,
@@ -1620,17 +1691,17 @@ def create_attack_chain_link(
     notes: str,
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         chain = connection.execute(
-            "SELECT * FROM assessment_attack_chains WHERE run_id = ? AND chain_key = ?",
-            (run.id, chain_key),
+            "SELECT * FROM assessment_attack_chains WHERE engagement_id = ? AND chain_key = ?",
+            (engagement.id, chain_key),
         ).fetchone()
         if chain is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="attack chain not found")
         return _upsert_chain_link(
             connection,
-            run.id,
+            engagement.id,
             chain_id=int(chain["id"]),
             relation=relation,
             entity_kind=entity_kind,
@@ -1641,24 +1712,24 @@ def create_attack_chain_link(
         )
 
 
-def list_attack_chains(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_attack_chains(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_attack_chains WHERE run_id = ? ORDER BY updated_at DESC, id DESC", (run.id,))
+        return _fetch_all(connection, "SELECT * FROM assessment_attack_chains WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
 
 
-def list_attack_chain_links(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_attack_chain_links(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         rows = connection.execute(
             """
             SELECT links.*, chains.chain_key
             FROM assessment_attack_chain_links AS links
             JOIN assessment_attack_chains AS chains ON chains.id = links.chain_id
-            WHERE links.run_id = ?
+            WHERE links.engagement_id = ?
             ORDER BY links.updated_at DESC, links.id DESC
             """,
-            (run.id,),
+            (engagement.id,),
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -1667,36 +1738,34 @@ def _upsert_simple_entity(
     connection,
     *,
     table: str,
-    run_id: int,
+    engagement_id: int,
     key_column: str,
     key_value: str,
     values: dict[str, Any],
 ) -> dict[str, Any]:
-    columns = ", ".join(["run_id", key_column, *values.keys()])
+    columns = ", ".join(["engagement_id", key_column, *values.keys()])
     placeholders = ", ".join(["?"] * (2 + len(values)))
     assignments = ", ".join([f"{column} = excluded.{column}" for column in values.keys()])
     connection.execute(
         f"""
         INSERT INTO {table} ({columns})
         VALUES ({placeholders})
-        ON CONFLICT(run_id, {key_column}) DO UPDATE SET
+        ON CONFLICT(engagement_id, {key_column}) DO UPDATE SET
             {assignments},
             updated_at = CURRENT_TIMESTAMP
         """,
-        (run_id, key_value, *values.values()),
+        (engagement_id, key_value, *values.values()),
     )
     row = connection.execute(
-        f"SELECT * FROM {table} WHERE run_id = ? AND {key_column} = ?",
-        (run_id, key_value),
+        f"SELECT * FROM {table} WHERE engagement_id = ? AND {key_column} = ?",
+        (engagement_id, key_value),
     ).fetchone()
     assert row is not None
     return dict(row)
 
 
 def record_credential(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     credential_key: str,
     kind: str,
@@ -1707,12 +1776,12 @@ def record_credential(
     notes: str,
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         return _upsert_simple_entity(
             connection,
             table="assessment_credentials",
-            run_id=run.id,
+            engagement_id=engagement.id,
             key_column="credential_key",
             key_value=credential_key,
             values={
@@ -1727,16 +1796,14 @@ def record_credential(
         )
 
 
-def list_credentials(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_credentials(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_credentials WHERE run_id = ? ORDER BY updated_at DESC, id DESC", (run.id,))
+        return _fetch_all(connection, "SELECT * FROM assessment_credentials WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
 
 
 def record_credential_test(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     credential_id: int,
     service_id: int | None,
@@ -1746,32 +1813,30 @@ def record_credential_test(
     evidence_ref: str,
     notes: str,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         cursor = connection.execute(
             """
             INSERT INTO assessment_credential_tests (
-                run_id, credential_id, service_id, target_ref, auth_context, outcome, evidence_ref, notes
+                engagement_id, credential_id, service_id, target_ref, auth_context, outcome, evidence_ref, notes
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (run.id, credential_id, service_id, target_ref, auth_context, outcome, evidence_ref, notes),
+            (engagement.id, credential_id, service_id, target_ref, auth_context, outcome, evidence_ref, notes),
         )
         row = connection.execute("SELECT * FROM assessment_credential_tests WHERE id = ?", (cursor.lastrowid,)).fetchone()
     assert row is not None
     return dict(row)
 
 
-def list_credential_tests(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_credential_tests(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_credential_tests WHERE run_id = ? ORDER BY updated_at DESC, id DESC", (run.id,))
+        return _fetch_all(connection, "SELECT * FROM assessment_credential_tests WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
 
 
 def record_access_record(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     access_key: str,
     credential_id: int | None,
@@ -1784,12 +1849,12 @@ def record_access_record(
     notes: str,
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         return _upsert_simple_entity(
             connection,
             table="assessment_access_records",
-            run_id=run.id,
+            engagement_id=engagement.id,
             key_column="access_key",
             key_value=access_key,
             values={
@@ -1806,16 +1871,14 @@ def record_access_record(
         )
 
 
-def list_access_records(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_access_records(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_access_records WHERE run_id = ? ORDER BY updated_at DESC, id DESC", (run.id,))
+        return _fetch_all(connection, "SELECT * FROM assessment_access_records WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
 
 
 def record_pivot(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     pivot_key: str,
     access_record_id: int | None,
@@ -1827,12 +1890,12 @@ def record_pivot(
     notes: str,
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         return _upsert_simple_entity(
             connection,
             table="assessment_pivots",
-            run_id=run.id,
+            engagement_id=engagement.id,
             key_column="pivot_key",
             key_value=pivot_key,
             values={
@@ -1848,16 +1911,14 @@ def record_pivot(
         )
 
 
-def list_pivots(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_pivots(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_pivots WHERE run_id = ? ORDER BY updated_at DESC, id DESC", (run.id,))
+        return _fetch_all(connection, "SELECT * FROM assessment_pivots WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
 
 
 def record_tunnel(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     tunnel_key: str,
     pivot_id: int | None,
@@ -1869,12 +1930,12 @@ def record_tunnel(
     notes: str,
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         return _upsert_simple_entity(
             connection,
             table="assessment_tunnels",
-            run_id=run.id,
+            engagement_id=engagement.id,
             key_column="tunnel_key",
             key_value=tunnel_key,
             values={
@@ -1890,16 +1951,14 @@ def record_tunnel(
         )
 
 
-def list_tunnels(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_tunnels(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_tunnels WHERE run_id = ? ORDER BY updated_at DESC, id DESC", (run.id,))
+        return _fetch_all(connection, "SELECT * FROM assessment_tunnels WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
 
 
 def record_blocked_technique(
-    project_id: int,
-    run_id: int,
-    user: User,
+    engagement_id: int,
     *,
     technique_key: str,
     technique: str,
@@ -1911,12 +1970,12 @@ def record_blocked_technique(
     notes: str,
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         return _upsert_simple_entity(
             connection,
             table="assessment_blocked_techniques",
-            run_id=run.id,
+            engagement_id=engagement.id,
             key_column="technique_key",
             key_value=technique_key,
             values={
@@ -1932,46 +1991,75 @@ def record_blocked_technique(
         )
 
 
-def list_blocked_techniques(project_id: int, run_id: int, user: User) -> list[dict[str, Any]]:
-    run = _run_or_404(project_id, run_id, user)
+def list_blocked_techniques(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_blocked_techniques WHERE run_id = ? ORDER BY updated_at DESC, id DESC", (run.id,))
+        return _fetch_all(connection, "SELECT * FROM assessment_blocked_techniques WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
 
 
-def assessment_summary(project_id: int, run_id: int, user: User) -> dict[str, Any]:
-    run = _run_or_404(project_id, run_id, user)
+def update_coverage_item_status(
+    engagement_id: int,
+    *,
+    coverage_item_id: int,
+    status_value: str,
+    notes: str,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    normalized_status = _normalize_coverage_status(status_value)
     with get_connection() as connection:
-        target_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_targets WHERE run_id = ?", (run.id,))
-        service_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_services WHERE run_id = ?", (run.id,))
-        request_variant_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_request_variants WHERE run_id = ?", (run.id,))
-        request_observation_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_request_observations WHERE run_id = ?", (run.id,))
-        coverage_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_coverage_items WHERE run_id = ?", (run.id,))
-        probe_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_probe_runs WHERE run_id = ?", (run.id,))
-        finding_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_findings WHERE run_id = ?", (run.id,))
+        row = connection.execute(
+            "SELECT * FROM assessment_coverage_items WHERE id = ? AND engagement_id = ?",
+            (coverage_item_id, engagement.id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="coverage item not found")
+        connection.execute(
+            "UPDATE assessment_coverage_items SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND engagement_id = ?",
+            (normalized_status, _append_notes(row["notes"], notes), coverage_item_id, engagement.id),
+        )
+        if row["service_id"] is not None:
+            _refresh_service_coverage_status(connection, engagement.id, int(row["service_id"]))
+        updated = connection.execute(
+            "SELECT * FROM assessment_coverage_items WHERE id = ?", (coverage_item_id,)
+        ).fetchone()
+    assert updated is not None
+    return dict(updated)
+
+
+def assessment_summary(engagement_id: int) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        target_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_targets WHERE engagement_id = ?", (engagement.id,))
+        service_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_services WHERE engagement_id = ?", (engagement.id,))
+        request_variant_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_request_variants WHERE engagement_id = ?", (engagement.id,))
+        request_observation_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_request_observations WHERE engagement_id = ?", (engagement.id,))
+        coverage_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_coverage_items WHERE engagement_id = ?", (engagement.id,))
+        probe_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_probe_runs WHERE engagement_id = ?", (engagement.id,))
+        finding_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_findings WHERE engagement_id = ?", (engagement.id,))
         open_surface_count = _scalar_row(
             connection,
-            "SELECT COUNT(*) FROM assessment_surfaces WHERE run_id = ? AND status IN ('discovered', 'deferred')",
-            (run.id,),
+            "SELECT COUNT(*) FROM assessment_surfaces WHERE engagement_id = ? AND status IN ('discovered', 'deferred')",
+            (engagement.id,),
         )
-        credential_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_credentials WHERE run_id = ?", (run.id,))
-        access_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_access_records WHERE run_id = ?", (run.id,))
-        pivot_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_pivots WHERE run_id = ?", (run.id,))
-        tunnel_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_tunnels WHERE run_id = ?", (run.id,))
-        blocked_technique_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_blocked_techniques WHERE run_id = ?", (run.id,))
-        chain_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_attack_chains WHERE run_id = ?", (run.id,))
+        credential_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_credentials WHERE engagement_id = ?", (engagement.id,))
+        access_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_access_records WHERE engagement_id = ?", (engagement.id,))
+        pivot_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_pivots WHERE engagement_id = ?", (engagement.id,))
+        tunnel_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_tunnels WHERE engagement_id = ?", (engagement.id,))
+        blocked_technique_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_blocked_techniques WHERE engagement_id = ?", (engagement.id,))
+        chain_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_attack_chains WHERE engagement_id = ?", (engagement.id,))
         coverage_rows = connection.execute(
-            "SELECT status, COUNT(*) AS total FROM assessment_coverage_items WHERE run_id = ? GROUP BY status ORDER BY status ASC",
-            (run.id,),
+            "SELECT status, COUNT(*) AS total FROM assessment_coverage_items WHERE engagement_id = ? GROUP BY status ORDER BY status ASC",
+            (engagement.id,),
         ).fetchall()
         finding_rows = connection.execute(
-            "SELECT status, COUNT(*) AS total FROM assessment_findings WHERE run_id = ? GROUP BY status ORDER BY status ASC",
-            (run.id,),
+            "SELECT status, COUNT(*) AS total FROM assessment_findings WHERE engagement_id = ? GROUP BY status ORDER BY status ASC",
+            (engagement.id,),
         ).fetchall()
         top_surfaces = connection.execute(
             """
             SELECT *
             FROM assessment_surfaces
-            WHERE run_id = ?
+            WHERE engagement_id = ?
             ORDER BY
                 CASE status
                     WHEN 'discovered' THEN 0
@@ -1982,13 +2070,13 @@ def assessment_summary(project_id: int, run_id: int, user: User) -> dict[str, An
                 updated_at DESC
             LIMIT 8
             """,
-            (run.id,),
+            (engagement.id,),
         ).fetchall()
         top_findings = connection.execute(
             """
             SELECT slug, title, severity, status, canonical_location, summary, source_name, updated_at
             FROM assessment_findings
-            WHERE run_id = ?
+            WHERE engagement_id = ?
             ORDER BY
                 CASE status
                     WHEN 'exploited' THEN 0
@@ -2001,17 +2089,17 @@ def assessment_summary(project_id: int, run_id: int, user: User) -> dict[str, An
                 updated_at DESC
             LIMIT 10
             """,
-            (run.id,),
+            (engagement.id,),
         ).fetchall()
         recent_probes = connection.execute(
             """
             SELECT result_status, attack_family, signal_type, agent_name, evidence_ref, created_at
             FROM assessment_probe_runs
-            WHERE run_id = ?
+            WHERE engagement_id = ?
             ORDER BY created_at DESC, id DESC
             LIMIT 10
             """,
-            (run.id,),
+            (engagement.id,),
         ).fetchall()
         open_coverage_items = connection.execute(
             """
@@ -2027,31 +2115,31 @@ def assessment_summary(project_id: int, run_id: int, user: User) -> dict[str, An
             FROM assessment_coverage_items AS coverage
             LEFT JOIN assessment_request_variants AS request_variants ON request_variants.id = coverage.request_variant_id
             LEFT JOIN assessment_services AS services ON services.id = coverage.service_id
-            WHERE coverage.run_id = ? AND coverage.status IN ('pending', 'queued', 'deferred')
+            WHERE coverage.engagement_id = ? AND coverage.status IN ('pending', 'queued', 'deferred', 'blocked')
             ORDER BY coverage.updated_at DESC, coverage.id DESC
             LIMIT 12
             """,
-            (run.id,),
+            (engagement.id,),
         ).fetchall()
         attack_chains = connection.execute(
             """
             SELECT chain_key, title, status, severity, narrative, updated_at
             FROM assessment_attack_chains
-            WHERE run_id = ?
+            WHERE engagement_id = ?
             ORDER BY updated_at DESC, id DESC
             LIMIT 8
             """,
-            (run.id,),
+            (engagement.id,),
         ).fetchall()
         service_coverage_gaps = connection.execute(
             """
             SELECT services.endpoint, services.service, services.coverage_status, services.updated_at
             FROM assessment_services AS services
-            WHERE services.run_id = ? AND services.coverage_status IN ('pending', 'partial', 'blocked')
+            WHERE services.engagement_id = ? AND services.coverage_status IN ('pending', 'partial', 'blocked')
             ORDER BY services.updated_at DESC, services.id DESC
             LIMIT 10
             """,
-            (run.id,),
+            (engagement.id,),
         ).fetchall()
     return {
         "target_count": target_count,

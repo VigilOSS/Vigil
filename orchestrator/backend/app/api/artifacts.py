@@ -3,10 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from ..security import CurrentUser
-from ..services.artifacts import list_artifacts_for_run, read_artifact_for_run
+from ..services.artifacts import list_artifacts_for_engagement, read_artifact_for_engagement
 
-router = APIRouter(prefix="/projects/{project_id}/runs/{run_id}/artifacts", tags=["artifacts"])
+router = APIRouter(prefix="/engagements/{engagement_key}/artifacts", tags=["artifacts"])
 
 
 class ArtifactResponse(BaseModel):
@@ -32,12 +31,12 @@ def _artifact_response_payload(artifact) -> dict:
 
 
 @router.get("", response_model=list[ArtifactResponse])
-def list_artifacts(project_id: int, run_id: int, current_user: CurrentUser) -> list[ArtifactResponse]:
-    artifacts = list_artifacts_for_run(project_id, run_id, current_user)
+def list_artifacts(engagement_key: str) -> list[ArtifactResponse]:
+    artifacts = list_artifacts_for_engagement(engagement_key)
     return [ArtifactResponse(**_artifact_response_payload(artifact)) for artifact in artifacts]
 
 
 @router.get("/{artifact_name}", response_model=ArtifactContentResponse)
-def read_artifact(project_id: int, run_id: int, artifact_name: str, current_user: CurrentUser) -> ArtifactContentResponse:
-    artifact = read_artifact_for_run(project_id, run_id, current_user, artifact_name)
+def read_artifact(engagement_key: str, artifact_name: str) -> ArtifactContentResponse:
+    artifact = read_artifact_for_engagement(engagement_key, artifact_name)
     return ArtifactContentResponse(content=artifact.content, **_artifact_response_payload(artifact.entry))

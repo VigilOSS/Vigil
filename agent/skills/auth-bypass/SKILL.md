@@ -105,3 +105,8 @@ PUT /api/profile {"name":"test","role":"admin","is_staff":true}  # Mass assignme
 5. Test every object reference with other accounts' IDs
 6. Check JWT/token security
 7. Test session lifecycle: fixation, expiration, invalidation
+
+## Extended Resources
+
+- `agent/references/payloads/jwt-payloads.md` — alg:none, key confusion, JWK/kid injection, weak secret brute-force
+- `agent/references/vuln-checklists/A07-authentication-failures.md` — OWASP Top 10:2025 authentication failures checklist

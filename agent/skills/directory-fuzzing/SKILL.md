@@ -83,3 +83,8 @@ ffuf -u https://TARGET -w /usr/share/seclists/Discovery/DNS/subdomains-top1milli
 ffuf -u https://TARGET/FUZZ -w wordlist.txt -ac -o /engagement/scans/dir_fuzz_results.json -of json
 curl -sI https://TARGET/discovered_path  # Verify
 ```
+
+## Extended Resources
+
+- `agent/references/tools/fuzzing/ffuf.md` — ffuf flags, filter/matcher options, wordlist selection
+- `agent/references/tools/fuzzing/gobuster.md` — gobuster dir/dns/vhost mode reference
