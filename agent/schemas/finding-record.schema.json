@@ -17,6 +17,37 @@
     "notes",
     "details"
   ],
+  "examples": [
+    {
+      "title": "Blind SQL injection in search",
+      "severity": "high",
+      "status": "confirmed",
+      "defect_family": "sql-injection",
+      "root_cause_key": "search-id-sqli",
+      "auth_context": "anonymous",
+      "canonical_location": "https://target.example/search?q",
+      "summary": "Boolean-blind SQL injection on the search endpoint",
+      "evidence_ref": "scans/sqlmap.txt",
+      "notes": "curl 'https://target.example/search?q=test%27+AND+1%3D1--+-' → 200 with results; curl 'https://target.example/search?q=test%27+AND+1%3D2--+-' → 200 empty. Confirmed with sqlmap --batch --level=3.",
+      "details": {
+        "owasp_category": "A03:2021 Injection",
+        "cwe_id": "CWE-89",
+        "request_method": "GET",
+        "parameter": "q",
+        "evidence": "Replayable request/response pair in scans/sqlmap.txt",
+        "impact": "Anonymous attackers can extract arbitrary data from the backing store",
+        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+        "cvss_score": 7.5,
+        "remediation": "Use parameterized queries for all search input",
+        "steps_to_reproduce": [
+          "Send GET /search?q=test'+AND+1=1--+-",
+          "Observe normal search results returned",
+          "Send GET /search?q=test'+AND+1=2--+-",
+          "Observe empty results — confirms boolean-blind SQLi"
+        ]
+      }
+    }
+  ],
   "properties": {
     "slug": {
       "type": "string",

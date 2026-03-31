@@ -40,6 +40,22 @@ Host-side commands are limited to coordination and non-target support only:
 
 ---
 
+## 2a. Listeners Are Operator-Controlled
+
+Agents must NOT start pwncat-vl, ngrok, frp, chisel listeners, `nc -lvp`, `socat` listeners,
+or any other network listener process. These are shared infrastructure that the operator manages.
+
+When exploitation requires a listener (reverse shell, tunnel, callback relay):
+1. Provide the exact listener commands in your output using `# MANUAL:` annotation
+2. Reference `agent/references/offensive-tactics/shell-handling.md` for the full command set
+3. Wait for operator confirmation before proceeding with steps that depend on the listener
+4. After the operator confirms, verify the shell by tailing the log file via Kali MCP
+
+Agents CAN read listener log files (`tail /data/shell-*.log`) via Kali MCP and verify
+that a shell connected. Agents CANNOT start, stop, or restart listener processes.
+
+---
+
 ## 3. Use Skills and References — They Are the Methodology
 
 **Step 1 — Check `agent/SKILL.md`** when you begin specialist work. It lists every available
