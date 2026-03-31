@@ -8,22 +8,34 @@ import type {
 } from "../lib/api";
 import { PhaseWaterfall } from "./PhaseWaterfall";
 
+const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
+
 type OverviewTabProps = {
   events: EventRecord[];
   assessmentSummary: AssessmentSummary | null;
   findings: (AssessmentFindingDetail | AssessmentFinding)[];
   chains: (AssessmentAttackChainDetail | AssessmentAttackChain)[];
+  currentPhase: string;
 };
 
-export function OverviewTab({ events, assessmentSummary, findings, chains }: OverviewTabProps) {
+function sortFindings(findings: (AssessmentFindingDetail | AssessmentFinding)[]) {
+  return [...findings].sort((left, right) => {
+    const severityDelta = SEVERITY_ORDER.indexOf(left.severity) - SEVERITY_ORDER.indexOf(right.severity);
+    if (severityDelta !== 0) return severityDelta;
+    return left.title.localeCompare(right.title);
+  });
+}
+
+export function OverviewTab({ events, assessmentSummary, findings, chains, currentPhase }: OverviewTabProps) {
   const s = assessmentSummary;
+  const sortedFindings = sortFindings(findings);
   const latestEvents = events
     .filter((e) => e.event_type.startsWith("task."))
     .slice(-5);
 
   return (
     <>
-      <PhaseWaterfall events={events} />
+      <PhaseWaterfall events={events} currentPhase={currentPhase} />
 
       <section className="panel">
         <div className="panel-header">
@@ -61,17 +73,17 @@ export function OverviewTab({ events, assessmentSummary, findings, chains }: Ove
         <article className="panel">
           <p className="eyebrow">Findings</p>
           <div style={{ display: "grid", gap: "12px", marginTop: "8px" }}>
-            {findings.slice(0, 5).map((f) => (
+            {sortedFindings.slice(0, 5).map((f) => (
               <div key={f.slug} style={{ display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" }}>
-                <span className={`badge severity-${f.severity}`}>{f.severity}</span>
                 <strong>{f.title}</strong>
+                <span className={`badge severity-${f.severity}`}>{f.severity}</span>
                 <span className="meta-text">{f.status}</span>
               </div>
             ))}
-            {findings.length > 5 && (
-              <p className="meta-text">+{findings.length - 5} more</p>
+            {sortedFindings.length > 5 && (
+              <p className="meta-text">+{sortedFindings.length - 5} more</p>
             )}
-            {findings.length === 0 && <p className="meta-text">No findings recorded yet.</p>}
+            {sortedFindings.length === 0 && <p className="meta-text">No findings recorded yet.</p>}
           </div>
         </article>
 

@@ -46,6 +46,10 @@ type EngagementPageProps = {
   onBack: () => void;
 };
 
+function formatStatusLabel(value: string | undefined) {
+  return (value ?? "unknown").replace(/_/g, " ");
+}
+
 export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const [engagement, setEngagement] = useState<Engagement | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -237,17 +241,19 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
     return () => window.clearInterval(interval);
   }, [activeEngagement, engagementKey, selectedName]);
 
+  const displayEvents = events;
+  const displayFindings = assessmentFindings.length > 0 ? assessmentFindings : (assessmentSummary?.top_findings ?? []);
+  const chains = assessmentChains.length > 0 ? assessmentChains : (assessmentSummary?.attack_chains ?? []);
+  const displaySummary = assessmentSummary;
+
   const latestSummary = useMemo(
-    () => (activeEngagement ? events.at(-1)?.summary ?? "Waiting for events" : "Waiting for events"),
-    [activeEngagement, events],
+    () => (activeEngagement ? displayEvents.at(-1)?.summary ?? "Waiting for recorded activity" : "Waiting for recorded activity"),
+    [activeEngagement, displayEvents],
   );
 
-  const findings = assessmentFindings.length > 0 ? assessmentFindings : (assessmentSummary?.top_findings ?? []);
-  const chains = assessmentChains.length > 0 ? assessmentChains : (assessmentSummary?.attack_chains ?? []);
-
   const tabCounts: Partial<Record<TabKey, number>> = {
-    findings: assessmentSummary?.finding_count ?? 0,
-    coverage: assessmentSummary?.coverage_count ?? 0,
+    findings: displaySummary?.finding_count ?? displayFindings.length,
+    coverage: displaySummary?.coverage_count ?? 0,
   };
 
   return (
@@ -260,10 +266,18 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
           <p className="lead">{latestSummary}</p>
         </div>
         <div className="page-actions">
-          <span className={`status-pill status-${engagement?.status ?? "queued"}`}>
-            {activeEngagement?.status ?? "queued"}
-          </span>
-          <span className="meta-text">Phase: {activeEngagement?.current_phase ?? "unknown"}</span>
+          <div className="status-summary">
+            <div className="status-summary-row">
+              <span className="status-summary-label">Run status</span>
+              <span className={`status-pill status-${engagement?.status ?? "queued"}`}>
+                {formatStatusLabel(activeEngagement?.status)}
+              </span>
+            </div>
+            <div className="status-summary-row">
+              <span className="status-summary-label">Workflow</span>
+              <span className="meta-text">{formatStatusLabel(activeEngagement?.current_phase)}</span>
+            </div>
+          </div>
           {loadError && <span className="error-text">{loadError}</span>}
           <button className="ghost-button" onClick={onBack}>Back</button>
         </div>
@@ -275,24 +289,25 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
 
           {activeTab === "overview" && (
             <OverviewTab
-              events={events}
-              assessmentSummary={assessmentSummary}
-              findings={findings}
+              events={displayEvents}
+              assessmentSummary={displaySummary}
+              findings={displayFindings}
               chains={chains}
+              currentPhase={activeEngagement.current_phase}
             />
           )}
 
           {activeTab === "findings" && (
             <FindingsTab
-              findings={assessmentFindings}
-              fallbackFindings={assessmentSummary?.top_findings ?? []}
-              summary={assessmentSummary}
+              findings={displayFindings}
+              fallbackFindings={displaySummary?.top_findings ?? []}
+              summary={displaySummary}
             />
           )}
 
           {activeTab === "coverage" && (
             <CoverageTab
-              summary={assessmentSummary}
+              summary={displaySummary}
               targets={assessmentTargets}
               services={assessmentServices}
               coverageItems={assessmentCoverageItems}
@@ -300,7 +315,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
           )}
 
           {activeTab === "activity" && (
-            <ActivityTab events={events} sessions={sessions} />
+            <ActivityTab events={displayEvents} sessions={sessions} />
           )}
 
           {activeTab === "artifacts" && (
