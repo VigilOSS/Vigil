@@ -21,6 +21,13 @@ FINDING_STATUS_RANK = {
     "reported": 4,
     "merged": -1,
 }
+_COVERAGE_STATUS_SYNONYMS = {
+    "done": "covered",
+    "not-applicable": "not_applicable",
+    "n/a": "not_applicable",
+    "tested": "covered",
+}
+COVERAGE_STATUSES = {"pending", "queued", "deferred", "covered", "not_applicable", "blocked"}
 SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -74,6 +81,14 @@ def _normalize_finding_status(value: str) -> str:
     status_value = (value or "draft").strip().lower()
     if status_value not in FINDING_STATUSES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid finding status: {value}")
+    return status_value
+
+
+def _normalize_coverage_status(value: str) -> str:
+    status_value = (value or "pending").strip().lower()
+    status_value = _COVERAGE_STATUS_SYNONYMS.get(status_value, status_value)
+    if status_value not in COVERAGE_STATUSES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid coverage status: {value}")
     return status_value
 
 
@@ -362,6 +377,7 @@ def _upsert_coverage_item(
     status_value: str,
     notes: str,
 ) -> dict[str, Any]:
+    normalized_status = _normalize_coverage_status(status_value)
     row = connection.execute(
         """
         SELECT *
@@ -378,7 +394,7 @@ def _upsert_coverage_item(
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, status_value, notes),
+            (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, normalized_status, notes),
         )
         row = connection.execute(
             "SELECT * FROM assessment_coverage_items WHERE id = ?",
@@ -391,11 +407,39 @@ def _upsert_coverage_item(
             SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (status_value, _append_notes(row["notes"], notes), row["id"]),
+            (normalized_status, _append_notes(row["notes"], notes), row["id"]),
         )
         row = connection.execute("SELECT * FROM assessment_coverage_items WHERE id = ?", (row["id"],)).fetchone()
     assert row is not None
+    if row["service_id"] is not None:
+        _refresh_service_coverage_status(connection, engagement_id, int(row["service_id"]))
     return dict(row)
+
+
+def _refresh_service_coverage_status(connection, engagement_id: int, service_id: int) -> None:
+    rows = connection.execute(
+        "SELECT status FROM assessment_coverage_items WHERE engagement_id = ? AND service_id = ?",
+        (engagement_id, service_id),
+    ).fetchall()
+    if not rows:
+        return
+    statuses = [_normalize_coverage_status(str(row["status"])) for row in rows]
+    if all(status_value in {"covered", "not_applicable"} for status_value in statuses):
+        coverage_status = "covered"
+    elif any(status_value == "blocked" for status_value in statuses):
+        coverage_status = "blocked"
+    elif any(status_value in {"covered", "not_applicable", "deferred"} for status_value in statuses):
+        coverage_status = "partial"
+    else:
+        coverage_status = "pending"
+    connection.execute(
+        """
+        UPDATE assessment_services
+        SET coverage_status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND engagement_id = ?
+        """,
+        (coverage_status, service_id, engagement_id),
+    )
 
 
 def _probe_key(
@@ -1961,6 +2005,7 @@ def update_coverage_item_status(
     notes: str,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    normalized_status = _normalize_coverage_status(status_value)
     with get_connection() as connection:
         row = connection.execute(
             "SELECT * FROM assessment_coverage_items WHERE id = ? AND engagement_id = ?",
@@ -1970,8 +2015,10 @@ def update_coverage_item_status(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="coverage item not found")
         connection.execute(
             "UPDATE assessment_coverage_items SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND engagement_id = ?",
-            (status_value, _append_notes(row["notes"], notes), coverage_item_id, engagement.id),
+            (normalized_status, _append_notes(row["notes"], notes), coverage_item_id, engagement.id),
         )
+        if row["service_id"] is not None:
+            _refresh_service_coverage_status(connection, engagement.id, int(row["service_id"]))
         updated = connection.execute(
             "SELECT * FROM assessment_coverage_items WHERE id = ?", (coverage_item_id,)
         ).fetchone()
@@ -2068,7 +2115,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
             FROM assessment_coverage_items AS coverage
             LEFT JOIN assessment_request_variants AS request_variants ON request_variants.id = coverage.request_variant_id
             LEFT JOIN assessment_services AS services ON services.id = coverage.service_id
-            WHERE coverage.engagement_id = ? AND coverage.status IN ('pending', 'queued', 'deferred')
+            WHERE coverage.engagement_id = ? AND coverage.status IN ('pending', 'queued', 'deferred', 'blocked')
             ORDER BY coverage.updated_at DESC, coverage.id DESC
             LIMIT 12
             """,

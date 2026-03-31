@@ -6,6 +6,7 @@
 #   ./install.sh codex [target_dir]
 #   ./install.sh --dry-run claude
 #
+# This installer provisions workflows for authorized realistic lab environments only.
 # Supported platforms: macOS and Linux only.
 set -euo pipefail
 

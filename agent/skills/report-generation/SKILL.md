@@ -23,6 +23,12 @@ Use the helper script or `curl` — never query the SQLite database file directl
 # Attack chains with narrative and severity
 ./scripts/fetch_assessment_record.sh attack-chains
 
+# Credentials discovered during exploitation
+./scripts/fetch_assessment_record.sh credentials
+
+# Access records and footholds confirmed via credential validation
+./scripts/fetch_assessment_record.sh access-records
+
 # Surfaces for coverage summary
 ./scripts/fetch_assessment_record.sh surfaces
 
@@ -167,7 +173,7 @@ Tool output in `<details>` blocks, generated scripts, scope verification table, 
 3. **Use pre-computed CVSS** from finding details. Recalculate only if proved impact at report time materially differs from what was validated
 4. **Use pre-computed remediation** from finding details. Augment only if the exploit chain revealed additional fix requirements
 5. Populate all template fields (flag missing evidence with `[EVIDENCE MISSING]`, never fabricate)
-6. Build attack path narrative from `attack-chains` endpoint data
+6. Build attack path narrative from `attack-chains` endpoint data and enrich it with `credentials` / `access-records` when those records explain the authenticated foothold or post-auth scope
 7. Compile coverage summary from `summary` endpoint
 8. Build the slug cross-reference table
 9. Write executive summary LAST — it depends on the complete finding set and chain analysis

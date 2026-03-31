@@ -68,8 +68,8 @@ exploit outputs: CONFIRMED/PARTIAL/FAILED status, extracted data, PoC
 
 Operator does:
 1. CONFIRMED → durable finding update with full evidence (HIGH severity)
-2. CONFIRMED + credentials → record credential via `post_assessment_record.sh credentials`, record access via `post_assessment_record.sh access-records`, then credential auto-use workflow (see operator prompt)
-3. CONFIRMED + multi-step chain → record chain via `record_attack_chain.sh` linking the finding steps
+2. CONFIRMED + credentials / access / credential tests → verify exploit-developer recorded them via the assessment API, then run the credential auto-use workflow (see operator prompt)
+3. CONFIRMED + multi-step chain → verify exploit-developer recorded the chain via `record_attack_chain.sh` and linked the finding steps
 4. CONFIRMED + new attack surface → ingest auth-aware variants and retest obligations into backend state
 5. PARTIAL → record as MEDIUM, validate partial signals in stages before giving up
 6. FAILED → log.md, move to next finding

@@ -191,8 +191,9 @@ using the assessment API via `post_assessment_record.sh`:
 - **Credentials:** `./scripts/post_assessment_record.sh credentials '<json>'`
 - **Credential tests:** `./scripts/post_assessment_record.sh credential-tests '<json>'`
 - **Access records:** `./scripts/post_assessment_record.sh access-records '<json>'`
-- **Coverage updates:** `./scripts/post_assessment_record.sh "coverage-items/<id>" '{"status":"tested","notes":"..."}' PATCH`
+- **Coverage updates:** `./scripts/post_assessment_record.sh "coverage-items/<id>" '{"status":"covered","notes":"..."}' PATCH`
 - **Blocked techniques:** `./scripts/post_assessment_record.sh blocked-techniques '<json>'`
 
 These follow the same backend-first principle as finding recording. Do not defer chain or credential
-recording to the operator.
+recording to the operator. The agent that proves the state writes it; the operator verifies it landed in
+canonical backend state and avoids writing duplicate rows.
