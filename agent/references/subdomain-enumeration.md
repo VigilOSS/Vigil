@@ -1,11 +1,11 @@
-# Wildcard Mode
+# Subdomain Enumeration
 
-Use this mode only when the target is a bare domain or contains `*`.
+Activate when scope.json `hosts` contains `*.domain` entries (e.g., `*.example.com`).
 
 ## Phase 0: Enumerate Subdomains
 
-1. Create a parent engagement directory for the wildcard run.
-2. Run `subfinder` into `scans/subdomains_raw.txt`.
+1. Identify which domains have `*.domain` entries in the `hosts` array.
+2. For each such domain, run `subfinder` into `scans/subdomains_raw.txt`.
 3. Apply the `subdomain-enumeration` skill's 3-stage filter:
    - DNS resolution
    - web-port reachability

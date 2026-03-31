@@ -74,7 +74,8 @@ After engagement initialization completes, repeat until all attack paths exhaust
    - **Phase 5 (Report):** `report-writer` → `agent/skills/report-generation/SKILL.md`
    If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, agents, rules, skill index, skills, references, and scripts before claiming no suitable skill exists.
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Do not use host Bash, `docker run`, `docker exec`, repo-local execution helpers, or ad hoc wrappers for in-scope target work. If Kali MCP has a runtime or reachability gap, stop target-facing work there and debug the runtime from the host without sending HTTP, DNS, or raw TCP traffic from the host to scoped targets.
-7. **DISPATCH** — ALWAYS dispatch to subagent. Do NOT test directly with host-side commands. Your job is orchestration: phase control, specialist selection, state review, and synchronized artifact handling.
+7. **DISPATCH** — ALWAYS dispatch to subagent for analysis, testing, validation, and exploitation work. Do NOT test directly with host-side commands. Your job is orchestration: phase control, specialist selection, state review, and synchronized artifact handling.
+   **Operator-executed exceptions** (via Kali MCP, not host-side): Collect-phase pipeline commands (Katana crawl, endpoint ingestion) and quick credential validation (single login test to confirm working/not-working). These are mechanical pipeline steps, not analysis. Dispatch a specialist once the pipeline step produces actionable state.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/record_finding.sh` or the assessment API so findings.md remains a synchronized export, not the authoritative store. `append_finding.sh` now rejects markdown and points to `schemas/finding-record.schema.json`.
    **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. They go to intel.md only. Dispatch exploit-developer to validate before recording. This reconciles "record immediately" with "no theoretical findings."
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/append_surface.sh` so the backend and readable export stay in sync. Do not call `scripts/lib/surfaces.sh` directly and do not patch `surfaces.jsonl` by hand during normal operation. After each surface update batch, wait for the command to finish and then verify `surfaces.jsonl` with a fresh read. If the first verification read does not reflect the expected change, re-read once before assuming failure. Only treat it as a real helper/backend problem if the command completed successfully and a second fresh read still disagrees; in that case, stop and report the sync issue instead of editing the artifact manually.
@@ -141,15 +142,30 @@ Full reference: `agent/references/offensive-tactics/shell-handling.md`
 Initialize a run with:
 
 ```bash
-./scripts/init_engagement.sh <target-url-or-host> \
-  [--scope-mode host_only|explicit_hosts|wildcard] \
-  [--scope-hosts host1,host2,...] \
-  [--out-of-scope-hosts host1,host2,...] \
+./scripts/init_engagement.sh [target-url-or-host] \
+  [--hosts host1,host2,*.domain,...] \
   [--auth-mode none|auth_json|manual|proxy_capture] \
   [--exploit-policy pause|full_send|selected]
 ```
 
-This creates the engagement directory, readable artifacts, session workspace, explicit scope metadata, an `auth.json` scaffold, engagement-local `AGENTS.md`/`CLAUDE.md` wrappers that point back to the workspace-root prompts and skills, the transient local work buffer used for batching worker tasks, and an `engagement.json` manifest.
+The `--hosts` list IS the scope — any host not listed is out of scope. Use `*.domain` entries to enable subdomain enumeration for that domain. The positional target is optional when `--hosts` is provided; the first host becomes the target automatically.
+
+Examples:
+```bash
+# Single host
+./scripts/init_engagement.sh https://example.com
+
+# Multiple hosts — only these are in scope
+./scripts/init_engagement.sh --hosts app.example.com,api.example.com,admin.example.com
+
+# Multiple hosts with subdomain enum on one domain
+./scripts/init_engagement.sh --hosts app.example.com,*.api.example.com,other.com
+
+# Single host with subdomain enum
+./scripts/init_engagement.sh --hosts example.com,*.example.com
+```
+
+This creates the engagement directory, readable artifacts, session workspace, scope metadata, an `auth.json` scaffold, engagement-local `AGENTS.md`/`CLAUDE.md` wrappers that point back to the workspace-root prompts and skills, the transient local work buffer used for batching worker tasks, and an `engagement.json` manifest.
 
 Rules:
 - Do not delegate initialization to a general subagent.
@@ -157,8 +173,8 @@ Rules:
 - Before initialization completes, do not read `scope.json`, `log.md`, `findings.md`, `intel.md`, `auth.json`, or `cases.db`.
 - Use `./scripts/init_engagement.sh` directly. Do not rewrite initialization in `python`, `python3`, `node`, or ad hoc shell blocks.
 - The core loop starts only after initialization completes successfully.
-- Scope defaults are conservative: host-only, no auth, `exploit_policy=pause`.
-- Discovered subdomains are not automatically in scope unless the explicit scope mode allows them.
+- Scope defaults are conservative: single host, no auth, `exploit_policy=pause`.
+- Discovered subdomains are only in scope when the `hosts` list includes a `*.domain` entry for that domain.
 - `auth_mode` is implemented through `auth.json`, not as dead scope metadata. The workflow uses auth only when `auth.json` is populated and marked for request use.
 
 ## Subagent Dispatch
@@ -260,12 +276,14 @@ jq '.current_phase = "<next>"' \
 
 ## Credential Auto-Use
 
-When ANY agent discovers credentials, the operator coordinates these steps (do not perform target-facing work directly — dispatch to subagents):
+When ANY agent discovers credentials, the operator coordinates these steps:
 
-1. **Operator writes to auth.json** — populate cookies, headers, or token fields. Set `state` to `available` and `use_for_requests` to `true`. This is local file work, not target-facing.
-2. **Dispatch exploit-developer to validate credentials** — the agent logs in via Kali MCP, confirms what access the credentials grant, and records findings with `auth_context: authenticated`. If login fails, update auth.json `state` to `invalid` and continue anonymously.
+1. **Operator tests credentials via Kali MCP** — a quick login check is mechanical pipeline work, not analysis. Run a single login request (curl POST, HTTP basic auth, etc.) via the Kali MCP command-execution tool to confirm working or not-working.
+   - If login **fails** → record result in log.md, continue anonymously. Do not dispatch a specialist for a failed login.
+   - If login **succeeds** → continue to step 2.
+2. **Operator writes to auth.json** — populate cookies, headers, or token fields from the successful login response. Set `state` to `available` and `use_for_requests` to `true`. This is local file work.
 3. **Operator re-runs Collect** — re-invoke Katana via Kali MCP with auth headers to discover authenticated-only endpoints. Re-ingest through `recon_ingest.sh` with the new auth context. This is the POST-AUTH RE-COLLECTION step.
-4. **Dispatch exploit-developer again** — test authenticated surfaces discovered in step 3.
+4. **Dispatch exploit-developer** — to test authenticated surfaces discovered in step 3. The agent maps what authenticated access grants and tests for privilege escalation, IDOR, and auth-boundary issues across the newly discovered endpoints. This is the analysis work that requires a specialist.
 
 Auth handling rules:
 - `auth.json` is the live auth contract. It may contain cookies, headers, `auth_context`, `use_for_requests`, and optional `expires_at`.
@@ -384,10 +402,9 @@ Phases: [x] Recon  [x] Collect  [>] Test  [ ] Exploit  [ ] Report
 ```
 - Every output: `[operator]` prefix. Log entries chronological.
 
-## Wildcard Mode
+## Subdomain Enumeration
 
-See `agent/references/wildcard-mode.md` for subdomain enumeration, prioritization, and sliding window rules.
-Only relevant when target contains `*` or is a bare domain.
+When `scope.json` `hosts` contains `*.domain` entries, subdomain enumeration is in scope for that domain. See `agent/references/subdomain-enumeration.md` for enumeration, prioritization, and sliding window rules.
 
 ## Handoff Reference
 

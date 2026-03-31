@@ -197,4 +197,4 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 | `engagement-methodology.md` | Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase |
 | `subagent-registry.md` | Registry schema, resume-vs-dispatch decision tree, and examples for `agent-registry.json` |
 | `handoff-protocols.md` | Agent-to-agent handoff rules and expected downstream actions |
-| `wildcard-mode.md` | Wildcard target enumeration, prioritization, and sliding-window execution rules |
+| `subdomain-enumeration.md` | Subdomain enumeration (when `*.domain` in hosts), prioritization, and sliding-window execution rules |

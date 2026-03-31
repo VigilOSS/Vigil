@@ -134,7 +134,7 @@ Load the relevant skill before starting validation or exploitation of a candidat
   **Paired references:** `references/payloads/ssti-payloads.md`, `references/vuln-checklists/A05-injection.md`
 
 - `agent/skills/subdomain-enumeration/SKILL.md`
-  **Use when:** Target scope is wildcard or bare domain; enumerating subdomains for additional attack surface.
+  **Use when:** The `hosts` array in scope.json contains `*.domain` entries; enumerating subdomains for additional attack surface.
   **Paired references:** `references/tools/recon/nmap.md` _(plus external OSINT sources)_
 
 - `agent/skills/user-enumeration/SKILL.md`

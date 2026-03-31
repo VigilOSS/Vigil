@@ -140,7 +140,6 @@ render_agents() {
 EOF
     render_banner
     cat <<'EOF'
-║   Realistic authorized lab environments                      ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
 ```

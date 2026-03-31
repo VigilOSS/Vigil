@@ -7,9 +7,7 @@ ROOT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 source "$SCRIPT_DIR/lib/auth.sh"
 
 TARGET=""
-SCOPE_MODE=""
-SCOPE_HOSTS_RAW=""
-OUT_OF_SCOPE_RAW=""
+HOSTS_RAW=""
 AUTH_MODE=""
 EXPLOIT_POLICY=""
 
@@ -24,19 +22,31 @@ normalize_target() {
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/init_engagement.sh <target-url-or-host> [options]
+Usage: ./scripts/init_engagement.sh [target-url-or-host] [options]
+
+The positional target is optional when --hosts is provided; the first
+host becomes the target automatically.
 
 Options:
-  --scope-mode host_only|explicit_hosts|wildcard
-  --scope-hosts host1,host2,...
-  --out-of-scope-hosts host1,host2,...
+  --hosts host1,host2,*.domain,...   Scope list. Use *.domain for subdomain enum.
   --auth-mode none|auth_json|manual|proxy_capture
   --exploit-policy pause|full_send|selected
 
+Any host NOT in --hosts is out of scope. Wildcard entries (*.example.com) enable
+subdomain enumeration and allow discovered subdomains of that domain in scope.
+
 Examples:
+  # Single host
   ./scripts/init_engagement.sh https://example.com
-  ./scripts/init_engagement.sh app.example.com --scope-mode host_only --auth-mode none --exploit-policy pause
-  ./scripts/init_engagement.sh https://api.example.com --scope-mode explicit_hosts --scope-hosts api.example.com,admin.example.com --auth-mode proxy_capture --exploit-policy selected
+
+  # Multiple hosts — only these are in scope
+  ./scripts/init_engagement.sh --hosts app.example.com,api.example.com,admin.example.com
+
+  # Multiple hosts with subdomain enum on one domain
+  ./scripts/init_engagement.sh --hosts app.example.com,*.api.example.com,other.com
+
+  # Single host with subdomain enum
+  ./scripts/init_engagement.sh --hosts example.com,*.example.com
 EOF
 }
 
@@ -242,41 +252,6 @@ EOF
   fi
 }
 
-derive_scope_hosts_json() {
-  local hostname="${1:?hostname required}"
-  local scope_mode="${2:?scope_mode required}"
-  local explicit_hosts_raw="${3:-}"
-  python3 - <<'PY' "$hostname" "$scope_mode" "$explicit_hosts_raw"
-import json
-import sys
-
-hostname, scope_mode, explicit_hosts_raw = sys.argv[1:]
-hosts = []
-if scope_mode == "host_only":
-    hosts = [hostname]
-elif scope_mode == "wildcard":
-    hosts = [hostname, f"*.{hostname}"]
-elif scope_mode == "explicit_hosts":
-    for part in explicit_hosts_raw.split(","):
-        item = part.strip()
-        if item:
-            hosts.append(item)
-    if hostname not in hosts:
-        hosts.insert(0, hostname)
-else:
-    raise SystemExit(f"unsupported scope mode: {scope_mode}")
-
-deduped = []
-seen = set()
-for host in hosts:
-    lowered = host.lower()
-    if lowered not in seen:
-        seen.add(lowered)
-        deduped.append(host)
-print(json.dumps(deduped, ensure_ascii=True))
-PY
-}
-
 require_interactive_or_die() {
   local missing_label="${1:?missing label required}"
   if [[ -t 0 ]]; then
@@ -289,19 +264,9 @@ require_interactive_or_die() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --scope-mode)
-      SCOPE_MODE="${2:-}"
-      [[ -n "$SCOPE_MODE" ]] || { echo "--scope-mode requires a value" >&2; exit 1; }
-      shift 2
-      ;;
-    --scope-hosts)
-      SCOPE_HOSTS_RAW="${2:-}"
-      [[ -n "$SCOPE_HOSTS_RAW" ]] || { echo "--scope-hosts requires a value" >&2; exit 1; }
-      shift 2
-      ;;
-    --out-of-scope-hosts)
-      OUT_OF_SCOPE_RAW="${2:-}"
-      [[ -n "${2:-}" ]] || { echo "--out-of-scope-hosts requires a value" >&2; exit 1; }
+    --hosts)
+      HOSTS_RAW="${2:-}"
+      [[ -n "$HOSTS_RAW" ]] || { echo "--hosts requires a value" >&2; exit 1; }
       shift 2
       ;;
     --auth-mode)
@@ -329,29 +294,22 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Derive target from --hosts when no positional target given
+if [[ -z "$TARGET" && -n "$HOSTS_RAW" ]]; then
+  # Use the first non-wildcard host, falling back to first host with *. stripped
+  TARGET=$(python3 - <<'PY' "$HOSTS_RAW"
+import sys
+raw = sys.argv[1]
+hosts = [h.strip() for h in raw.split(",") if h.strip()]
+non_wild = [h for h in hosts if not h.startswith("*.")]
+print(non_wild[0] if non_wild else hosts[0].removeprefix("*.") if hosts else "")
+PY
+  )
+fi
+
 if [[ -z "$TARGET" ]]; then
   require_interactive_or_die "target"
   TARGET="$(prompt_text "Target URL or host")"
-fi
-
-if [[ -z "$SCOPE_MODE" ]]; then
-  if [[ -t 0 ]]; then
-    SCOPE_MODE="$(prompt_choice "Scope mode" "host_only" "host_only" "explicit_hosts" "wildcard")"
-  else
-    SCOPE_MODE="host_only"
-  fi
-fi
-case "$SCOPE_MODE" in
-  host_only|explicit_hosts|wildcard) ;;
-  *)
-    echo "--scope-mode must be one of: host_only, explicit_hosts, wildcard" >&2
-    exit 1
-    ;;
-esac
-
-if [[ "$SCOPE_MODE" == "explicit_hosts" && -z "$SCOPE_HOSTS_RAW" ]]; then
-  require_interactive_or_die "scope hosts"
-  SCOPE_HOSTS_RAW="$(prompt_text "Comma-separated in-scope hosts")"
 fi
 
 if [[ -z "$AUTH_MODE" ]]; then
@@ -400,8 +358,9 @@ print(parsed.hostname or target)
 PY
 )
 
-if [[ -z "$OUT_OF_SCOPE_RAW" && -t 0 ]]; then
-  OUT_OF_SCOPE_RAW="$(prompt_text "Optional comma-separated out-of-scope hosts" "")"
+# If no --hosts given, the parsed hostname is the sole host
+if [[ -z "$HOSTS_RAW" ]]; then
+  HOSTS_RAW="$HOSTNAME_RAW"
 fi
 
 DATE=$(date +%Y-%m-%d)
@@ -413,16 +372,12 @@ DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${HOSTNAME_CLEAN}"
 ENGAGEMENT_KEY="$(basename "$DIR")"
 mkdir -p "$DIR/tools" "$DIR/downloads" "$DIR/scans" "$DIR/pids" "$DIR/sessions"
 
-SCOPE_HOSTS_JSON="$(derive_scope_hosts_json "$HOSTNAME_RAW" "$SCOPE_MODE" "$SCOPE_HOSTS_RAW")"
-OUT_OF_SCOPE_JSON="$(csv_to_json_array "$OUT_OF_SCOPE_RAW")"
+HOSTS_JSON="$(csv_to_json_array "$HOSTS_RAW")"
 
 cat > "$DIR/scope.json" <<EOF
 {
   "hostname": "${HOSTNAME_RAW}",
-  "scope_mode": "${SCOPE_MODE}",
-  "scope_hosts": ${SCOPE_HOSTS_JSON},
-  "scope": ${SCOPE_HOSTS_JSON},
-  "out_of_scope_hosts": ${OUT_OF_SCOPE_JSON},
+  "hosts": ${HOSTS_JSON},
   "exploit_policy": "${EXPLOIT_POLICY}",
   "exploit_review_state": "pending",
   "approved_findings": [],
@@ -437,7 +392,7 @@ cat > "$DIR/log.md" <<EOF
 - **Target**: ${TARGET_NORMALIZED}
 - **Date**: ${DATE}
 - **Status**: In Progress
-- **Scope Mode**: ${SCOPE_MODE}
+- **Hosts**: $(printf '%s' "$HOSTS_RAW" | tr ',' ', ')
 - **Auth Mode**: ${AUTH_MODE}
 - **Exploit Policy**: ${EXPLOIT_POLICY}
 

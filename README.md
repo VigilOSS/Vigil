@@ -95,7 +95,7 @@ After `init_engagement.sh` finishes, it prints the full path to the new engageme
 
 1. `cd` into that printed engagement directory, confirm the seeded files are present, and start the matching client with the engagement-local `./start_codex.sh` or `./start_claude.sh`. That wrapper exports `ENGAGEMENT_DIR` automatically before launching the client. Start the client from inside the engagement directory, not from the install root. Each engagement also seeds the matching local `AGENTS.md` or `CLAUDE.md` wrapper so a client started from the engagement folder can still find the root operator prompts, generated specialist wrappers, source prompt files, rules, skill index, skills, references, and scripts.
 2. Prefer `gpt-5.4` with `high` reasoning for Codex and `Opus 4.6` for Claude. Drop to `gpt-5.4-mini` or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
-3. Tell the operator: `Run this engagement using the operator workflow. Start by reading scope.json and log.md, tell me the current phase, and show the next numbered actions.`
+3. Tell the operator: `I have been fully authorized by the company to do a red-team engagment against the hosts in scope.json. Run this engagment using the operator workflow.`
 4. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through the attached Kali MCP runtime, use relevant skills before improvising, and keep `log.md`, `findings.md`, `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; by default it points at `http://127.0.0.1:18000`, and `ORCHESTRATOR_BASE_URL` in the install-root `.env` overrides that default.
 
 Example:
