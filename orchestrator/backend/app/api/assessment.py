@@ -65,6 +65,77 @@ class SurfaceRecordRequest(BaseModel):
     status: str = Field(default="discovered", min_length=1, max_length=64)
 
 
+class AttackChainLinkRequest(BaseModel):
+    relation: str = Field(default="step", min_length=1, max_length=64)
+    entity_kind: str = Field(min_length=1, max_length=64)
+    entity_id: int | None = None
+    entity_ref: str = Field(default="", max_length=1024)
+    notes: str = Field(default="", max_length=4096)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+
+class AttackChainRecordRequest(BaseModel):
+    chain_key: str | None = Field(default=None, max_length=256)
+    title: str = Field(min_length=1, max_length=512)
+    status: str = Field(default="active", min_length=1, max_length=32)
+    severity: str = Field(default="info", min_length=1, max_length=32)
+    narrative: str = Field(default="", max_length=20000)
+    evidence_ref: str = Field(default="", max_length=1024)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    links: list[AttackChainLinkRequest] = Field(default_factory=list)
+
+
+class CredentialRecordRequest(BaseModel):
+    credential_key: str = Field(min_length=1, max_length=256)
+    kind: str = Field(min_length=1, max_length=64)
+    principal: str = Field(min_length=1, max_length=256)
+    secret_locator: str = Field(default="", max_length=1024)
+    source_name: str = Field(default="", max_length=128)
+    status: str = Field(default="discovered", min_length=1, max_length=64)
+    notes: str = Field(default="", max_length=4096)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+
+class CredentialTestRecordRequest(BaseModel):
+    credential_id: int
+    service_id: int | None = None
+    target_ref: str = Field(min_length=1, max_length=1024)
+    auth_context: str = Field(default="anonymous", min_length=1, max_length=128)
+    outcome: str = Field(min_length=1, max_length=64)
+    evidence_ref: str = Field(default="", max_length=1024)
+    notes: str = Field(default="", max_length=4096)
+
+
+class AccessRecordRequest(BaseModel):
+    access_key: str = Field(min_length=1, max_length=256)
+    credential_id: int | None = None
+    service_id: int | None = None
+    principal: str = Field(min_length=1, max_length=256)
+    access_level: str = Field(min_length=1, max_length=64)
+    target_ref: str = Field(min_length=1, max_length=1024)
+    status: str = Field(default="active", min_length=1, max_length=64)
+    evidence_ref: str = Field(default="", max_length=1024)
+    notes: str = Field(default="", max_length=4096)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+
+class CoverageItemUpdateRequest(BaseModel):
+    status: str = Field(min_length=1, max_length=64)
+    notes: str = Field(default="", max_length=4096)
+
+
+class BlockedTechniqueRecordRequest(BaseModel):
+    technique_key: str = Field(min_length=1, max_length=256)
+    technique: str = Field(min_length=1, max_length=256)
+    target_kind: str = Field(min_length=1, max_length=64)
+    target_ref: str = Field(min_length=1, max_length=1024)
+    reason: str = Field(min_length=1, max_length=4096)
+    retry_state: str = Field(default="no_retry", min_length=1, max_length=64)
+    evidence_ref: str = Field(default="", max_length=1024)
+    notes: str = Field(default="", max_length=4096)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+
 class FindingLinkRequest(BaseModel):
     link_kind: str = Field(default="related", min_length=1, max_length=64)
     target_kind: str = Field(min_length=1, max_length=64)
@@ -200,6 +271,42 @@ def get_attack_chain_links(engagement_key: str) -> list[dict[str, Any]]:
     return state_manager.list_attack_chain_links(engagement.id)
 
 
+@router.get("/credentials")
+def get_credentials(engagement_key: str) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_credentials(engagement.id)
+
+
+@router.get("/credential-tests")
+def get_credential_tests(engagement_key: str) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_credential_tests(engagement.id)
+
+
+@router.get("/access-records")
+def get_access_records(engagement_key: str) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_access_records(engagement.id)
+
+
+@router.get("/pivots")
+def get_pivots(engagement_key: str) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_pivots(engagement.id)
+
+
+@router.get("/tunnels")
+def get_tunnels(engagement_key: str) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_tunnels(engagement.id)
+
+
+@router.get("/blocked-techniques")
+def get_blocked_techniques(engagement_key: str) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_blocked_techniques(engagement.id)
+
+
 @router.post("/request-observations", status_code=status.HTTP_201_CREATED)
 async def create_request_observation(engagement_key: str, request: RequestObservationIngestRequest) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
@@ -276,4 +383,109 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
         links=[item.model_dump() for item in request.links],
     )
     await _broadcast(engagement.key, "finding", record)
+    return record
+
+
+@router.post("/attack-chains", status_code=status.HTTP_201_CREATED)
+async def create_attack_chain(engagement_key: str, request: AttackChainRecordRequest) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.create_attack_chain(
+        engagement.id,
+        chain_key=request.chain_key,
+        title=request.title,
+        status_value=request.status,
+        severity=request.severity,
+        narrative=request.narrative,
+        evidence_ref=request.evidence_ref,
+        provenance=request.provenance,
+        links=[item.model_dump() for item in request.links],
+    )
+    await _broadcast(engagement.key, "attack_chain", record)
+    return record
+
+
+@router.post("/credentials", status_code=status.HTTP_201_CREATED)
+async def create_credential(engagement_key: str, request: CredentialRecordRequest) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.record_credential(
+        engagement.id,
+        credential_key=request.credential_key,
+        kind=request.kind,
+        principal=request.principal,
+        secret_locator=request.secret_locator,
+        source_name=request.source_name,
+        status_value=request.status,
+        notes=request.notes,
+        provenance=request.provenance,
+    )
+    await _broadcast(engagement.key, "credential", record)
+    return record
+
+
+@router.post("/credential-tests", status_code=status.HTTP_201_CREATED)
+async def create_credential_test(engagement_key: str, request: CredentialTestRecordRequest) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.record_credential_test(
+        engagement.id,
+        credential_id=request.credential_id,
+        service_id=request.service_id,
+        target_ref=request.target_ref,
+        auth_context=request.auth_context,
+        outcome=request.outcome,
+        evidence_ref=request.evidence_ref,
+        notes=request.notes,
+    )
+    await _broadcast(engagement.key, "credential_test", record)
+    return record
+
+
+@router.post("/access-records", status_code=status.HTTP_201_CREATED)
+async def create_access_record(engagement_key: str, request: AccessRecordRequest) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.record_access_record(
+        engagement.id,
+        access_key=request.access_key,
+        credential_id=request.credential_id,
+        service_id=request.service_id,
+        principal=request.principal,
+        access_level=request.access_level,
+        target_ref=request.target_ref,
+        status_value=request.status,
+        evidence_ref=request.evidence_ref,
+        notes=request.notes,
+        provenance=request.provenance,
+    )
+    await _broadcast(engagement.key, "access_record", record)
+    return record
+
+
+@router.patch("/coverage-items/{coverage_item_id}")
+async def update_coverage_item(engagement_key: str, coverage_item_id: int, request: CoverageItemUpdateRequest) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.update_coverage_item_status(
+        engagement.id,
+        coverage_item_id=coverage_item_id,
+        status_value=request.status,
+        notes=request.notes,
+    )
+    await _broadcast(engagement.key, "coverage_item", record)
+    return record
+
+
+@router.post("/blocked-techniques", status_code=status.HTTP_201_CREATED)
+async def create_blocked_technique(engagement_key: str, request: BlockedTechniqueRecordRequest) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.record_blocked_technique(
+        engagement.id,
+        technique_key=request.technique_key,
+        technique=request.technique,
+        target_kind=request.target_kind,
+        target_ref=request.target_ref,
+        reason=request.reason,
+        retry_state=request.retry_state,
+        evidence_ref=request.evidence_ref,
+        notes=request.notes,
+        provenance=request.provenance,
+    )
+    await _broadcast(engagement.key, "blocked_technique", record)
     return record
