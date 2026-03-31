@@ -468,6 +468,7 @@ EOF
 printf '[]\n' > "$DIR/intel-secrets.json"
 write_auth_scaffold "$DIR" "$AUTH_MODE" "$START_TIME"
 printf '[]\n' > "$DIR/sessions/index.json"
+printf '[]\n' > "$DIR/agent-registry.json"
 
 cat > "$DIR/engagement.json" <<EOF
 {
