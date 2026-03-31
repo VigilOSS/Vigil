@@ -179,3 +179,20 @@ root: `$AGENT_ROOT/scripts/<script-name>` or `./scripts/<script-name>` after `cd
 
 Do not hardcode absolute paths. Do not assume scripts are in the current working directory.
 Set `ENGAGEMENT_DIR` before calling any script that depends on it.
+
+---
+
+## 10. Chain, Credential, and Coverage State
+
+When your work produces attack chains, credentials, or access records, record them immediately
+using the assessment API via `post_assessment_record.sh`:
+
+- **Attack chains:** `./scripts/record_attack_chain.sh "$DIR" <agent-name> <chain-json-file>`
+- **Credentials:** `./scripts/post_assessment_record.sh credentials '<json>'`
+- **Credential tests:** `./scripts/post_assessment_record.sh credential-tests '<json>'`
+- **Access records:** `./scripts/post_assessment_record.sh access-records '<json>'`
+- **Coverage updates:** `./scripts/post_assessment_record.sh "coverage-items/<id>" '{"status":"tested","notes":"..."}' PATCH`
+- **Blocked techniques:** `./scripts/post_assessment_record.sh blocked-techniques '<json>'`
+
+These follow the same backend-first principle as finding recording. Do not defer chain or credential
+recording to the operator.

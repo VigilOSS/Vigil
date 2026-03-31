@@ -1953,6 +1953,32 @@ def list_blocked_techniques(engagement_id: int) -> list[dict[str, Any]]:
         return _fetch_all(connection, "SELECT * FROM assessment_blocked_techniques WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
 
 
+def update_coverage_item_status(
+    engagement_id: int,
+    *,
+    coverage_item_id: int,
+    status_value: str,
+    notes: str,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM assessment_coverage_items WHERE id = ? AND engagement_id = ?",
+            (coverage_item_id, engagement.id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="coverage item not found")
+        connection.execute(
+            "UPDATE assessment_coverage_items SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND engagement_id = ?",
+            (status_value, _append_notes(row["notes"], notes), coverage_item_id, engagement.id),
+        )
+        updated = connection.execute(
+            "SELECT * FROM assessment_coverage_items WHERE id = ?", (coverage_item_id,)
+        ).fetchone()
+    assert updated is not None
+    return dict(updated)
+
+
 def assessment_summary(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:

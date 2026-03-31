@@ -32,6 +32,12 @@ Use the provided helper or `curl` directly — never query the SQLite database f
 
 # Engagement-level counts for executive summary stats
 ./scripts/fetch_assessment_record.sh summary
+
+# Credentials discovered during exploitation (for attack path narrative)
+./scripts/fetch_assessment_record.sh credentials
+
+# Access records confirmed via credential validation
+./scripts/fetch_assessment_record.sh access-records
 ```
 
 The `report-findings` endpoint is the authoritative source for report content.

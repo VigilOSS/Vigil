@@ -176,16 +176,30 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
    d. Inspect work-buffer stats: `./scripts/dispatcher.sh "$DIR/cases.db" stats`
    e. Inspect coverage gaps: `./scripts/fetch_assessment_record.sh summary`
    Update scope.json phase to `consume-test` when ingestion is complete.
-3. **CONSUME & TEST** → load `agent/skills/case-dispatching/SKILL.md` for the work-buffer loop: reset-stale → stats → fetch → dispatch → done → requeue → repeat. Exit when pending=0.
-   Before leaving Test phase, run `./scripts/check_surface_coverage.sh "$DIR"`.
-   If it fails, do not advance. Resolve each remaining discovered surface by selecting a representative validation path and marking it `covered`, `deferred`, or `not_applicable`.
-   High-risk surfaces `account_recovery`, `dynamic_render`, `object_reference`, and `privileged_write`
-   may NOT remain `deferred` when moving to Exploit/Report. They must be `covered` or `not_applicable`.
-4. **EXPLOIT** → respect `exploit_policy` from `scope.json`.
-   - `pause`: stop and ask the human which findings are approved for exploitation. Use the local approval/session helper scripts yourself if needed, but do not instruct the human to run shell approval commands directly.
-   - `selected`: exploit only the approved finding slugs recorded in scope metadata.
-   - `full_send`: dispatch osint-analyst + exploit-developer in parallel.
-   After osint: read intel.md, HIGH value → durable finding update + exploit 2nd round.
+3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
+   a. Reset stale work items: `./scripts/dispatcher.sh "$DIR/cases.db" reset-stale 10`
+   b. Check stats: `./scripts/dispatcher.sh "$DIR/cases.db" stats`
+   c. Fetch and route by type — dispatch independent types in parallel:
+      - `api`, `api-spec`, `form`, `upload`, `graphql`, `websocket` → vulnerability-analyst (load matching vuln-class skill from `agent/SKILL.md`)
+      - `page`, `javascript`, `stylesheet`, `data` → source-analyzer (load `source-analysis` skill)
+      `./scripts/dispatcher.sh "$DIR/cases.db" fetch <type> 10 <agent-name>`
+   d. On subagent return: `./scripts/dispatcher.sh "$DIR/cases.db" done "id1,id2,..."`
+      Record findings via `record_finding.sh`. Record surfaces via `append_surface.sh`. Re-ingest new endpoints via `recon_ingest.sh`.
+   e. If vulnerability-analyst signals FUZZER_NEEDED for a parameter or directory, dispatch fuzzer with `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md` and a bounded objective (target URL, parameter name, max payloads).
+   f. Repeat a-e until pending=0 for all consumable types.
+   g. Before leaving: `./scripts/check_surface_coverage.sh "$DIR"`. If it fails, resolve each remaining surface as `covered`, `deferred`, or `not_applicable`. High-risk surfaces (`account_recovery`, `dynamic_render`, `object_reference`, `privileged_write`) may NOT remain `deferred`.
+4. **EXPLOIT** →
+   a. Dispatch osint-analyst with `agent/skills/osint-recon/SKILL.md` — intelligence gathering is always permitted regardless of `exploit_policy`. Feed the tech stack, domains, and people data from intel.md.
+   b. Respect `exploit_policy` from `scope.json` for exploit-developer dispatch:
+      - `pause`: present confirmed findings to the human and ask which are approved for exploitation.
+      - `selected`: exploit only the approved finding slugs recorded in scope metadata.
+      - `full_send`: dispatch exploit-developer immediately.
+   c. After exploit-developer returns with chains, record them:
+      `./scripts/record_attack_chain.sh "$DIR" exploit-developer <chain-json-file>`
+   d. After exploit-developer discovers or validates credentials, record them:
+      `./scripts/post_assessment_record.sh credentials '<json>'`
+      `./scripts/post_assessment_record.sh access-records '<json>'`
+   e. After osint-analyst returns: read intel.md. If HIGH-value CVEs or credentials found, update findings and dispatch exploit-developer for a 2nd round.
 5. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
 6. **REPORT** → **Before dispatching report-writer**, merge duplicate findings so the `report-findings` endpoint returns a clean deduplicated set. Check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker finding into the stronger one:
    `./scripts/merge_finding.sh "$DIR" <source-slug> <target-slug> "<reason>"`
