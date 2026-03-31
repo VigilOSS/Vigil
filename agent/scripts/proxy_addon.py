@@ -87,9 +87,6 @@ class CaseCollector:
         self.out_of_scope: list[str] = []
         self.engagement_dir: str = ""
         self.orchestrator_base_url = os.getenv("ORCHESTRATOR_BASE_URL", "").rstrip("/")
-        self.orchestrator_token = os.getenv("ORCHESTRATOR_TOKEN", "")
-        self.orchestrator_project_id = os.getenv("ORCHESTRATOR_PROJECT_ID", "")
-        self.orchestrator_run_id = os.getenv("ORCHESTRATOR_RUN_ID", "")
         self.backend_warning_emitted = False
 
     # -- mitmproxy lifecycle ------------------------------------------------
@@ -184,12 +181,7 @@ class CaseCollector:
             self.out_of_scope = []
 
     def _backend_configured(self) -> bool:
-        return bool(
-            self.orchestrator_base_url
-            and self.orchestrator_token
-            and self.orchestrator_project_id
-            and self.orchestrator_run_id
-        )
+        return bool(self.orchestrator_base_url and self.engagement_dir)
 
     def _warn_backend_unavailable(self):
         if not self.backend_warning_emitted:
@@ -444,10 +436,9 @@ class CaseCollector:
             "auto_generate_coverage": True,
         }
         request = Request(
-            f"{self.orchestrator_base_url}/projects/{self.orchestrator_project_id}/runs/{self.orchestrator_run_id}/assessment/request-observations",
+            f"{self.orchestrator_base_url}/engagements/{os.path.basename(self.engagement_dir)}/assessment/request-observations",
             data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
             headers={
-                "Authorization": f"Bearer {self.orchestrator_token}",
                 "Content-Type": "application/json",
             },
             method="POST",

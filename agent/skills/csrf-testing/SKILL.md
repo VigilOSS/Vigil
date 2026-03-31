@@ -92,3 +92,8 @@ origin: AI Threat Hunting
 - Business impact of the forged action
 - Severity: Medium (settings change) to High (account takeover, financial)
 - Remediation: synchronizer token pattern, SameSite=Strict, Origin validation
+
+## Extended Resources
+
+- `agent/references/payloads/csrf-payloads.md` — auto-submit forms, JSON CSRF, token bypass techniques
+- `agent/references/vuln-checklists/A01-broken-access-control.md` — OWASP Top 10:2025 access control checklist

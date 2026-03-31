@@ -37,6 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     socat \
     tcpdump \
+    tmux \
     ruby-full \
     golang-go \
     mcp-kali-server \
@@ -64,6 +65,10 @@ RUN mkdir -p /tmp/ligolo && \
     find /tmp/ligolo -type f -perm /111 -exec mv {} /usr/local/bin/ligolo-proxy \; && \
     chmod +x /usr/local/bin/ligolo-proxy && \
     rm -rf /tmp/ligolo
+RUN python3 -m venv /opt/pwncat-venv && \
+    /opt/pwncat-venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /opt/pwncat-venv/bin/pip install --no-cache-dir pwncat-vl && \
+    ln -sf /opt/pwncat-venv/bin/pwncat-cs /usr/local/bin/pwncat
 RUN GOPATH=/root/go go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest && \
     cp /root/go/bin/nuclei /usr/local/bin/nuclei && \
     GO111MODULE=on GOPATH=/root/go go install github.com/projectdiscovery/katana/cmd/katana@latest && \

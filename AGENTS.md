@@ -1,5 +1,5 @@
 # jujutsu VCS
-git commands will corrupt data, see ~/.codex/skills/jujutsu/SKILL.md
+git commands will corrupt data, see ~/.codex/skills/jujutsu/SKILL.md always use jujustu before new changes.
 
 # Repo conventions
 
@@ -8,6 +8,30 @@ git commands will corrupt data, see ~/.codex/skills/jujutsu/SKILL.md
 - Backend work lives under `orchestrator/backend`.
 - Frontend work lives under `orchestrator/frontend`.
 - The primary runtime image is `agent/docker/runtime-full/Dockerfile`.
+
+# Operator prompt regeneration
+
+`agent/operator-core.md` is the source for the rendered operator prompts. When you change
+`agent/operator-core.md` or `agent/scripts/render-operator-prompts.sh`, rerender the tracked
+artifacts before handing off:
+
+```bash
+cd agent
+./scripts/render-operator-prompts.sh repo
+```
+
+These generated files are committed in git and must stay in sync:
+
+- `agent/AGENTS.md`
+- `agent/CLAUDE.md`
+- `agent/.codex/agents/operator.toml`
+- `agent/.claude/agents/operator.md`
+
+Validate prompt wording and renderer drift with:
+
+```bash
+uv run --directory orchestrator/backend pytest tests/test_prompt_wording.py
+```
 
 # Orchestrator backend
 

@@ -47,6 +47,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update -y && \
     openssh-client \
     socat \
     tcpdump \
+    tmux \
     ; fi && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
@@ -86,6 +87,13 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null && \
       echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | tee /etc/apt/sources.list.d/ngrok.list && \
       apt update && apt install -y ngrok; \
+    fi
+
+RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
+      python3 -m venv /opt/pwncat-venv && \
+      /opt/pwncat-venv/bin/pip install --no-cache-dir --upgrade pip && \
+      /opt/pwncat-venv/bin/pip install --no-cache-dir pwncat-vl && \
+      ln -sf /opt/pwncat-venv/bin/pwncat-cs /usr/local/bin/pwncat; \
     fi
 
 COPY docker/kali-mcp-runtime/mcp-server-wrapper.sh /usr/bin/mcp-server

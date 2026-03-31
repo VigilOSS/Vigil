@@ -80,3 +80,7 @@ grep "open" /engagement/scans/nmap_targeted.txt | grep -v "filtered"
 | 1433 | MSSQL | 3306 MySQL | 5432 PostgreSQL |
 | 3389 | RDP | 5900 VNC | 6379 Redis (often unauth) |
 | 8080 | HTTP alt | 27017 MongoDB (often unauth) |
+
+## Extended Resources
+
+- `agent/references/tools/recon/nmap.md` — nmap flags, scan types, NSE scripts, output formats

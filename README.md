@@ -1,7 +1,5 @@
 # AI Threat Hunting
 
-The operating model assumes a fully authorized realistic lab environment that mirrors real public and enterprise behavior closely enough for transferable methodology and tooling decisions.
-
 This repository contains the operator prompts, Kali MCP runtime, engagement scaffolding, and orchestrator services used to run those engagements.
 
 ## Repository Layout
@@ -17,13 +15,21 @@ This repository contains the operator prompts, Kali MCP runtime, engagement scaf
 - `tests/`
   Shell/runtime contract tests.
 
+## Prompt Locality
+
+- Root operator prompts live at `AGENTS.md` and `CLAUDE.md`.
+- Specialist prompt sources live under `agent/agents/`.
+- Generated specialist wrappers live under `.codex/agents/` and `.claude/agents/`.
+- Always-active rules live under `agent/rules/`.
+- Skill discovery starts at `agent/SKILL.md`, then drills into `agent/skills/*/SKILL.md`.
+
 ## Quick Start
 
 ### Choose one client per install
 
-Keep Claude and Codex in separate installs and separate engagement trees. Do not run both clients against the same `engagements/` directory.
+Keep Claude and Codex in separate installs and separate engagement trees. Do not run both clients against the same install directory.
 
-The shared Kali MCP runtime is not per-engagement. Start it once and then attach one or more client installs to the same `docker exec -i security-research mcp-server` endpoint. Within a single install, the repo tracks one active engagement via `engagements/.active`.
+The shared Kali MCP runtime is not per-engagement. Start it once and then attach one or more client installs to the same `docker exec -i security-research mcp-server` endpoint. Within a single install, multiple engagements may exist under `agent/engagements/`.
 
 - Codex install:
 ```bash
@@ -43,12 +49,6 @@ To switch clients, stop using the current engagement, install the other client i
 
 ### 1. Kali MCP runtime
 
-Build the primary full image:
-
-```bash
-docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .
-```
-
 Start the shared runtime:
 
 ```bash
@@ -63,6 +63,18 @@ Attach Claude Code or Codex over stdio after the runtime is up:
 claude mcp add kali -s user -- docker exec -i security-research mcp-server
 codex mcp add kali -- docker exec -i security-research mcp-server
 ```
+
+### 2. Orchestrator UI
+
+The orchestrator frontend/backend is a separate local service. It is not part of the Kali runtime image and it is not started by `start_kali_mcp_runtime.sh`.
+
+Start it from the install root in a second terminal:
+
+```bash
+./orchestrator/start_local.sh
+```
+
+That builds the frontend, then serves the local UI from the backend at `http://127.0.0.1:18000`.
 
 Then create an engagement inside the chosen install:
 
@@ -79,24 +91,28 @@ If you omit those flags and run in a TTY, `init_engagement.sh` prompts for scope
 
 ### Starting an engagement
 
-After `init_engagement.sh` finishes, it prints the full path to the new engagement directory and updates `engagements/.active`.
+After `init_engagement.sh` finishes, it prints the full path to the new engagement directory.
 
-1. `cd` into that printed engagement directory, run `export ENG_DIR="$PWD"`, confirm the seeded files are present, and start `codex`.
-2. Switch Codex to `high`, then tell it: `Run this engagement using the operator workflow. Start by reading scope.json and log.md, tell me the current phase, and show the next numbered actions.`
-3. Expect Codex to assess the current state, usually start in `recon` for a new run, route target-facing work through the attached Kali MCP runtime, and keep `log.md`, `findings.md`, `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses.
+1. `cd` into that printed engagement directory, confirm the seeded files are present, and start the matching client with the engagement-local `./start_codex.sh` or `./start_claude.sh`. That wrapper exports `ENGAGEMENT_DIR` automatically before launching the client. Start the client from inside the engagement directory, not from the install root. Each engagement also seeds the matching local `AGENTS.md` or `CLAUDE.md` wrapper so a client started from the engagement folder can still find the root operator prompts, generated specialist wrappers, source prompt files, rules, skill index, skills, references, and scripts.
+2. Prefer `gpt-5.4` with `high` reasoning for Codex and `Opus 4.6` for Claude. Drop to `gpt-5.4-mini` or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
+3. Tell the operator: `Run this engagement using the operator workflow. Start by reading scope.json and log.md, tell me the current phase, and show the next numbered actions.`
+4. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through the attached Kali MCP runtime, use relevant skills before improvising, and keep `log.md`, `findings.md`, `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; by default it points at `http://127.0.0.1:18000`, and `ORCHESTRATOR_BASE_URL` in the install-root `.env` overrides that default.
+
+Example:
+
+```bash
+cd /path/to/printed/engagement
+./start_codex.sh
+```
 
 During the engagement, expect short operator updates, numbered next-step choices when a decision matters, and a manual approval checkpoint before exploit work continues when `exploit_policy` is `pause` or `selected`.
 
-When an engagement reaches exploit review with `--exploit-policy pause` or `selected`, the operator reviews and approves exploit work manually:
+The public agent roster is intentionally limited to the core roles: `operator`, `recon-specialist`, `source-analyzer`, `vulnerability-analyst`, `exploit-developer`, `fuzzer`, `osint-analyst`, and `report-writer`. Validator-, chain-, and ranker-style behaviors are folded into those roles instead of creating a larger visible roster.
 
-```bash
-./scripts/review_exploit_candidates.sh "$ENG_DIR"
-./scripts/approve_exploitation.sh "$ENG_DIR" selected FINDING-VA-001 FINDING-EX-003
-./scripts/launch_exploit_session.sh "$ENG_DIR" session-a FINDING-VA-001
-./scripts/merge_exploit_session.sh "$ENG_DIR" session-a
-```
+Worker sessions write proposal files under `sessions/<session-id>/`; the coordinator merges approved proposals back into canonical backend state. User-facing exploit review should happen through the orchestrator UI or by telling Codex/Claude which findings are approved. Direct shell invocation of approval/session scripts is an internal maintenance path, not the primary operator workflow.
 
-Worker sessions write proposal files under `sessions/<session-id>/`; the coordinator merges approved proposals back into canonical backend state.
+TODO:
+- Add first-class UI actions for exploit approval, session launch, and session merge so this workflow no longer depends on internal helper scripts at all.
 
 Methodology references:
 - [engagement-methodology.md](/path/to/vigil)
@@ -112,7 +128,8 @@ Methodology references:
 - Katana and Chromium for authenticated crawling
 - nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, nikto, WhatWeb, hydra, john, hashcat
 - post-access tooling such as evil-winrm, impacket, mitm6, chisel, ligolo-ng, proxychains-ng, Responder
-- an optional callback listener and ngrok bridge for listener-driven testing
+- pwncat-vl for interactive reverse shell handling, with tmux for session management
+- an HTTP callback listener and ngrok bridge for blind validation testing
 
 A lightweight runtime also exists at `agent/docker/runtime-lightweight/Dockerfile`. It is only for faster local iteration and validation. The default workflow, docs, scripts, and agent runtime all target `agent/docker/runtime-full/Dockerfile`.
 
@@ -139,10 +156,10 @@ These capabilities are intentionally present but not always started automaticall
 
 MITM remains optional. Use it when the engagement needs login capture, authenticated browsing through a live session, or a refresh of expired auth material.
 
-From the install root, you can recover the active engagement directory at any time with `ENG_DIR="$(cat agent/engagements/.active)"`.
+For ad hoc shell work outside the engagement launcher, export `ENGAGEMENT_DIR` explicitly to the target engagement directory. When starting Codex or Claude, prefer the matching engagement-local launcher so the correct engagement context is exported automatically.
 
 1. Build the proxy image once if needed: `docker compose -f agent/docker/docker-compose.yml build mitmproxy`
-2. Start the proxy against the active engagement: `docker run --rm -it -p 8080:8080 -v "$ENG_DIR:/engagement" security-research-proxy:latest`
+2. Start the proxy against the active engagement: `docker run --rm -it -p 8080:8080 -v "$ENGAGEMENT_DIR:/engagement" security-research-proxy:latest`
 3. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow, then confirm that `auth.json` was refreshed and continue the engagement with authenticated recollection and testing.
 
 If you need HTTPS interception, install the mitmproxy CA certificate in the browser or device before logging in.
@@ -156,9 +173,10 @@ Start and inspect it through the attached Kali MCP session when needed. Repo-loc
 
 ## Callback and Listener Handling
 
-Listener-driven testing is handled explicitly rather than ad hoc.
+Listener-driven testing comes in two forms: HTTP callbacks for blind validation, and
+reverse shells for post-exploitation. They use different tools and different workflows.
 
-### Local callback capture
+### HTTP callback capture (blind SSRF, OOB, webhooks)
 
 The main image includes a simple HTTP callback capture server:
 
@@ -166,11 +184,9 @@ The main image includes a simple HTTP callback capture server:
 docker exec -it security-research start-callback
 ```
 
-By default that starts a local listener on `0.0.0.0:8000` and prints all inbound requests, headers, and bodies.
+By default that starts a local listener on `0.0.0.0:8000` and prints all inbound requests, headers, and bodies. This is for blind SSRF validation, out-of-band webhook checks, file fetch validation, and exploit chains that need a simple HTTP hit collector.
 
-### Exposing callbacks with ngrok
-
-If you need an external callback URL:
+To expose externally with ngrok:
 
 ```bash
 docker exec -e USE_NGROK=1 \
@@ -179,32 +195,40 @@ docker exec -e USE_NGROK=1 \
   -it security-research start-callback
 ```
 
-This does two things:
+### Reverse shell handling (pwncat-vl + tmux)
 
-1. starts the local callback listener
-2. opens an ngrok HTTP tunnel to it
+For reverse shells, the runtime includes pwncat-vl (a maintained fork of pwncat-cs) and tmux. Shell listeners are OPERATOR-CONTROLLED — agents provide the commands but do not start listeners themselves. This prevents port conflicts when multiple engagements share the same runtime.
 
-The ngrok token is not baked into the image. Supply it at runtime.
+Workflow:
 
-Claude Code and Codex can use this path once the Kali MCP runtime is attached. The listener is not limited to manual shell use. If the token is available in the container environment, the agent can start ngrok-backed callbacks itself during an engagement. If the token is not present, provide it before starting the callback path.
+1. The exploit-developer agent's playbook includes `# MANUAL:` steps with the exact listener commands
+2. The operator starts the listener in a tmux session:
+   ```bash
+   docker exec -it security-research tmux new-session -d -s shell-4444 \
+     'pwncat -l -p 4444 2>&1 | tee /data/shell-4444.log'
+   ```
+3. Optionally expose via ngrok: `docker exec -e NGROK_AUTHTOKEN="..." -it security-research ngrok tcp 4444`
+4. The operator resumes the agent, which triggers the reverse shell payload
+5. The agent verifies the shell landed by reading the log file via Kali MCP
 
-The token is not part of mandatory repo initialization. Treat it as an optional engagement input that you pass only when external callback routing is needed.
+Shell sessions run inside tmux with output logged to `/data/shell-*.log`. The LLM agent can tail these log files through Kali MCP to observe shell output without needing interactive terminal access.
 
-### Why this matters
+Full reference: `agent/references/offensive-tactics/shell-handling.md`
 
-This callback path is meant for:
+### Why listeners are operator-controlled
 
-- blind SSRF validation
-- out-of-band webhook or callback checks
-- file fetch validation
-- application workflows that need a temporary receiver
-- exploit chains that need a simple HTTP payload host or hit collector
+- The Kali runtime is shared infrastructure across engagements
+- ngrok tunnels are account-scoped; a second tunnel can tear down the first
+- Port conflicts between concurrent engagements are silent failures
+- The operator is the only actor who knows the current port/tunnel allocation
 
-For reverse shells or richer callback workflows, use the same runtime plus the bundled post-access tools instead of treating callbacks as a special one-off path.
+### Metasploit (optional sidecar)
+
+Metasploit remains available as an optional sidecar for exploit modules only (gadget generation, specific CVE exploits). For shell handling, use pwncat-vl instead — MSF's memory footprint (~1.5GB+) makes it impractical as a persistent shell handler when running alongside the primary Kali runtime.
 
 ## Multi-Agent Workflow
 
-The project uses a multi-agent phase model, with durable state stored in the orchestrator:
+The engagement workflow uses a multi-agent phase model, with durable state stored in the orchestrator:
 
 - `recon`
   network and service enumeration, source inspection, and OSINT enrichment
@@ -219,7 +243,7 @@ The project uses a multi-agent phase model, with durable state stored in the orc
 - `report`
   findings synthesis and coverage review
 
-The run page exposes:
+The engagement detail page exposes:
 
 - target count
 - service count
@@ -251,6 +275,10 @@ The queue in `agent/scripts/schema.sql` is a transient work buffer and is not pa
 ## Development
 
 For repo-local development conventions used by Codex, see the root `AGENTS.md`.
+
+## TODO
+
+- Evaluate an optional Web3-focused workflow and agent set only after the core web/app investigation model is stable.
 
 ## Verification Commands
 

