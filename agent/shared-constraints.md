@@ -95,6 +95,23 @@ script are considered lost data.
 | fuzzer | FZ | FINDING-FZ-001 |
 | osint-analyst | OS | FINDING-OS-001 |
 
+**Title formula:** `[Bug Class] in [endpoint] allows [attacker role] to [impact] [victim/scope]`
+Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous attacker to read any user's PII."
+
+**CVSS↔severity must match:**
+
+| Severity | CVSS range |
+|----------|------------|
+| critical | 9.0–10.0 |
+| high | 7.0–8.9 |
+| medium | 4.0–6.9 |
+| low | 0.1–3.9 |
+| info | 0.0 |
+
+If your CVSS score does not fall within the matching severity range, adjust one or the other before recording.
+
+**Deduplication:** Before recording, query existing findings via `fetch_assessment_record.sh report-findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
+
 Record every finding with:
 ```
 ./scripts/record_finding.sh "$DIR" <agent-name> <finding-json-file>

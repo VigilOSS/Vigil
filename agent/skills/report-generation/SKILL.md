@@ -166,6 +166,16 @@ This table maps report IDs back to canonical backend slugs for traceability.
 
 Tool output in `<details>` blocks, generated scripts, scope verification table, timeline.
 
+## Pre-Report Validation
+
+Before generating the report body, run these checks against the backend data. If any check fails, **stop and flag the issue to the operator** — do not silently fix or ignore it.
+
+1. **Duplicate check:** scan findings for pairs sharing the same root cause + endpoint. Flag: "FINDING-VA-003 and FINDING-EX-001 appear to describe the same root cause on /api/users — resolve before report."
+2. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
+3. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
+
+Only proceed to report generation after validation passes or the operator resolves flagged issues.
+
 ## Generation Procedure
 
 1. **Pull backend state** using the queries in "Query Backend First" above

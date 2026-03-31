@@ -18,31 +18,8 @@ You are a batch agent — you consume the full engagement state and produce a si
 ## Query Backend Before Starting
 
 Pull canonical state from the orchestrator REST API before writing anything.
-Use the provided helper or `curl` directly — never query the SQLite database file.
-
-```bash
-# Report-ready findings: sorted by severity, CVSS/remediation extracted, sequential FINDING-NNN IDs
-./scripts/fetch_assessment_record.sh report-findings
-
-# Attack chains for narrative section
-./scripts/fetch_assessment_record.sh attack-chains
-
-# Surfaces for coverage summary
-./scripts/fetch_assessment_record.sh surfaces
-
-# Engagement-level counts for executive summary stats
-./scripts/fetch_assessment_record.sh summary
-
-# Credentials discovered during exploitation (for attack path narrative)
-./scripts/fetch_assessment_record.sh credentials
-
-# Access records confirmed via credential validation
-./scripts/fetch_assessment_record.sh access-records
-```
-
-The `report-findings` endpoint is the authoritative source for report content.
-Each record includes `report_id` (e.g. `FINDING-001`) and `slug` (the original backend ID).
-CVSS, remediation, steps-to-reproduce, CWE, and OWASP category are pre-extracted from `details_json`.
+The full query set, field descriptions, and generation procedure are in
+`agent/skills/report-generation/SKILL.md` — follow that procedure.
 
 Do not re-read `findings.md` when the backend is available — it is a synchronized export, not the source of truth.
 
@@ -90,6 +67,8 @@ Before writing, gather or confirm:
 Use this pattern unless the operator requires a different format:
 
 `[Bug Class] in [exact endpoint or feature] allows [attacker role] to [impact] [victim or scope]`
+
+If an upstream finding arrives with a title that does not follow this formula, rewrite it during report generation. The report is the deliverable — titles must be consistent and human-scannable.
 
 Bad titles:
 
@@ -155,18 +134,8 @@ Write the full report to `$ENGAGEMENT_DIR/report.md` with these sections:
 
 ## After Writing the Report
 
-1. **Emit a runtime event** so the orchestrator and UI know the report is available:
-   ```bash
-   ./scripts/emit_runtime_event.sh \
-       "report.generated" \
-       "report" \
-       "report.md" \
-       "report-writer" \
-       "Report generated with N findings"
-   ```
-2. **Update finding statuses** — for each finding included in the report, update its status
-   to `reported` via `record_finding.sh` to complete the finding lifecycle:
-   `draft -> confirmed -> exploited -> reported`
+Follow the post-report procedure in `agent/skills/report-generation/SKILL.md`:
+emit the runtime event, then update each included finding's status to `reported`.
 
 ## Handoffs
 
