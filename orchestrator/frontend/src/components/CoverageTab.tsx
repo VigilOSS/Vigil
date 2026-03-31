@@ -13,7 +13,12 @@ type CoverageTabProps = {
   coverageItems: AssessmentCoverageItem[];
 };
 
-export function CoverageTab({ summary, targets, services, coverageItems }: CoverageTabProps) {
+export function CoverageTab({
+  summary,
+  targets,
+  services,
+  coverageItems,
+}: CoverageTabProps) {
   const [expandedTarget, setExpandedTarget] = useState<number | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
 

@@ -1,24 +1,61 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { AssessmentFinding, AssessmentFindingDetail, AssessmentSummary, FindingDetails } from "../lib/api";
 
 type FindingsTabProps = {
-  findings: AssessmentFindingDetail[];
+  findings: (AssessmentFindingDetail | AssessmentFinding)[];
   fallbackFindings: AssessmentFinding[];
   summary: AssessmentSummary | null;
 };
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
 
-function isDetail(f: AssessmentFinding | AssessmentFindingDetail): f is AssessmentFindingDetail {
-  return "id" in f;
+function isDetail(finding: AssessmentFinding | AssessmentFindingDetail): finding is AssessmentFindingDetail {
+  return "id" in finding;
 }
 
-function parseDetails(f: AssessmentFindingDetail): FindingDetails {
+function parseDetails(finding: AssessmentFinding | AssessmentFindingDetail): FindingDetails {
+  if (!isDetail(finding)) return {};
   try {
-    return JSON.parse(f.details_json || "{}");
+    return JSON.parse(finding.details_json || "{}");
   } catch {
     return {};
   }
+}
+
+function sortFindings(findings: (AssessmentFindingDetail | AssessmentFinding)[]) {
+  return [...findings].sort((left, right) => {
+    const severityDelta = SEVERITY_ORDER.indexOf(left.severity) - SEVERITY_ORDER.indexOf(right.severity);
+    if (severityDelta !== 0) return severityDelta;
+    return left.title.localeCompare(right.title);
+  });
+}
+
+function lifecycleLabel(finding: AssessmentFinding | AssessmentFindingDetail) {
+  switch (finding.status) {
+    case "reported":
+      return "Included in report";
+    case "merged":
+      return isDetail(finding) && finding.merged_into_slug ? `Merged into ${finding.merged_into_slug}` : "Merged duplicate";
+    case "confirmed":
+      return "Confirmed";
+    case "exploited":
+      return "Exploited";
+    case "blocked":
+      return "Blocked during exploitation";
+    default:
+      return finding.status;
+  }
+}
+
+function rowMeta(finding: AssessmentFinding | AssessmentFindingDetail) {
+  const parts = [];
+  if (finding.source_name) {
+    parts.push(finding.source_name);
+  }
+  if (finding.status !== "reported") {
+    parts.push(lifecycleLabel(finding));
+  }
+  return parts.join(" · ");
 }
 
 export function FindingsTab({ findings, fallbackFindings, summary }: FindingsTabProps) {
@@ -28,81 +65,97 @@ export function FindingsTab({ findings, fallbackFindings, summary }: FindingsTab
 
   const allFindings = findings.length > 0 ? findings : fallbackFindings;
 
+  useEffect(() => {
+    if (!selected) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelected(null);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selected]);
+
   const severities = useMemo(() => {
-    const set = new Set(allFindings.map((f) => f.severity));
-    return SEVERITY_ORDER.filter((s) => set.has(s));
+    const set = new Set(allFindings.map((finding) => finding.severity));
+    return SEVERITY_ORDER.filter((severity) => set.has(severity));
   }, [allFindings]);
 
   const statuses = useMemo(() => {
     const set = new Set<string>();
-    allFindings.forEach((f) => set.add(f.status));
+    allFindings.forEach((finding) => set.add(finding.status));
     return Array.from(set);
   }, [allFindings]);
 
   const filtered = useMemo(() => {
-    return allFindings.filter((f) => {
-      if (severityFilter && f.severity !== severityFilter) return false;
-      if (statusFilter && f.status !== statusFilter) return false;
+    const visible = allFindings.filter((finding) => {
+      if (severityFilter && finding.severity !== severityFilter) return false;
+      if (statusFilter && finding.status !== statusFilter) return false;
       return true;
     });
+    return sortFindings(visible);
   }, [allFindings, severityFilter, statusFilter]);
 
   const selectedFinding = useMemo(
-    () => allFindings.find((f) => f.slug === selected) ?? null,
+    () => allFindings.find((finding) => finding.slug === selected) ?? null,
     [allFindings, selected],
   );
 
   const statusCounts = summary?.finding_statuses ?? {};
+  const details = selectedFinding ? parseDetails(selectedFinding) : {};
+  const showLifecycleBadge = selectedFinding && !["reported", "draft"].includes(selectedFinding.status);
 
   return (
     <>
-      {/* Filter bar */}
       <section className="panel filter-bar-panel">
         <div className="filter-bar">
           <div className="filter-group">
             <span className="filter-label">Severity</span>
-            {severities.map((s) => (
+            {severities.map((severity) => (
               <button
-                key={s}
+                key={severity}
                 type="button"
-                className={`filter-chip severity-${s} ${severityFilter === s ? "filter-active" : ""}`}
-                onClick={() => setSeverityFilter(severityFilter === s ? null : s)}
+                className={`filter-chip severity-${severity} ${severityFilter === severity ? "filter-active" : ""}`}
+                onClick={() => setSeverityFilter(severityFilter === severity ? null : severity)}
               >
-                {s}
+                {severity}
               </button>
             ))}
           </div>
           <div className="filter-group">
-            <span className="filter-label">Status</span>
-            {statuses.map((s) => (
+            <span className="filter-label">Lifecycle</span>
+            {statuses.map((status) => (
               <button
-                key={s}
+                key={status}
                 type="button"
-                className={`filter-chip ${statusFilter === s ? "filter-active" : ""}`}
-                onClick={() => setStatusFilter(statusFilter === s ? null : s)}
+                className={`filter-chip ${statusFilter === status ? "filter-active" : ""}`}
+                onClick={() => setStatusFilter(statusFilter === status ? null : status)}
               >
-                {s}
-                {statusCounts[s] != null && <span className="filter-count">{statusCounts[s]}</span>}
+                {status}
+                {statusCounts[status] != null && <span className="filter-count">{statusCounts[status]}</span>}
               </button>
             ))}
           </div>
         </div>
       </section>
 
-      {/* Findings list + detail */}
       <section className="findings-layout">
         <div className="findings-list">
-          {filtered.map((f) => (
+          {filtered.map((finding) => (
             <button
-              key={f.slug}
+              key={finding.slug}
               type="button"
-              className={`finding-row ${selected === f.slug ? "finding-row-active" : ""}`}
-              onClick={() => setSelected(selected === f.slug ? null : f.slug)}
+              className={`finding-row ${selected === finding.slug ? "finding-row-active" : ""}`}
+              onClick={() => setSelected(finding.slug)}
             >
-              <span className={`badge severity-${f.severity}`}>{f.severity}</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <strong>{f.title}</strong>
-                <p className="meta-text">{f.status}{f.source_name ? ` · ${f.source_name}` : ""}</p>
+              <div className="finding-row-main">
+                <strong className="finding-row-title">{finding.title}</strong>
+                <p className="meta-text">{rowMeta(finding) || finding.slug}</p>
+              </div>
+              <div className="finding-row-aside">
+                <span className={`badge severity-${finding.severity}`}>{finding.severity}</span>
               </div>
             </button>
           ))}
@@ -112,18 +165,24 @@ export function FindingsTab({ findings, fallbackFindings, summary }: FindingsTab
             </p>
           )}
         </div>
+      </section>
 
-        <div className="finding-detail panel">
-          {selectedFinding ? (
-            <div style={{ display: "grid", gap: "16px" }}>
-              <div>
-                <div style={{ display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap", marginBottom: "8px" }}>
-                  <span className={`badge severity-${selectedFinding.severity}`}>{selectedFinding.severity}</span>
-                  <span className={`badge status-${selectedFinding.status}`}>{selectedFinding.status}</span>
-                </div>
-                <h2 style={{ margin: 0 }}>{selectedFinding.title}</h2>
+      {selectedFinding && (
+        <div className="finding-overlay" role="presentation" onClick={() => setSelected(null)}>
+          <article className="finding-modal panel" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="finding-modal-header">
+              <div className="finding-modal-heading">
+                <h2>{selectedFinding.title}</h2>
+                <p className="meta-text">{selectedFinding.slug}</p>
               </div>
+              <div className="finding-modal-actions">
+                <span className={`badge severity-${selectedFinding.severity}`}>{selectedFinding.severity}</span>
+                {showLifecycleBadge && <span className={`badge status-${selectedFinding.status}`}>{selectedFinding.status}</span>}
+                <button type="button" className="ghost-button" onClick={() => setSelected(null)}>Close</button>
+              </div>
+            </div>
 
+            <div className="finding-modal-content">
               {selectedFinding.summary && (
                 <div>
                   <p className="eyebrow">Summary</p>
@@ -134,13 +193,27 @@ export function FindingsTab({ findings, fallbackFindings, summary }: FindingsTab
               {selectedFinding.canonical_location && (
                 <div>
                   <p className="eyebrow">Location</p>
-                  <p className="meta-text" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
-                    {selectedFinding.canonical_location}
-                  </p>
+                  <p className="meta-text finding-mono">{selectedFinding.canonical_location}</p>
                 </div>
               )}
 
               <div className="finding-meta-grid">
+                <div>
+                  <p className="eyebrow">Lifecycle</p>
+                  <p>{lifecycleLabel(selectedFinding)}</p>
+                </div>
+                {selectedFinding.source_name && (
+                  <div>
+                    <p className="eyebrow">Source</p>
+                    <p>{selectedFinding.source_name}</p>
+                  </div>
+                )}
+                {details.discovered_by && (
+                  <div>
+                    <p className="eyebrow">Discovered by</p>
+                    <p>{details.discovered_by}</p>
+                  </div>
+                )}
                 {isDetail(selectedFinding) && selectedFinding.defect_family && (
                   <div>
                     <p className="eyebrow">Defect family</p>
@@ -156,79 +229,81 @@ export function FindingsTab({ findings, fallbackFindings, summary }: FindingsTab
                 {isDetail(selectedFinding) && selectedFinding.root_cause_key && (
                   <div>
                     <p className="eyebrow">Root cause</p>
-                    <p style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{selectedFinding.root_cause_key}</p>
+                    <p className="finding-mono">{selectedFinding.root_cause_key}</p>
                   </div>
                 )}
-                {selectedFinding.source_name && (
+                {details.parameter && (
                   <div>
-                    <p className="eyebrow">Source</p>
-                    <p>{selectedFinding.source_name}</p>
+                    <p className="eyebrow">Parameter</p>
+                    <p>{details.parameter}</p>
                   </div>
                 )}
-                {isDetail(selectedFinding) && (() => {
-                  const d = parseDetails(selectedFinding);
-                  return (
-                    <>
-                      {d.owasp_category && (
-                        <div>
-                          <p className="eyebrow">OWASP</p>
-                          <p>{d.owasp_category}</p>
-                        </div>
-                      )}
-                      {d.cwe_id && (
-                        <div>
-                          <p className="eyebrow">CWE</p>
-                          <p>{d.cwe_id}</p>
-                        </div>
-                      )}
-                      {d.request_method && (
-                        <div>
-                          <p className="eyebrow">Method</p>
-                          <p>{d.request_method}</p>
-                        </div>
-                      )}
-                      {d.cvss_vector && (
-                        <div>
-                          <p className="eyebrow">CVSS</p>
-                          <p style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
-                            {d.cvss_vector}{d.cvss_score != null ? ` (${d.cvss_score})` : ""}
-                          </p>
-                        </div>
-                      )}
-                    </>
-                  );
-                })()}
+                {details.owasp_category && (
+                  <div>
+                    <p className="eyebrow">OWASP</p>
+                    <p>{details.owasp_category}</p>
+                  </div>
+                )}
+                {details.cwe_id && (
+                  <div>
+                    <p className="eyebrow">CWE</p>
+                    <p>{details.cwe_id}</p>
+                  </div>
+                )}
+                {details.request_method && (
+                  <div>
+                    <p className="eyebrow">Method</p>
+                    <p>{details.request_method}</p>
+                  </div>
+                )}
+                {details.cvss_vector && (
+                  <div>
+                    <p className="eyebrow">CVSS</p>
+                    <p className="finding-mono">
+                      {details.cvss_vector}
+                      {details.cvss_score != null ? ` (${details.cvss_score})` : ""}
+                    </p>
+                  </div>
+                )}
+                {isDetail(selectedFinding) && selectedFinding.merged_into_slug && (
+                  <div>
+                    <p className="eyebrow">Merged into</p>
+                    <p className="finding-mono">{selectedFinding.merged_into_slug}</p>
+                  </div>
+                )}
               </div>
 
-              {isDetail(selectedFinding) && (() => {
-                const d = parseDetails(selectedFinding);
-                return (
-                  <>
-                    {d.impact && (
-                      <div>
-                        <p className="eyebrow">Impact</p>
-                        <p>{d.impact}</p>
-                      </div>
-                    )}
-                    {d.remediation && (
-                      <div>
-                        <p className="eyebrow">Remediation</p>
-                        <p>{d.remediation}</p>
-                      </div>
-                    )}
-                    {d.steps_to_reproduce && d.steps_to_reproduce.length > 0 && (
-                      <div>
-                        <p className="eyebrow">Steps to reproduce</p>
-                        <ol style={{ margin: 0, paddingLeft: "20px" }}>
-                          {d.steps_to_reproduce.map((step, i) => (
-                            <li key={i} style={{ marginBottom: "4px" }}>{step}</li>
-                          ))}
-                        </ol>
-                      </div>
-                    )}
-                  </>
-                );
-              })()}
+              {details.impact && (
+                <div>
+                  <p className="eyebrow">Impact</p>
+                  <p>{details.impact}</p>
+                </div>
+              )}
+
+              {details.remediation && (
+                <div>
+                  <p className="eyebrow">Remediation</p>
+                  <p>{details.remediation}</p>
+                </div>
+              )}
+
+              {details.evidence && (
+                <div>
+                  <p className="eyebrow">Evidence detail</p>
+                  <p>{details.evidence}</p>
+                </div>
+              )}
+
+              {details.steps_to_reproduce && details.steps_to_reproduce.length > 0 && (
+                <div>
+                  <p className="eyebrow">Steps to reproduce</p>
+                  <ol className="finding-steps">
+                    {details.steps_to_reproduce.map((step, index) => (
+                      <li key={index}>{step}</li>
+                    ))}
+                  </ol>
+                </div>
+              )}
 
               {isDetail(selectedFinding) && selectedFinding.notes && (
                 <div>
@@ -239,18 +314,14 @@ export function FindingsTab({ findings, fallbackFindings, summary }: FindingsTab
 
               {isDetail(selectedFinding) && selectedFinding.evidence_ref && (
                 <div>
-                  <p className="eyebrow">Evidence</p>
-                  <p className="meta-text" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
-                    {selectedFinding.evidence_ref}
-                  </p>
+                  <p className="eyebrow">Evidence reference</p>
+                  <p className="meta-text finding-mono">{selectedFinding.evidence_ref}</p>
                 </div>
               )}
             </div>
-          ) : (
-            <p className="empty-state">Select a finding to view details.</p>
-          )}
+          </article>
         </div>
-      </section>
+      )}
     </>
   );
 }
