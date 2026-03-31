@@ -102,6 +102,40 @@ Before initializing any engagement, ensure the shared Kali MCP runtime is runnin
 
 This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install.
 
+## Listener Management
+
+Listeners (pwncat-vl, ngrok, chisel) are OPERATOR-CONTROLLED. Agents must never start them.
+
+**Why:** The Kali runtime is shared across engagements. An agent starting a listener on port 4444
+could conflict with another engagement's listener. ngrok tunnels are account-scoped — starting a
+second tunnel tears down the first. Only the operator knows the current port/tunnel allocation.
+
+**Workflow:**
+1. Agent output includes `# MANUAL:` playbook steps with exact listener commands
+2. Operator starts the listener (pwncat-vl in a tmux session inside the runtime)
+3. Operator optionally exposes the listener externally (ngrok or chisel)
+4. Operator resumes the agent (via SendMessage or re-dispatch)
+5. Agent verifies the shell by tailing the log file via Kali MCP
+
+**Quick reference:**
+```bash
+# Start pwncat-vl in a tmux session
+docker exec -it security-research tmux new-session -d -s shell-4444 \
+  'pwncat -l -p 4444 2>&1 | tee /data/shell-4444.log'
+
+# Expose via ngrok
+docker exec -e NGROK_AUTHTOKEN="$NGROK_AUTHTOKEN" \
+  -it security-research ngrok tcp 4444
+
+# List active tmux sessions
+docker exec security-research tmux list-sessions
+
+# Check shell log
+docker exec security-research tail -20 /data/shell-4444.log
+```
+
+Full reference: `agent/references/offensive-tactics/shell-handling.md`
+
 ## Engagement Initialization
 
 Initialize a run with:
@@ -167,51 +201,9 @@ PARALLEL: Independent tasks → parallel. Dependent → sequential.
 
 ### Subagent Registry
 
-Maintain `$DIR/agent-registry.json` to track subagent identities for resumption.
-The registry is an array — multiple agents per role are common (e.g., two exploit-developer
-agents working different finding clusters in parallel).
+Maintain `$DIR/agent-registry.json` to track subagent identities. After every dispatch that returns an agentId, append to the registry. **Always check the registry and attempt to resume a matching agent before dispatching fresh** — a resumed agent retains session tokens, cookie jars, and intermediate state. Re-dispatching from scratch is the most expensive failure mode in multi-step exploitation.
 
-After every dispatch that returns an agentId, append to the registry:
-```json
-[
-  {
-    "role": "exploit-developer",
-    "agent_id": "a424a88b02054913d",
-    "task": "RCE chain: phpMyAdmin → template injection → webshell",
-    "finding_slugs": ["FINDING-EX-001", "FINDING-EX-002"],
-    "skill_loaded": "agent/skills/command-injection/SKILL.md",
-    "target_url": "https://target.example",
-    "dispatched_at": "2026-03-30T15:30:00Z",
-    "status": "returned"
-  },
-  {
-    "role": "exploit-developer",
-    "agent_id": "b535bb9c13165a24e",
-    "task": "IDOR escalation on user API",
-    "finding_slugs": ["FINDING-VA-003"],
-    "skill_loaded": "agent/skills/idor-testing/SKILL.md",
-    "target_url": "https://target.example",
-    "dispatched_at": "2026-03-30T16:45:00Z",
-    "status": "returned"
-  }
-]
-```
-
-**Resume before re-dispatch.** Before spawning a new agent:
-1. Check `agent-registry.json` for `returned` entries matching the role
-2. **Resume** (via `SendMessage` to the existing `agent_id`) when ALL of:
-   - Same `target_url`
-   - At least one overlapping `finding_slug`, OR new task continues the same exploit chain
-   - Dispatched within the current session (agents from prior sessions are stale — their context is gone)
-3. **Dispatch fresh** when ANY of:
-   - No matching entry exists
-   - Different target or unrelated finding cluster
-   - The entry is from a prior session (check `dispatched_at` vs session start)
-   - The new task needs a different skill than `skill_loaded`
-
-A resumed agent retains its full context: session tokens, cookie jars, CSRF values, discovered
-endpoints, and intermediate state from prior tool calls. Re-dispatching from scratch forces the
-agent to re-discover all of that — the most expensive failure mode in multi-step exploitation.
+Full registry schema, resume-vs-dispatch decision tree, and examples: `agent/references/runtime-guides/subagent-registry.md`
 
 ## Phase Flow
 
@@ -321,43 +313,10 @@ Agents use PREFIXED IDs:
 
 Prefix mnemonics: EX=exploit, VA=vuln-analyst, SA=source-analyzer, RE=recon, FZ=fuzzer, OS=osint. The prefix is the agent mnemonic assigned by `record_finding.sh`, not the initials of the full agent name.
 
-Never hand-allocate finding IDs. Create a structured finding payload, then record it via:
+Never hand-allocate finding IDs. Create a structured JSON finding payload matching `schemas/finding-record.schema.json`, then record it via:
 `./scripts/record_finding.sh "$DIR" <agent-name> <finding-json-file>`
 
-This allocates or reuses the canonical slug under a lock, writes backend state first, and then synchronizes the markdown export.
-
-```json
-{
-  "title": "Blind SQL injection in search",
-  "severity": "high",
-  "status": "confirmed",
-  "defect_family": "sql-injection",
-  "root_cause_key": "search-id-sqli",
-  "auth_context": "anonymous",
-  "canonical_location": "https://target.example/search?q",
-  "summary": "Boolean-blind SQL injection on the search endpoint",
-  "evidence_ref": "scans/sqlmap.txt",
-  "notes": "Payloads AND 1=1 and AND 1=2 caused consistent behavioral divergence.",
-  "details": {
-    "owasp_category": "A03:2021 Injection",
-    "cwe_id": "CWE-89",
-    "request_method": "GET",
-    "evidence": "Replayable request/response pair in scans/sqlmap.txt",
-    "impact": "Anonymous attackers can extract arbitrary data from the backing store",
-    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
-    "cvss_score": 7.5,
-    "remediation": "Use parameterized queries for all search input",
-    "steps_to_reproduce": [
-      "Send GET /search?q=test'+AND+1=1--+-",
-      "Observe normal search results returned",
-      "Send GET /search?q=test'+AND+1=2--+-",
-      "Observe empty results — confirms boolean-blind SQLi"
-    ]
-  }
-}
-```
-
-If an agent only produced markdown, stop and convert it into the JSON shape required by `schemas/finding-record.schema.json`. `./scripts/append_finding.sh` is only a guardrail: it rejects markdown, prints the schema path, and exits nonzero.
+This allocates or reuses the canonical slug under a lock, writes backend state first, and then synchronizes the markdown export. If an agent only produced markdown, stop and convert it to the required JSON shape. `./scripts/append_finding.sh` is only a guardrail: it rejects markdown, prints the schema path, and exits nonzero.
 
 report-writer uses the `report-findings` backend endpoint which assigns sequential `FINDING-001~N` report IDs automatically. Each report finding includes both the `report_id` and the original `slug` for cross-referencing.
 

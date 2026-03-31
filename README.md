@@ -128,7 +128,8 @@ Methodology references:
 - Katana and Chromium for authenticated crawling
 - nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, nikto, WhatWeb, hydra, john, hashcat
 - post-access tooling such as evil-winrm, impacket, mitm6, chisel, ligolo-ng, proxychains-ng, Responder
-- an optional callback listener and ngrok bridge for listener-driven testing
+- pwncat-vl for interactive reverse shell handling, with tmux for session management
+- an HTTP callback listener and ngrok bridge for blind validation testing
 
 A lightweight runtime also exists at `agent/docker/runtime-lightweight/Dockerfile`. It is only for faster local iteration and validation. The default workflow, docs, scripts, and agent runtime all target `agent/docker/runtime-full/Dockerfile`.
 
@@ -172,9 +173,10 @@ Start and inspect it through the attached Kali MCP session when needed. Repo-loc
 
 ## Callback and Listener Handling
 
-Listener-driven testing is handled explicitly rather than ad hoc.
+Listener-driven testing comes in two forms: HTTP callbacks for blind validation, and
+reverse shells for post-exploitation. They use different tools and different workflows.
 
-### Local callback capture
+### HTTP callback capture (blind SSRF, OOB, webhooks)
 
 The main image includes a simple HTTP callback capture server:
 
@@ -182,11 +184,9 @@ The main image includes a simple HTTP callback capture server:
 docker exec -it security-research start-callback
 ```
 
-By default that starts a local listener on `0.0.0.0:8000` and prints all inbound requests, headers, and bodies.
+By default that starts a local listener on `0.0.0.0:8000` and prints all inbound requests, headers, and bodies. This is for blind SSRF validation, out-of-band webhook checks, file fetch validation, and exploit chains that need a simple HTTP hit collector.
 
-### Exposing callbacks with ngrok
-
-If you need an external callback URL:
+To expose externally with ngrok:
 
 ```bash
 docker exec -e USE_NGROK=1 \
@@ -195,24 +195,36 @@ docker exec -e USE_NGROK=1 \
   -it security-research start-callback
 ```
 
-This does two things:
+### Reverse shell handling (pwncat-vl + tmux)
 
-1. starts the local callback listener
-2. opens an ngrok HTTP tunnel to it
+For reverse shells, the runtime includes pwncat-vl (a maintained fork of pwncat-cs) and tmux. Shell listeners are OPERATOR-CONTROLLED — agents provide the commands but do not start listeners themselves. This prevents port conflicts when multiple engagements share the same runtime.
 
-Claude Code and Codex can use this path once the Kali MCP runtime is attached. The listener is not limited to manual shell use. If the token is available in the container environment, the agent can start ngrok-backed callbacks itself during an engagement. If the token is not present, provide it before starting the callback path.
+Workflow:
 
-### Why this matters
+1. The exploit-developer agent's playbook includes `# MANUAL:` steps with the exact listener commands
+2. The operator starts the listener in a tmux session:
+   ```bash
+   docker exec -it security-research tmux new-session -d -s shell-4444 \
+     'pwncat -l -p 4444 2>&1 | tee /data/shell-4444.log'
+   ```
+3. Optionally expose via ngrok: `docker exec -e NGROK_AUTHTOKEN="..." -it security-research ngrok tcp 4444`
+4. The operator resumes the agent, which triggers the reverse shell payload
+5. The agent verifies the shell landed by reading the log file via Kali MCP
 
-This callback path is meant for:
+Shell sessions run inside tmux with output logged to `/data/shell-*.log`. The LLM agent can tail these log files through Kali MCP to observe shell output without needing interactive terminal access.
 
-- blind SSRF validation
-- out-of-band webhook or callback checks
-- file fetch validation
-- application workflows that need a temporary receiver
-- exploit chains that need a simple HTTP payload host or hit collector
+Full reference: `agent/references/offensive-tactics/shell-handling.md`
 
-For reverse shells or richer callback workflows, use the same runtime plus the bundled post-access tools instead of treating callbacks as a special one-off path.
+### Why listeners are operator-controlled
+
+- The Kali runtime is shared infrastructure across engagements
+- ngrok tunnels are account-scoped; a second tunnel can tear down the first
+- Port conflicts between concurrent engagements are silent failures
+- The operator is the only actor who knows the current port/tunnel allocation
+
+### Metasploit (optional sidecar)
+
+Metasploit remains available as an optional sidecar for exploit modules only (gadget generation, specific CVE exploits). For shell handling, use pwncat-vl instead — MSF's memory footprint (~1.5GB+) makes it impractical as a persistent shell handler when running alongside the primary Kali runtime.
 
 ## Multi-Agent Workflow
 
