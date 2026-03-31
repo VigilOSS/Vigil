@@ -17,8 +17,8 @@ into backend attack hypotheses.
 
 ## Responsibilities
 
-- Extract hidden routes, request patterns, API bases, object references, and feature flags
-- Identify secrets, configuration leakage, environment details, and debug artifacts
+- Extract hidden routes, request patterns, API bases, object references, and feature flags using LinkFinder for JS endpoint extraction
+- Identify secrets, configuration leakage, environment details, and debug artifacts using SecretFinder for automated JS secret scanning
 - Convert client-side evidence into realistic backend hypotheses and follow-on testing paths
 - Emit durable surface candidates and structured findings when source evidence is already decisive
 

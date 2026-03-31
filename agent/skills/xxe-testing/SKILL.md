@@ -17,7 +17,7 @@ origin: AI Threat Hunting
 - `curl` (send crafted XML)
 - Burp Suite Repeater
 - XXEinjector
-- Out-of-band server (Burp Collaborator, interactsh)
+- OOB callback server (operator-provisioned — read `$DIR/.oob_url` if available; falls back to time-based detection)
 
 ## Methodology
 

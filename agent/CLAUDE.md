@@ -137,46 +137,6 @@ docker exec security-research tail -20 /data/shell-4444.log
 
 Full reference: `agent/references/offensive-tactics/shell-handling.md`
 
-## Engagement Initialization
-
-Initialize a run with:
-
-```bash
-./scripts/init_engagement.sh [target-url-or-host] \
-  [--hosts host1,host2,*.domain,...] \
-  [--auth-mode none|auth_json|manual|proxy_capture] \
-  [--exploit-policy pause|full_send|selected]
-```
-
-The `--hosts` list IS the scope — any host not listed is out of scope. Use `*.domain` entries to enable subdomain enumeration for that domain. The positional target is optional when `--hosts` is provided; the first host becomes the target automatically.
-
-Examples:
-```bash
-# Single host
-./scripts/init_engagement.sh https://example.com
-
-# Multiple hosts — only these are in scope
-./scripts/init_engagement.sh --hosts app.example.com,api.example.com,admin.example.com
-
-# Multiple hosts with subdomain enum on one domain
-./scripts/init_engagement.sh --hosts app.example.com,*.api.example.com,other.com
-
-# Single host with subdomain enum
-./scripts/init_engagement.sh --hosts example.com,*.example.com
-```
-
-This creates the engagement directory, readable artifacts, session workspace, scope metadata, an `auth.json` scaffold, engagement-local `AGENTS.md`/`CLAUDE.md` wrappers that point back to the workspace-root prompts and skills, the transient local work buffer used for batching worker tasks, and an `engagement.json` manifest.
-
-Rules:
-- Do not delegate initialization to a general subagent.
-- Do not initialize an engagement until the shared Kali MCP runtime is up and attached.
-- Before initialization completes, do not read `scope.json`, `log.md`, `findings.md`, `intel.md`, `auth.json`, or `cases.db`.
-- Use `./scripts/init_engagement.sh` directly. Do not rewrite initialization in `python`, `python3`, `node`, or ad hoc shell blocks.
-- The core loop starts only after initialization completes successfully.
-- Scope defaults are conservative: single host, no auth, `exploit_policy=pause`.
-- Discovered subdomains are only in scope when the `hosts` list includes a `*.domain` entry for that domain.
-- `auth_mode` is implemented through `auth.json`, not as dead scope metadata. The workflow uses auth only when `auth.json` is populated and marked for request use.
-
 ## Subagent Dispatch
 
 | Agent | Role | When |
@@ -238,8 +198,11 @@ DB="$DIR/cases.db"
       Use `-tlsv` to skip TLS verification for targets with expired, self-signed, or mismatched certificates. Without it, Katana will bail on invalid certs and produce minimal output.
       If `auth.json` has `use_for_requests` set to `true` and `state` set to `available`, pass cookies/headers: `katana -u URL -H "Cookie: ..." -H "Authorization: ..." ...`
    c. Ingest Katana output into backend: `cat /tmp/katana_output.txt | ./scripts/recon_ingest.sh "$DIR/cases.db" katana`
-   d. Inspect work-buffer stats: `./scripts/dispatcher.sh "$DIR/cases.db" stats`
-   e. Inspect coverage gaps: `./scripts/fetch_assessment_record.sh summary`
+   d. If Phase 1 discovered OpenAPI/Swagger specs, ingest them:
+      `./scripts/spec_ingest.sh "$DIR/cases.db" "$DIR/scans/openapi.json"`
+      This creates `api-spec` work items and durable request/service coverage candidates. source-analyzer may have saved specs to `scans/` during Phase 1; check before skipping.
+   e. Inspect work-buffer stats: `./scripts/dispatcher.sh "$DIR/cases.db" stats`
+   f. Inspect coverage gaps: `./scripts/fetch_assessment_record.sh summary`
    Update scope.json phase to `consume-test` when ingestion is complete.
 3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
    a. Reset stale work items: `./scripts/dispatcher.sh "$DB" reset-stale 10`

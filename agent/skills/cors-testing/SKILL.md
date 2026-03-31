@@ -18,7 +18,7 @@ origin: AI Threat Hunting
 - `curl` (send crafted Origin headers)
 - Burp Suite Repeater
 - Browser DevTools (Console for fetch tests)
-- CORScanner (automated testing)
+- Corsy (automated CORS misconfiguration scanning — actively maintained, better edge-case detection)
 - Custom HTML PoC pages
 
 ## Methodology
