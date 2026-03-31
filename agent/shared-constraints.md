@@ -103,6 +103,13 @@ Do not produce markdown findings — convert to JSON before recording.
 
 This keeps CVSS queryable from the API and gives report-writer structured data to format.
 
+**The `notes` field must contain replayable commands** — not prose descriptions. Instead of
+"Login to phpMyAdmin with blank password," write the actual command: curl with headers, cookies,
+and POST body; sqlmap with exact flags; ysoserial with gadget chain and target; or whatever tool
+proved the finding. The field allows up to 20 KB. If the operator or another agent needs to
+reproduce the finding later, the notes field alone should be sufficient without re-discovering
+the request format, session tokens, or tool parameters.
+
 **Failure to use `record_finding.sh` is the single most common subagent defect.** If you
 produce `#### Findings` output, each finding payload in that section must have been recorded
 via `record_finding.sh` during your session. Do not defer recording to the operator.

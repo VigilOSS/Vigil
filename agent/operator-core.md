@@ -29,6 +29,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Do not use host Bash, `docker run`, `docker exec`, repo-local execution helpers, or ad hoc wrappers for in-scope target work. If Kali MCP has a runtime or reachability gap, stop target-facing work there and debug the runtime from the host without sending HTTP, DNS, or raw TCP traffic from the host to scoped targets.
 7. **DISPATCH** — ALWAYS dispatch to subagent. Do NOT test directly with host-side commands. Your job is orchestration: phase control, specialist selection, state review, and synchronized artifact handling.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/record_finding.sh` or the assessment API so findings.md remains a synchronized export, not the authoritative store. `append_finding.sh` now rejects markdown and points to `schemas/finding-record.schema.json`.
+   **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. They go to intel.md only. Dispatch exploit-developer to validate before recording. This reconciles "record immediately" with "no theoretical findings."
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/append_surface.sh` so the backend and readable export stay in sync. Do not call `scripts/lib/surfaces.sh` directly and do not patch `surfaces.jsonl` by hand during normal operation. After each surface update batch, wait for the command to finish and then verify `surfaces.jsonl` with a fresh read. If the first verification read does not reflect the expected change, re-read once before assuming failure. Only treat it as a real helper/backend problem if the command completed successfully and a second fresh read still disagrees; in that case, stop and report the sync issue instead of editing the artifact manually.
    If surface recording fails with a connection error, verify the orchestrator backend is running and that `ORCHESTRATOR_BASE_URL` and the engagement key are set correctly (check `engagement.json` and `.orchestrator.env` in the engagement directory).
 10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
@@ -99,13 +100,14 @@ Every dispatch must include:
 - **Which skill to load** (from `agent/SKILL.md` using "Use when:" criteria)
 - **Prior findings relevant to this dispatch:**
   - For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, and the specific hypothesis to test
-  - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `fetch_assessment_record.sh` — do not pre-filter B candidates for it
+  - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `fetch_assessment_record.sh` — do not pre-filter B candidates (chain-target endpoints) for it
   - For `report-writer`: no finding context needed — the agent queries the `report-findings` endpoint directly
 
 ### Pre-Dispatch Checklist
 
 Before every dispatch, verify:
 
+- [ ] Agent registry checked — resume an existing agent if the criteria match (see Subagent Registry below)
 - [ ] Agent identity named and target URL specified
 - [ ] Current phase stated with specific task objective (not just "test this")
 - [ ] Skill to load identified from `agent/SKILL.md`
@@ -115,6 +117,54 @@ Before every dispatch, verify:
 
 DEDUP: Check log.md before dispatch. Never dispatch same agent for same objective twice.
 PARALLEL: Independent tasks → parallel. Dependent → sequential.
+
+### Subagent Registry
+
+Maintain `$DIR/agent-registry.json` to track subagent identities for resumption.
+The registry is an array — multiple agents per role are common (e.g., two exploit-developer
+agents working different finding clusters in parallel).
+
+After every dispatch that returns an agentId, append to the registry:
+```json
+[
+  {
+    "role": "exploit-developer",
+    "agent_id": "a424a88b02054913d",
+    "task": "RCE chain: phpMyAdmin → template injection → webshell",
+    "finding_slugs": ["FINDING-EX-001", "FINDING-EX-002"],
+    "skill_loaded": "agent/skills/command-injection/SKILL.md",
+    "target_url": "https://target.example",
+    "dispatched_at": "2026-03-30T15:30:00Z",
+    "status": "returned"
+  },
+  {
+    "role": "exploit-developer",
+    "agent_id": "b535bb9c13165a24e",
+    "task": "IDOR escalation on user API",
+    "finding_slugs": ["FINDING-VA-003"],
+    "skill_loaded": "agent/skills/idor-testing/SKILL.md",
+    "target_url": "https://target.example",
+    "dispatched_at": "2026-03-30T16:45:00Z",
+    "status": "returned"
+  }
+]
+```
+
+**Resume before re-dispatch.** Before spawning a new agent:
+1. Check `agent-registry.json` for `returned` entries matching the role
+2. **Resume** (via `SendMessage` to the existing `agent_id`) when ALL of:
+   - Same `target_url`
+   - At least one overlapping `finding_slug`, OR new task continues the same exploit chain
+   - Dispatched within the current session (agents from prior sessions are stale — their context is gone)
+3. **Dispatch fresh** when ANY of:
+   - No matching entry exists
+   - Different target or unrelated finding cluster
+   - The entry is from a prior session (check `dispatched_at` vs session start)
+   - The new task needs a different skill than `skill_loaded`
+
+A resumed agent retains its full context: session tokens, cookie jars, CSRF values, discovered
+endpoints, and intermediate state from prior tool calls. Re-dispatching from scratch forces the
+agent to re-discover all of that — the most expensive failure mode in multi-step exploitation.
 
 ## Phase Flow
 
@@ -157,7 +207,7 @@ DB="$DIR/cases.db"
       - `full_send`: dispatch exploit-developer immediately.
    c. Exploit-developer owns durable exploit-state recording. If it proves a chain, credential, access record, or credential test, it should write the JSON payloads under `$DIR/tools/exploit-state/` and record them before task completion with the repo scripts.
    d. On return, verify canonical exploit state via `fetch_assessment_record.sh attack-chains`, `credentials`, `access-records`, and `credential-tests`. Do not create duplicate operator-side rows unless you are explicitly merging a proposal-based exploit session with `merge_exploit_session.sh`.
-   e. After osint-analyst returns: read intel.md. If HIGH-value CVEs or credentials found, update findings and dispatch exploit-developer for a 2nd round.
+   e. After osint-analyst returns: read intel.md. **Do not record CVE matches as findings yet.** If HIGH-value CVEs with public PoCs were identified, dispatch exploit-developer to validate each against the live target — backported patches, missing binaries, and disabled modules routinely invalidate version-only matches. Only record a CVE-based finding after exploit-developer confirms exploitability or proves partial signal.
 5. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
 6. **REPORT** → **Before dispatching report-writer**, merge duplicate findings so the `report-findings` endpoint returns a clean deduplicated set. Check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker finding into the stronger one:
    `./scripts/merge_finding.sh "$DIR" <source-slug> <target-slug> "<reason>"`
@@ -270,7 +320,7 @@ OWASP Quick Ref: A01=Access Control, A02=Crypto, A03=Injection, A04=Insecure Des
 
 After receiving agent output with `#### Intelligence` section:
 - Append to corresponding intel.md table
-- Dedup: Technology→Component, People→Name, Emails→Email, Domains→Item+Type, Credentials→Type+Source
+- Dedup by: Technology table on Component, People on Name, Emails on Email, Domains on Item+Type, Credentials on Type+Source
 
 ## File Organization
 
