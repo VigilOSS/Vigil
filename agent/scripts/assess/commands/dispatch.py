@@ -216,7 +216,8 @@ def _requeue(db_path: str) -> None:
             elif coverage_item_id and str(coverage_item_id).isdigit():
                 queue_key = f"coverage:{coverage_item_id}:{case_type}"
             else:
-                queue_key = f"legacy:{auth_context}:{method}:{url}:{params_key_sig}:{case_type}"
+                print(f"ERROR: requeue line missing variant/service/coverage ID for queue_key", file=sys.stderr)
+                sys.exit(1)
 
         if not url or not url_path_val:
             print("ERROR: requeue line missing usable url/url_path", file=sys.stderr)

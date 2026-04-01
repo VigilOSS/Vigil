@@ -58,15 +58,36 @@ proved impact at report time materially differs from what was recorded at valida
 
 ## Writing Style
 
-Factual, evidence-based. No speculation — state conditions if impact is theoretical.
+Factual, evidence-based, active voice. No speculation — state conditions if impact is theoretical.
 Quantify where possible. No hyperbole or marketing language.
+
+**Voice:** Active by default. The endpoint does X. The attacker sends Y. The response contains Z.
+Not "it was discovered that" or "testing revealed that."
+
+**Audience:** Technical reader who knows vulnerability classes. Do not define XSS, SQLi, IDOR, or other
+standard terms. Do not explain how HTTP works. State what is broken and prove it.
+
+**Executive summary audience exception:** The executive summary is for non-technical stakeholders.
+Use business language there. "An attacker can download all customer records" not "IDOR on /api/users."
 
 Banned phrases: `could potentially`, `may allow`, `might be possible`, `could lead to`.
 Use instead: `An attacker can [exact action] by [exact method].`
 
+Banned filler: `Furthermore` · `Additionally` · `Moreover` · `It is worth noting` · `It should be noted` ·
+`As demonstrated above` · `During the course of our assessment` · `Upon further investigation` ·
+`This finding describes` · `This vulnerability allows` (as an opener) · `In conclusion` · `To summarize`.
+
+Banned remediation: `Implement proper input validation` · `Use appropriate access controls` ·
+`Follow security best practices` · `Sanitize user input`. Name the technology and the specific fix.
+
+**Padding test:** After writing each finding, re-read it. If you can remove a sentence without reducing
+the reader's understanding, remove it. Every sentence must contribute new information.
+
 ## Report Structure
 
-### 1. Executive Summary
+### 1. Executive Summary (ONE PAGE MAX)
+
+Written for the person who will not read the rest — a director, VP, or CISO.
 
 ```markdown
 ## Executive Summary
@@ -81,7 +102,9 @@ Use instead: `An attacker can [exact action] by [exact method].`
 | Info     | N |
 | **Total** | **N** |
 
-[1-2 paragraph narrative: posture, most impactful findings, top recommendation.]
+[1-2 paragraphs: overall posture in business terms, the most impactful finding described
+as attacker outcome with business consequence, one prioritized recommendation.
+No unexplained jargon. "SQL injection (direct database access)" not just "SQL injection."]
 ```
 
 ### 2. Methodology
@@ -99,27 +122,42 @@ Use instead: `An attacker can [exact action] by [exact method].`
 
 ### 3. Findings (sorted CRITICAL -> INFO, each self-contained)
 
+**Length discipline per section:**
+
+| Section | Limit | Rule |
+|---------|-------|------|
+| Description | 2-4 sentences | First sentence = attacker outcome. No class definitions. No restating the title. |
+| Steps to Reproduce | Numbered, 1 action per step | No narrative between steps. Copy-pasteable commands where possible. |
+| Evidence | 1 request/response per proof point | Response truncated to 5-15 relevant lines. Bold/annotate the proof line. |
+| Impact | 1-2 sentences | Quantified. What the attacker gets, how many records/users/systems affected. |
+| Remediation | 1-2 sentences | Names the technology and the specific fix. No generic advice. |
+
 ```markdown
 ### FINDING-001: [Title] [SEVERITY]
 **Slug:** FINDING-VA-003  **OWASP:** A03:2021  **CWE:** CWE-89  **CVSS:** 7.5 (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N)
 
 #### Description
-[Precise technical explanation]
+[2-4 sentences. First sentence: what the attacker gains. Remaining: how, where, auth context.]
 
 #### Steps to Reproduce
-1. [Step from steps_to_reproduce array]
-2. ...
+1. [Single action — e.g., "Send the following request:"]
+2. [Next action]
 
 #### Evidence
-**Request:** ```[full HTTP request]```
-**Response:** ```[relevant excerpt]```
+**Request:**
+```http
+[Full HTTP request, payload annotated if not obvious]
+```
+**Response (truncated):**
+```http
+[5-15 lines. **Bold the proof line** or annotate with ← leaked data / ← unauthorized]
+```
 
 #### Impact
-[From impact field — specific: "attacker can retrieve all 12,000 user credentials"]
+[1-2 sentences. Quantified attacker outcome.]
 
 #### Remediation
-1. [From remediation field]
-**References:** [CWE link, relevant standard]
+[1-2 sentences. Specific technology and control. References: CWE link.]
 ```
 
 ### 4. Attack Path Narrative
@@ -208,6 +246,23 @@ Only proceed to report generation after validation passes or the operator resolv
    ./scripts/assess.py record-finding report-writer /tmp/finding_update.json
    ```
    This completes the finding lifecycle: draft -> confirmed -> exploited -> reported.
+
+## Post-Generation Self-Review
+
+After writing the report, run this checklist against every finding before delivering. If any check fails, fix it.
+
+1. **First sentence test:** Does sentence one of each description state what the attacker gains? Not the bug class, not the endpoint, not "This finding describes..." — the attacker outcome.
+2. **Title echo test:** Did the description restate the title? Remove the duplication.
+3. **Class definition test:** Did you explain what any standard vulnerability class is? (IDOR, XSS, SQLi, SSRF, etc.) Remove it. The audience is security practitioners.
+4. **Filler scan:** Search for `Furthermore`, `Additionally`, `It should be noted`, `It is worth noting`, `During the course of`, `As demonstrated above`, `In conclusion`. Remove all instances.
+5. **Passive voice scan:** Search for `It was discovered`, `was found to be`, `was observed`, `testing revealed`. Rewrite to active voice.
+6. **Evidence length test:** Is any response block longer than 15 lines? Truncate to the relevant excerpt and annotate the proof.
+7. **Remediation specificity test:** Does every remediation name a technology or specific control? Flag any that say "implement proper X" or "follow best practices."
+8. **Sentence removal test:** Re-read each finding. For every sentence, ask: does removing it reduce the reader's understanding? If no, remove it.
+9. **Reproduction test:** Can someone with no context copy the steps-to-reproduce and replay the finding? Each step must be a single action.
+10. **Executive summary length:** Is it one page or less? If not, cut.
+11. **Severity count match:** Do the counts in the executive summary match the actual finding list?
+12. **Cross-reference completeness:** Does every finding in the body appear in the slug cross-reference table?
 
 ## Extended Resources
 

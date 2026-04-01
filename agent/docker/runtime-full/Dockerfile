@@ -84,8 +84,14 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
     fi
 
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
-      go install github.com/fatedier/frp/cmd/frpc@latest && \
-      cp /root/go/bin/frpc /usr/local/bin/frpc; \
+      FRP_VERSION=0.61.1 && \
+      curl -fsSL "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_amd64.tar.gz" \
+        | tar xzf - --strip-components=1 -C /usr/local/bin "frp_${FRP_VERSION}_linux_amd64/frpc" && \
+      chmod +x /usr/local/bin/frpc && \
+      go install github.com/projectdiscovery/interactsh/cmd/interactsh-server@latest && \
+      cp /root/go/bin/interactsh-server /usr/local/bin/interactsh-server && \
+      go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest && \
+      cp /root/go/bin/interactsh-client /usr/local/bin/interactsh-client; \
     fi
 
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
@@ -109,4 +115,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD command -v mcp-server >/dev/null && command -v katana >/dev/null && test -f /opt/mcp-tools/patched_kali_server.py || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["bash", "-lc", "sleep infinity"]
+CMD ["bash", "-lc", "mkdir -p /data && exec sleep infinity"]

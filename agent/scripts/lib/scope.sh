@@ -2,13 +2,8 @@
 
 scope_entries() {
     local eng_dir="${1:?engagement dir required}"
-    # Read the "hosts" array (new format), falling back to scope_hosts/scope (old format)
     jq -r '
-        (
-            (.hosts // [])
-            + (.scope_hosts // [])
-            + (.scope // [])
-        )
+        (.hosts // [])
         | map(select(type == "string" and . != ""))
         | unique[]
     ' \
