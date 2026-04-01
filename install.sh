@@ -72,8 +72,23 @@ PRESERVE_ROOT=""
 cleanup_on_failure() {
   if [ -n "$PRESERVE_ROOT" ] && [ -d "$PRESERVE_ROOT" ]; then
     echo "" >&2
-    fail "Install failed — preserved data is at: $PRESERVE_ROOT"
-    fail "Restore it manually or re-run the installer to retry."
+    warn "Install interrupted — restoring preserved data to $INSTALL_DIR ..."
+    mkdir -p "$INSTALL_DIR"
+    local restored=0
+    for keep in agent/engagements orchestrator/backend/data .runtime-data .env workspace runtime-home; do
+      if restore_install_path "$INSTALL_DIR" "$PRESERVE_ROOT" "$keep" 2>/dev/null; then
+        restored=$((restored + 1))
+      fi
+    done
+    if [ $restored -gt 0 ]; then
+      rm -rf "$PRESERVE_ROOT"
+      PRESERVE_ROOT=""
+      ok "Restored $restored preserved item(s) back to $INSTALL_DIR"
+      info "Re-run the installer to complete the upgrade."
+    else
+      fail "Auto-restore failed — preserved data is at: $PRESERVE_ROOT"
+      fail "Restore it manually or re-run the installer to retry."
+    fi
   fi
 }
 trap cleanup_on_failure EXIT
