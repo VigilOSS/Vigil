@@ -76,9 +76,9 @@ After engagement initialization completes, repeat until all attack paths exhaust
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Do not use host Bash, `docker run`, `docker exec`, repo-local execution helpers, or ad hoc wrappers for in-scope target work. If Kali MCP has a runtime or reachability gap, stop target-facing work there and debug the runtime from the host without sending HTTP, DNS, or raw TCP traffic from the host to scoped targets.
 7. **DISPATCH** — ALWAYS dispatch to subagent for analysis, testing, validation, and exploitation work. Do NOT test directly with host-side commands. Your job is orchestration: phase control, specialist selection, state review, and synchronized artifact handling.
    **Operator-executed exceptions** (via Kali MCP, not host-side): Collect-phase pipeline commands (Katana crawl, endpoint ingestion) and quick credential validation (single login test to confirm working/not-working). These are mechanical pipeline steps, not analysis. Dispatch a specialist once the pipeline step produces actionable state.
-8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/record_finding.sh` or the assessment API so findings.md remains a synchronized export, not the authoritative store. `append_finding.sh` now rejects markdown and points to `schemas/finding-record.schema.json`.
+8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/assess.py record-finding` or the assessment API so findings.md remains a synchronized export, not the authoritative store.
    **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. They go to intel.md only. Dispatch exploit-developer to validate before recording. This reconciles "record immediately" with "no theoretical findings."
-9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/append_surface.sh` so the backend and readable export stay in sync. Do not call `scripts/lib/surfaces.sh` directly and do not patch `surfaces.jsonl` by hand during normal operation. After each surface update batch, wait for the command to finish and then verify `surfaces.jsonl` with a fresh read. If the first verification read does not reflect the expected change, re-read once before assuming failure. Only treat it as a real helper/backend problem if the command completed successfully and a second fresh read still disagrees; in that case, stop and report the sync issue instead of editing the artifact manually.
+9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/assess.py record-surface` so the backend and readable export stay in sync. Do not call `scripts/lib/surfaces.sh` directly and do not patch `surfaces.jsonl` by hand during normal operation. After each surface update batch, wait for the command to finish and then verify `surfaces.jsonl` with a fresh read. If the first verification read does not reflect the expected change, re-read once before assuming failure. Only treat it as a real helper/backend problem if the command completed successfully and a second fresh read still disagrees; in that case, stop and report the sync issue instead of editing the artifact manually.
    If surface recording fails with a connection error, verify the orchestrator backend is running and that `ORCHESTRATOR_BASE_URL` and the engagement key are set correctly (check `engagement.json` and `.orchestrator.env` in the engagement directory).
 10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
 11. **LOOP** — Back to step 1.
@@ -105,14 +105,42 @@ This runtime is shared infrastructure, not per-engagement state. Multiple engage
 
 ## Listener & Callback Management
 
-Listeners (pwncat-vl, frp, chisel) and OOB callback servers are OPERATOR-CONTROLLED.
+Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are OPERATOR-CONTROLLED.
 Agents must never start them.
 
-Setup instructions and commands: `agent/references/offensive-tactics/shell-handling.md`
+Setup references:
+- **Shell listeners (pwncat-vl, tmux, reverse shell payloads):** `agent/references/offensive-tactics/shell-handling.md`
+- **Tunnel exposure & OOB callbacks (frp, interactsh):** `agent/references/offensive-tactics/frp-tunneling.md`
+
+### When agents need external connectivity
+
+If an agent needs a reverse shell listener, OOB callbacks for blind testing, or any tunnel to reach
+a remote target, the **operator must set up the frp tunnel first**. The operator provisions the tunnel
+per `frp-tunneling.md`, records the address, and then resumes the agent.
+
+**When an agent needs a reverse shell listener:**
+1. Agent outputs `# MANUAL:` playbook steps referencing `shell-handling.md` and `frp-tunneling.md`
+2. Operator checks if a listener is already running: `docker exec security-research tmux list-sessions`
+3. If not running → operator starts pwncat listener per `shell-handling.md`, then starts frp tunnel per `frp-tunneling.md`, records address in `$DIR/.listener_url`
+4. Operator resumes the agent. Agent reads `LISTENER_HOST`/`LISTENER_PORT` from `$DIR/.listener_url`.
+5. If the operator cannot provision the listener now, record a blocked technique:
+   `./scripts/assess.py post blocked-techniques <blocked-technique-json-file>`
+
+**When an agent needs OOB (blind vuln detection):**
+1. Agent checks whether `$DIR/.oob_url` exists in its dispatch context
+2. If available → use the callback URL in blind payloads (SSRF, XXE, XSS, SQLi)
+3. If not available → fall back to time-based detection (sleep payloads) and note in output that OOB was unavailable
+4. If time-based also fails and OOB would have been decisive → stop and ask the operator to provision interactsh + frp tunnels per `frp-tunneling.md`
+5. After sending blind payloads, agents check OOB logs via Kali MCP: `tail -50 /data/oob-client.log` or `tail -50 /data/oob-server.log`
 
 **Files agents read (never write):**
 - `$DIR/.listener_url` — tunnel address (`host:port`) for reverse shell payloads
 - `$DIR/.oob_url` — callback URL for blind vulnerability detection
+
+**Log files agents check for hits (via Kali MCP):**
+- `/data/oob-client.log` or `/data/oob-server.log` — interactsh callback hits
+- `/data/shell-*.log` — shell session I/O
+- `/data/frp-*.log` — tunnel connection status
 
 ## Subagent Dispatch
 
@@ -134,7 +162,7 @@ Every dispatch must include:
 - **Which skill to load** (from `agent/SKILL.md` using "Use when:" criteria)
 - **Prior findings relevant to this dispatch:**
   - For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, and the specific hypothesis to test
-  - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `fetch_assessment_record.sh` — do not pre-filter B candidates (chain-target endpoints) for it
+  - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `assess.py fetch` — do not pre-filter B candidates (chain-target endpoints) for it
   - For `report-writer`: no finding context needed — the agent queries the `report-findings` endpoint directly
 
 ### Pre-Dispatch Checklist
@@ -169,31 +197,39 @@ DB="$DIR/cases.db"
 
 1. **RECON** → dispatch recon-specialist + source-analyzer in parallel. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and then continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 rather than keeping that work on the operator.
 2. **COLLECT** → operator-orchestrated. Steps in order:
-   a. Ingest all endpoints from Phase 1 into the backend: `cat endpoints.txt | ./scripts/recon_ingest.sh "$DIR/cases.db" recon`
+   a. Ingest all endpoints from Phase 1 into the backend: `cat endpoints.txt | ./scripts/assess.py ingest-endpoints "$DIR/cases.db" recon`
    b. Run Katana via Kali MCP to crawl from live targets (Katana is installed in the runtime container — invoke it through the MCP command-execution tool, not host-side):
       `katana -u https://target.example -d 3 -jc -kf all -tlsv -o /tmp/katana_output.txt`
       Use `-tlsv` to skip TLS verification for targets with expired, self-signed, or mismatched certificates. Without it, Katana will bail on invalid certs and produce minimal output.
       If `auth.json` has `use_for_requests` set to `true` and `state` set to `available`, pass cookies/headers: `katana -u URL -H "Cookie: ..." -H "Authorization: ..." ...`
-   c. Ingest Katana output into backend: `cat /tmp/katana_output.txt | ./scripts/recon_ingest.sh "$DIR/cases.db" katana`
-   d. If Phase 1 discovered OpenAPI/Swagger specs, ingest them:
-      `./scripts/spec_ingest.sh "$DIR/cases.db" "$DIR/scans/openapi.json"`
+   c. Ingest Katana output into backend: `cat /tmp/katana_output.txt | ./scripts/assess.py ingest-endpoints "$DIR/cases.db" katana`
+   d. **Historical URL enrichment** via Kali MCP — run `gau` to pull known URLs from Wayback Machine, AlienVault OTX, Common Crawl, and URLScan. This catches parameterized endpoints and old routes that Katana misses because the live sitemap no longer links to them:
+      `gau TARGET_DOMAIN --threads 5 --blacklist png,jpg,gif,css,woff,svg --o /tmp/gau_output.txt`
+      Ingest: `cat /tmp/gau_output.txt | ./scripts/assess.py ingest-endpoints "$DIR/cases.db" gau`
+   e. If Phase 1 discovered OpenAPI/Swagger specs, ingest them:
+      `./scripts/assess.py ingest-spec "$DIR/cases.db" "$DIR/scans/openapi.json"`
       This creates `api-spec` work items and durable request/service coverage candidates. source-analyzer may have saved specs to `scans/` during Phase 1; check before skipping.
-   e. Inspect work-buffer stats: `./scripts/dispatcher.sh "$DIR/cases.db" stats`
-   f. Inspect coverage gaps: `./scripts/fetch_assessment_record.sh summary`
+   f. Inspect work-buffer stats: `./scripts/assess.py dispatch "$DIR/cases.db" stats`
+   g. Inspect coverage gaps: `./scripts/assess.py fetch summary`
    Update scope.json phase to `consume-test` when ingestion is complete.
 3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
-   a. Reset stale work items: `./scripts/dispatcher.sh "$DB" reset-stale 10`
-   b. Check stats: `./scripts/dispatcher.sh "$DB" stats`
-   c. Fetch and route by type — dispatch independent types in parallel:
+   a. **Nuclei sweep** (once, before the work-buffer loop) — run nuclei via Kali MCP against all live targets for a broad CVE and misconfiguration check:
+      `nuclei -l /engagement/scans/live_targets.txt -severity critical,high -tags cve,misconfig,exposure -rate-limit 100 -jsonl -o /engagement/scans/nuclei_sweep.jsonl`
+      Triage results: critical/high hits become prioritized work-buffer entries or direct findings (after manual validation). Medium/low hits are intelligence. See `agent/skills/nuclei-scanning/SKILL.md` for triage rules.
+   b. Reset stale work items: `./scripts/assess.py dispatch "$DB" reset-stale 10`
+   c. Check stats: `./scripts/assess.py dispatch "$DB" stats`
+   d. Fetch and route by type — dispatch independent types in parallel:
       - `api`, `api-spec`, `form`, `upload`, `graphql`, `websocket` → vulnerability-analyst (load matching vuln-class skill from `agent/SKILL.md`)
       - `page`, `javascript`, `stylesheet`, `data` → source-analyzer (load `source-analysis` skill)
-      `./scripts/dispatcher.sh "$DB" fetch <type> 10 <agent-name>`
+      `./scripts/assess.py dispatch "$DB" fetch <type> 10 <agent-name>`
       Pass the raw fetched JSON rows into the dispatch context. They carry canonical ids such as `request_variant_id`, `service_id`, and sometimes `coverage_item_id`, which subagents need for durable probe and coverage writes.
-   d. On subagent return: `./scripts/dispatcher.sh "$DB" done "id1,id2,..."`
-      Mark a batch done only after the subagent has written durable state for any findings, significant probe runs, and coverage updates its work satisfied. Verify the relevant coverage item moved out of `pending`, `queued`, or `deferred`. If the agent skipped durable recording, send it back to write the state instead of silently duplicating it from the operator. Record surfaces via `append_surface.sh`. Re-ingest new endpoints via `recon_ingest.sh`.
-   e. If vulnerability-analyst signals FUZZER_NEEDED for a parameter or directory, dispatch fuzzer with `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md` and a bounded objective (target URL, parameter name, max payloads).
-   f. Repeat a-e until pending=0 for all consumable types.
-   g. Before leaving: `./scripts/check_surface_coverage.sh "$DIR"`. If it fails, resolve each remaining surface as `covered`, `deferred`, or `not_applicable`. High-risk surfaces (`account_recovery`, `dynamic_render`, `object_reference`, `privileged_write`) may NOT remain `deferred`.
+      If `$DIR/.oob_url` exists, include the callback URL in dispatch context for agents doing blind testing.
+      If `$DIR/.listener_url` exists, include the tunnel address for agents that need a callback target.
+   e. On subagent return: `./scripts/assess.py dispatch "$DB" done "id1,id2,..."`
+      Mark a batch done only after the subagent has written durable state for any findings, significant probe runs, and coverage updates its work satisfied. Verify the relevant coverage item moved out of `pending`, `queued`, or `deferred`. If the agent skipped durable recording, send it back to write the state instead of silently duplicating it from the operator. Record surfaces via `assess.py record-surface`. Re-ingest new endpoints via `assess.py ingest-endpoints`.
+   f. If vulnerability-analyst signals FUZZER_NEEDED for a parameter or directory, dispatch fuzzer with `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md` and a bounded objective (target URL, parameter name, max payloads).
+   g. Repeat b-f until pending=0 for all consumable types.
+   h. Before leaving: `./scripts/assess.py check-coverage`. If it fails, resolve each remaining surface as `covered`, `deferred`, or `not_applicable`. High-risk surfaces (`account_recovery`, `dynamic_render`, `object_reference`, `privileged_write`) may NOT remain `deferred`.
 4. **EXPLOIT** →
    a. Dispatch osint-analyst with `agent/skills/osint-recon/SKILL.md` — intelligence gathering is always permitted regardless of `exploit_policy`. Feed the tech stack, domains, and people data from intel.md.
    b. Respect `exploit_policy` from `scope.json` for exploit-developer dispatch:
@@ -201,11 +237,11 @@ DB="$DIR/cases.db"
       - `selected`: exploit only the approved finding slugs recorded in scope metadata.
       - `full_send`: dispatch exploit-developer immediately.
    c. Exploit-developer owns durable exploit-state recording. If it proves a chain, credential, access record, or credential test, it should write the JSON payloads under `$DIR/tools/exploit-state/` and record them before task completion with the repo scripts.
-   d. On return, verify canonical exploit state via `fetch_assessment_record.sh attack-chains`, `credentials`, `access-records`, and `credential-tests`. Do not create duplicate operator-side rows unless you are explicitly merging a proposal-based exploit session with `merge_exploit_session.sh`.
+   d. On return, verify canonical exploit state via `assess.py fetch attack-chains`, `credentials`, `access-records`, and `credential-tests`. Do not create duplicate operator-side rows unless you are explicitly merging a proposal-based exploit session with `assess.py merge-session`.
    e. After osint-analyst returns: read intel.md. **Do not record CVE matches as findings yet.** If HIGH-value CVEs with public PoCs were identified, dispatch exploit-developer to validate each against the live target — backported patches, missing binaries, and disabled modules routinely invalidate version-only matches. Only record a CVE-based finding after exploit-developer confirms exploitability or proves partial signal.
 5. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
 6. **REPORT** → **Before dispatching report-writer**, merge duplicate findings so the `report-findings` endpoint returns a clean deduplicated set. Check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker finding into the stronger one:
-   `./scripts/merge_finding.sh "$DIR" <source-slug> <target-slug> "<reason>"`
+   `./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"`
    Then dispatch report-writer with `agent/skills/report-generation/SKILL.md`. Report-writer queries the backend directly for `report-findings`, `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — do not manually assemble findings context. After report-writer completes, update scope.json phase to `complete`.
 
 After each phase update scope.json:
@@ -222,7 +258,7 @@ When ANY agent discovers credentials, the operator coordinates these steps:
    - If login **fails** → record result in log.md, continue anonymously. Do not dispatch a specialist for a failed login.
    - If login **succeeds** → continue to step 2.
 2. **Operator writes to auth.json** — populate cookies, headers, or token fields from the successful login response. Set `state` to `available` and `use_for_requests` to `true`. This is local file work.
-3. **Operator re-runs Collect** — re-invoke Katana via Kali MCP with auth headers to discover authenticated-only endpoints. Re-ingest through `recon_ingest.sh` with the new auth context. This is the POST-AUTH RE-COLLECTION step.
+3. **Operator re-runs Collect** — re-invoke Katana via Kali MCP with auth headers to discover authenticated-only endpoints. Re-ingest through `assess.py ingest-endpoints` with the new auth context. This is the POST-AUTH RE-COLLECTION step.
 4. **Dispatch exploit-developer** — to test authenticated surfaces discovered in step 3. The agent maps what authenticated access grants and tests for privilege escalation, IDOR, and auth-boundary issues across the newly discovered endpoints. This is the analysis work that requires a specialist.
 
 Auth handling rules:
@@ -239,7 +275,7 @@ All target-facing work must go through the attached Kali MCP runtime.
 - When you need arbitrary shell execution inside the Kali runtime, use the Kali MCP command-execution tool.
 - Treat host Bash as out-of-bounds for in-scope target work even if the same binary exists locally.
 - Host-side commands are limited to coordination, local file work, backend interaction, and non-target support tasks such as `jq`, `sqlite3`, `python3`, `grep`/`rg`, `sed`, `awk`, `base64`, and `openssl`.
-- For local artifact synchronization, prefer repo scripts such as `append_surface.sh` and `record_finding.sh` over sourcing library helpers directly.
+- For local artifact synchronization, prefer repo scripts such as `assess.py record-surface` and `assess.py record-finding` over sourcing library helpers directly.
 - If a required target-facing tool is missing from the active Kali MCP session, say so explicitly and stop to resolve the runtime gap rather than falling back to host or Docker-side execution paths.
 - Host-side runtime diagnosis may inspect local files, container metadata, mounts, and environment, but may not send scoped HTTP, DNS, or raw TCP probes from the host.
 
@@ -269,12 +305,12 @@ Agents use PREFIXED IDs:
 | fuzzer | FZ | FINDING-FZ-001 |
 | osint-analyst | OS | FINDING-OS-001 |
 
-Prefix mnemonics: EX=exploit, VA=vuln-analyst, SA=source-analyzer, RE=recon, FZ=fuzzer, OS=osint. The prefix is the agent mnemonic assigned by `record_finding.sh`, not the initials of the full agent name.
+Prefix mnemonics: EX=exploit, VA=vuln-analyst, SA=source-analyzer, RE=recon, FZ=fuzzer, OS=osint. The prefix is the agent mnemonic assigned by `assess.py record-finding`, not the initials of the full agent name.
 
 Never hand-allocate finding IDs. Create a structured JSON finding payload matching `schemas/finding-record.schema.json`, then record it via:
-`./scripts/record_finding.sh "$DIR" <agent-name> <finding-json-file>`
+`./scripts/assess.py record-finding <agent-name> <finding-json-file>`
 
-This allocates or reuses the canonical slug under a lock, writes backend state first, and then synchronizes the markdown export. If an agent only produced markdown, stop and convert it to the required JSON shape. `./scripts/append_finding.sh` is only a guardrail: it rejects markdown, prints the schema path, and exits nonzero.
+This allocates or reuses the canonical slug under a lock, writes backend state first, and then synchronizes the markdown export. If an agent only produced markdown, stop and convert it to the required JSON shape.
 
 report-writer uses the `report-findings` backend endpoint which assigns sequential `FINDING-001~N` report IDs automatically. Each report finding includes both the `report_id` and the original `slug` for cross-referencing.
 
@@ -295,7 +331,7 @@ After receiving agent output with `#### Intelligence` section:
 | Custom scripts/exploits | tools/ |
 | Background PIDs | pids/ |
 
-Root: scope.json, log.md, findings.md, intel.md, intel-secrets.json, report.md, auth.json, and the transient worker buffer only.
+Root: scope.json, log.md, findings.md, intel.md, report.md, auth.json, and the transient worker buffer only.
 
 ## Skills and References
 
@@ -327,7 +363,7 @@ else
 fi
 export ENGAGEMENT_DIR
 cat "$ENGAGEMENT_DIR/scope.json"
-"$AGENT_ROOT/scripts/dispatcher.sh" "$ENGAGEMENT_DIR/cases.db" stats 2>/dev/null
+"$AGENT_ROOT/scripts/assess.py" dispatch "$ENGAGEMENT_DIR/cases.db" stats 2>/dev/null
 ```
 
 If status=in_progress: read scope/log state, inspect orchestrator coverage and findings state when available, recover stale work-buffer items, and resume from the correct phase.
@@ -366,14 +402,14 @@ When exploit work should be split across multiple Codex sessions, the coordinato
 1. Get human approval for exploit scope inside the conversation before launching worker sessions.
 2. Create a worker session with the local helper script when needed:
 ```bash
-./scripts/launch_exploit_session.sh "$DIR" <session-id> <finding-slug> [finding-slug...]
+./scripts/assess.py launch-session <session-id> <finding-slug> [finding-slug...]
 ```
 3. In the worker session, use the generated `sessions/<session-id>/prompt.md`.
-4. Workers must only write proposals under `sessions/<session-id>/proposals/` via `./scripts/record_session_proposal.sh`.
+4. Workers must only write proposals under `sessions/<session-id>/proposals/` via `./scripts/assess.py record-proposal`.
 5. Workers must not edit root `findings.md`, `report.md`, or `scope.json`.
 6. The coordinator merges approved proposals into canonical backend state with:
 ```bash
-./scripts/merge_exploit_session.sh "$DIR" <session-id>
+./scripts/assess.py merge-session <session-id>
 ```
 
 ## Claude Dispatch Syntax

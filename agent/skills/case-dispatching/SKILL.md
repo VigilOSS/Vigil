@@ -21,22 +21,22 @@ This skill is coordination-only. Use it to inspect the work buffer, route batche
 **CRITICAL: Fetch work items by type SEPARATELY. Route per table below. NEVER mix types.
 NEVER send page/js/css/data to vulnerability-analyst. NEVER send api/form/upload to source-analyzer.**
 
-Each iteration:
+Each iteration (set `DB="$DIR/cases.db"`):
 ```
-1. Reset stale: ./scripts/dispatcher.sh $DB reset-stale 10
-2. Check stats: ./scripts/dispatcher.sh $DB stats
+1. Reset stale: ./scripts/assess.py dispatch "$DB" reset-stale 10
+2. Check stats: ./scripts/assess.py dispatch "$DB" stats
 3. Fetch and route by type (vulnerability-analyst and source-analyzer can run IN PARALLEL):
 
    vulnerability-analyst: api, api-spec, form, upload, graphql, websocket
    source-analyzer: page, javascript, stylesheet, data
 
-   ./scripts/dispatcher.sh $DB fetch <type> 10 <agent_name>
+   ./scripts/assess.py dispatch "$DB" fetch <type> 10 <agent_name>
 
 4. On subagent return:
-   - Done: ./scripts/dispatcher.sh $DB done "id1,id2,..."
-   - New endpoints: feed them back through `recon_ingest.sh` or `spec_ingest.sh` so backend state is created first
-   - Findings: write structured finding state first with `record_finding.sh`, then keep findings.md synchronized
-   - Errors: ./scripts/dispatcher.sh $DB error "id1,id2,..."
+   - Done: ./scripts/assess.py dispatch "$DB" done "id1,id2,..."
+   - New endpoints: feed them back through `assess.py ingest-endpoints "$DB" <source>` or `assess.py ingest-spec "$DB" <spec-file>` so backend state is created first
+   - Findings: write structured finding state first with `assess.py record-finding`, then keep findings.md synchronized
+   - Errors: ./scripts/assess.py dispatch "$DB" error "id1,id2,..."
 5. pending=0 and producers stopped → report completion
 6. Otherwise → loop back to step 1
 ```
@@ -73,7 +73,7 @@ sqlite3 "$DB" ".timeout 5000" "
 
 ## Key Rules
 
-- ALWAYS use `./scripts/dispatcher.sh` for work-buffer ops (never read cases.db directly)
+- ALWAYS use `./scripts/assess.py dispatch "$DB" <action>` for work-buffer ops (never read cases.db directly)
 - Treat this skill as host-side coordination only. All real target testing stays in Kali MCP.
 - Record findings in backend state immediately and keep findings.md synchronized
 - Re-ingest new endpoints through backend-first producers; let the work buffer mirror the resulting canonical ids
@@ -85,12 +85,12 @@ sqlite3 "$DB" ".timeout 5000" "
 ## Dispatcher Quick Reference
 
 ```bash
-DB="<engagement_dir>/cases.db"
-./scripts/dispatcher.sh "$DB" stats
-./scripts/dispatcher.sh "$DB" fetch <type> <limit> <agent_name>
-./scripts/dispatcher.sh "$DB" done "id1,id2,id3"
-./scripts/dispatcher.sh "$DB" error "id1,id2,id3"
-./scripts/dispatcher.sh "$DB" reset-stale <minutes>
-echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | ./scripts/dispatcher.sh "$DB" requeue
-echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | ./scripts/dispatcher.sh "$DB" requeue
+DB="$DIR/cases.db"
+./scripts/assess.py dispatch "$DB" stats
+./scripts/assess.py dispatch "$DB" fetch <type> <limit> <agent_name>
+./scripts/assess.py dispatch "$DB" done "id1,id2,id3"
+./scripts/assess.py dispatch "$DB" error "id1,id2,id3"
+./scripts/assess.py dispatch "$DB" reset-stale <minutes>
+echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | ./scripts/assess.py dispatch "$DB" requeue
+echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | ./scripts/assess.py dispatch "$DB" requeue
 ```

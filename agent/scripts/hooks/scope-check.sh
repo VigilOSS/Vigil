@@ -47,7 +47,7 @@ esac
 
 # Also skip by first non-variable command in compound statements
 case "$COMMAND" in
-  *dispatcher.sh*|*schema.sql*) exit 0 ;;
+  *dispatcher.sh*|*assess.py*|*schema.sql*) exit 0 ;;
   *"cat "*|*"mkdir "*|*"jq "*|*"sqlite3 "*|*"grep "*|*"sed "*) exit 0 ;;
 esac
 

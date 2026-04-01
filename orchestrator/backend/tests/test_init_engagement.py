@@ -40,12 +40,8 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
             "bash",
             str(sandbox_root / "scripts" / "init_engagement.sh"),
             "https://app.example.com",
-            "--scope-mode",
-            "explicit_hosts",
-            "--scope-hosts",
+            "--hosts",
             "app.example.com,admin.example.com",
-            "--out-of-scope-hosts",
-            "beta.example.com",
             "--auth-mode",
             "manual",
             "--exploit-policy",
@@ -64,10 +60,8 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
     orchestrator_env = (engagement_dir / ".orchestrator.env").read_text(encoding="utf-8")
     agents_wrapper = (engagement_dir / "AGENTS.md").read_text(encoding="utf-8")
 
-    assert scope["scope_mode"] == "explicit_hosts"
-    assert scope["scope_hosts"] == ["app.example.com", "admin.example.com"]
-    assert scope["scope"] == ["app.example.com", "admin.example.com"]
-    assert scope["out_of_scope_hosts"] == ["beta.example.com"]
+    assert scope["hostname"] == "app.example.com"
+    assert scope["hosts"] == ["app.example.com", "admin.example.com"]
     assert scope["exploit_policy"] == "selected"
     assert scope["exploit_review_state"] == "pending"
     assert scope["approved_findings"] == []
@@ -128,9 +122,8 @@ def test_init_engagement_uses_safe_defaults_in_noninteractive_mode(tmp_path: Pat
     auth = json.loads((engagement_dir / "auth.json").read_text(encoding="utf-8"))
     orchestrator_env = (engagement_dir / ".orchestrator.env").read_text(encoding="utf-8")
 
-    assert scope["scope_mode"] == "host_only"
-    assert scope["scope_hosts"] == ["app.example.com"]
-    assert scope["out_of_scope_hosts"] == []
+    assert scope["hostname"] == "app.example.com"
+    assert scope["hosts"] == ["app.example.com"]
     assert scope["exploit_policy"] == "pause"
     assert "parallelism" not in scope
     assert "confirm_mode" not in scope
@@ -200,10 +193,11 @@ def test_init_engagement_uses_install_root_env_override_for_orchestrator_url(tmp
     start_codex = (engagement_dir / "start_codex.sh").read_text(encoding="utf-8")
 
     assert "ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000" in orchestrator_env
-    assert "load_orchestrator_env" in start_codex
 
 
 def test_orchestrator_env_loader_prefers_install_root_env_over_engagement_default(tmp_path: Path) -> None:
+    """Verify that assess.py's config module resolves ORCHESTRATOR_BASE_URL from
+    install-root .env before falling back to the engagement-dir default."""
     repo_root = Path(__file__).resolve().parents[3]
     agent_root = repo_root / "agent"
     install_root = tmp_path / "install-root"
@@ -227,14 +221,17 @@ def test_orchestrator_env_loader_prefers_install_root_env_over_engagement_defaul
     )
 
     engagement_dir = Path(result.stdout.strip())
+
+    # Use the Python config module to resolve the base URL (same path assess.py uses)
     resolved = subprocess.run(
         [
-            "bash",
-            "-lc",
+            "python3",
+            "-c",
             (
-                f'source "{sandbox_root / "scripts" / "lib" / "orchestrator_env.sh"}"; '
-                f'load_orchestrator_env "{engagement_dir}"; '
-                'printf "%s" "$ORCHESTRATOR_BASE_URL"'
+                "import sys; "
+                f"sys.path.insert(0, {str(sandbox_root / 'scripts')!r}); "
+                "from assess.lib.config import resolve_base_url; "
+                f"print(resolve_base_url({str(engagement_dir)!r}, {str(sandbox_root)!r}))"
             ),
         ],
         text=True,

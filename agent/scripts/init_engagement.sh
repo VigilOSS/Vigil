@@ -167,7 +167,7 @@ This engagement directory is only the run-artifact root. When you start Codex he
 - Scripts: ${ROOT_DIR}/scripts
 
 Artifact sync:
-- Use ${ROOT_DIR}/scripts/record_finding.sh and ${ROOT_DIR}/scripts/append_surface.sh
+- Use ${ROOT_DIR}/scripts/assess.py for all assessment operations (record-finding, record-surface, fetch, post, etc.)
 - When a shared prompt references \`./scripts/...\`, resolve it against ${ROOT_DIR}/scripts from this engagement session
 - Start Codex for this engagement with ${eng_dir}/start_codex.sh so ENGAGEMENT_DIR is exported automatically
 - The local ${eng_dir}/.orchestrator.env provides the default orchestrator base URL for backend-sync scripts; install-root .env can override it
@@ -194,7 +194,7 @@ This engagement directory is only the run-artifact root. When you start Claude h
 - Scripts: ${ROOT_DIR}/scripts
 
 Artifact sync:
-- Use ${ROOT_DIR}/scripts/record_finding.sh and ${ROOT_DIR}/scripts/append_surface.sh
+- Use ${ROOT_DIR}/scripts/assess.py for all assessment operations (record-finding, record-surface, fetch, post, etc.)
 - When a shared prompt references \`./scripts/...\`, resolve it against ${ROOT_DIR}/scripts from this engagement session
 - Start Claude for this engagement with ${eng_dir}/start_claude.sh so ENGAGEMENT_DIR is exported automatically
 - The local ${eng_dir}/.orchestrator.env provides the default orchestrator base URL for backend-sync scripts; install-root .env can override it
@@ -215,12 +215,6 @@ ENGAGEMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export ENGAGEMENT_DIR
 AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
 
-if [[ -f "$AGENT_ROOT/scripts/lib/orchestrator_env.sh" ]]; then
-  # shellcheck source=/dev/null
-  . "$AGENT_ROOT/scripts/lib/orchestrator_env.sh"
-  load_orchestrator_env "$ENGAGEMENT_DIR"
-fi
-
 exec codex "$@"
 EOF
   fi
@@ -233,12 +227,6 @@ set -euo pipefail
 ENGAGEMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export ENGAGEMENT_DIR
 AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
-
-if [[ -f "$AGENT_ROOT/scripts/lib/orchestrator_env.sh" ]]; then
-  # shellcheck source=/dev/null
-  . "$AGENT_ROOT/scripts/lib/orchestrator_env.sh"
-  load_orchestrator_env "$ENGAGEMENT_DIR"
-fi
 
 exec claude "$@"
 EOF
@@ -420,7 +408,6 @@ cat > "$DIR/report.md" <<EOF
 EOF
 
 : > "$DIR/surfaces.jsonl"
-printf '[]\n' > "$DIR/intel-secrets.json"
 write_auth_scaffold "$DIR" "$AUTH_MODE" "$START_TIME"
 printf '[]\n' > "$DIR/sessions/index.json"
 printf '[]\n' > "$DIR/agent-registry.json"

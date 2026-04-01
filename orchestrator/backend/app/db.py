@@ -375,7 +375,7 @@ def init_db() -> None:
                 credential_key TEXT NOT NULL,
                 kind TEXT NOT NULL DEFAULT 'password',
                 principal TEXT NOT NULL DEFAULT '',
-                secret_locator TEXT NOT NULL DEFAULT '',
+                secret TEXT NOT NULL DEFAULT '',
                 source_name TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'discovered',
                 notes TEXT NOT NULL DEFAULT '',
@@ -496,6 +496,11 @@ def init_db() -> None:
             )
             """
         )
+        # Migrate secret_locator → secret in assessment_credentials
+        cred_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_credentials)").fetchall()}
+        if "secret_locator" in cred_columns and "secret" not in cred_columns:
+            connection.execute("ALTER TABLE assessment_credentials RENAME COLUMN secret_locator TO secret")
+
         finding_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_findings)").fetchall()}
         finding_column_defaults = {
             "defect_family": "TEXT NOT NULL DEFAULT ''",

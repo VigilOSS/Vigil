@@ -17,7 +17,7 @@ recon outputs: endpoint list, technologies, JS file URLs, parameters, surface ca
 
 Operator does:
 1. Pass JS file URLs → dispatch source-analyzer — **bring `agent/skills/source-analysis/SKILL.md`**
-2. Import ALL endpoints → `recon_ingest.sh` → orchestrator backend state (with the local queue only as transient batching)
+2. Import ALL endpoints → `assess.py ingest-endpoints` → orchestrator backend state (with the local queue only as transient batching)
 3. Record technology stack → durable finding/state update + intel.md
 4. Turn auth boundaries, framework clues, and proxy hints into explicit hypotheses for exploit or source-analysis follow-up
 5. Requestable endpoints, object references, auth inconsistencies → dispatch vulnerability-analyst — **bring the vuln-class skill from `agent/SKILL.md` matching the candidate surface**
@@ -28,8 +28,8 @@ Operator does:
 source outputs: new API endpoints, routes, secrets/tokens, config objects
 
 Operator does:
-1. New requestable endpoints → `echo ... | ./scripts/recon_ingest.sh "$ENGAGEMENT_DIR/cases.db" source-analysis`
-2. Secrets/tokens → durable findings immediately (HIGH/MEDIUM) + `intel-secrets.json` for full values + intel.md Credentials table for preview/reference only
+1. New requestable endpoints → `echo ... | ./scripts/assess.py ingest-endpoints "$DIR/cases.db" source-analysis`
+2. Secrets/tokens → durable findings immediately (HIGH/MEDIUM) + credential backend record with full secret value + intel.md Credentials table for preview/reference only
 3. API routes, object references, mutation paths → dispatch vulnerability-analyst — **bring the vuln-class skill from `agent/SKILL.md` matching the candidate** (e.g., `idor-testing` for object refs, `sqli-testing` for query params)
 4. Parameter names, format hints, upload paths → dispatch fuzzer — **bring `agent/skills/parameter-fuzzing/SKILL.md`**
 5. Exploitable secrets or high-confidence abuse paths → dispatch exploit-developer — **bring the skill matching the specific finding class**
@@ -41,7 +41,7 @@ Operator does:
 vuln-analyst returns: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED blocks
 
 Operator does:
-1. HIGH/MEDIUM confidence → IMMEDIATELY dispatch exploit-developer with finding slug(s) and objective — **bring the skill matching the finding class** (e.g., `agent/skills/ssrf-testing/SKILL.md` for SSRF, `agent/skills/idor-testing/SKILL.md` for IDOR, `agent/skills/xss-testing/SKILL.md` for XSS). The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `fetch_assessment_record.sh` — do not pre-filter B candidates (chain-target endpoints) for it.
+1. HIGH/MEDIUM confidence → IMMEDIATELY dispatch exploit-developer with finding slug(s) and objective — **bring the skill matching the finding class** (e.g., `agent/skills/ssrf-testing/SKILL.md` for SSRF, `agent/skills/idor-testing/SKILL.md` for IDOR, `agent/skills/xss-testing/SKILL.md` for XSS). The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `assess.py fetch` — do not pre-filter B candidates (chain-target endpoints) for it.
 2. LOW confidence → record as durable draft finding, do NOT dispatch yet
 3. FUZZER_NEEDED → dispatch fuzzer — **bring `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md`** as appropriate, feed results back through vuln-analyst
 4. Report-ready findings → dispatch report-writer (only after durable + evidenced + severity-disciplined) — **bring `agent/skills/report-generation/SKILL.md`**
@@ -69,7 +69,7 @@ exploit outputs: CONFIRMED/PARTIAL/FAILED status, extracted data, PoC
 Operator does:
 1. CONFIRMED → durable finding update with full evidence (HIGH severity)
 2. CONFIRMED + credentials / access / credential tests → verify exploit-developer recorded them via the assessment API, then run the credential auto-use workflow (see operator prompt)
-3. CONFIRMED + multi-step chain → verify exploit-developer recorded the chain via `record_attack_chain.sh` and linked the finding steps
+3. CONFIRMED + multi-step chain → verify exploit-developer recorded the chain via `assess.py record-chain` and linked the finding steps
 4. CONFIRMED + new attack surface → ingest auth-aware variants and retest obligations into backend state
 5. PARTIAL → record as MEDIUM, validate partial signals in stages before giving up
 6. FAILED → log.md, move to next finding
@@ -90,7 +90,7 @@ Operator does after completion:
 
 ## REPORT-WRITER ← backend API (self-service)
 
-Report-writer queries the backend directly via `fetch_assessment_record.sh report-findings`, `attack-chains`, `surfaces`, and `summary`. The operator does not need to manually assemble findings context.
+Report-writer queries the backend directly via `assess.py fetch report-findings`, `attack-chains`, `surfaces`, and `summary`. The operator does not need to manually assemble findings context.
 
 Engagement directory path with: scope.json, log.md, findings.md, intel.md, plus canonical orchestrator backend findings, coverage, services, and chain state.
 
@@ -100,7 +100,7 @@ When multiple agents report findings against the same endpoint, defect family, o
 
 1. The operator checks for duplicate `root_cause_key` or overlapping `canonical_location` + `defect_family`
    across all agent findings before dispatching the next phase.
-2. Use `./scripts/merge_finding.sh "$DIR" <source-slug> <target-slug> <reason>` to merge
+2. Use `./scripts/assess.py merge-finding <source-slug> <target-slug> <reason>` to merge
    the weaker finding into the stronger one. The merge preserves evidence and notes from both.
 3. Always merge duplicates before dispatching `report-writer` to ensure `report-findings` returns a clean set.
 4. The source finding's status becomes `merged` and is excluded from `report-findings`.

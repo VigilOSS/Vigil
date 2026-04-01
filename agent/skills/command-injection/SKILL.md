@@ -91,4 +91,5 @@ origin: AI Threat Hunting
 
 - `agent/references/payloads/command-injection-payloads.md` — blind detection, filter bypass, Linux/Windows, argument injection
 - `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist
-- `agent/references/offensive-tactics/shell-handling.md` — pwncat-vl listener setup, tmux sessions, frp/chisel exposure (required when exploitation reaches RCE)
+- `agent/references/offensive-tactics/shell-handling.md` — pwncat-vl listener setup, tmux sessions, reverse shell payloads (required when exploitation reaches RCE)
+- `agent/references/offensive-tactics/frp-tunneling.md` — frp tunnel exposure, OOB callback setup (required for remote targets)

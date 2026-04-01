@@ -72,11 +72,12 @@ Attack techniques organized by kill chain phase. Used by: operator, exploit-deve
 | `offensive-tactics/lateral-movement/rdp-lateral.md` | RDP hijacking (tscon), SharpRDP headless |
 | `offensive-tactics/lateral-movement/tunneling-relaying.md` | SSH tunneling, netcat relay, NTLM relay, port forwarding |
 
-### offensive-tactics/ (shell handling)
+### offensive-tactics/ (shell handling & tunneling)
 
 | File | Techniques |
 |------|-----------|
-| `offensive-tactics/shell-handling.md` | pwncat-vl listeners, tmux session management, frp/chisel exposure, reverse shell payloads, log tailing for LLM visibility |
+| `offensive-tactics/shell-handling.md` | pwncat-vl listeners, tmux session management, reverse shell payloads, log tailing for LLM visibility |
+| `offensive-tactics/frp-tunneling.md` | frp SSH tunnel setup (HTTP + TCP modes), interactsh OOB callback servers, tunnel logging, standard engagement tunnels (reverse shell, OOB DNS/HTTPS/HTTP) |
 
 ### offensive-tactics/persistence/
 

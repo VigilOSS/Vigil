@@ -40,19 +40,25 @@ Host-side commands are limited to coordination and non-target support only:
 
 ---
 
-## 2a. Listeners Are Operator-Controlled
+## 2a. Listeners, Tunnels & OOB Are Operator-Controlled
 
-Agents must NOT start pwncat-vl, frp, chisel listeners, `nc -lvp`, `socat` listeners,
-or any other network listener process. These are shared infrastructure that the operator manages.
+Agents must NOT start pwncat-vl, frp tunnels, chisel listeners, `nc -lvp`, `socat` listeners,
+interactsh servers, or any other network listener process. These are shared infrastructure that
+the operator manages.
 
-When exploitation requires a listener (reverse shell, tunnel, callback relay):
-1. Provide the exact listener commands in your output using `# MANUAL:` annotation
-2. Reference `agent/references/offensive-tactics/shell-handling.md` for the full command set
-3. Wait for operator confirmation before proceeding with steps that depend on the listener
-4. After the operator confirms, verify the shell by tailing the log file via Kali MCP
+When exploitation requires a listener, tunnel, or OOB callback:
+1. Provide the exact commands in your output using `# MANUAL:` annotation
+2. Reference `agent/references/offensive-tactics/shell-handling.md` for shell listener commands
+3. Reference `agent/references/offensive-tactics/frp-tunneling.md` for tunnel exposure and OOB callback setup
+4. Wait for operator confirmation before proceeding with steps that depend on the listener/tunnel
+5. After the operator confirms, verify connection by tailing log files via Kali MCP
 
-Agents CAN read listener log files (`tail /data/shell-*.log`) via Kali MCP and verify
-that a shell connected. Agents CANNOT start, stop, or restart listener processes.
+Agents CAN read log files via Kali MCP to check for activity:
+- `/data/shell-*.log` — shell session I/O (verify shell connected)
+- `/data/oob-client.log` or `/data/oob-server.log` — interactsh callback hits (confirm blind vulns)
+- `/data/frp-*.log` — tunnel connection status
+
+Agents CANNOT start, stop, or restart listener, tunnel, or OOB processes.
 
 ---
 
@@ -80,9 +86,9 @@ Only improvise after confirming the existing skill and reference set is genuinel
 
 ## 4. Finding IDs and Recording
 
-**MANDATORY: Every finding MUST be recorded via `record_finding.sh`.** Never hand-allocate
+**MANDATORY: Every finding MUST be recorded via `assess.py record-finding`.** Never hand-allocate
 finding IDs. Never write findings only to markdown. Never skip the recording step. If you
-produce a finding in any output section, you MUST also call `record_finding.sh` before your
+produce a finding in any output section, you MUST also call `assess.py record-finding` before your
 task is complete. Findings that exist only in your output text and were not recorded via the
 script are considered lost data.
 
@@ -110,11 +116,11 @@ Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous
 
 If your CVSS score does not fall within the matching severity range, adjust one or the other before recording.
 
-**Deduplication:** Before recording, query existing findings via `fetch_assessment_record.sh report-findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
+**Deduplication:** Before recording, query existing findings via `assess.py fetch report-findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
 
 Record every finding with:
 ```
-./scripts/record_finding.sh "$DIR" <agent-name> <finding-json-file>
+./scripts/assess.py record-finding <agent-name> <finding-json-file>
 ```
 
 The JSON payload must match `schemas/finding-record.schema.json`.
@@ -143,9 +149,9 @@ proved the finding. The field allows up to 20 KB. If the operator or another age
 reproduce the finding later, the notes field alone should be sufficient without re-discovering
 the request format, session tokens, or tool parameters.
 
-**Failure to use `record_finding.sh` is the single most common subagent defect.** If you
+**Failure to use `assess.py record-finding` is the single most common subagent defect.** If you
 produce `#### Findings` output, each finding payload in that section must have been recorded
-via `record_finding.sh` during your session. Do not defer recording to the operator.
+via `assess.py record-finding` during your session. Do not defer recording to the operator.
 
 ---
 
@@ -153,10 +159,10 @@ via `record_finding.sh` during your session. Do not defer recording to the opera
 
 When your output includes `#### Surface Candidates`, these must be synced by the operator:
 ```
-./scripts/append_surface.sh
+./scripts/assess.py record-surface <type> <target> <source> [--rationale TEXT] [--status STATUS]
 ```
 
-Do not patch `surfaces.jsonl` by hand. Do not call `scripts/lib/surfaces.sh` directly.
+Do not patch `surfaces.jsonl` by hand.
 
 ---
 
@@ -169,7 +175,7 @@ Return structured output using these section headers when relevant to your role:
 
 Use `#### Decision` and `#### Action` for validation output (vulnerability-analyst).
 
-Every `#### Findings` block must contain finding payloads ready for `record_finding.sh`,
+Every `#### Findings` block must contain finding payloads ready for `assess.py record-finding`,
 not prose descriptions.
 
 ---
@@ -213,26 +219,27 @@ API security: `agent/references/api-security/`
 
 ## 9. Script Path Convention
 
-All script references (`record_finding.sh`, `append_surface.sh`, `merge_finding.sh`,
-`emit_runtime_event.sh`, `fetch_assessment_record.sh`, etc.) resolve from the agent workspace
-root: `$AGENT_ROOT/scripts/<script-name>` or `./scripts/<script-name>` after `cd agent`.
+All assessment operations use `./scripts/assess.py <subcommand>` resolved from the agent workspace
+root after `cd agent`. JSON payloads are always in files, never inline shell arguments.
 
-Do not hardcode absolute paths. Do not assume scripts are in the current working directory.
-Set `ENGAGEMENT_DIR` before calling any script that depends on it.
+Do not hardcode absolute paths. Set `ENGAGEMENT_DIR` before calling assess.py, or pass `--engagement-dir`.
 
 ---
 
 ## 10. Chain, Credential, and Coverage State
 
-When your work produces attack chains, credentials, or access records, record them immediately
-using the assessment API via `post_assessment_record.sh`:
+Record state immediately using `assess.py` with JSON files:
 
-- **Attack chains:** `./scripts/record_attack_chain.sh "$DIR" <agent-name> <chain-json-file>`
-- **Credentials:** `./scripts/post_assessment_record.sh credentials '<json>'`
-- **Credential tests:** `./scripts/post_assessment_record.sh credential-tests '<json>'`
-- **Access records:** `./scripts/post_assessment_record.sh access-records '<json>'`
-- **Coverage updates:** `./scripts/post_assessment_record.sh "coverage-items/<id>" '{"status":"covered","notes":"..."}' PATCH`
-- **Blocked techniques:** `./scripts/post_assessment_record.sh blocked-techniques '<json>'`
+- **Attack chains:** `./scripts/assess.py record-chain <agent-name> <chain-json-file>`
+- **Credentials:** `./scripts/assess.py post credentials <credential-json-file>`
+- **Credential tests:** `./scripts/assess.py post credential-tests <json-file>`
+- **Access records:** `./scripts/assess.py post access-records <json-file>`
+- **Coverage updates:** `./scripts/assess.py patch coverage-items/<id> <json-file>`
+- **Blocked techniques:** `./scripts/assess.py post blocked-techniques <json-file>`
+- **Probe runs:** `./scripts/assess.py post probe-runs <json-file>`
+
+Write payloads to `/tmp/<type>-<slug>.json` before calling.
+Never pass JSON as an inline shell argument.
 
 These follow the same backend-first principle as finding recording. Do not defer chain or credential
 recording to the operator. The agent that proves the state writes it; the operator verifies it landed in
