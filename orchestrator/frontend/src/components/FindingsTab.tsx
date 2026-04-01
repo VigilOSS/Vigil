@@ -67,10 +67,13 @@ function rowMeta(finding: AssessmentFinding | AssessmentFindingDetail) {
   return parts.join(" · ");
 }
 
+const FINDINGS_PAGE_SIZE = 50;
+
 export function FindingsTab({ findings, fallbackFindings, summary, chains, chainLinks }: FindingsTabProps) {
   const [severityFilter, setSeverityFilter] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
 
   const allFindings = findings.length > 0 ? findings : fallbackFindings;
 
@@ -99,6 +102,7 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
   }, [allFindings]);
 
   const filtered = useMemo(() => {
+    setPage(0);
     const visible = allFindings.filter((finding) => {
       if (severityFilter && finding.severity !== severityFilter) return false;
       if (statusFilter && finding.status !== statusFilter) return false;
@@ -106,6 +110,9 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
     });
     return sortFindings(visible);
   }, [allFindings, severityFilter, statusFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / FINDINGS_PAGE_SIZE));
+  const pageFindings = filtered.slice(page * FINDINGS_PAGE_SIZE, (page + 1) * FINDINGS_PAGE_SIZE);
 
   const selectedFinding = useMemo(
     () => allFindings.find((finding) => finding.slug === selected) ?? null,
@@ -182,7 +189,7 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
 
       <section className="findings-layout">
         <div className="findings-list">
-          {filtered.map((finding) => (
+          {pageFindings.map((finding) => (
             <button
               key={finding.slug}
               type="button"
@@ -207,6 +214,13 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
             </p>
           )}
         </div>
+        {totalPages > 1 && (
+          <div className="pager">
+            <button type="button" className="pager-button" disabled={page === 0} onClick={() => setPage(page - 1)}>Prev</button>
+            <span className="meta-text">Page {page + 1} of {totalPages} ({filtered.length} findings)</span>
+            <button type="button" className="pager-button" disabled={page >= totalPages - 1} onClick={() => setPage(page + 1)}>Next</button>
+          </div>
+        )}
       </section>
 
       {selectedFinding && (
