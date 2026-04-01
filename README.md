@@ -81,12 +81,12 @@ Then create an engagement inside the chosen install:
 ```bash
 cd agent
 ./scripts/init_engagement.sh https://target.example \
-  --scope-mode host_only \
+  --hosts target.example \
   --auth-mode none \
   --exploit-policy pause
 ```
 
-If you omit those flags and run in a TTY, `init_engagement.sh` prompts for scope, auth mode, and exploit policy. In non-interactive runs, the safe defaults are `host_only`, `none`, and `pause`.
+If you omit those flags and run in a TTY, `init_engagement.sh` prompts for target, auth mode, and exploit policy. In non-interactive runs, the safe defaults are the parsed target hostname as the sole `hosts` entry, `none`, and `pause`.
 
 
 ### Starting an engagement
@@ -129,7 +129,8 @@ Methodology references:
 - nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, nikto, WhatWeb, hydra, john, hashcat
 - post-access tooling such as evil-winrm, impacket, mitm6, chisel, ligolo-ng, proxychains-ng, Responder
 - pwncat-vl for interactive reverse shell handling, with tmux for session management
-- an HTTP callback listener and ngrok bridge for blind validation testing
+- interactsh for OOB callback detection (blind SSRF, XXE, XSS, DNS)
+- frp SSH tunneling for exposing listeners and OOB servers to remote targets
 
 A lightweight runtime also exists at `agent/docker/runtime-lightweight/Dockerfile`. It is only for faster local iteration and validation. The default workflow, docs, scripts, and agent runtime all target `agent/docker/runtime-full/Dockerfile`.
 
@@ -171,33 +172,53 @@ In the engagement flow, this usually happens during `recon` or `collect` when an
 Metasploit is not assumed to be always-on. Start it only when exploit chaining or module validation warrants it.
 Start and inspect it through the attached Kali MCP session when needed. Repo-local helper scripts are not the supported target-facing path.
 
-## Callback and Listener Handling
+## Callback, Listener & Tunnel Handling
 
-Listener-driven testing comes in two forms: HTTP callbacks for blind validation, and
-reverse shells for post-exploitation. They use different tools and different workflows.
+Listener-driven testing comes in three forms: OOB callbacks for blind vulnerability detection,
+HTTP callbacks for simple request capture, and reverse shells for post-exploitation.
+They share frp as the tunnel layer for external exposure.
 
-### HTTP callback capture (blind SSRF, OOB, webhooks)
+### Tunnel exposure (frp)
 
-The main image includes a simple HTTP callback capture server:
+frp is the primary tunnel tool for exposing local services to remote targets. It is self-hosted
+(no data leaves your infrastructure) and supports multiple simultaneous tunnels. Tunnels, listeners,
+and OOB servers are **OPERATOR-CONTROLLED** — agents provide commands but never start them.
+
+Full setup reference: `agent/references/offensive-tactics/frp-tunneling.md`
+
+Standard engagement tunnels:
+
+| Tunnel | Purpose | Public endpoint |
+|--------|---------|-----------------|
+| `oob-rev` | Reverse shell listener (pwncat) | `server.com:4444` |
+| `oob-https` | OOB HTTPS callbacks (interactsh) | `server.com:8443` |
+| `oob-dns` | OOB DNS callbacks (interactsh) | `server.com:53` |
+| `oob-http` | OOB HTTP callbacks | `https://researcher.example` |
+
+### OOB callback detection (interactsh)
+
+interactsh runs DNS and HTTP/HTTPS listeners for blind vulnerability confirmation (SSRF, XXE, XSS,
+SQLi, log4shell). The frp tunnels above expose it to remote targets. Agents check
+`/data/oob-client.log` or `/data/oob-server.log` via Kali MCP to confirm callback hits.
+
+Full setup reference: `agent/references/offensive-tactics/frp-tunneling.md` § interactsh Setup
+
+### HTTP callback capture (simple)
+
+The main image also includes a simple HTTP callback capture server for quick blind SSRF validation
+and webhook checks:
 
 ```bash
 docker exec -it security-research start-callback
 ```
 
-By default that starts a local listener on `0.0.0.0:8000` and prints all inbound requests, headers, and bodies. This is for blind SSRF validation, out-of-band webhook checks, file fetch validation, and exploit chains that need a simple HTTP hit collector.
-
-To expose externally with ngrok:
-
-```bash
-docker exec -e USE_NGROK=1 \
-  -e NGROK_AUTHTOKEN="$NGROK_AUTHTOKEN" \
-  -e CALLBACK_PORT=8000 \
-  -it security-research start-callback
-```
+By default that starts a local listener on `0.0.0.0:8000` and prints all inbound requests, headers,
+and bodies. To expose externally, use an frp HTTP mode tunnel per `frp-tunneling.md`.
 
 ### Reverse shell handling (pwncat-vl + tmux)
 
-For reverse shells, the runtime includes pwncat-vl (a maintained fork of pwncat-cs) and tmux. Shell listeners are OPERATOR-CONTROLLED — agents provide the commands but do not start listeners themselves. This prevents port conflicts when multiple engagements share the same runtime.
+For reverse shells, the runtime includes pwncat-vl (a maintained fork of pwncat-cs) and tmux.
+Shell listeners are OPERATOR-CONTROLLED — agents provide the commands but do not start listeners.
 
 Workflow:
 
@@ -207,20 +228,20 @@ Workflow:
    docker exec -it security-research tmux new-session -d -s shell-4444 \
      'pwncat -l -p 4444 2>&1 | tee /data/shell-4444.log'
    ```
-3. Optionally expose via ngrok: `docker exec -e NGROK_AUTHTOKEN="..." -it security-research ngrok tcp 4444`
+3. The operator starts the frp tunnel per `frp-tunneling.md` and records the address in `$DIR/.listener_url`
 4. The operator resumes the agent, which triggers the reverse shell payload
-5. The agent verifies the shell landed by reading the log file via Kali MCP
+5. The agent verifies the shell landed by reading `/data/shell-4444.log` via Kali MCP
 
-Shell sessions run inside tmux with output logged to `/data/shell-*.log`. The LLM agent can tail these log files through Kali MCP to observe shell output without needing interactive terminal access.
+Shell sessions run inside tmux with output logged to `/data/shell-*.log`.
 
 Full reference: `agent/references/offensive-tactics/shell-handling.md`
 
 ### Why listeners are operator-controlled
 
 - The Kali runtime is shared infrastructure across engagements
-- ngrok tunnels are account-scoped; a second tunnel can tear down the first
 - Port conflicts between concurrent engagements are silent failures
 - The operator is the only actor who knows the current port/tunnel allocation
+- frp proxy names must be unique across all active tunnels
 
 ### Metasploit (optional sidecar)
 

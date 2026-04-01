@@ -75,7 +75,7 @@ Return concise structured output with these sections when relevant:
 ## Finding Recording
 
 **MANDATORY:** If your recon produces findings (e.g., exposed admin panels, default credentials,
-information disclosure), record each via `./scripts/record_finding.sh "$DIR" recon-specialist <finding-json-file>`
+information disclosure), record each via `./scripts/assess.py record-finding recon-specialist <finding-json-file>`
 before your task completes. Do not defer recording to the operator. Unrecorded findings are lost data.
 
 ## Handoffs

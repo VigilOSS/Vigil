@@ -187,7 +187,7 @@ can still be used as a transient batching buffer for follow-up testing:
 awk '{print $1}' "$ENGAGEMENT_DIR/scans/subdomains_live.txt" | sort -u | while IFS= read -r sub; do
   echo "GET https://$sub"
 done | \
-  ./scripts/recon_ingest.sh "$ENGAGEMENT_DIR/cases.db" subdomain-enum
+  ./scripts/assess.py ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum
 ```
 
 ## What to Record
