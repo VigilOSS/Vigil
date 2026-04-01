@@ -40,8 +40,21 @@ Return concise structured output with these sections when relevant:
 ## Finding Recording
 
 **MANDATORY:** If fuzzing produces confirmed findings, record each via
-`./scripts/record_finding.sh "$DIR" fuzzer <finding-json-file>` before your task completes.
+`./scripts/assess.py record-finding fuzzer <finding-json-file>` before your task completes.
 Do not defer recording to the operator. Unrecorded findings are lost data.
+
+## OOB Callback Confirmation
+
+When fuzzing blind injection surfaces with OOB payloads, check the callback logs via Kali MCP
+after each batch:
+
+```bash
+tail -50 /data/oob-client.log
+tail -50 /data/oob-server.log
+```
+
+If `$DIR/.oob_url` was provided in your dispatch context, include the callback URL in blind
+payloads. A callback hit in the log confirms the vulnerability.
 
 ## Handoffs
 

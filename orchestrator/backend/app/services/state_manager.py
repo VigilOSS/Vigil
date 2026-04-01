@@ -1770,7 +1770,7 @@ def record_credential(
     credential_key: str,
     kind: str,
     principal: str,
-    secret_locator: str,
+    secret: str,
     source_name: str,
     status_value: str,
     notes: str,
@@ -1787,7 +1787,7 @@ def record_credential(
             values={
                 "kind": kind,
                 "principal": principal,
-                "secret_locator": secret_locator,
+                "secret": secret,
                 "source_name": source_name,
                 "status": status_value,
                 "notes": notes,

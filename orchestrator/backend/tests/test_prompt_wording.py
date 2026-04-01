@@ -112,7 +112,7 @@ def test_phase_two_methodology_guidance_is_present_in_skills_and_references():
     assert "read between the lines" in engagement_methodology.lower()
     assert "prove it in stages" in engagement_methodology.lower()
     assert "hypothesis" in web_recon.lower()
-    assert "durable backend" in osint_recon.lower()
+    assert "canonical destination" in osint_recon.lower()
     assert "optional final phase" in athena_skill.lower()
     assert "ctf scope" not in api04.lower()
     assert "authorized realistic lab" in install_script.lower()

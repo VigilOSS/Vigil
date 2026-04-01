@@ -18,22 +18,22 @@ Use the helper script or `curl` — never query the SQLite database file directl
 
 ```bash
 # Report-ready findings: sorted by severity, CVSS/remediation extracted, sequential report IDs assigned
-./scripts/fetch_assessment_record.sh report-findings
+./scripts/assess.py fetch report-findings
 
 # Attack chains with narrative and severity
-./scripts/fetch_assessment_record.sh attack-chains
+./scripts/assess.py fetch attack-chains
 
 # Credentials discovered during exploitation
-./scripts/fetch_assessment_record.sh credentials
+./scripts/assess.py fetch credentials
 
 # Access records and footholds confirmed via credential validation
-./scripts/fetch_assessment_record.sh access-records
+./scripts/assess.py fetch access-records
 
 # Surfaces for coverage summary
-./scripts/fetch_assessment_record.sh surfaces
+./scripts/assess.py fetch surfaces
 
 # Assessment-level counts
-./scripts/fetch_assessment_record.sh summary
+./scripts/assess.py fetch summary
 ```
 
 The `report-findings` endpoint returns each finding with:
@@ -194,7 +194,7 @@ Only proceed to report generation after validation passes or the operator resolv
 1. **Write report to `$ENGAGEMENT_DIR/report.md`**
 2. **Emit a runtime event** so the orchestrator and UI know the report exists:
    ```bash
-   ./scripts/emit_runtime_event.sh \
+   ./scripts/assess.py emit-event \
        "report.generated" \
        "report" \
        "report.md" \
@@ -205,7 +205,7 @@ Only proceed to report generation after validation passes or the operator resolv
    ```bash
    # For each finding slug included in the report:
    echo '{"slug":"FINDING-VA-003","status":"reported","title":"...","severity":"...","defect_family":"...","root_cause_key":"...","auth_context":"...","canonical_location":"...","summary":"...","evidence_ref":"...","notes":"","details":{"evidence":"...","impact":"..."}}' > /tmp/finding_update.json
-   ./scripts/record_finding.sh "$DIR" report-writer /tmp/finding_update.json
+   ./scripts/assess.py record-finding report-writer /tmp/finding_update.json
    ```
    This completes the finding lifecycle: draft -> confirmed -> exploited -> reported.
 

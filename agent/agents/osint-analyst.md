@@ -44,7 +44,7 @@ A CVE with a public PoC does not become a finding until exploit-developer valida
 the actual target (backported patches, missing CGI binaries, disabled modules, and firewall rules
 all invalidate version-only matches).
 
-Only record a finding via `./scripts/record_finding.sh "$DIR" osint-analyst <finding-json-file>`
+Only record a finding via `./scripts/assess.py record-finding osint-analyst <finding-json-file>`
 when you have target-specific proof that does not require exploit-developer validation — for example,
 breached credentials confirmed against the target's email domain, or a public data leak containing
 target-specific secrets.

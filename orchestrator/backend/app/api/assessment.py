@@ -89,7 +89,7 @@ class CredentialRecordRequest(BaseModel):
     credential_key: str = Field(min_length=1, max_length=256)
     kind: str = Field(min_length=1, max_length=64)
     principal: str = Field(min_length=1, max_length=256)
-    secret_locator: str = Field(default="", max_length=1024)
+    secret: str = Field(default="", max_length=1024, description="The credential secret value (password, token, key)")
     source_name: str = Field(default="", max_length=128)
     status: str = Field(default="discovered", min_length=1, max_length=64)
     notes: str = Field(default="", max_length=4096)
@@ -412,7 +412,7 @@ async def create_credential(engagement_key: str, request: CredentialRecordReques
         credential_key=request.credential_key,
         kind=request.kind,
         principal=request.principal,
-        secret_locator=request.secret_locator,
+        secret=request.secret,
         source_name=request.source_name,
         status_value=request.status,
         notes=request.notes,
