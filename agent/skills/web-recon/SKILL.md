@@ -12,7 +12,10 @@ origin: AI Threat Hunting
 
 ## Tools
 
-`curl`, `whatweb`, `openssl`, `grep`/`sed`/`jq`
+- `httpx` — fast HTTP probing, tech detection, status codes, titles (primary for bulk host verification)
+- `whatweb` — deep web technology fingerprinting
+- `wafw00f` — WAF identification (identify before attempting bypass)
+- `curl`, `openssl`, `grep`/`sed`/`jq` — manual inspection and verification
 
 ## Methodology
 
@@ -34,6 +37,14 @@ expose reverse proxies, app servers, framework routing, and auth enforcement bou
 whatweb -a 3 https://TARGET
 curl -sL https://TARGET | grep -iE "generator|powered.by|built.with"
 curl -sL https://TARGET | grep -i '<meta' | head -20
+```
+
+```bash
+# httpx bulk probing — confirms live hosts and captures tech stack in one pass
+echo "https://TARGET" | httpx -silent -status-code -title -tech-detect -server -content-length
+
+# WAF detection — identify the WAF before attempting bypass payloads
+wafw00f https://TARGET
 ```
 
 ### 3. CMS Detection

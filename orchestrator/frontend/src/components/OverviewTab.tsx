@@ -1,6 +1,7 @@
 import type {
   AssessmentAttackChain,
   AssessmentAttackChainDetail,
+  AssessmentAttackChainLink,
   AssessmentFinding,
   AssessmentFindingDetail,
   AssessmentSummary,
@@ -15,6 +16,7 @@ type OverviewTabProps = {
   assessmentSummary: AssessmentSummary | null;
   findings: (AssessmentFindingDetail | AssessmentFinding)[];
   chains: (AssessmentAttackChainDetail | AssessmentAttackChain)[];
+  chainLinks: AssessmentAttackChainLink[];
   currentPhase: string;
 };
 
@@ -26,11 +28,11 @@ function sortFindings(findings: (AssessmentFindingDetail | AssessmentFinding)[])
   });
 }
 
-export function OverviewTab({ events, assessmentSummary, findings, chains, currentPhase }: OverviewTabProps) {
+export function OverviewTab({ events, assessmentSummary, findings, chains, chainLinks, currentPhase }: OverviewTabProps) {
   const s = assessmentSummary;
   const sortedFindings = sortFindings(findings);
   const latestEvents = events
-    .filter((e) => e.event_type.startsWith("task."))
+    .filter((e) => e.event_type !== "artifact.updated")
     .slice(-5);
 
   return (
@@ -90,16 +92,30 @@ export function OverviewTab({ events, assessmentSummary, findings, chains, curre
         <article className="panel">
           <p className="eyebrow">Attack chains</p>
           <div style={{ display: "grid", gap: "12px", marginTop: "8px" }}>
-            {chains.map((c) => (
-              <div key={c.chain_key} style={{ display: "grid", gap: "4px" }}>
-                <div style={{ display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" }}>
-                  <span className={`badge severity-${c.severity}`}>{c.severity}</span>
-                  <strong>{c.title}</strong>
-                  <span className="meta-text">{c.status}</span>
+            {chains.map((c) => {
+              const linkedFindings = chainLinks
+                .filter((link) => link.chain_key === c.chain_key && link.entity_kind === "finding")
+                .map((link) => {
+                  const match = findings.find((f) =>
+                    (link.entity_ref && f.slug === link.entity_ref) ||
+                    (link.entity_id != null && "id" in f && f.id === link.entity_id)
+                  );
+                  return match ? match.title : (link.entity_ref || `finding #${link.entity_id}`);
+                });
+              return (
+                <div key={c.chain_key} style={{ display: "grid", gap: "4px" }}>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" }}>
+                    <span className={`badge severity-${c.severity}`}>{c.severity}</span>
+                    <strong>{c.title}</strong>
+                    <span className="meta-text">{c.status}</span>
+                  </div>
+                  {c.narrative && <p className="meta-text">{c.narrative}</p>}
+                  {linkedFindings.length > 0 && (
+                    <p className="meta-text">Findings: {linkedFindings.join(", ")}</p>
+                  )}
                 </div>
-                {c.narrative && <p className="meta-text">{c.narrative}</p>}
-              </div>
-            ))}
+              );
+            })}
             {chains.length === 0 && <p className="meta-text">No attack chains linked yet.</p>}
           </div>
         </article>

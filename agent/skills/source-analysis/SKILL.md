@@ -15,7 +15,9 @@ origin: AI Threat Hunting
 
 ## Tools
 
-`curl`, `grep`/`sed`/`awk`, `jq`
+- `LinkFinder` — automated endpoint extraction from JavaScript files
+- `SecretFinder` — scan JS files for API keys, tokens, and secrets
+- `curl`, `grep`/`sed`/`awk`, `jq` — manual extraction and verification
 
 ## Division of Labor
 
@@ -42,6 +44,30 @@ HTML comments, meta tags (canonical, CSRF, API base), inline config (`window.__C
 ```bash
 curl -sL <js-url> | grep -oE '["'"'"'](/[a-zA-Z0-9_/\-\.]+)["'"'"']' | sort -u
 ```
+
+#### Automated JS Endpoint Extraction
+
+```bash
+# LinkFinder — extract endpoints from JS (far more thorough than manual grep on minified code)
+python3 linkfinder.py -i https://TARGET/static/js/app.js -o cli
+
+# Batch all JS files discovered in step 1
+for js_url in $(cat /engagement/scans/js_files.txt); do
+  python3 linkfinder.py -i "$js_url" -o cli
+done | sort -u > /engagement/scans/js_endpoints.txt
+
+# SecretFinder — scan for API keys, tokens, credentials in JS
+python3 SecretFinder.py -i https://TARGET/static/js/app.js -o cli
+
+# Batch scan
+for js_url in $(cat /engagement/scans/js_files.txt); do
+  python3 SecretFinder.py -i "$js_url" -o cli
+done | sort -u > /engagement/scans/js_secrets.txt
+```
+
+Use LinkFinder and SecretFinder as the primary extraction pass. Fall back to manual grep
+for edge cases they miss (inline scripts, dynamically loaded chunks, non-standard patterns).
+
 - API calls: fetch(), axios, XHR, $.ajax patterns
 - SPA routes: React `path="/..."`, Vue `{ path: }`, Angular `{ path: }`
 - Secrets: api_key, token, secret, password assignments; AWS `AKIA[A-Z0-9]{16}`; JWT `eyJ...`

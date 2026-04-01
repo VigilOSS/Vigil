@@ -1,4 +1,5 @@
 # jujutsu VCS
+
 git commands will corrupt data, see ~/.codex/skills/jujutsu/SKILL.md always use jujustu before new changes.
 
 # Repo conventions
@@ -7,7 +8,6 @@ git commands will corrupt data, see ~/.codex/skills/jujutsu/SKILL.md always use 
 - `AGENTS.md` is for repo-local development workflow and verification expectations.
 - Backend work lives under `orchestrator/backend`.
 - Frontend work lives under `orchestrator/frontend`.
-- The primary runtime image is `agent/docker/runtime-full/Dockerfile`.
 
 # Operator prompt regeneration
 
@@ -24,8 +24,8 @@ These generated files are committed in git and must stay in sync:
 
 - `agent/AGENTS.md`
 - `agent/CLAUDE.md`
-- `agent/.codex/agents/operator.toml`
-- `agent/.claude/agents/operator.md`
+- `agent/.codex/agents/*`
+- `agent/.claude/agents/*`
 
 Validate prompt wording and renderer drift with:
 
@@ -72,3 +72,37 @@ Build the primary runtime image from the repo root:
 ```bash
 docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .
 ```
+
+# Making edits to the codebase? READ THIS
+
+## Architecture Overview
+
+### File Hierarchy (under `agent/`)
+
+**Orchestration layer:**
+
+- `operator-core.md` — THE brain. Phase flow, core loop, dispatch rules, credential auto-use, finding format. 
+CLAUDE.md and AGENTS.md are generated wrappers of this filesh`
+- `shared-constraints.md` — Rules every subagent loads FIRST
+- `rules/hunting.md` — Always-active hunting rules
+- `rules/reporting.md` — Always-active reporting rules
+
+**Skill index**:
+
+- `SKILL.md` — Routing table. Every agent loads this to find the right skill via "Use when:" line. Each entry has "Paired references:" pointing to the reference cheatsheets.
+
+**References library (under `references/`):**
+
+- `INDEX.md` — Library index. Points to all reference files organized by category.
+
+
+### Dispatch & Skill Loading Chain
+
+operator-core (phase logic)
+→ dispatches agent (e.g., vulnerability-analyst)
+    → agent loads shared-constraints.md FIRST
+    → agent loads SKILL.md (routing table)
+    → matches "Use when:" line to find correct skill
+    → loads skill (e.g., skills/xss-testing/SKILL.md)
+    → skill lists tools + methodology steps
+    → skill's "Extended Resources" points to reference cheatsheets (e.g., references/payloads/xss-payloads.md)

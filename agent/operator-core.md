@@ -27,7 +27,8 @@ After engagement initialization completes, repeat until all attack paths exhaust
    - **Phase 5 (Report):** `report-writer` → `agent/skills/report-generation/SKILL.md`
    If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, agents, rules, skill index, skills, references, and scripts before claiming no suitable skill exists.
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Do not use host Bash, `docker run`, `docker exec`, repo-local execution helpers, or ad hoc wrappers for in-scope target work. If Kali MCP has a runtime or reachability gap, stop target-facing work there and debug the runtime from the host without sending HTTP, DNS, or raw TCP traffic from the host to scoped targets.
-7. **DISPATCH** — ALWAYS dispatch to subagent. Do NOT test directly with host-side commands. Your job is orchestration: phase control, specialist selection, state review, and synchronized artifact handling.
+7. **DISPATCH** — ALWAYS dispatch to subagent for analysis, testing, validation, and exploitation work. Do NOT test directly with host-side commands. Your job is orchestration: phase control, specialist selection, state review, and synchronized artifact handling.
+   **Operator-executed exceptions** (via Kali MCP, not host-side): Collect-phase pipeline commands (Katana crawl, endpoint ingestion) and quick credential validation (single login test to confirm working/not-working). These are mechanical pipeline steps, not analysis. Dispatch a specialist once the pipeline step produces actionable state.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/record_finding.sh` or the assessment API so findings.md remains a synchronized export, not the authoritative store. `append_finding.sh` now rejects markdown and points to `schemas/finding-record.schema.json`.
    **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. They go to intel.md only. Dispatch exploit-developer to validate before recording. This reconciles "record immediately" with "no theoretical findings."
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/append_surface.sh` so the backend and readable export stay in sync. Do not call `scripts/lib/surfaces.sh` directly and do not patch `surfaces.jsonl` by hand during normal operation. After each surface update batch, wait for the command to finish and then verify `surfaces.jsonl` with a fresh read. If the first verification read does not reflect the expected change, re-read once before assuming failure. Only treat it as a real helper/backend problem if the command completed successfully and a second fresh read still disagrees; in that case, stop and report the sync issue instead of editing the artifact manually.
@@ -55,64 +56,32 @@ Before initializing any engagement, ensure the shared Kali MCP runtime is runnin
 
 This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install.
 
-## Listener Management
+## Listener & Callback Management
 
-Listeners (pwncat-vl, ngrok, chisel) are OPERATOR-CONTROLLED. Agents must never start them.
+Listeners (pwncat-vl, frp, chisel) and OOB callback servers are OPERATOR-CONTROLLED.
+Agents must never start them.
 
-**Why:** The Kali runtime is shared across engagements. An agent starting a listener on port 4444
-could conflict with another engagement's listener. ngrok tunnels are account-scoped — starting a
-second tunnel tears down the first. Only the operator knows the current port/tunnel allocation.
+Setup instructions and commands: `agent/references/offensive-tactics/shell-handling.md`
 
-**Workflow:**
-1. Agent output includes `# MANUAL:` playbook steps with exact listener commands
-2. Operator starts the listener (pwncat-vl in a tmux session inside the runtime)
-3. Operator optionally exposes the listener externally (ngrok or chisel)
-4. Operator resumes the agent (via SendMessage or re-dispatch)
-5. Agent verifies the shell by tailing the log file via Kali MCP
+### How agents interact with listeners
 
-**Quick reference:**
-```bash
-# Start pwncat-vl in a tmux session
-docker exec -it security-research tmux new-session -d -s shell-4444 \
-  'pwncat -l -p 4444 2>&1 | tee /data/shell-4444.log'
+**When an agent needs a reverse shell listener:**
+1. Agent outputs `# MANUAL:` playbook steps referencing `shell-handling.md`
+2. Operator checks if a listener is already running: `docker exec security-research tmux list-sessions`
+3. If not running → operator sets it up per shell-handling.md, records address in `$DIR/.listener_url`
+4. Operator resumes the agent. Agent reads `LISTENER_HOST`/`LISTENER_PORT` from `$DIR/.listener_url`.
+5. If the operator cannot provision the listener now, record a blocked technique:
+   `./scripts/post_assessment_record.sh blocked-techniques '{"technique":"reverse_shell","reason":"listener not provisioned","finding_slug":"FINDING-EX-NNN"}'`
 
-# Expose via ngrok
-docker exec -e NGROK_AUTHTOKEN="$NGROK_AUTHTOKEN" \
-  -it security-research ngrok tcp 4444
+**When an agent needs OOB (blind vuln detection):**
+1. Agent checks whether `$DIR/.oob_url` exists in its dispatch context
+2. If available → use the callback URL in blind payloads (SSRF, XXE, XSS, SQLi)
+3. If not available → fall back to time-based detection (sleep payloads) and note in output that OOB was unavailable
+4. If time-based also fails and OOB would have been decisive → stop and ask the operator to provision an OOB server per shell-handling.md § OOB Callback Servers
 
-# List active tmux sessions
-docker exec security-research tmux list-sessions
-
-# Check shell log
-docker exec security-research tail -20 /data/shell-4444.log
-```
-
-Full reference: `agent/references/offensive-tactics/shell-handling.md`
-
-## Engagement Initialization
-
-Initialize a run with:
-
-```bash
-./scripts/init_engagement.sh <target-url-or-host> \
-  [--scope-mode host_only|explicit_hosts|wildcard] \
-  [--scope-hosts host1,host2,...] \
-  [--out-of-scope-hosts host1,host2,...] \
-  [--auth-mode none|auth_json|manual|proxy_capture] \
-  [--exploit-policy pause|full_send|selected]
-```
-
-This creates the engagement directory, readable artifacts, session workspace, explicit scope metadata, an `auth.json` scaffold, engagement-local `AGENTS.md`/`CLAUDE.md` wrappers that point back to the workspace-root prompts and skills, the transient local work buffer used for batching worker tasks, and an `engagement.json` manifest.
-
-Rules:
-- Do not delegate initialization to a general subagent.
-- Do not initialize an engagement until the shared Kali MCP runtime is up and attached.
-- Before initialization completes, do not read `scope.json`, `log.md`, `findings.md`, `intel.md`, `auth.json`, or `cases.db`.
-- Use `./scripts/init_engagement.sh` directly. Do not rewrite initialization in `python`, `python3`, `node`, or ad hoc shell blocks.
-- The core loop starts only after initialization completes successfully.
-- Scope defaults are conservative: host-only, no auth, `exploit_policy=pause`.
-- Discovered subdomains are not automatically in scope unless the explicit scope mode allows them.
-- `auth_mode` is implemented through `auth.json`, not as dead scope metadata. The workflow uses auth only when `auth.json` is populated and marked for request use.
+**Files agents read (never write):**
+- `$DIR/.listener_url` — tunnel address (`host:port`) for reverse shell payloads
+- `$DIR/.oob_url` — callback URL for blind vulnerability detection
 
 ## Subagent Dispatch
 
@@ -175,22 +144,33 @@ DB="$DIR/cases.db"
       Use `-tlsv` to skip TLS verification for targets with expired, self-signed, or mismatched certificates. Without it, Katana will bail on invalid certs and produce minimal output.
       If `auth.json` has `use_for_requests` set to `true` and `state` set to `available`, pass cookies/headers: `katana -u URL -H "Cookie: ..." -H "Authorization: ..." ...`
    c. Ingest Katana output into backend: `cat /tmp/katana_output.txt | ./scripts/recon_ingest.sh "$DIR/cases.db" katana`
-   d. Inspect work-buffer stats: `./scripts/dispatcher.sh "$DIR/cases.db" stats`
-   e. Inspect coverage gaps: `./scripts/fetch_assessment_record.sh summary`
+   d. **Historical URL enrichment** via Kali MCP — run `gau` to pull known URLs from Wayback Machine, AlienVault OTX, Common Crawl, and URLScan. This catches parameterized endpoints and old routes that Katana misses because the live sitemap no longer links to them:
+      `gau TARGET_DOMAIN --threads 5 --blacklist png,jpg,gif,css,woff,svg --o /tmp/gau_output.txt`
+      Ingest: `cat /tmp/gau_output.txt | ./scripts/recon_ingest.sh "$DIR/cases.db" gau`
+   e. If Phase 1 discovered OpenAPI/Swagger specs, ingest them:
+      `./scripts/spec_ingest.sh "$DIR/cases.db" "$DIR/scans/openapi.json"`
+      This creates `api-spec` work items and durable request/service coverage candidates. source-analyzer may have saved specs to `scans/` during Phase 1; check before skipping.
+   f. Inspect work-buffer stats: `./scripts/dispatcher.sh "$DIR/cases.db" stats`
+   g. Inspect coverage gaps: `./scripts/fetch_assessment_record.sh summary`
    Update scope.json phase to `consume-test` when ingestion is complete.
 3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
-   a. Reset stale work items: `./scripts/dispatcher.sh "$DB" reset-stale 10`
-   b. Check stats: `./scripts/dispatcher.sh "$DB" stats`
-   c. Fetch and route by type — dispatch independent types in parallel:
+   a. **Nuclei sweep** (once, before the work-buffer loop) — run nuclei via Kali MCP against all live targets for a broad CVE and misconfiguration check:
+      `nuclei -l /engagement/scans/live_targets.txt -severity critical,high -tags cve,misconfig,exposure -rate-limit 100 -jsonl -o /engagement/scans/nuclei_sweep.jsonl`
+      Triage results: critical/high hits become prioritized work-buffer entries or direct findings (after manual validation). Medium/low hits are intelligence. See `agent/skills/nuclei-scanning/SKILL.md` for triage rules.
+   b. Reset stale work items: `./scripts/dispatcher.sh "$DB" reset-stale 10`
+   c. Check stats: `./scripts/dispatcher.sh "$DB" stats`
+   d. Fetch and route by type — dispatch independent types in parallel:
       - `api`, `api-spec`, `form`, `upload`, `graphql`, `websocket` → vulnerability-analyst (load matching vuln-class skill from `agent/SKILL.md`)
       - `page`, `javascript`, `stylesheet`, `data` → source-analyzer (load `source-analysis` skill)
       `./scripts/dispatcher.sh "$DB" fetch <type> 10 <agent-name>`
       Pass the raw fetched JSON rows into the dispatch context. They carry canonical ids such as `request_variant_id`, `service_id`, and sometimes `coverage_item_id`, which subagents need for durable probe and coverage writes.
-   d. On subagent return: `./scripts/dispatcher.sh "$DB" done "id1,id2,..."`
+      If `$DIR/.oob_url` exists, include the callback URL in dispatch context for agents doing blind testing.
+      If `$DIR/.listener_url` exists, include the tunnel address for agents that need a callback target.
+   e. On subagent return: `./scripts/dispatcher.sh "$DB" done "id1,id2,..."`
       Mark a batch done only after the subagent has written durable state for any findings, significant probe runs, and coverage updates its work satisfied. Verify the relevant coverage item moved out of `pending`, `queued`, or `deferred`. If the agent skipped durable recording, send it back to write the state instead of silently duplicating it from the operator. Record surfaces via `append_surface.sh`. Re-ingest new endpoints via `recon_ingest.sh`.
-   e. If vulnerability-analyst signals FUZZER_NEEDED for a parameter or directory, dispatch fuzzer with `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md` and a bounded objective (target URL, parameter name, max payloads).
-   f. Repeat a-e until pending=0 for all consumable types.
-   g. Before leaving: `./scripts/check_surface_coverage.sh "$DIR"`. If it fails, resolve each remaining surface as `covered`, `deferred`, or `not_applicable`. High-risk surfaces (`account_recovery`, `dynamic_render`, `object_reference`, `privileged_write`) may NOT remain `deferred`.
+   f. If vulnerability-analyst signals FUZZER_NEEDED for a parameter or directory, dispatch fuzzer with `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md` and a bounded objective (target URL, parameter name, max payloads).
+   g. Repeat b-f until pending=0 for all consumable types.
+   h. Before leaving: `./scripts/check_surface_coverage.sh "$DIR"`. If it fails, resolve each remaining surface as `covered`, `deferred`, or `not_applicable`. High-risk surfaces (`account_recovery`, `dynamic_render`, `object_reference`, `privileged_write`) may NOT remain `deferred`.
 4. **EXPLOIT** →
    a. Dispatch osint-analyst with `agent/skills/osint-recon/SKILL.md` — intelligence gathering is always permitted regardless of `exploit_policy`. Feed the tech stack, domains, and people data from intel.md.
    b. Respect `exploit_policy` from `scope.json` for exploit-developer dispatch:
@@ -213,12 +193,14 @@ jq '.current_phase = "<next>"' \
 
 ## Credential Auto-Use
 
-When ANY agent discovers credentials, the operator coordinates these steps (do not perform target-facing work directly — dispatch to subagents):
+When ANY agent discovers credentials, the operator coordinates these steps:
 
-1. **Operator writes to auth.json** — populate cookies, headers, or token fields. Set `state` to `available` and `use_for_requests` to `true`. This is local file work, not target-facing.
-2. **Dispatch exploit-developer to validate credentials** — the agent logs in via Kali MCP, confirms what access the credentials grant, and records findings with `auth_context: authenticated`. If login fails, update auth.json `state` to `invalid` and continue anonymously.
+1. **Operator tests credentials via Kali MCP** — a quick login check is mechanical pipeline work, not analysis. Run a single login request (curl POST, HTTP basic auth, etc.) via the Kali MCP command-execution tool to confirm working or not-working.
+   - If login **fails** → record result in log.md, continue anonymously. Do not dispatch a specialist for a failed login.
+   - If login **succeeds** → continue to step 2.
+2. **Operator writes to auth.json** — populate cookies, headers, or token fields from the successful login response. Set `state` to `available` and `use_for_requests` to `true`. This is local file work.
 3. **Operator re-runs Collect** — re-invoke Katana via Kali MCP with auth headers to discover authenticated-only endpoints. Re-ingest through `recon_ingest.sh` with the new auth context. This is the POST-AUTH RE-COLLECTION step.
-4. **Dispatch exploit-developer again** — test authenticated surfaces discovered in step 3.
+4. **Dispatch exploit-developer** — to test authenticated surfaces discovered in step 3. The agent maps what authenticated access grants and tests for privilege escalation, IDOR, and auth-boundary issues across the newly discovered endpoints. This is the analysis work that requires a specialist.
 
 Auth handling rules:
 - `auth.json` is the live auth contract. It may contain cookies, headers, `auth_context`, `use_for_requests`, and optional `expires_at`.
@@ -337,10 +319,9 @@ Phases: [x] Recon  [x] Collect  [>] Test  [ ] Exploit  [ ] Report
 ```
 - Every output: `[operator]` prefix. Log entries chronological.
 
-## Wildcard Mode
+## Subdomain Enumeration
 
-See `agent/references/wildcard-mode.md` for subdomain enumeration, prioritization, and sliding window rules.
-Only relevant when target contains `*` or is a bare domain.
+When `scope.json` `hosts` contains `*.domain` entries, subdomain enumeration is in scope for that domain. See `agent/references/subdomain-enumeration.md` for enumeration, prioritization, and sliding window rules.
 
 ## Handoff Reference
 

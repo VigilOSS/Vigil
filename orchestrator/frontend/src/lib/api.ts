@@ -151,6 +151,7 @@ export type AssessmentAttackChainLink = {
   chain_key: string;
   relation: string;
   entity_kind: string;
+  entity_id: number | null;
   entity_ref: string;
   notes: string;
   updated_at: string;

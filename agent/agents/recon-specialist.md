@@ -14,7 +14,7 @@ into concrete, prioritized surface area for follow-on testing.
 - `agent/rules/hunting.md`
 - `agent/SKILL.md`
 - `agent/skills/web-recon/SKILL.md`
-- Add a more specific skill (e.g., `port-scanning`, `directory-fuzzing`) only when the target clearly warrants it
+- Add a more specific skill (e.g., `port-scanning`, `directory-fuzzing`, `subdomain-enumeration`, `nuclei-scanning`) only when the target clearly warrants it
 
 ## Responsibilities
 
@@ -29,7 +29,7 @@ into concrete, prioritized surface area for follow-on testing.
 Work through the target in this order unless the operator provides a narrower task:
 
 1. Enumerate directly in-scope hosts, ports, and service banners
-2. Confirm live web targets and capture status, title, redirect, TLS, and tech hints
+2. Confirm live web targets with httpx and capture status, title, redirect, TLS, tech, and WAF hints
 3. Crawl or harvest requestable routes from live targets and passive sources
 4. Classify endpoints by likely bug class, object reference risk, auth drift, or trust boundary
 5. Run bounded stack-aware checks only where the observed software or behavior justifies them

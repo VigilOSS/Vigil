@@ -71,9 +71,8 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactContent | null>(null);
   const activeEngagement = engagement?.key === engagementKey ? engagement : null;
 
-  // Keep link state fetched for future use
+  // Keep state fetched for future use
   void assessmentFindingLinks;
-  void assessmentChainLinks;
   void assessmentSurfaces;
   void assessmentProbes;
 
@@ -293,6 +292,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
               assessmentSummary={displaySummary}
               findings={displayFindings}
               chains={chains}
+              chainLinks={assessmentChainLinks}
               currentPhase={activeEngagement.current_phase}
             />
           )}
@@ -302,6 +302,8 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
               findings={displayFindings}
               fallbackFindings={displaySummary?.top_findings ?? []}
               summary={displaySummary}
+              chains={assessmentChains}
+              chainLinks={assessmentChainLinks}
             />
           )}
 

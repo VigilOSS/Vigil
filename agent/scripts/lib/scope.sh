@@ -2,27 +2,16 @@
 
 scope_entries() {
     local eng_dir="${1:?engagement dir required}"
+    # Read the "hosts" array (new format), falling back to scope_hosts/scope (old format)
     jq -r '
         (
-            [.hostname]
+            (.hosts // [])
             + (.scope_hosts // [])
             + (.scope // [])
-            + (
-                if (.scope_mode // "") == "wildcard" and (.hostname // "") != ""
-                then ["*." + .hostname]
-                else []
-                end
-            )
         )
         | map(select(type == "string" and . != ""))
         | unique[]
     ' \
-        "$eng_dir/scope.json" 2>/dev/null || true
-}
-
-out_of_scope_entries() {
-    local eng_dir="${1:?engagement dir required}"
-    jq -r '(.out_of_scope_hosts // []) | map(select(type == "string" and . != "")) | unique[]' \
         "$eng_dir/scope.json" 2>/dev/null || true
 }
 
@@ -54,29 +43,6 @@ host_in_scope() {
         fi
         wildcard_domain="${allowed#*.}"
         if [[ "$allowed" == "*."* ]]; then
-            case "$host" in
-                *".$wildcard_domain"|"$wildcard_domain") return 0 ;;
-            esac
-        fi
-    done
-
-    return 1
-}
-
-host_explicitly_out_of_scope() {
-    local host="${1:?host required}"
-    shift
-    local blocked wildcard_domain
-    host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
-
-    for blocked in "$@"; do
-        [[ -n "$blocked" ]] || continue
-        blocked="$(printf '%s' "$blocked" | tr '[:upper:]' '[:lower:]')"
-        if [[ "$host" == "$blocked" ]]; then
-            return 0
-        fi
-        wildcard_domain="${blocked#*.}"
-        if [[ "$blocked" == "*."* ]]; then
             case "$host" in
                 *".$wildcard_domain"|"$wildcard_domain") return 0 ;;
             esac
