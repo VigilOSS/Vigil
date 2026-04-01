@@ -154,17 +154,10 @@ class CaseCollector:
         try:
             with open(scope_path, "r") as fh:
                 data = json.load(fh)
-            if isinstance(data, list):
-                self.scope = data
-            elif isinstance(data, dict):
-                raw_scope = []
-                # New format: "hosts" array is the complete scope
-                raw_scope.extend(data.get("hosts", []) or [])
-                # Backward compat: old format used scope_hosts/scope
-                raw_scope.extend(data.get("scope_hosts", []) or [])
-                raw_scope.extend(data.get("scope", []) or [])
+            if isinstance(data, dict):
+                raw_hosts = data.get("hosts", []) or []
                 self.scope = list(dict.fromkeys(
-                    item for item in raw_scope if isinstance(item, str) and item
+                    item for item in raw_hosts if isinstance(item, str) and item
                 ))
             else:
                 self.scope = []

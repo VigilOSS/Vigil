@@ -191,9 +191,9 @@ Standard engagement tunnels:
 | Tunnel | Purpose | Public endpoint |
 |--------|---------|-----------------|
 | `oob-rev` | Reverse shell listener (pwncat) | `server.com:4444` |
-| `oob-https` | OOB HTTPS callbacks (interactsh) | `server.com:8443` |
 | `oob-dns` | OOB DNS callbacks (interactsh) | `server.com:53` |
-| `oob-http` | OOB HTTP callbacks | `https://researcher.example` |
+| `oob` | OOB HTTP/HTTPS callbacks (Caddy TLS) | `https://researcher.example` |
+| `relay` | Generic TCP relay (C2, proxy) | `server.com:8080` |
 
 ### OOB callback detection (interactsh)
 
