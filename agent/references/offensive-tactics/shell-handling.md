@@ -86,7 +86,7 @@ To expose it to remote targets, set up an frp tunnel.
 
 The `oob-rev` proxy in `/data/frpc.toml` handles this — start frpc and record the address:
 ```bash
-echo "researcher.example:4444" > "$DIR/.listener_url"
+echo "researcher.example:8443" > "$DIR/.listener_url"
 ```
 
 Agents read `LISTENER_HOST` and `LISTENER_PORT` from `$DIR/.listener_url` (or from dispatch context)
