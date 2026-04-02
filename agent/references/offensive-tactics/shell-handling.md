@@ -84,11 +84,9 @@ To expose it to remote targets, set up an frp tunnel.
 
 **Full tunnel setup commands:** `agent/references/offensive-tactics/frp-tunneling.md`
 
-Quick reference — the standard reverse shell tunnel:
+The `oob-rev` proxy in `/data/frpc.toml` handles this — start frpc and record the address:
 ```bash
-# See frp-tunneling.md § "Reverse shell listener (TCP, port 4444)" for the full command
-# After starting the tunnel, record the address:
-echo "server.com:4444" > "$DIR/.listener_url"
+echo "oob-relay.example.com:8443" > "$DIR/.listener_url"
 ```
 
 Agents read `LISTENER_HOST` and `LISTENER_PORT` from `$DIR/.listener_url` (or from dispatch context)
@@ -137,7 +135,7 @@ Agents **MUST NOT:**
 
 Agents **CAN:**
 - Read listener log files (`tail /data/shell-*.log`) via Kali MCP
-- Read OOB callback logs (`tail /data/oob-*.log`) via Kali MCP to check for hits
+- Read OOB callback logs (`tail /data/oob-server.log`) via Kali MCP to check for hits
 - Provide reverse shell payloads for the operator to deploy
 - Verify that a shell connected by checking log output
 - Send commands to an established shell via `tmux send-keys` (if operator authorizes)

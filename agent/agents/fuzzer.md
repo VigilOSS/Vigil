@@ -49,7 +49,6 @@ When fuzzing blind injection surfaces with OOB payloads, check the callback logs
 after each batch:
 
 ```bash
-tail -50 /data/oob-client.log
 tail -50 /data/oob-server.log
 ```
 

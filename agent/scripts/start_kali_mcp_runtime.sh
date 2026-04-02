@@ -53,7 +53,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if ! docker inspect --type image "$IMAGE" >/dev/null 2>&1; then
+if ! docker inspect --type image "$IMAGE" >/dev/null 2>&1 \
+   && ! docker image inspect "$IMAGE" >/dev/null 2>&1 \
+   && [ -z "$(docker images -q "$IMAGE" 2>/dev/null)" ]; then
   echo "[runtime] Missing image: $IMAGE" >&2
   echo "[runtime] Build it first, for example:" >&2
   echo "  docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile ." >&2

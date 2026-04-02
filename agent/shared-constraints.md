@@ -55,8 +55,8 @@ When exploitation requires a listener, tunnel, or OOB callback:
 
 Agents CAN read log files via Kali MCP to check for activity:
 - `/data/shell-*.log` — shell session I/O (verify shell connected)
-- `/data/oob-client.log` or `/data/oob-server.log` — interactsh callback hits (confirm blind vulns)
-- `/data/frp-*.log` — tunnel connection status
+- `/data/oob-server.log` — interactsh callback hits (confirm blind vulns)
+- `/data/frpc.log` — tunnel connection status
 
 Agents CANNOT start, stop, or restart listener, tunnel, or OOB processes.
 
@@ -80,7 +80,7 @@ well enough or when you need payloads, OWASP checklists, or tool guidance.
 When a skill's "Extended Resources" section lists reference files, those are required reading
 for that test class — not optional supplemental material.
 
-Only improvise after confirming the existing skill and reference set is genuinely insufficient.
+Only improvise after confirming the e erence set is genuinely insufficient.
 
 ---
 
@@ -188,6 +188,7 @@ These are the most commonly violated rules — internalize them before you start
 - **Kill weak leads fast.** Theory without a real request, more than two fragile preconditions stacked, or "might be chainable" without a proved chain → kill it.
 - **Severity follows proved impact.** Do not let recon hints, CVEs, or intuition inflate severity beyond what the evidence shows.
 - **No speculative language.** Write `An attacker can [exact action] by [exact method]`, never `could potentially`, `may allow`, or `might be possible`.
+- **No filler or padding.** Do not use `Furthermore`, `Additionally`, `It should be noted`, or similar filler transitions. Do not restate titles in descriptions. Do not define standard vulnerability classes to a security audience. Every sentence must contribute new information.
 - **Sibling rule.** When one route or method is vulnerable, inspect its siblings before moving on.
 - **Credentials require proof.** Leaked tokens or keys only matter when you show what they actually grant.
 - **Validate before writing.** Do not draft report content before the lead is reproducible and worth a human reader's time.

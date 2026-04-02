@@ -80,7 +80,7 @@ RUN ln -sf /usr/share/wordlists /wordlists && \
 
 COPY docker/kali-mcp-runtime/mcp-server-wrapper.sh /usr/bin/mcp-server
 COPY docker/kali-mcp-runtime/patched_kali_server.py /opt/mcp-tools/patched_kali_server.py
-RUN chmod +x /usr/bin/mcp-server && mkdir -p /opt/mcp-tools
+RUN chmod +x /usr/bin/mcp-server && mkdir -p /opt/mcp-tools /data
 
 WORKDIR /engagement
 ENTRYPOINT ["/usr/bin/tini","--"]
