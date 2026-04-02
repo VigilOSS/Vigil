@@ -32,17 +32,21 @@ The public endpoint is `researcher.example:<port>`.
 
 ## Prerequisites (one-time setup)
 
-### DNS delegation for OOB callbacks
+### DNS record for OOB callbacks
 
-Add an NS record in your DNS provider for `researcher.example`:
+One NS record is required in your DNS provider for `researcher.example`:
 
-| Type | Name | Value |
-|------|------|-------|
-| NS | `oob.rp` | `researcher.example` |
+| Type | Name | Value | Purpose |
+|------|------|-------|---------|
+| **NS** | `oob.rp` | `researcher.example` | Delegates all of `*.researcher.example` (including the apex) to your frp server so both DNS and HTTP callbacks reach interactsh via the tunnels |
 
-This delegates `*.researcher.example` to your frp server so DNS callbacks from targets
-reach interactsh-server via the UDP 53 tunnel. Without this, DNS queries are answered by the
-normal authoritative DNS (wildcard A record) and never reach interactsh.
+The wildcard A record on `*.researcher.example` already routes HTTP traffic to the frp server
+through Caddy. The NS delegation routes DNS queries to interactsh's DNS listener (UDP 53 tunnel).
+interactsh-server handles A-record responses for its own domain via the `-ip` flag (set to the
+frp server's public IP) — see the startup command below.
+
+**Do NOT add an A record at `researcher.example`.** Route53 treats the NS record as a
+delegation zone cut — an A record at the same name is shadowed and never returned to resolvers.
 
 ### AWS Security Group
 
@@ -70,8 +74,13 @@ aws ec2 authorize-security-group-ingress --profile vigiloss --region us-east-2 \
 A single config file defines all tunnels. Write it to `/data/frpc.toml` inside the Kali runtime
 (persists across restarts via the volume mount).
 
+interactsh binds to the container's bridge IP, not loopback. The config must use that IP
+for `localIP` so frpc can reach the interactsh listeners. The snippet below auto-detects it.
+
 ```bash
-docker exec security-research bash -c 'cat > /data/frpc.toml << "FRPEOF"
+docker exec security-research bash -c '
+CONTAINER_IP=$(hostname -i | awk "{print \$1}")
+cat > /data/frpc.toml << FRPEOF
 serverAddr = "researcher.example"
 serverPort = 7000
 auth.token = "<TOKEN>"
@@ -81,7 +90,7 @@ auth.token = "<TOKEN>"
 [[proxies]]
 name = "oob-dns"
 type = "udp"
-localIP = "127.0.0.1"
+localIP = "${CONTAINER_IP}"
 localPort = 53
 remotePort = 53
 
@@ -89,7 +98,7 @@ remotePort = 53
 [[proxies]]
 name = "oob"
 type = "http"
-localIP = "127.0.0.1"
+localIP = "${CONTAINER_IP}"
 localPort = 80
 subdomain = "oob"
 
@@ -97,13 +106,16 @@ subdomain = "oob"
 [[proxies]]
 name = "oob-rev"
 type = "tcp"
-localIP = "127.0.0.1"
+localIP = "${CONTAINER_IP}"
 localPort = 4444
 remotePort = 8443
-FRPEOF'
+FRPEOF
+echo "[frpc] localIP set to ${CONTAINER_IP}"
+'
 ```
 
-Add more proxies as needed:
+Add more proxies as needed (use `${CONTAINER_IP}` for services inside the container,
+`127.0.0.1` only for services bound to loopback):
 ```toml
 # Additional TCP tunnel (example: SOCKS relay on 1080)
 [[proxies]]
@@ -183,11 +195,19 @@ cloud metadata tokens, and credentials — sending those to third-party infrastr
 
 ### Starting interactsh-server
 
-Use `-skip-acme` — Caddy handles TLS for the HTTP tunnel. interactsh does not need its own certs.
+Flags:
+- `-skip-acme` — Caddy handles TLS. interactsh does not need its own certs.
+- `-v -debug` — without these, interactions are stored internally but never written to stdout/log.
+- `-listen-ip 0.0.0.0` — binds all interfaces so frpc can reach it on the container bridge IP.
+- `-ip <SERVER_IP>` — the public IP interactsh returns in DNS A responses. Must be the frp server's
+  IP, not the local machine's IP (interactsh auto-detection gets this wrong in Docker/tunnel setups).
+
+The command resolves the server IP dynamically from `researcher.example`:
 
 ```bash
 docker exec -it security-research tmux new-session -d -s oob-server \
-  'interactsh-server -d researcher.example -skip-acme 2>&1 | tee /data/oob-server.log'
+  "SERVER_IP=\$(dig +short researcher.example A | head -1) && \
+   interactsh-server -d researcher.example -listen-ip 0.0.0.0 -ip \$SERVER_IP -skip-acme -v -debug 2>&1 | tee /data/oob-server.log"
 ```
 
 interactsh-server listens on DNS (UDP 53) and HTTP (TCP 80). The frpc tunnels expose both.
@@ -195,9 +215,10 @@ interactsh-server listens on DNS (UDP 53) and HTTP (TCP 80). The frpc tunnels ex
 ### Full startup sequence
 
 ```bash
-# 1. Start interactsh-server
+# 1. Start interactsh-server (resolve server IP dynamically)
 docker exec -it security-research tmux new-session -d -s oob-server \
-  'interactsh-server -d researcher.example -skip-acme 2>&1 | tee /data/oob-server.log'
+  "SERVER_IP=\$(dig +short researcher.example A | head -1) && \
+   interactsh-server -d researcher.example -listen-ip 0.0.0.0 -ip \$SERVER_IP -skip-acme -v -debug 2>&1 | tee /data/oob-server.log"
 
 # 2. Wait for server to initialize
 sleep 3
@@ -213,12 +234,19 @@ echo "researcher.example" > "$DIR/.oob_url"
 ### Verifying OOB works
 
 ```bash
-# From any machine, trigger a DNS callback:
+# DNS callback (from any machine):
 dig researcher.example @8.8.8.8
+
+# HTTP callback (from target or any machine):
+curl http://researcher.example/ssrf-test-$(date +%s)
+
+# DNS-only callback (subdomain-based, for blind SSRF/XXE/SQLi):
+curl http://ssrf-test-$(date +%s).researcher.example
 
 # Check if interactsh recorded it:
 docker exec security-research tail -20 /data/oob-server.log
-# Should show: "Received DNS interaction (A) from ..."
+# Should show lines like: "[INF] Received DNS interaction (A) from ..."
+# With -v -debug, every interaction is logged with full details.
 ```
 
 ---

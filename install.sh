@@ -246,8 +246,11 @@ else
 
   if [ -d "$INSTALL_DIR/agent/scripts" ]; then
     chmod +x "$INSTALL_DIR/agent/scripts/"*.sh "$INSTALL_DIR/agent/scripts/lib/"*.sh "$INSTALL_DIR/agent/scripts/hooks/"*.sh 2>/dev/null || true
+    chmod +x "$INSTALL_DIR/agent/scripts/assess.py" 2>/dev/null || true
     ok "Script permissions set"
   fi
+
+  mkdir -p "$INSTALL_DIR/.runtime-data"
 fi
 
 echo ""
@@ -260,7 +263,12 @@ elif [ "$SKIP_DOCKER_IMAGE_CHECKS" = "1" ]; then
   warn "Skipping Docker image build/verification (AI_THREAT_HUNTING_SKIP_DOCKER_IMAGE_CHECKS=1)"
 else
   cd "$INSTALL_DIR"
-  if $FORCE_REBUILD || ! docker inspect --type image security-research:latest >/dev/null 2>&1; then
+  _image_exists() {
+    docker inspect --type image "$1" >/dev/null 2>&1 \
+      || docker image inspect "$1" >/dev/null 2>&1 \
+      || [ -n "$(docker images -q "$1" 2>/dev/null)" ]
+  }
+  if $FORCE_REBUILD || ! _image_exists security-research:latest; then
     info "Building security-research runtime image..."
     if docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .; then
       ok "security-research image ready"
