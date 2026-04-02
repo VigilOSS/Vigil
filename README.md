@@ -174,78 +174,11 @@ Start and inspect it through the attached Kali MCP session when needed. Repo-loc
 
 ## Callback, Listener & Tunnel Handling
 
-Listener-driven testing comes in three forms: OOB callbacks for blind vulnerability detection,
-HTTP callbacks for simple request capture, and reverse shells for post-exploitation.
-They share frp as the tunnel layer for external exposure.
+Tunnels (frp), listeners (pwncat-vl), and OOB callback servers (interactsh) are **OPERATOR-CONTROLLED** shared infrastructure. Agents provide commands but never start them.
 
-### Tunnel exposure (frp)
-
-frp is the primary tunnel tool for exposing local services to remote targets. It is self-hosted
-(no data leaves your infrastructure) and supports multiple simultaneous tunnels. Tunnels, listeners,
-and OOB servers are **OPERATOR-CONTROLLED** — agents provide commands but never start them.
-
-Full setup reference: `agent/references/offensive-tactics/frp-tunneling.md`
-
-Standard engagement tunnels:
-
-| Tunnel | Purpose | Public endpoint |
-|--------|---------|-----------------|
-| `oob-rev` | Reverse shell listener (pwncat) | `server.com:4444` |
-| `oob-dns` | OOB DNS callbacks (interactsh) | `server.com:53` |
-| `oob` | OOB HTTP/HTTPS callbacks (Caddy TLS) | `https://researcher.example` |
-| `relay` | Generic TCP relay (C2, proxy) | `server.com:8080` |
-
-### OOB callback detection (interactsh)
-
-interactsh runs DNS and HTTP/HTTPS listeners for blind vulnerability confirmation (SSRF, XXE, XSS,
-SQLi, log4shell). The frp tunnels above expose it to remote targets. Agents check
-`/data/oob-client.log` or `/data/oob-server.log` via Kali MCP to confirm callback hits.
-
-Full setup reference: `agent/references/offensive-tactics/frp-tunneling.md` § interactsh Setup
-
-### HTTP callback capture (simple)
-
-The main image also includes a simple HTTP callback capture server for quick blind SSRF validation
-and webhook checks:
-
-```bash
-docker exec -it security-research start-callback
-```
-
-By default that starts a local listener on `0.0.0.0:8000` and prints all inbound requests, headers,
-and bodies. To expose externally, use an frp HTTP mode tunnel per `frp-tunneling.md`.
-
-### Reverse shell handling (pwncat-vl + tmux)
-
-For reverse shells, the runtime includes pwncat-vl (a maintained fork of pwncat-cs) and tmux.
-Shell listeners are OPERATOR-CONTROLLED — agents provide the commands but do not start listeners.
-
-Workflow:
-
-1. The exploit-developer agent's playbook includes `# MANUAL:` steps with the exact listener commands
-2. The operator starts the listener in a tmux session:
-   ```bash
-   docker exec -it security-research tmux new-session -d -s shell-4444 \
-     'pwncat -l -p 4444 2>&1 | tee /data/shell-4444.log'
-   ```
-3. The operator starts the frp tunnel per `frp-tunneling.md` and records the address in `$DIR/.listener_url`
-4. The operator resumes the agent, which triggers the reverse shell payload
-5. The agent verifies the shell landed by reading `/data/shell-4444.log` via Kali MCP
-
-Shell sessions run inside tmux with output logged to `/data/shell-*.log`.
-
-Full reference: `agent/references/offensive-tactics/shell-handling.md`
-
-### Why listeners are operator-controlled
-
-- The Kali runtime is shared infrastructure across engagements
-- Port conflicts between concurrent engagements are silent failures
-- The operator is the only actor who knows the current port/tunnel allocation
-- frp proxy names must be unique across all active tunnels
-
-### Metasploit (optional sidecar)
-
-Metasploit remains available as an optional sidecar for exploit modules only (gadget generation, specific CVE exploits). For shell handling, use pwncat-vl instead — MSF's memory footprint (~1.5GB+) makes it impractical as a persistent shell handler when running alongside the primary Kali runtime.
+- **Tunnel setup, OOB callbacks, interactsh, frpc config:** `agent/references/offensive-tactics/frp-tunneling.md`
+- **Shell listeners, pwncat-vl, reverse shell payloads:** `agent/references/offensive-tactics/shell-handling.md`
+- **Metasploit** remains available as an optional sidecar for exploit modules only. For shell handling, use pwncat-vl instead.
 
 ## Multi-Agent Workflow
 

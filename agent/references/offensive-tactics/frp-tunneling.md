@@ -52,7 +52,7 @@ The `cal-example-sg` security group must allow:
 |------|----------|---------|
 | 7000 | TCP | frpc → frps bind port |
 | 53 | **UDP** | OOB DNS callbacks (interactsh) |
-| 4444 | TCP | Reverse shell listener |
+| 8443 | TCP | Reverse shell listener |
 | 80 | TCP | Caddy HTTP / ACME |
 | 443 | TCP | Caddy HTTPS (HTTP mode tunnels) |
 
@@ -93,15 +93,14 @@ localIP = "127.0.0.1"
 localPort = 80
 subdomain = "oob"
 
-# As needed
-# # Reverse shell listener (TCP, port 4444)
-# [[proxies]]
-# name = "oob-rev"
-# type = "tcp"
-# localIP = "127.0.0.1"
-# localPort = 4444
-# remotePort = 4444
-# FRPEOF'
+# Reverse shell listener (TCP, port 4444)
+[[proxies]]
+name = "oob-rev"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 4444
+remotePort = 8443
+FRPEOF'
 ```
 
 Add more proxies as needed:
@@ -145,7 +144,7 @@ port is occupied on the frp server.
 
 Record addresses after tunnels are up:
 ```bash
-echo "researcher.example:4444" > "$DIR/.listener_url"
+echo "researcher.example:8443" > "$DIR/.listener_url"
 echo "researcher.example" > "$DIR/.oob_url"
 ```
 
@@ -157,7 +156,7 @@ echo "researcher.example" > "$DIR/.oob_url"
 |--------|------|-----------|-----------------|---------|
 | `oob-dns` | UDP | 53 | `researcher.example:53` | **Primary OOB** — DNS callbacks (interactsh) |
 | `oob` | HTTP | 80 | `https://researcher.example` | interactsh client polling + HTTP callbacks |
-| `oob-rev` | TCP | 4444 | `researcher.example:4444` | Reverse shell listener (pwncat) |
+| `oob-rev` | TCP | 4444 | `researcher.example:8443` | Reverse shell listener (pwncat) |
 
 ### Why DNS is the primary OOB mechanism
 
