@@ -32,7 +32,7 @@ def _database_requires_reset(db_path: Path) -> bool:
 
             engagement_scoped_tables = {"engagement_sessions", "events"}
             engagement_scoped_tables.update(
-                table_name for table_name in tables if table_name.startswith("assessment_")
+                table_name for table_name in tables if table_name.startswith("assessment_") or table_name.startswith("code_")
             )
             for table_name in engagement_scoped_tables:
                 if table_name not in tables:
@@ -496,6 +496,160 @@ def init_db() -> None:
             )
             """
         )
+        # ── Code Analysis Tables ──────────────────────────────────
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_repos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                repo_key TEXT NOT NULL,
+                name TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT '',
+                repo_path TEXT NOT NULL,
+                total_files INTEGER NOT NULL DEFAULT 0,
+                analyzable_files INTEGER NOT NULL DEFAULT 0,
+                total_loc INTEGER NOT NULL DEFAULT 0,
+                commit_hash TEXT NOT NULL DEFAULT '',
+                branch TEXT NOT NULL DEFAULT '',
+                analysis_status TEXT NOT NULL DEFAULT 'ingested',
+                threat_model_json TEXT NOT NULL DEFAULT '{}',
+                git_churn_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, repo_key),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_modules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                repo_id INTEGER NOT NULL,
+                module_key TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                trust_boundary TEXT NOT NULL DEFAULT '',
+                file_count INTEGER NOT NULL DEFAULT 0,
+                critical_file_count INTEGER NOT NULL DEFAULT 0,
+                analysis_status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, repo_id, module_key),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                repo_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT '',
+                loc INTEGER NOT NULL DEFAULT 0,
+                file_hash TEXT NOT NULL DEFAULT '',
+                classification TEXT NOT NULL DEFAULT 'unclassified',
+                role TEXT NOT NULL DEFAULT '',
+                slot_types_json TEXT NOT NULL DEFAULT '[]',
+                analysis_priority INTEGER NOT NULL DEFAULT 0,
+                analysis_status TEXT NOT NULL DEFAULT 'unclassified',
+                analysis_depth TEXT NOT NULL DEFAULT 'none',
+                skip_reason TEXT NOT NULL DEFAULT '',
+                variant_check_status TEXT NOT NULL DEFAULT 'pending',
+                module_id INTEGER,
+                git_churn_score INTEGER NOT NULL DEFAULT 0,
+                has_past_cve_fix INTEGER NOT NULL DEFAULT 0,
+                header_snippet TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, repo_id, file_path),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE,
+                FOREIGN KEY(module_id) REFERENCES code_modules(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_contexts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
+                function_name TEXT NOT NULL,
+                start_line INTEGER NOT NULL DEFAULT 0,
+                end_line INTEGER NOT NULL DEFAULT 0,
+                slot_types_json TEXT NOT NULL DEFAULT '[]',
+                call_chain_json TEXT NOT NULL DEFAULT '{}',
+                data_flow_json TEXT NOT NULL DEFAULT '{}',
+                cross_refs_json TEXT NOT NULL DEFAULT '[]',
+                guard_annotations_json TEXT NOT NULL DEFAULT '[]',
+                sink_annotations_json TEXT NOT NULL DEFAULT '[]',
+                context_text TEXT NOT NULL DEFAULT '',
+                analysis_status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, file_id, function_name, start_line),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_analysis_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                context_id INTEGER,
+                file_id INTEGER NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 50,
+                status TEXT NOT NULL DEFAULT 'pending',
+                assigned_agent TEXT NOT NULL DEFAULT '',
+                disposition TEXT NOT NULL DEFAULT '',
+                analysis_notes TEXT NOT NULL DEFAULT '',
+                expansion_request_json TEXT NOT NULL DEFAULT '{}',
+                consumed_at TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(context_id) REFERENCES code_contexts(id) ON DELETE CASCADE,
+                FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_analysis_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                queue_item_id INTEGER NOT NULL,
+                context_id INTEGER,
+                file_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL DEFAULT '',
+                function_name TEXT NOT NULL DEFAULT '',
+                hypothesis TEXT NOT NULL DEFAULT '',
+                evidence TEXT NOT NULL DEFAULT '',
+                disposition TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'medium',
+                finding_slug TEXT NOT NULL DEFAULT '',
+                cwe_id TEXT NOT NULL DEFAULT '',
+                slot_type TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE CASCADE,
+                FOREIGN KEY(context_id) REFERENCES code_contexts(id) ON DELETE SET NULL,
+                FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
+            )
+            """
+        )
+        # ── End Code Analysis Tables ──────────────────────────────
+
         # Migrate secret_locator → secret in assessment_credentials
         cred_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_credentials)").fetchall()}
         if "secret_locator" in cred_columns and "secret" not in cred_columns:

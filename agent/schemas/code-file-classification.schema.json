@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/code-file-classification.schema.json",
+  "title": "Code File Classification",
+  "description": "Classification payload for bulk-classifying source code files by security relevance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "file_id",
+    "classification"
+  ],
+  "examples": [
+    {
+      "file_id": 42,
+      "classification": "critical",
+      "role": "protocol_parser",
+      "slot_types": ["NETWORK-INPUT", "PROTOCOL-FIELD"],
+      "analysis_priority": 95
+    }
+  ],
+  "properties": {
+    "file_id": {
+      "type": "integer",
+      "description": "Backend ID of the code_files record to classify."
+    },
+    "classification": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low", "skip"],
+      "description": "Security relevance tier. critical: parses untrusted input, auth, crypto, protocol state machines. high: memory mgmt, command building, file I/O. medium: utility, string handling. low: build, test infra. skip: generated, docs, vendored."
+    },
+    "role": {
+      "type": "string",
+      "description": "Functional role of the file (e.g., protocol_parser, auth_handler, crypto_impl, entry_point, memory_allocator, config_parser, utility, test, build, documentation).",
+      "default": ""
+    },
+    "slot_types": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "NETWORK-INPUT",
+          "URL-COMPONENT",
+          "CMD-ARGUMENT",
+          "FILE-CONTENT",
+          "ENV-VARIABLE",
+          "CALLBACK-DATA",
+          "PROTOCOL-FIELD"
+        ]
+      },
+      "description": "Types of untrusted data that flow into this file. Required for critical and high files.",
+      "default": []
+    },
+    "analysis_priority": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Priority score combining classification tier, git churn, entry-point proximity, and past CVE history. critical: 80-100, high: 50-79, medium: 20-49, low: 5-19, skip: 0.",
+      "default": 50
+    }
+  }
+}

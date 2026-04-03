@@ -152,6 +152,25 @@ Copy-pasteable payloads organized by attack type. Used by: exploit-developer, vu
 | `payloads/business-logic-payloads.md` | Negative quantity, coupon abuse, payment bypass, mass assignment |
 | `payloads/info-disclosure-probes.md` | Standard endpoints checklist (/metrics, /.env, /actuator, cloud metadata) |
 
+## code-vuln-patterns/ — SAST-Surviving Vulnerability Patterns
+
+Source code vulnerability patterns that require multi-function reasoning and semantic understanding.
+Used by: code-vuln-hunter, code-variant-hunter, code-vuln-verifier.
+
+These are NOT traditional SAST patterns. They focus on bugs that survive CodeQL, Semgrep, and OSS-Fuzz —
+multi-function chains, combinatorial arithmetic, state machine bugs, and incomplete patches.
+
+| File | Focus | Languages |
+|------|-------|-----------|
+| `code-vuln-patterns/buffer-overflow.md` | Cross-function size propagation, incomplete bounds checks, realloc chains | C/C++, Python, JS |
+| `code-vuln-patterns/integer-overflow.md` | Combinatorial arithmetic, signed/unsigned confusion across boundaries, encoding expansion | C/C++, Python, JS |
+| `code-vuln-patterns/format-string.md` | Indirect format control, multi-source format construction, callback chains | C/C++, Python, JS |
+| `code-vuln-patterns/use-after-free.md` | Cross-module lifetime reasoning, refcount errors, async cleanup races | C/C++, Python, JS |
+| `code-vuln-patterns/injection.md` | Semantic context escaping, multi-stage sanitization failures, protocol injection | C/C++, Python, JS |
+| `code-vuln-patterns/race-condition.md` | State machine bugs, async refactoring artifacts, signal handler races | C/C++, Python, JS |
+| `code-vuln-patterns/crypto-misuse.md` | Subtle mode/parameter misuse, timing leaks, non-obvious randomness issues | C/C++, Python, JS |
+| `code-vuln-patterns/auth-bypass.md` | Logic-level auth gaps, fallback bypasses, path normalization, method confusion | C/C++, Python, JS |
+
 ## tools/ — CLI Tool Cheatsheets
 
 Quick-reference per tool, organized by usage phase.

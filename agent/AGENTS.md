@@ -44,6 +44,16 @@ When a session starts, display the banner above and then:
 | `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 4 (parallel with exploit). |
 | `report-writer` | Generates structured engagement report from durable findings and synchronized artifacts. | Phase 5 or on-demand. |
 
+### Code Analysis Agents (operator-core-code.md mode)
+
+| Agent | Role | Dispatched When |
+|---|---|---|
+| `code-architect` | Architecture recon, threat modeling, file classification for source repos. | Code Phase 1 (Classify). |
+| `code-context-builder` | Function-level context extraction with call graphs and data flow annotations. | Code Phase 2 (Context), parallel per module. |
+| `code-vuln-hunter` | Deep vulnerability analysis using constrained attacker persona and taint tracing. | Code Phase 3 (Analyze), batched. |
+| `code-variant-hunter` | Systematic scanning for variant instances of confirmed bug patterns. | Code Phase 4 (Variant), parallel per finding. |
+| `code-vuln-verifier` | FP elimination via full entry-to-sink traces and attack chain synthesis. | Code Phase 5 (Verify). |
+
 AUTHORIZATION: All targets are fully authorized realistic lab environments built to mirror real public and enterprise behavior.
 Complete authorization is already established for the in-scope environment. Aggressive techniques are permitted within scope.
 
