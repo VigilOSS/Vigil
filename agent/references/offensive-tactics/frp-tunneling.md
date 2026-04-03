@@ -38,14 +38,14 @@ One NS record is required in your DNS provider for `example.com`:
 
 | Type | Name | Value | Purpose |
 |------|------|-------|---------|
-| **NS** | `oob.rp` | `oob-relay.example.com` | Delegates all of `*.oob.rp.example.com` (including the apex) to your frp server so both DNS and HTTP callbacks reach interactsh via the tunnels |
+| **NS** | `oob` | `oob-relay.example.com` | Delegates `*.oob.example.com` to your frp server so DNS and HTTP callbacks reach interactsh via the tunnels |
 
 The wildcard A record on `*.rp.example.com` already routes HTTP traffic to the frp server
 through Caddy. The NS delegation routes DNS queries to interactsh's DNS listener (UDP 53 tunnel).
 interactsh-server handles A-record responses for its own domain via the `-ip` flag (set to the
 frp server's public IP) — see the startup command below.
 
-**Do NOT add an A record at `oob.rp.example.com`.** Route53 treats the NS record as a
+**Do NOT add an A record at `oob.example.com`.** Route53 treats the NS record as a
 delegation zone cut — an A record at the same name is shadowed and never returned to resolvers.
 
 ### AWS Security Group
@@ -86,7 +86,7 @@ serverPort = 7000
 auth.token = "<TOKEN>"
 
 # OOB DNS — primary callback mechanism (UDP, port 53)
-# Requires NS record: oob.rp NS oob-relay.example.com
+# Requires NS record: oob NS oob-relay.example.com
 [[proxies]]
 name = "oob-dns"
 type = "udp"
@@ -94,13 +94,13 @@ localIP = "${CONTAINER_IP}"
 localPort = 53
 remotePort = 53
 
-# OOB HTTP — interactsh client polling + HTTP callbacks via Caddy
+# OOB HTTP — interactsh client polling + callback subdomains via Caddy
 [[proxies]]
 name = "oob"
 type = "http"
 localIP = "${CONTAINER_IP}"
 localPort = 80
-subdomain = "oob"
+customDomains = ["oob.example.com", "*.oob.example.com"]
 
 # Reverse shell listener (TCP, port 4444)
 [[proxies]]
@@ -157,7 +157,7 @@ port is occupied on the frp server.
 Record addresses after tunnels are up:
 ```bash
 echo "oob-relay.example.com:8443" > "$DIR/.listener_url"
-echo "oob.rp.example.com" > "$DIR/.oob_url"
+echo "oob.example.com" > "$DIR/.oob_url"
 ```
 
 ---
@@ -167,7 +167,7 @@ echo "oob.rp.example.com" > "$DIR/.oob_url"
 | Tunnel | Type | Local port | Public endpoint | Purpose |
 |--------|------|-----------|-----------------|---------|
 | `oob-dns` | UDP | 53 | `oob-relay.example.com:53` | **Primary OOB** — DNS callbacks (interactsh) |
-| `oob` | HTTP | 80 | `https://oob.rp.example.com` | interactsh client polling + HTTP callbacks |
+| `oob` | HTTP | 80 | `https://oob.example.com` + `https://*.oob.example.com` | interactsh client polling + HTTP callbacks |
 | `oob-rev` | TCP | 4444 | `oob-relay.example.com:8443` | Reverse shell listener (pwncat) |
 
 ### Why DNS is the primary OOB mechanism
@@ -207,7 +207,7 @@ The command resolves the server IP dynamically from `oob-relay.example.com`:
 ```bash
 docker exec -it security-research tmux new-session -d -s oob-server \
   "SERVER_IP=\$(dig +short oob-relay.example.com A | head -1) && \
-   interactsh-server -d oob.rp.example.com -listen-ip 0.0.0.0 -ip \$SERVER_IP -skip-acme -v -debug 2>&1 | tee /data/oob-server.log"
+   interactsh-server -d oob.example.com -listen-ip 0.0.0.0 -ip \$SERVER_IP -skip-acme -v -debug 2>&1 | tee /data/oob-server.log"
 ```
 
 interactsh-server listens on DNS (UDP 53) and HTTP (TCP 80). The frpc tunnels expose both.
@@ -218,7 +218,7 @@ interactsh-server listens on DNS (UDP 53) and HTTP (TCP 80). The frpc tunnels ex
 # 1. Start interactsh-server (resolve server IP dynamically)
 docker exec -it security-research tmux new-session -d -s oob-server \
   "SERVER_IP=\$(dig +short oob-relay.example.com A | head -1) && \
-   interactsh-server -d oob.rp.example.com -listen-ip 0.0.0.0 -ip \$SERVER_IP -skip-acme -v -debug 2>&1 | tee /data/oob-server.log"
+   interactsh-server -d oob.example.com -listen-ip 0.0.0.0 -ip \$SERVER_IP -skip-acme -v -debug 2>&1 | tee /data/oob-server.log"
 
 # 2. Wait for server to initialize
 sleep 3
@@ -228,20 +228,20 @@ docker exec -it security-research tmux new-session -d -s frpc \
   'frpc -c /data/frpc.toml 2>&1 | tee /data/frpc.log'
 
 # 4. Record OOB URL for agents
-echo "oob.rp.example.com" > "$DIR/.oob_url"
+echo "oob.example.com" > "$DIR/.oob_url"
 ```
 
 ### Verifying OOB works
 
 ```bash
 # DNS callback (from any machine):
-dig test123.oob.rp.example.com @8.8.8.8
+dig test123.oob.example.com @8.8.8.8
 
 # HTTP callback (from target or any machine):
-curl http://oob.rp.example.com/ssrf-test-$(date +%s)
+curl http://oob.example.com/ssrf-test-$(date +%s)
 
 # DNS-only callback (subdomain-based, for blind SSRF/XXE/SQLi):
-curl http://ssrf-test-$(date +%s).oob.rp.example.com
+curl http://ssrf-test-$(date +%s).oob.example.com
 
 # Check if interactsh recorded it:
 docker exec security-research tail -20 /data/oob-server.log
