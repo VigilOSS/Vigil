@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/code-analysis-result.schema.json",
+  "title": "Code Analysis Result",
+  "description": "Per-function analysis result payload recorded by code-vuln-hunter after analyzing a context slice.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "queue_item_id",
+    "file_id",
+    "disposition"
+  ],
+  "examples": [
+    {
+      "queue_item_id": 7,
+      "context_id": 42,
+      "file_id": 15,
+      "agent_name": "code-vuln-hunter",
+      "function_name": "parseurl",
+      "hypothesis": "Attacker-controlled URL scheme length passed to memcpy without bounds check",
+      "evidence": "In parseurl() at line 342, schemelen is derived from user-supplied URL without validation. memcpy(buf, scheme, schemelen) copies attacker-controlled bytes into fixed-size heap buffer.",
+      "disposition": "finding",
+      "confidence": "high",
+      "finding_slug": "FINDING-CH-001",
+      "cwe_id": "CWE-122",
+      "slot_type": "URL-COMPONENT",
+      "notes": "Guard at line 305 uses signed int comparison allowing negative bypass."
+    }
+  ],
+  "properties": {
+    "queue_item_id": {
+      "type": "integer",
+      "description": "ID of the code_analysis_queue item this result corresponds to."
+    },
+    "context_id": {
+      "type": ["integer", "null"],
+      "description": "ID of the code_contexts record analyzed. Null if analysis was file-level without function context.",
+      "default": null
+    },
+    "file_id": {
+      "type": "integer",
+      "description": "ID of the code_files record containing the analyzed function."
+    },
+    "agent_name": {
+      "type": "string",
+      "description": "Name of the agent that produced this result.",
+      "default": ""
+    },
+    "function_name": {
+      "type": "string",
+      "description": "Name of the analyzed function.",
+      "default": ""
+    },
+    "hypothesis": {
+      "type": "string",
+      "description": "The vulnerability hypothesis tested. What could go wrong and why.",
+      "default": ""
+    },
+    "evidence": {
+      "type": "string",
+      "description": "Evidence supporting the disposition. For findings: code snippet + taint path + guard failure. For clean: brief reasoning why no vulnerability exists.",
+      "default": ""
+    },
+    "disposition": {
+      "type": "string",
+      "enum": ["finding", "suspicious", "clean", "needs_context"],
+      "description": "Analysis result. finding: confirmed vulnerability. suspicious: needs variant analysis or deeper context. clean: no vulnerability. needs_context: blocked on missing code."
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"],
+      "description": "high: full taint trace + guards evaluated. medium: trace but unresolved callees. low: pattern match only.",
+      "default": "medium"
+    },
+    "finding_slug": {
+      "type": "string",
+      "description": "If disposition is 'finding', the slug of the assessment_findings record created. Empty otherwise.",
+      "default": ""
+    },
+    "cwe_id": {
+      "type": "string",
+      "description": "Specific CWE ID (e.g., CWE-122, CWE-190). Must be specific, not generic (CWE-119).",
+      "default": ""
+    },
+    "slot_type": {
+      "type": "string",
+      "description": "Shannon slot type classification of the vulnerability (e.g., BUFFER-WRITE, FORMAT-STRING, INTEGER-OVERFLOW, USE-AFTER-FREE, CMD-INJECTION).",
+      "default": ""
+    },
+    "notes": {
+      "type": "string",
+      "description": "Additional notes, context expansion requests, or follow-up recommendations.",
+      "default": ""
+    }
+  }
+}

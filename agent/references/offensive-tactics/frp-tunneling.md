@@ -86,6 +86,9 @@ serverAddr = "researcher.example"
 serverPort = 7000
 auth.token = "REPLACE_WITH_YOUR_OWN_TOKEN"
 
+# Auto-reconnect when frps restarts or IP changes (connects by hostname)
+loginFailExit = false
+
 # OOB DNS — primary callback mechanism (UDP, port 53)
 # Requires NS record: oob NS researcher.example
 [[proxies]]
@@ -203,12 +206,51 @@ Flags:
 - `-ip <SERVER_IP>` — the public IP interactsh returns in DNS A responses. Must be the frp server's
   IP, not the local machine's IP (interactsh auto-detection gets this wrong in Docker/tunnel setups).
 
-The command resolves the server IP dynamically from `researcher.example`:
+The frp server (`researcher.example`) restarts nightly and gets a new public IP each time.
+interactsh-server bakes the IP into DNS responses at startup, so it must be restarted when the
+IP changes. The wrapper script below handles this automatically — it checks every 60 seconds
+and restarts interactsh when the IP rotates.
 
+Write the wrapper once (persists via volume mount):
 ```bash
-docker exec -it security-research tmux new-session -d -s oob-server \
-  "SERVER_IP=\$(dig +short researcher.example A | head -1) && \
-   interactsh-server -d researcher.example -listen-ip 0.0.0.0 -ip \$SERVER_IP -skip-acme -v -debug 2>&1 | tee /data/oob-server.log"
+docker exec security-research bash -c 'cat > /data/start-oob.sh << "OOBEOF"
+#!/usr/bin/env bash
+# interactsh-server wrapper — auto-restarts when frp server IP changes
+DOMAIN="researcher.example"
+FRP_HOST="researcher.example"
+CHECK_INTERVAL=60
+CURRENT_IP=""
+
+while true; do
+  NEW_IP=$(dig +short "$FRP_HOST" A | head -1)
+
+  if [ -z "$NEW_IP" ]; then
+    echo "[oob-watch] DNS lookup failed for $FRP_HOST, retrying in ${CHECK_INTERVAL}s..."
+    sleep "$CHECK_INTERVAL"
+    continue
+  fi
+
+  if [ "$NEW_IP" != "$CURRENT_IP" ]; then
+    if [ -n "$CURRENT_IP" ]; then
+      echo "[oob-watch] IP changed: $CURRENT_IP → $NEW_IP — restarting interactsh-server"
+    else
+      echo "[oob-watch] Starting interactsh-server with IP $NEW_IP"
+    fi
+
+    pkill -f "interactsh-server" 2>/dev/null
+    sleep 1
+
+    CURRENT_IP="$NEW_IP"
+    interactsh-server -d "$DOMAIN" -listen-ip 0.0.0.0 -ip "$CURRENT_IP" \
+      -skip-acme -v -debug >> /data/oob-server.log 2>&1 &
+
+    echo "[oob-watch] interactsh-server started (PID $!, IP $CURRENT_IP)"
+  fi
+
+  sleep "$CHECK_INTERVAL"
+done
+OOBEOF
+chmod +x /data/start-oob.sh'
 ```
 
 interactsh-server listens on DNS (UDP 53) and HTTP (TCP 80). The frpc tunnels expose both.
@@ -216,21 +258,24 @@ interactsh-server listens on DNS (UDP 53) and HTTP (TCP 80). The frpc tunnels ex
 ### Full startup sequence
 
 ```bash
-# 1. Start interactsh-server (resolve server IP dynamically)
+# 1. Start interactsh-server (auto-restarts on IP change)
 docker exec -it security-research tmux new-session -d -s oob-server \
-  "SERVER_IP=\$(dig +short researcher.example A | head -1) && \
-   interactsh-server -d researcher.example -listen-ip 0.0.0.0 -ip \$SERVER_IP -skip-acme -v -debug 2>&1 | tee /data/oob-server.log"
+  'bash /data/start-oob.sh 2>&1 | tee -a /data/oob-watch.log'
 
 # 2. Wait for server to initialize
-sleep 3
+sleep 5
 
-# 3. Start all frp tunnels (DNS + HTTP + reverse shell)
+# 3. Start frpc (auto-reconnects on server restart via loginFailExit = false)
 docker exec -it security-research tmux new-session -d -s frpc \
   'frpc -c /data/frpc.toml 2>&1 | tee /data/frpc.log'
 
 # 4. Record OOB URL for agents
 echo "researcher.example" > "$DIR/.oob_url"
 ```
+
+Both services are now resilient to the nightly server restart:
+- **frpc** reconnects automatically (`loginFailExit = false`, connects by hostname)
+- **interactsh-server** detects the IP change within 60 seconds and restarts with the new IP
 
 ### Verifying OOB works
 
@@ -310,8 +355,10 @@ persists across restarts.
 
 | Log file | Source | What it contains |
 |----------|--------|-----------------|
-| `/data/frpc.log` | frpc (all tunnels) | Tunnel registration, connection status, errors |
-| `/data/oob-server.log` | interactsh-server | **Callback hits — check here for OOB confirmation** |
+| `/data/frpc.log` | frpc (all tunnels) | Tunnel registration, connection status, reconnection events |
+| `/data/oob-server.log` | interactsh-server | **Raw callback hits** (includes AWS noise) |
+| `/data/oob-client.log` | interactsh-client | **Correlated callback hits** (preferred, no noise) |
+| `/data/oob-watch.log` | start-oob.sh wrapper | IP change detection, interactsh restart events |
 | `/data/shell-*.log` | pwncat shell sessions | Shell I/O (see `shell-handling.md`) |
 
 ---
