@@ -23,7 +23,8 @@ Internet → oob-relay.example.com:<port> (TCP/UDP) → frps → frpc ───�
 ```
 
 **HTTP mode tunnels** go through Caddy, which terminates TLS and proxies to frps by Host header.
-The public URL is `https://<subdomain>.rp.example.com`.
+For frp subdomain tunnels the URL is `https://<name>.rp.example.com`.
+For OOB callbacks the URL is `https://<id>.oob.example.com`.
 
 **TCP/UDP tunnels** bypass Caddy entirely. frps opens the port directly on the server.
 The public endpoint is `oob-relay.example.com:<port>`.
@@ -83,7 +84,7 @@ CONTAINER_IP=$(hostname -i | awk "{print \$1}")
 cat > /data/frpc.toml << FRPEOF
 serverAddr = "oob-relay.example.com"
 serverPort = 7000
-auth.token = "<TOKEN>"
+auth.token = "REPLACE_WITH_YOUR_OWN_TOKEN"
 
 # OOB DNS — primary callback mechanism (UDP, port 53)
 # Requires NS record: oob NS oob-relay.example.com
@@ -246,7 +247,30 @@ curl http://ssrf-test-$(date +%s).oob.example.com
 # Check if interactsh recorded it:
 docker exec security-research tail -20 /data/oob-server.log
 # Should show lines like: "[INF] Received DNS interaction (A) from ..."
-# With -v -debug, every interaction is logged with full details.
+```
+
+### Viewing callback hits
+
+**interactsh-client (preferred)** — shows only hits matching your payload's correlation ID.
+Filters out AWS health check noise and other non-engagement DNS traffic automatically.
+
+```bash
+# Interactive — run in a terminal, shows correlated hits as they arrive
+docker exec -it security-research interactsh-client -server oob.example.com
+
+# Background — log to file, agents can tail it via Kali MCP
+docker exec -it security-research tmux new-session -d -s oob-client \
+  'interactsh-client -server oob.example.com -v -poll-interval 5 2>&1 | tee /data/oob-client.log'
+```
+
+The client prints a unique callback URL on startup (e.g., `abc123.oob.example.com`).
+Use that URL in blind payloads. Only callbacks containing that correlation ID appear in the output.
+
+**Raw server log (noisy)** — shows ALL interactions including AWS resolver health checks.
+Use only for debugging, not for confirming OOB hits during an engagement.
+
+```bash
+docker exec security-research tail -50 /data/oob-server.log
 ```
 
 ---
