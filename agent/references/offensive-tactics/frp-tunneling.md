@@ -38,7 +38,7 @@ One NS record is required in your DNS provider for `researcher.example`:
 
 | Type | Name | Value | Purpose |
 |------|------|-------|---------|
-| **NS** | `oob.rp` | `researcher.example` | Delegates all of `*.researcher.example` (including the apex) to your frp server so both DNS and HTTP callbacks reach interactsh via the tunnels |
+| **NS** | `oob` | `researcher.example` | Delegates `*.researcher.example` to your frp server so DNS and HTTP callbacks reach interactsh via the tunnels |
 
 The wildcard A record on `*.researcher.example` already routes HTTP traffic to the frp server
 through Caddy. The NS delegation routes DNS queries to interactsh's DNS listener (UDP 53 tunnel).
@@ -86,7 +86,7 @@ serverPort = 7000
 auth.token = "<TOKEN>"
 
 # OOB DNS — primary callback mechanism (UDP, port 53)
-# Requires NS record: oob.rp NS researcher.example
+# Requires NS record: oob NS researcher.example
 [[proxies]]
 name = "oob-dns"
 type = "udp"
@@ -94,13 +94,13 @@ localIP = "${CONTAINER_IP}"
 localPort = 53
 remotePort = 53
 
-# OOB HTTP — interactsh client polling + HTTP callbacks via Caddy
+# OOB HTTP — interactsh client polling + callback subdomains via Caddy
 [[proxies]]
 name = "oob"
 type = "http"
 localIP = "${CONTAINER_IP}"
 localPort = 80
-subdomain = "oob"
+customDomains = ["researcher.example", "*.researcher.example"]
 
 # Reverse shell listener (TCP, port 4444)
 [[proxies]]
@@ -167,7 +167,7 @@ echo "researcher.example" > "$DIR/.oob_url"
 | Tunnel | Type | Local port | Public endpoint | Purpose |
 |--------|------|-----------|-----------------|---------|
 | `oob-dns` | UDP | 53 | `researcher.example:53` | **Primary OOB** — DNS callbacks (interactsh) |
-| `oob` | HTTP | 80 | `https://researcher.example` | interactsh client polling + HTTP callbacks |
+| `oob` | HTTP | 80 | `https://researcher.example` + `https://*.researcher.example` | interactsh client polling + HTTP callbacks |
 | `oob-rev` | TCP | 4444 | `researcher.example:8443` | Reverse shell listener (pwncat) |
 
 ### Why DNS is the primary OOB mechanism
