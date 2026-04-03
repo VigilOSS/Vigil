@@ -185,6 +185,12 @@ Quick-reference per tool, organized by usage phase.
 | `tools/exploitation/hydra.md` | Online password brute-forcing |
 | `tools/exploitation/dalfox.md` | XSS scanning with parameter analysis and blind XSS |
 
+### tools/reporting/ — Used by: report-writer, operator
+
+| File | Tool |
+|------|------|
+| `tools/reporting/jira-api.md` | Jira REST API v3: authentication, issue CRUD, ADF formatting for security findings |
+
 ### tools/cracking/ — Used by: exploit-developer
 
 | File | Tool |

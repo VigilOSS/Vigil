@@ -34,7 +34,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/assess.py record-surface` so the backend and readable export stay in sync. Do not call `scripts/lib/surfaces.sh` directly and do not patch `surfaces.jsonl` by hand during normal operation. After each surface update batch, wait for the command to finish and then verify `surfaces.jsonl` with a fresh read. If the first verification read does not reflect the expected change, re-read once before assuming failure. Only treat it as a real helper/backend problem if the command completed successfully and a second fresh read still disagrees; in that case, stop and report the sync issue instead of editing the artifact manually.
    If surface recording fails with a connection error, verify the orchestrator backend is running and that `ORCHESTRATOR_BASE_URL` and the engagement key are set correctly (check `engagement.json` and `.orchestrator.env` in the engagement directory).
 10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
-11. **LOOP** — Back to step 1.
+11. **LOOP** — Back to step 1 to discovery and exploit more findings
 
 ## Investigation Priorities
 

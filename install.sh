@@ -98,6 +98,12 @@ copy_if_exists() {
   local dest="$2"
   if [ -e "$src" ]; then
     mkdir -p "$(dirname "$dest")"
+    # Remove existing dest directory to prevent cp -a from nesting
+    # source/ inside dest/ (cp -a dir/ existing_dir/ → existing_dir/dir/).
+    # Data preservation is handled by preserve_install_path before this runs.
+    if [ -d "$src" ] && [ -d "$dest" ]; then
+      rm -rf "$dest"
+    fi
     cp -a "$src" "$dest"
   fi
 }
