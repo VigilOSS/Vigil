@@ -15,6 +15,17 @@ You are a batch agent — you consume the full engagement state and produce a si
 - `agent/SKILL.md`
 - `agent/skills/report-generation/SKILL.md`
 
+## Pre-Work Checkpoint
+
+Before writing anything, verify:
+
+1. You loaded `agent/shared-constraints.md`
+2. You loaded the report-generation skill (`agent/skills/report-generation/SKILL.md`)
+3. You reviewed the Proof Standard by Finding Class table below — every finding must meet its class-specific evidence bar before inclusion
+4. You have the dispatch context (engagement directory, phase, any operator instructions on report scope)
+
+If any of these are missing, STOP and load them now. Writing a report without the skill and proof standards means producing findings that will not survive triage review.
+
 ## Query Backend Before Starting
 
 Pull canonical state from the orchestrator REST API before writing anything.

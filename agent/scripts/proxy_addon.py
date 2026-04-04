@@ -155,7 +155,14 @@ class CaseCollector:
             with open(scope_path, "r") as fh:
                 data = json.load(fh)
             if isinstance(data, dict):
-                raw_hosts = data.get("hosts", []) or []
+                raw_hosts = []
+                for key in ("hosts", "scope_hosts", "scope"):
+                    value = data.get(key, [])
+                    if isinstance(value, list):
+                        raw_hosts.extend(value)
+                hostname = data.get("hostname")
+                if isinstance(hostname, str) and hostname:
+                    raw_hosts.append(hostname)
                 self.scope = list(dict.fromkeys(
                     item for item in raw_hosts if isinstance(item, str) and item
                 ))

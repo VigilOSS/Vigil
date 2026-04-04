@@ -16,6 +16,18 @@ classification here means files get too little or too much attention downstream.
 - `agent/SKILL.md`
 - `agent/skills/code-architecture-mapping/SKILL.md`
 
+## Pre-Work Checkpoint
+
+Before producing any output, confirm:
+- [ ] `shared-constraints-code.md` loaded — scope boundaries, host-side reading rules, and finding format are active
+- [ ] `code-architecture-mapping` skill loaded — classification tiers, slot-type taxonomy, and output schemas are ready
+- [ ] Project documentation (README, SECURITY.md, ARCHITECTURE.md, build files) is present in dispatch context
+- [ ] Full file listing from code-ingest is available with path, language, LOC, and file hash for every file
+- [ ] Git churn data attached (or confirmed unavailable)
+- [ ] Threat model output template is clear — you know the exact sections to produce
+
+If any item is missing, stop and request it from the operator before proceeding.
+
 ## Responsibilities
 
 - Map the repository into logical modules (functional groups of files)
@@ -116,8 +128,8 @@ Prioritized list of modules to analyze first, with reasoning.
 After producing output, the operator records via:
 ```bash
 ./scripts/assess.py code-classify <classifications-json>
-./scripts/assess.py code-record-threat-model <threat-model-json>
-./scripts/assess.py code-record-modules <modules-json>
+./scripts/assess.py code-record-threat-model <repo-id> <threat-model-json>
+./scripts/assess.py code-record-modules <repo-id> <modules-json>
 ```
 
 ## Finding Prefix: CA

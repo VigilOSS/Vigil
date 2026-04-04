@@ -35,6 +35,131 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _json_decode(value: Any, default: Any) -> Any:
+    if isinstance(value, str) and value:
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return default
+    return default
+
+
+def _hydrate_code_file(row: Any) -> dict[str, Any]:
+    payload = dict(row)
+    payload["slot_types"] = _json_decode(payload.get("slot_types_json"), [])
+    return payload
+
+
+def _hydrate_code_context(row: Any) -> dict[str, Any]:
+    payload = dict(row)
+    payload["slot_types"] = _json_decode(payload.get("slot_types_json"), [])
+    payload["call_chain"] = _json_decode(payload.get("call_chain_json"), {})
+    payload["data_flow"] = _json_decode(payload.get("data_flow_json"), {})
+    payload["cross_refs"] = _json_decode(payload.get("cross_refs_json"), [])
+    payload["guard_annotations"] = _json_decode(payload.get("guard_annotations_json"), [])
+    payload["sink_annotations"] = _json_decode(payload.get("sink_annotations_json"), [])
+    return payload
+
+
+def _get_repo_row(connection, engagement_id: int, repo_id: int) -> dict[str, Any]:
+    row = connection.execute(
+        "SELECT * FROM code_repos WHERE engagement_id = ? AND id = ?",
+        (engagement_id, repo_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code repo not found")
+    return dict(row)
+
+
+def _get_file_rows(connection, engagement_id: int, file_ids: set[int]) -> dict[int, dict[str, Any]]:
+    if not file_ids:
+        return {}
+    placeholders = ",".join("?" for _ in file_ids)
+    rows = connection.execute(
+        f"SELECT * FROM code_files WHERE engagement_id = ? AND id IN ({placeholders})",
+        (engagement_id, *sorted(file_ids)),
+    ).fetchall()
+    found = {int(row["id"]): dict(row) for row in rows}
+    if len(found) != len(file_ids):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code file not found")
+    return found
+
+
+def _get_context_rows(connection, engagement_id: int, context_ids: set[int]) -> dict[int, dict[str, Any]]:
+    if not context_ids:
+        return {}
+    placeholders = ",".join("?" for _ in context_ids)
+    rows = connection.execute(
+        f"SELECT * FROM code_contexts WHERE engagement_id = ? AND id IN ({placeholders})",
+        (engagement_id, *sorted(context_ids)),
+    ).fetchall()
+    found = {int(row["id"]): dict(row) for row in rows}
+    if len(found) != len(context_ids):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code context not found")
+    return found
+
+
+def _get_queue_rows(connection, engagement_id: int, item_ids: set[int]) -> dict[int, dict[str, Any]]:
+    if not item_ids:
+        return {}
+    placeholders = ",".join("?" for _ in item_ids)
+    rows = connection.execute(
+        f"SELECT * FROM code_analysis_queue WHERE engagement_id = ? AND id IN ({placeholders})",
+        (engagement_id, *sorted(item_ids)),
+    ).fetchall()
+    found = {int(row["id"]): dict(row) for row in rows}
+    if len(found) != len(item_ids):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Queue item not found")
+    return found
+
+
+def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> None:
+    total_contexts = _scalar_row(
+        connection,
+        "SELECT COUNT(*) FROM code_contexts WHERE engagement_id = ? AND file_id = ?",
+        (engagement_id, file_id),
+    )
+    if total_contexts == 0:
+        return
+
+    analyzed_contexts = _scalar_row(
+        connection,
+        """
+        SELECT COUNT(*)
+        FROM code_contexts
+        WHERE engagement_id = ? AND file_id = ? AND analysis_status IN ('analyzed', 'done')
+        """,
+        (engagement_id, file_id),
+    )
+    needs_context = _scalar_row(
+        connection,
+        """
+        SELECT COUNT(*)
+        FROM code_contexts
+        WHERE engagement_id = ? AND file_id = ? AND analysis_status = 'needs_context'
+        """,
+        (engagement_id, file_id),
+    )
+
+    if needs_context > 0:
+        next_status = "needs_context"
+    elif analyzed_contexts == total_contexts:
+        next_status = "analyzed"
+    elif analyzed_contexts > 0:
+        next_status = "in_progress"
+    else:
+        next_status = "classified"
+
+    connection.execute(
+        """
+        UPDATE code_files
+        SET analysis_status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE engagement_id = ? AND id = ?
+        """,
+        (next_status, engagement_id, file_id),
+    )
+
+
 # =========================================================================
 # Repository Management
 # =========================================================================
@@ -55,7 +180,7 @@ def create_code_repo(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        cursor = connection.execute(
+        connection.execute(
             """
             INSERT INTO code_repos (
                 engagement_id, repo_key, name, language, repo_path,
@@ -63,6 +188,17 @@ def create_code_repo(
                 commit_hash, branch, git_churn_json
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(engagement_id, repo_key) DO UPDATE SET
+                name = excluded.name,
+                language = excluded.language,
+                repo_path = excluded.repo_path,
+                total_files = excluded.total_files,
+                analyzable_files = excluded.analyzable_files,
+                total_loc = excluded.total_loc,
+                commit_hash = excluded.commit_hash,
+                branch = excluded.branch,
+                git_churn_json = excluded.git_churn_json,
+                updated_at = CURRENT_TIMESTAMP
             """,
             (
                 engagement.id, repo_key, name, language, repo_path,
@@ -71,8 +207,8 @@ def create_code_repo(
             ),
         )
         row = connection.execute(
-            "SELECT * FROM code_repos WHERE id = ?",
-            (cursor.lastrowid,),
+            "SELECT * FROM code_repos WHERE engagement_id = ? AND repo_key = ?",
+            (engagement.id, repo_key),
         ).fetchone()
         assert row is not None
         return dict(row)
@@ -113,6 +249,7 @@ def bulk_create_code_files(
     inserted = 0
     skipped = 0
     with get_connection() as connection:
+        _get_repo_row(connection, engagement.id, repo_id)
         for f in files:
             cursor = connection.execute(
                 """
@@ -145,6 +282,7 @@ def list_code_files(
     engagement_id: int,
     *,
     repo_id: int | None = None,
+    module_id: int | None = None,
     classification: str | None = None,
     analysis_status: str | None = None,
     limit: int | None = None,
@@ -155,6 +293,9 @@ def list_code_files(
     if repo_id is not None:
         clauses.append("repo_id = ?")
         params.append(repo_id)
+    if module_id is not None:
+        clauses.append("module_id = ?")
+        params.append(module_id)
     if classification is not None:
         clauses.append("classification = ?")
         params.append(classification)
@@ -165,7 +306,7 @@ def list_code_files(
     if limit is not None:
         query += f" LIMIT {int(limit)}"
     with get_connection() as connection:
-        return _fetch_all(connection, query, tuple(params))
+        return [_hydrate_code_file(row) for row in connection.execute(query, tuple(params)).fetchall()]
 
 
 def get_code_file(engagement_id: int, file_id: int) -> dict[str, Any]:
@@ -177,7 +318,7 @@ def get_code_file(engagement_id: int, file_id: int) -> dict[str, Any]:
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code file not found")
-    return dict(row)
+    return _hydrate_code_file(row)
 
 
 _VALID_CLASSIFICATIONS = frozenset({"critical", "high", "medium", "low", "skip"})
@@ -271,7 +412,7 @@ def update_code_file(
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code file not found")
-    return dict(row)
+    return _hydrate_code_file(row)
 
 
 # =========================================================================
@@ -284,10 +425,22 @@ def bulk_create_code_modules(
     modules: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
-    created: list[dict[str, Any]] = []
+    created: list[int] = []
     with get_connection() as connection:
+        _get_repo_row(connection, engagement.id, repo_id)
+        repo_files = connection.execute(
+            """
+            SELECT id, file_path
+            FROM code_files
+            WHERE engagement_id = ? AND repo_id = ?
+            """,
+            (engagement.id, repo_id),
+        ).fetchall()
+        file_by_path = {str(row["file_path"]): int(row["id"]) for row in repo_files}
+        repo_file_ids = {int(row["id"]) for row in repo_files}
+
         for m in modules:
-            cursor = connection.execute(
+            connection.execute(
                 """
                 INSERT INTO code_modules (
                     engagement_id, repo_id, module_key, name, description, trust_boundary
@@ -313,8 +466,88 @@ def bulk_create_code_modules(
                 (engagement.id, repo_id, m["module_key"]),
             ).fetchone()
             assert row is not None
-            created.append(dict(row))
-    return created
+            module_id = int(row["id"])
+            created.append(module_id)
+
+            selected_ids: set[int] = set()
+            for file_id in m.get("file_ids", []):
+                selected_ids.add(int(file_id))
+            for file_path in m.get("files", []):
+                if file_path not in file_by_path:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code file not found")
+                selected_ids.add(file_by_path[file_path])
+            if not selected_ids.issubset(repo_file_ids):
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code file not found")
+
+            if selected_ids:
+                keep_placeholders = ",".join("?" for _ in selected_ids)
+                connection.execute(
+                    f"""
+                    UPDATE code_files
+                    SET module_id = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND module_id = ? AND id NOT IN ({keep_placeholders})
+                    """,
+                    (engagement.id, module_id, *sorted(selected_ids)),
+                )
+                assign_placeholders = ",".join("?" for _ in selected_ids)
+                connection.execute(
+                    f"""
+                    UPDATE code_files
+                    SET module_id = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND repo_id = ? AND id IN ({assign_placeholders})
+                    """,
+                    (module_id, engagement.id, repo_id, *sorted(selected_ids)),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE code_files
+                    SET module_id = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND module_id = ?
+                    """,
+                    (engagement.id, module_id),
+                )
+
+        repo_module_ids = [
+            int(row["id"])
+            for row in connection.execute(
+                "SELECT id FROM code_modules WHERE engagement_id = ? AND repo_id = ?",
+                (engagement.id, repo_id),
+            ).fetchall()
+        ]
+        for module_id in repo_module_ids:
+            file_count = _scalar_row(
+                connection,
+                "SELECT COUNT(*) FROM code_files WHERE engagement_id = ? AND module_id = ?",
+                (engagement.id, module_id),
+            )
+            critical_file_count = _scalar_row(
+                connection,
+                """
+                SELECT COUNT(*)
+                FROM code_files
+                WHERE engagement_id = ? AND module_id = ? AND classification = 'critical'
+                """,
+                (engagement.id, module_id),
+            )
+            connection.execute(
+                """
+                UPDATE code_modules
+                SET file_count = ?, critical_file_count = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE engagement_id = ? AND id = ?
+                """,
+                (file_count, critical_file_count, engagement.id, module_id),
+            )
+
+        rows = []
+        for module_id in created:
+            row = connection.execute(
+                "SELECT * FROM code_modules WHERE engagement_id = ? AND id = ?",
+                (engagement.id, module_id),
+            ).fetchone()
+            assert row is not None
+            rows.append(dict(row))
+    return rows
 
 
 def list_code_modules(
@@ -344,7 +577,9 @@ def bulk_create_code_contexts(
     engagement = _engagement_or_404(engagement_id)
     inserted = 0
     skipped = 0
+    rows: list[dict[str, Any]] = []
     with get_connection() as connection:
+        _get_file_rows(connection, engagement.id, {int(ctx["file_id"]) for ctx in contexts})
         for ctx in contexts:
             cursor = connection.execute(
                 """
@@ -375,7 +610,22 @@ def bulk_create_code_contexts(
                 inserted += 1
             else:
                 skipped += 1
-    return {"inserted": inserted, "skipped": skipped, "total": len(contexts)}
+            row = connection.execute(
+                """
+                SELECT *
+                FROM code_contexts
+                WHERE engagement_id = ? AND file_id = ? AND function_name = ? AND start_line = ?
+                """,
+                (
+                    engagement.id,
+                    ctx["file_id"],
+                    ctx["function_name"],
+                    ctx.get("start_line", 0),
+                ),
+            ).fetchone()
+            assert row is not None
+            rows.append(_hydrate_code_context(row))
+    return {"inserted": inserted, "skipped": skipped, "total": len(contexts), "contexts": rows}
 
 
 def list_code_contexts(
@@ -395,7 +645,7 @@ def list_code_contexts(
         params.append(analysis_status)
     query = f"SELECT * FROM code_contexts WHERE {' AND '.join(clauses)} ORDER BY id ASC"
     with get_connection() as connection:
-        return _fetch_all(connection, query, tuple(params))
+        return [_hydrate_code_context(row) for row in connection.execute(query, tuple(params)).fetchall()]
 
 
 _CODE_CONTEXT_ALLOWED_FIELDS = frozenset({
@@ -419,7 +669,7 @@ def update_code_context(
             ).fetchone()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code context not found")
-        return dict(row)
+        return _hydrate_code_context(row)
 
     json_list_fields = {"slot_types_json", "cross_refs_json", "guard_annotations_json", "sink_annotations_json"}
     json_object_fields = {"call_chain_json", "data_flow_json"}
@@ -447,7 +697,7 @@ def update_code_context(
             ).fetchone()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code context not found")
-        return dict(row)
+        return _hydrate_code_context(row)
 
     set_clauses.append("updated_at = CURRENT_TIMESTAMP")
     params.extend([engagement.id, context_id])
@@ -463,7 +713,7 @@ def update_code_context(
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code context not found")
-    return dict(row)
+    return _hydrate_code_context(row)
 
 
 # =========================================================================
@@ -477,8 +727,18 @@ def bulk_create_queue_items(
     engagement = _engagement_or_404(engagement_id)
     inserted = 0
     with get_connection() as connection:
+        _get_file_rows(connection, engagement.id, {int(item["file_id"]) for item in items})
+        context_rows = _get_context_rows(connection, engagement.id, {int(item["context_id"]) for item in items})
         for item in items:
             priority = max(0, min(100, int(item.get("priority", 50))))
+            file_id = int(item["file_id"])
+            context_id = int(item["context_id"])
+            context_row = context_rows[context_id]
+            if int(context_row["file_id"]) != file_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Queue item context does not belong to the specified file",
+                )
             cursor = connection.execute(
                 """
                 INSERT INTO code_analysis_queue (
@@ -488,14 +748,23 @@ def bulk_create_queue_items(
                 """,
                 (
                     engagement.id,
-                    item.get("context_id"),
-                    item["file_id"],
+                    context_id,
+                    file_id,
                     priority,
                 ),
             )
             if cursor.rowcount > 0:
                 inserted += 1
-    return {"inserted": inserted, "total": len(items)}
+                connection.execute(
+                    """
+                    UPDATE code_contexts
+                    SET analysis_status = 'pending', updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND id = ?
+                    """,
+                    (engagement.id, context_id),
+                )
+                _sync_file_analysis_status(connection, engagement.id, file_id)
+        return {"inserted": inserted, "total": len(items)}
 
 
 def queue_stats(engagement_id: int) -> dict[str, Any]:
@@ -558,7 +827,18 @@ def fetch_queue_items(
             """,
             (engagement.id, agent_name, now),
         ).fetchall()
-    return [dict(row) for row in rows]
+        if not rows:
+            return []
+
+        file_rows = _get_file_rows(connection, engagement.id, {int(row["file_id"]) for row in rows})
+        context_rows = _get_context_rows(connection, engagement.id, {int(row["context_id"]) for row in rows})
+        payload: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["context"] = _hydrate_code_context(context_rows[int(row["context_id"])])
+            item["file"] = _hydrate_code_file(file_rows[int(row["file_id"])])
+            payload.append(item)
+    return payload
 
 
 _VALID_DISPOSITIONS = frozenset({"finding", "suspicious", "clean", "needs_context"})
@@ -581,18 +861,31 @@ def complete_queue_items(
     now = _now_iso()
     placeholders = ",".join("?" for _ in item_ids)
     with get_connection() as connection:
+        queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
+        next_status = "needs_context" if disposition == "needs_context" else "done"
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
-            SET status = 'done',
+            SET status = ?,
                 disposition = ?,
                 analysis_notes = ?,
                 completed_at = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE engagement_id = ? AND id IN ({placeholders})
             """,
-            (disposition, notes, now, engagement.id, *item_ids),
+            (next_status, disposition, notes, now, engagement.id, *item_ids),
         )
+        for row in queue_rows.values():
+            context_status = "needs_context" if disposition == "needs_context" else "analyzed"
+            connection.execute(
+                """
+                UPDATE code_contexts
+                SET analysis_status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE engagement_id = ? AND id = ?
+                """,
+                (context_status, engagement.id, row["context_id"]),
+            )
+            _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
         return {"updated": cursor.rowcount, "total": len(item_ids)}
 
 
@@ -606,6 +899,7 @@ def error_queue_items(
         return {"updated": 0, "total": 0}
     placeholders = ",".join("?" for _ in item_ids)
     with get_connection() as connection:
+        _get_queue_rows(connection, engagement.id, set(item_ids))
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
@@ -629,6 +923,7 @@ def needs_context_queue_items(
         return {"updated": 0, "total": 0}
     placeholders = ",".join("?" for _ in item_ids)
     with get_connection() as connection:
+        queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
@@ -639,6 +934,16 @@ def needs_context_queue_items(
             """,
             (_json_text(expansion_request), engagement.id, *item_ids),
         )
+        for row in queue_rows.values():
+            connection.execute(
+                """
+                UPDATE code_contexts
+                SET analysis_status = 'needs_context', updated_at = CURRENT_TIMESTAMP
+                WHERE engagement_id = ? AND id = ?
+                """,
+                (engagement.id, row["context_id"]),
+            )
+            _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
         return {"updated": cursor.rowcount, "total": len(item_ids)}
 
 
@@ -674,6 +979,23 @@ def create_analysis_result(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
+        queue_row = _get_queue_rows(connection, engagement.id, {int(result["queue_item_id"])})[
+            int(result["queue_item_id"])
+        ]
+        file_row = _get_file_rows(connection, engagement.id, {int(result["file_id"])})[
+            int(result["file_id"])
+        ]
+        context_id = result.get("context_id")
+        if context_id is None:
+            context_id = int(queue_row["context_id"])
+        context_row = _get_context_rows(connection, engagement.id, {int(context_id)})[int(context_id)]
+
+        if int(queue_row["file_id"]) != int(file_row["id"]) or int(context_row["file_id"]) != int(file_row["id"]):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Analysis result file/context references do not match the queue item",
+            )
+
         cursor = connection.execute(
             """
             INSERT INTO code_analysis_results (
@@ -687,7 +1009,7 @@ def create_analysis_result(
             (
                 engagement.id,
                 result["queue_item_id"],
-                result.get("context_id"),
+                context_id,
                 result["file_id"],
                 result.get("agent_name", ""),
                 result.get("function_name", ""),
@@ -706,6 +1028,16 @@ def create_analysis_result(
             (cursor.lastrowid,),
         ).fetchone()
         assert row is not None
+        context_status = "needs_context" if result.get("disposition") == "needs_context" else "analyzed"
+        connection.execute(
+            """
+            UPDATE code_contexts
+            SET analysis_status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ?
+            """,
+            (context_status, engagement.id, int(context_id)),
+        )
+        _sync_file_analysis_status(connection, engagement.id, int(file_row["id"]))
         return dict(row)
 
 
@@ -740,6 +1072,7 @@ def record_threat_model(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
+        _get_repo_row(connection, engagement.id, repo_id)
         connection.execute(
             """
             UPDATE code_repos
@@ -921,8 +1254,35 @@ def code_coverage_summary(
         )
         unresolved_needs_context = _scalar_row(
             connection,
-            f"SELECT COUNT(*) FROM code_analysis_queue WHERE engagement_id = ? AND status = 'needs_context'",
-            (engagement.id,),
+            (
+                "SELECT COUNT(*) FROM code_analysis_queue WHERE engagement_id = ? AND status = 'needs_context'"
+                if repo_id is None
+                else """
+                SELECT COUNT(*)
+                FROM code_analysis_queue
+                WHERE engagement_id = ? AND status = 'needs_context'
+                  AND file_id IN (
+                      SELECT id FROM code_files WHERE engagement_id = ? AND repo_id = ?
+                  )
+                """
+            ),
+            (engagement.id,) if repo_id is None else (engagement.id, engagement.id, repo_id),
+        )
+        unresolved_active_queue = _scalar_row(
+            connection,
+            (
+                "SELECT COUNT(*) FROM code_analysis_queue WHERE engagement_id = ? AND status IN ('pending', 'processing')"
+                if repo_id is None
+                else """
+                SELECT COUNT(*)
+                FROM code_analysis_queue
+                WHERE engagement_id = ? AND status IN ('pending', 'processing')
+                  AND file_id IN (
+                      SELECT id FROM code_files WHERE engagement_id = ? AND repo_id = ?
+                  )
+                """
+            ),
+            (engagement.id,) if repo_id is None else (engagement.id, engagement.id, repo_id),
         )
         skip_reason_rows = connection.execute(
             f"""
@@ -954,6 +1314,10 @@ def code_coverage_summary(
         gate_reasons.append(
             f"Unresolved needs-context items: {unresolved_needs_context}"
         )
+    if unresolved_active_queue > 0:
+        gate_reasons.append(
+            f"Queue items still pending or processing: {unresolved_active_queue}"
+        )
     gate_passed = len(gate_reasons) == 0
 
     return {
@@ -976,6 +1340,7 @@ def code_coverage_summary(
             "high_coverage_pct": round(high_coverage, 1),
             "overall_loc_analyzed": overall_loc_analyzed,
             "unresolved_needs_context": unresolved_needs_context,
+            "active_queue_items": unresolved_active_queue,
             "skip_reasons": skip_reasons,
         },
         "gate": {
