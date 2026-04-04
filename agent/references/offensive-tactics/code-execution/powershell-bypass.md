@@ -26,11 +26,9 @@ Set-ExecutionPolicy Bypass -Scope Process
 ```
 
 ## WMIC + XSL for Code Execution
-```cmd
-# evil.xsl contains JScript payload
-wmic os get /FORMAT:"evil.xsl"
-```
+- See `lolbins-execution.md` WMIC + XSL section for full syntax
 - Bypasses PowerShell logging entirely since code runs via JScript
+- Note: WMIC deprecated in Windows 11+
 
 ## Download Cradles (Alternatives to IEX/DownloadString)
 ```powershell

@@ -300,3 +300,12 @@ def run(args) -> None:
 
     if security_files:
         print(f"\nFiles with security-related commit history: {len(security_files)}")
+
+    # Generate ctags symbol index (non-blocking — failure is OK)
+    try:
+        from assess.commands.code_setup_lsp import _setup_ctags
+        result = _setup_ctags(repo_path)
+        if not result.get('available'):
+            print("\nSymbol index: ctags not available (install Universal ctags for better cross-references)", file=sys.stderr)
+    except Exception:
+        print("\nSymbol index: ctags not available", file=sys.stderr)

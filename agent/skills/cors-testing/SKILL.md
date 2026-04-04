@@ -48,7 +48,7 @@ origin: AI Threat Hunting
 - [ ] `Origin: https://sub.target.example` — subdomain trust
 - [ ] `Origin: https://target.example.evil.example` — suffix match flaw
 - [ ] `Origin: https://eviltarget.example` — prefix match flaw
-- [ ] `Origin: https://target.example.evil.example` — regex bypass
+- [ ] `Origin: https://target.example\.evil.example` — regex escape bypass
 - [ ] `Origin: https://target.example%60.evil.example` — encoded characters
 - [ ] If subdomain accepted + XSS on subdomain = full chain
 
@@ -101,4 +101,3 @@ origin: AI Threat Hunting
 ## Extended Resources
 
 - `agent/references/payloads/cors-payloads.md` — null origin, subdomain wildcard, pre-flight bypass
-- `agent/references/vuln-checklists/A01-broken-access-control.md` — OWASP Top 10:2025 access control checklist

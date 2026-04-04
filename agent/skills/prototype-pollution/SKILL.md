@@ -123,4 +123,4 @@ deep-extend          deap.merge             mixin-deep
 
 ## Extended Resources
 
-- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist
+_(none — methodology in skill)_

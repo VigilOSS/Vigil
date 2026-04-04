@@ -424,13 +424,14 @@ traversal and server-side template injection. The access control was on the macr
 between the macro-level authorization and the template-level authorization — a resource
 access control issue disguised as a template injection.
 
-### CVE-2021-39115 (Jira — Mass Assignment via REST API)
-Jira's REST API allowed updating issue fields via PUT requests. Certain internal fields
-(workflow status, security level, reporter) could be set by sending them in the JSON body,
-even though the UI did not expose these fields for editing by non-admin users. The API
-deserialized the full JSON body into the issue model without checking per-field write
-permissions. The field-level authorization was enforced in the UI layer but not in the API
-layer — a classic mass assignment where the binding was too broad.
+### CVE-2023-23752 (Joomla — Improper API Access Control Leading to Data Exposure)
+Joomla's REST API allowed unauthenticated access to configuration endpoints. The
+`/api/index.php/v1/config/application?public=true` endpoint returned the full database
+configuration including credentials without requiring authentication. The web-accessible
+configuration endpoint lacked proper access control — the data was correctly stored, but the
+API route that exposed it had no authorization check. The UI required admin login to view
+configuration, but the API layer was unprotected — a classic missing ownership filter on a
+sensitive resource endpoint.
 
 ### CVE-2023-42793 (JetBrains TeamCity — Auth Bypass Leading to Data Exposure)
 TeamCity's REST API had an authentication bypass where certain API endpoints could be

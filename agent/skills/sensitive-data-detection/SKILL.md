@@ -233,7 +233,7 @@ After SQLi extraction, classify the data:
 ```bash
 # For each extracted column, sample values and detect type
 # Run Phase 1 patterns against extracted data
-# Additionally check for:
+# Also scan for:
 
 # MD5 hashes (likely password hashes)
 rg -oN '\b[a-f0-9]{32}\b' "$EXTRACT_FILE"
@@ -323,3 +323,29 @@ Detected PII feeds into intel.md:
 - Internal IPs / domains → intel.md Domains & Infrastructure table
 - Credentials → intel.md Credentials & Secrets table
 - Bulk PII exposure → durable finding via `assess.py record-finding` or assessment API, then keep `findings.md` synchronized
+
+## Cryptographic Weakness Checks
+
+### Insecure Randomness
+- [ ] Collect multiple session tokens and analyze for sequential patterns
+- [ ] Check reset tokens for predictability: timestamp-based, sequential, short length
+- [ ] Test if CSRF tokens are reusable or predictable
+- [ ] Verify OTP/verification codes have sufficient entropy (6+ digits, not sequential)
+- [ ] Check UUID versions in API responses — UUIDv1 contains timestamp and MAC address
+
+### Weak Password Hashing
+- [ ] If password hashes are exposed, identify the algorithm (MD5, SHA1, SHA256, bcrypt, scrypt, argon2)
+- [ ] Check for unsalted hashes — identical passwords produce identical hashes
+- [ ] Verify bcrypt cost factor is >= 12 (if observable from timing or source; 10 is absolute minimum)
+- [ ] Check for reversible encryption used instead of hashing for passwords
+- [ ] Look for custom/homegrown hashing schemes in source code
+
+### Key Management
+- [ ] Check for exposed key material: `/keys/`, `/certs/`, `/.ssh/`
+- [ ] Look for JWT secrets in source code or configuration files
+- [ ] Check if the same key is used for multiple purposes (signing + encryption)
+- [ ] Verify key rotation — are old keys still accepted?
+
+## Extended Resources
+
+- `agent/references/payloads/info-disclosure-probes.md` — standard probe endpoints and metadata paths

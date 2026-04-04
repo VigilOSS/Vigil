@@ -44,7 +44,8 @@
           "FILE-CONTENT",
           "ENV-VARIABLE",
           "CALLBACK-DATA",
-          "PROTOCOL-FIELD"
+          "PROTOCOL-FIELD",
+          "SERIALIZED-DATA"
         ]
       },
       "description": "Types of untrusted data that flow into this file. Required for critical and high files.",

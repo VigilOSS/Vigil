@@ -111,3 +111,21 @@ Fetch .map → extract `sources` array → reconstruct original source for analy
 3. Frontend routes revealing app structure
 4. Hidden form fields and debug endpoints
 5. Source maps and debug artifacts
+
+## Supply Chain Checks
+
+- [ ] Identify internal/private package names from exposed manifests or JS source maps
+- [ ] Check if private package names exist on public registries (npm, PyPI, RubyGems)
+- [ ] Look for typosquatting candidates: common misspellings of popular packages in dependency lists
+- [ ] Check for scoped vs unscoped npm packages — `@company/pkg` vs `company-pkg`
+- [ ] Check for lockfile manipulation: does the app use lockfiles for reproducible builds?
+- [ ] Verify that `package-lock.json` registry URLs point to expected registries (not attacker-controlled)
+- [ ] Check for mixed registries in lockfiles (public + private pointing to wrong source)
+- [ ] Verify CDN-loaded scripts/styles have `integrity` attributes (SRI)
+- [ ] Check if `<script>` tags loading from third-party domains use SRI hashes
+- [ ] Test if missing SRI allows content injection via compromised CDN
+
+## Extended Resources
+
+- `agent/references/payloads/info-disclosure-probes.md` — standard probe endpoints, metadata paths, and environment file paths
+- `agent/references/tools/exploitation/dalfox.md` — for JS-discovered parameterized URLs that may be XSS candidates

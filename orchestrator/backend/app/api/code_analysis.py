@@ -187,6 +187,14 @@ def get_repo(engagement_key: str, repo_id: int) -> dict[str, Any]:
     return code_analysis.get_code_repo(engagement.id, repo_id)
 
 
+@router.patch("/repos/{repo_id}")
+async def update_repo(engagement_key: str, repo_id: int, request: dict[str, Any]) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = code_analysis.update_code_repo(engagement.id, repo_id, **request)
+    await _broadcast(engagement.key, "repo", record)
+    return record
+
+
 # ---------------------------------------------------------------------------
 # File endpoints
 # ---------------------------------------------------------------------------

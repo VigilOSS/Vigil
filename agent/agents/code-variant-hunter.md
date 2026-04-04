@@ -25,6 +25,7 @@ Before producing any output, confirm:
 - [ ] Candidate file list for scanning is present — same language, relevant classification levels
 - [ ] Abstract bug pattern is provided or derivable from the original finding
 - [ ] Threat model context available for understanding trust boundaries during quick taint checks
+- [ ] Cross-reference tools identified: check dispatch context for `lsp_config` — use LSP find-all-references to locate all callers of vulnerable functions across the codebase
 
 If any item is missing, stop and request it from the operator before proceeding.
 

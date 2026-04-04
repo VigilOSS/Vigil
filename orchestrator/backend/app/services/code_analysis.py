@@ -44,6 +44,14 @@ def _json_decode(value: Any, default: Any) -> Any:
     return default
 
 
+def _hydrate_code_repo(row: Any) -> dict[str, Any]:
+    payload = dict(row)
+    payload["lsp_config"] = _json_decode(payload.get("lsp_config_json"), {})
+    payload["git_churn"] = _json_decode(payload.get("git_churn_json"), {})
+    payload["threat_model"] = _json_decode(payload.get("threat_model_json"), {})
+    return payload
+
+
 def _hydrate_code_file(row: Any) -> dict[str, Any]:
     payload = dict(row)
     payload["slot_types"] = _json_decode(payload.get("slot_types_json"), [])
@@ -211,17 +219,17 @@ def create_code_repo(
             (engagement.id, repo_key),
         ).fetchone()
         assert row is not None
-        return dict(row)
+        return _hydrate_code_repo(row)
 
 
 def list_code_repos(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        return _fetch_all(
-            connection,
+        rows = connection.execute(
             "SELECT * FROM code_repos WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC",
             (engagement.id,),
-        )
+        ).fetchall()
+        return [_hydrate_code_repo(row) for row in rows]
 
 
 def get_code_repo(engagement_id: int, repo_id: int) -> dict[str, Any]:
@@ -233,7 +241,55 @@ def get_code_repo(engagement_id: int, repo_id: int) -> dict[str, Any]:
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code repo not found")
-    return dict(row)
+    return _hydrate_code_repo(row)
+
+
+_CODE_REPO_ALLOWED_FIELDS = frozenset({
+    "name", "language", "repo_path", "analysis_status",
+    "lsp_config_json",
+})
+
+
+def update_code_repo(
+    engagement_id: int,
+    repo_id: int,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    if not kwargs:
+        return get_code_repo(engagement_id, repo_id)
+
+    json_object_fields = {"lsp_config_json"}
+    set_clauses = []
+    params: list[Any] = []
+    for key, value in kwargs.items():
+        if key not in _CODE_REPO_ALLOWED_FIELDS:
+            continue
+        if key in json_object_fields:
+            set_clauses.append(f"{key} = ?")
+            params.append(_json_text(value))
+        else:
+            set_clauses.append(f"{key} = ?")
+            params.append(value)
+
+    if not set_clauses:
+        return get_code_repo(engagement_id, repo_id)
+
+    set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+    params.extend([engagement.id, repo_id])
+
+    with get_connection() as connection:
+        connection.execute(
+            f"UPDATE code_repos SET {', '.join(set_clauses)} WHERE engagement_id = ? AND id = ?",
+            tuple(params),
+        )
+        row = connection.execute(
+            "SELECT * FROM code_repos WHERE engagement_id = ? AND id = ?",
+            (engagement.id, repo_id),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code repo not found")
+    return _hydrate_code_repo(row)
 
 
 # =========================================================================
@@ -1087,7 +1143,7 @@ def record_threat_model(
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code repo not found")
-    return dict(row)
+    return _hydrate_code_repo(row)
 
 
 def get_threat_model(

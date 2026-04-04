@@ -1,15 +1,17 @@
 # Authentication Bypass — Logic-Level Authentication Gaps
 
-## What SAST Already Catches
+> For web framework-specific auth bypass patterns (Django, Flask, FastAPI, Express, Next.js, NestJS, Spring),
+> see `web-app-auth.md` which provides per-framework code examples and CVEs. This file covers
+> generic/C/C++ auth bypass patterns and cross-framework logic bugs.
+
+## What SAST Already Catches (Skip These)
 
 - Missing authentication middleware on route definition
 - Hardcoded credentials in source code
 - `strcmp` for password comparison (timing attack)
 - Missing CSRF token validation on state-changing routes
 
-Skip these patterns.
-
-## What You're Hunting (SAST-Surviving Patterns)
+## What You're Hunting (LLM-Advantage Patterns)
 
 ### Auth Check on Wrong Operation or Wrong Point
 The auth check exists but is applied incorrectly:
@@ -70,33 +72,15 @@ Token is validated but incompletely:
 
 **Detection approach**: For every privileged operation, trace backward to find the auth check. Verify it checks the right principal, the right permission, and cannot be bypassed via any alternative code path.
 
-## Python Specific
+## Python / JavaScript / Java Framework-Specific
 
-**Dangerous patterns**:
-- Decorator ordering: `@login_required` applied after `@route()` may not fire as expected in all frameworks
-- Django `permission_classes` on ViewSet but not on individual actions (`retrieve` vs `list` vs `create`)
-- Flask `@before_request` exception — a new route added without the auth blueprint
-- FastAPI dependency injection: auth dependency declared but `Depends()` forgotten on a specific endpoint
-- `getattr(user, 'is_admin', False)` — defaults to False when attribute is missing, which is correct, but `getattr(user, 'is_admin', True)` defaults to True (seen in copy-paste errors)
+See `web-app-auth.md` for comprehensive per-framework patterns including:
+- Django decorator ordering, DRF permission_classes, Flask @before_request gaps
+- Express middleware ordering, Next.js middleware matcher, NestJS guard bypass
+- Spring @PreAuthorize, antMatchers vs mvcMatchers, HiddenHttpMethodFilter
+- FastAPI Depends() gaps, Flask-Login overrides, JWT algorithm confusion
 
-**Framework-specific**:
-- Django REST Framework: `IsAuthenticated` checks auth but not object-level permissions
-- Flask-Login: `@login_required` but `current_user.is_authenticated` can be overridden by user model
-- FastAPI: `Security()` dependency vs `Depends()` — subtle difference in OpenAPI schema generation but identical runtime behavior (often confused)
-
-## JavaScript Specific
-
-**Dangerous patterns**:
-- Express middleware ordering: auth middleware added after the route it should protect
-- Next.js `middleware.ts` matcher configuration: `matcher: ['/dashboard/:path*']` doesn't match `/dashboard` (no trailing content)
-- JWT verification with `algorithms: ['HS256', 'none']` — `none` algorithm bypass
-- Prototype pollution setting `isAdmin: true` on the request object before auth check reads it
-- `res.redirect()` before `next()` — response sent but middleware chain continues executing
-
-**Framework-specific**:
-- Express: `app.use('/admin', authMiddleware)` vs `app.use('/admin/', authMiddleware)` — trailing slash semantics
-- Next.js App Router: server component auth vs client component auth — client-side checks are bypassable
-- Nest.js: Guard applied at controller level but a specific route uses `@Public()` decorator (intended but often over-applied)
+The patterns below in C/C++ Specific are NOT covered in web-app-auth.md and remain here.
 
 ## Detection Questions
 
@@ -106,10 +90,25 @@ Token is validated but incompletely:
 4. **What happens when auth fails?** Reject? Fallback? Fail open?
 5. **Are there any paths that were added after the auth middleware and might have been missed?** Check git log for routes added after the initial auth implementation.
 
-## Real CVE Patterns
+## Real CVE Examples
 
-**Pattern 1 — Path normalization in web servers**: Nginx/Apache/Tomcat path traversal where `..` sequences or URL encoding bypass location-based access controls. The auth layer normalizes differently than the file-serving layer.
+### CVE-2021-41773 (Apache httpd — path normalization auth bypass)
+Apache 2.4.49 introduced a path normalization flaw where `/.%2e/` sequences bypassed
+`<Directory>` access controls. The URL decoder resolved `%2e` to `.` after the auth
+check had already evaluated the un-decoded path. The auth layer and the file-serving
+layer disagreed on which path was being accessed — a classic multi-function normalization
+mismatch across the request processing pipeline.
 
-**Pattern 2 — JWT audience confusion**: Token issued for Service A is accepted by Service B because both share the same signing key and neither validates the `aud` claim. Attacker obtains a low-privilege token from A and uses it for high-privilege operations on B.
+### CVE-2023-22602 (Apache Shiro + Spring Boot — path matching bypass)
+Shiro's `PathMatchingFilter` used Ant-style path matching while Spring Boot used its
+own path matching. Requests with trailing slashes or path parameters (`;param`) matched
+in Spring but not in Shiro, bypassing auth checks. The fix required Shiro to delegate
+path matching to the framework rather than maintaining its own matcher.
 
-**Pattern 3 — HTTP method override**: Application blocks DELETE requests to `/api/resources/{id}` for non-owners, but accepts `POST /api/resources/{id}` with `X-HTTP-Method-Override: DELETE` header, and the override header is processed after the auth check.
+### CVE-2019-19844 (Django — Unicode case-folding password reset)
+Django's password reset accepted email addresses that differed only in Unicode case
+folding. An attacker could request a reset for `admin@example.com` using a
+confusable Unicode equivalent, and the reset email would be sent to the attacker's
+address if the email system resolved the confusable differently than Django's
+`iexact` lookup. The auth check (email lookup) and the action (send email) operated
+on different normalizations of the same input.

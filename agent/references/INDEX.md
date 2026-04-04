@@ -6,26 +6,9 @@ On-demand reference library. Read specific files when needed — do NOT load eve
 
 1. Check this index to find the relevant reference file
 2. Use the listed path under `references/` to load only the specific file you need
-3. Example: testing for SQL injection? Read `references/vuln-checklists/A05-injection.md`
+3. Example: testing for SQL injection? Read `references/payloads/sqli-payloads.md`
 
 ---
-
-## vuln-checklists/ — OWASP Top 10:2025
-
-Testing checklists per vulnerability category. Used by: vulnerability-analyst, exploit-developer, operator.
-
-| File | Category |
-|------|----------|
-| `vuln-checklists/A01-broken-access-control.md` | IDOR, privilege escalation, CORS, CSRF, JWT tampering |
-| `vuln-checklists/A02-security-misconfiguration.md` | Default creds, verbose errors, directory listing, missing headers |
-| `vuln-checklists/A03-supply-chain-failures.md` | Outdated components, known CVEs, exposed .git, dependency confusion |
-| `vuln-checklists/A04-cryptographic-failures.md` | Weak TLS, hardcoded secrets, weak hashing, insecure random |
-| `vuln-checklists/A05-injection.md` | SQLi, XSS, command injection, SSTI, NoSQL, LDAP injection |
-| `vuln-checklists/A06-insecure-design.md` | Logic flaws, rate limiting, business logic bypass |
-| `vuln-checklists/A07-authentication-failures.md` | Credential stuffing, session fixation, MFA bypass, user enumeration |
-| `vuln-checklists/A08-integrity-failures.md` | Insecure deserialization, CI/CD exposure, unsigned updates |
-| `vuln-checklists/A09-logging-failures.md` | Log injection, missing audit trails (observational) |
-| `vuln-checklists/A10-exceptional-conditions.md` | Error disclosure, fail-open, transaction rollback, resource exhaustion |
 
 ## api-security/ — OWASP API Security Top 10:2023
 
@@ -169,7 +152,7 @@ multi-function chains, combinatorial arithmetic, state machine bugs, and incompl
 | `code-vuln-patterns/injection.md` | Semantic context escaping, multi-stage sanitization failures, protocol injection | C/C++, Python, JS |
 | `code-vuln-patterns/race-condition.md` | State machine bugs, async refactoring artifacts, signal handler races | C/C++, Python, JS |
 | `code-vuln-patterns/crypto-misuse.md` | Subtle mode/parameter misuse, timing leaks, non-obvious randomness issues | C/C++, Python, JS |
-| `code-vuln-patterns/auth-bypass.md` | Logic-level auth gaps, fallback bypasses, path normalization, method confusion | C/C++, Python, JS |
+| `code-vuln-patterns/auth-bypass.md` | Generic/C auth gaps, fallback bypasses, token validation gaps. Framework-specific → see `web-app-auth.md` | C/C++ (frameworks → web-app-auth) |
 | `code-vuln-patterns/uninitialized-memory.md` | Conditional initialization, cross-function partial init, stack/heap info leaks | C/C++, Python, JS |
 | `code-vuln-patterns/type-confusion.md` | void* casts, union abuse, tagged union errors, inheritance downcasts | C/C++, Python, JS |
 | `code-vuln-patterns/null-dereference.md` | Cross-function NULL propagation, optional field assumptions, race-to-NULL | C/C++, Python, JS |
@@ -197,7 +180,6 @@ Quick-reference per tool, organized by usage phase.
 | `tools/recon/puredns.md` | Active DNS brute-force with wildcard filtering |
 | `tools/recon/dnsx.md` | Bulk DNS resolution and record enumeration |
 | `tools/recon/gau.md` | Historical URL discovery (Wayback, OTX, Common Crawl, URLScan) |
-| `tools/recon/nikto.md` | Web server vulnerability scanner |
 
 ### tools/fuzzing/ — Used by: fuzzer, recon-specialist
 

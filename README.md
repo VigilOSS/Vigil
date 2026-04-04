@@ -126,7 +126,7 @@ Methodology references:
 
 - Kali MCP server
 - Katana and Chromium for authenticated crawling
-- nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, nikto, WhatWeb, hydra, john, hashcat
+- nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, WhatWeb, hydra, john, hashcat
 - post-access tooling such as evil-winrm, impacket, mitm6, chisel, ligolo-ng, proxychains-ng, Responder
 - pwncat-vl for interactive reverse shell handling, with tmux for session management
 - interactsh for OOB callback detection (blind SSRF, XXE, XSS, DNS)

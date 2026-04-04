@@ -72,6 +72,7 @@ Annotate what kind of untrusted data enters critical and high files:
 - `ENV-VARIABLE` — Environment variable values
 - `CALLBACK-DATA` — Data passed through callback interfaces from other modules
 - `PROTOCOL-FIELD` — Protocol-specific parsed fields (HTTP chunked encoding sizes, Content-Length, etc.)
+- `SERIALIZED-DATA` — Binary/structured serialization formats (protobuf, ASN.1, flatbuffers, CBOR, MessagePack, BSON)
 
 ## Input
 

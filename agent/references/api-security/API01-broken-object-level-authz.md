@@ -1,6 +1,6 @@
 # API1:2023 — Broken Object Level Authorization
 
-> See also: [A01-broken-access-control](../vuln-checklists/A01-broken-access-control.md) | Skill: `idor-testing`
+> Skill: `idor-testing`
 
 ## REST BOLA/IDOR — CRUD Coverage
 - [ ] Test every CRUD endpoint with swapped IDs — map all endpoints accepting object IDs first

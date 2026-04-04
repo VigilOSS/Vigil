@@ -327,9 +327,10 @@ operations, but the roaming buffer captured raw memory contents including key
 material. The crypto was correct; the memory management around it violated the
 security assumptions.
 
-### CVE-2019-5443 (cURL — non-constant-time NTLM response comparison)
-The NTLM authentication handler in cURL compared challenge-response values using
-standard memory comparison (`memcmp`). While NTLM itself is a deprecated protocol,
-the timing side-channel in the comparison allowed network-adjacent attackers to
-accelerate brute-force attacks against the NTLM response. The authentication
-algorithm was implemented correctly; only the comparison method was wrong.
+### CVE-2018-0737 (OpenSSL — RSA key generation timing side-channel)
+OpenSSL's RSA key generation used a GCD computation during prime selection that
+was not constant-time. A local attacker able to measure cache-timing signals
+(via Flush+Reload or similar microarchitectural attacks) could recover enough
+information about the prime factors to reconstruct the private key. The RSA
+algorithm was implemented correctly; only the GCD helper lacked constant-time
+guarantees, leaking bit-level information about the generated primes.

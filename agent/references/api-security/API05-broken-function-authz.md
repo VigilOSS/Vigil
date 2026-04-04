@@ -1,6 +1,6 @@
 # API5:2023 — Broken Function Level Authorization
 
-> See also: [A01-broken-access-control](../vuln-checklists/A01-broken-access-control.md) | Skill: `auth-bypass`
+> Skill: `auth-bypass`
 
 ## Admin Endpoint Access with User Tokens
 - [ ] Test admin paths with regular user token: `curl -H "Authorization: Bearer USER_TOKEN" https://api/admin/users`

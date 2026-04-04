@@ -1,6 +1,6 @@
 # API3:2023 — Broken Object Property Level Authorization
 
-> See also: [A01-broken-access-control](../vuln-checklists/A01-broken-access-control.md) | Skill: `parameter-fuzzing`
+> Skill: `parameter-fuzzing`
 
 ## Mass Assignment — Extra Fields in Write Requests
 - [ ] Add `"role": "admin"` to user profile update: `curl -X PUT -d '{"name":"test","role":"admin"}' https://api/users/me`

@@ -19,7 +19,8 @@ origin: AI Threat Hunting
 
 ### 1. Quick Initial Scan
 ```bash
-nmap -sV -sC -T4 TARGET -oA /engagement/scans/nmap_initial
+nmap -Pn -sV -sC -T4 TARGET -oA /engagement/scans/nmap_initial
+# -Pn: skip host discovery (required when ICMP is blocked by firewall)
 ```
 
 ### 2. Full TCP Scan
@@ -27,7 +28,7 @@ nmap -sV -sC -T4 TARGET -oA /engagement/scans/nmap_initial
 nmap -sV -sC -T4 -p- TARGET -oN /engagement/scans/nmap_full_tcp.txt
 # Speed optimization: discover ports first, then deep scan
 nmap -sS -T4 -p- --min-rate 1000 TARGET -oG /engagement/scans/ports_only.txt
-PORTS=$(grep -oP '\d+/open' /engagement/scans/ports_only.txt | cut -d/ -f1 | tr '\n' ',' | sed 's/,$//')
+PORTS=$(grep -oE '[0-9]+/open' /engagement/scans/ports_only.txt | cut -d/ -f1 | tr '\n' ',' | sed 's/,$//')
 nmap -sV -sC -p "$PORTS" TARGET -oN /engagement/scans/nmap_targeted.txt
 ```
 
@@ -63,7 +64,7 @@ nmap --source-port 53 -sV -p PORT TARGET      # Source port trick
 
 ### 7. Output Parsing
 ```bash
-grep -oP '\d+/open/tcp//\S+' /engagement/scans/nmap_initial.gnmap
+grep -oE '[0-9]+/open/tcp//[^ ]+' /engagement/scans/nmap_initial.gnmap
 grep "open" /engagement/scans/nmap_targeted.txt | grep -v "filtered"
 ```
 
@@ -77,9 +78,22 @@ grep "open" /engagement/scans/nmap_targeted.txt | grep -v "filtered"
 | 53 | DNS | Zone transfer |
 | 80/443 | HTTP/S | Web app testing |
 | 139/445 | SMB | Shares, null sessions |
-| 1433 | MSSQL | 3306 MySQL | 5432 PostgreSQL |
-| 3389 | RDP | 5900 VNC | 6379 Redis (often unauth) |
-| 8080 | HTTP alt | 27017 MongoDB (often unauth) |
+| 1433 | MSSQL | Default creds, xp_cmdshell |
+| 3306 | MySQL | Remote auth, UDF |
+| 5432 | PostgreSQL | COPY TO PROGRAM |
+| 3389 | RDP | Brute-force, BlueKeep |
+| 5900 | VNC | Auth bypass, no-password |
+| 6379 | Redis | Often unauthenticated |
+| 8080 | HTTP alt | Management panels |
+| 27017 | MongoDB | Often unauthenticated |
+
+## What to Record
+
+- Open ports with service names and versions
+- OS detection results if available
+- Notable NSE script output (vulns, default creds, misconfigs)
+- Filtered ports worth retesting after gaining access
+- Non-web services to hand off for deeper testing
 
 ## Extended Resources
 

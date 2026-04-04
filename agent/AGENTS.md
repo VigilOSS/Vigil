@@ -347,7 +347,7 @@ Root: scope.json, log.md, findings.md, intel.md, report.md, auth.json, and the t
 If a relevant skill exists for the task, you must use it before improvising.
 If no suitable skill exists, check `agent/SKILL.md` and then `agent/references/INDEX.md`. Only invent a new approach after confirming the existing skill/reference set is insufficient.
 
-**References are not optional depth.** The `agent/references/` library contains 20+ payload files, OWASP Top 10:2025 checklists, API Security Top 10:2023 checklists, red team TTPs, and CLI tool cheatsheets. When a skill's "Extended Resources" footer lists reference files, those are required reading for that test class.
+**References are not optional depth.** The `agent/references/` library contains 20+ payload files, OWASP Top 10:2021 checklists, API Security Top 10:2023 checklists, red team TTPs, and CLI tool cheatsheets. When a skill's "Extended Resources" footer lists reference files, those are required reading for that test class.
 
 ## Key Rule Reminders
 

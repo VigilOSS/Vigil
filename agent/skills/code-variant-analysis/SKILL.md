@@ -18,6 +18,11 @@ origin: AI Threat Hunting
 - Host-side file reading (`cat`) — read candidate files for detailed analysis
 - `find` — locate files matching naming or extension criteria
 
+Cross-reference tools (check dispatch context for `lsp_config`):
+- **LSP find-all-references** — find every call site of a vulnerable function across the entire codebase (far more reliable than grep for variant scanning)
+- **LSP call-hierarchy** — trace incoming calls to identify all code paths that reach a vulnerable pattern
+- **ctags index** — `grep '^<symbol>\t' <repo>/tags` to find definitions when LSP unavailable
+
 ## Methodology
 
 ### Step 1: Extract Abstract Pattern
