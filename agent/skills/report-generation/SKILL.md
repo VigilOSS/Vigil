@@ -242,8 +242,8 @@ Only proceed to report generation after validation passes or the operator resolv
 3. **Update finding statuses to `reported`** for all findings included in the report:
    ```bash
    # For each finding slug included in the report:
-   echo '{"slug":"FINDING-VA-003","status":"reported","title":"...","severity":"...","defect_family":"...","root_cause_key":"...","auth_context":"...","canonical_location":"...","summary":"...","evidence_ref":"...","notes":"","details":{"evidence":"...","impact":"..."}}' > /tmp/finding_update.json
-   ./scripts/assess.py record-finding report-writer /tmp/finding_update.json
+   echo '{"status":"reported","notes":"Included in report.md","provenance":{"reported_by":"report-writer"}}' > /tmp/finding_patch.json
+   ./scripts/assess.py patch findings/FINDING-VA-003 /tmp/finding_patch.json
    ```
    This completes the finding lifecycle: draft -> confirmed -> exploited -> reported.
 

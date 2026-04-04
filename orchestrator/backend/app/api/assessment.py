@@ -173,6 +173,22 @@ class FindingRecordRequest(BaseModel):
     links: list[FindingLinkRequest] = Field(default_factory=list)
 
 
+class FindingPatchRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=512)
+    severity: str | None = Field(default=None, min_length=1, max_length=32)
+    status: str | None = Field(default=None, min_length=1, max_length=32)
+    defect_family: str | None = Field(default=None, max_length=128)
+    root_cause_key: str | None = Field(default=None, max_length=256)
+    auth_context: str | None = Field(default=None, min_length=1, max_length=128)
+    canonical_location: str | None = Field(default=None, max_length=1024)
+    summary: str | None = Field(default=None, max_length=4096)
+    evidence_ref: str | None = Field(default=None, max_length=1024)
+    notes: str | None = Field(default=None, max_length=20000)
+    source_name: str | None = Field(default=None, max_length=128)
+    details: dict[str, Any] | None = None
+    provenance: dict[str, Any] | None = None
+
+
 async def _broadcast(engagement_key: str, record_type: str, payload: dict[str, Any]) -> None:
     await broadcaster.publish(
         engagement_key,
@@ -381,6 +397,34 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
         service_id=request.service_id,
         surface_id=request.surface_id,
         links=[item.model_dump() for item in request.links],
+    )
+    await _broadcast(engagement.key, "finding", record)
+    return record
+
+
+@router.patch("/findings/{finding_slug}")
+async def patch_finding(
+    engagement_key: str,
+    finding_slug: str,
+    request: FindingPatchRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.patch_finding(
+        engagement.id,
+        slug=finding_slug,
+        title=request.title,
+        severity=request.severity,
+        status_value=request.status,
+        defect_family=request.defect_family,
+        root_cause_key=request.root_cause_key,
+        auth_context=request.auth_context,
+        canonical_location=request.canonical_location,
+        summary=request.summary,
+        evidence_ref=request.evidence_ref,
+        notes=request.notes,
+        source_name=request.source_name,
+        details=request.details,
+        provenance=request.provenance,
     )
     await _broadcast(engagement.key, "finding", record)
     return record

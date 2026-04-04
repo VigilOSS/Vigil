@@ -1316,6 +1316,56 @@ def update_finding(
     return result["finding"]
 
 
+def patch_finding(
+    engagement_id: int,
+    *,
+    slug: str,
+    title: str | None = None,
+    severity: str | None = None,
+    status_value: str | None = None,
+    defect_family: str | None = None,
+    root_cause_key: str | None = None,
+    auth_context: str | None = None,
+    canonical_location: str | None = None,
+    summary: str | None = None,
+    evidence_ref: str | None = None,
+    notes: str | None = None,
+    source_name: str | None = None,
+    details: dict[str, Any] | None = None,
+    provenance: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, slug),
+        ).fetchone()
+    if existing is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
+
+    return create_finding(
+        engagement.id,
+        slug=slug,
+        title=title if title is not None else str(existing["title"]),
+        severity=severity if severity is not None else str(existing["severity"]),
+        status_value=status_value if status_value is not None else str(existing["status"]),
+        defect_family=defect_family or "",
+        root_cause_key=root_cause_key or "",
+        auth_context=auth_context or "",
+        canonical_location=canonical_location or "",
+        summary="" if summary is None else summary,
+        evidence_ref=evidence_ref or "",
+        notes="" if notes is None else notes,
+        source_name=source_name or "",
+        details=details,
+        provenance=provenance,
+        request_variant_id=None,
+        service_id=None,
+        surface_id=None,
+        links=None,
+    )
+
+
 def merge_findings(
     engagement_id: int,
     *,
