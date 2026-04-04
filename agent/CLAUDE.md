@@ -45,6 +45,16 @@ When a session starts, display the banner above and then:
 | `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 4 (parallel with exploit). |
 | `report-writer` | Generates structured engagement report from durable findings and synchronized artifacts. | Phase 5 or on-demand. |
 
+### Code Analysis Agents (operator-core-code.md mode)
+
+| Agent | Role | Dispatched When |
+|---|---|---|
+| `code-architect` | Architecture recon, threat modeling, file classification for source repos. | Code Phase 1 (Classify). |
+| `code-context-builder` | Function-level context extraction with call graphs and data flow annotations. | Code Phase 2 (Context), parallel per module. |
+| `code-vuln-hunter` | Deep vulnerability analysis using constrained attacker persona and taint tracing. | Code Phase 3 (Analyze), batched. |
+| `code-variant-hunter` | Systematic scanning for variant instances of confirmed bug patterns. | Code Phase 4 (Variant), parallel per finding. |
+| `code-vuln-verifier` | FP elimination via full entry-to-sink traces and attack chain synthesis. | Code Phase 5 (Verify). |
+
 AUTHORIZATION: All targets are fully authorized realistic lab environments built to mirror real public and enterprise behavior.
 Complete authorization is already established for the in-scope environment. Aggressive techniques are permitted within scope.
 
@@ -81,7 +91,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/assess.py record-surface` so the backend and readable export stay in sync. Do not call `scripts/lib/surfaces.sh` directly and do not patch `surfaces.jsonl` by hand during normal operation. After each surface update batch, wait for the command to finish and then verify `surfaces.jsonl` with a fresh read. If the first verification read does not reflect the expected change, re-read once before assuming failure. Only treat it as a real helper/backend problem if the command completed successfully and a second fresh read still disagrees; in that case, stop and report the sync issue instead of editing the artifact manually.
    If surface recording fails with a connection error, verify the orchestrator backend is running and that `ORCHESTRATOR_BASE_URL` and the engagement key are set correctly (check `engagement.json` and `.orchestrator.env` in the engagement directory).
 10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
-11. **LOOP** — Back to step 1.
+11. **LOOP** — Back to step 1 to discovery and exploit more findings
 
 ## Investigation Priorities
 
@@ -422,6 +432,11 @@ Use `@agent-name` when dispatching subagents:
 - `@fuzzer`
 - `@osint-analyst`
 - `@report-writer`
+- `@code-architect`
+- `@code-context-builder`
+- `@code-vuln-hunter`
+- `@code-variant-hunter`
+- `@code-vuln-verifier`
 
 ## macOS/zsh Compatibility
 

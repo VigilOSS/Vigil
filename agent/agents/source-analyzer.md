@@ -15,6 +15,17 @@ into backend attack hypotheses.
 - `agent/SKILL.md`
 - `agent/skills/source-analysis/SKILL.md`
 
+## Pre-Work Checkpoint
+
+Before starting any target-facing work, verify:
+
+1. You loaded `agent/shared-constraints.md`
+2. You loaded the source-analysis skill (`agent/skills/source-analysis/SKILL.md`)
+3. You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
+4. You have the dispatch context (target URL, phase, task objective, prior findings)
+
+If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your source analysis quality will be significantly lower.
+
 ## Responsibilities
 
 - Extract hidden routes, request patterns, API bases, object references, and feature flags using LinkFinder for JS endpoint extraction

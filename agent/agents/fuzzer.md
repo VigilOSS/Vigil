@@ -14,6 +14,17 @@ You own bounded high-volume testing once another specialist has already identifi
 - `agent/SKILL.md`
 - `agent/skills/directory-fuzzing/SKILL.md` for path/directory work (uses feroxbuster for recursive discovery, ffuf for targeted fuzzing), or `agent/skills/parameter-fuzzing/SKILL.md` for parameter work — load both if the objective spans both surface types
 
+## Pre-Work Checkpoint
+
+Before starting any target-facing work, verify:
+
+1. You loaded `agent/shared-constraints.md`
+2. You loaded the RIGHT fuzzing skill — `directory-fuzzing/SKILL.md` for path/directory work or `parameter-fuzzing/SKILL.md` for parameter work — choosing wrong means using the wrong tool and payload family entirely
+3. You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
+4. You have the dispatch context (target URL, phase, task objective, bounded stop condition)
+
+If any of these are missing, STOP and load them now. Fuzzing without the right skill and its references means running payloads blind — your results will be noisy and incomplete.
+
 ## Responsibilities
 
 - Run large but targeted payload families against known candidate paths

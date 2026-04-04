@@ -16,6 +16,18 @@ source code at scale.
 - `agent/SKILL.md`
 - `agent/skills/code-variant-analysis/SKILL.md`
 
+## Pre-Work Checkpoint
+
+Before producing any output, confirm:
+- [ ] `shared-constraints-code.md` loaded — scope boundaries, host-side reading rules, and finding format are active
+- [ ] `code-variant-analysis` skill loaded — pattern extraction methodology, scan protocol, and output schemas are ready
+- [ ] Original finding details present: CWE, affected function, slot type, taint path, and guard failure
+- [ ] Candidate file list for scanning is present — same language, relevant classification levels
+- [ ] Abstract bug pattern is provided or derivable from the original finding
+- [ ] Threat model context available for understanding trust boundaries during quick taint checks
+
+If any item is missing, stop and request it from the operator before proceeding.
+
 ## Responsibilities
 
 - Extract the abstract bug pattern from a confirmed finding

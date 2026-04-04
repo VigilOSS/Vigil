@@ -101,6 +101,31 @@ Scan for entry points where execution begins or external interaction occurs:
 - **CLI parsers**: argument parsing (`argparse`, `getopt`, `clap`, `cobra`, `flag`)
 - **Plugin/extension entry points**: `init()` functions, module registration macros
 
+#### Web Framework Entry Points
+
+For web applications, identify framework-specific route handlers and middleware:
+
+| Framework | Entry Point Pattern | Search Command |
+|-----------|---|---|
+| Django | `def view(request)`, `class ViewSet`, `path()`/`url()` in urls.py | `rg "def \w+\(request" --type py` and `rg "path\(\|url\(" urls.py` |
+| Flask | `@app.route()`, `@blueprint.route()` | `rg "@\w+\.route\(" --type py` |
+| FastAPI | `@app.get/post/put/delete()`, `@router.` | `rg "@(app\|router)\.(get\|post\|put\|delete\|patch)" --type py` |
+| Express | `app.get/post()`, `router.get/post()` | `rg "(app\|router)\.(get\|post\|put\|delete\|patch)\(" --type js` |
+| Next.js | `export default function` / `export async function GET` in route.ts/page.tsx | `rg "export.*(GET\|POST\|PUT\|DELETE\|default)" --type ts` |
+| Spring | `@RestController`, `@GetMapping`, `@PostMapping` | `rg "@(Rest)?Controller\|@(Get\|Post\|Put\|Delete\|Patch)Mapping" --type java` |
+| Rails | Controller actions, `resources :` in routes.rb | `rg "def (index\|show\|create\|update\|destroy\|new\|edit)" --type ruby` |
+| Go net/http | `http.HandleFunc`, `mux.Handle`, `mux.HandleFunc` | `rg "(HandleFunc\|\.Handle)\(" --type go` |
+| Gin (Go) | `r.GET/POST()`, `group.` | `rg "\.(GET\|POST\|PUT\|DELETE\|PATCH)\(" --type go` |
+
+Also identify middleware/interceptor registration patterns — these control auth, CORS, rate limiting, and request parsing for all routes:
+
+| Framework | Middleware Pattern | Search Command |
+|-----------|---|---|
+| Django | `MIDDLEWARE` in settings.py, `@decorator` on views | `rg "MIDDLEWARE" settings.py` |
+| Express | `app.use()` | `rg "app\.use\(" --type js` |
+| Spring | `@Component` + `Filter`/`HandlerInterceptor` | `rg "implements.*(Filter\|HandlerInterceptor)" --type java` |
+| FastAPI | `Depends()`, `@app.middleware` | `rg "Depends\(\|@app\.middleware" --type py` |
+
 ### Step 8: Map Trust Boundaries
 
 Identify every point where external (untrusted) data enters the system:

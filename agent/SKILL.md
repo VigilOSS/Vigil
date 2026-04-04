@@ -53,6 +53,10 @@ Load the relevant skill before starting validation or exploitation of a candidat
   **Use when:** Testing price manipulation, quantity abuse, workflow skipping, coupon/promo abuse, or payment bypass.
   **Paired references:** `references/payloads/business-logic-payloads.md`, `references/vuln-checklists/A06-insecure-design.md`
 
+- `agent/skills/cache-poisoning/SKILL.md`
+  **Use when:** Target sits behind a CDN, reverse proxy, or caching layer; testing for cache poisoning via unkeyed headers or cache deception via path normalization.
+  **Paired references:** `references/vuln-checklists/A02-security-misconfiguration.md`
+
 - `agent/skills/command-injection/SKILL.md`
   **Use when:** Input lands in OS commands, shell eval, or system calls (ping, DNS lookup, file conversion, etc.).
   **Paired references:** `references/payloads/command-injection-payloads.md`, `references/vuln-checklists/A05-injection.md`
@@ -60,6 +64,10 @@ Load the relevant skill before starting validation or exploitation of a candidat
 - `agent/skills/cors-testing/SKILL.md`
   **Use when:** Testing cross-origin access, `Access-Control-Allow-Origin` policy, or credentialed cross-site requests.
   **Paired references:** `references/payloads/cors-payloads.md`, `references/vuln-checklists/A01-broken-access-control.md`
+
+- `agent/skills/crlf-injection/SKILL.md`
+  **Use when:** User input appears in HTTP response headers, redirect locations, or logged fields; testing for header injection and response splitting.
+  **Paired references:** `references/vuln-checklists/A05-injection.md`
 
 - `agent/skills/csrf-testing/SKILL.md`
   **Use when:** Testing state-changing requests without proper origin or token validation.
@@ -97,6 +105,18 @@ Load the relevant skill before starting validation or exploitation of a candidat
   **Use when:** Target uses JWT authentication; testing `alg:none`, key confusion, JWK/kid injection, or weak secret brute-force. Use in addition to auth-bypass when JWT is the mechanism.
   **Paired references:** `references/payloads/jwt-payloads.md`, `references/vuln-checklists/A07-authentication-failures.md`
 
+- `agent/skills/mass-assignment/SKILL.md`
+  **Use when:** API accepts JSON/form-encoded bodies for create/update operations; testing for unauthorized field binding, privilege escalation via extra parameters, or excessive data exposure in responses.
+  **Paired references:** `references/vuln-checklists/A01-broken-access-control.md`, `references/api-security/API03-broken-property-authz.md`
+
+- `agent/skills/nosql-injection/SKILL.md`
+  **Use when:** Application uses MongoDB, CouchDB, Redis, or Elasticsearch; parameters may reach NoSQL queries via operator injection or JavaScript execution.
+  **Paired references:** `references/payloads/nosql-injection-payloads.md`, `references/vuln-checklists/A05-injection.md`
+
+- `agent/skills/oauth-oidc-testing/SKILL.md`
+  **Use when:** Application uses OAuth 2.0 or OpenID Connect for authentication; testing redirect_uri manipulation, state parameter abuse, token leakage, scope escalation, or PKCE bypass.
+  **Paired references:** `references/payloads/jwt-payloads.md`, `references/vuln-checklists/A07-authentication-failures.md`
+
 - `agent/skills/open-redirect-testing/SKILL.md`
   **Use when:** Testing redirect parameters (`next`, `url`, `return_to`, etc.) for open redirect or OAuth token theft chains.
   **Paired references:** `references/payloads/open-redirect-payloads.md`, `references/vuln-checklists/A01-broken-access-control.md`
@@ -108,6 +128,10 @@ Load the relevant skill before starting validation or exploitation of a candidat
 - `agent/skills/port-scanning/SKILL.md`
   **Use when:** Discovering open ports, service banners, and non-web services on in-scope hosts.
   **Paired references:** `references/tools/recon/nmap.md`
+
+- `agent/skills/prototype-pollution/SKILL.md`
+  **Use when:** JavaScript/Node.js application accepts JSON input that may flow through deep merge or recursive assignment; testing for prototype chain pollution leading to XSS, RCE, or DoS.
+  **Paired references:** `references/vuln-checklists/A05-injection.md`
 
 - `agent/skills/race-condition-testing/SKILL.md`
   **Use when:** Testing time-of-check/time-of-use (TOCTOU) flaws, limit-overrun conditions, or concurrent state mutations.

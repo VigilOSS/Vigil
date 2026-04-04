@@ -11,6 +11,11 @@ from assess.lib.config import load_config
 def register(subparsers) -> None:
     p = subparsers.add_parser("code-coverage", help="Display code analysis coverage summary")
     p.add_argument("--repo-id", default=None, help="Filter by repository ID")
+    p.add_argument(
+        "--require-gate-pass",
+        action="store_true",
+        help="Exit non-zero unless the coverage gate explicitly passes",
+    )
     p.set_defaults(func=run)
 
 
@@ -33,13 +38,12 @@ def run(args) -> None:
 
     _print_coverage(result)
 
-    # Exit code based on gate status: exit 0 only if gate explicitly passed
-    gate = result.get('gate', {})
-    if isinstance(gate, dict):
-        passed = gate.get('passed')
-        if passed is not True:
-            # Gate failed or is unknown — exit non-zero so scripts can use this as a gate
-            sys.exit(1)
+    if args.require_gate_pass:
+        gate = result.get('gate', {})
+        if isinstance(gate, dict):
+            passed = gate.get('passed')
+            if passed is not True:
+                sys.exit(1)
 
 
 def _print_coverage(data: dict) -> None:

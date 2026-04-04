@@ -271,6 +271,53 @@ def test_init_engagement_writes_claude_only_launchers_for_claude_install(tmp_pat
     assert str(sandbox_root / "CLAUDE.md") in claude_wrapper
 
 
+def test_start_codex_exports_engagement_orchestrator_url(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    agent_root = repo_root / "agent"
+    install_root = tmp_path / "install-root"
+    sandbox_root = install_root / "agent"
+    _copy_init_fixture_tree(agent_root, sandbox_root, client="codex")
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=https://override.example.test/\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(sandbox_root / "scripts" / "init_engagement.sh"),
+            "https://app.example.com",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=str(sandbox_root),
+    )
+    engagement_dir = Path(result.stdout.strip())
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "codex").write_text(
+        "#!/usr/bin/env bash\n"
+        "printf 'ENGAGEMENT_DIR=%s\\n' \"${ENGAGEMENT_DIR:-}\"\n"
+        "printf 'ORCHESTRATOR_BASE_URL=%s\\n' \"${ORCHESTRATOR_BASE_URL:-}\"\n",
+        encoding="utf-8",
+    )
+    os.chmod(bin_dir / "codex", 0o755)
+
+    launch = subprocess.run(
+        [str(engagement_dir / "start_codex.sh")],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=str(engagement_dir),
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
+
+    assert f"ENGAGEMENT_DIR={engagement_dir}" in launch.stdout
+    assert "ORCHESTRATOR_BASE_URL=https://override.example.test" in launch.stdout
+
+
 def test_install_upgrade_preserves_agent_engagements(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     install_script = repo_root / "install.sh"

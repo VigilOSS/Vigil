@@ -17,6 +17,18 @@ analysis possible within LLM context windows.
 - `agent/SKILL.md`
 - `agent/skills/code-context-building/SKILL.md`
 
+## Pre-Work Checkpoint
+
+Before producing any output, confirm:
+- [ ] `shared-constraints-code.md` loaded — scope boundaries, host-side reading rules, and finding format are active
+- [ ] `code-context-building` skill loaded — context slice format, annotation conventions, and output schemas are ready
+- [ ] Phase 1 outputs available: module map, file classifications with slot-type annotations, and threat model
+- [ ] Header files and type definitions for the current batch are included in dispatch context
+- [ ] File contents for the module batch are present and within the ~15-20K line size target
+- [ ] Cross-module boundary list from Phase 1 is accessible for callee signature lookups
+
+If any item is missing, stop and request it from the operator before proceeding.
+
 ## Responsibilities
 
 - Read all source files in a module batch (+ relevant headers/types)
@@ -88,8 +100,8 @@ Array of context slice JSON objects as described above.
 Prioritized list of functions to analyze in Phase 3:
 ```json
 [
-  {"context_id": null, "file_id": 42, "priority": 95},
-  {"context_id": null, "file_id": 42, "priority": 88}
+  {"context_id": 301, "file_id": 42, "priority": 95},
+  {"context_id": 302, "file_id": 42, "priority": 88}
 ]
 ```
 Priority = file analysis_priority * function_risk_multiplier, where risk multiplier accounts for:
@@ -106,7 +118,9 @@ List of unresolved cross-module calls that Phase 3 may need to expand.
 The operator records via:
 ```bash
 ./scripts/assess.py code-record-contexts <contexts-json>
-./scripts/assess.py code-dispatch <db> queue <queue-items-json>
+# Use the returned context ids (or fetch them via ./scripts/assess.py fetch "code/contexts?file_id=<file-id>")
+# when constructing queue items.
+./scripts/assess.py code-dispatch queue <queue-items-json>
 ```
 
 ## Finding Prefix: CB

@@ -20,6 +20,18 @@ patches, and state machine bugs.
 - `agent/skills/code-vulnerability-analysis/SKILL.md`
 - The CWE-specific pattern reference matching the context's slot types (from `agent/references/code-vuln-patterns/`)
 
+## Pre-Work Checkpoint
+
+Before producing any output, confirm:
+- [ ] `shared-constraints-code.md` loaded — scope boundaries, finding format, and disposition requirements are active
+- [ ] `code-vulnerability-analysis` skill loaded — analysis protocol, confidence scale, and output schemas are ready
+- [ ] **CWE-specific pattern reference loaded** — the correct `code-vuln-patterns/*.md` file matching the context's slot types is present (this is the most critical item; without it, pattern-level depth is lost)
+- [ ] Context slices with call graphs and data flow annotations are present for every function in the batch
+- [ ] Threat model summary is in dispatch context — trust boundaries, entry points, and high-value targets are known
+- [ ] Slot-type annotations on each context slice are readable and complete
+
+If any item is missing — especially the CWE pattern reference — stop and request it from the operator before proceeding.
+
 ## Responsibilities
 
 - Perform deep taint analysis on each function context slice
@@ -34,24 +46,32 @@ patches, and state machine bugs.
 You are not looking for the bugs that `grep` or Semgrep would find. You are looking for:
 
 ### 1. Multi-Function Reasoning Chains
+> Reference: `code-vuln-patterns/buffer-overflow.md` § Cross-Function Size Propagation, `integer-overflow.md` § Type Transition Chains
+
 Where each function is individually correct, but the composition is wrong:
 - Size computed in A, passed through B, used in C — overflow only visible across the chain
 - Sanitization in A, but B re-introduces the tainted value from a different source
 - Guard in A protects one code path, but B reaches the same sink via an unguarded path
 
 ### 2. Incomplete Patches
+> Reference: Load the `code-vuln-patterns/` file matching the original bug's CWE — check siblings in the same function and same switch statement
+
 Where a bug was fixed in one place but the same pattern exists elsewhere:
 - Fixed `memcpy(dst, src, len)` in function A but identical pattern in function B
 - Added bounds check in one switch case but not in the sibling cases
 - Patched the signed integer comparison but left the unsigned path unprotected
 
 ### 3. State Machine Bugs
+> Reference: `code-vuln-patterns/race-condition.md` § State Machine Transitions, `use-after-free.md` § Connection State Shared Between Handler and Cleanup
+
 Where concurrent or async operations create exploitable windows:
 - State freed during cleanup while another thread still processes it
 - State machine transition skips validation when events arrive out of order
 - Blocking code made async but ordering guarantees were lost in the refactor
 
 ### 4. Combinatorial Integer Arithmetic
+> Reference: `code-vuln-patterns/integer-overflow.md` § Length + Offset, `buffer-overflow.md` § Realloc Growth Factor
+
 Where arithmetic is correct per-function but wrong in combination:
 - `size_t` returned from A, stored as `int` in B, used as `size_t` again in C — sign extension
 - Length + offset both validated independently but their sum overflows

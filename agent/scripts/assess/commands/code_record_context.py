@@ -48,6 +48,13 @@ def run(args) -> None:
         skipped = result.get('skipped', 0)
         print(f"=== Code Contexts Summary ===")
         print(f"Contexts inserted: {inserted} (skipped: {skipped})")
+        for ctx in result.get('contexts', []):
+            ctx_id = ctx.get('id', '?')
+            file_id = ctx.get('file_id', '?')
+            function_name = ctx.get('function_name', '?')
+            start_line = ctx.get('start_line', 0)
+            end_line = ctx.get('end_line', 0)
+            print(f"  [{ctx_id}] file={file_id} {function_name} ({start_line}-{end_line})")
     else:
         print(f"=== Code Contexts Summary ===")
         print(json.dumps(result, indent=2, ensure_ascii=False))

@@ -5,6 +5,17 @@ import json
 import sys
 from pathlib import Path
 
+from assess.lib.schema_validation import SchemaValidationError, load_schema, validate_payload
+
+
+_PROPOSAL_SCHEMAS = {
+    "finding_record": "finding-record.schema.json",
+    "probe_run": "probe-run.schema.json",
+    "attack_chain": "attack-chain.schema.json",
+    "credential": "credential.schema.json",
+    "access_record": "access-record.schema.json",
+}
+
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("record-proposal", help="Record a session proposal")
@@ -40,9 +51,14 @@ def run(args) -> None:
         print("session proposal payload must be a JSON object", file=sys.stderr)
         sys.exit(1)
 
-    valid_types = {"finding_record", "probe_run", "attack_chain", "credential", "access_record"}
-    if proposal_type not in valid_types:
+    schema_name = _PROPOSAL_SCHEMAS.get(proposal_type)
+    if schema_name is None:
         print(f"unsupported proposal type: {proposal_type}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        validate_payload(payload, load_schema(schema_name))
+    except SchemaValidationError as exc:
+        print(f"session proposal payload invalid: {exc}", file=sys.stderr)
         sys.exit(1)
 
     # Append to proposals.jsonl

@@ -15,6 +15,17 @@ not to replace target validation.
 - `agent/SKILL.md`
 - `agent/skills/osint-recon/SKILL.md`
 
+## Pre-Work Checkpoint
+
+Before starting any work, verify:
+
+1. You loaded `agent/shared-constraints.md`
+2. You loaded the osint-recon skill (`agent/skills/osint-recon/SKILL.md`)
+3. You read the skill's `## Extended Resources` section and loaded the listed reference files
+4. You have the dispatch context (target domain, tech stack, phase, task objective, prior intel)
+
+If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your intelligence quality will be significantly lower.
+
 ## Responsibilities
 
 - Gather relevant CVEs, vendor advisories, public disclosures, org exposure clues, and supporting context

@@ -3,7 +3,23 @@
 scope_entries() {
     local eng_dir="${1:?engagement dir required}"
     jq -r '
-        (.hosts // [])
+        [
+          .hostname,
+          (.hosts // []),
+          (.scope_hosts // []),
+          (.scope // [])
+        ]
+        | flatten
+        | map(select(type == "string" and . != ""))
+        | unique[]
+    ' \
+        "$eng_dir/scope.json" 2>/dev/null || true
+}
+
+out_of_scope_entries() {
+    local eng_dir="${1:?engagement dir required}"
+    jq -r '
+        (.out_of_scope_hosts // [])
         | map(select(type == "string" and . != ""))
         | unique[]
     ' \
