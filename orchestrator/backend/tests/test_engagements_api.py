@@ -188,6 +188,58 @@ def test_coverage_patch_normalizes_tested_to_covered_and_refreshes_service_statu
     assert summary.json()["service_coverage_gaps"] == []
 
 
+def test_findings_patch_updates_existing_finding_by_slug(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-VA-001",
+            "title": "IDOR in orders",
+            "severity": "medium",
+            "status": "draft",
+            "defect_family": "idor",
+            "root_cause_key": "orders-idor",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/orders/7",
+            "summary": "Order data can be accessed cross-tenant.",
+            "evidence_ref": "findings.md",
+            "notes": "Initial triage.",
+            "source_name": "vulnerability-analyst",
+            "details": {
+                "evidence": "Initial request/response pair",
+                "impact": "Potential cross-tenant access",
+            },
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [],
+        },
+    )
+    assert created.status_code == 201
+
+    patched = client.patch(
+        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-VA-001",
+        json={
+            "status": "confirmed",
+            "severity": "high",
+            "notes": "Verified with adjacent object identifiers.",
+            "details": {"impact": "Confirmed cross-tenant order read"},
+            "provenance": {"verified_by": "code-vuln-verifier"},
+        },
+    )
+    assert patched.status_code == 200
+    payload = patched.json()
+    assert payload["finding"]["slug"] == "FINDING-VA-001"
+    assert payload["finding"]["status"] == "confirmed"
+    assert payload["finding"]["severity"] == "high"
+
+    findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
+    assert findings.status_code == 200
+    finding = next(item for item in findings.json() if item["slug"] == "FINDING-VA-001")
+    assert "Verified with adjacent object identifiers." in finding["notes"]
+    assert json.loads(finding["details_json"])["impact"] == "Confirmed cross-tenant order read"
+    assert json.loads(finding["provenance_json"])["verified_by"] == "code-vuln-verifier"
+
+
 def test_coverage_patch_rejects_unknown_status_values(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 

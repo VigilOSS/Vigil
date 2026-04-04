@@ -1,4 +1,4 @@
-"""assess.py patch — generic PATCH for coverage-item updates etc."""
+"""assess.py patch — generic PATCH for findings, coverage items, and similar endpoints."""
 from __future__ import annotations
 
 import json
@@ -11,7 +11,7 @@ from assess.lib.config import load_config
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("patch", help="PATCH /assessment/{endpoint} with JSON file payload")
-    p.add_argument("endpoint", help="e.g. coverage-items/42")
+    p.add_argument("endpoint", help="e.g. coverage-items/42 or findings/FINDING-VA-001")
     p.add_argument("json_file", help="Path to JSON payload file")
     p.set_defaults(func=run)
 
