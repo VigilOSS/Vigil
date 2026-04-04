@@ -226,7 +226,34 @@ Each batch dispatch produces:
 4. **Context Slices**: one per function in critical/high files (JSON format above)
 5. **Analysis Queue**: prioritized function list for Phase 3 dispatch
 
+## Critical: Macro Expansion (C/C++)
+
+Macros can hide dangerous operations. The context builder MUST:
+
+1. **Identify macro calls in function bodies** — any ALL_CAPS identifier or project-specific naming pattern that isn't a function or constant
+2. **Find macro definitions** in header files (grep for `#define MACRO_NAME`)
+3. **Record macro expansions as sink/guard annotations** when the macro contains:
+   - Memory operations: `memcpy`, `malloc`, `free`, `realloc`
+   - Format strings: `printf`, `fprintf`, `syslog`, `snprintf`
+   - Control flow: `return`, `goto`, `break`, `continue`, `exit`
+   - System calls: `system`, `exec`, `open`, `close`
+4. **Annotate the context slice** with a `macro_expansions` field listing which macros are used and what they expand to
+
+Without this, the vulnerability hunter will miss bugs hidden behind macros like `COPY(dst, src, len)` wrapping `memcpy`.
+
+## Critical: Conditional Compilation Tracking (#ifdef)
+
+Functions may behave differently depending on build flags:
+
+1. **Record all #ifdef/#if/#ifndef blocks** within each function
+2. **Annotate the context slice** with `ifdef_regions` listing the condition and line range
+3. **Mark which branch is the default build** (consult CMakeLists.txt/Makefile for default flag values)
+4. **Flag functions where security-relevant code differs between branches** — these need analysis of BOTH branches
+
+Without this, the vulnerability hunter may analyze only one branch and miss a vulnerability in the other.
+
 ## Extended Resources
 
 - Project header files (read during execution as needed based on include directives)
 - Architecture map output from Phase 1 (file classifications, module groupings, trust boundaries)
+- Build system files (CMakeLists.txt, Makefile, configure.ac) for default #ifdef flag resolution

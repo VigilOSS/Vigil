@@ -30,15 +30,17 @@ def run(args) -> None:
             sys.exit(1)
         _fetch(cfg, int(extra[0]), extra[1])
     elif action == "done":
-        if not extra:
-            print("Usage: code-dispatch done <id1,id2,...>", file=sys.stderr)
+        if len(extra) < 2:
+            print("Usage: code-dispatch done <id1,id2,...> <disposition> [notes]", file=sys.stderr)
             sys.exit(1)
-        _done(cfg, extra[0])
+        notes = extra[2] if len(extra) > 2 else ""
+        _done(cfg, extra[0], extra[1], notes)
     elif action == "error":
         if not extra:
-            print("Usage: code-dispatch error <id1,id2,...>", file=sys.stderr)
+            print("Usage: code-dispatch error <id1,id2,...> [notes]", file=sys.stderr)
             sys.exit(1)
-        _error(cfg, extra[0])
+        notes = extra[1] if len(extra) > 1 else ""
+        _error(cfg, extra[0], notes)
     elif action == "needs-context":
         if not extra:
             print("Usage: code-dispatch needs-context <id1,id2,...> [expansion-json-file]", file=sys.stderr)
@@ -105,28 +107,36 @@ def _fetch(cfg, limit: int, agent_name: str) -> None:
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _done(cfg, id_list: str) -> None:
+def _done(cfg, id_list: str, disposition: str, notes: str = "") -> None:
     ids = _validate_id_list(id_list)
+    payload: dict = {'item_ids': ids, 'disposition': disposition}
+    if notes:
+        payload['notes'] = notes
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
-        result = client.post('code/analysis-queue/done', {'ids': ids})
+        result = client.post('code/analysis-queue/done', payload)
     finally:
         client.close()
 
-    print(f"Marked done: {id_list}")
+    updated = result.get('updated', 0) if isinstance(result, dict) else result
+    print(f"Marked done ({disposition}): {updated} item(s)")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _error(cfg, id_list: str) -> None:
+def _error(cfg, id_list: str, notes: str = "") -> None:
     ids = _validate_id_list(id_list)
+    payload: dict = {'item_ids': ids}
+    if notes:
+        payload['notes'] = notes
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
-        result = client.post('code/analysis-queue/error', {'ids': ids})
+        result = client.post('code/analysis-queue/error', payload)
     finally:
         client.close()
 
-    print(f"Marked error: {id_list}")
+    updated = result.get('updated', 0) if isinstance(result, dict) else result
+    print(f"Marked error: {updated} item(s)")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
@@ -134,14 +144,14 @@ def _error(cfg, id_list: str) -> None:
 def _needs_context(cfg, id_list: str, expansion_file: str | None) -> None:
     ids = _validate_id_list(id_list)
 
-    payload: dict = {'ids': ids}
+    payload: dict = {'item_ids': ids}
     if expansion_file:
         ep = Path(expansion_file)
         if not ep.is_file():
             print(f"Expansion JSON file not found: {expansion_file}", file=sys.stderr)
             sys.exit(1)
         expansion = json.loads(ep.read_text(encoding="utf-8"))
-        payload['expansion'] = expansion
+        payload['expansion_request'] = expansion
 
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:

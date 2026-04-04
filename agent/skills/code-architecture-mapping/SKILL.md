@@ -150,6 +150,7 @@ For each critical and high file, annotate which Shannon slot types apply:
 | `ENV-VARIABLE` | Environment variable values | PATH, LD_PRELOAD, HTTP_PROXY |
 | `CALLBACK-DATA` | Data arriving through callbacks, webhooks, events | Signal handler data, timer callback arguments, IPC payloads |
 | `PROTOCOL-FIELD` | Structured protocol fields | TLS extension values, HTTP/2 frame fields, DNS record data |
+| `SERIALIZED-DATA` | Binary/structured serialization formats | protobuf, ASN.1, flatbuffers, CBOR, MessagePack, BSON |
 
 A file may have multiple slot types. Record the primary slot type and any secondary ones.
 

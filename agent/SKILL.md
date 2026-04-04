@@ -173,7 +173,7 @@ Load these skills when performing white-box source code analysis (operator-core-
 
 - `agent/skills/code-vulnerability-analysis/SKILL.md`
   **Use when:** Phase 3 — performing deep vulnerability analysis on context slices. Load the CWE-specific reference matching the context's slot types.
-  **Paired references:** `references/code-vuln-patterns/buffer-overflow.md`, `references/code-vuln-patterns/integer-overflow.md`, `references/code-vuln-patterns/format-string.md`, `references/code-vuln-patterns/use-after-free.md`, `references/code-vuln-patterns/injection.md`, `references/code-vuln-patterns/race-condition.md`, `references/code-vuln-patterns/crypto-misuse.md`, `references/code-vuln-patterns/auth-bypass.md`
+  **Paired references:** `references/code-vuln-patterns/buffer-overflow.md`, `references/code-vuln-patterns/integer-overflow.md`, `references/code-vuln-patterns/format-string.md`, `references/code-vuln-patterns/use-after-free.md`, `references/code-vuln-patterns/injection.md`, `references/code-vuln-patterns/race-condition.md`, `references/code-vuln-patterns/crypto-misuse.md`, `references/code-vuln-patterns/auth-bypass.md`, `references/code-vuln-patterns/uninitialized-memory.md`, `references/code-vuln-patterns/type-confusion.md`, `references/code-vuln-patterns/null-dereference.md`, `references/code-vuln-patterns/algorithmic-dos.md`, `references/code-vuln-patterns/error-handling.md`
 
 - `agent/skills/code-variant-analysis/SKILL.md`
   **Use when:** Phase 4 — scanning the codebase for variant instances of a confirmed bug pattern.

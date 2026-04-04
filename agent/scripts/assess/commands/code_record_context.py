@@ -43,7 +43,11 @@ def run(args) -> None:
     finally:
         client.close()
 
-    created_count = result.get('created', len(contexts))
-    print(f"=== Code Contexts Summary ===")
-    print(f"Contexts created: {created_count}")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    if isinstance(result, dict):
+        inserted = result.get('inserted', 0)
+        skipped = result.get('skipped', 0)
+        print(f"=== Code Contexts Summary ===")
+        print(f"Contexts inserted: {inserted} (skipped: {skipped})")
+    else:
+        print(f"=== Code Contexts Summary ===")
+        print(json.dumps(result, indent=2, ensure_ascii=False))

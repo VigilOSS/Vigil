@@ -108,9 +108,10 @@ def bulk_create_code_files(
     engagement_id: int,
     repo_id: int,
     files: list[dict[str, Any]],
-) -> int:
+) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     inserted = 0
+    skipped = 0
     with get_connection() as connection:
         for f in files:
             cursor = connection.execute(
@@ -135,7 +136,9 @@ def bulk_create_code_files(
             )
             if cursor.rowcount > 0:
                 inserted += 1
-    return inserted
+            else:
+                skipped += 1
+    return {"inserted": inserted, "skipped": skipped, "total": len(files)}
 
 
 def list_code_files(
@@ -177,14 +180,21 @@ def get_code_file(engagement_id: int, file_id: int) -> dict[str, Any]:
     return dict(row)
 
 
+_VALID_CLASSIFICATIONS = frozenset({"critical", "high", "medium", "low", "skip"})
+
+
 def bulk_classify_code_files(
     engagement_id: int,
     classifications: list[dict[str, Any]],
-) -> int:
+) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     updated = 0
     with get_connection() as connection:
         for c in classifications:
+            classification = c.get("classification", "")
+            if classification not in _VALID_CLASSIFICATIONS:
+                continue
+            priority = max(0, min(100, int(c.get("analysis_priority", 0))))
             cursor = connection.execute(
                 """
                 UPDATE code_files
@@ -197,17 +207,24 @@ def bulk_classify_code_files(
                 WHERE engagement_id = ? AND id = ?
                 """,
                 (
-                    c["classification"],
+                    classification,
                     c.get("role", ""),
                     _json_list_text(c.get("slot_types")),
-                    c.get("analysis_priority", 0),
+                    priority,
                     engagement.id,
                     c["file_id"],
                 ),
             )
             if cursor.rowcount > 0:
                 updated += 1
-    return updated
+    return {"updated": updated, "total": len(classifications)}
+
+
+_CODE_FILE_ALLOWED_FIELDS = frozenset({
+    "classification", "role", "analysis_priority", "analysis_status",
+    "analysis_depth", "skip_reason", "variant_check_status", "module_id",
+    "notes", "slot_types_json",
+})
 
 
 def update_code_file(
@@ -222,9 +239,11 @@ def update_code_file(
     set_clauses = []
     params: list[Any] = []
     json_list_fields = {"slot_types_json"}
-    json_object_fields = set()
+    json_object_fields: set[str] = set()
 
     for key, value in kwargs.items():
+        if key not in _CODE_FILE_ALLOWED_FIELDS:
+            continue  # silently ignore disallowed fields
         if key in json_list_fields:
             set_clauses.append(f"{key} = ?")
             params.append(_json_list_text(value))
@@ -234,6 +253,9 @@ def update_code_file(
         else:
             set_clauses.append(f"{key} = ?")
             params.append(value)
+
+    if not set_clauses:
+        return get_code_file(engagement_id, file_id)
 
     set_clauses.append("updated_at = CURRENT_TIMESTAMP")
     params.extend([engagement.id, file_id])
@@ -318,9 +340,10 @@ def list_code_modules(
 def bulk_create_code_contexts(
     engagement_id: int,
     contexts: list[dict[str, Any]],
-) -> int:
+) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     inserted = 0
+    skipped = 0
     with get_connection() as connection:
         for ctx in contexts:
             cursor = connection.execute(
@@ -350,7 +373,9 @@ def bulk_create_code_contexts(
             )
             if cursor.rowcount > 0:
                 inserted += 1
-    return inserted
+            else:
+                skipped += 1
+    return {"inserted": inserted, "skipped": skipped, "total": len(contexts)}
 
 
 def list_code_contexts(
@@ -371,6 +396,13 @@ def list_code_contexts(
     query = f"SELECT * FROM code_contexts WHERE {' AND '.join(clauses)} ORDER BY id ASC"
     with get_connection() as connection:
         return _fetch_all(connection, query, tuple(params))
+
+
+_CODE_CONTEXT_ALLOWED_FIELDS = frozenset({
+    "analysis_status", "slot_types_json", "call_chain_json", "data_flow_json",
+    "cross_refs_json", "guard_annotations_json", "sink_annotations_json",
+    "context_text",
+})
 
 
 def update_code_context(
@@ -395,6 +427,8 @@ def update_code_context(
     set_clauses = []
     params: list[Any] = []
     for key, value in kwargs.items():
+        if key not in _CODE_CONTEXT_ALLOWED_FIELDS:
+            continue  # silently ignore disallowed fields
         if key in json_list_fields:
             set_clauses.append(f"{key} = ?")
             params.append(_json_list_text(value))
@@ -404,6 +438,16 @@ def update_code_context(
         else:
             set_clauses.append(f"{key} = ?")
             params.append(value)
+
+    if not set_clauses:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM code_contexts WHERE engagement_id = ? AND id = ?",
+                (engagement.id, context_id),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code context not found")
+        return dict(row)
 
     set_clauses.append("updated_at = CURRENT_TIMESTAMP")
     params.extend([engagement.id, context_id])
@@ -429,11 +473,12 @@ def update_code_context(
 def bulk_create_queue_items(
     engagement_id: int,
     items: list[dict[str, Any]],
-) -> int:
+) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     inserted = 0
     with get_connection() as connection:
         for item in items:
+            priority = max(0, min(100, int(item.get("priority", 50))))
             cursor = connection.execute(
                 """
                 INSERT INTO code_analysis_queue (
@@ -445,12 +490,12 @@ def bulk_create_queue_items(
                     engagement.id,
                     item.get("context_id"),
                     item["file_id"],
-                    item.get("priority", 50),
+                    priority,
                 ),
             )
             if cursor.rowcount > 0:
                 inserted += 1
-    return inserted
+    return {"inserted": inserted, "total": len(items)}
 
 
 def queue_stats(engagement_id: int) -> dict[str, Any]:
@@ -478,40 +523,45 @@ def fetch_queue_items(
     limit: int,
     agent_name: str,
 ) -> list[dict[str, Any]]:
+    """Atomically claim pending queue items for an agent.
+
+    Uses UPDATE ... WHERE id IN (SELECT ... LIMIT) to prevent two concurrent
+    callers from claiming the same rows.
+    """
     engagement = _engagement_or_404(engagement_id)
     now = _now_iso()
     with get_connection() as connection:
+        # Atomic claim: UPDATE with subquery SELECT in one statement
+        connection.execute(
+            """
+            UPDATE code_analysis_queue
+            SET status = 'processing',
+                assigned_agent = ?,
+                consumed_at = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id IN (
+                SELECT id FROM code_analysis_queue
+                WHERE engagement_id = ? AND status = 'pending'
+                ORDER BY priority DESC, id ASC
+                LIMIT ?
+            )
+            """,
+            (agent_name, now, engagement.id, limit),
+        )
+        # Fetch the rows we just claimed
         rows = connection.execute(
             """
             SELECT * FROM code_analysis_queue
-            WHERE engagement_id = ? AND status = 'pending'
+            WHERE engagement_id = ? AND assigned_agent = ? AND status = 'processing'
+              AND consumed_at = ?
             ORDER BY priority DESC, id ASC
-            LIMIT ?
             """,
-            (engagement.id, limit),
+            (engagement.id, agent_name, now),
         ).fetchall()
-        items = [dict(row) for row in rows]
-        if items:
-            ids = [item["id"] for item in items]
-            placeholders = ",".join("?" for _ in ids)
-            connection.execute(
-                f"""
-                UPDATE code_analysis_queue
-                SET status = 'processing',
-                    assigned_agent = ?,
-                    consumed_at = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id IN ({placeholders})
-                """,
-                (agent_name, now, *ids),
-            )
-            # Re-fetch to return updated rows
-            updated_rows = connection.execute(
-                f"SELECT * FROM code_analysis_queue WHERE id IN ({placeholders})",
-                tuple(ids),
-            ).fetchall()
-            items = [dict(row) for row in updated_rows]
-    return items
+    return [dict(row) for row in rows]
+
+
+_VALID_DISPOSITIONS = frozenset({"finding", "suspicious", "clean", "needs_context"})
 
 
 def complete_queue_items(
@@ -519,10 +569,15 @@ def complete_queue_items(
     item_ids: list[int],
     disposition: str,
     notes: str = "",
-) -> int:
+) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not item_ids:
-        return 0
+        return {"updated": 0, "total": 0}
+    if disposition not in _VALID_DISPOSITIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid disposition '{disposition}'. Must be one of: {', '.join(sorted(_VALID_DISPOSITIONS))}",
+        )
     now = _now_iso()
     placeholders = ",".join("?" for _ in item_ids)
     with get_connection() as connection:
@@ -538,17 +593,17 @@ def complete_queue_items(
             """,
             (disposition, notes, now, engagement.id, *item_ids),
         )
-        return cursor.rowcount
+        return {"updated": cursor.rowcount, "total": len(item_ids)}
 
 
 def error_queue_items(
     engagement_id: int,
     item_ids: list[int],
     notes: str = "",
-) -> int:
+) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not item_ids:
-        return 0
+        return {"updated": 0, "total": 0}
     placeholders = ",".join("?" for _ in item_ids)
     with get_connection() as connection:
         cursor = connection.execute(
@@ -561,17 +616,17 @@ def error_queue_items(
             """,
             (notes, engagement.id, *item_ids),
         )
-        return cursor.rowcount
+        return {"updated": cursor.rowcount, "total": len(item_ids)}
 
 
 def needs_context_queue_items(
     engagement_id: int,
     item_ids: list[int],
     expansion_request: dict[str, Any],
-) -> int:
+) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not item_ids:
-        return 0
+        return {"updated": 0, "total": 0}
     placeholders = ",".join("?" for _ in item_ids)
     with get_connection() as connection:
         cursor = connection.execute(
@@ -584,13 +639,13 @@ def needs_context_queue_items(
             """,
             (_json_text(expansion_request), engagement.id, *item_ids),
         )
-        return cursor.rowcount
+        return {"updated": cursor.rowcount, "total": len(item_ids)}
 
 
 def reset_stale_queue_items(
     engagement_id: int,
     minutes: int,
-) -> int:
+) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         cursor = connection.execute(
@@ -602,11 +657,11 @@ def reset_stale_queue_items(
                 updated_at = CURRENT_TIMESTAMP
             WHERE engagement_id = ?
               AND status = 'processing'
-              AND consumed_at < datetime('now', ? || ' minutes')
+              AND (consumed_at < datetime('now', ? || ' minutes') OR consumed_at IS NULL)
             """,
             (engagement.id, f"-{minutes}"),
         )
-        return cursor.rowcount
+        return {"reset": cursor.rowcount}
 
 
 # =========================================================================
@@ -885,6 +940,22 @@ def code_coverage_summary(
     critical_coverage = (critical_analyzed / critical_total * 100.0) if critical_total > 0 else 0.0
     high_coverage = (high_analyzed / high_total * 100.0) if high_total > 0 else 0.0
 
+    # -- Coverage gate --
+    gate_reasons: list[str] = []
+    if critical_total > 0 and critical_analyzed < critical_total:
+        gate_reasons.append(
+            f"Critical files not fully analyzed: {critical_analyzed}/{critical_total}"
+        )
+    if high_total > 0 and high_analyzed < high_total:
+        gate_reasons.append(
+            f"High files not fully analyzed: {high_analyzed}/{high_total}"
+        )
+    if unresolved_needs_context > 0:
+        gate_reasons.append(
+            f"Unresolved needs-context items: {unresolved_needs_context}"
+        )
+    gate_passed = len(gate_reasons) == 0
+
     return {
         "total_files": total_files,
         "by_classification": by_classification,
@@ -906,5 +977,9 @@ def code_coverage_summary(
             "overall_loc_analyzed": overall_loc_analyzed,
             "unresolved_needs_context": unresolved_needs_context,
             "skip_reasons": skip_reasons,
+        },
+        "gate": {
+            "passed": gate_passed,
+            "reasons": gate_reasons,
         },
     }
