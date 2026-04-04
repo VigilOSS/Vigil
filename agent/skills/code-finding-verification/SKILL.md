@@ -18,6 +18,12 @@ origin: AI Threat Hunting
 - `git blame` — understanding code provenance, identifying recent changes, correlating with known fixes
 - `rg` / `grep` — locating upstream guards, build configuration, and related code paths
 
+Cross-reference tools (check dispatch context for `lsp_config`):
+- **LSP call-hierarchy** — trace the complete call chain from external entry point to vulnerable sink (critical for Check 1: Reachability)
+- **LSP find-all-references** — verify whether upstream guards exist on ALL paths to the sink, not just the one analyzed (Check 2)
+- **LSP go-to-definition** — resolve function implementations for guard evaluation without manual file lookups
+- **ctags index** — `grep '^<symbol>\t' <repo>/tags` to find definitions when LSP unavailable
+
 ## Methodology — The 5-Check Protocol
 
 Every finding must survive all 5 checks. Failure at any check results in KILL or DOWNGRADE. This protocol is adversarial toward the finding — assume it is a false positive and force it to prove otherwise.

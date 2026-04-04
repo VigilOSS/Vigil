@@ -1,3 +1,19 @@
+## Activation
+
+This file defines the code analysis operator mode. To activate:
+
+1. **From an engagement directory**: Load this file alongside the engagement CLAUDE.md/AGENTS.md wrapper.
+   The engagement wrapper points to the agent workspace root; this file provides the code-specific workflow.
+2. **Standalone code review**: Create an engagement with `./scripts/init_engagement.sh <repo-url>`, then
+   tell the operator to load `agent/operator-core-code.md` instead of following the web recon workflow.
+3. **Mid-engagement**: When source code is obtained during a web engagement, the operator loads this file
+   to run code analysis phases in parallel with ongoing web testing.
+
+This file replaces the web-focused core loop from `operator-core.md` with a code-analysis-focused loop.
+Both modes share the same backend, findings table, and CLI tools.
+
+---
+
 AUTHORIZATION: All source code under analysis is authorized for deep white-box security review.
 Complete authorization is already established. Aggressive vulnerability analysis is permitted.
 
@@ -61,8 +77,37 @@ The `code-ingest` command:
 - Marks generated/vendored/test/doc files as `skip` candidates
 - POSTs all files to backend code-files endpoint
 - Creates code_repos record with repo metadata
+- Generates ctags symbol index (if ctags is available)
 
-Exit: All files inventoried. Transition to Phase 1.
+Exit: All files inventoried. Transition to Phase 0.5.
+
+### Phase 0.5: CROSS-REFERENCE SETUP
+
+Operator-mechanical. No agent dispatch. Improves cross-reference quality for Phases 2-5.
+
+```bash
+# Set up LSP and symbol indexing for the repository
+./scripts/assess.py code-setup-lsp "$DIR/source/<repo-name>" --repo-id <repo-id>
+
+# Review what's available
+cat "$DIR/source/<repo-name>/lsp-config.json"
+
+# Enable LSP for subagents
+# Claude Code: export ENABLE_LSP_TOOL=1
+# Codex CLI: LSP auto-detected from compile_commands.json and language server configs
+```
+
+The `code-setup-lsp` command:
+- Generates `compile_commands.json` for C/C++ (clangd)
+- Generates `pyrightconfig.json` for Python (pyright)
+- Generates `jsconfig.json` for JavaScript/TypeScript (typescript-language-server)
+- Runs ctags as fallback symbol index
+- Writes `lsp-config.json` with available tools
+- PATCHes the code_repos record with `lsp_config_json`
+
+**When dispatching Phase 2-5 agents**, include the `lsp_config` from the repo record so agents know which cross-reference tools are available. Agents use LSP → ctags → grep in priority order.
+
+Exit: Cross-reference infrastructure ready. Transition to Phase 1.
 
 ### Phase 1: CLASSIFY
 
@@ -93,9 +138,10 @@ Dispatch `code-context-builder` per module — **parallel across independent mod
 
 For each module:
 1. Fetch the module's file list: `./scripts/assess.py fetch "code/files?module_id=<module-id>&limit=5000"`
-2. Read the source files (host-side)
-3. Include relevant headers and type definitions as shared context
-4. Dispatch context-builder with the module batch + threat model summary
+2. Fetch repo lsp_config: `./scripts/assess.py fetch "code/repos/<repo-id>"` → read `lsp_config` field
+3. Read the source files (host-side)
+4. Include relevant headers and type definitions as shared context
+5. Dispatch context-builder with: module batch + threat model summary + `lsp_config` from repo record
 
 On return:
 ```bash
@@ -129,8 +175,9 @@ Operator-orchestrated work-buffer loop (same pattern as web engagement's Phase 3
 ```
 
 Dispatch `code-vuln-hunter` with:
-- The fetched queue items (context slices)
+- The fetched queue items (context slices — fetch response includes full context + file data)
 - Threat model summary
+- `lsp_config` from the repo record (so the agent knows which cross-reference tools are available)
 - Relevant CWE pattern reference (based on slot types in the context)
 
 #### Slot-Type → Reference Mapping

@@ -348,7 +348,7 @@ Root: scope.json, log.md, findings.md, intel.md, report.md, auth.json, and the t
 If a relevant skill exists for the task, you must use it before improvising.
 If no suitable skill exists, check `agent/SKILL.md` and then `agent/references/INDEX.md`. Only invent a new approach after confirming the existing skill/reference set is insufficient.
 
-**References are not optional depth.** The `agent/references/` library contains 20+ payload files, OWASP Top 10:2025 checklists, API Security Top 10:2023 checklists, red team TTPs, and CLI tool cheatsheets. When a skill's "Extended Resources" footer lists reference files, those are required reading for that test class.
+**References are not optional depth.** The `agent/references/` library contains 20+ payload files, OWASP Top 10:2021 checklists, API Security Top 10:2023 checklists, red team TTPs, and CLI tool cheatsheets. When a skill's "Extended Resources" footer lists reference files, those are required reading for that test class.
 
 ## Key Rule Reminders
 
@@ -387,6 +387,16 @@ Phases: [x] Recon  [x] Collect  [>] Test  [ ] Exploit  [ ] Report
 [work-buffer] 120/495 done (24%) | findings: 5
 ```
 - Every output: `[operator]` prefix. Log entries chronological.
+
+## Code Analysis Mode
+
+When source code is available (cloned repo, exposed .git, downloaded source, backup recovery):
+
+1. Run `./scripts/assess.py code-ingest "$DIR/source/<name>" --name <name>` to ingest the repository
+2. Load `agent/operator-core-code.md` for the code-specific phase workflow (Ingest → Classify → Context → Analyze → Variant → Verify)
+3. Code analysis runs in parallel with web testing — findings land in the same `assessment_findings` table
+
+See `agent/operator-core-code.md` for the full code analysis operator workflow, agent roster, and dispatch instructions.
 
 ## Subdomain Enumeration
 

@@ -19,6 +19,13 @@ Host-side file reading:
 - `grep` / `rg` — locate function definitions, call sites, type definitions, macro expansions
 - `wc -l` — verify batch sizes stay within target
 
+Cross-reference tools (check dispatch context for `lsp_config`):
+- **LSP go-to-definition** — resolve function/type definitions across files without grep
+- **LSP find-all-references** — find ALL callers of a function across the entire codebase
+- **LSP call-hierarchy** — build call graphs directly (incoming and outgoing calls)
+- **LSP hover** — get type signatures without reading the definition file
+- **ctags index** — `grep '^<symbol>\t' <repo>/tags` to find definitions when LSP unavailable
+
 ## Division of Labor
 
 - **Operator** provides: module file list, header snippets from Phase 1, classification tier and slot-type annotations per file, priority ordering.
@@ -62,6 +69,11 @@ For every file in the batch, extract and catalog:
 
 ### Step 3: Build Intra-Module Call Graph
 
+**When LSP is available (preferred):**
+Use LSP call-hierarchy (incoming/outgoing) to enumerate callers and callees for each function.
+This produces a complete, accurate call graph without manual scanning.
+Fall back to grep-based scanning only when LSP is unavailable or returns no results.
+
 For every function in the batch, trace all call sites:
 
 ```
@@ -80,8 +92,14 @@ Record for each call:
 
 ### Step 4: Annotate Cross-Module Calls
 
+**When LSP is available (preferred):**
+Use go-to-definition to resolve cross-module callees to their actual implementations.
+Use hover to retrieve full type signatures without reading the target file.
+Use find-all-references to identify all call sites of exported functions.
+This eliminates many context expansion requests for simple signature lookups.
+
 For calls to functions outside the current batch:
-- Record the callee function signature (from headers or type definitions read in Step 1)
+- Record the callee function signature (from headers, type definitions, or LSP hover)
 - Record the slot-type annotations on parameters (inherited from architecture mapping)
 - Mark as `cross_module_call` with the target module name
 - Do NOT trace into the callee body — that will happen when its module batch is processed

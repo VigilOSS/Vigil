@@ -136,3 +136,8 @@ validates them. Do not treat `findings.md` as the canonical destination.
 - Historical URLs → intel.md DNS table, then ingest confirmed or high-value paths into backend coverage state
 - Social/org intel → intel.md Social table
 - For each meaningful lead, record the hypothesis it supports: vulnerable component, reachable hidden surface, reusable credential, or escalation path
+
+## Extended Resources
+
+- `agent/references/tools/recon/gau.md` — historical URL discovery (Wayback, OTX, Common Crawl)
+- `agent/references/tools/recon/httpx.md` — HTTP probing for validating discovered URLs

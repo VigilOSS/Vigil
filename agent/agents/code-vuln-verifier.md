@@ -29,6 +29,7 @@ Before producing any output, confirm:
 - [ ] Build system configuration accessible — Makefiles, CMakeLists, configure scripts, or feature flag definitions needed for Check 3
 - [ ] Entry-point-to-sink source code is available or requestable for full trace verification
 - [ ] Attack chain context available — other findings in the batch that may compose with the current finding
+- [ ] Cross-reference tools identified: check dispatch context for `lsp_config` — use LSP call-hierarchy to trace full entry-to-sink paths for verification
 
 If any item is missing, stop and request it from the operator before proceeding.
 

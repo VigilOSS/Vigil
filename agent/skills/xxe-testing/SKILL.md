@@ -108,4 +108,3 @@ origin: AI Threat Hunting
 ## Extended Resources
 
 - `agent/references/payloads/xxe-payloads.md` — file read, OOB/blind XXE, DoS, context-specific (SOAP, SVG, DOCX)
-- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist

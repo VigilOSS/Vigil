@@ -26,6 +26,7 @@ Before producing any output, confirm:
 - [ ] Header files and type definitions for the current batch are included in dispatch context
 - [ ] File contents for the module batch are present and within the ~15-20K line size target
 - [ ] Cross-module boundary list from Phase 1 is accessible for callee signature lookups
+- [ ] Cross-reference tools identified: check dispatch context for `lsp_config` — note whether LSP, ctags, or grep-only is available
 
 If any item is missing, stop and request it from the operator before proceeding.
 
@@ -33,8 +34,8 @@ If any item is missing, stop and request it from the operator before proceeding.
 
 - Read all source files in a module batch (+ relevant headers/types)
 - Extract function signatures, struct/type definitions, macro definitions
-- Build intra-module call graph (function A calls function B at line N)
-- Annotate cross-module calls (signature + slot-type annotations only, not full bodies)
+- Build intra-module call graph — **use LSP call-hierarchy when available** for complete, accurate caller/callee enumeration; fall back to grep when LSP is unavailable
+- Annotate cross-module calls — **use LSP go-to-definition and hover when available** to resolve signatures without reading the full definition file
 - For each function in critical/high files, produce a context slice containing:
   - The function body
   - Parameter types and which carry untrusted data (from Phase 1 slot-type annotations)

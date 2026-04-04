@@ -29,6 +29,7 @@ Before producing any output, confirm:
 - [ ] Context slices with call graphs and data flow annotations are present for every function in the batch
 - [ ] Threat model summary is in dispatch context — trust boundaries, entry points, and high-value targets are known
 - [ ] Slot-type annotations on each context slice are readable and complete
+- [ ] Cross-reference tools identified: check dispatch context for `lsp_config` — note whether LSP, ctags, or grep-only is available for cross-module resolution
 
 If any item is missing — especially the CWE pattern reference — stop and request it from the operator before proceeding.
 

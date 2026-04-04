@@ -102,4 +102,3 @@ origin: AI Threat Hunting
 ## Extended Resources
 
 - `agent/references/payloads/ssti-payloads.md` — per-engine detection and RCE (Jinja2, Twig, Pug, Freemarker, ERB, etc.)
-- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist

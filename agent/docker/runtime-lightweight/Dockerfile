@@ -6,7 +6,6 @@ ENV KALI_MCP_CLIENT_PATH=/usr/share/mcp-kali-server/client.py
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nmap \
-    nikto \
     whatweb \
     dnsutils \
     whois \
@@ -73,7 +72,19 @@ RUN GOPATH=/root/go go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@
     cp /root/go/bin/nuclei /usr/local/bin/nuclei && \
     GO111MODULE=on GOPATH=/root/go go install github.com/projectdiscovery/katana/cmd/katana@latest && \
     cp /root/go/bin/katana /usr/local/bin/katana && \
+    GOPATH=/root/go go install github.com/projectdiscovery/httpx/cmd/httpx@latest && \
+    cp /root/go/bin/httpx /usr/local/bin/httpx && \
+    GOPATH=/root/go go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest && \
+    cp /root/go/bin/dnsx /usr/local/bin/dnsx && \
+    GOPATH=/root/go go install github.com/lc/gau/v2/cmd/gau@latest && \
+    cp /root/go/bin/gau /usr/local/bin/gau && \
+    GOPATH=/root/go go install github.com/hahwul/dalfox/v2@latest && \
+    cp /root/go/bin/dalfox /usr/local/bin/dalfox && \
+    GOPATH=/root/go go install github.com/d3mondev/puredns/v2@latest && \
+    cp /root/go/bin/puredns /usr/local/bin/puredns && \
     rm -rf /root/go
+RUN curl -fsSL "https://github.com/epi052/feroxbuster/releases/latest/download/feroxbuster_amd64.deb.zip" \
+    -o /tmp/ferox.zip && unzip /tmp/ferox.zip -d /tmp && dpkg -i /tmp/feroxbuster_*_amd64.deb && rm -rf /tmp/ferox*
 
 RUN ln -sf /usr/share/wordlists /wordlists && \
     ln -sf /usr/share/seclists /seclists

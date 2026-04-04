@@ -339,13 +339,15 @@ but if a worker communicates with multiple workers, there's no global ordering g
 
 ## Real CVE Examples
 
-### CVE-2023-46218 (cURL — mixed-case cookie domain TOCTOU)
-cURL's cookie handling had a race between validating a cookie's domain and storing it.
-The domain normalization (lowercasing) happened after the domain validation check. In
-certain concurrent scenarios with the multi-interface, a cookie domain could pass
-validation in its original case and then, after case normalization, match a different
-domain than intended. The check and the use operated on semantically different values
-due to the transformation between them.
+### CVE-2016-5195 (Linux kernel — Dirty COW page table race)
+The copy-on-write mechanism in the Linux kernel memory manager had a race condition
+between the page fault handler and the `madvise(MADV_DONTNEED)` system call. Thread 1
+triggered a write fault on a COW-mapped read-only page, causing the kernel to allocate
+a writable copy. Thread 2 simultaneously called `madvise(MADV_DONTNEED)` on the same
+range, discarding the private copy and reverting the mapping to the original read-only
+file page. The page table update in the fault handler then wrote to the original page
+instead of the copy. The check (page is COW) and the use (write to the resolved page)
+were in different kernel functions with no lock spanning both.
 
 ### CVE-2022-24765 (git — unsafe directory ownership check)
 Git checked directory ownership to prevent running in directories owned by other users
@@ -354,9 +356,12 @@ actual git operations happened later. On a shared system, an attacker could swap
 directory (or its parent) between the ownership check and git's use of the directory.
 The TOCTOU window spanned multiple function calls across the initialization code.
 
-### CVE-2017-1000117 (git — SSH URL command injection via hostname race)
-Git's SSH transport validated the hostname in one code path but constructed the SSH
-command in another. On systems where hostname resolution could be influenced (DNS
-rebinding), the hostname validated by the security check could differ from the one
-used in the SSH command. The check and the use were temporally separated by the
-DNS resolution step, creating a TOCTOU window at the network level.
+### CVE-2023-0386 (Linux kernel — OverlayFS TOCTOU privilege escalation)
+The OverlayFS filesystem had a TOCTOU race in its file copy-up mechanism. When a file
+was modified on an overlay mount, the kernel checked the file's permissions and
+ownership in the lower layer, then performed the copy-up to the upper layer. An
+attacker could exploit the race by swapping a SUID binary into the lower layer between
+the permission check and the copy-up operation. The security check in `ovl_copy_up_one`
+and the actual file copy in `ovl_do_copy_up` were separate functions with no atomic
+guarantee, allowing a crafted setuid executable to be copied to the upper layer with
+elevated privileges intact.

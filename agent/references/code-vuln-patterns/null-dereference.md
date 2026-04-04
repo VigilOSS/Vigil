@@ -305,27 +305,29 @@ lookups, and Map.get() calls.
 
 ## Real CVE Examples
 
-### CVE-2023-2163 (Linux kernel — BPF verifier null pointer dereference)
-The BPF verifier tracked register states across branches. When a conditional branch
-checked whether a pointer register was NULL and took the non-NULL path, the verifier
-recorded that the register was non-NULL. However, a subsequent operation could
-invalidate this assumption (register spill and reload across a function call), and
-the verifier's state tracking did not account for the invalidation. The generated
-BPF program then dereferenced a potentially NULL pointer that the verifier had
-incorrectly proven non-NULL. The null check was in the verifier's abstract
-interpretation, not in the generated code — a cross-system type-state reasoning gap.
+### CVE-2019-9213 (Linux kernel — vm_area_struct null pointer dereference)
+The mmap implementation allowed unprivileged users to create a mapping at virtual
+address zero by exploiting an incomplete check in the `expand_downwards` path. The
+allocation logic validated the address in one function, but the actual VMA insertion
+in a separate function did not re-check for a zero base. Once a zero-page mapping
+existed, kernel code paths that dereferenced userspace-controlled pointers (expecting
+the kernel's own NULL-check guards) could be exploited. The check and the use were
+split across mm subsystem boundaries.
 
-### CVE-2022-32250 (Linux kernel — Netfilter null deref via use-after-free)
-In the Netfilter subsystem, an expression object was freed during error handling but
-its pointer in the parent rule structure was not set to NULL. A subsequent operation
-on the rule iterated over its expressions and dereferenced the stale pointer. The
-free happened in the error path of one function; the dereference happened during
-rule evaluation in a completely different code path triggered by incoming packets.
+### CVE-2023-3390 (Linux kernel — Netfilter nft_set null deref on error path)
+In the Netfilter nf_tables subsystem, a set element's transaction object could be
+dereferenced after a failed set update. The allocation occurred in one function,
+and the error-handling code in a separate function assumed the transaction object was
+always valid. When memory pressure caused the allocation to fail, the element was
+added to the set's pending list with a NULL transaction pointer. The commit path in
+a third function then dereferenced the NULL transaction to apply the update, causing
+a kernel crash exploitable for denial of service.
 
-### CVE-2020-1938 (Apache Tomcat Ghostcat — null processing in AJP)
-The AJP (Apache JServ Protocol) connector could receive requests with null attribute
-values. The request processing code accessed these attributes without null checks in
-several handler functions. An attacker sending a crafted AJP request with null
-attributes could trigger null pointer dereferences in request attribute processing,
-leading to denial of service. The AJP parsing set fields to null in one module;
-the servlet processing read them without guards in another.
+### CVE-2022-1016 (Linux kernel — nf_tables uninitialized register leading to null deref)
+The nf_tables register initialization logic did not ensure all registers were set
+before evaluation. A crafted nf_tables rule could reference a register that was never
+written to by a prior expression in the rule chain. The register write happened in
+one expression handler, and the register read in another — each individually correct,
+but the rule composition allowed a path where the read executed without a preceding
+write. The uninitialized register value, when used as a pointer in the verdict
+expression, caused a null pointer dereference in the packet evaluation path.

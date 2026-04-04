@@ -47,35 +47,35 @@ Load the relevant skill before starting validation or exploitation of a candidat
 
 - `agent/skills/auth-bypass/SKILL.md`
   **Use when:** Testing login bypass, session fixation, MFA bypass, token manipulation, or credential-based auth logic.
-  **Paired references:** `references/payloads/jwt-payloads.md`, `references/vuln-checklists/A07-authentication-failures.md`
+  **Paired references:** `references/payloads/jwt-payloads.md`
 
 - `agent/skills/business-logic-testing/SKILL.md`
   **Use when:** Testing price manipulation, quantity abuse, workflow skipping, coupon/promo abuse, or payment bypass.
-  **Paired references:** `references/payloads/business-logic-payloads.md`, `references/vuln-checklists/A06-insecure-design.md`
+  **Paired references:** `references/payloads/business-logic-payloads.md`
 
 - `agent/skills/cache-poisoning/SKILL.md`
   **Use when:** Target sits behind a CDN, reverse proxy, or caching layer; testing for cache poisoning via unkeyed headers or cache deception via path normalization.
-  **Paired references:** `references/vuln-checklists/A02-security-misconfiguration.md`
+  **Paired references:** _(none — methodology in skill)_
 
 - `agent/skills/command-injection/SKILL.md`
   **Use when:** Input lands in OS commands, shell eval, or system calls (ping, DNS lookup, file conversion, etc.).
-  **Paired references:** `references/payloads/command-injection-payloads.md`, `references/vuln-checklists/A05-injection.md`
+  **Paired references:** `references/payloads/command-injection-payloads.md`
 
 - `agent/skills/cors-testing/SKILL.md`
   **Use when:** Testing cross-origin access, `Access-Control-Allow-Origin` policy, or credentialed cross-site requests.
-  **Paired references:** `references/payloads/cors-payloads.md`, `references/vuln-checklists/A01-broken-access-control.md`
+  **Paired references:** `references/payloads/cors-payloads.md`
 
 - `agent/skills/crlf-injection/SKILL.md`
   **Use when:** User input appears in HTTP response headers, redirect locations, or logged fields; testing for header injection and response splitting.
-  **Paired references:** `references/vuln-checklists/A05-injection.md`
+  **Paired references:** _(none — methodology in skill)_
 
 - `agent/skills/csrf-testing/SKILL.md`
   **Use when:** Testing state-changing requests without proper origin or token validation.
-  **Paired references:** `references/payloads/csrf-payloads.md`, `references/vuln-checklists/A01-broken-access-control.md`
+  **Paired references:** `references/payloads/csrf-payloads.md`
 
 - `agent/skills/deserialization-testing/SKILL.md`
   **Use when:** Application deserializes user-controlled data (Java, PHP, Python pickle, Node.js, .NET).
-  **Paired references:** `references/payloads/deserialization-payloads.md`, `references/vuln-checklists/A08-integrity-failures.md`
+  **Paired references:** `references/payloads/deserialization-payloads.md`
 
 - `agent/skills/directory-fuzzing/SKILL.md`
   **Use when:** Discovering hidden paths, admin panels, backup files, or undocumented endpoints via wordlist fuzzing.
@@ -87,7 +87,7 @@ Load the relevant skill before starting validation or exploitation of a candidat
 
 - `agent/skills/file-upload-testing/SKILL.md`
   **Use when:** Testing file upload endpoints for extension bypass, content-type bypass, SVG XSS, or zip slip.
-  **Paired references:** `references/payloads/upload-payloads.md`, `references/vuln-checklists/A05-injection.md`
+  **Paired references:** `references/payloads/upload-payloads.md`
 
 - `agent/skills/graphql-testing/SKILL.md`
   **Use when:** Target exposes a GraphQL API; testing introspection, batching abuse, injection in variables, or authorization on queries/mutations.
@@ -95,31 +95,31 @@ Load the relevant skill before starting validation or exploitation of a candidat
 
 - `agent/skills/idor-testing/SKILL.md`
   **Use when:** Testing object references in API parameters, IDs, GUIDs, or path segments for unauthorized access.
-  **Paired references:** `references/vuln-checklists/A01-broken-access-control.md`, `references/api-security/API01-broken-object-level-authz.md`
+  **Paired references:** `references/api-security/API01-broken-object-level-authz.md`
 
 - `agent/skills/info-disclosure-testing/SKILL.md`
   **Use when:** Probing for exposed debug endpoints, error responses, environment files, metadata endpoints, or stack traces.
-  **Paired references:** `references/payloads/info-disclosure-probes.md`, `references/vuln-checklists/A02-security-misconfiguration.md`
+  **Paired references:** `references/payloads/info-disclosure-probes.md`
 
 - `agent/skills/jwt-testing/SKILL.md`
   **Use when:** Target uses JWT authentication; testing `alg:none`, key confusion, JWK/kid injection, or weak secret brute-force. Use in addition to auth-bypass when JWT is the mechanism.
-  **Paired references:** `references/payloads/jwt-payloads.md`, `references/vuln-checklists/A07-authentication-failures.md`
+  **Paired references:** `references/payloads/jwt-payloads.md`
 
 - `agent/skills/mass-assignment/SKILL.md`
   **Use when:** API accepts JSON/form-encoded bodies for create/update operations; testing for unauthorized field binding, privilege escalation via extra parameters, or excessive data exposure in responses.
-  **Paired references:** `references/vuln-checklists/A01-broken-access-control.md`, `references/api-security/API03-broken-property-authz.md`
+  **Paired references:** `references/api-security/API03-broken-property-authz.md`
 
 - `agent/skills/nosql-injection/SKILL.md`
   **Use when:** Application uses MongoDB, CouchDB, Redis, or Elasticsearch; parameters may reach NoSQL queries via operator injection or JavaScript execution.
-  **Paired references:** `references/payloads/nosql-injection-payloads.md`, `references/vuln-checklists/A05-injection.md`
+  **Paired references:** `references/payloads/nosql-injection-payloads.md`
 
 - `agent/skills/oauth-oidc-testing/SKILL.md`
   **Use when:** Application uses OAuth 2.0 or OpenID Connect for authentication; testing redirect_uri manipulation, state parameter abuse, token leakage, scope escalation, or PKCE bypass.
-  **Paired references:** `references/payloads/jwt-payloads.md`, `references/vuln-checklists/A07-authentication-failures.md`
+  **Paired references:** `references/payloads/jwt-payloads.md`
 
 - `agent/skills/open-redirect-testing/SKILL.md`
   **Use when:** Testing redirect parameters (`next`, `url`, `return_to`, etc.) for open redirect or OAuth token theft chains.
-  **Paired references:** `references/payloads/open-redirect-payloads.md`, `references/vuln-checklists/A01-broken-access-control.md`
+  **Paired references:** `references/payloads/open-redirect-payloads.md`
 
 - `agent/skills/parameter-fuzzing/SKILL.md`
   **Use when:** Fuzzing hidden or undocumented query/body parameters, header variants, or content-type mutations.
@@ -131,23 +131,23 @@ Load the relevant skill before starting validation or exploitation of a candidat
 
 - `agent/skills/prototype-pollution/SKILL.md`
   **Use when:** JavaScript/Node.js application accepts JSON input that may flow through deep merge or recursive assignment; testing for prototype chain pollution leading to XSS, RCE, or DoS.
-  **Paired references:** `references/vuln-checklists/A05-injection.md`
+  **Paired references:** _(none — methodology in skill)_
 
 - `agent/skills/race-condition-testing/SKILL.md`
   **Use when:** Testing time-of-check/time-of-use (TOCTOU) flaws, limit-overrun conditions, or concurrent state mutations.
-  **Paired references:** `references/payloads/race-condition-payloads.md`, `references/vuln-checklists/A06-insecure-design.md`
+  **Paired references:** `references/payloads/race-condition-payloads.md`
 
 - `agent/skills/request-smuggling/SKILL.md`
   **Use when:** Target sits behind a reverse proxy or load balancer; testing CL.TE, TE.CL, TE.TE, or HTTP/2 downgrade desync.
-  **Paired references:** `references/payloads/request-smuggling-payloads.md`, `references/vuln-checklists/A05-injection.md`
+  **Paired references:** `references/payloads/request-smuggling-payloads.md`
 
 - `agent/skills/sensitive-data-detection/SKILL.md`
   **Use when:** Scanning responses, JS bundles, or downloadable files for exposed secrets, PII, tokens, or internal data.
-  **Paired references:** `references/payloads/info-disclosure-probes.md`, `references/vuln-checklists/A04-cryptographic-failures.md`
+  **Paired references:** `references/payloads/info-disclosure-probes.md`
 
 - `agent/skills/sqli-testing/SKILL.md`
   **Use when:** Input is reflected in SQL queries (search, login, filters, sort params, REST IDs, GraphQL variables).
-  **Paired references:** `references/payloads/sqli-payloads.md`, `references/vuln-checklists/A05-injection.md`, `references/tools/exploitation/sqlmap.md`
+  **Paired references:** `references/payloads/sqli-payloads.md`, `references/tools/exploitation/sqlmap.md`
 
 - `agent/skills/ssrf-testing/SKILL.md`
   **Use when:** User-controlled URL or hostname parameter is fetched server-side (webhooks, imports, previews, image fetch, PDF render).
@@ -155,7 +155,7 @@ Load the relevant skill before starting validation or exploitation of a candidat
 
 - `agent/skills/ssti-testing/SKILL.md`
   **Use when:** Input is reflected inside a server-side template (Jinja2, Twig, Pug, Freemarker, ERB, Velocity, etc.).
-  **Paired references:** `references/payloads/ssti-payloads.md`, `references/vuln-checklists/A05-injection.md`
+  **Paired references:** `references/payloads/ssti-payloads.md`
 
 - `agent/skills/nuclei-scanning/SKILL.md`
   **Use when:** Live targets identified and tech stacks known; running template-based vulnerability sweeps for CVEs, misconfigs, and exposures.
@@ -167,19 +167,19 @@ Load the relevant skill before starting validation or exploitation of a candidat
 
 - `agent/skills/user-enumeration/SKILL.md`
   **Use when:** Testing login, password reset, or registration flows for username/email oracle behavior.
-  **Paired references:** `references/vuln-checklists/A07-authentication-failures.md`
+  **Paired references:** _(none — methodology in skill)_
 
 - `agent/skills/websocket-testing/SKILL.md`
   **Use when:** Target uses WebSocket connections; testing message injection, auth drift, or cross-site WebSocket hijacking.
-  **Paired references:** `references/vuln-checklists/A01-broken-access-control.md`
+  **Paired references:** _(none — methodology in skill)_
 
 - `agent/skills/xss-testing/SKILL.md`
   **Use when:** User input is reflected in HTML/JS context (reflected, stored, or DOM-based XSS).
-  **Paired references:** `references/payloads/xss-payloads.md`, `references/vuln-checklists/A05-injection.md`, `references/tools/exploitation/dalfox.md`
+  **Paired references:** `references/payloads/xss-payloads.md`, `references/tools/exploitation/dalfox.md`
 
 - `agent/skills/xxe-testing/SKILL.md`
   **Use when:** Application parses XML input (file upload, SOAP API, SVG, DOCX, RSS feed).
-  **Paired references:** `references/payloads/xxe-payloads.md`, `references/vuln-checklists/A05-injection.md`
+  **Paired references:** `references/payloads/xxe-payloads.md`
 
 ---
 

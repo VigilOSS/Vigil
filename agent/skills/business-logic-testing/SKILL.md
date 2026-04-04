@@ -132,9 +132,10 @@ curl -s "http://target/api/coupon/apply" -d '{"code":"Discount50"}'
 ### 5. Feature Abuse
 
 ```bash
-# Email/notification abuse — trigger mass emails
+# Email/notification abuse — trigger mass emails (send array with 100+ entries)
 curl -s -X POST "http://target/api/invite" \
-  -d '{"emails":["a@x.com","b@x.com","c@x.com",...1000 emails]}'
+  -H "Content-Type: application/json" \
+  -d '{"emails":["a1@x.com","a2@x.com","a3@x.com","a4@x.com","a5@x.com"]}'
 
 # Referral abuse — refer yourself
 curl -s -X POST "http://target/api/referral" \
@@ -190,7 +191,25 @@ curl -s -X POST "http://target/api/payment" \
   - MEDIUM: workflow bypass, feature abuse, state corruption
   - LOW: minor logic inconsistency, informational leak via logic
 
+## Error & Rollback Abuse
+
+- [ ] Interrupt multi-step transactions at each step — does partial state persist incorrectly?
+- [ ] Test payment flow: complete payment step, force error on confirmation — is money deducted but order not created?
+- [ ] Test concurrent conflicting operations: simultaneous update + delete on same resource
+- [ ] Check if failed transactions leave database in inconsistent state
+- [ ] Test idempotency: replay a successful request — does it duplicate the action?
+- [ ] Test behavior when a dependent microservice is unavailable
+- [ ] Check if feature flags / circuit breakers expose unprotected fallback behavior
+- [ ] Test if degraded mode bypasses security controls (auth, rate limiting, input validation)
+- [ ] Verify that fallback endpoints maintain the same security posture as primary endpoints
+
+## Webhook Integrity
+
+- [ ] Test webhook endpoints without signature verification
+- [ ] Test with empty/invalid `X-Hub-Signature` or equivalent header
+- [ ] Check if webhook signature uses HMAC-MD5 or other weak algorithm
+- [ ] Verify replay protection — can old webhook payloads be replayed?
+
 ## Extended Resources
 
 - `agent/references/payloads/business-logic-payloads.md` — negative quantity, coupon abuse, payment bypass, mass assignment
-- `agent/references/vuln-checklists/A06-insecure-design.md` — OWASP Top 10:2025 insecure design checklist

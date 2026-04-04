@@ -1,6 +1,6 @@
 # API10:2023 — Unsafe Consumption of APIs
 
-> See also: [A05-injection](../vuln-checklists/A05-injection.md) | Skill: `ssrf-testing`
+> Skill: `ssrf-testing`
 
 ## SSRF via Third-Party API Integration
 - [ ] Identify endpoints that fetch external data: URL import, link preview, feed parsing

@@ -100,4 +100,3 @@ origin: AI Threat Hunting
 ## Extended Resources
 
 - `agent/references/payloads/upload-payloads.md` — extension bypass, Content-Type bypass, magic bytes, SVG XSS, zip slip
-- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist

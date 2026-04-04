@@ -61,7 +61,7 @@ Each iteration (set `DB="$DIR/cases.db"`):
 ## Progress Display (after EVERY batch)
 
 ```
-Phases: [x] Recon  [x] Collect  [>] Consume & Test  [ ] Exploit  [ ] Report
+Phases: [x] Recon (pass 1)  [x] Recon (gate ✓)  [x] Collect  [>] Consume & Test  [ ] Exploit  [ ] Report
 [work-buffer] 120/495 done (24%) | api: 15/21 | page: 98/464 | js: 7/10 | findings: 5
 ```
 ```bash

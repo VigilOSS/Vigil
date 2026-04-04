@@ -130,5 +130,4 @@ curl "https://target/api/orders?user_id=other_user_id"
 
 ## Extended Resources
 
-- `agent/references/vuln-checklists/A01-broken-access-control.md` — OWASP Top 10:2025 access control checklist
 - `agent/references/api-security/API03-broken-property-authz.md` — OWASP API Security Top 10:2023 excessive data exposure / mass assignment

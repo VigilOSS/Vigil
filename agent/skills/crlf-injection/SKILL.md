@@ -75,8 +75,8 @@ curl -A "Mozilla/5.0%0d%0a[CRITICAL] Unauthorized access detected" https://targe
 ```
 - [ ] Unicode CRLF sequences
 ```
-%E5%98%8A%E5%98%8D    (UTF-8 encoding of Unicode line separators)
-%C4%8D%C4%8A          (alternative UTF-8 sequences)
+%E5%98%8A%E5%98%8D    (UTF-8 sequences that trigger CRLF in certain proxies/parsers — Cer0 research)
+%C4%8D%C4%8A          (UTF-8 sequences that trigger CRLF in specific parser implementations)
 ```
 - [ ] Raw characters in contexts that accept them
 ```
@@ -119,4 +119,4 @@ curl --http2 -H ":path: /page%0d%0aInjected:value" https://target/
 
 ## Extended Resources
 
-- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist
+_(none — methodology in skill)_

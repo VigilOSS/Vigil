@@ -266,5 +266,4 @@ After writing the report, run this checklist against every finding before delive
 
 ## Extended Resources
 
-- `agent/references/vuln-checklists/` — OWASP category reference for finding classification
 - `agent/references/runtime-guides/engagement-methodology.md` — methodology narrative source

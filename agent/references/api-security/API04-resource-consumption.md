@@ -1,6 +1,6 @@
 # API4:2023 — Unrestricted Resource Consumption
 
-> See also: [A06-insecure-design](../vuln-checklists/A06-insecure-design.md) | Skill: `business-logic-testing`
+> Skill: `business-logic-testing`
 
 ## Rate Limiting on Auth Endpoints
 - [ ] Brute-force login endpoint — 100+ requests: `for i in $(seq 1 100); do curl -s -o /dev/null -w "%{http_code}" -X POST -d '{"user":"admin","pass":"'$i'"}' https://api/auth/login; done`

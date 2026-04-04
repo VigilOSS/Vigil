@@ -168,9 +168,8 @@ public:
         if (!auth_) throw AuthError();  // throws AFTER socket_ and tls_ are set
         cache_ = init_cache(cfg.cache_size);          // field 4: never reached
     }
-    // Destructor tries to clean up all fields:
     ~Session() {
-        delete cache_;   // cache_ was never initialized — UB
+        delete cache_;
         cleanup_auth(auth_);
         SSL_free(tls_);
         close(socket_);
@@ -178,8 +177,13 @@ public:
 };
 ```
 
-If the constructor throws on field 3, the destructor still runs (in C++ with
-RAII and try/catch around construction). It accesses `cache_` which was never set.
+If the constructor throws on field 3, the destructor for `Session` does NOT run
+(C++ rule: destructors only run for fully constructed objects). `socket_` and
+`tls_` are raw handles — not RAII wrappers — so they leak silently. Member
+sub-object destructors run for fully constructed members, but raw ints and
+pointers have trivial destructors that release nothing. The fix is either RAII
+wrappers for each resource (`unique_ptr`, socket guard) or two-phase init where
+the constructor cannot throw and a separate `init()` returns an error code.
 
 ### 7. Error Code Propagation Loss
 
@@ -383,14 +387,16 @@ processed it, causing the connection to use weak or predictable keys. The error
 condition was detectable but the handler took the wrong action: it processed the
 CCS rather than aborting the handshake.
 
-### CVE-2022-27536 (Go crypto/x509 — certificate chain verification fail-open)
-Go's `crypto/x509` certificate verification had a code path where an error during
-chain building caused the verifier to fall through to accepting the certificate.
-The error occurred in an intermediate validation step, was caught, but the
-surrounding function continued without returning the error to the caller. The
-result was that certain malformed certificate chains passed verification. The
-error was detected in a sub-function, but the propagation back to the verification
-decision point was broken.
+### CVE-2020-0601 (Windows CryptoAPI — ECC curve parameter validation fail-open)
+Windows CryptoAPI (crypt32.dll) failed to fully validate ECC certificate curve
+parameters. When verifying a certificate's ECC public key, the API checked that
+the key was on a named curve but did not verify that the curve's generator point
+matched the standard definition. An attacker could craft a certificate with a
+custom generator that made their key appear to belong to a trusted CA's curve.
+The validation existed but was incomplete — the missing generator check caused
+the verifier to fall through to acceptance, treating a forged certificate chain
+as valid. The error was a classic fail-open: partial validation that looked
+correct but silently accepted malformed inputs.
 
 ### CVE-2019-1559 (OpenSSL — padding oracle via error differentiation)
 OpenSSL's TLS record processing returned different error types for padding errors

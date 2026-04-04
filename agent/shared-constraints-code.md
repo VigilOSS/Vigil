@@ -35,6 +35,30 @@ Host-side commands permitted for code analysis:
 - `git log`, `git blame`, `git diff` — for history analysis
 - `wc -l`, `file`, `sha256sum` — for file metadata
 
+### Cross-Reference Tools
+
+Check your dispatch context for `lsp_config` to see which tools are available for this repo.
+Use them in priority order — the most precise tool first:
+
+1. **LSP tool** (most accurate — semantic, language-aware, handles macros/templates)
+   - **Claude Code**: Use the built-in LSP tool (requires `ENABLE_LSP_TOOL=1`). Operations:
+     - Go-to-definition: navigate to where a function/type is defined
+     - Find-all-references: find every call site of a function across the codebase
+     - Hover: get type signatures and documentation without reading the file
+     - Call-hierarchy: trace incoming/outgoing calls for a function
+   - **Codex CLI**: LSP is auto-detected from `compile_commands.json` and language server configs. Use the same operations via Codex's built-in code intelligence.
+   - **How to detect LSP availability**: check `lsp_config` in your dispatch context. If `languages.<lang>.available` is `true`, LSP operations work for that language.
+   - **On failure**: if an LSP query returns no results or errors, fall back to ctags/grep. Do not retry the same LSP query.
+
+2. **ctags index** (fast fallback — definitions only, no callers, no type info)
+   - Query: `grep '^<symbol>\t' <repo>/tags` to find definition file and line number
+   - Example: `grep '^packet_read_with_status\t' /path/to/repo/tags` → shows `pkt-line.c` and line number
+   - Use for: locating function definitions when LSP is unavailable
+
+3. **`rg` / `grep`** (last resort — text-level, no semantics)
+   - Use for: pattern matching when neither LSP nor ctags is available
+   - Example: `rg 'packet_read_with_status\(' --type c` for call sites
+
 ---
 
 ## 3. Findings Use the Existing Backend

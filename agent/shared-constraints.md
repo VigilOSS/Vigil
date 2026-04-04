@@ -72,7 +72,6 @@ well enough or when you need payloads, OWASP checklists, or tool guidance.
 
 **References are not a fallback.** The `references/` library contains:
 - `payloads/` — 20 copy-pasteable attack payload files per bug class
-- `vuln-checklists/` — OWASP Top 10:2025 testing checklists
 - `api-security/` — OWASP API Security Top 10:2023 checklists
 - `offensive-tactics/` — red team TTPs by kill-chain phase
 - `tools/` — CLI tool cheatsheets (nmap, ffuf, sqlmap, hydra, etc.)
@@ -213,7 +212,6 @@ Full rule sets: `agent/rules/hunting.md`, `agent/rules/reporting.md`
 | A09 | Security Logging and Monitoring Failures |
 | A10 | Server-Side Request Forgery |
 
-Full checklists: `agent/references/vuln-checklists/`
 API security: `agent/references/api-security/`
 
 ---

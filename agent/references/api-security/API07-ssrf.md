@@ -1,6 +1,6 @@
 # API7:2023 — Server Side Request Forgery
 
-> See also: [A05-injection](../vuln-checklists/A05-injection.md) | Skill: `ssrf-testing`
+> Skill: `ssrf-testing`
 
 ## Webhook URL SSRF
 - [ ] Test webhook registration with internal URLs: `curl -X POST -d '{"url":"http://127.0.0.1:8080/admin"}' https://api/webhooks`

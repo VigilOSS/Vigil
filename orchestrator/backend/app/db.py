@@ -514,6 +514,7 @@ def init_db() -> None:
                 analysis_status TEXT NOT NULL DEFAULT 'ingested',
                 threat_model_json TEXT NOT NULL DEFAULT '{}',
                 git_churn_json TEXT NOT NULL DEFAULT '{}',
+                lsp_config_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, repo_key),
@@ -671,6 +672,12 @@ def init_db() -> None:
         for column_name, definition in finding_column_defaults.items():
             if column_name not in finding_columns:
                 connection.execute(f"ALTER TABLE assessment_findings ADD COLUMN {column_name} {definition}")
+
+        # Migrate code_repos: add lsp_config_json if missing
+        repo_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_repos)").fetchall()}
+        if repo_columns and "lsp_config_json" not in repo_columns:
+            connection.execute("ALTER TABLE code_repos ADD COLUMN lsp_config_json TEXT NOT NULL DEFAULT '{}'")
+
         connection.commit()
 
 

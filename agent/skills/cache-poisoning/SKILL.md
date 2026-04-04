@@ -114,4 +114,3 @@ curl -H "X-Forwarded-Host: attacker.example" -H "X-Forwarded-Scheme: https" http
 
 ## Extended Resources
 
-- `agent/references/vuln-checklists/A02-security-misconfiguration.md` — OWASP Top 10:2025 misconfiguration checklist
