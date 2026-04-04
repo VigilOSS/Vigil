@@ -175,6 +175,10 @@ multi-function chains, combinatorial arithmetic, state machine bugs, and incompl
 | `code-vuln-patterns/null-dereference.md` | Cross-function NULL propagation, optional field assumptions, race-to-NULL | C/C++, Python, JS |
 | `code-vuln-patterns/algorithmic-dos.md` | Hash collision, ReDoS, parser bombs, unbounded allocation, zip bombs | C/C++, Python, JS |
 | `code-vuln-patterns/error-handling.md` | Fail-open, unchecked returns, cleanup double-free, exception swallowing, resource leaks | C/C++, Python, JS |
+| `code-vuln-patterns/web-app-auth.md` | Middleware ordering, decorator bypass, role check logic, path normalization, OAuth implementation flaws | C/C++, Python, JS, Java, Go |
+| `code-vuln-patterns/web-app-injection.md` | ORM bypass, second-order injection, template injection, deserialization in web contexts, NoSQL injection | Python, JS, Java, Ruby |
+| `code-vuln-patterns/web-app-data-exposure.md` | IDOR in ORM queries, mass assignment, serializer over-exposure, GraphQL field auth, bulk endpoints | Python, JS, Java, Ruby, Go |
+| `code-vuln-patterns/ai-ml-security.md` | Prompt injection, MCP tool poisoning, RAG poisoning, unsafe tool execution, cross-user context leakage | Python, JS, Java |
 
 ## tools/ — CLI Tool Cheatsheets
 
@@ -193,6 +197,7 @@ Quick-reference per tool, organized by usage phase.
 | `tools/recon/puredns.md` | Active DNS brute-force with wildcard filtering |
 | `tools/recon/dnsx.md` | Bulk DNS resolution and record enumeration |
 | `tools/recon/gau.md` | Historical URL discovery (Wayback, OTX, Common Crawl, URLScan) |
+| `tools/recon/nikto.md` | Web server vulnerability scanner |
 
 ### tools/fuzzing/ — Used by: fuzzer, recon-specialist
 
@@ -200,6 +205,9 @@ Quick-reference per tool, organized by usage phase.
 |------|------|
 | `tools/fuzzing/ffuf.md` | Web fuzzing (parameters, vhosts, targeted directory work) |
 | `tools/fuzzing/feroxbuster.md` | Recursive content discovery (primary for directory scanning) |
+| `tools/fuzzing/dirb.md` | URL brute-forcing with wordlists |
+| `tools/fuzzing/gobuster.md` | Directory/file, DNS, and vhost brute-forcing |
+| `tools/fuzzing/wfuzz.md` | Web fuzzer for parameters, headers, and paths |
 
 ### tools/exploitation/ — Used by: exploit-developer, vulnerability-analyst
 
@@ -228,7 +236,7 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 
 | File | Purpose |
 |------|---------|
-| `engagement-methodology.md` | Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase |
-| `subagent-registry.md` | Registry schema, resume-vs-dispatch decision tree, and examples for `agent-registry.json` |
+| `runtime-guides/engagement-methodology.md` | Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase |
+| `runtime-guides/subagent-registry.md` | Registry schema, resume-vs-dispatch decision tree, and examples for `agent-registry.json` |
 | `handoff-protocols.md` | Agent-to-agent handoff rules and expected downstream actions |
 | `subdomain-enumeration.md` | Subdomain enumeration (when `*.domain` in hosts), prioritization, and sliding-window execution rules |

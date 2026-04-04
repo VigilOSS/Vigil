@@ -133,3 +133,35 @@ def test_specialist_agent_sources_exist_for_public_roster():
     }
 
     assert expected <= {path.name for path in agent_dir.glob("*.md")}
+
+
+def test_code_analysis_prompt_uses_current_cli_contracts():
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_prompt = (repo_root / "agent" / "operator-core-code.md").read_text(encoding="utf-8")
+    architect_prompt = (repo_root / "agent" / "agents" / "code-architect.md").read_text(encoding="utf-8")
+    context_prompt = (repo_root / "agent" / "agents" / "code-context-builder.md").read_text(encoding="utf-8")
+
+    for text in (operator_prompt, architect_prompt, context_prompt):
+        assert "fetch code-files" not in text
+        assert "code-dispatch <db> queue" not in text
+
+    assert 'fetch "code/files' in operator_prompt
+    assert "code-record-threat-model <repo-id> <threat-model-json>" in operator_prompt
+    assert "code-record-modules <repo-id> <modules-json>" in operator_prompt
+    assert 'code-dispatch done "id1,id2,..." <disposition>' in operator_prompt
+    assert "--require-gate-pass" in operator_prompt
+
+
+def test_code_analysis_codex_wrappers_exist():
+    repo_root = Path(__file__).resolve().parents[3]
+    codex_dir = repo_root / "agent" / ".codex" / "agents"
+
+    expected = {
+        "code-architect.toml",
+        "code-context-builder.toml",
+        "code-variant-hunter.toml",
+        "code-vuln-hunter.toml",
+        "code-vuln-verifier.toml",
+    }
+
+    assert expected <= {path.name for path in codex_dir.glob("*.toml")}

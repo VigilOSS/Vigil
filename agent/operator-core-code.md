@@ -16,7 +16,7 @@ Path convention:
 After code analysis engagement initialization completes, repeat until all critical/high files
 analyzed or user signals stop:
 
-1. **ASSESS STATE** — Read `code-scope.json` (or `scope.json` with `source_repos`). Check code coverage stats via `./scripts/assess.py code-coverage`. Backend state is canonical.
+1. **ASSESS STATE** — Read `code-scope.json` (or `scope.json` with `source_repos`). Check code coverage stats via `./scripts/assess.py code-coverage`. Backend state is canonical; use `--require-gate-pass` only for the final Phase 5 gate.
 2. **DECIDE NEXT ACTION** — Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified). In Phase 2, prioritize critical modules first. In Phase 3, prioritize high-priority analysis queue items. In Phase 4, prioritize findings with highest severity for variant scanning. Coverage gaps drive decisions.
 3. **FORMULATE PLAN** — Select agent, skill, module batch, and batch size. Default model policy: Claude operator and substantial workers use `Opus 4.6`. Only drop to `Sonnet 4.6` for bounded sidecar work.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.
@@ -31,7 +31,7 @@ analyzed or user signals stop:
 7. **DISPATCH** — ALWAYS dispatch to subagent for analysis work. Operator handles mechanical pipeline: file ingestion, queue management, context expansion fetching, coverage tracking.
 8. **RECORD FINDINGS IMMEDIATELY** — Code findings use the same `./scripts/assess.py record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
 9. **RECORD SURFACES** — Code-specific surface types: `parser_entry`, `protocol_handler`, `crypto_operation`, `auth_check`, `file_io`, `memory_allocator`. Record via `./scripts/assess.py record-surface`.
-10. **TRACK COVERAGE** — After each batch, run `./scripts/assess.py code-coverage`. Before entering Phase 5, verify the coverage gate passes (all critical files analyzed, no unresolved needs-context).
+10. **TRACK COVERAGE** — After each batch, run `./scripts/assess.py code-coverage`. Before entering Phase 5, verify the coverage gate passes with `./scripts/assess.py code-coverage --require-gate-pass` (all critical files analyzed, no unresolved needs-context).
 11. **LOOP** — Back to step 1.
 
 ## Phase Flow
@@ -48,7 +48,7 @@ git clone <repo-url> $DIR/source/<repo-name>
 # 2. Ingest into backend
 ./scripts/assess.py code-ingest "$DIR/source/<repo-name>" --name <repo-name> --language <primary-lang>
 
-# 3. Verify ingestion
+# 3. Verify ingestion/progress
 ./scripts/assess.py code-coverage
 ```
 
@@ -69,7 +69,7 @@ Exit: All files inventoried. Transition to Phase 1.
 Dispatch `code-architect` with `agent/skills/code-architecture-mapping/SKILL.md`.
 
 Provide:
-- Full file listing (from `./scripts/assess.py fetch code-files`)
+- Full file listing (from `./scripts/assess.py fetch "code/files?repo_id=<repo-id>&limit=5000"`)
 - Project documentation (README, SECURITY.md, build files — read from source dir)
 - Git churn data (from code_repos.git_churn_json)
 
@@ -78,9 +78,9 @@ On return:
 # Record classifications
 ./scripts/assess.py code-classify <classifications-json>
 # Record threat model
-./scripts/assess.py code-record-threat-model <threat-model-json>
+./scripts/assess.py code-record-threat-model <repo-id> <threat-model-json>
 # Record modules
-./scripts/assess.py code-record-modules <modules-json>
+./scripts/assess.py code-record-modules <repo-id> <modules-json>
 # Check progress
 ./scripts/assess.py code-coverage
 ```
@@ -92,7 +92,7 @@ Exit: Every file classified. Threat model recorded. Transition to Phase 2.
 Dispatch `code-context-builder` per module — **parallel across independent modules**.
 
 For each module:
-1. Fetch module's file list: files with classification critical or high in that module
+1. Fetch the module's file list: `./scripts/assess.py fetch "code/files?module_id=<module-id>&limit=5000"`
 2. Read the source files (host-side)
 3. Include relevant headers and type definitions as shared context
 4. Dispatch context-builder with the module batch + threat model summary
@@ -101,7 +101,9 @@ On return:
 ```bash
 # Record context slices
 ./scripts/assess.py code-record-contexts <contexts-json>
-# Populate analysis queue
+# The command returns context rows with ids. Build queue items from those ids,
+# or fetch them explicitly with ./scripts/assess.py fetch "code/contexts?file_id=<file-id>"
+# Populate analysis queue (each item must include context_id + file_id)
 ./scripts/assess.py code-dispatch queue <queue-items-json>
 # Check progress
 ./scripts/assess.py code-dispatch stats
@@ -131,12 +133,33 @@ Dispatch `code-vuln-hunter` with:
 - Threat model summary
 - Relevant CWE pattern reference (based on slot types in the context)
 
+#### Slot-Type → Reference Mapping
+
+Include the pattern references matching the context's slot types and language when dispatching code-vuln-hunter:
+
+| Slot Type / Context | Primary References | Also Include If... |
+|---|---|---|
+| NETWORK-INPUT, PROTOCOL-FIELD (C/C++) | `buffer-overflow.md`, `integer-overflow.md` | `format-string.md` if printf-family sinks |
+| NETWORK-INPUT, PROTOCOL-FIELD (Python/JS/Java/Go) | `web-app-injection.md`, `web-app-auth.md` | `race-condition.md` if async handlers |
+| URL-COMPONENT | `injection.md`, `auth-bypass.md` | `web-app-auth.md` if web framework |
+| FILE-CONTENT | `injection.md`, `buffer-overflow.md` | `type-confusion.md` if parser with unions/variants |
+| CMD-ARGUMENT | `injection.md` | `format-string.md` if logging sinks |
+| CALLBACK-DATA | `use-after-free.md`, `race-condition.md` | `type-confusion.md` if void*/interface{} casts |
+| PROTOCOL-FIELD + state machine | `race-condition.md` | `use-after-free.md` if connection lifecycle |
+| Any + crypto operations | `crypto-misuse.md` | Always |
+| Any + auth/session logic | `auth-bypass.md`, `web-app-auth.md` | Always |
+| Any + error handling paths | `error-handling.md` | `null-dereference.md` if pointer/optional types |
+| Any + memory allocation | `buffer-overflow.md`, `integer-overflow.md` | `uninitialized-memory.md`, `algorithmic-dos.md` |
+| Any + AI/ML/LLM code | `ai-ml-security.md` | Always for LangChain/LlamaIndex/MCP code |
+
+All references are under `agent/references/code-vuln-patterns/`. Include the full path in the dispatch context.
+
 On return:
 ```bash
-# Mark items done
-./scripts/assess.py code-dispatch done "id1,id2,..."
 # Record analysis results
 ./scripts/assess.py code-record-analysis <analysis-json>
+# Mark items done
+./scripts/assess.py code-dispatch done "id1,id2,..." <disposition>
 # Record any findings
 ./scripts/assess.py record-finding code-vuln-hunter <finding-json>
 ```
@@ -172,7 +195,7 @@ Exit: All findings have been variant-checked. Transition to Phase 5.
 
 **Coverage gate** — must pass before proceeding:
 ```bash
-./scripts/assess.py code-coverage
+./scripts/assess.py code-coverage --require-gate-pass
 # Must show: all critical files analyzed, all high files analyzed, no needs-context
 ```
 

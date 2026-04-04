@@ -20,6 +20,18 @@ Can I actually trigger this vulnerability from outside the process?"
 - `agent/SKILL.md`
 - `agent/skills/code-finding-verification/SKILL.md`
 
+## Pre-Work Checkpoint
+
+Before producing any output, confirm:
+- [ ] `shared-constraints-code.md` loaded — scope boundaries, finding format, and disposition requirements are active
+- [ ] `code-finding-verification` skill loaded — verification protocol, disposition categories, and output schemas are ready
+- [ ] All findings to verify are present with full evidence: CWE, taint path, guard evaluation, slot type, and confidence
+- [ ] Build system configuration accessible — Makefiles, CMakeLists, configure scripts, or feature flag definitions needed for Check 3
+- [ ] Entry-point-to-sink source code is available or requestable for full trace verification
+- [ ] Attack chain context available — other findings in the batch that may compose with the current finding
+
+If any item is missing, stop and request it from the operator before proceeding.
+
 ## Responsibilities
 
 - Review each finding for false positive indicators

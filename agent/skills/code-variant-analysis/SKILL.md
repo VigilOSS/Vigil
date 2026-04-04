@@ -138,6 +138,72 @@ Evidence: [code snippet]
 | Auth bypass via empty password | Same auth function | Any auth check | Authentication functions where empty/null input causes early success return instead of failure |
 | TOCTOU in file check-then-use | Same file path | Any file operation pair | `access()`/`stat()` followed by `open()` on same path without O_NOFOLLOW or lock |
 
+### Language-Specific Search Patterns
+
+When scanning non-C/C++ codebases, use these language-idiomatic patterns instead of (or alongside) the C-focused examples above.
+
+#### Python
+```bash
+# Dangerous sinks
+rg "\.raw\(|\.extra\(|RawSQL|eval\(|exec\(|compile\(" --type py -l
+rg "pickle\.(loads|load)\(|yaml\.load\(|subprocess.*shell\s*=\s*True" --type py -l
+rg "__import__|getattr\(.*,\s*(user|req|param|input)" --type py -l
+
+# Auth patterns
+rg "login_required|permission_required|has_perm|is_authenticated" --type py -l
+rg "@(csrf_exempt|require_http_methods)" --type py -l
+
+# ORM with user input
+rg "\.filter\(.*request\.|\.exclude\(.*request\." --type py -l
+rg "order_by\(.*request\.|\.extra\(" --type py -l
+```
+
+#### JavaScript / TypeScript
+```bash
+# Dangerous sinks
+rg "eval\(|Function\(|child_process|\.exec\(|\.execSync\(" --type js --type ts -l
+rg "innerHTML|outerHTML|document\.write|\.html\(" --type js --type ts -l
+rg "__proto__|constructor\[|prototype\[" --type js --type ts -l
+
+# Auth patterns
+rg "isAuthenticated|isAuthorized|requireAuth|passport\." --type js --type ts -l
+rg "jwt\.verify|jwt\.decode|jsonwebtoken" --type js --type ts -l
+
+# ORM/DB with user input
+rg "\.findById\(req\.|\.findOne\(.*req\.|\.literal\(" --type js --type ts -l
+rg "\$where|\$regex|\$ne|\$gt|\$lt" --type js --type ts -l
+```
+
+#### Java
+```bash
+# Dangerous sinks
+rg "ObjectInputStream|Runtime\.getRuntime|ProcessBuilder" --type java -l
+rg "createNativeQuery|createQuery\(.*\+|Statement\.execute" --type java -l
+rg "XMLInputFactory|SAXParser|DocumentBuilder" --type java -l
+
+# Auth patterns
+rg "@PreAuthorize|@Secured|@RolesAllowed|hasRole|hasAuthority" --type java -l
+rg "antMatchers|requestMatchers|authorizeRequests" --type java -l
+
+# Deserialization
+rg "readObject\(|readResolve\(|Serializable" --type java -l
+rg "ObjectMapper.*enableDefaultTyping|@JsonTypeInfo" --type java -l
+```
+
+#### Go
+```bash
+# Dangerous sinks
+rg "unsafe\.Pointer|exec\.Command|os\.StartProcess" --type go -l
+rg "template\.HTML|template\.JS|template\.URL" --type go -l
+rg "sql\.Query\(.*\+|sql\.Exec\(.*\+" --type go -l
+
+# Auth patterns
+rg "func.*middleware|func.*auth|jwt\.|ParseToken" --type go -l
+
+# Type safety
+rg "interface\{\}|\.\(type\)|reflect\." --type go -l
+```
+
 ## Scan Ordering
 
 Process candidate files in this order:

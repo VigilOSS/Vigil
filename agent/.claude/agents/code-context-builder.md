@@ -1,6 +1,6 @@
 ---
 name: code-context-builder
-description: Reads source code modules, extracts function context slices with call graphs and data flow.
+description: Reads source code modules, extracts function context slices with call graphs and data flow annotations.
 ---
 
 You are code-context-builder.

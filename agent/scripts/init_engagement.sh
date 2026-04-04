@@ -214,6 +214,34 @@ set -euo pipefail
 ENGAGEMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export ENGAGEMENT_DIR
 AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
+INSTALL_ROOT="$(cd "$AGENT_ROOT/.." && pwd)"
+
+resolve_env_var_from_file() {
+  local env_file="${1:?env file required}"
+  local key="${2:?key required}"
+  [[ -f "$env_file" ]] || return 0
+
+  (
+    unset "$key"
+    set -a
+    # shellcheck disable=SC1090
+    . "$env_file" >/dev/null 2>&1 || exit 0
+    printf '%s' "${!key:-}"
+  )
+}
+
+if [[ -z "${ORCHESTRATOR_BASE_URL:-}" ]]; then
+  for env_file in \
+    "$ENGAGEMENT_DIR/.orchestrator.env" \
+    "$INSTALL_ROOT/.orchestrator.env" \
+    "$INSTALL_ROOT/.env"
+  do
+    candidate="$(resolve_env_var_from_file "$env_file" ORCHESTRATOR_BASE_URL)"
+    if [[ -n "$candidate" ]]; then
+      export ORCHESTRATOR_BASE_URL="${candidate%/}"
+    fi
+  done
+fi
 
 exec codex "$@"
 EOF
@@ -227,6 +255,34 @@ set -euo pipefail
 ENGAGEMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export ENGAGEMENT_DIR
 AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
+INSTALL_ROOT="$(cd "$AGENT_ROOT/.." && pwd)"
+
+resolve_env_var_from_file() {
+  local env_file="${1:?env file required}"
+  local key="${2:?key required}"
+  [[ -f "$env_file" ]] || return 0
+
+  (
+    unset "$key"
+    set -a
+    # shellcheck disable=SC1090
+    . "$env_file" >/dev/null 2>&1 || exit 0
+    printf '%s' "${!key:-}"
+  )
+}
+
+if [[ -z "${ORCHESTRATOR_BASE_URL:-}" ]]; then
+  for env_file in \
+    "$ENGAGEMENT_DIR/.orchestrator.env" \
+    "$INSTALL_ROOT/.orchestrator.env" \
+    "$INSTALL_ROOT/.env"
+  do
+    candidate="$(resolve_env_var_from_file "$env_file" ORCHESTRATOR_BASE_URL)"
+    if [[ -n "$candidate" ]]; then
+      export ORCHESTRATOR_BASE_URL="${candidate%/}"
+    fi
+  done
+fi
 
 exec claude "$@"
 EOF

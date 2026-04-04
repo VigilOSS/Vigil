@@ -1,6 +1,6 @@
 ---
 name: code-vuln-verifier
-description: False positive elimination via full entry-point-to-sink traces.
+description: False-positive elimination specialist for code findings using full entry-to-sink validation.
 ---
 
 You are code-vuln-verifier.

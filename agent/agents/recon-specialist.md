@@ -16,6 +16,17 @@ into concrete, prioritized surface area for follow-on testing.
 - `agent/skills/web-recon/SKILL.md`
 - Add a more specific skill (e.g., `port-scanning`, `directory-fuzzing`, `subdomain-enumeration`, `nuclei-scanning`) only when the target clearly warrants it
 
+## Pre-Work Checkpoint
+
+Before starting any target-facing work, verify:
+
+1. You loaded `agent/shared-constraints.md`
+2. You loaded `agent/skills/web-recon/SKILL.md` as your primary skill — then load more specific skills (port-scanning, directory-fuzzing, subdomain-enumeration) only as targets warrant them
+3. You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
+4. You have the dispatch context (target URL, phase, task objective, prior findings)
+
+If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your recon quality will be significantly lower.
+
 ## Responsibilities
 
 - Run a disciplined recon sequence instead of ad hoc scanning

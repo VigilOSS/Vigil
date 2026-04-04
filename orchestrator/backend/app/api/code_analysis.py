@@ -64,6 +64,8 @@ class CodeModuleRecord(BaseModel):
     name: str = Field(min_length=1, max_length=256)
     description: str = Field(default="", max_length=4096)
     trust_boundary: str = Field(default="", max_length=1024)
+    files: list[str] = Field(default_factory=list)
+    file_ids: list[int] = Field(default_factory=list)
 
 
 class CodeModulesBulkCreateRequest(BaseModel):
@@ -90,7 +92,7 @@ class CodeContextsBulkCreateRequest(BaseModel):
 
 
 class QueueItemRecord(BaseModel):
-    context_id: int | None = None
+    context_id: int
     file_id: int
     priority: int = Field(default=50, ge=0, le=100)
 
@@ -205,6 +207,7 @@ async def bulk_create_files(engagement_key: str, request: CodeFilesBulkCreateReq
 def list_files(
     engagement_key: str,
     repo_id: int | None = Query(default=None),
+    module_id: int | None = Query(default=None),
     classification: str | None = Query(default=None),
     analysis_status: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=5000),
@@ -213,6 +216,7 @@ def list_files(
     return code_analysis.list_code_files(
         engagement.id,
         repo_id=repo_id,
+        module_id=module_id,
         classification=classification,
         analysis_status=analysis_status,
         limit=limit,

@@ -1,6 +1,6 @@
 ---
 name: code-architect
-description: Architecture recon, threat modeling, and file classification for source code.
+description: Architecture reconnaissance, threat modeling, and file classification for source code repositories.
 ---
 
 You are code-architect.

@@ -21,6 +21,11 @@ AGENT_NAMES=(
   fuzzer
   osint-analyst
   report-writer
+  code-architect
+  code-context-builder
+  code-vuln-hunter
+  code-variant-hunter
+  code-vuln-verifier
 )
 
 agent_description() {
@@ -33,6 +38,11 @@ agent_description() {
     fuzzer) printf '%s\n' "High-volume fuzzing specialist for bounded payload families." ;;
     osint-analyst) printf '%s\n' "External intelligence specialist for CVEs, disclosures, and context." ;;
     report-writer) printf '%s\n' "Human-first reporting specialist for concise, evidence-backed reporting." ;;
+    code-architect) printf '%s\n' "Architecture reconnaissance, threat modeling, and file classification for source code repositories." ;;
+    code-context-builder) printf '%s\n' "Reads source code modules, extracts function context slices with call graphs and data flow annotations." ;;
+    code-vuln-hunter) printf '%s\n' "Deep vulnerability analysis specialist for function-level code review and exploitability assessment." ;;
+    code-variant-hunter) printf '%s\n' "Systematic variant scanner for confirmed code vulnerability patterns." ;;
+    code-vuln-verifier) printf '%s\n' "False-positive elimination specialist for code findings using full entry-to-sink validation." ;;
   esac
 }
 
@@ -84,6 +94,21 @@ render_agent_roster() {
 EOF
 }
 
+render_code_agent_roster() {
+  cat <<'EOF'
+### Code Analysis Agents (operator-core-code.md mode)
+
+| Agent | Role | Dispatched When |
+|---|---|---|
+| `code-architect` | Architecture recon, threat modeling, file classification for source repos. | Code Phase 1 (Classify). |
+| `code-context-builder` | Function-level context extraction with call graphs and data flow annotations. | Code Phase 2 (Context), parallel per module. |
+| `code-vuln-hunter` | Deep vulnerability analysis using constrained attacker persona and taint tracing. | Code Phase 3 (Analyze), batched. |
+| `code-variant-hunter` | Systematic scanning for variant instances of confirmed bug patterns. | Code Phase 4 (Variant), parallel per finding. |
+| `code-vuln-verifier` | FP elimination via full entry-to-sink traces and attack chain synthesis. | Code Phase 5 (Verify). |
+
+EOF
+}
+
 render_claude() {
   {
     cat <<'EOF'
@@ -107,6 +132,7 @@ When a session starts, display the banner above and then:
 EOF
     render_prompt_locality
     render_agent_roster
+    render_code_agent_roster
     cat "$CORE_FILE"
     cat <<'EOF'
 
@@ -120,6 +146,11 @@ Use `@agent-name` when dispatching subagents:
 - `@fuzzer`
 - `@osint-analyst`
 - `@report-writer`
+- `@code-architect`
+- `@code-context-builder`
+- `@code-vuln-hunter`
+- `@code-variant-hunter`
+- `@code-vuln-verifier`
 
 ## macOS/zsh Compatibility
 
@@ -154,6 +185,7 @@ When a session starts, display the banner above and then:
 EOF
     render_prompt_locality
     render_agent_roster
+    render_code_agent_roster
     cat "$CORE_FILE"
     cat <<'EOF'
 

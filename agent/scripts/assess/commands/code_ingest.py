@@ -50,6 +50,7 @@ def register(subparsers) -> None:
     p.add_argument("repo_path", help="Path to the repository root")
     p.add_argument("--name", default=None, help="Repository name (default: directory basename)")
     p.add_argument("--language", default=None, help="Override primary language detection")
+    p.add_argument("--repo-key", default=None, help="Explicit repository key (default: stable name+path hash)")
     p.set_defaults(func=run)
 
 
@@ -87,6 +88,13 @@ def _sha256_file(filepath: str) -> str:
     except OSError:
         return ''
     return h.hexdigest()
+
+
+def _repo_key_for_path(repo_name: str, repo_path: str) -> str:
+    normalized_name = repo_name.lower().replace(' ', '-')
+    canonical_path = os.path.realpath(repo_path)
+    path_hash = hashlib.sha256(canonical_path.encode('utf-8')).hexdigest()[:12]
+    return f"{normalized_name}-{path_hash}"
 
 
 def _count_lines(filepath: str) -> int:
@@ -244,7 +252,7 @@ def run(args) -> None:
     try:
         # Create the repo record
         repo_payload = {
-            'repo_key': repo_name.lower().replace(' ', '-'),
+            'repo_key': args.repo_key or _repo_key_for_path(repo_name, repo_path),
             'name': repo_name,
             'language': args.language or '',
             'repo_path': repo_path,
