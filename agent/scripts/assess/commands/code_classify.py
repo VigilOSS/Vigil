@@ -49,7 +49,7 @@ def run(args) -> None:
     finally:
         client.close()
 
-    classified_count = result.get('classified', len(payload))
+    classified_count = result.get('updated', len(payload))
 
     # Compute tier breakdown
     tier_counts: dict[str, int] = {}

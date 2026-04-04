@@ -28,7 +28,7 @@ def run(args) -> None:
         sys.exit(1)
 
     payload = {
-        'repo_id': args.repo_id,
+        'repo_id': int(args.repo_id),
         'threat_model': threat_model,
     }
 

@@ -33,10 +33,13 @@ def run(args) -> None:
 
     _print_coverage(result)
 
-    # Exit code based on gate status
+    # Exit code based on gate status: exit 0 only if gate explicitly passed
     gate = result.get('gate', {})
-    if isinstance(gate, dict) and gate.get('passed') is False:
-        sys.exit(1)
+    if isinstance(gate, dict):
+        passed = gate.get('passed')
+        if passed is not True:
+            # Gate failed or is unknown — exit non-zero so scripts can use this as a gate
+            sys.exit(1)
 
 
 def _print_coverage(data: dict) -> None:
@@ -52,7 +55,7 @@ def _print_coverage(data: dict) -> None:
         for tier in ('critical', 'high', 'medium', 'low', 'skip'):
             tier_data = by_class.get(tier, {})
             if isinstance(tier_data, dict):
-                count = tier_data.get('total', 0)
+                count = tier_data.get('count', 0)
                 analyzed = tier_data.get('analyzed', 0)
                 if tier == 'skip':
                     print(f"  {tier:10s}: {count:>4} files |   -- skipped  |   --")
@@ -66,30 +69,29 @@ def _print_coverage(data: dict) -> None:
                 print(f"  {tier:10s}: {tier_data:>4} files")
 
     # Function-Level
-    contexts = data.get('contexts', {})
-    if contexts:
-        total_ctx = contexts.get('total', 0)
-        analyzed_ctx = contexts.get('analyzed', 0)
-        needs_ctx = contexts.get('needs_context', 0)
-        pending_ctx = contexts.get('pending', 0)
+    func_level = data.get('function_level', {})
+    if func_level:
+        total_ctx = func_level.get('total_contexts', 0)
+        analyzed_ctx = func_level.get('analyzed', 0)
+        needs_ctx = func_level.get('needs_context', 0)
+        pending_ctx = func_level.get('pending', 0)
         print(f"\nFunction-Level:")
         print(f"  Total contexts: {total_ctx}")
         print(f"  Analyzed: {analyzed_ctx} | Needs context: {needs_ctx} | Pending: {pending_ctx}")
 
     # Findings
-    findings = data.get('findings', {})
+    findings = data.get('findings_summary', {})
     if findings:
-        total_findings = findings.get('total', 0)
-        f_critical = findings.get('critical', 0)
-        f_high = findings.get('high', 0)
-        f_medium = findings.get('medium', 0)
-        f_low = findings.get('low', 0)
+        total_findings = findings.get('total_code_findings', 0)
+        by_severity = findings.get('by_severity', {})
+        f_critical = by_severity.get('critical', 0)
+        f_high = by_severity.get('high', 0)
+        f_medium = by_severity.get('medium', 0)
+        f_low = by_severity.get('low', 0)
         print(f"\nFindings: {total_findings} total ({f_critical} critical, {f_high} high, {f_medium} medium, {f_low} low)")
-
-    # Variants
-    variants = data.get('variants', 0)
-    if variants:
-        print(f"Variants: {variants}")
+        variant_count = findings.get('variant_count', 0)
+        if variant_count:
+            print(f"Variants: {variant_count}")
 
     # Coverage Gate
     gate = data.get('gate', {})

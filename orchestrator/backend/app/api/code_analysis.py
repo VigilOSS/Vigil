@@ -249,15 +249,15 @@ async def update_file(engagement_key: str, file_id: int, request: dict[str, Any]
 # ---------------------------------------------------------------------------
 
 @router.post("/modules", status_code=status.HTTP_201_CREATED)
-async def bulk_create_modules(engagement_key: str, request: CodeModulesBulkCreateRequest) -> dict[str, Any]:
+async def bulk_create_modules(engagement_key: str, request: CodeModulesBulkCreateRequest) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.bulk_create_code_modules(
+    records = code_analysis.bulk_create_code_modules(
         engagement.id,
         repo_id=request.repo_id,
         modules=[m.model_dump() for m in request.modules],
     )
-    await _broadcast(engagement.key, "modules", record)
-    return record
+    await _broadcast(engagement.key, "modules", {"count": len(records)})
+    return records
 
 
 @router.get("/modules")
@@ -394,7 +394,7 @@ async def reset_stale_queue_items(engagement_key: str, request: QueueResetStaleR
 @router.post("/analysis-results", status_code=status.HTTP_201_CREATED)
 async def create_analysis_result(engagement_key: str, request: AnalysisResultRecord) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.create_analysis_result(engagement.id, **request.model_dump())
+    record = code_analysis.create_analysis_result(engagement.id, request.model_dump())
     await _broadcast(engagement.key, "analysis_result", record)
     return record
 

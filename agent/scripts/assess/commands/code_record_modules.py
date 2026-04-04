@@ -41,7 +41,7 @@ def run(args) -> None:
             sys.exit(1)
 
     payload = {
-        'repo_id': args.repo_id,
+        'repo_id': int(args.repo_id),
         'modules': modules,
     }
 
@@ -52,7 +52,11 @@ def run(args) -> None:
     finally:
         client.close()
 
-    created_count = result.get('created', len(modules))
-    print(f"=== Code Modules Summary ===")
-    print(f"Modules created: {created_count}")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    if isinstance(result, list):
+        print(f"=== Code Modules Summary ===")
+        print(f"Modules created: {len(result)}")
+        for mod in result:
+            print(f"  [{mod.get('id', '?')}] {mod.get('module_key', '?')}: {mod.get('name', '?')}")
+    else:
+        print(f"=== Code Modules Summary ===")
+        print(json.dumps(result, indent=2, ensure_ascii=False))

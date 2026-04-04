@@ -26,14 +26,22 @@ LANG_MAP = {
 }
 
 SKIP_DIRS = frozenset({
-    '.git', '.svn', '__pycache__', 'node_modules', '.tox', 'venv',
+    '.git', '.svn', '.hg', '__pycache__', 'node_modules', '.tox',
+    'venv', '.venv', 'env', '.env', 'dist', 'build', 'target',
+    'vendor', '.next', '.nuxt', '.expo', '.gradle', '.idea',
+    '.vscode', '.vs', 'coverage', '.nyc_output',
 })
 
 SKIP_EXTENSIONS = frozenset({
-    '.pyc', '.o', '.so', '.a', '.dylib', '.exe', '.dll',
-    '.min.js', '.bundle.js', '.map',
-    '.png', '.jpg', '.gif', '.ico', '.svg', '.pdf',
-    '.woff', '.woff2', '.ttf', '.eot',
+    '.pyc', '.pyo', '.o', '.so', '.a', '.dylib', '.exe', '.dll', '.lib',
+    '.jar', '.class', '.dex', '.war', '.ear',
+    '.min.js', '.bundle.js', '.min.css', '.bundle.css', '.map',
+    '.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg', '.bmp', '.webp',
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx',
+    '.woff', '.woff2', '.ttf', '.eot', '.otf',
+    '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar',
+    '.mp3', '.mp4', '.wav', '.avi', '.mov', '.mkv',
+    '.sqlite', '.sqlite3', '.db',
 })
 
 
@@ -187,8 +195,17 @@ def run(args) -> None:
         # Prune skip directories
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
 
+        # Skip symlinked directories to prevent traversal outside repo
+        dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
+
         for filename in filenames:
             filepath = os.path.join(dirpath, filename)
+
+            # Skip symlinks — prevents traversal to /etc/passwd or outside the repo
+            if os.path.islink(filepath):
+                skipped += 1
+                continue
+
             rel_path = os.path.relpath(filepath, repo_path)
 
             if _should_skip_file(rel_path, filename):
@@ -207,14 +224,13 @@ def run(args) -> None:
             has_security_history = rel_path in security_files
 
             file_record = {
-                'path': rel_path,
-                'filename': filename,
-                'language': lang,
+                'file_path': rel_path,
+                'language': lang or '',
                 'loc': loc,
-                'sha256': sha,
+                'file_hash': sha,
                 'header_snippet': header,
-                'churn_score': churn,
-                'has_security_history': has_security_history,
+                'git_churn_score': churn,
+                'has_past_cve_fix': has_security_history,
             }
             files.append(file_record)
 
@@ -228,12 +244,14 @@ def run(args) -> None:
     try:
         # Create the repo record
         repo_payload = {
+            'repo_key': repo_name.lower().replace(' ', '-'),
             'name': repo_name,
-            'path': repo_path,
-            'primary_language': args.language,
-            'has_git': has_git,
-            'total_files': len(files),
+            'language': args.language or '',
+            'repo_path': repo_path,
+            'total_files': len(files) + skipped,
+            'analyzable_files': len(files),
             'total_loc': total_loc,
+            'git_churn': {'churn_scores': dict(sorted(churn_scores.items(), key=lambda x: -x[1])[:30])} if churn_scores else {},
         }
         repo_resp = client.post('code/repos', repo_payload)
         repo_id = repo_resp.get('id') or repo_resp.get('repo_id')
@@ -251,7 +269,7 @@ def run(args) -> None:
                 'files': batch,
             }
             resp = client.post('code/files', files_payload)
-            created_count += resp.get('created', len(batch))
+            created_count += resp.get('inserted', len(batch))
 
     finally:
         client.close()

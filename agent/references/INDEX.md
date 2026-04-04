@@ -170,6 +170,11 @@ multi-function chains, combinatorial arithmetic, state machine bugs, and incompl
 | `code-vuln-patterns/race-condition.md` | State machine bugs, async refactoring artifacts, signal handler races | C/C++, Python, JS |
 | `code-vuln-patterns/crypto-misuse.md` | Subtle mode/parameter misuse, timing leaks, non-obvious randomness issues | C/C++, Python, JS |
 | `code-vuln-patterns/auth-bypass.md` | Logic-level auth gaps, fallback bypasses, path normalization, method confusion | C/C++, Python, JS |
+| `code-vuln-patterns/uninitialized-memory.md` | Conditional initialization, cross-function partial init, stack/heap info leaks | C/C++, Python, JS |
+| `code-vuln-patterns/type-confusion.md` | void* casts, union abuse, tagged union errors, inheritance downcasts | C/C++, Python, JS |
+| `code-vuln-patterns/null-dereference.md` | Cross-function NULL propagation, optional field assumptions, race-to-NULL | C/C++, Python, JS |
+| `code-vuln-patterns/algorithmic-dos.md` | Hash collision, ReDoS, parser bombs, unbounded allocation, zip bombs | C/C++, Python, JS |
+| `code-vuln-patterns/error-handling.md` | Fail-open, unchecked returns, cleanup double-free, exception swallowing, resource leaks | C/C++, Python, JS |
 
 ## tools/ — CLI Tool Cheatsheets
 
