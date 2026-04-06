@@ -19,12 +19,15 @@ Host-side file reading:
 - `grep` / `rg` — locate function definitions, call sites, type definitions, macro expansions
 - `wc -l` — verify batch sizes stay within target
 
-Cross-reference tools (check dispatch context for `lsp_config`):
-- **LSP go-to-definition** — resolve function/type definitions across files without grep
-- **LSP find-all-references** — find ALL callers of a function across the entire codebase
-- **LSP call-hierarchy** — build call graphs directly (incoming and outgoing calls)
-- **LSP hover** — get type signatures without reading the definition file
-- **ctags index** — `grep '^<symbol>\t' <repo>/tags` to find definitions when LSP unavailable
+Cross-reference tools:
+- **ctags index** — `grep '^<symbol>\t' <repo>/tags` to find function/type definitions across files
+- **grep / rg** — find all call sites, references, and code patterns across the entire codebase
+
+Audit trail requirement:
+- Every context slice MUST include `audit_metadata.cross_ref_usage` describing how cross-references were obtained.
+- Record `tool` as one of `ctags`, `grep`, or `mixed`.
+- Record `queries` as the concrete lookups used (e.g., `grep '^parseurl\t' tags`, `rg 'parseurl\s*\(' --type c`).
+- If no cross-reference helper was used, record `tool: "grep"` and explain why in `notes`.
 
 ## Division of Labor
 
@@ -69,10 +72,11 @@ For every file in the batch, extract and catalog:
 
 ### Step 3: Build Intra-Module Call Graph
 
-**When LSP is available (preferred):**
-Use LSP call-hierarchy (incoming/outgoing) to enumerate callers and callees for each function.
-This produces a complete, accurate call graph without manual scanning.
-Fall back to grep-based scanning only when LSP is unavailable or returns no results.
+Use ctags to locate function definitions and grep/rg to enumerate callers and callees for each function.
+- **ctags**: `grep '^<function>\t' <repo>/tags` resolves where a function is defined
+- **grep/rg**: `rg '<function>\s*\(' --type c` finds all call sites across the codebase
+
+Record every ctags/grep lookup used for this step under `audit_metadata.cross_ref_usage`.
 
 For every function in the batch, trace all call sites:
 
@@ -92,14 +96,14 @@ Record for each call:
 
 ### Step 4: Annotate Cross-Module Calls
 
-**When LSP is available (preferred):**
-Use go-to-definition to resolve cross-module callees to their actual implementations.
-Use hover to retrieve full type signatures without reading the target file.
-Use find-all-references to identify all call sites of exported functions.
-This eliminates many context expansion requests for simple signature lookups.
+Use ctags to resolve cross-module callees to their actual implementations and grep/rg to identify all call sites of exported functions.
+- **ctags**: `grep '^<function>\t' <repo>/tags` to find the definition file, then read the signature
+- **grep/rg**: `rg '<function>\s*\(' --type c` to find all call sites across the codebase
+
+Record every lookup used for this step under `audit_metadata.cross_ref_usage`.
 
 For calls to functions outside the current batch:
-- Record the callee function signature (from headers, type definitions, or LSP hover)
+- Record the callee function signature (from headers, type definitions, or ctags lookup)
 - Record the slot-type annotations on parameters (inherited from architecture mapping)
 - Mark as `cross_module_call` with the target module name
 - Do NOT trace into the callee body — that will happen when its module batch is processed
@@ -182,6 +186,17 @@ Each function produces one context slice as structured data:
   "cross_refs": [
     {"function": "normalize_encoding", "module": "http-encoding", "signature": "int normalize_encoding(char *dst, const char *src, size_t len)"}
   ],
+  "audit_metadata": {
+    "cross_ref_usage": {
+      "tool": "mixed",
+      "queries": [
+        "grep '^parse_header_value\t' tags",
+        "rg 'parse_header_value\\s*\\(' --type c",
+        "grep '^normalize_encoding\t' tags"
+      ],
+      "notes": "Used ctags for definition lookups and rg for caller/callee enumeration"
+    }
+  },
   "guard_annotations": [
     {
       "variable": "value_len",
@@ -218,6 +233,7 @@ Each function produces one context slice as structured data:
 | `data_flow.untrusted_locals` | Local variables derived from untrusted data |
 | `data_flow.derived_sizes` | Size/length variables derived from untrusted data |
 | `cross_refs` | Cross-module function references (signature only) |
+| `audit_metadata.cross_ref_usage` | Durable audit trail showing whether ctags or grep produced the cross-reference evidence |
 | `guard_annotations` | Protective checks with completeness assessment |
 | `sink_annotations` | Dangerous operations with untrusted argument flags |
 | `context_text` | Full source text of the function for analyzer reference |

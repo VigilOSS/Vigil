@@ -167,6 +167,18 @@ If you need HTTPS interception, install the mitmproxy CA certificate in the brow
 
 In the engagement flow, this usually happens during `recon` or `collect` when anonymous coverage is insufficient, or later when a previously working authenticated session has expired.
 
+### ctags for code analysis
+
+Code analysis agents use ctags for fast definition lookups and grep/rg for call site enumeration. `code-ingest` generates a ctags index automatically during repository ingestion.
+
+macOS ships BSD ctags which is limited. Install Universal ctags for best results:
+
+```bash
+brew install universal-ctags
+```
+
+Universal ctags produces richer tag data (signatures, kinds, line numbers) and supports recursive indexing. Without ctags installed, agents fall back to grep-only cross-references.
+
 ### Metasploit
 
 Metasploit is not assumed to be always-on. Start it only when exploit chaining or module validation warrants it.

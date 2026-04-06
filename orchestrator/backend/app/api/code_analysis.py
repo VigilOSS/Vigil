@@ -84,6 +84,7 @@ class CodeContextRecord(BaseModel):
     cross_refs: list[dict[str, Any]] = Field(default_factory=list)
     guard_annotations: list[dict[str, Any]] = Field(default_factory=list)
     sink_annotations: list[dict[str, Any]] = Field(default_factory=list)
+    audit_metadata: dict[str, Any] = Field(default_factory=dict)
     context_text: str = Field(default="", max_length=100000)
 
 
@@ -140,6 +141,7 @@ class AnalysisResultRecord(BaseModel):
     cwe_id: str = Field(default="", max_length=32)
     slot_type: str = Field(default="", max_length=128)
     notes: str = Field(default="", max_length=20000)
+    audit_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ThreatModelRecordRequest(BaseModel):

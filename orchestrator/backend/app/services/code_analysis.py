@@ -66,6 +66,13 @@ def _hydrate_code_context(row: Any) -> dict[str, Any]:
     payload["cross_refs"] = _json_decode(payload.get("cross_refs_json"), [])
     payload["guard_annotations"] = _json_decode(payload.get("guard_annotations_json"), [])
     payload["sink_annotations"] = _json_decode(payload.get("sink_annotations_json"), [])
+    payload["audit_metadata"] = _json_decode(payload.get("audit_metadata_json"), {})
+    return payload
+
+
+def _hydrate_code_analysis_result(row: Any) -> dict[str, Any]:
+    payload = dict(row)
+    payload["audit_metadata"] = _json_decode(payload.get("audit_metadata_json"), {})
     return payload
 
 
@@ -77,6 +84,20 @@ def _get_repo_row(connection, engagement_id: int, repo_id: int) -> dict[str, Any
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code repo not found")
     return dict(row)
+
+
+def _get_repo_rows(connection, engagement_id: int, repo_ids: set[int]) -> dict[int, dict[str, Any]]:
+    if not repo_ids:
+        return {}
+    placeholders = ",".join("?" for _ in repo_ids)
+    rows = connection.execute(
+        f"SELECT * FROM code_repos WHERE engagement_id = ? AND id IN ({placeholders})",
+        (engagement_id, *sorted(repo_ids)),
+    ).fetchall()
+    found = {int(row["id"]): dict(row) for row in rows}
+    if len(found) != len(repo_ids):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code repo not found")
+    return found
 
 
 def _get_file_rows(connection, engagement_id: int, file_ids: set[int]) -> dict[int, dict[str, Any]]:
@@ -148,15 +169,30 @@ def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> 
         """,
         (engagement_id, file_id),
     )
+    queue_rows = connection.execute(
+        """
+        SELECT status, COUNT(*) AS total
+        FROM code_analysis_queue
+        WHERE engagement_id = ? AND file_id = ?
+        GROUP BY status
+        """,
+        (engagement_id, file_id),
+    ).fetchall()
+    queue_counts = {str(row["status"]): int(row["total"]) for row in queue_rows}
+    pending_queue = queue_counts.get("pending", 0)
+    processing_queue = queue_counts.get("processing", 0)
+    queue_needs_context = queue_counts.get("needs_context", 0)
 
-    if needs_context > 0:
+    if needs_context > 0 or queue_needs_context > 0:
         next_status = "needs_context"
-    elif analyzed_contexts == total_contexts:
+    elif analyzed_contexts == total_contexts and pending_queue == 0 and processing_queue == 0:
         next_status = "analyzed"
-    elif analyzed_contexts > 0:
+    elif processing_queue > 0 or analyzed_contexts > 0:
         next_status = "in_progress"
+    elif pending_queue > 0:
+        next_status = "queued"
     else:
-        next_status = "classified"
+        next_status = "context_built"
 
     connection.execute(
         """
@@ -643,9 +679,9 @@ def bulk_create_code_contexts(
                     engagement_id, file_id, function_name, start_line, end_line,
                     slot_types_json, call_chain_json, data_flow_json,
                     cross_refs_json, guard_annotations_json, sink_annotations_json,
-                    context_text
+                    audit_metadata_json, context_text
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     engagement.id,
@@ -659,6 +695,7 @@ def bulk_create_code_contexts(
                     _json_list_text(ctx.get("cross_refs")),
                     _json_list_text(ctx.get("guard_annotations")),
                     _json_list_text(ctx.get("sink_annotations")),
+                    _json_text(ctx.get("audit_metadata")),
                     ctx.get("context_text", ""),
                 ),
             )
@@ -681,6 +718,7 @@ def bulk_create_code_contexts(
             ).fetchone()
             assert row is not None
             rows.append(_hydrate_code_context(row))
+            _sync_file_analysis_status(connection, engagement.id, int(ctx["file_id"]))
     return {"inserted": inserted, "skipped": skipped, "total": len(contexts), "contexts": rows}
 
 
@@ -707,7 +745,7 @@ def list_code_contexts(
 _CODE_CONTEXT_ALLOWED_FIELDS = frozenset({
     "analysis_status", "slot_types_json", "call_chain_json", "data_flow_json",
     "cross_refs_json", "guard_annotations_json", "sink_annotations_json",
-    "context_text",
+    "audit_metadata_json", "context_text",
 })
 
 
@@ -728,7 +766,7 @@ def update_code_context(
         return _hydrate_code_context(row)
 
     json_list_fields = {"slot_types_json", "cross_refs_json", "guard_annotations_json", "sink_annotations_json"}
-    json_object_fields = {"call_chain_json", "data_flow_json"}
+    json_object_fields = {"call_chain_json", "data_flow_json", "audit_metadata_json"}
 
     set_clauses = []
     params: list[Any] = []
@@ -887,12 +925,16 @@ def fetch_queue_items(
             return []
 
         file_rows = _get_file_rows(connection, engagement.id, {int(row["file_id"]) for row in rows})
+        repo_rows = _get_repo_rows(connection, engagement.id, {int(file_rows[int(row["file_id"])]["repo_id"]) for row in rows})
         context_rows = _get_context_rows(connection, engagement.id, {int(row["context_id"]) for row in rows})
+        for file_id in {int(row["file_id"]) for row in rows}:
+            _sync_file_analysis_status(connection, engagement.id, file_id)
         payload: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
             item["context"] = _hydrate_code_context(context_rows[int(row["context_id"])])
             item["file"] = _hydrate_code_file(file_rows[int(row["file_id"])])
+            item["repo"] = _hydrate_code_repo(repo_rows[int(file_rows[int(row["file_id"])]["repo_id"])])
             payload.append(item)
     return payload
 
@@ -955,7 +997,7 @@ def error_queue_items(
         return {"updated": 0, "total": 0}
     placeholders = ",".join("?" for _ in item_ids)
     with get_connection() as connection:
-        _get_queue_rows(connection, engagement.id, set(item_ids))
+        queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
@@ -966,6 +1008,8 @@ def error_queue_items(
             """,
             (notes, engagement.id, *item_ids),
         )
+        for row in queue_rows.values():
+            _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
         return {"updated": cursor.rowcount, "total": len(item_ids)}
 
 
@@ -1009,6 +1053,16 @@ def reset_stale_queue_items(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
+        stale_rows = connection.execute(
+            """
+            SELECT id, file_id
+            FROM code_analysis_queue
+            WHERE engagement_id = ?
+              AND status = 'processing'
+              AND (consumed_at < datetime('now', ? || ' minutes') OR consumed_at IS NULL)
+            """,
+            (engagement.id, f"-{minutes}"),
+        ).fetchall()
         cursor = connection.execute(
             """
             UPDATE code_analysis_queue
@@ -1022,6 +1076,8 @@ def reset_stale_queue_items(
             """,
             (engagement.id, f"-{minutes}"),
         )
+        for row in stale_rows:
+            _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
         return {"reset": cursor.rowcount}
 
 
@@ -1058,9 +1114,9 @@ def create_analysis_result(
                 engagement_id, queue_item_id, context_id, file_id,
                 agent_name, function_name, hypothesis, evidence,
                 disposition, confidence, finding_slug, cwe_id,
-                slot_type, notes
+                slot_type, notes, audit_metadata_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -1077,6 +1133,7 @@ def create_analysis_result(
                 result.get("cwe_id", ""),
                 result.get("slot_type", ""),
                 result.get("notes", ""),
+                _json_text(result.get("audit_metadata")),
             ),
         )
         row = connection.execute(
@@ -1094,7 +1151,7 @@ def create_analysis_result(
             (context_status, engagement.id, int(context_id)),
         )
         _sync_file_analysis_status(connection, engagement.id, int(file_row["id"]))
-        return dict(row)
+        return _hydrate_code_analysis_result(row)
 
 
 def list_analysis_results(
@@ -1114,7 +1171,7 @@ def list_analysis_results(
         params.append(disposition)
     query = f"SELECT * FROM code_analysis_results WHERE {' AND '.join(clauses)} ORDER BY id DESC"
     with get_connection() as connection:
-        return _fetch_all(connection, query, tuple(params))
+        return [_hydrate_code_analysis_result(row) for row in connection.execute(query, tuple(params)).fetchall()]
 
 
 # =========================================================================

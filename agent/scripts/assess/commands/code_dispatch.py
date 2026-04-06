@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from assess.lib.code_audit import write_json_snapshot
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
@@ -104,6 +105,14 @@ def _fetch(cfg, limit: int, agent_name: str) -> None:
     finally:
         client.close()
 
+    snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-fetch",
+        label=agent_name,
+        payload=result,
+        metadata={"command": "code-dispatch fetch", "agent_name": agent_name, "limit": limit},
+    )
+    print(f"Saved audit snapshot: {snapshot.name}", file=sys.stderr)
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -118,8 +127,16 @@ def _done(cfg, id_list: str, disposition: str, notes: str = "") -> None:
     finally:
         client.close()
 
+    snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-done",
+        label=disposition,
+        payload=result,
+        metadata={"command": "code-dispatch done", "item_ids": ids, "disposition": disposition},
+    )
     updated = result.get('updated', 0) if isinstance(result, dict) else result
     print(f"Marked done ({disposition}): {updated} item(s)")
+    print(f"Saved audit snapshot: {snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
@@ -135,8 +152,16 @@ def _error(cfg, id_list: str, notes: str = "") -> None:
     finally:
         client.close()
 
+    snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-error",
+        label="items",
+        payload=result,
+        metadata={"command": "code-dispatch error", "item_ids": ids},
+    )
     updated = result.get('updated', 0) if isinstance(result, dict) else result
     print(f"Marked error: {updated} item(s)")
+    print(f"Saved audit snapshot: {snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
@@ -159,7 +184,16 @@ def _needs_context(cfg, id_list: str, expansion_file: str | None) -> None:
     finally:
         client.close()
 
+    snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-needs-context",
+        label="items",
+        payload={"request": payload, "response": result},
+        source_path=expansion_file,
+        metadata={"command": "code-dispatch needs-context", "item_ids": ids},
+    )
     print(f"Marked needs-context: {id_list}")
+    print(f"Saved audit snapshot: {snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
@@ -171,8 +205,16 @@ def _reset_stale(cfg, minutes: int) -> None:
     finally:
         client.close()
 
+    snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-reset-stale",
+        label=f"{minutes}m",
+        payload=result,
+        metadata={"command": "code-dispatch reset-stale", "minutes": minutes},
+    )
     reset_count = result.get('reset', 0) if isinstance(result, dict) else 0
     print(f"Reset {reset_count} stale item(s) (stuck > {minutes} min)")
+    print(f"Saved audit snapshot: {snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
@@ -191,13 +233,30 @@ def _queue(cfg, queue_items_file: str) -> None:
         print("Queue items file must contain a JSON array or object", file=sys.stderr)
         sys.exit(1)
 
+    submit_snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-submit",
+        label=fp.stem,
+        payload=items,
+        source_path=str(fp),
+        metadata={"command": "code-dispatch queue", "count": len(items)},
+    )
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
         result = client.post('code/analysis-queue', {'items': items})
     finally:
         client.close()
 
+    response_snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-response",
+        label=fp.stem,
+        payload=result,
+        source_path=str(submit_snapshot),
+        metadata={"command": "code-dispatch queue", "count": len(items)},
+    )
     queued_count = result.get('queued', len(items)) if isinstance(result, dict) else len(items)
     print(f"Queued {queued_count} analysis item(s)")
+    print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))

@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from assess.lib.code_audit import write_json_snapshot
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
@@ -37,17 +38,35 @@ def run(args) -> None:
             sys.exit(1)
 
     cfg = load_config(args.engagement_dir)
+    submit_snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-contexts-submit",
+        label=json_path.stem,
+        payload=contexts,
+        source_path=str(json_path),
+        metadata={"command": "code-record-contexts", "count": len(contexts)},
+    )
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
         result = client.post('code/contexts', {'contexts': contexts})
     finally:
         client.close()
 
+    response_snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-contexts-response",
+        label=json_path.stem,
+        payload=result,
+        source_path=str(submit_snapshot),
+        metadata={"command": "code-record-contexts", "count": len(contexts)},
+    )
+
     if isinstance(result, dict):
         inserted = result.get('inserted', 0)
         skipped = result.get('skipped', 0)
         print(f"=== Code Contexts Summary ===")
         print(f"Contexts inserted: {inserted} (skipped: {skipped})")
+        print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
         for ctx in result.get('contexts', []):
             ctx_id = ctx.get('id', '?')
             file_id = ctx.get('file_id', '?')
