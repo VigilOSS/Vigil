@@ -13,11 +13,18 @@ import {
   AssessmentTarget,
   Artifact,
   ArtifactContent,
+  CodeAnalysisResult,
+  CodeCoverage,
+  CodeModule,
+  CodeQueueStats,
+  CodeRepo,
   Engagement,
   EngagementSession,
   EventRecord,
   engagementWebSocketUrl,
   getAssessmentSummary,
+  getCodeCoverage,
+  getCodeQueueStats,
   getEngagement,
   listArtifacts,
   listAssessmentAttackChainLinks,
@@ -29,12 +36,16 @@ import {
   listAssessmentServices,
   listAssessmentSurfaces,
   listAssessmentTargets,
+  listCodeAnalysisResults,
+  listCodeModules,
+  listCodeRepos,
   listEngagementSessions,
   listEvents,
   readArtifact,
 } from "../lib/api";
 import { ActivityTab } from "../components/ActivityTab";
 import { ArtifactViewer } from "../components/ArtifactViewer";
+import { CodeAnalysisTab } from "../components/CodeAnalysisTab";
 import { CoverageTab } from "../components/CoverageTab";
 import { FindingsTab } from "../components/FindingsTab";
 import { OverviewTab } from "../components/OverviewTab";
@@ -67,6 +78,11 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const [assessmentTargets, setAssessmentTargets] = useState<AssessmentTarget[]>([]);
   const [assessmentServices, setAssessmentServices] = useState<AssessmentService[]>([]);
   const [assessmentCoverageItems, setAssessmentCoverageItems] = useState<AssessmentCoverageItem[]>([]);
+  const [codeRepos, setCodeRepos] = useState<CodeRepo[]>([]);
+  const [codeModules, setCodeModules] = useState<CodeModule[]>([]);
+  const [codeQueueStats, setCodeQueueStats] = useState<CodeQueueStats | null>(null);
+  const [codeCoverage, setCodeCoverage] = useState<CodeCoverage | null>(null);
+  const [codeResults, setCodeResults] = useState<CodeAnalysisResult[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactContent | null>(null);
   const activeEngagement = engagement?.key === engagementKey ? engagement : null;
@@ -128,6 +144,16 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
     ]);
   }
 
+  function refreshCodeAnalysis() {
+    return Promise.all([
+      listCodeRepos(engagementKey).then(setCodeRepos).catch(() => setCodeRepos([])),
+      listCodeModules(engagementKey).then(setCodeModules).catch(() => setCodeModules([])),
+      getCodeQueueStats(engagementKey).then(setCodeQueueStats).catch(() => setCodeQueueStats(null)),
+      getCodeCoverage(engagementKey).then(setCodeCoverage).catch(() => setCodeCoverage(null)),
+      listCodeAnalysisResults(engagementKey).then(setCodeResults).catch(() => setCodeResults([])),
+    ]);
+  }
+
   useEffect(() => {
     let cancelled = false;
     let refreshing = false;
@@ -156,6 +182,11 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
           setAssessmentTargets([]);
           setAssessmentServices([]);
           setAssessmentCoverageItems([]);
+          setCodeRepos([]);
+          setCodeModules([]);
+          setCodeQueueStats(null);
+          setCodeCoverage(null);
+          setCodeResults([]);
           setSelectedName(null);
           setSelectedArtifact(null);
           return;
@@ -163,7 +194,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
 
         if (cancelled) return;
 
-        await Promise.all([refreshSessions(), refreshEvents(), refreshArtifacts(), refreshAssessment()]);
+        await Promise.all([refreshSessions(), refreshEvents(), refreshArtifacts(), refreshAssessment(), refreshCodeAnalysis()]);
       } catch (error) {
         if (cancelled) return;
         const message = error instanceof Error ? error.message : "Failed to load engagement details";
@@ -203,6 +234,9 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
       if (payload.type === "assessment.updated") {
         refreshAssessment();
       }
+      if (payload.type === "code_analysis.updated") {
+        refreshCodeAnalysis();
+      }
       refreshEngagement();
       refreshSessions();
       refreshArtifacts();
@@ -222,7 +256,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
       if (refreshing) return;
       refreshing = true;
       void refreshEngagement()
-        .then(() => Promise.all([refreshSessions(), refreshEvents(), refreshArtifacts(), refreshAssessment()]))
+        .then(() => Promise.all([refreshSessions(), refreshEvents(), refreshArtifacts(), refreshAssessment(), refreshCodeAnalysis()]))
         .then(() => {
           if (selectedName) {
             refreshSelectedArtifact(selectedName);
@@ -253,6 +287,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const tabCounts: Partial<Record<TabKey, number>> = {
     findings: displaySummary?.finding_count ?? displayFindings.length,
     coverage: displaySummary?.coverage_count ?? 0,
+    code: codeRepos.length > 0 ? codeResults.length : undefined,
   };
 
   return (
@@ -304,6 +339,16 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
               summary={displaySummary}
               chains={assessmentChains}
               chainLinks={assessmentChainLinks}
+            />
+          )}
+
+          {activeTab === "code" && (
+            <CodeAnalysisTab
+              repos={codeRepos}
+              modules={codeModules}
+              queueStats={codeQueueStats}
+              coverage={codeCoverage}
+              results={codeResults}
             />
           )}
 

@@ -25,7 +25,7 @@ Before producing any output, confirm:
 - [ ] Candidate file list for scanning is present — same language, relevant classification levels
 - [ ] Abstract bug pattern is provided or derivable from the original finding
 - [ ] Threat model context available for understanding trust boundaries during quick taint checks
-- [ ] Cross-reference tools identified: check dispatch context for `lsp_config` — use LSP find-all-references to locate all callers of vulnerable functions across the codebase
+- [ ] Cross-reference tools identified: check dispatch context for ctags availability — use `grep`/`rg` to locate all callers of vulnerable functions across the codebase
 
 If any item is missing, stop and request it from the operator before proceeding.
 
@@ -121,3 +121,8 @@ Per-file variant check status:
 - **Same pattern, different severity**: the variant may be higher or lower severity than the original
 - **Link to original**: every variant finding MUST reference the original finding
 - **Document checked files**: record which files were scanned even if no variants were found — this is coverage evidence
+
+## Handoffs
+
+- **→ code-vuln-verifier** (via operator): Confirmed variant findings pass to verification with the same evidence package format as original findings. Include the `variant_of` link so the verifier can check whether the original's guard fix applies.
+- **→ report-writer** (via operator): After verification, all confirmed variants appear in the report grouped with their original finding.

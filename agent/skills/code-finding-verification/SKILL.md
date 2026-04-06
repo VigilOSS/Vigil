@@ -18,11 +18,13 @@ origin: AI Threat Hunting
 - `git blame` — understanding code provenance, identifying recent changes, correlating with known fixes
 - `rg` / `grep` — locating upstream guards, build configuration, and related code paths
 
-Cross-reference tools (check dispatch context for `lsp_config`):
-- **LSP call-hierarchy** — trace the complete call chain from external entry point to vulnerable sink (critical for Check 1: Reachability)
-- **LSP find-all-references** — verify whether upstream guards exist on ALL paths to the sink, not just the one analyzed (Check 2)
-- **LSP go-to-definition** — resolve function implementations for guard evaluation without manual file lookups
-- **ctags index** — `grep '^<symbol>\t' <repo>/tags` to find definitions when LSP unavailable
+Cross-reference tools:
+- **ctags index** — `grep '^<symbol>\t' <repo>/tags` to resolve function definitions for guard evaluation and call chain tracing
+- **grep / rg** — trace complete call chains from entry points to sinks, verify upstream guards on all paths
+
+Audit trail requirement:
+- Every verification memo should state whether ctags or grep was used for full-path tracing.
+- If verification results are recorded in machine-readable form, include `audit_metadata.cross_ref_usage` with the concrete lookups used.
 
 ## Methodology — The 5-Check Protocol
 
@@ -194,9 +196,28 @@ The verification phase produces:
 4. **Attack Chains**: composite chains linking multiple findings
 5. **Verification Summary**: statistics (X findings in, Y confirmed, Z killed, W downgraded, N chains identified)
 
+When you persist structured verification state, include:
+
+```json
+{
+  "audit_metadata": {
+    "cross_ref_usage": {
+      "tool": "mixed",
+      "queries": [
+        "grep '^parse_header_value\t' tags",
+        "rg 'parse_header_value\\s*\\(' --type c",
+        "rg 'validate_header_length\\s*\\(' --type c"
+      ],
+      "notes": "Used ctags for definition lookup and rg to prove full reachability and upstream guard coverage"
+    }
+  }
+}
+```
+
 ## Extended Resources
 
 - Build system configuration — `Makefile`, `CMakeLists.txt`, `Cargo.toml`, `configure.ac`, `.config` files for understanding compile-time flag state
 - Compile-time flag documentation — project docs explaining feature flags, debug modes, and optional components
 - Architecture map from Phase 1 — entry points and trust boundaries for reachability tracing
 - Context slices from Phase 2 — call graphs for upstream guard search
+- **CWE pattern reference (REQUIRED)** — load the `agent/references/code-vuln-patterns/*.md` file matching each finding's CWE. Pattern knowledge is needed for guard completeness evaluation (Check 2: are ALL variant forms of this bug class guarded?) and exploitation feasibility assessment (Check 4: what does a real exploit look like for this pattern?).

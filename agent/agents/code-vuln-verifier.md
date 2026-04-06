@@ -29,7 +29,8 @@ Before producing any output, confirm:
 - [ ] Build system configuration accessible — Makefiles, CMakeLists, configure scripts, or feature flag definitions needed for Check 3
 - [ ] Entry-point-to-sink source code is available or requestable for full trace verification
 - [ ] Attack chain context available — other findings in the batch that may compose with the current finding
-- [ ] Cross-reference tools identified: check dispatch context for `lsp_config` — use LSP call-hierarchy to trace full entry-to-sink paths for verification
+- [ ] Cross-reference tools identified: check dispatch context for ctags availability — use ctags + grep to trace full entry-to-sink paths for verification
+- [ ] Audit trail plan ready: verification notes or structured updates will state the actual ctags/grep lookups used
 
 If any item is missing, stop and request it from the operator before proceeding.
 
@@ -42,6 +43,7 @@ If any item is missing, stop and request it from the operator before proceeding.
 - Assess whether exploitation requires conditions the attacker cannot create
 - Synthesize attack chains across multiple findings when applicable
 - Update finding status: confirmed, downgraded, or killed
+- Preserve auditability by recording the cross-reference method actually used for reachability and upstream-guard checks
 
 ## Verification Protocol
 

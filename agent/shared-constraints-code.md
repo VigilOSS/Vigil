@@ -37,26 +37,15 @@ Host-side commands permitted for code analysis:
 
 ### Cross-Reference Tools
 
-Check your dispatch context for `lsp_config` to see which tools are available for this repo.
-Use them in priority order — the most precise tool first:
+Use these in priority order:
 
-1. **LSP tool** (most accurate — semantic, language-aware, handles macros/templates)
-   - **Claude Code**: Use the built-in LSP tool (requires `ENABLE_LSP_TOOL=1`). Operations:
-     - Go-to-definition: navigate to where a function/type is defined
-     - Find-all-references: find every call site of a function across the codebase
-     - Hover: get type signatures and documentation without reading the file
-     - Call-hierarchy: trace incoming/outgoing calls for a function
-   - **Codex CLI**: LSP is auto-detected from `compile_commands.json` and language server configs. Use the same operations via Codex's built-in code intelligence.
-   - **How to detect LSP availability**: check `lsp_config` in your dispatch context. If `languages.<lang>.available` is `true`, LSP operations work for that language.
-   - **On failure**: if an LSP query returns no results or errors, fall back to ctags/grep. Do not retry the same LSP query.
-
-2. **ctags index** (fast fallback — definitions only, no callers, no type info)
+1. **ctags index** (fast definition lookup — generated during code-ingest)
    - Query: `grep '^<symbol>\t' <repo>/tags` to find definition file and line number
    - Example: `grep '^packet_read_with_status\t' /path/to/repo/tags` → shows `pkt-line.c` and line number
-   - Use for: locating function definitions when LSP is unavailable
+   - Use for: locating function/type definitions across the codebase
 
-3. **`rg` / `grep`** (last resort — text-level, no semantics)
-   - Use for: pattern matching when neither LSP nor ctags is available
+2. **`rg` / `grep`** (call sites, patterns, and anything ctags can't resolve)
+   - Use for: finding all callers, tracing data flow, cross-module references
    - Example: `rg 'packet_read_with_status\(' --type c` for call sites
 
 ---
@@ -99,11 +88,28 @@ Record dispositions via `./scripts/assess.py code-record-analysis`.
 
 ---
 
-## 6. Skills and References Are Methodology
+## 6. Skills and References Are Methodology — They Are Required, Not Optional
 
-Before analyzing code, load the relevant skill from `agent/SKILL.md` and read the extended
-references it lists. The `agent/references/code-vuln-patterns/` files contain the reasoning
-patterns for SAST-surviving bugs — these are your methodology, not optional depth.
+**Step 1 — Check `agent/SKILL.md`** when you begin specialist work. It lists every code analysis
+skill with "Use when:" criteria. Load the matching skill before doing any analysis.
+
+**Step 2 — Read the skill's Extended Resources section.** Every code analysis skill lists specific
+reference files. Load them.
+
+**Step 3 — Load the CWE pattern references** from `agent/references/code-vuln-patterns/` matching
+the slot types and defect families in your dispatch context. The operator's slot-type → reference
+mapping table (in operator-core-code.md Phase 3) selects which files to include per dispatch.
+
+**References are not supplemental depth.** The `agent/references/code-vuln-patterns/` files contain:
+- "What SAST Already Catches (Skip These)" — so you don't waste time on patterns static tools find
+- "What You're Hunting (LLM-Advantage Patterns)" — the specific multi-function and semantic patterns only deep analysis can find
+- Language-specific idioms and real CVE examples that ground pattern matching in reality
+
+When a skill's Extended Resources section marks a reference as **(REQUIRED)**, you must load it
+before producing any findings or dispositions. Without it, your analysis lacks the pattern depth
+that distinguishes this pipeline from a static analysis tool.
+
+Only improvise after confirming the reference set is genuinely insufficient for the code under review.
 
 ---
 

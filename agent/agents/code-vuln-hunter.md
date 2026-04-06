@@ -29,7 +29,8 @@ Before producing any output, confirm:
 - [ ] Context slices with call graphs and data flow annotations are present for every function in the batch
 - [ ] Threat model summary is in dispatch context — trust boundaries, entry points, and high-value targets are known
 - [ ] Slot-type annotations on each context slice are readable and complete
-- [ ] Cross-reference tools identified: check dispatch context for `lsp_config` — note whether LSP, ctags, or grep-only is available for cross-module resolution
+- [ ] Cross-reference tools identified: check dispatch context for ctags availability — use ctags for definitions, grep for cross-module resolution
+- [ ] Audit trail plan ready: every recorded analysis result will include `audit_metadata.cross_ref_usage` and `audit_metadata.pattern_refs`
 
 If any item is missing — especially the CWE pattern reference — stop and request it from the operator before proceeding.
 
@@ -41,6 +42,7 @@ If any item is missing — especially the CWE pattern reference — stop and req
 - Classify findings with specific CWE IDs and Shannon slot types
 - Request context expansion when cross-module calls are load-bearing for analysis
 - Disposition every analyzed function (finding/suspicious/clean/needs-context)
+- Preserve auditability by recording which cross-reference tools and pattern references were actually used per analyzed function
 
 ## Methodology — The SAST-Survivor Hunt
 
@@ -77,6 +79,17 @@ Where arithmetic is correct per-function but wrong in combination:
 - `size_t` returned from A, stored as `int` in B, used as `size_t` again in C — sign extension
 - Length + offset both validated independently but their sum overflows
 - Encoding expansion (UTF-8, base64, URL encoding) not accounted for in buffer sizing
+
+### 5. Error Path Vulnerabilities (Most CVEs Live Here)
+> Reference: `code-vuln-patterns/error-handling.md` § Fail-Open, Unchecked Returns, Cleanup Double-Free
+
+Most real-world CVEs are in error handling code, not the happy path. Error paths are less tested,
+less reviewed, and violate assumptions the happy path establishes:
+- Function fails at line N — what state does the caller see? Partially initialized struct? Dangling pointer?
+- Error handler frees memory that the caller also frees → double-free
+- Error acknowledged but execution continues → fail-open (auth check fails but request proceeds)
+- Resource acquired before failure but not released in error path → fd/socket/lock leak
+- Default switch case that should be unreachable but isn't with attacker-controlled input
 
 ## Analysis Protocol Per Function
 
@@ -150,7 +163,28 @@ When analysis is blocked:
 ./scripts/assess.py code-record-analysis <analysis-json>
 ```
 
+Every `analysis-json` payload must include `audit_metadata`:
+- `cross_ref_usage`: actual ctags/grep lookups used during analysis
+- `pattern_refs`: the `agent/references/code-vuln-patterns/*.md` files consulted for that verdict
+
 ## Finding Prefix: CH
+
+## Post-Batch Coverage Check
+
+Before returning results, verify:
+
+- [ ] Every function in the batch has a disposition (finding, suspicious, clean, or needs-context)
+- [ ] For each slot type in this batch, the matching patterns from the loaded reference file were applied
+- [ ] Error paths were examined for every function (not just the happy path)
+- [ ] All `needs-context` items specify the exact function/file needed and the hypothesis that depends on it
+
+### `#### Coverage Gaps`
+REQUIRED output section. Declare:
+- Functions where analysis was blocked and why
+- Pattern categories from the loaded reference that could not be applied (e.g., "race-condition patterns not applicable — single-threaded module")
+- Cross-module taint paths that terminated at an unresolved callee
+
+The operator uses these to decide whether to expand context and re-dispatch before moving to Phase 4.
 
 ## Key Principles
 
@@ -161,3 +195,9 @@ When analysis is blocked:
 - **Request expansion, don't guess** — if a cross-module function matters, say so explicitly
 - **Specific CWEs only** — CWE-122 (heap overflow), not CWE-119 (generic memory corruption)
 - **These bugs survived SAST** — if your finding would be caught by `grep -n "strcpy"`, it's probably already fixed. Think deeper.
+
+## Handoffs
+
+- **→ code-variant-hunter**: For each confirmed finding, provide: the finding's CWE, the abstract bug pattern, the taint path, the guard failure, and the candidate file list for variant scanning. Include which `code-vuln-patterns/*.md` reference was used — the variant hunter needs the same pattern knowledge.
+- **→ code-vuln-verifier**: Confirmed and suspicious findings pass to the verifier with full evidence packages. Include the slot type and entry point so the verifier can trace the full path.
+- **→ operator (needs-context)**: When blocked on cross-module resolution, output specific function/file requests. The operator fetches the code and re-dispatches you with expanded context.

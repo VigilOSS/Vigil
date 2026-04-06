@@ -26,7 +26,8 @@ Before producing any output, confirm:
 - [ ] Header files and type definitions for the current batch are included in dispatch context
 - [ ] File contents for the module batch are present and within the ~15-20K line size target
 - [ ] Cross-module boundary list from Phase 1 is accessible for callee signature lookups
-- [ ] Cross-reference tools identified: check dispatch context for `lsp_config` — note whether LSP, ctags, or grep-only is available
+- [ ] Cross-reference tools identified: check dispatch context for ctags availability — use ctags for definitions, grep for call sites
+- [ ] Audit trail plan ready: every context slice will include `audit_metadata.cross_ref_usage` documenting the exact ctags/grep lookups used
 
 If any item is missing, stop and request it from the operator before proceeding.
 
@@ -34,8 +35,9 @@ If any item is missing, stop and request it from the operator before proceeding.
 
 - Read all source files in a module batch (+ relevant headers/types)
 - Extract function signatures, struct/type definitions, macro definitions
-- Build intra-module call graph — **use LSP call-hierarchy when available** for complete, accurate caller/callee enumeration; fall back to grep when LSP is unavailable
-- Annotate cross-module calls — **use LSP go-to-definition and hover when available** to resolve signatures without reading the full definition file
+- Build intra-module call graph using grep/rg for caller/callee enumeration, ctags for definition resolution
+- Annotate cross-module calls — use ctags to locate definitions, then read the target file for signatures
+- Record cross-reference provenance in every context slice via `audit_metadata.cross_ref_usage` documenting whether ctags or grep was used
 - For each function in critical/high files, produce a context slice containing:
   - The function body
   - Parameter types and which carry untrusted data (from Phase 1 slot-type annotations)
@@ -82,6 +84,18 @@ For each function in a critical/high file, produce:
   "cross_refs": [
     {"function": "Curl_ssl_connect", "module": "vtls", "direction": "callee", "slot_types": ["NETWORK-INPUT"]}
   ],
+  "audit_metadata": {
+    "cross_ref_usage": {
+      "tool": "mixed",
+      "queries": [
+        "callHierarchy(parseurl)",
+        "definition(Curl_dyn_add)",
+        "grep '^memcpy\\t' tags"
+      ],
+      "available": {"ctags": true},
+      "notes": "ctags resolved definitions; grep used for call site enumeration"
+    }
+  },
   "guard_annotations": [
     {"type": "length_check", "line": 305, "variable": "schemelen", "operator": "<", "bound": "MAX_SCHEME_LEN", "notes": "Uses signed int comparison"}
   ],
@@ -129,6 +143,18 @@ The operator records via:
 You rarely produce findings, but if you discover an obvious vulnerability during context
 building (e.g., a sink with no guard at all on a clearly untrusted input), flag it.
 
+## Coverage Gap Declaration
+
+Include `#### Coverage Gaps` in your output. Declare any functions or files you could not fully
+annotate, with the reason:
+
+- Cross-module callee with no available source → name the function, file, and why it matters
+- Macro-heavy code that obscures control flow → name the macros and where they're used
+- Assembly or inline asm blocks → note them for manual review
+- Files exceeding batch size that were split → note what was deferred to a follow-up dispatch
+
+The operator uses these gaps to decide whether to re-dispatch with expanded scope before moving to Phase 3.
+
 ## Key Principles
 
 - **Completeness over speed**: A missing sink annotation means the hunter misses a vulnerability.
@@ -136,3 +162,8 @@ building (e.g., a sink with no guard at all on a clearly untrusted input), flag 
 - **Headers are mandatory context**: Always include relevant struct definitions so the hunter understands data types.
 - **Cross-module calls are boundaries, not blockers**: Record the signature and slot types; don't try to inline the full callee.
 - **Size target**: ~15-20K lines of source per dispatch. If a module exceeds this, split into sub-batches by subdirectory or file group.
+
+## Handoffs
+
+- **→ code-vuln-hunter** (via operator): Your context slices become the input for vulnerability analysis. The quality of your annotations directly determines whether the hunter finds bugs. Missing sink annotations = missed vulnerabilities. Missing guard annotations = false positives.
+- **→ operator (coverage gaps)**: Your `#### Coverage Gaps` section tells the operator which modules need re-dispatch with expanded scope before Phase 3 begins. Be specific about what's missing and why it matters.

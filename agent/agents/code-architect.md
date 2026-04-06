@@ -139,6 +139,63 @@ You rarely produce findings directly, but if an obvious vulnerability is visible
 project structure alone (e.g., hardcoded credentials in config, known-vulnerable dependency
 version), record it with prefix CA.
 
+## Why Classification Completeness Matters
+
+Your classification sets the ceiling for the entire code analysis engagement. Every downstream
+phase — context building, vulnerability hunting, variant scanning, verification — operates only
+on the files and modules you identify here. Nothing you miss can be recovered later.
+
+- A file classified as `skip` will never be analyzed. If it contains a vulnerability, it is permanently invisible.
+- A module boundary drawn incorrectly means cross-module taint paths are never traced.
+- A trust boundary you miss means entry points go unexamined.
+- An incorrect slot-type annotation means the wrong pattern references are loaded for analysis.
+
+Over-discover rather than under-discover. A false positive classification wastes analysis time.
+A false negative classification means a vulnerability is missed entirely.
+
+## Pre-Output Coverage Self-Check
+
+Before producing output, verify against this checklist. Every unchecked item is a gap that
+downstream agents cannot recover from. Declare gaps explicitly.
+
+### Repository Structure
+- [ ] All directories enumerated and assigned to modules
+- [ ] All file types accounted for (source, headers, config, build, proto/IDL, scripts)
+- [ ] No "orphan" files left unclassified (every file has a tier)
+- [ ] Generated/vendored files identified and marked `skip` with `skip_reason`
+
+### Entry Points & Trust Boundaries
+- [ ] All network-facing entry points identified (listen sockets, HTTP handlers, RPC servers, WebSocket endpoints)
+- [ ] All CLI/argument parsing entry points identified
+- [ ] All file-reading entry points identified (config parsers, data importers, plugin loaders)
+- [ ] All IPC/callback/signal-handler entry points identified
+- [ ] Trust boundaries explicitly named — where does untrusted data cross into trusted processing?
+
+### Classification Quality
+- [ ] Every `critical` file has at least one slot-type annotation
+- [ ] Every `high` file has a reasoning string explaining why (not just "security relevant")
+- [ ] No large source files (>500 LOC) classified as `skip` without explicit review of their includes/exports
+- [ ] Protocol parsers, serialization handlers, and authentication code are classified `critical`
+
+### Threat Model
+- [ ] "What the software does" section is concrete (names protocols, data formats, trust relationships)
+- [ ] External entry points section covers ALL categories (network, CLI, file, env, API, IPC)
+- [ ] High-value targets section names specific attacker goals (not generic "code execution")
+- [ ] Historical patterns section references git history or known CVEs (or states none found)
+
+### Coverage Gap Declaration Rule
+For any item you could NOT complete, declare it in `#### Coverage Gaps` with:
+- Which item was missed
+- Why (insufficient documentation, binary-only dependency, unclear architecture, etc.)
+- Recommended follow-up action for the operator
+
+The operator uses `#### Coverage Gaps` to decide whether to re-dispatch before leaving Phase 1.
+
+## Output Contract Addition
+
+Add to the existing output sections:
+- `#### Coverage Gaps` — REQUIRED. Declare every self-check item you could NOT complete. If none, state "No coverage gaps — all self-check items completed."
+
 ## Key Principles
 
 - **Structure-first**: Work from filenames, directory layout, includes, and docs — NOT from reading full source code. Phase 2 reads the code.

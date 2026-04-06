@@ -34,7 +34,7 @@ analyzed or user signals stop:
 
 1. **ASSESS STATE** — Read `code-scope.json` (or `scope.json` with `source_repos`). Check code coverage stats via `./scripts/assess.py code-coverage`. Backend state is canonical; use `--require-gate-pass` only for the final Phase 5 gate.
 2. **DECIDE NEXT ACTION** — Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified). In Phase 2, prioritize critical modules first. In Phase 3, prioritize high-priority analysis queue items. In Phase 4, prioritize findings with highest severity for variant scanning. Coverage gaps drive decisions.
-3. **FORMULATE PLAN** — Select agent, skill, module batch, and batch size. Default model policy: Claude operator and substantial workers use `Opus 4.6`. Only drop to `Sonnet 4.6` for bounded sidecar work.
+3. **FORMULATE PLAN** — Select agent, skill, module batch, and batch size. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.
 5. **USE SKILLS FIRST** — Check `agent/SKILL.md` for the right skill.
    - **Phase 0 (Ingest):** operator-mechanical, no agent dispatch needed
@@ -79,35 +79,11 @@ The `code-ingest` command:
 - Creates code_repos record with repo metadata
 - Generates ctags symbol index (if ctags is available)
 
-Exit: All files inventoried. Transition to Phase 0.5.
-
-### Phase 0.5: CROSS-REFERENCE SETUP
-
-Operator-mechanical. No agent dispatch. Improves cross-reference quality for Phases 2-5.
-
 ```bash
-# Set up LSP and symbol indexing for the repository
-./scripts/assess.py code-setup-lsp "$DIR/source/<repo-name>" --repo-id <repo-id>
-
-# Review what's available
-cat "$DIR/source/<repo-name>/lsp-config.json"
-
-# Enable LSP for subagents
-# Claude Code: export ENABLE_LSP_TOOL=1
-# Codex CLI: LSP auto-detected from compile_commands.json and language server configs
+jq '.current_phase = "classify"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
 ```
 
-The `code-setup-lsp` command:
-- Generates `compile_commands.json` for C/C++ (clangd)
-- Generates `pyrightconfig.json` for Python (pyright)
-- Generates `jsconfig.json` for JavaScript/TypeScript (typescript-language-server)
-- Runs ctags as fallback symbol index
-- Writes `lsp-config.json` with available tools
-- PATCHes the code_repos record with `lsp_config_json`
-
-**When dispatching Phase 2-5 agents**, include the `lsp_config` from the repo record so agents know which cross-reference tools are available. Agents use LSP → ctags → grep in priority order.
-
-Exit: Cross-reference infrastructure ready. Transition to Phase 1.
+Exit: All files inventoried. ctags symbol index generated if ctags is available (install Universal ctags for best results). Transition to Phase 1.
 
 ### Phase 1: CLASSIFY
 
@@ -130,34 +106,97 @@ On return:
 ./scripts/assess.py code-coverage
 ```
 
-Exit: Every file classified. Threat model recorded. Transition to Phase 2.
+**Before transitioning:** Review code-architect's `#### Coverage Gaps` output. If critical gaps
+exist (unclassified directories, missing entry points, unclear trust boundaries), re-dispatch
+with targeted scope before proceeding. Gaps here are permanent — Phase 2+ cannot recover them.
 
-### Phase 2: CONTEXT-BUILD
+```bash
+jq '.current_phase = "context-build"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+```
+
+Exit: Every file classified. Threat model recorded. Coverage gaps reviewed. Transition to Phase 2.
+
+### Phase 2: CONTEXT-BUILD (Most Critical Phase)
+
+Phase 2 determines the ceiling of the entire engagement. A missed annotation, an unresolved
+cross-module call, or a poorly-traced data flow means the vulnerability hunter in Phase 3
+cannot find the bug. Invest time here — speed in Phase 2 costs findings in Phase 3.
 
 Dispatch `code-context-builder` per module — **parallel across independent modules**.
+Use sub-agents for parallelism: the operator stays as the long-running orchestrator, dispatching
+and managing context-builder agents. Each sub-agent handles one module batch independently.
 
-For each module:
-1. Fetch the module's file list: `./scripts/assess.py fetch "code/files?module_id=<module-id>&limit=5000"`
-2. Fetch repo lsp_config: `./scripts/assess.py fetch "code/repos/<repo-id>"` → read `lsp_config` field
-3. Read the source files (host-side)
-4. Include relevant headers and type definitions as shared context
-5. Dispatch context-builder with: module batch + threat model summary + `lsp_config` from repo record
+#### Step-by-step per module:
 
-On return:
+**1. Prepare the dispatch context (operator-mechanical):**
+```bash
+# Fetch module's files with classifications and slot types
+./scripts/assess.py fetch "code/files?module_id=<module-id>&limit=5000"
+
+# Read critical/high file contents (host-side)
+# Include ALL header files referenced by the module — struct definitions,
+# type aliases, and macro definitions are mandatory context
+```
+
+**2. Assemble the dispatch payload:**
+- Module file list with classifications and slot-type annotations from Phase 1
+- Threat model summary (trust boundaries, entry points, high-value targets)
+- Header files and type definitions as shared context — **do not skip these**
+- Path to repo `tags` file for ctags lookups
+- Cross-module boundary list from Phase 1 (which functions cross into other modules)
+
+**3. Dispatch context-builder:**
+```bash
+# Target: ~15-20K lines per dispatch. Split large modules into sub-batches.
+# If a module has 40K lines, split by subdirectory or logical file group.
+```
+
+**4. On return — quality check before recording:**
+
+Before recording context slices, verify the return:
+- [ ] Every critical/high function in the batch has a context slice
+- [ ] Context slices include sink annotations (not just call graphs)
+- [ ] Guard annotations are present for functions with identified sinks
+- [ ] Cross-module calls are annotated with callee signatures and slot types
+- [ ] `audit_metadata.cross_ref_usage` is present (documents how cross-refs were resolved)
+- [ ] `#### Coverage Gaps` section reviewed — any blocker that would cause Phase 3 to miss a vulnerability
+
+If the context-builder reports gaps in critical modules (unresolved callees for security-relevant
+functions, macro-hidden sinks, header files it couldn't find), **re-dispatch with expanded scope
+before moving to Phase 3.** Do not proceed with incomplete context on critical modules.
+
 ```bash
 # Record context slices
 ./scripts/assess.py code-record-contexts <contexts-json>
-# The command returns context rows with ids. Build queue items from those ids,
-# or fetch them explicitly with ./scripts/assess.py fetch "code/contexts?file_id=<file-id>"
-# Populate analysis queue (each item must include context_id + file_id)
+# Build and populate analysis queue from returned context ids
 ./scripts/assess.py code-dispatch queue <queue-items-json>
-# Check progress
+# Check progress across all modules
 ./scripts/assess.py code-dispatch stats
 ```
 
-**Size management:** Each dispatch targets ~15-20K lines of source code. Split large modules.
+**5. Context expansion loop (before Phase 3):**
 
-Exit: All critical/high files have context slices. Analysis queue populated. Transition to Phase 3.
+After ALL module batches return, review the aggregate coverage gaps:
+```bash
+# Check: are all critical files contextualized? Any needs-context?
+./scripts/assess.py code-dispatch stats
+```
+- If any critical module has unresolved cross-module calls that affect security-relevant
+  functions, fetch the missing code and re-dispatch the context-builder for that module.
+- If header files were missing, locate them and include them in a re-dispatch.
+- This loop should resolve before Phase 3 begins — every `needs-context` at the context
+  level is a vulnerability the hunter will miss.
+
+**Size management:** Each dispatch targets ~15-20K lines of source code. Split large modules
+by subdirectory or file group. Prefer splitting at logical boundaries (e.g., separate the
+parser from the handler) rather than arbitrary file count splits.
+
+```bash
+jq '.current_phase = "analyze"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+```
+
+Exit: All critical/high files have context slices with sink and guard annotations. Coverage gaps
+in critical modules resolved. Analysis queue populated. Transition to Phase 3.
 
 ### Phase 3: ANALYZE
 
@@ -177,7 +216,7 @@ Operator-orchestrated work-buffer loop (same pattern as web engagement's Phase 3
 Dispatch `code-vuln-hunter` with:
 - The fetched queue items (context slices — fetch response includes full context + file data)
 - Threat model summary
-- `lsp_config` from the repo record (so the agent knows which cross-reference tools are available)
+- Path to repo `tags` file for ctags lookups (if generated during ingest)
 - Relevant CWE pattern reference (based on slot types in the context)
 
 #### Slot-Type → Reference Mapping
@@ -219,24 +258,57 @@ On return:
 
 Repeat until analysis queue is empty.
 
-Exit: All queue items processed. No unresolved `needs-context`. Transition to Phase 4.
+**Before transitioning:** Review aggregate `#### Coverage Gaps` across all hunter batches. If
+critical taint paths terminated at unresolved callees, expand context and re-dispatch those
+items. If pattern categories were skipped (e.g., crypto-misuse patterns not applied to a module
+with crypto operations), re-dispatch with the correct references.
+
+```bash
+jq '.current_phase = "variant"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+```
+
+Exit: All queue items processed. No unresolved `needs-context`. Coverage gaps reviewed. Transition to Phase 4.
 
 ### Phase 4: VARIANT ANALYSIS
 
-For each confirmed finding (and each `suspicious` result worth checking):
+For each confirmed finding (and each `suspicious` result worth checking), scan the codebase
+for the same bug pattern in other locations. This is the code equivalent of the "sibling rule."
 
 ```bash
-# Get findings
+# Get all findings for variant scanning
 ./scripts/assess.py fetch findings
 ```
 
+**Per finding, prepare dispatch:**
+1. Extract the abstract bug pattern from the finding (CWE, taint path shape, guard failure type)
+2. Identify candidate files: same language, classification `medium` or above
+3. Select the CWE pattern reference matching the finding's defect family (same file the hunter used)
+
 Dispatch `code-variant-hunter` with:
 - The finding details (CWE, pattern, taint path, guard failure)
+- The abstract bug pattern (generalized from the specific finding)
 - Candidate files (same language, classification medium or above)
+- CWE pattern reference from `agent/references/code-vuln-patterns/` matching the finding's CWE
+- Threat model summary (trust boundaries for quick reachability checks)
 
-On return: record variant findings and scan results.
+**Parallel dispatch**: Independent findings can be variant-scanned in parallel (different sub-agents).
 
-Exit: All findings have been variant-checked. Transition to Phase 5.
+On return:
+```bash
+# Record variant findings
+./scripts/assess.py record-finding code-variant-hunter <variant-finding-json>
+# Verify scan coverage — check that candidate files were actually scanned
+```
+
+Review the scan results table: if high-value candidate files were skipped or if the pattern
+abstraction was too narrow (0 matches across many files), consider re-dispatching with a
+broader pattern definition.
+
+```bash
+jq '.current_phase = "verify"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+```
+
+Exit: All confirmed findings have been variant-checked. Scan results recorded. Transition to Phase 5.
 
 ### Phase 5: VERIFY AND REPORT
 
@@ -246,12 +318,42 @@ Exit: All findings have been variant-checked. Transition to Phase 5.
 # Must show: all critical files analyzed, all high files analyzed, no needs-context
 ```
 
-Dispatch `code-vuln-verifier` with all findings for final FP elimination.
+If the gate fails, resolve remaining items before proceeding:
+- `needs-context` items: expand context and re-dispatch to Phase 3
+- Unanalyzed critical files: dispatch context-builder (Phase 2) then hunter (Phase 3)
+- Do NOT skip the gate
 
-On return: update finding statuses (confirmed/downgraded/killed). Record attack chains.
+**Verification dispatch:**
 
-Then dispatch `report-writer` with `agent/skills/report-generation/SKILL.md` for the final report.
-Report-writer queries `report-findings` endpoint which includes both code and web findings.
+Dispatch `code-vuln-verifier` with all confirmed + suspicious findings. Include:
+- Full evidence packages from code-vuln-hunter (CWE, taint path, guard evaluation)
+- Variant findings from code-variant-hunter (linked to originals)
+- CWE pattern references matching each finding's defect family
+- Build system configuration for compile-time flag evaluation
+
+On return:
+```bash
+# Update finding statuses based on verification results
+# Confirmed findings: status stays "confirmed"
+# Downgraded: update severity via assess.py
+# Killed (false positive): update status to "killed" with reasoning
+./scripts/assess.py record-finding code-vuln-verifier <updated-finding-json>
+```
+
+**Pre-report deduplication:**
+Before dispatching report-writer, check for duplicate findings (same `canonical_location` and
+similar `defect_family` across hunter and variant-hunter):
+```bash
+./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"
+```
+
+**Report dispatch:**
+Dispatch `report-writer` with `agent/skills/report-generation/SKILL.md`. Report-writer queries
+the `report-findings` endpoint which includes both code and web findings.
+
+```bash
+jq '.current_phase = "complete"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+```
 
 ## Agent Roster — Code Analysis
 
@@ -304,16 +406,38 @@ Every code analysis dispatch must include:
 - **Agent identity** and **repository name**
 - **Current phase** and **specific task objective**
 - **Which skill to load** (from `agent/SKILL.md`)
+- **CWE pattern references** matching the dispatch context's slot types (Phase 3/4/5)
 - **Threat model summary** (trust boundaries, entry points, slot types)
 - **Module being analyzed** (for Phase 2/3 dispatches)
 - **Prior findings relevant** to this dispatch (for Phase 4/5)
 
-## Claude Dispatch Syntax
+### Pre-Dispatch Checklist
 
-Use `@agent-name` when dispatching subagents:
-- `@code-architect`
-- `@code-context-builder`
-- `@code-vuln-hunter`
-- `@code-variant-hunter`
-- `@code-vuln-verifier`
-- `@report-writer`
+Before every dispatch, verify:
+
+- [ ] Agent identity named and repository specified
+- [ ] Current phase stated with specific task objective (not just "analyze this")
+- [ ] Skill to load identified from `agent/SKILL.md`
+- [ ] CWE pattern references selected from slot-type mapping table (Phase 3) or from finding's CWE (Phase 4/5)
+- [ ] Threat model summary included (trust boundaries, entry points, high-value targets)
+- [ ] Module/file scope for this dispatch defined (not "everything")
+- [ ] Prior findings included for Phase 4/5 dispatches (finding slugs, CWEs, affected functions)
+- [ ] Log checked for duplicate dispatch — never dispatch same agent for same module/batch twice
+
+DEDUP: Check the analysis queue and dispatch log before every dispatch. Never dispatch the same
+agent for the same module or file batch twice. If re-analysis is needed (e.g., after context
+expansion), state the new context explicitly so the agent knows this is a re-dispatch, not a duplicate.
+
+## Session Resumption
+
+On start or when resuming inside a code analysis engagement:
+```bash
+cat "$DIR/scope.json"                              # Current phase
+./scripts/assess.py code-coverage                  # File classification + analysis coverage
+./scripts/assess.py code-dispatch stats             # Queue state (pending/processing/done/needs-context)
+./scripts/assess.py fetch findings                  # Existing findings
+```
+
+Resume from the current phase. If `code-dispatch stats` shows `processing` items, they were
+interrupted — reset stale items with `./scripts/assess.py code-dispatch reset-stale 10` and
+re-dispatch. If `needs-context` items exist, expand context and re-queue them.

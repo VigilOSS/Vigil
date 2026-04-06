@@ -359,6 +359,14 @@ If no suitable skill exists, check `agent/SKILL.md` and then `agent/references/I
 - **Credentials require proof** — show what leaked tokens actually grant before recording a finding
 - **Validate before writing** — no report drafting before a lead is reproducible and evidence-backed
 
+## Source Code Analysis Mode
+
+When source code is available (cloned repo, exposed `.git`, decompiled source, backup download):
+- Load `agent/operator-core-code.md` for the code analysis workflow (Phases 0–5: Ingest → Classify → Context → Analyze → Variant → Verify)
+- Code analysis runs in parallel with web testing — findings land in the same `assessment_findings` table
+- Code findings use `canonical_location = "file:<path>:<line>"` and link to web findings via attack chains
+- See the Code Analysis Agents roster above for available specialists
+
 ## Session Resumption
 
 On start or when resuming inside an engagement:

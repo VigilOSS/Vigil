@@ -18,10 +18,9 @@ origin: AI Threat Hunting
 - Host-side file reading (`cat`) — read candidate files for detailed analysis
 - `find` — locate files matching naming or extension criteria
 
-Cross-reference tools (check dispatch context for `lsp_config`):
-- **LSP find-all-references** — find every call site of a vulnerable function across the entire codebase (far more reliable than grep for variant scanning)
-- **LSP call-hierarchy** — trace incoming calls to identify all code paths that reach a vulnerable pattern
-- **ctags index** — `grep '^<symbol>\t' <repo>/tags` to find definitions when LSP unavailable
+Cross-reference tools:
+- **ctags index** — `grep '^<symbol>\t' <repo>/tags` to find definitions of vulnerable functions and their wrappers
+- **grep / rg** — find every call site of a vulnerable function across the entire codebase, trace incoming calls to identify all code paths that reach a vulnerable pattern
 
 ## Methodology
 
@@ -234,3 +233,4 @@ For each variant scan, produce:
 - Original finding details (provided in dispatch context) — the concrete bug that seeds the variant search
 - Architecture map from Phase 1 — file classifications and module groupings for systematic scanning
 - Context slices from Phase 2 — call graphs and data flow annotations for quick taint assessment
+- **CWE pattern reference (REQUIRED)** — load the `agent/references/code-vuln-patterns/*.md` file matching the original finding's CWE. The pattern taxonomy, language-specific idioms, and "What You're Hunting" sections define what a variant looks like for this bug class. Without this, variant scanning degrades to grep-for-similar-syntax rather than hunting the underlying pattern.

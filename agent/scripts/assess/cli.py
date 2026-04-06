@@ -32,7 +32,6 @@ def main(argv: list[str] | None = None) -> None:
         code_record_context,
         code_record_modules,
         code_record_threat_model,
-        code_setup_lsp,
         dispatch,
         emit_event,
         fetch,
@@ -79,7 +78,6 @@ def main(argv: list[str] | None = None) -> None:
         code_dispatch,
         code_record_analysis,
         code_coverage,
-        code_setup_lsp,
     ):
         mod.register(sub)
 

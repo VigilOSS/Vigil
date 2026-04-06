@@ -129,6 +129,11 @@ def test_context_creation_returns_ids_and_queue_fetch_returns_joined_work_items(
     engagement_key = "2026-04-04-code-queue"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
     repo = _create_repo(client, engagement_key)
+    repo_patch = client.patch(
+        f"/engagements/{engagement_key}/assessment/code/repos/{repo['id']}",
+        json={"lsp_config_json": {"languages": {"python": {"available": False}}, "ctags": {"available": True}}},
+    )
+    assert repo_patch.status_code == 200
     files = _create_files(client, engagement_key, int(repo["id"]))
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
@@ -148,6 +153,7 @@ def test_context_creation_returns_ids_and_queue_fetch_returns_joined_work_items(
                     "cross_refs": [],
                     "guard_annotations": [{"type": "length_check", "line": 12}],
                     "sink_annotations": [{"type": "BUFFER-WRITE", "line": 22}],
+                    "audit_metadata": {"cross_ref_usage": {"tool": "grep", "queries": ["rg parse_message"]}},
                     "context_text": "def parse_message(data):\n    sink(data)\n",
                 }
             ]
@@ -159,6 +165,13 @@ def test_context_creation_returns_ids_and_queue_fetch_returns_joined_work_items(
     assert len(contexts_payload["contexts"]) == 1
     context = contexts_payload["contexts"][0]
     assert context["id"] > 0
+    assert context["audit_metadata"]["cross_ref_usage"]["tool"] == "grep"
+
+    file_after_context = client.get(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
+    )
+    assert file_after_context.status_code == 200
+    assert file_after_context.json()["analysis_status"] == "context_built"
 
     queue_without_context = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue",
@@ -180,6 +193,12 @@ def test_context_creation_returns_ids_and_queue_fetch_returns_joined_work_items(
     )
     assert queue_response.status_code == 201
 
+    file_after_queue = client.get(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
+    )
+    assert file_after_queue.status_code == 200
+    assert file_after_queue.json()["analysis_status"] == "queued"
+
     fetch_response = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
         json={"limit": 1, "agent_name": "code-vuln-hunter"},
@@ -192,8 +211,17 @@ def test_context_creation_returns_ids_and_queue_fetch_returns_joined_work_items(
     assert work_item["context"]["id"] == context["id"]
     assert work_item["context"]["slot_types"] == ["NETWORK-INPUT"]
     assert work_item["context"]["call_chain"]["callees"][0]["function"] == "sink"
+    assert work_item["context"]["audit_metadata"]["cross_ref_usage"]["tool"] == "grep"
     assert work_item["file"]["id"] == parser_file["id"]
     assert work_item["file"]["file_path"] == "src/parser.py"
+    assert work_item["repo"]["id"] == repo["id"]
+    assert work_item["repo"]["lsp_config"]["ctags"]["available"] is True
+
+    file_after_fetch = client.get(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
+    )
+    assert file_after_fetch.status_code == 200
+    assert file_after_fetch.json()["analysis_status"] == "queued" or file_after_fetch.json()["analysis_status"] == "in_progress"
 
 
 def test_analysis_completion_rolls_up_context_and_file_coverage(client, isolate_settings):
@@ -219,6 +247,7 @@ def test_analysis_completion_rolls_up_context_and_file_coverage(client, isolate_
                     "cross_refs": [],
                     "guard_annotations": [],
                     "sink_annotations": [],
+                    "audit_metadata": {"cross_ref_usage": {"tool": "lsp", "queries": ["go-to-definition(parse_message)"]}},
                     "context_text": "def parse_message(data):\n    return data\n",
                 }
             ]
@@ -259,9 +288,17 @@ def test_analysis_completion_rolls_up_context_and_file_coverage(client, isolate_
             "disposition": "clean",
             "confidence": "high",
             "notes": "No exploitable issue found.",
+            "audit_metadata": {"cross_ref_usage": {"tool": "lsp", "queries": ["references(parse_message)"]}},
         },
     )
     assert analysis_result.status_code == 201
+    assert analysis_result.json()["audit_metadata"]["cross_ref_usage"]["tool"] == "lsp"
+
+    file_before_done = client.get(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
+    )
+    assert file_before_done.status_code == 200
+    assert file_before_done.json()["analysis_status"] == "in_progress"
 
     done = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
@@ -355,7 +392,7 @@ def test_coverage_gate_stays_closed_until_queue_items_are_completed(client, isol
     )
     assert coverage_before_done.status_code == 200
     payload = coverage_before_done.json()
-    assert payload["by_classification"]["critical"]["analyzed"] == 1
+    assert payload["by_classification"]["critical"]["analyzed"] == 0
     assert payload["gate"]["passed"] is False
     assert any("queue items still pending or processing" in reason.lower() for reason in payload["gate"]["reasons"])
 
