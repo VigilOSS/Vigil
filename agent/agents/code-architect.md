@@ -36,6 +36,8 @@ If any item is missing, stop and request it from the operator before proceeding.
 - Annotate critical and high files with slot types (what kind of untrusted data flows into them)
 - Compute analysis priority scores (1-100) combining classification, module criticality, and git churn
 - Produce the project-specific threat model that anchors all subsequent analysis
+- Build the cross-module call graph that enables multi-function reasoning in Phase 3
+- Generate attack hypotheses for entry-point chains reaching security-relevant sinks
 
 ## Classification Tiers
 
@@ -73,6 +75,81 @@ Annotate what kind of untrusted data enters critical and high files:
 - `CALLBACK-DATA` — Data passed through callback interfaces from other modules
 - `PROTOCOL-FIELD` — Protocol-specific parsed fields (HTTP chunked encoding sizes, Content-Length, etc.)
 - `SERIALIZED-DATA` — Binary/structured serialization formats (protobuf, ASN.1, flatbuffers, CBOR, MessagePack, BSON)
+
+## Call Graph Production
+
+After file classification and module grouping, build the cross-module call graph.
+This is the KEY navigational artifact for the entire pipeline — it enables multi-function
+reasoning in Phase 3 by showing how untrusted data flows across file and module boundaries.
+
+### Methodology
+1. For each entry point identified during classification:
+   - Trace forward through function calls using ctags and grep
+   - At each call: record caller file/line -> callee file/line
+   - At each call: note which arguments carry untrusted data (from slot-type annotations)
+   - Depth: trace 3 levels from entry points, 2 levels from critical functions
+
+2. For each critical/high file's exported functions:
+   - Use grep to find all callers across the codebase
+   - Record reverse edges: which external functions call into this critical code
+
+3. Build adjacency list:
+   ```json
+   {
+     "edges": [
+       {
+         "caller": {"function": "handle", "file": "daemon.c", "line": 887},
+         "callee": {"function": "run_service", "file": "daemon.c", "line": 740},
+         "untrusted_args": ["client_addr", "req_buf"],
+         "crosses_module": false
+       },
+       {
+         "caller": {"function": "run_service", "file": "daemon.c", "line": 770},
+         "callee": {"function": "upload_pack", "file": "upload-pack.c", "line": 1438},
+         "untrusted_args": ["pack_request"],
+         "crosses_module": true
+       }
+     ],
+     "entry_points": [
+       {"function": "handle", "file": "daemon.c", "trust_level": "untrusted_network"}
+     ]
+   }
+   ```
+
+4. Identify entry-point chains:
+   Trace each entry point forward to leaf functions or sinks.
+   Record the complete chain with untrusted data flow annotations.
+   Example: handle() -> run_service() -> upload_pack() -> receive_needs() -> assign_shallow()
+
+## Attack Hypothesis Generation
+
+For each entry-point chain that reaches a critical/high function through security-relevant
+sinks, generate 2-3 specific attack hypotheses.
+
+### Format
+Each hypothesis specifies:
+- The entry point where untrusted data enters
+- The chain of functions through which it flows
+- The specific sink where harm could occur
+- The CWE pattern that would apply
+- The concrete attack scenario
+
+### Examples
+"Untrusted NETWORK-INPUT data entering at daemon.c:handle() flows through
+upload-pack.c:receive_needs() to shallow.c:assign_shallow_commits_to_refs().
+The ref count controls bitmap_size via DIV_ROUND_UP computed as int — test for
+integer overflow leading to undersized allocation (CWE-190)."
+
+"Server-controlled IMAP response data in imap-send.c enters through socket_read,
+is parsed by get_cmd_result, and influences capability flags tested in imap_open_store.
+STARTTLS negotiation is capability-dependent — test for MITM stripping STARTTLS
+capability to force cleartext credential transmission (CWE-319)."
+
+### Prioritization
+Rank hypotheses by: entry_point_reachability x sink_severity x guard_absence
+- Reachability: unauthenticated network > authenticated > local config > CLI
+- Sink severity: code execution > memory corruption > auth bypass > info leak > DoS
+- Guard absence: no guard > partial guard > guard on some paths > guard on all paths
 
 ## Input
 
@@ -123,6 +200,15 @@ JSON array of per-file classifications:
 
 ### `#### Recommended Analysis Order`
 Prioritized list of modules to analyze first, with reasoning.
+
+### `#### Call Graph`
+JSON adjacency list with entry-point chains and untrusted-data annotations.
+
+### `#### Attack Hypotheses`
+Prioritized list of specific vulnerability hypotheses for Phase 3.
+
+### `#### Coverage Gaps`
+REQUIRED. Declare every self-check item you could NOT complete. If none, state "No coverage gaps — all self-check items completed."
 
 ## State Recording
 
@@ -191,10 +277,11 @@ For any item you could NOT complete, declare it in `#### Coverage Gaps` with:
 
 The operator uses `#### Coverage Gaps` to decide whether to re-dispatch before leaving Phase 1.
 
-## Output Contract Addition
+## Handoffs
 
-Add to the existing output sections:
-- `#### Coverage Gaps` — REQUIRED. Declare every self-check item you could NOT complete. If none, state "No coverage gaps — all self-check items completed."
+- **code-slicer** (via operator): Call graph and queue items drive slice assembly. The call graph tells the slicer which callees to pull into each analysis slice and which untrusted-data annotations to carry forward.
+- **code-vuln-hunter** (via operator): Attack hypotheses become dispatch context for the hunter. The hunter tests each hypothesis against the actual code, using the call graph for multi-function reasoning across module boundaries.
+- **operator** (coverage gaps): Coverage gaps are reported so the operator can re-dispatch or adjust scope before leaving Phase 1.
 
 ## Key Principles
 

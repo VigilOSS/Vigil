@@ -186,23 +186,24 @@ Load the relevant skill before starting validation or exploitation of a candidat
 ## Code Analysis Skills
 
 Load these skills when performing white-box source code analysis (operator-core-code.md mode).
+Pipeline: Ingest → Classify+Map → Slice → Hunt → Verify+Variant
 
 - `agent/skills/code-architecture-mapping/SKILL.md`
-  **Use when:** Phase 1 — classifying a new repository's files, mapping modules, identifying trust boundaries, building the threat model.
+  **Use when:** Phase 1 (Classify+Map) — classifying files, mapping modules, building threat model, producing cross-module call graph, generating attack hypotheses.
   **Paired references:** _(works from project metadata, no vulnerability references needed)_
 
-- `agent/skills/code-context-building/SKILL.md`
-  **Use when:** Phase 2 — extracting function-level context slices with call graphs, data flow, and guard annotations for a module batch.
-  **Paired references:** _(reads source files directly during execution)_
+- `agent/skills/code-slicing/SKILL.md`
+  **Use when:** Phase 2 (Slice) — assembling minimal source code slices for vulnerability analysis. Mechanical assembly of target function + callees + callers + types/macros from the filesystem.
+  **Paired references:** _(reads source files directly, no analytical references needed)_
 
 - `agent/skills/code-vulnerability-analysis/SKILL.md`
-  **Use when:** Phase 3 — performing deep vulnerability analysis on context slices. Load the CWE-specific reference matching the context's slot types.
+  **Use when:** Phase 3 (Hunt) — performing deep vulnerability analysis on source code slices using Trail of Bits methodology. Load the CWE-specific reference matching the slice's slot types.
   **Paired references:** `references/code-vuln-patterns/buffer-overflow.md`, `references/code-vuln-patterns/integer-overflow.md`, `references/code-vuln-patterns/format-string.md`, `references/code-vuln-patterns/use-after-free.md`, `references/code-vuln-patterns/injection.md`, `references/code-vuln-patterns/race-condition.md`, `references/code-vuln-patterns/crypto-misuse.md`, `references/code-vuln-patterns/auth-bypass.md`, `references/code-vuln-patterns/uninitialized-memory.md`, `references/code-vuln-patterns/type-confusion.md`, `references/code-vuln-patterns/null-dereference.md`, `references/code-vuln-patterns/algorithmic-dos.md`, `references/code-vuln-patterns/error-handling.md`
 
 - `agent/skills/code-variant-analysis/SKILL.md`
-  **Use when:** Phase 4 — scanning the codebase for variant instances of a confirmed bug pattern.
-  **Paired references:** _(uses original finding details as reference)_
+  **Use when:** Phase 4 (Verify+Variant, parallel) — scanning the codebase for variant instances of a confirmed bug pattern.
+  **Paired references:** _(uses original finding details and CWE pattern reference from the hunter)_
 
 - `agent/skills/code-finding-verification/SKILL.md`
-  **Use when:** Phase 5 — eliminating false positives via full entry-to-sink traces and constrained attacker persona.
-  **Paired references:** _(uses build system configuration and compile-time flags)_
+  **Use when:** Phase 4 (Verify+Variant, parallel) — eliminating false positives via five-check protocol with devil's advocate methodology and multi-perspective voting.
+  **Paired references:** _(uses build system configuration, CWE pattern references for pattern verification)_
