@@ -44,7 +44,7 @@ def run(args) -> None:
         sys.exit(0)
 
     # Validate required fields
-    required = {"queue_item_id", "file_id", "disposition"}
+    required = {"file_id", "disposition"}
     for i, result in enumerate(results):
         if not isinstance(result, dict):
             print(f"Item {i} is not a JSON object", file=sys.stderr)

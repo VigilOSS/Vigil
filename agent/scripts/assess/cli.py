@@ -27,6 +27,7 @@ def main(argv: list[str] | None = None) -> None:
         code_classify,
         code_coverage,
         code_dispatch,
+        code_index,
         code_ingest,
         code_record_analysis,
         code_record_modules,
@@ -47,7 +48,6 @@ def main(argv: list[str] | None = None) -> None:
         record_proposal,
         record_surface,
         review_exploits,
-        slice_manifest,
     )
 
     for mod in (
@@ -71,13 +71,13 @@ def main(argv: list[str] | None = None) -> None:
         record_proposal,
         merge_session,
         code_ingest,
+        code_index,
         code_classify,
         code_record_threat_model,
         code_record_modules,
         code_dispatch,
         code_record_analysis,
         code_coverage,
-        slice_manifest,
     ):
         mod.register(sub)
 

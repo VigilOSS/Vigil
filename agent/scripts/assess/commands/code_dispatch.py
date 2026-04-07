@@ -12,7 +12,10 @@ from assess.lib.config import load_config
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("code-dispatch", help="Code analysis queue dispatch engine")
-    p.add_argument("action", help="stats|fetch|done|error|needs-context|reset-stale|queue")
+    p.add_argument(
+        "action",
+        help="stats|fetch|done|error|needs-context|reset-stale|queue|requeue-triggers",
+    )
     p.add_argument("extra", nargs="*", help="Action-specific arguments")
     p.set_defaults(func=run)
 
@@ -32,10 +35,14 @@ def run(args) -> None:
         _fetch(cfg, int(extra[0]), extra[1])
     elif action == "done":
         if len(extra) < 2:
-            print("Usage: code-dispatch done <id1,id2,...> <disposition> [notes]", file=sys.stderr)
+            print(
+                "Usage: code-dispatch done <id1,id2,...> <disposition> [notes] [cwe-coverage-json-file]",
+                file=sys.stderr,
+            )
             sys.exit(1)
         notes = extra[2] if len(extra) > 2 else ""
-        _done(cfg, extra[0], extra[1], notes)
+        cwe_file = extra[3] if len(extra) > 3 else ""
+        _done(cfg, extra[0], extra[1], notes, cwe_file)
     elif action == "error":
         if not extra:
             print("Usage: code-dispatch error <id1,id2,...> [notes]", file=sys.stderr)
@@ -58,9 +65,17 @@ def run(args) -> None:
             print("Usage: code-dispatch queue <queue-items-json-file>", file=sys.stderr)
             sys.exit(1)
         _queue(cfg, extra[0])
+    elif action == "requeue-triggers":
+        if not extra:
+            print("Usage: code-dispatch requeue-triggers <triggers-json-file>", file=sys.stderr)
+            sys.exit(1)
+        _requeue_triggers(cfg, extra[0])
     else:
         print(f"Unknown action: {action}", file=sys.stderr)
-        print("Actions: stats, fetch, done, error, needs-context, reset-stale, queue", file=sys.stderr)
+        print(
+            "Actions: stats, fetch, done, error, needs-context, reset-stale, queue, requeue-triggers",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -116,11 +131,18 @@ def _fetch(cfg, limit: int, agent_name: str) -> None:
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _done(cfg, id_list: str, disposition: str, notes: str = "") -> None:
+def _done(cfg, id_list: str, disposition: str, notes: str = "", cwe_file: str = "") -> None:
     ids = _validate_id_list(id_list)
     payload: dict = {'item_ids': ids, 'disposition': disposition}
     if notes:
         payload['notes'] = notes
+    if cwe_file:
+        cwe_path = Path(cwe_file)
+        if not cwe_path.is_file():
+            print(f"CWE coverage JSON file not found: {cwe_file}", file=sys.stderr)
+            sys.exit(1)
+        cwe_data = json.loads(cwe_path.read_text(encoding="utf-8"))
+        payload['cwe_coverage'] = cwe_data
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
         result = client.post('code/analysis-queue/done', payload)
@@ -220,6 +242,9 @@ def _reset_stale(cfg, minutes: int) -> None:
 
 
 def _queue(cfg, queue_items_file: str) -> None:
+    """Queue analysis items. Items can include batch_theme, slot_types, and
+    guidance_hypotheses fields alongside the existing format — those are
+    passed through as-is to the backend."""
     fp = Path(queue_items_file)
     if not fp.is_file():
         print(f"Queue items JSON file not found: {queue_items_file}", file=sys.stderr)
@@ -257,6 +282,79 @@ def _queue(cfg, queue_items_file: str) -> None:
     )
     queued_count = result.get('queued', len(items)) if isinstance(result, dict) else len(items)
     print(f"Queued {queued_count} analysis item(s)")
+    print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
+    if isinstance(result, dict) and result:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _requeue_triggers(cfg, triggers_file: str) -> None:
+    """Requeue cross-file triggers as new analysis queue items.
+
+    Reads a JSON file containing a cross_file_triggers array (as produced in
+    analysis results) and reformats each trigger as a queue item with the
+    triggering finding context, then posts to code/analysis-queue.
+    """
+    fp = Path(triggers_file)
+    if not fp.is_file():
+        print(f"Triggers JSON file not found: {triggers_file}", file=sys.stderr)
+        sys.exit(1)
+
+    raw = json.loads(fp.read_text(encoding="utf-8"))
+
+    # Accept either a bare array or an object with a cross_file_triggers key
+    if isinstance(raw, dict):
+        triggers = raw.get('cross_file_triggers', [])
+    elif isinstance(raw, list):
+        triggers = raw
+    else:
+        print("Triggers file must contain a JSON array or object", file=sys.stderr)
+        sys.exit(1)
+
+    if not triggers:
+        print("No triggers to requeue.")
+        return
+
+    # Convert triggers to queue items
+    items = []
+    for trigger in triggers:
+        item: dict = {
+            'file_path': trigger.get('file_path', ''),
+            'reason': trigger.get('reason', ''),
+            'trigger_context': {
+                'vuln_class': trigger.get('vuln_class', ''),
+                'source': 'cross_file_trigger',
+            },
+        }
+        # Pass through any extra fields from the trigger
+        for key in trigger:
+            if key not in ('file_path', 'reason', 'vuln_class'):
+                item['trigger_context'][key] = trigger[key]
+        items.append(item)
+
+    submit_snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-requeue-triggers",
+        label=fp.stem,
+        payload=items,
+        source_path=str(fp),
+        metadata={"command": "code-dispatch requeue-triggers", "count": len(items)},
+    )
+    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    try:
+        result = client.post('code/analysis-queue/requeue', {'items': items})
+    finally:
+        client.close()
+
+    response_snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-requeue-response",
+        label=fp.stem,
+        payload=result,
+        source_path=str(submit_snapshot),
+        metadata={"command": "code-dispatch requeue-triggers", "count": len(items)},
+    )
+    queued_count = result.get('queued', len(items)) if isinstance(result, dict) else len(items)
+    print(f"Requeued {queued_count} trigger item(s)")
     print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))

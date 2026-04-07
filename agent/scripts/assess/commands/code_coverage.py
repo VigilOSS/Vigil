@@ -8,6 +8,33 @@ from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
 
+# Source of truth: which vulnerability classes apply to which slot types.
+SLOT_VULN_CLASSES = {
+    "NETWORK-INPUT": {
+        "native": ["buffer-overflow", "integer-overflow", "format-string"],
+        "managed": ["web-app-injection", "web-app-auth", "ssrf", "open-redirect", "path-traversal"],
+    },
+    "PROTOCOL-FIELD": {
+        "native": ["buffer-overflow", "integer-overflow", "format-string"],
+        "managed": ["web-app-injection", "web-app-auth", "race-condition"],
+    },
+    "URL-COMPONENT": {"all": ["injection", "auth-bypass", "ssrf", "open-redirect", "web-app-auth"]},
+    "FILE-CONTENT": {"all": ["injection", "buffer-overflow", "type-confusion", "path-traversal", "xxe", "file-upload"]},
+    "CMD-ARGUMENT": {"all": ["injection", "format-string", "path-traversal"]},
+    "CALLBACK-DATA": {"all": ["use-after-free", "race-condition", "type-confusion", "deserialization"]},
+    "ENV-VARIABLE": {"all": ["injection", "path-traversal"]},
+    "_crypto": {"all": ["crypto-misuse"]},
+    "_auth": {"all": ["auth-bypass", "web-app-auth"]},
+    "_error": {"all": ["error-handling"]},
+}
+
+EFFORT_THRESHOLDS = {
+    "critical": 70,
+    "high": 50,
+    "medium": 30,
+}
+
+
 def register(subparsers) -> None:
     p = subparsers.add_parser("code-coverage", help="Display code analysis coverage summary")
     p.add_argument("--repo-id", default=None, help="Filter by repository ID")
@@ -16,11 +43,20 @@ def register(subparsers) -> None:
         action="store_true",
         help="Exit non-zero unless the coverage gate explicitly passes",
     )
+    p.add_argument(
+        "--cwe-matrix",
+        action="store_true",
+        help="Display per-file CWE effort coverage matrix",
+    )
     p.set_defaults(func=run)
 
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
+
+    if args.cwe_matrix:
+        _run_cwe_matrix(cfg, args)
+        return
 
     endpoint = 'code/coverage'
     if args.repo_id:
@@ -37,6 +73,7 @@ def run(args) -> None:
         sys.exit(0)
 
     _print_coverage(result)
+    _print_vuln_class_summary(result)
 
     if args.require_gate_pass:
         gate = result.get('gate', {})
@@ -44,6 +81,205 @@ def run(args) -> None:
             passed = gate.get('passed')
             if passed is not True:
                 sys.exit(1)
+
+
+def _run_cwe_matrix(cfg, args) -> None:
+    """Fetch and display the per-file CWE effort coverage matrix."""
+    endpoint = 'code/coverage?detail=cwe'
+    if args.repo_id:
+        endpoint = f'code/coverage?detail=cwe&repo_id={args.repo_id}'
+
+    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    try:
+        result = client.get(endpoint)
+    except Exception:
+        # Gracefully fall back to standard coverage if the detail=cwe
+        # endpoint is not available on this backend
+        fallback_endpoint = 'code/coverage'
+        if args.repo_id:
+            fallback_endpoint = f'code/coverage?repo_id={args.repo_id}'
+        try:
+            result = client.get(fallback_endpoint)
+        finally:
+            client.close()
+        print("NOTE: Backend does not support detail=cwe; showing standard coverage.\n")
+        if isinstance(result, dict):
+            _print_coverage(result)
+        else:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    finally:
+        # close() may already have been called in the except branch
+        try:
+            client.close()
+        except Exception:
+            pass
+
+    if not isinstance(result, dict):
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        sys.exit(0)
+
+    files = result.get('files', [])
+    if not files:
+        print("NOTE: No CWE coverage data available from backend.\n")
+        _print_coverage(result)
+        return
+
+    _print_cwe_matrix(files)
+
+    # Exit non-zero if any critical file has effort below threshold
+    has_gap = _check_effort_gaps(files)
+    if has_gap:
+        sys.exit(1)
+
+
+def _print_cwe_matrix(files: list[dict]) -> None:
+    """Print the per-file CWE effort matrix table."""
+    # Collect all vuln families across files
+    all_families: list[str] = []
+    seen: set[str] = set()
+    for f in files:
+        for cwe in f.get('cwe_coverage', []):
+            fam = cwe.get('family', '')
+            if fam and fam not in seen:
+                all_families.append(fam)
+                seen.add(fam)
+
+    if not all_families:
+        print("NOTE: No CWE effort data found in coverage response.\n")
+        return
+
+    # Truncate family names for column headers (max 11 chars)
+    col_width = 11
+    headers = [fam[:col_width] for fam in all_families]
+
+    # Build header
+    name_width = 28
+    print("=== CWE Coverage Matrix ===")
+    header_line = f"{'File':<{name_width}}"
+    for h in headers:
+        header_line += f" | {h:^{col_width}}"
+    print(header_line)
+    print("-" * len(header_line))
+
+    for f in files:
+        classification = f.get('classification', '')
+        file_path = f.get('file_path', f.get('file_name', '?'))
+        # Use just the filename for display
+        display_name = file_path.rsplit('/', 1)[-1] if '/' in file_path else file_path
+        if classification:
+            abbr = classification[:4]
+            display_name = f"{display_name} ({abbr})"
+        display_name = display_name[:name_width]
+
+        # Build effort lookup for this file
+        effort_map: dict[str, int] = {}
+        for cwe in f.get('cwe_coverage', []):
+            effort_map[cwe.get('family', '')] = cwe.get('effort', 0)
+
+        # Determine applicable families for this file
+        applicable = f.get('applicable_families', set())
+        if isinstance(applicable, list):
+            applicable = set(applicable)
+
+        threshold = EFFORT_THRESHOLDS.get(classification, 0)
+
+        row = f"{display_name:<{name_width}}"
+        for fam in all_families:
+            if applicable and fam not in applicable:
+                cell = "--"
+            elif fam in effort_map:
+                val = effort_map[fam]
+                marker = "!" if threshold > 0 and val < threshold else ""
+                cell = f"{val}{marker}"
+            else:
+                # Family is applicable but untested
+                cell = "0!" if threshold > 0 else "0"
+            row += f" | {cell:^{col_width}}"
+        print(row)
+
+    print()
+
+
+def _check_effort_gaps(files: list[dict]) -> bool:
+    """Return True if any critical-classified file has effort below threshold."""
+    for f in files:
+        classification = f.get('classification', '')
+        threshold = EFFORT_THRESHOLDS.get(classification, 0)
+        if threshold == 0:
+            continue
+
+        applicable = f.get('applicable_families', [])
+        if isinstance(applicable, list):
+            applicable = set(applicable)
+
+        effort_map: dict[str, int] = {}
+        for cwe in f.get('cwe_coverage', []):
+            effort_map[cwe.get('family', '')] = cwe.get('effort', 0)
+
+        for fam in applicable:
+            effort = effort_map.get(fam, 0)
+            if effort < threshold:
+                return True
+    return False
+
+
+def _print_vuln_class_summary(data: dict) -> None:
+    """Print a vulnerability class coverage summary from CWE effort data."""
+    files = data.get('files', [])
+    if not files:
+        # No per-file CWE data — gracefully skip
+        return
+
+    total = 0
+    full_coverage = 0
+    shallow_gaps = 0
+    zero_tested = 0
+
+    for f in files:
+        classification = f.get('classification', '')
+        if classification == 'skip':
+            continue
+        total += 1
+
+        cwe_coverage = f.get('cwe_coverage', [])
+        applicable = f.get('applicable_families', [])
+
+        if not cwe_coverage and not applicable:
+            # No data for this file — treat as zero-tested if it has a classification
+            if classification in ('critical', 'high', 'medium', 'low'):
+                zero_tested += 1
+            continue
+
+        effort_map: dict[str, int] = {}
+        for cwe in cwe_coverage:
+            effort_map[cwe.get('family', '')] = cwe.get('effort', 0)
+
+        threshold = EFFORT_THRESHOLDS.get(classification, 0)
+        has_zero = False
+        has_shallow = False
+
+        families_to_check = set(applicable) if applicable else set(effort_map.keys())
+        for fam in families_to_check:
+            effort = effort_map.get(fam, 0)
+            if effort == 0:
+                has_zero = True
+            elif threshold > 0 and effort < threshold:
+                has_shallow = True
+
+        if has_zero:
+            zero_tested += 1
+        elif has_shallow:
+            shallow_gaps += 1
+        else:
+            full_coverage += 1
+
+    if total > 0:
+        print(f"Vulnerability Class Coverage:")
+        print(f"  Files at full coverage: {full_coverage}/{total}")
+        print(f"  Files with shallow gaps: {shallow_gaps}/{total}")
+        print(f"  Files with zero-tested classes: {zero_tested}/{total}")
+        print()
 
 
 def _print_coverage(data: dict) -> None:

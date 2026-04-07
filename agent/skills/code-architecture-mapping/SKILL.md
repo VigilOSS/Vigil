@@ -10,7 +10,7 @@ origin: AI Threat Hunting
 
 - Phase 1 of code analysis pipeline. This is the entry point before any vulnerability analysis begins.
 - When a new repository or codebase needs classification, threat modeling, and prioritization before deep review.
-- Must run to completion before dispatching code-slicing. Every subsequent phase depends on the file classification, call graph, and attack hypotheses produced here.
+- Must run to completion before dispatching code-vuln-hunter. Every subsequent phase depends on the file classification, call graph, file analysis queue, and attack hypotheses produced here.
 
 ## Tools
 
@@ -217,7 +217,9 @@ Files scoring 50+ are dispatched first. Files scoring 30-49 are second wave. Fil
 The call graph is the navigational backbone for the entire pipeline. Without it,
 the hunter cannot trace multi-function vulnerability chains across file boundaries.
 
-Using ctags + grep:
+When a structural index is available (`analysis-state/structural-index/`), use the pre-computed function definitions and call sites as the starting point for call graph construction. The structural index provides exact function boundaries, call site locations, and import statements — use these to resolve call graph edges more accurately than header-only grep. The architect then adds security annotations (trust boundaries, untrusted data flow, module boundary crossings) that tree-sitter cannot provide.
+
+Using ctags + grep (supplemented by structural index when available):
 
 1. **Forward trace from entry points** (identified in Step 7):
    For each entry point function:
@@ -290,7 +292,7 @@ Output format:
 ### Step 13: Generate Attack Hypotheses
 
 For each entry-point chain with a high-severity sink, generate 2-3 specific
-attack hypotheses. These become the primary dispatch context for Phase 3 hunters.
+attack hypotheses. Hypotheses attach to file-analysis-queue entries as `guidance_hypotheses`. Files without hypotheses still appear in the queue with an empty array — the hunter provides unconstrained analysis first, then checks hypotheses. This prevents hypothesis anchoring where the analysis scope gets limited to what the architect predicted.
 
 Each hypothesis specifies:
 1. **Entry point**: where untrusted data enters and what the attacker controls
@@ -314,10 +316,11 @@ Produce a structured architecture map containing:
 2. **Entry Point Catalog**: function, file, line, type (main/API/handler/callback/CLI)
 3. **Trust Boundary Map**: boundary name, entry function, data format, slot type
 4. **File Classification Table**: file path, classification tier, slot types, priority score
-5. **Analysis Queue**: ordered list of files/modules for Phase 2 dispatch, grouped into ~15-20K line batches
+5. **File Analysis Queue**: ordered list of files for Phase 2 (Hunt) dispatch, grouped by `batch_theme` for cross-file reasoning. Written to `analysis-state/file-analysis-queue.json`. Every critical/high file appears regardless of whether a hypothesis names it.
 6. **Call Graph**: JSON adjacency list with edges, entry points, and critical sinks. Written to analysis-state/call_graph.json.
 7. **Entry-Point Chains**: ranked list of complete data flow chains from entry to sink.
 8. **Attack Hypotheses**: prioritized list of specific vulnerability hypotheses. Each includes: entry point, chain, sink, CWE, concrete scenario, score. Written to analysis-state/attack_hypotheses.json.
+9. **Structural Index Integration**: when `analysis-state/structural-index/` exists, the call graph and entry-point chains incorporate tree-sitter-derived function definitions, call sites, and security sinks for higher accuracy.
 
 ## Extended Resources
 

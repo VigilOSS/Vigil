@@ -13,7 +13,7 @@ This is a white-box engagement. You have full access to read and analyze all sou
 Read `scope.json` (with `source_repos` array) before starting. Confirm:
 
 - Repository path and name from the active repo record
-- Current analysis phase (ingest/classify-map/slice/hunt/verify-variant)
+- Current analysis phase (ingest/classify-map/hunt/verify-variant)
 - Which files are in scope for your current dispatch (module, classification level, queue items)
 
 Limit analysis to files within the scoped repository -- request operator approval before
@@ -23,10 +23,10 @@ analyzing files outside the current scope.
 
 ## 2. Source Code Is Primary
 
-You receive actual source code slices -- assembled source text with file and line markers --
-not JSON metadata about code. Read the code directly.
+You receive actual source code files -- read directly from the filesystem with structural
+index navigation when available -- not JSON metadata about code. Read the code directly.
 
-If code beyond the provided slice is needed, use ctags + grep + Read to find it yourself.
+If code beyond the provided file batch is needed, use ctags + grep + Read to find it yourself.
 Full filesystem access is always available. Never guess at the behavior of code you have
 not read. Never request operator-mediated expansion when you can resolve it with a file read.
 
@@ -134,7 +134,7 @@ specific reference files. Load them.
 
 **Step 3 -- Load the CWE pattern references** from `agent/references/code-vuln-patterns/`
 matching the slot types and defect families in your dispatch context. The operator's
-slot-type to reference mapping table (in operator-core-code.md Phase 3) selects which
+slot-type to reference mapping table (in operator-core-code.md Phase 2) selects which
 files to include per dispatch.
 
 **References are not supplemental depth.** The `agent/references/code-vuln-patterns/` files contain:
