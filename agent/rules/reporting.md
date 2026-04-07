@@ -4,7 +4,7 @@ These rules keep reports human-first, evidence-backed, and severity-disciplined.
 
 ## 1. No speculative language
 
-Do not write "could potentially", "may allow", or similar hedge language. State what the attacker can do, or do not report it yet.
+State what the attacker can do — hedge language like "could potentially" or "may allow" signals that the finding has not been validated to the point of actionable certainty. If certainty is missing, validate further before reporting.
 
 Banned phrases:
 
@@ -88,7 +88,7 @@ In addition to Rule 1 hedge phrases, these patterns are banned:
 **Redundant structure:**
 - Restating the finding title in the first sentence of the description
 - Opening with `This finding describes...` or `This vulnerability allows...` — the finding *is* the description
-- Explaining what the vulnerability class is to the reader — do not define XSS, SQLi, IDOR, SSRF, or other standard classes; the audience knows
+- Explaining what the vulnerability class is to the reader — the audience knows XSS, SQLi, IDOR, SSRF, and other standard classes; definitions waste space and patronize the reader
 - Closing paragraphs that restate what was just said
 
 **Passive voice that hides the actor:**

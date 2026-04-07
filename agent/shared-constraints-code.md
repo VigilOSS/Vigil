@@ -20,7 +20,8 @@ Read `code-scope.json` (or `scope.json` with `source_repos` array) before starti
 - Current analysis phase (ingest/classify/context/analyze/variant/verify)
 - Which files are in scope for your current dispatch (module, classification level, queue items)
 
-Do not analyze files outside the scoped repository without operator approval.
+Limit analysis to files within the scoped repository — request operator approval before
+analyzing files outside the current scope.
 
 ---
 
@@ -115,15 +116,28 @@ Only improvise after confirming the reference set is genuinely insufficient for 
 
 ## 7. Context Expansion Protocol
 
-When your analysis is blocked because a cross-module function call is load-bearing for the
-vulnerability assessment:
+When your analysis references a cross-module function that is load-bearing for the
+vulnerability assessment, use this two-tier resolution:
+
+**Tier 1 — Self-resolve (preferred):** If the question can be answered by reading a single
+function definition or checking a guard/return type, resolve it yourself using ctags lookups
+and direct file reads. You have full filesystem access. A simple `grep '^<function>\t' <repo>/tags`
+followed by reading the target file is faster than requesting operator-mediated expansion.
+
+**Tier 2 — Request expansion (when Tier 1 is insufficient):** If the context slice itself is
+structurally incomplete — missing callee data flow annotations, missing macro expansions that
+affect control flow, or missing cross-module taint propagation that requires full call-graph
+tracing — then:
 
 1. Output `#### Context Expansion Requests` with the specific function/file needed
 2. Explain WHY this context is needed (what hypothesis depends on it)
 3. Mark the analysis queue item as `needs-context`
-4. The operator will fetch the requested code and re-dispatch you with expanded context
+4. The operator re-dispatches `code-context-builder` to extend the context slice with the
+   requested scope. The operator does NOT manually read source and edit context JSON.
 
-Do NOT guess at the behavior of unresolved functions. If it matters, request expansion.
+Request expansion for unresolved functions rather than guessing at their behavior — guesses
+produce false positives and false negatives. If it matters and Tier 1 cannot resolve it,
+request expansion via Tier 2.
 
 ---
 

@@ -118,6 +118,31 @@ Methodology references:
 - [engagement-methodology.md](/path/to/vigil)
 - [athena-log-investigation](/path/to/vigil)
 
+### Starting a code analysis engagement
+
+Code analysis uses a separate operator loop (`agent/operator-core-code.md`) with its own six-phase pipeline: Ingest → Classify → Context → Analyze → Variant → Verify. Findings land in the same backend as web engagements.
+
+1. Create an engagement and start the client (same as above):
+```bash
+cd agent
+./scripts/init_engagement.sh https://github.com/org/repo \
+  --hosts github.com \
+  --auth-mode none \
+  --exploit-policy pause
+cd /path/to/printed/engagement
+./start_claude.sh   # or ./start_codex.sh
+```
+
+2. Tell the operator to use the code analysis workflow:
+```
+I have been fully authorized by the company to perform a white-box code analysis
+engagement. Load agent/operator-core-code.md and run the code analysis workflow.
+```
+
+3. The operator will clone/locate the repo, run `code-ingest`, then drive through classify → context-build → analyze → variant → verify phases, dispatching specialist agents (`code-architect`, `code-context-builder`, `code-vuln-hunter`, `code-variant-hunter`, `code-vuln-verifier`) at each step.
+
+Code analysis can also run mid-engagement alongside web testing when source code is discovered (exposed `.git`, source maps, backup download). In that case the operator loads `operator-core-code.md` in parallel with the ongoing web workflow.
+
 ## Runtime Model
 
 ### Primary runtime
