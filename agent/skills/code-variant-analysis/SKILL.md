@@ -232,5 +232,6 @@ For each variant scan, produce:
 
 - Original finding details (provided in dispatch context) — the concrete bug that seeds the variant search
 - Architecture map from Phase 1 — file classifications and module groupings for systematic scanning
-- Context slices from Phase 2 — call graphs and data flow annotations for quick taint assessment
+- Call graph from Phase 1 — cross-module call chains for tracing untrusted data flow during quick taint checks
+- Full filesystem access — read source files directly for pattern matching and taint verification
 - **CWE pattern reference (REQUIRED)** — load the `agent/references/code-vuln-patterns/*.md` file matching the original finding's CWE. The pattern taxonomy, language-specific idioms, and "What You're Hunting" sections define what a variant looks like for this bug class. Without this, variant scanning degrades to grep-for-similar-syntax rather than hunting the underlying pattern.

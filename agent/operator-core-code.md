@@ -27,28 +27,27 @@ Always-active rules:
 Path convention:
 - When a shared prompt references `./scripts/...`, resolve it from the agent workspace root after `cd agent`
 
-## Core Loop — Code Analysis Mode
+## Core Loop -- Code Analysis Mode
 
 After code analysis engagement initialization completes, repeat until all critical/high files
 analyzed or user signals stop:
 
-1. **ASSESS STATE** — Read `code-scope.json` (or `scope.json` with `source_repos`). Check code coverage stats via `./scripts/assess.py code-coverage`. Backend state is canonical; use `--require-gate-pass` only for the final Phase 5 gate.
-2. **DECIDE NEXT ACTION** — Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified). In Phase 2, prioritize critical modules first. In Phase 3, prioritize high-priority analysis queue items. In Phase 4, prioritize findings with highest severity for variant scanning. Coverage gaps drive decisions.
-3. **FORMULATE PLAN** — Select agent, skill, module batch, and batch size. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
-4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.
-5. **USE SKILLS FIRST** — Check `agent/SKILL.md` for the right skill.
+1. **ASSESS STATE** -- Read `code-scope.json` (or `scope.json` with `source_repos`). Check code coverage stats via `./scripts/assess.py code-coverage`. Backend state is canonical; use `--require-gate-pass` only for the final Phase 4 gate.
+2. **DECIDE NEXT ACTION** -- Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified, call graph complete). In Phase 2, slice critical modules first. In Phase 3, prioritize high-priority attack hypotheses. In Phase 4, drive aggressive FP elimination on all findings. Coverage gaps drive decisions.
+3. **FORMULATE PLAN** -- Select agent, skill, batch size, and attack hypotheses. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
+4. **PRESENT OR PROCEED** -- Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.
+5. **USE SKILLS FIRST** -- Check `agent/SKILL.md` for the right skill.
    - **Phase 0 (Ingest):** operator-mechanical, no agent dispatch needed
-   - **Phase 1 (Classify):** `code-architect` → `agent/skills/code-architecture-mapping/SKILL.md`
-   - **Phase 2 (Context):** `code-context-builder` → `agent/skills/code-context-building/SKILL.md` (parallel per module)
-   - **Phase 3 (Analyze):** `code-vuln-hunter` → `agent/skills/code-vulnerability-analysis/SKILL.md` + CWE-specific refs
-   - **Phase 4 (Variant):** `code-variant-hunter` → `agent/skills/code-variant-analysis/SKILL.md`
-   - **Phase 5 (Verify):** `code-vuln-verifier` → `agent/skills/code-finding-verification/SKILL.md`
-6. **HOST BASH FOR SOURCE READING** — Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work — Kali MCP is not needed for reading source files.
-7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis and context-building work. The operator's job is orchestration: fetching metadata, providing paths, recording outputs, gating quality, and managing the queue. Subagents read source files directly and produce structured outputs. Source reading, context authoring, and vulnerability judgment belong to subagents — the operator provides paths and metadata, not content.
-8. **RECORD FINDINGS IMMEDIATELY** — Code findings use the same `./scripts/assess.py record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
-9. **RECORD SURFACES** — Code-specific surface types: `parser_entry`, `protocol_handler`, `crypto_operation`, `auth_check`, `file_io`, `memory_allocator`. Record via `./scripts/assess.py record-surface`.
-10. **TRACK COVERAGE** — After each batch, run `./scripts/assess.py code-coverage`. Before entering Phase 5, verify the coverage gate passes with `./scripts/assess.py code-coverage --require-gate-pass` (all critical files analyzed, no unresolved needs-context).
-11. **LOOP** — Back to step 1.
+   - **Phase 1 (Classify + Map):** `code-architect` -> `agent/skills/code-architecture-mapping/SKILL.md`
+   - **Phase 2 (Slice):** `code-slicer` -> `agent/skills/code-slicing/SKILL.md` (parallel per queue item)
+   - **Phase 3 (Hunt):** `code-vuln-hunter` -> `agent/skills/code-vulnerability-analysis/SKILL.md` + CWE-specific refs
+   - **Phase 4 (Verify + Variant):** `code-vuln-verifier` -> `agent/skills/code-finding-verification/SKILL.md` AND `code-variant-hunter` -> `agent/skills/code-variant-analysis/SKILL.md` (parallel)
+6. **HOST BASH FOR SOURCE READING** -- Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work -- Kali MCP is not needed for reading source files.
+7. **DISPATCH** -- Dispatch to the appropriate subagent for all analysis and context-building work. The operator's job is orchestration: fetching metadata, providing paths, recording outputs, gating quality, and managing the queue. Subagents read source files directly and produce structured outputs. Source reading, slice assembly, and vulnerability judgment belong to subagents -- the operator provides paths and metadata, not content.
+8. **RECORD FINDINGS IMMEDIATELY** -- Code findings use the same `./scripts/assess.py record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
+9. **RECORD SURFACES** -- Code-specific surface types: `parser_entry`, `protocol_handler`, `crypto_operation`, `auth_check`, `file_io`, `memory_allocator`. Record via `./scripts/assess.py record-surface`.
+10. **TRACK COVERAGE** -- After each batch, run `./scripts/assess.py code-coverage`. Before entering Phase 4 verification, verify the coverage gate passes with `./scripts/assess.py code-coverage --require-gate-pass` (all critical files analyzed, no unresolved needs-context).
+11. **LOOP** -- Back to step 1.
 
 ## Phase Flow
 
@@ -80,19 +79,50 @@ The `code-ingest` command:
 - Generates ctags symbol index (if ctags is available)
 
 ```bash
-jq '.current_phase = "classify"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+jq '.current_phase = "classify-map"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
 ```
 
 Exit: All files inventoried. ctags symbol index generated if ctags is available (install Universal ctags for best results). Transition to Phase 1.
 
-### Phase 1: CLASSIFY
+### Phase 1: CLASSIFY + MAP
 
 Dispatch `code-architect` with `agent/skills/code-architecture-mapping/SKILL.md`.
 
 Provide:
 - Full file listing (from `./scripts/assess.py fetch "code/files?repo_id=<repo-id>&limit=5000"`)
-- Project documentation (README, SECURITY.md, build files — read from source dir)
+- Project documentation (README, SECURITY.md, build files -- read from source dir)
 - Git churn data (from code_repos.git_churn_json)
+
+Phase 1 now produces five deliverables, not three. The call graph and attack hypotheses are the
+key additions -- they replace the old Phase 2 context-builder's annotation work with navigational
+artifacts that hunters can use directly alongside actual source code.
+
+**Deliverables from code-architect:**
+
+1. **File classifications** -- every file tagged with priority (critical/high/medium/low/skip) and
+   slot types (NETWORK-INPUT, PROTOCOL-FIELD, CMD-ARGUMENT, URL-COMPONENT, FILE-CONTENT,
+   CALLBACK-DATA, ENV-VARIABLE). Same as before.
+
+2. **Module map** -- logical groupings of related files. Same as before.
+
+3. **Threat model** -- trust boundaries, entry points, high-value targets, data flow between
+   trust zones. Same as before.
+
+4. **Cross-module call graph** -- adjacency list showing caller->callee edges with file and line
+   number, annotated with untrusted-data crossings. Built via ctags + grep during Phase 1.
+   Format: each edge records `{caller_func, caller_file, caller_line, callee_func, callee_file,
+   callee_line, crosses_trust_boundary: bool, untrusted_data_label: string|null}`.
+   The call graph focuses on entry-point chains: paths from external input (network, file, CLI)
+   through processing functions to security-sensitive sinks (memory allocation, command execution,
+   file I/O, auth decisions). Internal helper calls without security relevance can be omitted.
+
+5. **Attack hypothesis queue** -- for each high-priority entry-point chain, a specific testable
+   hypothesis. Each hypothesis names the entry point, the function chain, the suspected defect
+   class, and the CWE. Example:
+   "Untrusted NETWORK-INPUT data entering at daemon.c:handle() flows through
+   upload-pack.c:receive_needs() to shallow.c:assign_shallow_commits_to_refs() -- test for
+   integer overflow in bitmap sizing (CWE-190)"
+   Hypotheses are ranked by entry-point exposure and sink severity. The queue feeds Phase 3.
 
 On return:
 ```bash
@@ -102,121 +132,121 @@ On return:
 ./scripts/assess.py code-record-threat-model <repo-id> <threat-model-json>
 # Record modules
 ./scripts/assess.py code-record-modules <repo-id> <modules-json>
+# Store call graph in analysis-state/
+cp <call-graph-json> "$DIR/tools/analysis-state/call-graph.json"
+# Store attack hypotheses in analysis-state/
+cp <hypotheses-json> "$DIR/tools/analysis-state/attack-hypotheses.json"
 # Check progress
 ./scripts/assess.py code-coverage
 ```
 
-**Before transitioning:** Review code-architect's `#### Coverage Gaps` output. If critical gaps
-exist (unclassified directories, missing entry points, unclear trust boundaries), re-dispatch
-with targeted scope before proceeding. Gaps here are permanent — Phase 2+ cannot recover them.
+**Before transitioning:** Review code-architect's `#### Coverage Gaps` output. Critical gaps to
+check before proceeding:
+- Unresolved entry-point chains (external input sources with no traced path to sinks)
+- Missing cross-module edges for security-critical paths (e.g., auth module calls into crypto
+  module but the edge is not in the graph)
+- Unclassified directories that contain security-relevant code
+- Attack hypotheses that reference functions not found in the call graph
+
+If critical gaps exist, re-dispatch code-architect with targeted scope before proceeding. Gaps
+in the call graph become blind spots for every downstream phase.
 
 ```bash
-jq '.current_phase = "context-build"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+jq '.current_phase = "slice"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
 ```
 
-Exit: Every file classified. Threat model recorded. Coverage gaps reviewed. Transition to Phase 2.
+Exit: Every file classified. Threat model recorded. Call graph recorded with entry-point chains.
+Attack hypotheses queued. Coverage gaps reviewed. Transition to Phase 2.
 
-### Phase 2: CONTEXT-BUILD (Most Critical Phase)
+### Phase 2: SLICE
 
-Phase 2 determines the ceiling of the entire engagement. A missed annotation, an unresolved
-cross-module call, or a poorly-traced data flow means the vulnerability hunter in Phase 3
-cannot find the bug. Invest time here — speed in Phase 2 costs findings in Phase 3.
+Phase 2 is mechanical source code assembly. The old Phase 2 (context-build) produced JSON
+annotations and metadata about code. The new Phase 2 assembles actual source code into slices
+that Phase 3 hunters read directly. No annotation, no structured metadata -- just the relevant
+source code with file/line markers so hunters know where they are.
 
-Dispatch `code-context-builder` per module — **parallel across independent modules**.
+Dispatch `code-slicer` per queue item -- **parallel across independent items**.
 Use sub-agents for parallelism: the operator stays as the long-running orchestrator, dispatching
-and managing context-builder agents. Each sub-agent handles one module batch independently.
+and managing slicer agents. Each sub-agent handles one queue item independently.
 
-#### Step-by-step per module:
+#### Step-by-step per queue item:
 
-**1. Prepare the dispatch metadata (operator-mechanical):**
-```bash
-# Fetch module's files with classifications and slot types
-./scripts/assess.py fetch "code/files?module_id=<module-id>&limit=5000"
-```
+**1. Prepare the dispatch payload (operator-mechanical):**
 
-The context-builder reads source files, headers, and type definitions directly from the
-filesystem — provide the repo root path so it can navigate to the files itself.
-
-**2. Assemble the dispatch payload (metadata only):**
-- Module file list JSON with classifications and slot-type annotations from Phase 1
-- Source repository root path (builder reads files directly from this path)
+For each queue item (attack hypothesis from Phase 1):
+- Target function + file from the hypothesis
+- Call graph excerpt: the subgraph rooted at the target function, showing its callee chain
+  down to sinks (extract from `analysis-state/call-graph.json`)
+- Repository root path
 - Path to repo `tags` file for ctags lookups (if generated during ingest)
-- Threat model summary (trust boundaries, entry points, high-value targets)
-- Cross-module boundary list from Phase 1 (function names and target modules, not source content)
 
-**3. Dispatch context-builder:**
-```bash
-# Target: ~15-20K lines per dispatch. Split large modules into sub-batches.
-# If a module has 40K lines, split by subdirectory or logical file group.
-```
+**2. Dispatch code-slicer with `agent/skills/code-slicing/SKILL.md`:**
 
-**4. On return — MANDATORY quality gate before recording:**
+The slicer:
+1. Reads the target function and its callees from the filesystem
+2. Resolves type definitions, macros, and constants needed to understand the code
+3. Includes error handling paths (catch blocks, goto cleanup, defer statements)
+4. Marks unresolvable external dependencies as UNRESOLVED with a note
+5. Outputs: a slice file in `analysis-state/` containing actual source code with
+   `// FILE: <path> LINES: <start>-<end>` markers between sections
 
-Before recording context slices, verify the return. If ANY required item below fails,
-**REJECT the batch and re-dispatch the context-builder.** Record only outputs that pass all
-mandatory checks — degraded context slices produce missed vulnerabilities in Phase 3.
+The slicer does NOT:
+- Annotate code with JSON metadata
+- Produce structured sink/guard/data-flow objects
+- Make vulnerability judgments
+- Generate structured annotation metadata (JSON context objects, sink/guard catalogs)
 
-Hard requirements (reject on failure):
-- [ ] Every critical/high function in the batch has a context slice
-- [ ] `audit_metadata.cross_ref_usage` is present on every context slice (documents exact ctags/grep lookups used)
-- [ ] Sink annotations are present for functions with identified sinks (not just call graphs)
-- [ ] Guard annotations are present for functions with identified sinks
-- [ ] Slot types use the canonical Shannon names (NETWORK-INPUT, PROTOCOL-FIELD, CMD-ARGUMENT, URL-COMPONENT, FILE-CONTENT, CALLBACK-DATA, ENV-VARIABLE) — NOT vulnerability-class labels
+**3. On return -- MANDATORY quality gate before accepting:**
+
+Hard requirements (reject and re-dispatch on failure):
+- [ ] Slice contains actual source code (NOT JSON annotations, NOT stubs, NOT summaries)
+- [ ] All critical callees in the call graph excerpt are resolved or explicitly marked UNRESOLVED
+      with the reason (external library, binary-only, generated code)
+- [ ] Slice size is within 2K-15K lines (if under 2K, callee resolution likely failed; if over
+      15K, the slice is too broad and should be split)
+- [ ] Types and macros for the target function's parameter types are included (a hunter cannot
+      evaluate integer overflow if it cannot see the typedef)
+- [ ] File/line markers are present between sections
 
 Soft requirements (note and decide):
-- [ ] Cross-module calls are annotated with callee signatures and slot types
-- [ ] `#### Coverage Gaps` section reviewed — any blocker that would cause Phase 3 to miss a vulnerability
-
-If the context-builder reports gaps in critical modules (unresolved callees for security-relevant
-functions, macro-hidden sinks, header files it couldn't find), **re-dispatch with expanded scope
-before moving to Phase 3.** Do not proceed with incomplete context on critical modules.
+- [ ] Error handling paths included for the target function
+- [ ] Cross-module callees resolved at least one level deep
 
 ```bash
-# Record context slices
-./scripts/assess.py code-record-contexts <contexts-json>
-# Build and populate analysis queue from returned context ids
-./scripts/assess.py code-dispatch queue <queue-items-json>
-# Check progress across all modules
+# Record slice location for Phase 3 dispatch
+# Slices live in analysis-state/ as plain text files
+ls "$DIR/tools/analysis-state/slice-*.txt"
+# Update queue status
+./scripts/assess.py code-dispatch done "id1,id2,..." sliced
+# Check progress across all items
 ./scripts/assess.py code-dispatch stats
 ```
 
-**5. Context expansion loop (before Phase 3):**
+**Size management:** Each slice targets 2K-15K lines of source code. If a call graph excerpt
+spans more code than this, split at logical boundaries: separate the entry-point function from
+deep callees, or split by trust boundary crossings. The slicer decides the split; the operator
+provides the size constraint.
 
-After ALL module batches return, review the aggregate coverage gaps:
-```bash
-# Check: are all critical files contextualized? Any needs-context?
-./scripts/assess.py code-dispatch stats
-```
-- If any critical module has unresolved cross-module calls that affect security-relevant
-  functions, fetch the missing code and re-dispatch the context-builder for that module.
-- If header files were missing, locate them and include them in a re-dispatch.
-- This loop should resolve before Phase 3 begins — every `needs-context` at the context
-  level is a vulnerability the hunter will miss.
-
-**Size management:** Each dispatch targets ~15-20K lines of source code. Split large modules
-by subdirectory or file group. Prefer splitting at logical boundaries (e.g., separate the
-parser from the handler) rather than arbitrary file count splits.
-
-**Phase 2 exit gate — ALL of the following must be true before transitioning:**
-- [ ] Every dispatched context-builder has returned (no `active` agents in the registry for this phase)
-- [ ] Every returned batch passed the mandatory quality gate (step 4 above)
-- [ ] All critical modules have context slices with sink, guard, and `audit_metadata` annotations
-- [ ] Coverage gaps in critical modules reviewed and resolved or explicitly accepted
-- [ ] Analysis queue populated with prioritized items from all module batches
-
-Wait for all context-builder dispatches to return and resolve all mandatory quality checks
-before transitioning to Phase 3.
+**Phase 2 exit gate -- ALL of the following must be true before transitioning:**
+- [ ] Every queued attack hypothesis has a corresponding slice in analysis-state/
+- [ ] Every slice passed the mandatory quality gate
+- [ ] No UNRESOLVED markers on security-critical callees (sinks, auth checks, allocators)
+      unless the dependency is genuinely external
+- [ ] Coverage gaps reviewed -- any hypothesis whose slice is too thin to test
 
 ```bash
-jq '.current_phase = "analyze"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+jq '.current_phase = "hunt"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
 ```
 
-Exit: All critical/high files have context slices with sink and guard annotations. Coverage gaps
-in critical modules resolved. Analysis queue populated. Transition to Phase 3.
+Exit: All queued items have slices. Coverage gaps reviewed. Transition to Phase 3.
 
-### Phase 3: ANALYZE
+### Phase 3: HUNT
 
-Operator-orchestrated work-buffer loop (same pattern as web engagement's Phase 3).
+Operator-orchestrated. This is the most expensive phase -- use Opus.
+
+Phase 3 hunters read actual source code, not JSON annotations. They receive a filesystem path
+to a slice file, a call graph excerpt for navigation, and attack hypotheses to test. They have
+full filesystem access to trace beyond the slice when needed.
 
 ```bash
 # Check queue
@@ -229,15 +259,44 @@ Operator-orchestrated work-buffer loop (same pattern as web engagement's Phase 3
 ./scripts/assess.py code-dispatch fetch 10 code-vuln-hunter
 ```
 
-Dispatch `code-vuln-hunter` with:
-- The fetched queue items (context slices — fetch response includes full context + file data)
-- Threat model summary
-- Path to repo `tags` file for ctags lookups (if generated during ingest)
-- Relevant CWE pattern reference (based on slot types in the context)
+Dispatch `code-vuln-hunter` with `agent/skills/code-vulnerability-analysis/SKILL.md` and:
 
-#### Slot-Type → Reference Mapping
+- **Source code slice PATH** -- the actual file path in analysis-state/, not a JSON blob, not a
+  context ID. The hunter reads the slice directly.
+- **Call graph excerpt** -- the subgraph for the target module showing entry-point chains and
+  trust boundary crossings. The hunter uses this to understand where data flows and which
+  cross-module calls matter.
+- **Threat model summary** -- trust boundaries, entry points, and high-value targets relevant
+  to this batch. Gives the hunter the "why" behind the code.
+- **Attack hypotheses** -- the specific testable scenarios from Phase 1 for the functions in
+  this batch. Each hypothesis names the entry point, function chain, suspected defect, and CWE.
+- **CWE pattern references** -- matching the slot types in this batch (use the Slot-Type ->
+  Reference Mapping table below).
+- **Adversarial framing preamble** -- include this verbatim in every Phase 3 dispatch:
 
-Include the pattern references matching the context's slot types and language when dispatching code-vuln-hunter:
+> This source code slice contains the path from [entry point] through [function chain].
+> There are 2-3 security issues in this code that survived every static analysis tool.
+> They are in multi-function reasoning chains, error handling paths, integer arithmetic,
+> or protocol edge cases. Find them. After your initial analysis, look again for subtler
+> issues that are easy to miss.
+
+Replace [entry point] and [function chain] with the actual values from the hypothesis.
+
+**FULL FILESYSTEM ACCESS**: The hunter can Read/Grep/Glob beyond the slice. The slice is a
+starting point, not a cage. If the hunter needs to trace a cross-module call, check a macro
+definition, or verify a type width, it uses ctags + Read to find the target directly. This
+replaces the old Tier 2 context expansion loop entirely.
+
+**No Tier 2 context expansion loop**: The old pipeline had hunters request re-dispatch of
+context-builder when blocked on a cross-module call. The new pipeline gives hunters filesystem
+access. If the hunter needs to see a callee in another module, it reads it. If truly blocked
+(external library with no source, binary-only dependency, generated code without templates),
+the hunter marks `needs-context` and the operator assembles an additional slice targeted at
+the gap.
+
+#### Slot-Type -> Reference Mapping
+
+Include the pattern references matching the batch's slot types and language when dispatching:
 
 | Slot Type / Context | Primary References | Also Include If... |
 |---|---|---|
@@ -266,107 +325,122 @@ On return:
 ./scripts/assess.py record-finding code-vuln-hunter <finding-json>
 ```
 
-**Context expansion loop:** When items return as `needs-context`:
-1. Review the expansion request — what function/file is needed and why
-2. If the hunter could have resolved this with a simple cross-file read (single function lookup),
-   note it as a hunter process gap — future dispatches should remind the hunter to self-resolve
-   simple lookups via grep/ctags before requesting expansion
-3. If the context slice itself is structurally incomplete (missing callee signatures, missing
-   data flow through a cross-module boundary, missing macro expansions), **re-dispatch
-   code-context-builder** with the original context slice and the expansion request. The builder
-   regenerates/extends the context slice with the additional code.
-4. Record the updated context slice and re-queue the item for the next hunter batch
-
-Context authoring is context-builder work. The operator provides the expansion request and
-re-dispatches; the builder reads the source and produces the updated structured annotations.
+**Handling needs-context returns:** When items return as `needs-context`:
+1. Review the request -- what function, file, or dependency is missing and why
+2. If the hunter could have resolved this with filesystem access (a function in another file in
+   the same repo), note it as a process gap. Future dispatches should remind the hunter to
+   self-resolve via Read/Grep/ctags before requesting expansion.
+3. If the gap is genuinely unresolvable from the filesystem (external library source needed,
+   binary dependency, macro-generated code), dispatch code-slicer to assemble an additional
+   slice targeted at the gap. Provide the original slice path and the expansion request.
+4. Re-queue the item with the additional slice path for the next hunter batch.
 
 Repeat until analysis queue is empty.
 
-**Before transitioning:** Review aggregate `#### Coverage Gaps` across all hunter batches. If
-critical taint paths terminated at unresolved callees, expand context and re-dispatch those
-items. If pattern categories were skipped (e.g., crypto-misuse patterns not applied to a module
-with crypto operations), re-dispatch with the correct references.
+**Before transitioning:** Review aggregate Coverage Gaps across all hunter batches. If critical
+taint paths terminated at unresolved callees, assemble additional slices and re-dispatch. If
+pattern categories were skipped (e.g., crypto-misuse patterns not applied to a module with
+crypto operations), re-dispatch with the correct references.
 
 ```bash
-jq '.current_phase = "variant"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+jq '.current_phase = "verify-variant"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
 ```
 
-Exit: All queue items processed. No unresolved `needs-context`. Coverage gaps reviewed. Transition to Phase 4.
+Exit: All queue items processed. No unresolved `needs-context`. Coverage gaps reviewed.
+Transition to Phase 4.
 
-### Phase 4: VARIANT ANALYSIS
+### Phase 4: VERIFY + VARIANT
 
-For each confirmed finding (and each `suspicious` result worth checking), scan the codebase
-for the same bug pattern in other locations. This is the code equivalent of the "sibling rule."
+Phase 4 merges the old Phases 4 and 5 into a single parallel phase. Two agents run
+simultaneously on independent objectives:
 
-```bash
-# Get all findings for variant scanning
-./scripts/assess.py fetch findings
-```
+- **Agent A (code-vuln-verifier)**: TOB-style false positive elimination on all findings
+- **Agent B (code-variant-hunter)**: systematic variant scanning for confirmed bug patterns
 
-**Per finding, prepare dispatch:**
-1. Extract the abstract bug pattern from the finding (CWE, taint path shape, guard failure type)
-2. Identify candidate files: same language, classification `medium` or above
-3. Select the CWE pattern reference matching the finding's defect family (same file the hunter used)
+Both agents run in parallel because their work is independent: the verifier evaluates existing
+findings, while the variant hunter scans for new instances of confirmed patterns.
 
-Dispatch `code-variant-hunter` with:
-- The finding details (CWE, pattern, taint path, guard failure)
-- The abstract bug pattern (generalized from the specific finding)
-- Candidate files (same language, classification medium or above)
-- CWE pattern reference from `agent/references/code-vuln-patterns/` matching the finding's CWE
-- Threat model summary (trust boundaries for quick reachability checks)
-
-**Parallel dispatch**: Independent findings can be variant-scanned in parallel (different sub-agents).
-
-On return:
-```bash
-# Record variant findings
-./scripts/assess.py record-finding code-variant-hunter <variant-finding-json>
-# Verify scan coverage — check that candidate files were actually scanned
-```
-
-Review the scan results table: if high-value candidate files were skipped or if the pattern
-abstraction was too narrow (0 matches across many files), consider re-dispatching with a
-broader pattern definition.
-
-```bash
-jq '.current_phase = "verify"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
-```
-
-Exit: All confirmed findings have been variant-checked. Scan results recorded. Transition to Phase 5.
-
-### Phase 5: VERIFY AND REPORT
-
-**Coverage gate** — must pass before proceeding:
+**Coverage gate** -- must pass before proceeding:
 ```bash
 ./scripts/assess.py code-coverage --require-gate-pass
 # Must show: all critical files analyzed, all high files analyzed, no needs-context
 ```
 
 If the gate fails, resolve remaining items before proceeding:
-- `needs-context` items: expand context and re-dispatch to Phase 3
-- Unanalyzed critical files: dispatch context-builder (Phase 2) then hunter (Phase 3)
-- The gate must pass before proceeding — unresolved items become permanently invisible to the report
+- `needs-context` items: assemble additional slices and re-dispatch to Phase 3
+- Unanalyzed critical files: dispatch slicer (Phase 2) then hunter (Phase 3)
+- The gate must pass before proceeding -- unresolved items become permanently invisible to
+  the report
 
-**Verification dispatch:**
+#### Agent A: Verification
 
-Dispatch `code-vuln-verifier` with all confirmed + suspicious findings. Include:
-- Full evidence packages from code-vuln-hunter (CWE, taint path, guard evaluation)
-- Variant findings from code-variant-hunter (linked to originals)
+Dispatch `code-vuln-verifier` with `agent/skills/code-finding-verification/SKILL.md`.
+
+Provide:
+- All findings from Phase 3 (confirmed + suspicious)
+- Source code paths for each finding (the slice paths and the canonical file locations)
 - CWE pattern references matching each finding's defect family
-- Build system configuration for compile-time flag evaluation
+- Build system configuration for compile-time flag evaluation (Makefiles, CMakeLists,
+  configure scripts, feature flags)
 
-On return:
+The verifier's job is aggressive FP elimination. False positives are expected in any
+AI-assisted vulnerability pipeline. A killed finding is a good outcome -- it means the
+verification stage is doing its job.
+
+The verifier:
+- Traces the full entry-to-sink path for each finding, reading source directly
+- Evaluates whether guards actually prevent the claimed attack
+- Checks compile-time flags that might disable the vulnerable path
+- Checks whether the function is reachable from an external entry point
+- Produces a disposition for each finding: confirmed, downgraded (with new severity),
+  or killed (with detailed reasoning)
+
+#### Agent B: Variant Scanning
+
+Dispatch `code-variant-hunter` with `agent/skills/code-variant-analysis/SKILL.md`.
+
+Provide:
+- Confirmed findings with their abstract bug patterns (CWE, taint path shape, guard
+  failure type, code pattern signature)
+- Candidate file list: same language, classification `medium` or above
+- CWE pattern references from `agent/references/code-vuln-patterns/` matching each
+  finding's CWE
+- Threat model summary (trust boundaries for quick reachability checks)
+
+The variant hunter:
+- Extracts the abstract pattern from each confirmed finding
+- Searches the codebase for functions matching the same pattern shape
+- Evaluates whether each candidate has the same guard failure
+- Records variant findings with references back to the original
+
+**Parallel dispatch**: Agent A and Agent B are dispatched simultaneously. They have no
+data dependency on each other -- the verifier works from the Phase 3 finding list, and the
+variant hunter works from confirmed findings plus the codebase.
+
+#### Multi-Perspective Voting
+
+If the verifier and variant hunter produce conflicting assessments of a finding (one
+confirms, the other produces evidence against), dispatch a third agent with both
+perspectives and the source code. The third agent evaluates both arguments against the
+code and produces a reasoned disposition. Majority vote (2 of 3) determines the final
+disposition.
+
+This should be rare -- the verifier evaluates existing findings while the variant hunter
+scans for new ones. Conflicts arise only when the variant hunter finds evidence that
+contradicts a Phase 3 finding (e.g., discovers a guard the original hunter missed).
+
+#### On return from both agents:
+
 ```bash
-# Update finding statuses based on verification results
-# Confirmed findings: status stays "confirmed"
-# Downgraded: update severity via assess.py
-# Killed (false positive): update status to "killed" with reasoning
+# Record verification results (updates existing findings)
 ./scripts/assess.py record-finding code-vuln-verifier <updated-finding-json>
+# Record variant findings (new findings)
+./scripts/assess.py record-finding code-variant-hunter <variant-finding-json>
 ```
 
 **Pre-report deduplication:**
 Before dispatching report-writer, check for duplicate findings (same `canonical_location` and
-similar `defect_family` across hunter and variant-hunter):
+similar `defect_family` across hunter and variant-hunter prefixes):
 ```bash
 ./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"
 ```
@@ -379,26 +453,98 @@ the `report-findings` endpoint which includes both code and web findings.
 jq '.current_phase = "complete"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
 ```
 
-## Agent Roster — Code Analysis
+## Agent Roster -- Code Analysis
 
 | Agent | Role | Phase |
 |-------|------|-------|
-| `code-architect` | Architecture recon, threat modeling, file classification | Phase 1 |
-| `code-context-builder` | Function-level context extraction with call graphs and data flow | Phase 2 (parallel per module) |
-| `code-vuln-hunter` | Deep vulnerability analysis with constrained attacker persona | Phase 3 (batched, parallel) |
-| `code-variant-hunter` | Systematic variant scanning across codebase | Phase 4 (parallel per finding) |
-| `code-vuln-verifier` | FP elimination via full entry-to-sink traces | Phase 5 |
-| `report-writer` | Final report generation (reused from web engagement) | Phase 5 |
+| `code-architect` | Architecture recon, threat modeling, call graph, attack hypotheses | Phase 1 |
+| `code-slicer` | Mechanical source code slice assembly | Phase 2 (parallel per item) |
+| `code-vuln-hunter` | Deep vulnerability analysis with TOB-style methodology | Phase 3 (batched, parallel) |
+| `code-variant-hunter` | Systematic variant scanning for confirmed bug patterns | Phase 4 (parallel with verifier) |
+| `code-vuln-verifier` | FP elimination with devil's advocate verification | Phase 4 (parallel with variant) |
+| `report-writer` | Final report generation (reused from web engagement) | Phase 4 (after verify) |
 
-## Finding Prefixes — Code Analysis
+## Finding Prefixes -- Code Analysis
 
 | Agent | Prefix | Example |
 |-------|--------|---------|
 | code-architect | CA | FINDING-CA-001 |
-| code-context-builder | CB | FINDING-CB-001 |
+| code-slicer | CS | FINDING-CS-001 |
 | code-vuln-hunter | CH | FINDING-CH-001 |
 | code-variant-hunter | CV | FINDING-CV-001 |
 | code-vuln-verifier | VF | (updates only, no new findings) |
+
+## Dispatch Context Template
+
+Every code analysis dispatch must include:
+- **Agent identity** and **repository name**
+- **Current phase** and **specific task objective**
+- **Which skill to load** (from `agent/SKILL.md`)
+- **For Phase 1**: full file listing, project docs, git churn data
+- **For Phase 2**: queue items (attack hypotheses), call graph excerpt showing callee chain,
+  repo root path, ctags path
+- **For Phase 3**: source code slice PATH (not JSON, not context ID), call graph excerpt,
+  threat model summary, attack hypotheses for this batch, CWE pattern refs, adversarial
+  framing preamble
+- **For Phase 4 verifier**: finding list with source code paths, CWE pattern refs, build
+  system configuration
+- **For Phase 4 variant**: confirmed findings with abstract patterns, candidate file list,
+  CWE pattern refs, threat model summary
+
+### Pre-Dispatch Checklist
+
+Before every dispatch, verify:
+
+- [ ] Agent identity named and repository specified
+- [ ] Current phase stated with specific task objective (not just "analyze this")
+- [ ] Skill to load identified from `agent/SKILL.md`
+- [ ] For Phase 3: CWE pattern references selected via slot-type mapping table
+- [ ] For Phase 3: Attack hypotheses included for functions in this batch
+- [ ] For Phase 3: Adversarial framing preamble included (with actual entry point and chain)
+- [ ] For Phase 3: Source code slice path included (NOT context ID, NOT JSON metadata)
+- [ ] Call graph excerpt included for Phase 2/3 dispatches
+- [ ] Log checked for duplicate dispatch -- never dispatch same agent for same item twice
+
+DEDUP: Check the analysis queue and dispatch log before every dispatch. Never dispatch the same
+agent for the same item or file batch twice. If re-analysis is needed (e.g., after slice
+expansion), state the new context explicitly so the agent knows this is a re-dispatch, not a
+duplicate.
+
+PARALLEL: Independent items -> parallel (Phase 2 slicing, Phase 4 verify vs variant).
+Dependent items -> sequential (Phase 3 batch depends on Phase 2 slice).
+
+## Session Resumption
+
+On start or when resuming inside a code analysis engagement:
+```bash
+cat "$DIR/scope.json"                              # Current phase
+./scripts/assess.py code-coverage                  # File classification + analysis coverage
+./scripts/assess.py code-dispatch stats             # Queue state (pending/processing/done/needs-context)
+./scripts/assess.py fetch findings                  # Existing findings
+```
+
+Resume from the current phase. If `code-dispatch stats` shows `processing` items, they were
+interrupted -- reset stale items with `./scripts/assess.py code-dispatch reset-stale 10` and
+re-dispatch. If `needs-context` items exist, assemble additional slices and re-queue them.
+
+Phase-specific resume actions:
+- **Phase 1 (classify-map)**: Check if call graph and attack hypotheses exist in analysis-state/.
+  If missing, the architect dispatch was interrupted. Re-dispatch.
+- **Phase 2 (slice)**: Check which queue items have slice files. Resume slicing for items
+  without slices.
+- **Phase 3 (hunt)**: Check queue stats. Reset stale items and resume the work-buffer loop.
+- **Phase 4 (verify-variant)**: Check if both verifier and variant hunter have returned.
+  Resume whichever is incomplete.
+
+## Coverage Communication
+
+After each phase transition, display:
+```
+Code Analysis: [x] Ingest  [x] Classify+Map  [>] Slice  [ ] Hunt  [ ] Verify+Variant
+[coverage] 45/687 files critical | 89 high | 203 medium | 112 low | 238 skipped
+[queue] 0 pending | 0 processing | 0 done | 0 needs-context
+[findings] 0 confirmed | 0 suspicious
+```
 
 ## Integration with Web Engagement
 
@@ -414,83 +560,39 @@ When source code is obtained mid-engagement (exposed .git, source maps, backup d
 - `assessment_attack_chains` link code findings to web findings when the same endpoint is affected
 - Code surfaces inform exploit-developer dispatches during web testing
 
-## Coverage Communication
+## Operator Boundary -- Orchestration, Not Authorship
 
-After each phase transition, display:
-```
-Code Analysis: [x] Ingest  [x] Classify  [>] Context  [ ] Analyze  [ ] Variant  [ ] Verify
-[coverage] 45/687 files critical | 89 high | 203 medium | 112 low | 238 skipped
-[queue] 0 pending | 0 processing | 0 done | 0 needs-context
-[findings] 0 confirmed | 0 suspicious
-```
-
-## Dispatch Context Template
-
-Every code analysis dispatch must include:
-- **Agent identity** and **repository name**
-- **Current phase** and **specific task objective**
-- **Which skill to load** (from `agent/SKILL.md`)
-- **CWE pattern references** matching the dispatch context's slot types (Phase 3/4/5)
-- **Threat model summary** (trust boundaries, entry points, slot types)
-- **Module being analyzed** (for Phase 2/3 dispatches)
-- **Prior findings relevant** to this dispatch (for Phase 4/5)
-
-### Pre-Dispatch Checklist
-
-Before every dispatch, verify:
-
-- [ ] Agent identity named and repository specified
-- [ ] Current phase stated with specific task objective (not just "analyze this")
-- [ ] Skill to load identified from `agent/SKILL.md`
-- [ ] CWE pattern references selected from slot-type mapping table (Phase 3) or from finding's CWE (Phase 4/5)
-- [ ] Threat model summary included (trust boundaries, entry points, high-value targets)
-- [ ] Module/file scope for this dispatch defined (not "everything")
-- [ ] Prior findings included for Phase 4/5 dispatches (finding slugs, CWEs, affected functions)
-- [ ] Log checked for duplicate dispatch — never dispatch same agent for same module/batch twice
-
-DEDUP: Check the analysis queue and dispatch log before every dispatch. Never dispatch the same
-agent for the same module or file batch twice. If re-analysis is needed (e.g., after context
-expansion), state the new context explicitly so the agent knows this is a re-dispatch, not a duplicate.
-
-## Session Resumption
-
-On start or when resuming inside a code analysis engagement:
-```bash
-cat "$DIR/scope.json"                              # Current phase
-./scripts/assess.py code-coverage                  # File classification + analysis coverage
-./scripts/assess.py code-dispatch stats             # Queue state (pending/processing/done/needs-context)
-./scripts/assess.py fetch findings                  # Existing findings
-```
-
-Resume from the current phase. If `code-dispatch stats` shows `processing` items, they were
-interrupted — reset stale items with `./scripts/assess.py code-dispatch reset-stale 10` and
-re-dispatch. If `needs-context` items exist, expand context and re-queue them.
-
-## Operator Boundary — Orchestration, Not Authorship
-
-The operator is an orchestrator. Subagents are the readers, analysts, and context authors.
-When this boundary is violated — when the operator reads source to build payloads, hand-edits
-context JSON, or makes vulnerability judgments — operator context bloats, quality gating
+The operator is an orchestrator. Subagents are the readers, analysts, and slice assemblers.
+When this boundary is violated -- when the operator reads source to build payloads, hand-edits
+slice files, or makes vulnerability judgments -- operator context bloats, quality gating
 degrades, and the engagement produces the exact failure modes seen in prior runs.
 
 **The operator's job is metadata and coordination:**
 - Fetch file lists, classifications, queue stats, and coverage from the backend
-- Provide repo paths, tags paths, threat model summaries, and module file lists to subagents
+- Provide repo paths, tags paths, call graph excerpts, threat model summaries, and attack
+  hypotheses to subagents
 - Record subagent outputs via `assess.py` after they pass quality gates
-- Gate phase transitions on mandatory checklists — reject and re-dispatch when gates fail
+- Gate phase transitions on mandatory checklists -- reject and re-dispatch when gates fail
 - Manage the analysis queue (fetch, dispatch, done, reset-stale)
 - Review coverage gaps and decide whether to re-dispatch or accept
+- Extract call graph excerpts from analysis-state/ for dispatch context
 
 **Source reading belongs to subagents** because they have the domain context to interpret what
 they read. When the operator pre-reads source, it duplicates work without the domain benefit,
 filling the context window with code the operator will never analyze.
 
-**Context authoring belongs to code-context-builder** because context slices require structured
-sink/guard/data-flow annotations that come from reading and understanding the code. When the
-operator hand-edits context JSON (e.g., for context expansion), the annotations are missing
-or shallow, which degrades Phase 3 hunter accuracy.
+**Slice assembly belongs to code-slicer** because assembling a useful slice requires
+understanding which callees matter, which type definitions are needed, and where error
+handling paths diverge. When the operator hand-assembles slices, critical code is missed.
 
 **Vulnerability judgment belongs to hunter and verifier** because disposition decisions (finding,
 clean, suspicious) require the constrained attacker persona, CWE pattern references, and
 taint-path evaluation that those agents are built for. Operator-side analysis skips this
 methodology and produces unreliable verdicts.
+
+## macOS/zsh Compatibility
+
+- Use absolute paths: `/usr/bin/curl`, `/bin/cat`, `/usr/bin/grep`, etc.
+- Do NOT use `grep -P` (Perl regex). Use `grep -E` (extended) or `rg` instead.
+- HEREDOC: Use unquoted delimiter (`<< EOF`), NOT single-quoted (`<< 'EOF'`).
+- New files: use bash commands (mkdir, cat >, echo >). Existing files: use Edit tool.

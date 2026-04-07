@@ -10,7 +10,7 @@ origin: AI Threat Hunting
 
 - Phase 1 of code analysis pipeline. This is the entry point before any vulnerability analysis begins.
 - When a new repository or codebase needs classification, threat modeling, and prioritization before deep review.
-- Must run to completion before dispatching code-context-building. Every subsequent phase depends on the file classification and module map produced here.
+- Must run to completion before dispatching code-slicing. Every subsequent phase depends on the file classification, call graph, and attack hypotheses produced here.
 
 ## Tools
 
@@ -212,6 +212,101 @@ priority = classification_base + git_churn_bonus + entry_point_proximity + past_
 
 Files scoring 50+ are dispatched first. Files scoring 30-49 are second wave. Files below 30 are analyzed only if time permits.
 
+### Step 11: Build Cross-Module Call Graph
+
+The call graph is the navigational backbone for the entire pipeline. Without it,
+the hunter cannot trace multi-function vulnerability chains across file boundaries.
+
+Using ctags + grep:
+
+1. **Forward trace from entry points** (identified in Step 7):
+   For each entry point function:
+   a. Read the function body
+   b. Identify all function calls
+   c. For each call: resolve to definition via ctags (grep '^<function>\t' tags)
+   d. Record edge: {caller: {function, file, line}, callee: {function, file, line}}
+   e. Note which arguments carry untrusted data (from slot-type annotations in Step 10)
+   f. Note if edge crosses a module boundary (from Step 6)
+   g. Recurse into callee (up to depth 3 from entry point)
+
+2. **Reverse trace from critical sinks**:
+   For each critical/high file's exported functions:
+   a. grep/rg to find all callers across the codebase
+   b. Record reverse edges
+   c. This identifies which entry points can reach each critical function
+
+3. **Build adjacency list**:
+   ```json
+   {
+     "edges": [
+       {
+         "caller": {"function": "...", "file": "...", "line": N},
+         "callee": {"function": "...", "file": "...", "line": N},
+         "untrusted_args": ["arg1", "arg3"],
+         "crosses_module": true/false,
+         "edge_type": "direct|callback|vtable"
+       }
+     ],
+     "entry_points": [...],
+     "critical_sinks": [...]
+   }
+   ```
+
+4. **Mark indirect calls**:
+   Function pointer calls, vtable dispatches, and callback invocations are
+   harder to resolve. Mark these as edge_type "callback" or "vtable" and
+   list the possible targets if determinable from type analysis.
+
+Record every ctags/grep lookup used in audit_metadata.
+
+### Step 12: Identify Entry-Point Chains
+
+From the call graph, extract complete chains from entry points to sinks:
+
+1. For each entry point: depth-first traversal following callee edges
+2. At each node: check if it reaches a critical/high function
+3. If yes: record the complete chain with untrusted data annotations
+4. Rank chains by: sink severity x number of trust boundary crossings
+
+Output format:
+```json
+{
+  "chains": [
+    {
+      "entry": {"function": "handle", "file": "daemon.c", "trust_level": "untrusted_network"},
+      "path": [
+        {"function": "run_service", "file": "daemon.c", "untrusted_data": ["client_request"]},
+        {"function": "upload_pack", "file": "upload-pack.c", "untrusted_data": ["pack_request"]},
+        {"function": "receive_needs", "file": "upload-pack.c", "untrusted_data": ["shallow_lines"]}
+      ],
+      "sink": {"function": "assign_shallow_commits_to_refs", "file": "shallow.c"},
+      "sink_type": "integer_arithmetic",
+      "boundary_crossings": 2
+    }
+  ]
+}
+```
+
+### Step 13: Generate Attack Hypotheses
+
+For each entry-point chain with a high-severity sink, generate 2-3 specific
+attack hypotheses. These become the primary dispatch context for Phase 3 hunters.
+
+Each hypothesis specifies:
+1. **Entry point**: where untrusted data enters and what the attacker controls
+2. **Chain**: the sequence of functions through which data flows
+3. **Sink**: the specific operation that could cause harm
+4. **CWE**: the vulnerability class that would apply
+5. **Concrete scenario**: "If the attacker sends [specific input], it reaches [function]
+   where [specific operation] occurs without [specific guard], causing [specific harm]"
+
+Prioritize by:
+- entry_point_reachability: unauthenticated_network(4) > authenticated(3) > local_config(2) > CLI(1)
+- sink_severity: code_execution(4) > memory_corruption(3) > auth_bypass(3) > info_leak(2) > DoS(1)
+- guard_absence: no_guard(4) > partial(3) > most_paths(2) > all_paths(1)
+
+Score = reachability x severity x guard_absence. Include hypotheses scoring >= 16.
+
 ## Output Format
 
 Produce a structured architecture map containing:
@@ -220,6 +315,9 @@ Produce a structured architecture map containing:
 3. **Trust Boundary Map**: boundary name, entry function, data format, slot type
 4. **File Classification Table**: file path, classification tier, slot types, priority score
 5. **Analysis Queue**: ordered list of files/modules for Phase 2 dispatch, grouped into ~15-20K line batches
+6. **Call Graph**: JSON adjacency list with edges, entry points, and critical sinks. Written to analysis-state/call_graph.json.
+7. **Entry-Point Chains**: ranked list of complete data flow chains from entry to sink.
+8. **Attack Hypotheses**: prioritized list of specific vulnerability hypotheses. Each includes: entry point, chain, sink, CWE, concrete scenario, score. Written to analysis-state/attack_hypotheses.json.
 
 ## Extended Resources
 
