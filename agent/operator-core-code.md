@@ -1,16 +1,16 @@
 ## Activation
 
-This file defines the code analysis operator mode. To activate:
-
-1. **From an engagement directory**: Load this file alongside the engagement CLAUDE.md/AGENTS.md wrapper.
-   The engagement wrapper points to the agent workspace root; this file provides the code-specific workflow.
-2. **Standalone code review**: Create an engagement with `./scripts/init_engagement.sh <repo-url>`, then
-   tell the operator to load `agent/operator-core-code.md` instead of following the web recon workflow.
-3. **Mid-engagement**: When source code is obtained during a web engagement, the operator loads this file
-   to run code analysis phases in parallel with ongoing web testing.
-
 This file replaces the web-focused core loop from `operator-core.md` with a code-analysis-focused loop.
 Both modes share the same backend, findings table, and CLI tools.
+
+**When this file applies:**
+- Standalone code engagement (`scope.json` has `engagement_type: "code"`, `current_phase: "ingest"`)
+- Mid-engagement when source code is obtained (exposed `.git`, source maps, backup download) —
+  code analysis phases run in parallel with ongoing web testing
+
+**Expected state on entry:** engagement directory exists with `scope.json`, `source/` directory,
+and orchestrator backend reachable. The operator reads `scope.json` to determine the current phase
+and resumes from there.
 
 ---
 
@@ -187,8 +187,9 @@ The slicer:
 2. Resolves type definitions, macros, and constants needed to understand the code
 3. Includes error handling paths (catch blocks, goto cleanup, defer statements)
 4. Marks unresolvable external dependencies as UNRESOLVED with a note
-5. Outputs: a slice file in `analysis-state/` containing actual source code with
-   `// FILE: <path> LINES: <start>-<end>` markers between sections
+5. Outputs: a slice file at `tools/analysis-state/slices/<function_name>.slice`
+   containing actual source code with `--- <SECTION>: <name> | <path>:<start>-<end> ---`
+   markers between sections
 
 The slicer does NOT:
 - Annotate code with JSON metadata
@@ -213,12 +214,14 @@ Soft requirements (note and decide):
 - [ ] Cross-module callees resolved at least one level deep
 
 ```bash
-# Record slice location for Phase 3 dispatch
-# Slices live in analysis-state/ as plain text files
-ls "$DIR/tools/analysis-state/slice-*.txt"
-# Update queue status
-./scripts/assess.py code-dispatch done "id1,id2,..." sliced
-# Check progress across all items
+# Record slice in the manifest (local file, no backend call needed)
+# Do NOT call code-dispatch done here -- queue items stay pending for Phase 3 to claim.
+./scripts/assess.py slice-manifest record <queue_item_id> <function_name> \
+    tools/analysis-state/slices/<function_name>.slice \
+    --files-included <N> --line-count <N> \
+    --unresolved dep1 dep2  # optional: list unresolved external refs
+# Check progress -- manifest entries vs total queue items
+./scripts/assess.py slice-manifest stats
 ./scripts/assess.py code-dispatch stats
 ```
 
@@ -228,7 +231,7 @@ deep callees, or split by trust boundary crossings. The slicer decides the split
 provides the size constraint.
 
 **Phase 2 exit gate -- ALL of the following must be true before transitioning:**
-- [ ] Every queued attack hypothesis has a corresponding slice in analysis-state/
+- [ ] Every queued attack hypothesis has an entry in `slice-manifest.json` with a valid slice path
 - [ ] Every slice passed the mandatory quality gate
 - [ ] No UNRESOLVED markers on security-critical callees (sinks, auth checks, allocators)
       unless the dependency is genuinely external
@@ -249,20 +252,24 @@ to a slice file, a call graph excerpt for navigation, and attack hypotheses to t
 full filesystem access to trace beyond the slice when needed.
 
 ```bash
-# Check queue
+# Check queue -- items should still be pending (Phase 2 did NOT mark them done)
 ./scripts/assess.py code-dispatch stats
 
-# Reset stale items
+# Reset stale items from any interrupted Phase 2 slicing
 ./scripts/assess.py code-dispatch reset-stale 10
 
-# Fetch batch for analysis
+# Fetch batch for analysis -- this claims pending items for the hunter
 ./scripts/assess.py code-dispatch fetch 10 code-vuln-hunter
+
+# For each fetched queue item, look up its slice path in the manifest
+./scripts/assess.py slice-manifest lookup <queue_item_id>
+# Returns JSON with: target_function, slice_path, line_count, unresolved_refs
 ```
 
 Dispatch `code-vuln-hunter` with `agent/skills/code-vulnerability-analysis/SKILL.md` and:
 
-- **Source code slice PATH** -- the actual file path in analysis-state/, not a JSON blob, not a
-  context ID. The hunter reads the slice directly.
+- **Source code slice PATH** -- looked up from `slice-manifest.json` using the queue item ID.
+  The path points to a `.slice` file in `tools/analysis-state/slices/`. The hunter reads it directly.
 - **Call graph excerpt** -- the subgraph for the target module showing entry-point chains and
   trust boundary crossings. The hunter uses this to understand where data flows and which
   cross-module calls matter.

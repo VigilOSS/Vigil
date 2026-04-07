@@ -13,7 +13,7 @@ This is a white-box engagement. You have full access to read and analyze all sou
 Read `scope.json` (with `source_repos` array) before starting. Confirm:
 
 - Repository path and name from the active repo record
-- Current analysis phase (ingest/classify/context/analyze/variant/verify)
+- Current analysis phase (ingest/classify-map/slice/hunt/verify-variant)
 - Which files are in scope for your current dispatch (module, classification level, queue items)
 
 Limit analysis to files within the scoped repository -- request operator approval before

@@ -10,6 +10,8 @@ TARGET=""
 HOSTS_RAW=""
 AUTH_MODE=""
 EXPLOIT_POLICY=""
+MODE="web"
+REPO=""
 
 normalize_target() {
   local raw="$1"
@@ -28,25 +30,33 @@ The positional target is optional when --hosts is provided; the first
 host becomes the target automatically.
 
 Options:
+  --mode web|code                    Engagement type (default: web)
   --hosts host1,host2,*.domain,...   Scope list. Use *.domain for subdomain enum.
   --auth-mode none|auth_json|manual|proxy_capture
   --exploit-policy pause|full_send|selected
+  --repo /path/to/repo|https://...   Repository path or clone URL (code mode)
 
 Any host NOT in --hosts is out of scope. Wildcard entries (*.example.com) enable
 subdomain enumeration and allow discovered subdomains of that domain in scope.
 
 Examples:
-  # Single host
+  # Web engagement — single host
   ./scripts/init_engagement.sh https://example.com
 
-  # Multiple hosts — only these are in scope
+  # Web engagement — multiple hosts
   ./scripts/init_engagement.sh --hosts app.example.com,api.example.com,admin.example.com
 
-  # Multiple hosts with subdomain enum on one domain
-  ./scripts/init_engagement.sh --hosts app.example.com,*.api.example.com,other.com
-
-  # Single host with subdomain enum
+  # Web engagement — subdomain enum
   ./scripts/init_engagement.sh --hosts example.com,*.example.com
+
+  # Code analysis — local repository
+  ./scripts/init_engagement.sh --mode code --repo /path/to/repo
+
+  # Code analysis — clone URL
+  ./scripts/init_engagement.sh --mode code --repo https://github.com/org/repo
+
+  # Code analysis — positional shorthand
+  ./scripts/init_engagement.sh --mode code /path/to/repo
 EOF
 }
 
@@ -308,6 +318,16 @@ require_interactive_or_die() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --mode)
+      MODE="${2:-}"
+      [[ -n "$MODE" ]] || { echo "--mode requires a value" >&2; exit 1; }
+      shift 2
+      ;;
+    --repo)
+      REPO="${2:-}"
+      [[ -n "$REPO" ]] || { echo "--repo requires a value" >&2; exit 1; }
+      shift 2
+      ;;
     --hosts)
       HOSTS_RAW="${2:-}"
       [[ -n "$HOSTS_RAW" ]] || { echo "--hosts requires a value" >&2; exit 1; }
@@ -338,31 +358,94 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Derive target from --hosts when no positional target given
-if [[ -z "$TARGET" && -n "$HOSTS_RAW" ]]; then
-  # Use the first non-wildcard host, falling back to first host with *. stripped
-  TARGET=$(python3 - <<'PY' "$HOSTS_RAW"
+case "$MODE" in
+  web|code) ;;
+  *)
+    echo "--mode must be one of: web, code" >&2
+    exit 1
+    ;;
+esac
+
+# --- Code mode: resolve repo, force safe defaults for web-only fields ---
+if [[ "$MODE" == "code" ]]; then
+  # Accept repo from --repo or the positional arg
+  if [[ -n "$REPO" && -n "$TARGET" ]]; then
+    echo "In code mode, provide the repo via --repo or as a positional arg, not both" >&2
+    exit 1
+  fi
+  if [[ -z "$REPO" && -n "$TARGET" ]]; then
+    REPO="$TARGET"
+    TARGET=""
+  fi
+  if [[ -z "$REPO" ]]; then
+    require_interactive_or_die "repo"
+    REPO="$(prompt_text "Repository path or clone URL")"
+  fi
+
+  # Derive a label from the repo path/URL for directory naming
+  REPO_NAME=$(python3 - <<'PY' "$REPO"
+import sys, os
+from urllib.parse import urlparse
+
+raw = sys.argv[1]
+parsed = urlparse(raw)
+if parsed.scheme in ("http", "https", "ssh", "git"):
+    name = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+else:
+    name = os.path.basename(os.path.abspath(raw))
+name = name.removesuffix(".git")
+print(name or "repo")
+PY
+  )
+
+  # Web-only fields: force safe defaults
+  HOSTS_RAW=""
+  AUTH_MODE="none"
+  if [[ -z "$EXPLOIT_POLICY" ]]; then
+    if [[ -t 0 ]]; then
+      EXPLOIT_POLICY="$(prompt_choice "Exploit policy" "pause" "pause" "full_send" "selected")"
+    else
+      EXPLOIT_POLICY="pause"
+    fi
+  fi
+fi
+
+# --- Web mode: resolve target, hosts, auth mode ---
+if [[ "$MODE" == "web" ]]; then
+  # Derive target from --hosts when no positional target given
+  if [[ -z "$TARGET" && -n "$HOSTS_RAW" ]]; then
+    TARGET=$(python3 - <<'PY' "$HOSTS_RAW"
 import sys
 raw = sys.argv[1]
 hosts = [h.strip() for h in raw.split(",") if h.strip()]
 non_wild = [h for h in hosts if not h.startswith("*.")]
 print(non_wild[0] if non_wild else hosts[0].removeprefix("*.") if hosts else "")
 PY
-  )
-fi
+    )
+  fi
 
-if [[ -z "$TARGET" ]]; then
-  require_interactive_or_die "target"
-  TARGET="$(prompt_text "Target URL or host")"
-fi
+  if [[ -z "$TARGET" ]]; then
+    require_interactive_or_die "target"
+    TARGET="$(prompt_text "Target URL or host")"
+  fi
 
-if [[ -z "$AUTH_MODE" ]]; then
-  if [[ -t 0 ]]; then
-    AUTH_MODE="$(prompt_choice "Auth mode" "none" "none" "auth_json" "manual" "proxy_capture")"
-  else
-    AUTH_MODE="none"
+  if [[ -z "$AUTH_MODE" ]]; then
+    if [[ -t 0 ]]; then
+      AUTH_MODE="$(prompt_choice "Auth mode" "none" "none" "auth_json" "manual" "proxy_capture")"
+    else
+      AUTH_MODE="none"
+    fi
+  fi
+
+  if [[ -z "$EXPLOIT_POLICY" ]]; then
+    if [[ -t 0 ]]; then
+      EXPLOIT_POLICY="$(prompt_choice "Exploit policy" "pause" "pause" "full_send" "selected")"
+    else
+      EXPLOIT_POLICY="pause"
+    fi
   fi
 fi
+
 case "$AUTH_MODE" in
   none|auth_json|manual|proxy_capture) ;;
   *)
@@ -371,13 +454,6 @@ case "$AUTH_MODE" in
     ;;
 esac
 
-if [[ -z "$EXPLOIT_POLICY" ]]; then
-  if [[ -t 0 ]]; then
-    EXPLOIT_POLICY="$(prompt_choice "Exploit policy" "pause" "pause" "full_send" "selected")"
-  else
-    EXPLOIT_POLICY="pause"
-  fi
-fi
 case "$EXPLOIT_POLICY" in
   pause|full_send|selected) ;;
   *)
@@ -389,10 +465,79 @@ esac
 cd "$ROOT_DIR"
 mkdir -p engagements
 
-TARGET_NORMALIZED=$(normalize_target "$TARGET")
+DATE=$(date +%Y-%m-%d)
+TIME=$(date +%H%M%S)
+START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-HOSTNAME_RAW=$(
-  TARGET="$TARGET_NORMALIZED" python3 - <<'PY'
+if [[ "$MODE" == "code" ]]; then
+  # Code mode: directory named after repo, no web target
+  DIR_LABEL=$(printf '%s' "$REPO_NAME" | tr '.:/' '-' | tr -cd '[:alnum:]-')
+  DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${DIR_LABEL}"
+  ENGAGEMENT_KEY="$(basename "$DIR")"
+  mkdir -p "$DIR/tools" "$DIR/downloads" "$DIR/scans" "$DIR/pids" "$DIR/sessions" "$DIR/source"
+
+  cat > "$DIR/scope.json" <<EOF
+{
+  "engagement_type": "code",
+  "repo": "${REPO}",
+  "repo_name": "${REPO_NAME}",
+  "hosts": [],
+  "exploit_policy": "${EXPLOIT_POLICY}",
+  "exploit_review_state": "pending",
+  "approved_findings": [],
+  "source_repos": [],
+  "status": "in_progress",
+  "current_phase": "ingest"
+}
+EOF
+
+  cat > "$DIR/log.md" <<EOF
+# Engagement Log
+
+- **Mode**: Code Analysis
+- **Repository**: ${REPO}
+- **Date**: ${DATE}
+- **Status**: In Progress
+- **Exploit Policy**: ${EXPLOIT_POLICY}
+
+---
+EOF
+
+  cat > "$DIR/findings.md" <<EOF
+# Findings
+
+- **Repository**: ${REPO}
+- **Engagement Date**: ${DATE}
+- **Finding Count**: 0
+
+---
+EOF
+
+  cat > "$DIR/report.md" <<EOF
+# Engagement Report
+
+- **Repository**: ${REPO}
+- **Engagement Date**: ${DATE}
+- **Status**: Pending — report not yet generated
+
+---
+EOF
+
+  cat > "$DIR/engagement.json" <<EOF
+{
+  "key": "${ENGAGEMENT_KEY}",
+  "repo": "${REPO}",
+  "repo_name": "${REPO_NAME}",
+  "created_at": "${START_TIME}"
+}
+EOF
+
+else
+  # Web mode: original behavior
+  TARGET_NORMALIZED=$(normalize_target "$TARGET")
+
+  HOSTNAME_RAW=$(
+    TARGET="$TARGET_NORMALIZED" python3 - <<'PY'
 import os
 from urllib.parse import urlparse
 
@@ -400,25 +545,20 @@ target = os.environ["TARGET"]
 parsed = urlparse(target)
 print(parsed.hostname or target)
 PY
-)
+  )
 
-# If no --hosts given, the parsed hostname is the sole host
-if [[ -z "$HOSTS_RAW" ]]; then
-  HOSTS_RAW="$HOSTNAME_RAW"
-fi
+  # If no --hosts given, the parsed hostname is the sole host
+  if [[ -z "$HOSTS_RAW" ]]; then
+    HOSTS_RAW="$HOSTNAME_RAW"
+  fi
 
-DATE=$(date +%Y-%m-%d)
-TIME=$(date +%H%M%S)
-START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  HOSTS_JSON="$(csv_to_json_array "$HOSTS_RAW")"
+  HOSTNAME_CLEAN=$(printf '%s' "$HOSTNAME_RAW" | tr '.:' '-' | tr -cd '[:alnum:]-')
+  DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${HOSTNAME_CLEAN}"
+  ENGAGEMENT_KEY="$(basename "$DIR")"
+  mkdir -p "$DIR/tools" "$DIR/downloads" "$DIR/scans" "$DIR/pids" "$DIR/sessions"
 
-HOSTNAME_CLEAN=$(printf '%s' "$HOSTNAME_RAW" | tr '.:' '-' | tr -cd '[:alnum:]-')
-DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${HOSTNAME_CLEAN}"
-ENGAGEMENT_KEY="$(basename "$DIR")"
-mkdir -p "$DIR/tools" "$DIR/downloads" "$DIR/scans" "$DIR/pids" "$DIR/sessions"
-
-HOSTS_JSON="$(csv_to_json_array "$HOSTS_RAW")"
-
-cat > "$DIR/scope.json" <<EOF
+  cat > "$DIR/scope.json" <<EOF
 {
   "hostname": "${HOSTNAME_RAW}",
   "hosts": ${HOSTS_JSON},
@@ -430,7 +570,7 @@ cat > "$DIR/scope.json" <<EOF
 }
 EOF
 
-cat > "$DIR/log.md" <<EOF
+  cat > "$DIR/log.md" <<EOF
 # Engagement Log
 
 - **Target**: ${TARGET_NORMALIZED}
@@ -443,7 +583,7 @@ cat > "$DIR/log.md" <<EOF
 ---
 EOF
 
-cat > "$DIR/findings.md" <<EOF
+  cat > "$DIR/findings.md" <<EOF
 # Findings
 
 - **Target**: ${TARGET_NORMALIZED}
@@ -453,7 +593,7 @@ cat > "$DIR/findings.md" <<EOF
 ---
 EOF
 
-cat > "$DIR/report.md" <<EOF
+  cat > "$DIR/report.md" <<EOF
 # Engagement Report
 
 - **Target**: ${TARGET_NORMALIZED}
@@ -463,12 +603,7 @@ cat > "$DIR/report.md" <<EOF
 ---
 EOF
 
-: > "$DIR/surfaces.jsonl"
-write_auth_scaffold "$DIR" "$AUTH_MODE" "$START_TIME"
-printf '[]\n' > "$DIR/sessions/index.json"
-printf '[]\n' > "$DIR/agent-registry.json"
-
-cat > "$DIR/engagement.json" <<EOF
+  cat > "$DIR/engagement.json" <<EOF
 {
   "key": "${ENGAGEMENT_KEY}",
   "target": "${TARGET_NORMALIZED}",
@@ -476,6 +611,12 @@ cat > "$DIR/engagement.json" <<EOF
   "created_at": "${START_TIME}"
 }
 EOF
+fi
+
+: > "$DIR/surfaces.jsonl"
+write_auth_scaffold "$DIR" "$AUTH_MODE" "$START_TIME"
+printf '[]\n' > "$DIR/sessions/index.json"
+printf '[]\n' > "$DIR/agent-registry.json"
 
 printf 'ORCHESTRATOR_BASE_URL=%q\n' "$(default_orchestrator_base_url)" > "$DIR/.orchestrator.env"
 
