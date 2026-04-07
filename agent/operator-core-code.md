@@ -44,7 +44,7 @@ analyzed or user signals stop:
    - **Phase 4 (Variant):** `code-variant-hunter` → `agent/skills/code-variant-analysis/SKILL.md`
    - **Phase 5 (Verify):** `code-vuln-verifier` → `agent/skills/code-finding-verification/SKILL.md`
 6. **HOST BASH FOR SOURCE READING** — Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work — Kali MCP is not needed for reading source files.
-7. **DISPATCH** — ALWAYS dispatch to subagent for analysis work. Operator handles mechanical pipeline: file ingestion, queue management, context expansion fetching, coverage tracking.
+7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis and context-building work. The operator's job is orchestration: fetching metadata, providing paths, recording outputs, gating quality, and managing the queue. Subagents read source files directly and produce structured outputs. Source reading, context authoring, and vulnerability judgment belong to subagents — the operator provides paths and metadata, not content.
 8. **RECORD FINDINGS IMMEDIATELY** — Code findings use the same `./scripts/assess.py record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
 9. **RECORD SURFACES** — Code-specific surface types: `parser_entry`, `protocol_handler`, `crypto_operation`, `auth_check`, `file_io`, `memory_allocator`. Record via `./scripts/assess.py record-surface`.
 10. **TRACK COVERAGE** — After each batch, run `./scripts/assess.py code-coverage`. Before entering Phase 5, verify the coverage gate passes with `./scripts/assess.py code-coverage --require-gate-pass` (all critical files analyzed, no unresolved needs-context).
@@ -128,22 +128,21 @@ and managing context-builder agents. Each sub-agent handles one module batch ind
 
 #### Step-by-step per module:
 
-**1. Prepare the dispatch context (operator-mechanical):**
+**1. Prepare the dispatch metadata (operator-mechanical):**
 ```bash
 # Fetch module's files with classifications and slot types
 ./scripts/assess.py fetch "code/files?module_id=<module-id>&limit=5000"
-
-# Read critical/high file contents (host-side)
-# Include ALL header files referenced by the module — struct definitions,
-# type aliases, and macro definitions are mandatory context
 ```
 
-**2. Assemble the dispatch payload:**
-- Module file list with classifications and slot-type annotations from Phase 1
+The context-builder reads source files, headers, and type definitions directly from the
+filesystem — provide the repo root path so it can navigate to the files itself.
+
+**2. Assemble the dispatch payload (metadata only):**
+- Module file list JSON with classifications and slot-type annotations from Phase 1
+- Source repository root path (builder reads files directly from this path)
+- Path to repo `tags` file for ctags lookups (if generated during ingest)
 - Threat model summary (trust boundaries, entry points, high-value targets)
-- Header files and type definitions as shared context — **do not skip these**
-- Path to repo `tags` file for ctags lookups
-- Cross-module boundary list from Phase 1 (which functions cross into other modules)
+- Cross-module boundary list from Phase 1 (function names and target modules, not source content)
 
 **3. Dispatch context-builder:**
 ```bash
@@ -151,14 +150,21 @@ and managing context-builder agents. Each sub-agent handles one module batch ind
 # If a module has 40K lines, split by subdirectory or logical file group.
 ```
 
-**4. On return — quality check before recording:**
+**4. On return — MANDATORY quality gate before recording:**
 
-Before recording context slices, verify the return:
+Before recording context slices, verify the return. If ANY required item below fails,
+**REJECT the batch and re-dispatch the context-builder.** Record only outputs that pass all
+mandatory checks — degraded context slices produce missed vulnerabilities in Phase 3.
+
+Hard requirements (reject on failure):
 - [ ] Every critical/high function in the batch has a context slice
-- [ ] Context slices include sink annotations (not just call graphs)
+- [ ] `audit_metadata.cross_ref_usage` is present on every context slice (documents exact ctags/grep lookups used)
+- [ ] Sink annotations are present for functions with identified sinks (not just call graphs)
 - [ ] Guard annotations are present for functions with identified sinks
+- [ ] Slot types use the canonical Shannon names (NETWORK-INPUT, PROTOCOL-FIELD, CMD-ARGUMENT, URL-COMPONENT, FILE-CONTENT, CALLBACK-DATA, ENV-VARIABLE) — NOT vulnerability-class labels
+
+Soft requirements (note and decide):
 - [ ] Cross-module calls are annotated with callee signatures and slot types
-- [ ] `audit_metadata.cross_ref_usage` is present (documents how cross-refs were resolved)
 - [ ] `#### Coverage Gaps` section reviewed — any blocker that would cause Phase 3 to miss a vulnerability
 
 If the context-builder reports gaps in critical modules (unresolved callees for security-relevant
@@ -190,6 +196,16 @@ After ALL module batches return, review the aggregate coverage gaps:
 **Size management:** Each dispatch targets ~15-20K lines of source code. Split large modules
 by subdirectory or file group. Prefer splitting at logical boundaries (e.g., separate the
 parser from the handler) rather than arbitrary file count splits.
+
+**Phase 2 exit gate — ALL of the following must be true before transitioning:**
+- [ ] Every dispatched context-builder has returned (no `active` agents in the registry for this phase)
+- [ ] Every returned batch passed the mandatory quality gate (step 4 above)
+- [ ] All critical modules have context slices with sink, guard, and `audit_metadata` annotations
+- [ ] Coverage gaps in critical modules reviewed and resolved or explicitly accepted
+- [ ] Analysis queue populated with prioritized items from all module batches
+
+Wait for all context-builder dispatches to return and resolve all mandatory quality checks
+before transitioning to Phase 3.
 
 ```bash
 jq '.current_phase = "analyze"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
@@ -251,10 +267,18 @@ On return:
 ```
 
 **Context expansion loop:** When items return as `needs-context`:
-1. Read the requested functions/files (host-side)
-2. Append to the context slice
-3. Re-queue the item
-4. Re-dispatch in next batch
+1. Review the expansion request — what function/file is needed and why
+2. If the hunter could have resolved this with a simple cross-file read (single function lookup),
+   note it as a hunter process gap — future dispatches should remind the hunter to self-resolve
+   simple lookups via grep/ctags before requesting expansion
+3. If the context slice itself is structurally incomplete (missing callee signatures, missing
+   data flow through a cross-module boundary, missing macro expansions), **re-dispatch
+   code-context-builder** with the original context slice and the expansion request. The builder
+   regenerates/extends the context slice with the additional code.
+4. Record the updated context slice and re-queue the item for the next hunter batch
+
+Context authoring is context-builder work. The operator provides the expansion request and
+re-dispatches; the builder reads the source and produces the updated structured annotations.
 
 Repeat until analysis queue is empty.
 
@@ -321,7 +345,7 @@ Exit: All confirmed findings have been variant-checked. Scan results recorded. T
 If the gate fails, resolve remaining items before proceeding:
 - `needs-context` items: expand context and re-dispatch to Phase 3
 - Unanalyzed critical files: dispatch context-builder (Phase 2) then hunter (Phase 3)
-- Do NOT skip the gate
+- The gate must pass before proceeding — unresolved items become permanently invisible to the report
 
 **Verification dispatch:**
 
@@ -441,3 +465,32 @@ cat "$DIR/scope.json"                              # Current phase
 Resume from the current phase. If `code-dispatch stats` shows `processing` items, they were
 interrupted — reset stale items with `./scripts/assess.py code-dispatch reset-stale 10` and
 re-dispatch. If `needs-context` items exist, expand context and re-queue them.
+
+## Operator Boundary — Orchestration, Not Authorship
+
+The operator is an orchestrator. Subagents are the readers, analysts, and context authors.
+When this boundary is violated — when the operator reads source to build payloads, hand-edits
+context JSON, or makes vulnerability judgments — operator context bloats, quality gating
+degrades, and the engagement produces the exact failure modes seen in prior runs.
+
+**The operator's job is metadata and coordination:**
+- Fetch file lists, classifications, queue stats, and coverage from the backend
+- Provide repo paths, tags paths, threat model summaries, and module file lists to subagents
+- Record subagent outputs via `assess.py` after they pass quality gates
+- Gate phase transitions on mandatory checklists — reject and re-dispatch when gates fail
+- Manage the analysis queue (fetch, dispatch, done, reset-stale)
+- Review coverage gaps and decide whether to re-dispatch or accept
+
+**Source reading belongs to subagents** because they have the domain context to interpret what
+they read. When the operator pre-reads source, it duplicates work without the domain benefit,
+filling the context window with code the operator will never analyze.
+
+**Context authoring belongs to code-context-builder** because context slices require structured
+sink/guard/data-flow annotations that come from reading and understanding the code. When the
+operator hand-edits context JSON (e.g., for context expansion), the annotations are missing
+or shallow, which degrades Phase 3 hunter accuracy.
+
+**Vulnerability judgment belongs to hunter and verifier** because disposition decisions (finding,
+clean, suspicious) require the constrained attacker persona, CWE pattern references, and
+taint-path evaluation that those agents are built for. Operator-side analysis skips this
+methodology and produces unreliable verdicts.

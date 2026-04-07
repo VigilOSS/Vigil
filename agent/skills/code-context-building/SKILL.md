@@ -31,8 +31,8 @@ Audit trail requirement:
 
 ## Division of Labor
 
-- **Operator** provides: module file list, header snippets from Phase 1, classification tier and slot-type annotations per file, priority ordering.
-- **Builder** reads: full source code for assigned module batch plus relevant headers/type definitions. Produces: context slices with call graphs, data flow annotations, guard catalogs, and a prioritized analysis queue.
+- **Operator** provides: module file list with classifications and slot-type annotations, source repository root path, ctags tags file path, threat model summary, cross-module boundary list, and priority ordering. The operator provides metadata and paths, not source content.
+- **Builder** reads: full source code for the assigned module batch directly from the filesystem, plus relevant headers and type definitions found by following `#include` directives. Produces: context slices with call graphs, data flow annotations, guard catalogs, and a prioritized analysis queue.
 
 ## Methodology
 
@@ -106,7 +106,7 @@ For calls to functions outside the current batch:
 - Record the callee function signature (from headers, type definitions, or ctags lookup)
 - Record the slot-type annotations on parameters (inherited from architecture mapping)
 - Mark as `cross_module_call` with the target module name
-- Do NOT trace into the callee body — that will happen when its module batch is processed
+- Record the callee's signature and slot types at the boundary — tracing into the body happens when the callee's module batch is processed
 - If the callee is in a system library or third-party dependency, record its known behavior (e.g., `memcpy(dst, src, n)` — copies n bytes, no bounds check)
 
 ### Step 5: Trace Data Flow and Annotate Guards and Sinks

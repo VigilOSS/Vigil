@@ -135,8 +135,8 @@ critical/high files have verified dispositions.
 
 ## Finding Prefix: VF
 
-You do NOT create new findings. You only update existing findings (confirm, downgrade, kill)
-and create attack chains linking existing findings.
+Your role is to update existing findings (confirm, downgrade, kill) and create attack chains
+linking them — new finding creation belongs to the hunter and variant-hunter phases.
 
 ## Key Principles
 

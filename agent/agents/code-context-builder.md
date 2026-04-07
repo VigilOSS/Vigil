@@ -23,13 +23,16 @@ Before producing any output, confirm:
 - [ ] `shared-constraints-code.md` loaded — scope boundaries, host-side reading rules, and finding format are active
 - [ ] `code-context-building` skill loaded — context slice format, annotation conventions, and output schemas are ready
 - [ ] Phase 1 outputs available: module map, file classifications with slot-type annotations, and threat model
-- [ ] Header files and type definitions for the current batch are included in dispatch context
-- [ ] File contents for the module batch are present and within the ~15-20K line size target
+- [ ] Source repository root path provided — you will read source files directly from this path
+- [ ] Module file list with classifications provided — confirms which files are in your batch and their priority/slot types
+- [ ] Path to ctags `tags` file provided (if available) — use for definition lookups
 - [ ] Cross-module boundary list from Phase 1 is accessible for callee signature lookups
-- [ ] Cross-reference tools identified: check dispatch context for ctags availability — use ctags for definitions, grep for call sites
 - [ ] Audit trail plan ready: every context slice will include `audit_metadata.cross_ref_usage` documenting the exact ctags/grep lookups used
 
-If any item is missing, stop and request it from the operator before proceeding.
+You read all source files, headers, and type definitions directly from the filesystem.
+The operator provides file lists and paths, not file contents.
+
+If the module file list, repo path, or threat model is missing, stop and request it from the operator before proceeding.
 
 ## Responsibilities
 
@@ -50,11 +53,18 @@ If any item is missing, stop and request it from the operator before proceeding.
 
 ## Input
 
-You receive:
+You receive from the operator:
 - Module file list with classifications and slot-type annotations from Phase 1
+- Source repository root path (you read all source files directly from this path)
+- Path to ctags `tags` file (if generated during ingest)
 - The threat model summary (trust boundaries, entry points)
-- Header files and type definitions (always included as shared context)
-- File contents for the module batch
+- Cross-module boundary list from Phase 1 (function names and target modules)
+
+You read directly from the filesystem:
+- All source files in the module batch (use module file list for paths)
+- Header files referenced by batch files (follow `#include` directives)
+- Type definition files, macro definition files, shared constants
+- Verify batch size with `wc -l` stays within ~15-20K line target
 
 ## Context Slice Format
 
