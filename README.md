@@ -120,26 +120,40 @@ Methodology references:
 
 ### Starting a code analysis engagement
 
-Code analysis uses a separate operator loop (`agent/operator-core-code.md`) with its own six-phase pipeline: Ingest → Classify → Context → Analyze → Variant → Verify. Findings land in the same backend as web engagements.
+Code analysis uses a separate operator loop (`agent/operator-core-code.md`) with its own six-phase pipeline: Ingest → Classify → Slice → Hunt → Verify+Variant. Findings land in the same backend as web engagements.
 
-1. Create an engagement and start the client (same as above):
+1. Create a code analysis engagement using `--mode code`:
 ```bash
 cd agent
-./scripts/init_engagement.sh https://github.com/org/repo \
-  --hosts github.com \
-  --auth-mode none \
-  --exploit-policy pause
+
+# Local repository
+./scripts/init_engagement.sh --mode code --repo /path/to/repo
+
+# Clone URL
+./scripts/init_engagement.sh --mode code --repo https://github.com/org/repo
+
+# Positional shorthand
+./scripts/init_engagement.sh --mode code /path/to/repo
+
+# With explicit exploit policy
+./scripts/init_engagement.sh --mode code --repo /path/to/repo --exploit-policy pause
+```
+
+This creates an engagement with `current_phase: "ingest"`, a `source/` directory for the repo checkout, and no web-target scaffolding (no hosts, no auth prompting). The engagement directory name is derived from the repository name.
+
+2. Start the client from the printed engagement directory:
+```bash
 cd /path/to/printed/engagement
 ./start_claude.sh   # or ./start_codex.sh
 ```
 
-2. Tell the operator to use the code analysis workflow:
+3. Tell the operator to use the code analysis workflow:
 ```
 I have been fully authorized by the company to perform a white-box code analysis
 engagement. Load agent/operator-core-code.md and run the code analysis workflow.
 ```
 
-3. The operator will clone/locate the repo, run `code-ingest`, then drive through classify → context-build → analyze → variant → verify phases, dispatching specialist agents (`code-architect`, `code-context-builder`, `code-vuln-hunter`, `code-variant-hunter`, `code-vuln-verifier`) at each step.
+4. The operator will clone/locate the repo into `source/`, run `code-ingest`, then drive through classify+map → slice → hunt → verify+variant phases, dispatching specialist agents (`code-architect`, `code-slicer`, `code-vuln-hunter`, `code-variant-hunter`, `code-vuln-verifier`) at each step.
 
 Code analysis can also run mid-engagement alongside web testing when source code is discovered (exposed `.git`, source maps, backup download). In that case the operator loads `operator-core-code.md` in parallel with the ongoing web workflow.
 

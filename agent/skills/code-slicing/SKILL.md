@@ -158,8 +158,11 @@ Record final size and any trimming decisions in Assembly Metadata.
 
 ## Output Format
 
-1. **Slice files**: one `.md` file per queue item, written to `analysis-state/` directory
-2. **Assembly metadata**: JSON with file paths, line counts, callee depth, unresolved refs
+1. **Slice files**: one `.slice` file per queue item, written to `tools/analysis-state/slices/`
+   Canonical path: `tools/analysis-state/slices/<function_name>.slice`
+2. **Slice manifest entry**: the operator appends to `tools/analysis-state/slice-manifest.json`
+   after accepting the slice. Each entry records: queue_item_id, target_function, slice_path,
+   files_included, line_count, trimmed (bool), unresolved_refs (list)
 3. **Coverage report**: which queue items have slices, which failed
 
 ## Extended Resources
