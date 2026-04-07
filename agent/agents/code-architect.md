@@ -24,6 +24,7 @@ Before producing any output, confirm:
 - [ ] Project documentation (README, SECURITY.md, ARCHITECTURE.md, build files) is present in dispatch context
 - [ ] Full file listing from code-ingest is available with path, language, LOC, and file hash for every file
 - [ ] Git churn data attached (or confirmed unavailable)
+- [ ] Structural index checked — if `analysis-state/structural-index/` exists, it's loaded for call graph construction
 - [ ] Threat model output template is clear — you know the exact sections to produce
 
 If any item is missing, stop and request it from the operator before proceeding.
@@ -82,6 +83,10 @@ After file classification and module grouping, build the cross-module call graph
 This is the KEY navigational artifact for the entire pipeline — it enables multi-function
 reasoning in Phase 3 by showing how untrusted data flows across file and module boundaries.
 
+### Structural Index Consumption
+
+If a structural index exists at `analysis-state/structural-index/`, use it as the foundation for call graph construction. The structural index provides pre-computed function definitions, call sites, entry points, and imports via tree-sitter parsing. Use this data to construct the call graph more accurately — focus on security interpretation (trust boundaries, data flow direction, untrusted-data annotations) rather than manually extracting function signatures from source headers. When the structural index is available, cross-reference it with grep/ctags results to resolve ambiguities. The structural index provides the mechanical extraction; the architect provides the security semantics that tree-sitter cannot infer.
+
 ### Methodology
 1. For each entry point identified during classification:
    - Trace forward through function calls using ctags and grep
@@ -122,6 +127,8 @@ reasoning in Phase 3 by showing how untrusted data flows across file and module 
    Example: handle() -> run_service() -> upload_pack() -> receive_needs() -> assign_shallow()
 
 ## Attack Hypothesis Generation
+
+Attack hypotheses are guidance for hunters, not the sole work items. Every critical and high file enters the file analysis queue regardless of whether a hypothesis names it — hypotheses help hunters prioritize within files, but files without hypotheses are still fully analyzed during the unconstrained broad analysis pass. This prevents hypothesis anchoring where the analysis scope gets limited to what the architect predicted.
 
 For each entry-point chain that reaches a critical/high function through security-relevant
 sinks, generate 2-3 specific attack hypotheses.
@@ -205,7 +212,25 @@ Prioritized list of modules to analyze first, with reasoning.
 JSON adjacency list with entry-point chains and untrusted-data annotations.
 
 ### `#### Attack Hypotheses`
-Prioritized list of specific vulnerability hypotheses for Phase 3.
+Prioritized list of specific vulnerability hypotheses for the file analysis queue.
+
+### `#### File Analysis Queue`
+JSON array written to `analysis-state/file-analysis-queue.json`. Every critical and high file MUST appear in this queue. Files without hypotheses appear with an empty `guidance_hypotheses` array — the hunter provides unconstrained analysis first, then checks hypotheses. The queue is grouped by `batch_theme` (logical module) so the hunter can reason across related files in the same dispatch. Priority scores from Step 9 determine dispatch order.
+
+```json
+[
+  {
+    "file_id": 42,
+    "file_path": "com/example/RemotePrint.java",
+    "priority": 95,
+    "classification": "critical",
+    "batch_theme": "auth-module",
+    "slot_types": ["NETWORK-INPUT"],
+    "guidance_hypotheses": ["Hypothesis text here..."],
+    "related_files": ["com/example/FileUtils.java"]
+  }
+]
+```
 
 ### `#### Coverage Gaps`
 REQUIRED. Declare every self-check item you could NOT complete. If none, state "No coverage gaps — all self-check items completed."
@@ -279,13 +304,13 @@ The operator uses `#### Coverage Gaps` to decide whether to re-dispatch before l
 
 ## Handoffs
 
-- **code-slicer** (via operator): Call graph and queue items drive slice assembly. The call graph tells the slicer which callees to pull into each analysis slice and which untrusted-data annotations to carry forward.
-- **code-vuln-hunter** (via operator): Attack hypotheses become dispatch context for the hunter. The hunter tests each hypothesis against the actual code, using the call graph for multi-function reasoning across module boundaries.
+- **code-vuln-hunter** (via operator): The file analysis queue and call graph drive direct file-level vulnerability analysis. The call graph tells the hunter which entry-point chains to trace and which cross-file connections to follow. Attack hypotheses provide optional guidance — the hunter tests them AFTER an unconstrained broad analysis pass.
 - **operator** (coverage gaps): Coverage gaps are reported so the operator can re-dispatch or adjust scope before leaving Phase 1.
 
 ## Key Principles
 
-- **Structure-first**: Work from filenames, directory layout, includes, and docs — NOT from reading full source code. Phase 2 reads the code.
+- **Structure-first**: Work from filenames, directory layout, includes, and docs — NOT from reading full source code. The file analysis queue feeds the hunter, which reads the code.
 - **Git churn is signal**: Files with high churn and past CVE fixes get priority boost.
 - **Over-classify rather than under-classify**: A file wrongly classified as "high" wastes some analysis time. A file wrongly classified as "skip" means a vulnerability is missed entirely.
 - **Name the trust boundaries explicitly**: "Processes untrusted network input" is better than "security relevant."
+- **File queue completeness over hypothesis completeness**: Every critical/high file enters the queue regardless of whether a hypothesis names it — vulnerability classes not covered by hypotheses (path traversal, SSRF, etc.) are tested during the unconstrained broad analysis pass.
