@@ -292,7 +292,7 @@ reasons are specific and verifiable, not generic dismissals.
 |-------------|---------|---------------|
 | `confirmed` | Finding survives all 5 checks at stated severity | Include in report as-is |
 | `downgraded` | Finding survives but at lower severity | Include with adjusted severity + reasoning |
-| `killed` | Finding is a false positive | Exclude from report, patch canonical finding status to `false_positive`, record kill reason for audit |
+| `killed` | Finding is a false positive | Exclude from report, persist a `false_positive` verification on the canonical finding, record kill reason for audit |
 | `voting` | Ambiguous — escalated to multi-perspective voting | Hold pending operator decision |
 
 ### Kill Reason Format (for audit trail)
@@ -317,6 +317,7 @@ Examples:
 When you persist a false positive in structured finding state, include:
 - `details.kill_check` — integer 1-5 for the failed verification check
 - `details.kill_reason` — concise verifier rationale suitable for later query/reporting
+- Use `./scripts/assess.py verify-finding <slug> <verification-json>` instead of a generic finding patch so the verification transition is recorded in the audit ledger
 
 ## Output Format
 

@@ -166,7 +166,9 @@ Use the standard finding JSON schema. Code-specific fields:
 {
   "title": "Heap buffer overflow in URL parser via overlong scheme",
   "severity": "high",
-  "status": "confirmed",
+  "workflow_status": "active",
+  "verification_state": "verified",
+  "verification_disposition": "confirmed",
   "defect_family": "buffer-overflow",
   "canonical_location": "file:lib/urlapi.c:342",
   "summary": "Attacker-controlled URL scheme exceeding 64 bytes overflows stack buffer in parseurl()",

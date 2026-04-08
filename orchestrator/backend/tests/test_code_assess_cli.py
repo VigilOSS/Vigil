@@ -45,6 +45,10 @@ def _load_code_index_module():
     return _load_assess_module("code_index.py", "test_code_index_command")
 
 
+def _load_verify_finding_module():
+    return _load_assess_module("verify_finding.py", "test_verify_finding_command")
+
+
 def test_code_coverage_is_informational_by_default(monkeypatch, capsys):
     module = _load_code_coverage_module()
 
@@ -360,6 +364,88 @@ def test_code_classify_resolves_file_path_to_file_id(monkeypatch, tmp_path):
     posted = captured["payload"]["classifications"][0]
     assert posted["file_id"] == 42
     assert "file_path" not in posted
+
+
+def test_verify_finding_posts_verification_payload_and_syncs_markdown(monkeypatch, tmp_path, capsys):
+    module = _load_verify_finding_module()
+
+    payload_path = tmp_path / "verify.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "disposition": "false_positive",
+                "reason_code": "check-2-guard",
+                "reason_text": "Guard proves the path is unreachable.",
+                "artifact_ref": "tools/analysis-state/code-verification/FINDING-VA-001.json",
+                "details": {
+                    "kill_check": 2,
+                    "kill_reason": "Guard proves the path is unreachable.",
+                    "evidence": "validate_header_length() rejects the input before arithmetic.",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    findings_file = tmp_path / "findings.md"
+    findings_file.write_text("# Findings\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def post(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return {
+                "finding": {
+                    "slug": "FINDING-VA-001",
+                    "title": "Suppressed parser finding",
+                    "severity": "medium",
+                    "workflow_status": "false_positive",
+                    "verification_state": "verified",
+                    "verification_disposition": "false_positive",
+                    "notes": "Killed by verifier.",
+                },
+                "transition": {"action": "verified_false_positive"},
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    monkeypatch.setattr(
+        module,
+        "sync_finding_markdown",
+        lambda path, finding: captured.setdefault("synced", (path, finding["slug"])),
+    )
+    monkeypatch.setattr(module, "update_finding_count", lambda path: captured.setdefault("count_path", path))
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=tmp_path,
+            finding_slug="FINDING-VA-001",
+            json_file=str(payload_path),
+        )
+    )
+
+    assert captured["endpoint"] == "findings/FINDING-VA-001/verify"
+    assert captured["payload"]["disposition"] == "false_positive"
+    assert captured["synced"] == (str(findings_file), "FINDING-VA-001")
+    assert captured["count_path"] == str(findings_file)
+    assert "\"verified_false_positive\"" in capsys.readouterr().out
 
 
 def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypatch, tmp_path):

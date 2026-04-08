@@ -218,8 +218,8 @@ Stats: confirmed/downgraded/killed counts, confirmation rate, coverage percentag
 ## State Recording
 
 ```bash
-# Update a killed finding to durable false-positive state
-./scripts/assess.py patch findings/<slug> <status-update-json>
+# Persist a verification decision on the canonical finding
+./scripts/assess.py verify-finding <slug> <verification-json>
 
 # Record attack chains
 ./scripts/assess.py record-chain code-vuln-verifier <chain-json>
@@ -228,12 +228,16 @@ Stats: confirmed/downgraded/killed counts, confirmation rate, coverage percentag
 ./scripts/assess.py record-finding code-vuln-verifier <updated-finding-json>
 ```
 
-For kills, prefer the patch payload:
+For kills, use the verification payload:
 
 ```json
 {
-  "status": "false_positive",
+  "disposition": "false_positive",
+  "reason_code": "check-2-guard",
+  "reason_text": "validate_header_length() bounds-checks to 8192 bytes before parse_header_value().",
+  "artifact_ref": "tools/analysis-state/code-verification/FINDING-CH-001.json",
   "notes": "Check 2 KILL: validate_header_length() at http.c:92 bounds-checks to 8192 bytes on all paths before parse_header_value().",
+  "source_name": "code-vuln-verifier",
   "details": {
     "kill_check": 2,
     "kill_reason": "validate_header_length() at http.c:92 bounds-checks to 8192 bytes on all paths before parse_header_value().",

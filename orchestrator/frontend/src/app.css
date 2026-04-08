@@ -409,7 +409,8 @@ input {
 
 .status-queued,
 .status-pending,
-.status-draft {
+.status-draft,
+.status-unreviewed {
   background: rgba(140, 123, 98, 0.12);
   color: var(--pending);
 }
@@ -420,7 +421,8 @@ input {
 }
 
 .status-running,
-.status-in_progress {
+.status-in_progress,
+.status-active {
   background: rgba(244, 162, 89, 0.18);
   color: var(--warn);
 }
@@ -431,6 +433,16 @@ input {
 .status-reported {
   background: rgba(47, 127, 82, 0.16);
   color: var(--ok);
+}
+
+.status-downgraded {
+  background: rgba(23, 53, 76, 0.12);
+  color: var(--accent);
+}
+
+.status-disputed {
+  background: rgba(117, 79, 31, 0.16);
+  color: #8a5a1f;
 }
 
 .status-failed,
@@ -542,6 +554,27 @@ input {
 
 .finding-row-suppressed .finding-row-title {
   text-decoration: line-through;
+}
+
+.finding-transitions {
+  display: grid;
+  gap: 10px;
+}
+
+.finding-transition-row {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.62);
+  display: grid;
+  gap: 4px;
+}
+
+.finding-transition-header {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: baseline;
 }
 
 .finding-row-main {

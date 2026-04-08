@@ -409,7 +409,10 @@ export function CodeAnalysisTab({
           {/* Results list */}
           <div className="code-results-list">
             {pageResults.map((r) => (
-              <article key={r.id} className={`code-result-row ${r.finding_status === "false_positive" ? "code-result-row-suppressed" : ""}`}>
+              <article
+                key={r.id}
+                className={`code-result-row ${r.finding_workflow_status === "false_positive" ? "code-result-row-suppressed" : ""}`}
+              >
                 <div className="code-result-header">
                   <span className={`badge code-disposition-${r.disposition}`}>{r.disposition}</span>
                   <strong className="mono-text">{r.function_name || `file #${r.file_id}`}</strong>
@@ -433,7 +436,15 @@ export function CodeAnalysisTab({
                   <div className="code-result-detail">
                     <span className="code-result-label">Finding:</span>
                     <span className="mono-text">{r.finding_slug}</span>
-                    {r.finding_status && <span className={`badge status-${r.finding_status}`}>{r.finding_status}</span>}
+                    {r.finding_workflow_status && (
+                      <span className={`badge status-${r.finding_workflow_status}`}>{r.finding_workflow_status}</span>
+                    )}
+                    {r.finding_verification_disposition && r.finding_verification_disposition !== "none" && (
+                      <span className={`badge status-${r.finding_verification_disposition}`}>{r.finding_verification_disposition}</span>
+                    )}
+                    {r.finding_verification_state === "disputed" && (
+                      <span className="badge status-disputed">disputed</span>
+                    )}
                   </div>
                 )}
               </article>

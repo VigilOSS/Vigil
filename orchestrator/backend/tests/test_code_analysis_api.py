@@ -1023,10 +1023,10 @@ def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
     assert len(results_list.json()) == 1
 
 
-def test_analysis_results_include_linked_finding_status(client, isolate_settings):
-    engagement_key = "2026-04-04-analysis-result-finding-status"
+def test_analysis_results_include_linked_finding_lifecycle(client, isolate_settings):
+    engagement_key = "2026-04-04-analysis-result-finding-lifecycle"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="finding-status-repo")
+    repo = _create_repo(client, engagement_key, repo_key="finding-lifecycle-repo")
     files = _create_files(client, engagement_key, int(repo["id"]))
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
@@ -1036,7 +1036,9 @@ def test_analysis_results_include_linked_finding_status(client, isolate_settings
             "slug": "FINDING-CH-777",
             "title": "Suppressed parser finding",
             "severity": "medium",
-            "status": "false_positive",
+            "workflow_status": "false_positive",
+            "verification_state": "verified",
+            "verification_disposition": "false_positive",
             "defect_family": "integer-overflow",
             "root_cause_key": "suppressed-parser-finding",
             "auth_context": "anonymous",
@@ -1074,14 +1076,18 @@ def test_analysis_results_include_linked_finding_status(client, isolate_settings
         },
     )
     assert result_response.status_code == 201
-    assert result_response.json()["finding_status"] == "false_positive"
+    assert result_response.json()["finding_workflow_status"] == "false_positive"
+    assert result_response.json()["finding_verification_state"] == "verified"
+    assert result_response.json()["finding_verification_disposition"] == "false_positive"
 
     results_list = client.get(
         f"/engagements/{engagement_key}/assessment/code/analysis-results?file_id={parser_file['id']}"
     )
     assert results_list.status_code == 200
     assert len(results_list.json()) == 1
-    assert results_list.json()[0]["finding_status"] == "false_positive"
+    assert results_list.json()[0]["finding_workflow_status"] == "false_positive"
+    assert results_list.json()[0]["finding_verification_state"] == "verified"
+    assert results_list.json()[0]["finding_verification_disposition"] == "false_positive"
 
 
 def test_coverage_detail_cwe(client, isolate_settings):

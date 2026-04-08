@@ -28,6 +28,12 @@ function sortFindings(findings: (AssessmentFindingDetail | AssessmentFinding)[])
   });
 }
 
+function verificationSummary(finding: AssessmentFindingDetail | AssessmentFinding) {
+  if (finding.verification_state === "disputed") return "disputed";
+  if (finding.verification_disposition !== "none") return finding.verification_disposition;
+  return finding.verification_state;
+}
+
 export function OverviewTab({ events, assessmentSummary, findings, chains, chainLinks, currentPhase }: OverviewTabProps) {
   const s = assessmentSummary;
   const sortedFindings = sortFindings(findings);
@@ -79,7 +85,8 @@ export function OverviewTab({ events, assessmentSummary, findings, chains, chain
               <div key={f.slug} style={{ display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" }}>
                 <strong>{f.title}</strong>
                 <span className={`badge severity-${f.severity}`}>{f.severity}</span>
-                <span className="meta-text">{f.status}</span>
+                <span className="meta-text">{f.workflow_status}</span>
+                <span className="meta-text">{verificationSummary(f)}</span>
               </div>
             ))}
             {sortedFindings.length > 5 && (

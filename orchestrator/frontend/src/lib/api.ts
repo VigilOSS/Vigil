@@ -60,7 +60,9 @@ export type AssessmentFinding = {
   slug: string;
   title: string;
   severity: string;
-  status: string;
+  workflow_status: string;
+  verification_state: string;
+  verification_disposition: string;
   canonical_location: string;
   summary: string;
   source_name: string;
@@ -92,6 +94,25 @@ export type AssessmentFindingDetail = AssessmentFinding & {
   auth_context: string;
   details_json: string;
   merged_into_slug?: string | null;
+};
+
+export type AssessmentFindingTransition = {
+  id: number;
+  actor: string;
+  action: string;
+  from_workflow_status: string | null;
+  to_workflow_status: string;
+  from_verification_state: string | null;
+  to_verification_state: string;
+  from_verification_disposition: string | null;
+  to_verification_disposition: string;
+  from_severity: string | null;
+  to_severity: string;
+  reason_code: string;
+  reason_text: string;
+  artifact_ref: string;
+  metadata_json: string;
+  created_at: string;
 };
 
 export type AssessmentFindingLink = {
@@ -182,7 +203,9 @@ export type AssessmentSummary = {
   blocked_technique_count: number;
   attack_chain_count: number;
   coverage_statuses: Record<string, number>;
-  finding_statuses: Record<string, number>;
+  finding_workflow_statuses: Record<string, number>;
+  finding_verification_states: Record<string, number>;
+  finding_verification_dispositions: Record<string, number>;
   top_surfaces: AssessmentSurface[];
   top_findings: AssessmentFinding[];
   recent_probes: AssessmentProbe[];
@@ -273,6 +296,12 @@ export function listAssessmentSurfaces(engagementKey: string) {
 
 export function listAssessmentFindings(engagementKey: string) {
   return request<AssessmentFindingDetail[]>(`/engagements/${engagementKey}/assessment/findings`);
+}
+
+export function listAssessmentFindingTransitions(engagementKey: string, findingSlug: string) {
+  return request<AssessmentFindingTransition[]>(
+    `/engagements/${engagementKey}/assessment/findings/${encodeURIComponent(findingSlug)}/transitions`,
+  );
 }
 
 export function listAssessmentFindingLinks(engagementKey: string) {
@@ -472,7 +501,9 @@ export type CodeAnalysisResult = {
   cwe_id: string;
   slot_type: string;
   notes: string;
-  finding_status?: string | null;
+  finding_workflow_status?: string | null;
+  finding_verification_state?: string | null;
+  finding_verification_disposition?: string | null;
   audit_metadata: Record<string, unknown>;
   created_at: string;
 };

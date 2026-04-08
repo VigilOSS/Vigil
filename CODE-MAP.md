@@ -50,7 +50,7 @@ Keep it light:
 - `agent/scripts/init_engagement.sh` - engagement bootstrap. Why: creates run directories, seeds local wrappers, and initializes scope/auth/runtime scaffolding.
 - `agent/scripts/assess.py` - CLI entrypoint. Why: stable shell surface into the assessment and code-analysis workflows.
 - `agent/scripts/assess/cli.py` - subcommand registry. Why: authoritative map of supported operator/backend actions.
-- `agent/scripts/assess/commands/` - command families. Why: fetch/post/patch, record-*, dispatch/ingest, exploit/session, and `code-*` flows are split here.
+- `agent/scripts/assess/commands/` - command families. Why: fetch/post/patch, record-*, dedicated finding verification, dispatch/ingest, exploit/session, and `code-*` flows are split here.
 - `agent/scripts/assess/lib/` - shared plumbing. Why: API client, locking, auth, scope, DB helpers, schema validation, sessions, and tree-sitter indexing live here.
 - `agent/schemas/` - JSON payload contracts. Why: durable record formats for findings, chains, credentials, access records, probe runs, proposals, and code-analysis outputs.
 - `agent/scripts/schema.sql` - transient local queue schema. Why: local case/work-item buffering, not orchestrator backend state.
@@ -76,12 +76,12 @@ Keep it light:
 - `orchestrator/backend/app/api/engagements.py` - engagement/session read API. Why: stable frontend entrypoint for what exists and where it is in the workflow.
 - `orchestrator/backend/app/api/events.py` - event/timeline API. Why: records operator/agent events and exposes progress summaries.
 - `orchestrator/backend/app/api/artifacts.py` - artifact read API. Why: allowlisted artifact exposure instead of arbitrary file serving.
-- `orchestrator/backend/app/api/assessment.py` - runtime assessment API. Why: canonical live state interface for recon, surfaces, coverage, findings, chains, credentials, and blocked techniques.
+- `orchestrator/backend/app/api/assessment.py` - runtime assessment API. Why: canonical live state interface for recon, surfaces, coverage, findings, finding verification/transitions, chains, credentials, and blocked techniques.
 - `orchestrator/backend/app/api/code_analysis.py` - code-analysis API. Why: repo/file/module ingestion, analysis queue, results, threat model, coverage gate, and triggers live here.
 - `orchestrator/backend/app/services/engagements.py` - filesystem-to-DB sync. Why: `agent/engagements/*` starts on disk, but the UI needs queryable state.
 - `orchestrator/backend/app/services/events.py` - event domain logic. Why: timeline projection and summarization stay out of routers.
 - `orchestrator/backend/app/services/artifacts.py` - artifact policy layer. Why: file exposure rules stay explicit.
-- `orchestrator/backend/app/services/state_manager.py` - assessment domain logic. Why: normalization, dedupe/upsert behavior, finding lifecycle, and summary rollups are business rules, not CRUD.
+- `orchestrator/backend/app/services/state_manager.py` - assessment domain logic. Why: normalization, dedupe/upsert behavior, finding lifecycle projection, transition ledgering, and summary rollups are business rules, not CRUD.
 - `orchestrator/backend/app/services/code_analysis.py` - code-analysis domain logic. Why: queue claiming/completion, needs-context flow, result recording, triggers, and coverage rules are workflow logic.
 - `orchestrator/backend/app/ws.py` - in-process websocket broadcaster. Why: fans API mutations out to the UI without external messaging infrastructure.
 - `orchestrator/backend/tests/` - backend contract tests. Why: pins engagement bootstrap, websocket behavior, prompt rendering, CLI/backend contracts, and code-analysis workflow rules.

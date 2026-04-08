@@ -7,6 +7,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.findings import sync_finding_markdown, update_finding_count
 
 
 def register(subparsers) -> None:
@@ -30,3 +31,10 @@ def run(args) -> None:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     finally:
         client.close()
+
+    if args.endpoint.startswith("findings/") and isinstance(result, dict):
+        finding = result.get("finding")
+        findings_file = Path(cfg.engagement_dir) / "findings.md"
+        if isinstance(finding, dict) and findings_file.is_file():
+            sync_finding_markdown(str(findings_file), finding)
+            update_finding_count(str(findings_file))
