@@ -32,7 +32,7 @@ Before producing any output, confirm:
 - [ ] **CWE-specific pattern reference loaded** -- the correct `code-vuln-patterns/*.md` file
       matching the slot types is present. WITHOUT IT, PATTERN-LEVEL DEPTH IS LOST.
 - [ ] **File batch provided**: file paths, priorities, batch theme, slot types, classification tier
-- [ ] **Structural index loaded (if available at `analysis-state/structural-index/`)** -- provides
+- [ ] **Structural index loaded (if available at `tools/analysis-state/structural-index/`)** -- provides
       function map, entry points, security sinks as navigation checklist
 - [ ] **Threat model summary available** -- trust boundaries, entry points, high-value targets
 - [ ] **Call graph excerpt available** -- shows how functions connect to entry points and other modules
@@ -89,8 +89,8 @@ For assumptions about inputs that are NOT enforced by the code itself, note them
 For each file in the batch, build the analysis plan before diving into deep analysis:
 
 1. **Read the structural index** for this file (if available). Look up the index filename in
-   `analysis-state/structural-index-manifest.json`'s `path_to_index` mapping using the file's
-   relative path, then read the corresponding JSON from `analysis-state/structural-index/`.
+   `tools/analysis-state/structural-index-manifest.json`'s `path_to_index` mapping using the file's
+   relative path, then read the corresponding JSON from `tools/analysis-state/structural-index/`.
    The sink catalog is a minimum checklist -- account for every catalogued sink, but also look
    beyond the catalog for patterns tree-sitter cannot detect (semantic issues, multi-function
    logic errors, trust boundary violations). If no structural index exists, fall back to manual
