@@ -25,6 +25,8 @@ analyzing files outside the current scope.
 
 You receive actual source code files -- read directly from the filesystem with structural
 index navigation when available -- not JSON metadata about code. Read the code directly.
+Start with structure (entry points, exports, sinks, stateful regions), then deepen where the
+risk or uncertainty is highest. Do not substitute metadata summaries for source reads.
 
 If code beyond the provided file batch is needed, use ctags + grep + Read to find it yourself.
 Full filesystem access is always available. Never guess at the behavior of code you have
@@ -41,9 +43,9 @@ This is NOT target-facing network work -- Kali MCP is not needed for reading sou
 
 | Tool | Use |
 |---|---|
-| `Read` / `cat` / `head` / `tail` | Read source files |
-| `Grep` / `rg` / `grep` | Search code patterns, find call sites |
-| `Glob` / `find` | Locate files by pattern |
+| `Read` | Read source files |
+| `rg` | Search code patterns, find call sites |
+| `Glob` | Locate files by pattern |
 | `python3`, `jq`, `sqlite3` | Data processing and backend interaction |
 | `git log`, `git blame`, `git diff` | History analysis |
 
@@ -91,14 +93,20 @@ The same rule from web testing applies to code review:
 
 ---
 
-## 6. Disposition Every Analyzed Function
+## 6. Account For Every Analyzed Function
 
-Every function you analyze must receive exactly one disposition:
+Every function you analyze must still receive exactly one disposition because the backend
+records one result per function:
 
 - `finding` -- Confirmed vulnerability with CWE, evidence, and exploitability assessment
 - `suspicious` -- Anomalous pattern needing variant analysis or deeper context to confirm
 - `clean` -- No vulnerabilities found in current analysis
 - `needs-context` -- Analysis blocked on missing information (specify exactly what is needed)
+
+Coverage must be explicit, but write-up depth can be proportional:
+- Attack-facing, sink-bearing, stateful, or ambiguous functions need full reasoning.
+- Obviously mechanical helpers can use concise `clean` dispositions once you have verified they
+  do not hide sinks, trust-boundary assumptions, or material error behavior.
 
 Record dispositions via `./scripts/assess.py code-record-analysis`.
 
@@ -111,7 +119,7 @@ thinking any of these, stop and apply the required action instead.
 
 | Rationalization | Why It Fails | Required Action |
 |---|---|---|
-| "I get the gist" | Gist-level misses edge cases | Read line by line |
+| "I get the gist" | Gist-level misses edge cases | Read the code directly. Use structure-first triage, then line-by-line on risky or ambiguous spans |
 | "This function is simple" | Simple functions compose into complex bugs | Apply full analysis anyway |
 | "This looks safe" | Must verify, not assume | Trace every taint path to every sink |
 | "The guard seems sufficient" | Must verify on ALL paths | Check guard covers all branches |

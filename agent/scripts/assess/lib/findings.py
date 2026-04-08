@@ -57,8 +57,6 @@ def update_finding_count(findings_file: str) -> None:
     path = Path(findings_file)
     text = path.read_text(encoding="utf-8")
 
-    count = len(_FINDING_HEADING_RE.findall(text, re.MULTILINE))
-    # Actually count with multiline
     count = 0
     for line in text.splitlines():
         if _FINDING_HEADING_RE.match(line):

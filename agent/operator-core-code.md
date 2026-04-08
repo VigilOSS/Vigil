@@ -34,7 +34,7 @@ analyzed or user signals stop:
 
 1. **ASSESS STATE** -- Read `code-scope.json` (or `scope.json` with `source_repos`). Check code coverage stats via `./scripts/assess.py code-coverage`. Check CWE effort matrix via `./scripts/assess.py code-coverage --cwe-matrix` when in Phase 2B. Backend state is canonical; use `--require-gate-pass` only for the final Phase 3 gate.
 2. **DECIDE NEXT ACTION** -- Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified, call graph complete, structural index generated). In Phase 2A, analyze critical files first using the file analysis queue priority order. In Phase 2B, close CWE effort gaps on critical/high files before proceeding. In Phase 3, drive aggressive FP elimination on all findings. Coverage gaps drive decisions.
-3. **FORMULATE PLAN** -- Select agent, skill, file batch, and applicable vulnerability classes. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
+3. **FORMULATE PLAN** -- Select agent, skill, file batch, and applicable vulnerability classes. Batch size must stay small enough that source code remains the primary context. Use adaptive batching by module, entry-chain cluster, or sink family instead of a fixed-size handoff. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
 4. **PRESENT OR PROCEED** -- Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.
 5. **USE SKILLS FIRST** -- Check `agent/SKILL.md` for the right skill.
    - **Phase 0 (Ingest + Index):** operator-mechanical, no agent dispatch needed
@@ -190,6 +190,14 @@ Hunters read actual source files directly from the filesystem, navigating with t
 index (when available), call graph excerpts, and attack hypotheses as guidance. They have full
 filesystem access to trace beyond the provided file batch when needed.
 
+Adaptive batching is part of the method, not a convenience:
+- Default to 1 logical module or 1-3 tightly related files per hunter dispatch
+- Shrink further when files are large, parser-heavy, stateful, or the supporting metadata would
+  crowd out the actual source
+- Widen only when multiple files form one tight entry-chain and the added context materially
+  improves reasoning
+- Treat fetch size as queue mechanics, not mandatory prompt size
+
 #### Phase 2A -- Broad Hunt
 
 **Queue setup:**
@@ -212,6 +220,10 @@ filesystem access to trace beyond the provided file batch when needed.
 # Fetch batch for analysis -- returns file-based items grouped by batch_theme
 ./scripts/assess.py code-dispatch fetch 10 code-vuln-hunter
 ```
+
+The fetch size is a queue convenience, not a required prompt batch size. Split fetched items into
+smaller hunter dispatches whenever code volume, framework noise, or support metadata would make
+the prompt context heavier than the source files themselves.
 
 **Dispatch `code-vuln-hunter`** with `agent/skills/code-vulnerability-analysis/SKILL.md` and:
 
@@ -242,16 +254,20 @@ filesystem access to trace beyond the provided file batch when needed.
   performs unconstrained broad analysis first, then checks these hypotheses second. This
   ordering prevents hypothesis anchoring where the analysis scope narrows to the architect's
   predictions.
-- **Structural index** (if available) -- per-file function map, entry points, security sink
-  catalog, and call sites from `analysis-state/structural-index/`. Look up the index filename
-  for each file via `structural-index-manifest.json`'s `path_to_index` mapping using the
-  file's relative path (e.g., `manifest["path_to_index"]["src/main.c"]` returns the index
-  filename). The hunter uses this as a navigation map and completeness checklist: every
-  catalogued sink must be accounted for in the analysis.
+- **Structural index** (if available) -- include the relevant per-file index data from
+  `analysis-state/structural-index/`. For small batches, passing the full per-file JSON is fine.
+  For larger files, prefer a trimmed summary containing the function map, entry points,
+  relevant sink catalog, and the call sites touching the entry chains under review. Look up the
+  index filename for each file via `structural-index-manifest.json`'s `path_to_index` mapping
+  using the file's relative path (e.g., `manifest["path_to_index"]["src/main.c"]` returns the
+  index filename). The hunter uses this as a navigation map and completeness checklist: every
+  catalogued sink still needs to be accounted for.
 - **Call graph excerpt** -- the subgraph for the target module showing entry-point chains and
-  trust boundary crossings from `analysis-state/call-graph.json`.
+  trust boundary crossings from `analysis-state/call-graph.json`. Include only the subgraph
+  relevant to the files and chains in this dispatch.
 - **Threat model summary** -- trust boundaries, entry points, and high-value targets relevant
-  to this batch from the Phase 1 threat model.
+  to this batch from the Phase 1 threat model. Keep this short and file-local; do not dump the
+  full Phase 1 artifact when a 3-8 bullet summary will do.
 - **CWE pattern references** -- matching the applicable vulnerability classes for this batch.
   Use the Slot-Type -> Reference Mapping table below to select which pattern files to include.
 - **Effort score guidelines** -- effort thresholds for this file's classification tier:
@@ -271,6 +287,10 @@ Replace [entry points] and [function chains] with the actual values from the bat
 **FULL FILESYSTEM ACCESS**: The hunter can Read/Grep/Glob beyond the file batch. The provided
 files are a starting point, not a cage. If the hunter needs to trace a cross-module call, check
 a macro definition, or verify a type width, it uses ctags + Read to find the target directly.
+
+**Context budget rule**: Dispatch context should help the hunter navigate, not outweigh the
+source files. If structural index blobs, call-graph data, and threat-model prose are taking more
+room than the code under review, compress them into summaries or narrower excerpts first.
 
 #### Slot-Type -> Reference Mapping
 
@@ -582,10 +602,10 @@ Every code analysis dispatch must include:
 - **For Phase 1**: full file listing, project docs, git churn data, structural index manifest (if available)
 - **For Phase 2 (Hunt)**: file paths from queue items, batch theme, slot types,
   applicable vulnerability classes (ALL classes from SLOT_VULN_CLASSES for these slot types),
-  guidance hypotheses (labeled "check AFTER broad analysis"), structural index per-file JSON
-  (if available), call graph excerpt, threat model summary, CWE pattern references matching
-  applicable classes, effort score guidelines (thresholds for this tier), adversarial framing
-  preamble
+  guidance hypotheses (labeled "check AFTER broad analysis"), structural index excerpt or
+  per-file JSON (if available), relevant call graph subgraph, concise threat model summary,
+  CWE pattern references matching applicable classes, effort score guidelines (thresholds for
+  this tier), adversarial framing preamble
 - **For Phase 2B (CWE Re-Analysis)**: cwe_directives (specific classes below threshold),
   prior_effort (scores from prior pass), target_effort (threshold), entry_chains_to_trace
   (chains not yet traced), cwe_pattern_refs -- plus structural index, call graph, threat model
@@ -605,11 +625,12 @@ Before every dispatch, verify:
 - [ ] For Phase 2: applicable vulnerability classes listed (ALL from SLOT_VULN_CLASSES for these slot types)
 - [ ] For Phase 2: CWE pattern references selected via slot-type mapping table
 - [ ] For Phase 2: guidance hypotheses included and labeled "check AFTER broad analysis"
-- [ ] For Phase 2: structural index per-file JSON included (if available)
+- [ ] For Phase 2: structural index excerpt or per-file JSON included (if available)
 - [ ] For Phase 2: adversarial framing preamble included (with actual entry points and chains)
 - [ ] For Phase 2: effort score thresholds included for the file's classification tier
 - [ ] For Phase 2B: cwe_directives and prior_effort included for CWE-directed re-analysis
 - [ ] Call graph excerpt included for Phase 2 dispatches
+- [ ] Supporting context clipped to the relevant files and chains; no unrelated JSON dumps
 - [ ] Log checked for duplicate dispatch -- never dispatch same agent for same file batch twice
 
 DEDUP: Check the analysis queue and dispatch log before every dispatch. Never dispatch the same
