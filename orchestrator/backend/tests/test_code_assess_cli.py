@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 import sys
 
@@ -200,6 +201,113 @@ def test_code_index_walk_repo_skips_named_pipes(tmp_path):
     files = module._walk_repo(str(repo_path))
 
     assert files == [{"file_path": "main.py", "language": "python"}]
+
+
+def test_git_security_history_args_limits_large_repos():
+    module = _load_code_ingest_module()
+
+    assert module._git_security_history_args(60_000) == [f"--since={module._GIT_SECURITY_LOOKBACK}"]
+    assert module._git_security_history_args(500) == ["--all"]
+    assert module._git_security_history_args(None) == ["--all"]
+
+
+def test_git_security_files_parses_streamed_output(monkeypatch, tmp_path):
+    module = _load_code_ingest_module()
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, stdout, stderr, text, cwd, timeout):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        captured["timeout"] = timeout
+        stdout.write("commit:abc123\nsrc/auth.py\nsrc/http.py\n\ncommit:def456\nsrc/auth.py\n")
+        stdout.flush()
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    files = module._git_security_files(str(tmp_path), [f"--since={module._GIT_SECURITY_LOOKBACK}"])
+
+    assert files == {"src/auth.py", "src/http.py"}
+    assert captured["cmd"] == [
+        "git",
+        "log",
+        f"--since={module._GIT_SECURITY_LOOKBACK}",
+        "--grep=CVE\\|security\\|vulnerability\\|fix.*vuln\\|buffer.overflow\\|use.after.free",
+        "--format=commit:%H",
+        "--name-only",
+    ]
+
+
+def test_git_churn_scores_warns_on_timeout(monkeypatch, capsys, tmp_path):
+    module = _load_code_ingest_module()
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="git log", timeout=module._GIT_LOG_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert module._git_churn_scores(str(tmp_path)) == {}
+    assert "git churn scan timed out" in capsys.readouterr().err
+
+
+def test_code_ingest_limits_security_scan_for_large_histories(monkeypatch, capsys, tmp_path):
+    module = _load_code_ingest_module()
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    (repo_path / ".git").mkdir()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path / "engagement"),
+        ),
+    )
+    monkeypatch.setattr(module, "_git_commit_count", lambda repo_path: 60_000)
+    monkeypatch.setattr(module, "_git_churn_scores", lambda repo_path: {})
+
+    captured: dict[str, object] = {}
+
+    def fake_security_files(repo_path, history_args):
+        captured["history_args"] = history_args
+        return set()
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def post(self, endpoint: str, payload: dict):
+            if endpoint == "code/repos":
+                return {"id": 7}
+            if endpoint == "code/files":
+                return {"inserted": len(payload["files"])}
+            raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "_git_security_files", fake_security_files)
+    monkeypatch.setattr(module, "_setup_ctags", lambda repo_path: {"available": False})
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            repo_path=str(repo_path),
+            name="demo",
+            language=None,
+            repo_key=None,
+            engagement_dir=tmp_path / "engagement",
+        )
+    )
+
+    assert captured["history_args"] == [f"--since={module._GIT_SECURITY_LOOKBACK}"]
+    assert "limiting security scan to current branch over the last" in capsys.readouterr().err
 
 
 def test_code_classify_resolves_file_path_to_file_id(monkeypatch, tmp_path):
