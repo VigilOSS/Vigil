@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastapi import APIRouter, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..services import state_manager
 from ..services.engagements import get_engagement_or_404
@@ -162,10 +162,14 @@ class MergeFindingsRequest(BaseModel):
 
 
 class FindingRecordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     slug: str | None = Field(default=None, max_length=256)
     title: str = Field(min_length=1, max_length=512)
     severity: str = Field(default="info", min_length=1, max_length=32)
-    status: str = Field(default="draft", min_length=1, max_length=32)
+    workflow_status: str = Field(default="active", min_length=1, max_length=32)
+    verification_state: str = Field(default="unreviewed", min_length=1, max_length=32)
+    verification_disposition: str = Field(default="none", min_length=1, max_length=32)
     defect_family: str = Field(default="", max_length=128)
     root_cause_key: str = Field(default="", max_length=256)
     auth_context: str = Field(default="anonymous", min_length=1, max_length=128)
@@ -183,9 +187,13 @@ class FindingRecordRequest(BaseModel):
 
 
 class FindingPatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str | None = Field(default=None, min_length=1, max_length=512)
     severity: str | None = Field(default=None, min_length=1, max_length=32)
-    status: str | None = Field(default=None, min_length=1, max_length=32)
+    workflow_status: str | None = Field(default=None, min_length=1, max_length=32)
+    verification_state: str | None = Field(default=None, min_length=1, max_length=32)
+    verification_disposition: str | None = Field(default=None, min_length=1, max_length=32)
     defect_family: str | None = Field(default=None, max_length=128)
     root_cause_key: str | None = Field(default=None, max_length=256)
     auth_context: str | None = Field(default=None, min_length=1, max_length=128)
@@ -196,6 +204,24 @@ class FindingPatchRequest(BaseModel):
     source_name: str | None = Field(default=None, max_length=128)
     details: dict[str, Any] | None = None
     provenance: dict[str, Any] | None = None
+    reason_code: str = Field(default="", max_length=128)
+    reason_text: str = Field(default="", max_length=4096)
+    artifact_ref: str = Field(default="", max_length=1024)
+
+
+class FindingVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    disposition: Literal["confirmed", "downgraded", "false_positive", "disputed"]
+    reason_code: str = Field(default="", max_length=128)
+    reason_text: str = Field(min_length=1, max_length=4096)
+    new_severity: str | None = Field(default=None, min_length=1, max_length=32)
+    evidence_ref: str = Field(default="", max_length=1024)
+    artifact_ref: str = Field(default="", max_length=1024)
+    notes: str = Field(default="", max_length=20000)
+    source_name: str = Field(default="", max_length=128)
+    details: dict[str, Any] = Field(default_factory=dict)
+    provenance: dict[str, Any] = Field(default_factory=dict)
 
 
 async def _broadcast(engagement_key: str, record_type: str, payload: dict[str, Any]) -> None:
@@ -262,6 +288,12 @@ def get_surfaces(engagement_key: str) -> list[dict[str, Any]]:
 def get_findings(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.list_findings(engagement.id)
+
+
+@router.get("/findings/{finding_slug}/transitions")
+def get_finding_transitions(engagement_key: str, finding_slug: str) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_finding_transitions(engagement.id, slug=finding_slug)
 
 
 @router.get("/report-findings")
@@ -392,7 +424,9 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
         slug=request.slug,
         title=request.title,
         severity=request.severity,
-        status_value=request.status,
+        workflow_status=request.workflow_status,
+        verification_state=request.verification_state,
+        verification_disposition=request.verification_disposition,
         defect_family=request.defect_family,
         root_cause_key=request.root_cause_key,
         auth_context=request.auth_context,
@@ -424,7 +458,9 @@ async def patch_finding(
         slug=finding_slug,
         title=request.title,
         severity=request.severity,
-        status_value=request.status,
+        workflow_status=request.workflow_status,
+        verification_state=request.verification_state,
+        verification_disposition=request.verification_disposition,
         defect_family=request.defect_family,
         root_cause_key=request.root_cause_key,
         auth_context=request.auth_context,
@@ -435,8 +471,36 @@ async def patch_finding(
         source_name=request.source_name,
         details=request.details,
         provenance=request.provenance,
+        transition_reason_code=request.reason_code,
+        transition_reason_text=request.reason_text,
+        transition_artifact_ref=request.artifact_ref,
     )
-    await _broadcast(engagement.key, "finding", record)
+    await _broadcast(engagement.key, "finding_patch", record)
+    return record
+
+
+@router.post("/findings/{finding_slug}/verify")
+async def verify_finding(
+    engagement_key: str,
+    finding_slug: str,
+    request: FindingVerifyRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.verify_finding(
+        engagement.id,
+        slug=finding_slug,
+        disposition=request.disposition,
+        reason_code=request.reason_code,
+        reason_text=request.reason_text,
+        source_name=request.source_name,
+        evidence_ref=request.evidence_ref,
+        notes=request.notes,
+        details=request.details,
+        provenance=request.provenance,
+        artifact_ref=request.artifact_ref,
+        new_severity=request.new_severity,
+    )
+    await _broadcast(engagement.key, "finding_verify", record)
     return record
 
 

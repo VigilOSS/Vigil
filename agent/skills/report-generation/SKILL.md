@@ -239,13 +239,13 @@ Only proceed to report generation after validation passes or the operator resolv
        "report-writer" \
        "Report generated with N findings"
    ```
-3. **Update finding statuses to `reported`** for all findings included in the report:
+3. **Update finding workflow status to `reported`** for all findings included in the report:
    ```bash
    # For each finding slug included in the report:
-   echo '{"status":"reported","notes":"Included in report.md","provenance":{"reported_by":"report-writer"}}' > /tmp/finding_patch.json
+   echo '{"workflow_status":"reported","notes":"Included in report.md","provenance":{"reported_by":"report-writer"}}' > /tmp/finding_patch.json
    ./scripts/assess.py patch findings/FINDING-VA-003 /tmp/finding_patch.json
    ```
-   This completes the finding lifecycle: draft -> confirmed -> exploited -> reported.
+   This advances the workflow lifecycle after verification has already established the durable disposition.
 
 ## Post-Generation Self-Review
 

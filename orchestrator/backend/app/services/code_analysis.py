@@ -71,7 +71,9 @@ def _analysis_result_row(connection, result_id: int) -> Any:
         """
         SELECT
             results.*,
-            findings.status AS finding_status
+            findings.status AS finding_workflow_status,
+            findings.verification_state AS finding_verification_state,
+            findings.verification_disposition AS finding_verification_disposition
         FROM code_analysis_results AS results
         LEFT JOIN assessment_findings AS findings
           ON findings.engagement_id = results.engagement_id
@@ -1272,7 +1274,9 @@ def list_analysis_results(
     query = f"""
         SELECT
             results.*,
-            findings.status AS finding_status
+            findings.status AS finding_workflow_status,
+            findings.verification_state AS finding_verification_state,
+            findings.verification_disposition AS finding_verification_disposition
         FROM code_analysis_results AS results
         LEFT JOIN assessment_findings AS findings
           ON findings.engagement_id = results.engagement_id

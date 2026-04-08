@@ -4,14 +4,15 @@ import type {
   AssessmentAttackChainLink,
   AssessmentFinding,
   AssessmentFindingDetail,
-  AssessmentSummary,
+  AssessmentFindingTransition,
   FindingDetails,
 } from "../lib/api";
+import { listAssessmentFindingTransitions } from "../lib/api";
 
 type FindingsTabProps = {
+  engagementKey: string;
   findings: (AssessmentFindingDetail | AssessmentFinding)[];
   fallbackFindings: AssessmentFinding[];
-  summary: AssessmentSummary | null;
   chains: AssessmentAttackChainDetail[];
   chainLinks: AssessmentAttackChainLink[];
 };
@@ -39,22 +40,43 @@ function sortFindings(findings: (AssessmentFindingDetail | AssessmentFinding)[])
   });
 }
 
-function lifecycleLabel(finding: AssessmentFinding | AssessmentFindingDetail) {
-  switch (finding.status) {
+function workflowLabel(finding: AssessmentFinding | AssessmentFindingDetail) {
+  switch (finding.workflow_status) {
     case "reported":
       return "Included in report";
     case "merged":
       return isDetail(finding) && finding.merged_into_slug ? `Merged into ${finding.merged_into_slug}` : "Merged duplicate";
-    case "confirmed":
-      return "Confirmed";
+    case "active":
+      return "Active";
     case "exploited":
       return "Exploited";
     case "blocked":
-      return "Blocked during exploitation";
+      return "Blocked";
+    case "false_positive":
+      return "Suppressed";
+    default:
+      return finding.workflow_status;
+  }
+}
+
+function verificationKey(finding: AssessmentFinding | AssessmentFindingDetail) {
+  if (finding.verification_state === "disputed") return "disputed";
+  if (finding.verification_disposition !== "none") return finding.verification_disposition;
+  return finding.verification_state;
+}
+
+function verificationLabel(finding: AssessmentFinding | AssessmentFindingDetail) {
+  switch (verificationKey(finding)) {
+    case "confirmed":
+      return "Verified";
+    case "downgraded":
+      return "Downgraded";
     case "false_positive":
       return "False positive";
+    case "disputed":
+      return "Disputed";
     default:
-      return finding.status;
+      return "Unreviewed";
   }
 }
 
@@ -63,19 +85,30 @@ function rowMeta(finding: AssessmentFinding | AssessmentFindingDetail) {
   if (finding.source_name) {
     parts.push(finding.source_name);
   }
-  if (finding.status !== "reported") {
-    parts.push(lifecycleLabel(finding));
+  parts.push(verificationLabel(finding));
+  if (finding.workflow_status !== "active") {
+    parts.push(workflowLabel(finding));
   }
   return parts.join(" · ");
 }
 
 const FINDINGS_PAGE_SIZE = 50;
 
-export function FindingsTab({ findings, fallbackFindings, summary, chains, chainLinks }: FindingsTabProps) {
+export function FindingsTab({
+  engagementKey,
+  findings,
+  fallbackFindings,
+  chains,
+  chainLinks,
+}: FindingsTabProps) {
   const [severityFilter, setSeverityFilter] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const [workflowFilter, setWorkflowFilter] = useState<string | null>(null);
+  const [verificationFilter, setVerificationFilter] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [page, setPage] = useState(0);
+  const [transitions, setTransitions] = useState<AssessmentFindingTransition[]>([]);
+  const [transitionsLoading, setTransitionsLoading] = useState(false);
+  const [transitionsError, setTransitionsError] = useState<string | null>(null);
 
   const allFindings = findings.length > 0 ? findings : fallbackFindings;
 
@@ -92,26 +125,80 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [selected]);
 
+  useEffect(() => {
+    if (!selected) {
+      setTransitions([]);
+      setTransitionsLoading(false);
+      setTransitionsError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setTransitionsLoading(true);
+    setTransitionsError(null);
+    listAssessmentFindingTransitions(engagementKey, selected)
+      .then((rows) => {
+        if (cancelled) return;
+        setTransitions(rows);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setTransitions([]);
+        setTransitionsError(error instanceof Error ? error.message : "Failed to load transition history");
+      })
+      .finally(() => {
+        if (!cancelled) setTransitionsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [engagementKey, selected]);
+
   const severities = useMemo(() => {
     const set = new Set(allFindings.map((finding) => finding.severity));
     return SEVERITY_ORDER.filter((severity) => set.has(severity));
   }, [allFindings]);
 
-  const statuses = useMemo(() => {
+  const workflowStatuses = useMemo(() => {
     const set = new Set<string>();
-    allFindings.forEach((finding) => set.add(finding.status));
+    allFindings.forEach((finding) => set.add(finding.workflow_status));
     return Array.from(set);
+  }, [allFindings]);
+
+  const verificationStatuses = useMemo(() => {
+    const set = new Set<string>();
+    allFindings.forEach((finding) => set.add(verificationKey(finding)));
+    return Array.from(set);
+  }, [allFindings]);
+
+  const workflowCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const finding of allFindings) {
+      counts[finding.workflow_status] = (counts[finding.workflow_status] ?? 0) + 1;
+    }
+    return counts;
+  }, [allFindings]);
+
+  const verificationCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const finding of allFindings) {
+      const key = verificationKey(finding);
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+    return counts;
   }, [allFindings]);
 
   const filtered = useMemo(() => {
     setPage(0);
     const visible = allFindings.filter((finding) => {
       if (severityFilter && finding.severity !== severityFilter) return false;
-      if (statusFilter && finding.status !== statusFilter) return false;
+      if (workflowFilter && finding.workflow_status !== workflowFilter) return false;
+      if (verificationFilter && verificationKey(finding) !== verificationFilter) return false;
       return true;
     });
     return sortFindings(visible);
-  }, [allFindings, severityFilter, statusFilter]);
+  }, [allFindings, severityFilter, workflowFilter, verificationFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / FINDINGS_PAGE_SIZE));
   const pageFindings = filtered.slice(page * FINDINGS_PAGE_SIZE, (page + 1) * FINDINGS_PAGE_SIZE);
@@ -121,9 +208,7 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
     [allFindings, selected],
   );
 
-  const statusCounts = summary?.finding_statuses ?? {};
   const details = selectedFinding ? parseDetails(selectedFinding) : {};
-  const showLifecycleBadge = selectedFinding && !["reported", "draft"].includes(selectedFinding.status);
 
   const findingLinkMatches = useMemo(() => {
     const findingIdToSlug = new Map<number, string>();
@@ -173,16 +258,30 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
             ))}
           </div>
           <div className="filter-group">
-            <span className="filter-label">Lifecycle</span>
-            {statuses.map((status) => (
+            <span className="filter-label">Workflow</span>
+            {workflowStatuses.map((status) => (
               <button
                 key={status}
                 type="button"
-                className={`filter-chip ${statusFilter === status ? "filter-active" : ""}`}
-                onClick={() => setStatusFilter(statusFilter === status ? null : status)}
+                className={`filter-chip ${workflowFilter === status ? "filter-active" : ""}`}
+                onClick={() => setWorkflowFilter(workflowFilter === status ? null : status)}
               >
                 {status}
-                {statusCounts[status] != null && <span className="filter-count">{statusCounts[status]}</span>}
+                <span className="filter-count">{workflowCounts[status] ?? 0}</span>
+              </button>
+            ))}
+          </div>
+          <div className="filter-group">
+            <span className="filter-label">Verification</span>
+            {verificationStatuses.map((status) => (
+              <button
+                key={status}
+                type="button"
+                className={`filter-chip ${verificationFilter === status ? "filter-active" : ""}`}
+                onClick={() => setVerificationFilter(verificationFilter === status ? null : status)}
+              >
+                {status}
+                <span className="filter-count">{verificationCounts[status] ?? 0}</span>
               </button>
             ))}
           </div>
@@ -195,7 +294,7 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
             <button
               key={finding.slug}
               type="button"
-              className={`finding-row ${finding.status === "false_positive" ? "finding-row-suppressed" : ""} ${selected === finding.slug ? "finding-row-active" : ""}`}
+              className={`finding-row ${finding.workflow_status === "false_positive" ? "finding-row-suppressed" : ""} ${selected === finding.slug ? "finding-row-active" : ""}`}
               onClick={() => setSelected(finding.slug)}
             >
               <div className="finding-row-main">
@@ -207,6 +306,8 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
                   <span className="badge" title="Attack chains">{findingChainCounts[finding.slug]} chain{findingChainCounts[finding.slug] !== 1 ? "s" : ""}</span>
                 )}
                 <span className={`badge severity-${finding.severity}`}>{finding.severity}</span>
+                <span className={`badge status-${finding.workflow_status}`}>{finding.workflow_status}</span>
+                <span className={`badge status-${verificationKey(finding)}`}>{verificationLabel(finding)}</span>
               </div>
             </button>
           ))}
@@ -235,7 +336,8 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
               </div>
               <div className="finding-modal-actions">
                 <span className={`badge severity-${selectedFinding.severity}`}>{selectedFinding.severity}</span>
-                {showLifecycleBadge && <span className={`badge status-${selectedFinding.status}`}>{selectedFinding.status}</span>}
+                <span className={`badge status-${selectedFinding.workflow_status}`}>{selectedFinding.workflow_status}</span>
+                <span className={`badge status-${verificationKey(selectedFinding)}`}>{verificationLabel(selectedFinding)}</span>
                 <button type="button" className="ghost-button" onClick={() => setSelected(null)}>Close</button>
               </div>
             </div>
@@ -257,8 +359,12 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
 
               <div className="finding-meta-grid">
                 <div>
-                  <p className="eyebrow">Lifecycle</p>
-                  <p>{lifecycleLabel(selectedFinding)}</p>
+                  <p className="eyebrow">Workflow</p>
+                  <p>{workflowLabel(selectedFinding)}</p>
+                </div>
+                <div>
+                  <p className="eyebrow">Verification</p>
+                  <p>{verificationLabel(selectedFinding)}</p>
                 </div>
                 {selectedFinding.source_name && (
                   <div>
@@ -372,6 +478,44 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
                   </ol>
                 </div>
               )}
+
+              <div>
+                <p className="eyebrow">Transition history</p>
+                {transitionsLoading && <p className="meta-text">Loading transition history…</p>}
+                {transitionsError && <p className="meta-text">{transitionsError}</p>}
+                {!transitionsLoading && !transitionsError && transitions.length === 0 && (
+                  <p className="meta-text">No transition history recorded yet.</p>
+                )}
+                {!transitionsLoading && !transitionsError && transitions.length > 0 && (
+                  <div className="finding-transitions">
+                    {transitions.map((transition) => (
+                      <div key={transition.id} className="finding-transition-row">
+                        <div className="finding-transition-header">
+                          <strong>{transition.action}</strong>
+                          <span className="meta-text">{transition.actor || "system"}</span>
+                          <span className="meta-text">{transition.created_at}</span>
+                        </div>
+                        <p className="meta-text">
+                          Workflow: {transition.from_workflow_status ?? "none"} → {transition.to_workflow_status}
+                          {" · "}
+                          Verification: {transition.from_verification_state ?? "none"} / {transition.from_verification_disposition ?? "none"}
+                          {" → "}
+                          {transition.to_verification_state} / {transition.to_verification_disposition}
+                        </p>
+                        {(transition.from_severity || transition.to_severity) && (
+                          <p className="meta-text">
+                            Severity: {transition.from_severity ?? "none"} → {transition.to_severity}
+                          </p>
+                        )}
+                        {transition.reason_text && <p>{transition.reason_text}</p>}
+                        {transition.artifact_ref && (
+                          <p className="meta-text finding-mono">{transition.artifact_ref}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
 
               {selectedChains.length > 0 && (
                 <div>

@@ -48,12 +48,14 @@ def main(argv: list[str] | None = None) -> None:
         record_proposal,
         record_surface,
         review_exploits,
+        verify_finding,
     )
 
     for mod in (
         fetch,
         post,
         patch,
+        verify_finding,
         emit_event,
         log_entry,
         record_finding,

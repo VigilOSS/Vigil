@@ -90,9 +90,54 @@ def load_config(engagement_dir_flag: str | None = None) -> Config:
     agent_root = str(Path(eng_dir).parent.parent)
     eng_key = Path(eng_dir).name
     base_url = resolve_base_url(eng_dir, agent_root)
-    return Config(
+    cfg = Config(
         base_url=base_url,
         engagement_dir=eng_dir,
         engagement_key=eng_key,
         agent_root=agent_root,
     )
+    _verify_backend(cfg)
+    return cfg
+
+
+def _verify_backend(cfg: Config) -> None:
+    """Quick check that the backend is reachable and knows our engagement.
+
+    Prints a warning on failure but does not abort — offline/local-only
+    workflows should still work.
+    """
+    import http.client
+    import json as _json
+    import sys
+    from urllib.parse import urlparse
+
+    parsed = urlparse(cfg.base_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 80
+    path = f"{(parsed.path or '').rstrip('/')}/engagements/{cfg.engagement_key}/assessment/summary"
+
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=2)
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8", errors="replace")
+        conn.close()
+
+        if resp.status == 404:
+            print(
+                f"WARNING: Backend at {cfg.base_url} returned 404 for engagement '{cfg.engagement_key}'.\n"
+                f"  The engagement directory may not be visible to the backend's sync_engagements() scanner.\n"
+                f"  Backend engagement root and local engagement dir may be on different install paths.\n"
+                f"  Data written via the API may be lost or routed to a stale engagement.\n"
+                f"  Engagement dir: {cfg.engagement_dir}",
+                file=sys.stderr,
+            )
+        elif resp.status >= 400:
+            print(
+                f"WARNING: Backend at {cfg.base_url} returned HTTP {resp.status} for engagement check.\n"
+                f"  Response: {body[:200]}",
+                file=sys.stderr,
+            )
+    except Exception:
+        # Backend unreachable — not fatal, local-only mode is valid
+        pass
