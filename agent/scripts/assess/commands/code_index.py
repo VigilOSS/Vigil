@@ -8,7 +8,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from assess.commands.code_ingest import SKIP_DIRS, SKIP_EXTENSIONS, _should_skip_file
+from assess.commands.code_ingest import (
+    SKIP_DIRS,
+    SKIP_EXTENSIONS,
+    _is_regular_file,
+    _should_skip_file,
+)
 from assess.lib.treesitter_index import (
     SUPPORTED_LANGUAGES,
     index_file,
@@ -54,7 +59,7 @@ def _walk_repo(repo_path: str) -> list[dict[str, str]]:
 
         for filename in filenames:
             filepath = os.path.join(dirpath, filename)
-            if os.path.islink(filepath):
+            if not _is_regular_file(filepath):
                 continue
 
             rel_path = os.path.relpath(filepath, repo_path)
