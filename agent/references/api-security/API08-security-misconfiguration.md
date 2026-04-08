@@ -1,6 +1,6 @@
 # API8:2023 — Security Misconfiguration
 
-> See also: [A02-security-misconfiguration](../vuln-checklists/A02-security-misconfiguration.md) | Skill: `web-recon`
+> Skill: `web-recon`
 
 ## CORS Misconfiguration on APIs
 - [ ] Test wildcard CORS with credentials: `curl -I -H "Origin: https://evil.example" https://api/data` — check for `Access-Control-Allow-Origin: *` with `Access-Control-Allow-Credentials: true`

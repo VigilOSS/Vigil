@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from assess.lib.code_audit import write_json_snapshot
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
@@ -43,7 +44,7 @@ def run(args) -> None:
         sys.exit(0)
 
     # Validate required fields
-    required = {"queue_item_id", "file_id", "disposition"}
+    required = {"file_id", "disposition"}
     for i, result in enumerate(results):
         if not isinstance(result, dict):
             print(f"Item {i} is not a JSON object", file=sys.stderr)
@@ -57,11 +58,21 @@ def run(args) -> None:
             sys.exit(1)
 
     cfg = load_config(args.engagement_dir)
+    submit_snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-analysis-submit",
+        label=json_path.stem,
+        payload=results,
+        source_path=str(json_path),
+        metadata={"command": "code-record-analysis", "count": len(results)},
+    )
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    responses = []
     try:
         created = 0
         for result in results:
             resp = client.post("code/analysis-results", result)
+            responses.append(resp)
             created += 1
             disp = result.get("disposition", "?")
             func = result.get("function_name", "unknown")
@@ -69,8 +80,18 @@ def run(args) -> None:
     finally:
         client.close()
 
+    response_snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-analysis-response",
+        label=json_path.stem,
+        payload=responses,
+        source_path=str(submit_snapshot),
+        metadata={"command": "code-record-analysis", "count": len(results)},
+    )
+
     print(f"\n=== Analysis Results Summary ===")
     print(f"Results recorded: {created}")
+    print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
 
     # Count dispositions
     dispositions = {}

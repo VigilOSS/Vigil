@@ -118,8 +118,9 @@ render_template("page.html", name=user_input)   # user_input is a variable, not 
 # Jinja2 — unsafe:
 render_template_string(user_input)               # user_input IS the template
 render_template_string(f"Hello {user_input}")    # user_input = "{{config}}" → leaks config
-# Even with render_template, if user controls template name:
-render_template(user_input)                      # user_input = "../../../etc/passwd" (LFI)
+# If user controls template name — constrained by Jinja2's FileSystemLoader,
+# but misconfigured loaders or symlinks may allow traversal:
+render_template(user_input)                      # user_input = "../secret/internal.html"
 ```
 
 ```javascript
@@ -197,7 +198,8 @@ def process(data):
 
 # yaml.load in config parsing
 config = yaml.load(uploaded_file.read(), Loader=yaml.FullLoader)
-# FullLoader allows some Python objects; yaml.UnsafeLoader allows all
+# FullLoader had bypass CVEs pre-PyYAML 5.4 (CVE-2020-1747); prefer SafeLoader.
+# yaml.UnsafeLoader / yaml.Loader allow arbitrary Python objects → RCE
 ```
 
 ```java

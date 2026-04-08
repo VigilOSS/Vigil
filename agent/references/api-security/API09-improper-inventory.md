@@ -1,6 +1,6 @@
 # API9:2023 — Improper Inventory Management
 
-> See also: [A02-security-misconfiguration](../vuln-checklists/A02-security-misconfiguration.md) | Skill: `source-analysis`
+> Skill: `source-analysis`
 
 ## Undocumented Endpoint Discovery via JS Analysis
 - [ ] Extract API endpoints from JavaScript bundles: search for `/api/`, `fetch(`, `axios.`, `$.ajax`

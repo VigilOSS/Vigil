@@ -234,18 +234,21 @@ template({ data: userInput });
 
 ## Real CVE Examples
 
-### CVE-2015-3153 (cURL — header data in format context)
-Custom HTTP headers set by applications were passed through internal logging functions
-that used the header content in a printf-like context. If the header value (which
-could originate from user input or server responses) contained format specifiers, it
-would be interpreted as a format string. The data flowed through multiple abstraction
-layers: HTTP header storage → logging subsystem → format output function.
+### CVE-2012-0809 (sudo — format string in sudo_debug)
+The sudo utility passed the program name (argv[0]) directly as the format argument to
+a printf-family function inside the `sudo_debug` logging path. An attacker could create
+a symlink to the sudo binary with a name containing format specifiers (e.g., `%s%s%s`).
+When executed through the symlink, the crafted name flowed from argv[0] through the
+debug initialization function and into a printf call as the format string. The argv
+parsing and the format-consuming debug function were in separate compilation units.
 
-### CVE-2013-0222 (coreutils — format string in error message)
-When processing certain inputs, error messages were constructed by concatenating
-user-controlled data with static strings, then passing the result to a printf-family
-function as the format argument. The concatenation happened in one function, the
-printf call in another. Each function in isolation looked correct.
+### CVE-2012-3569 (VMware OVF Tool — format string in error handler)
+The VMware OVF Tool passed user-supplied OVF filenames into an error-handling function
+that used the filename as a format argument to a printf-family call. The filename was
+read and validated in the OVF parser module, but on parse failure, the error reporting
+function in a separate module received the raw filename and used it directly as the
+format string. Format specifiers embedded in the filename caused memory corruption,
+enabling arbitrary code execution.
 
 ### CVE-2018-16842 (cURL — format string in warning message)
 The `curl` command-line tool's warning message construction used user-supplied URL

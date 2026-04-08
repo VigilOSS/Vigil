@@ -362,3 +362,158 @@ export function engagementWebSocketUrl(engagementKey: string): string {
   url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
 }
+
+// ── Code analysis types ─────────────────────────────────
+
+export type CodeRepo = {
+  id: number;
+  repo_key: string;
+  name: string;
+  language: string;
+  repo_path: string;
+  total_files: number;
+  analyzable_files: number;
+  total_loc: number;
+  commit_hash: string;
+  branch: string;
+  analysis_status: string;
+  // Hydrated (parsed) fields — the backend also returns *_json raw strings but
+  // these parsed objects are what the frontend should use.
+  threat_model: Record<string, unknown>;
+  git_churn: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CodeFile = {
+  id: number;
+  repo_id: number;
+  file_path: string;
+  language: string;
+  loc: number;
+  file_hash: string;
+  classification: string;
+  role: string;
+  slot_types: string[];
+  analysis_priority: number;
+  analysis_status: string;
+  analysis_depth: string;
+  skip_reason: string;
+  variant_check_status: string;
+  module_id: number | null;
+  git_churn_score: number;
+  has_past_cve_fix: boolean;
+  header_snippet: string;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CodeModule = {
+  id: number;
+  repo_id: number;
+  module_key: string;
+  name: string;
+  description: string;
+  trust_boundary: string;
+  file_count: number;
+  critical_file_count: number;
+  analysis_status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CodeQueueStats = {
+  pending: number;
+  processing: number;
+  done: number;
+  error: number;
+  needs_context: number;
+  total: number;
+};
+
+export type CodeCoverage = {
+  total_files: number;
+  by_classification: Record<string, { count: number; analyzed: number }>;
+  by_status: Record<string, number>;
+  function_level: {
+    total_contexts: number;
+    analyzed: number;
+    needs_context: number;
+    pending: number;
+  };
+  findings_summary: {
+    total_code_findings: number;
+    by_severity: Record<string, number>;
+    variant_count: number;
+  };
+  confidence: {
+    critical_coverage_pct: number;
+    high_coverage_pct: number;
+    overall_loc_analyzed: number;
+    unresolved_needs_context: number;
+    active_queue_items: number;
+    skip_reasons: Record<string, number>;
+  };
+  gate: {
+    passed: boolean;
+    reasons: string[];
+    effort_warnings?: string[];
+  };
+};
+
+export type CodeAnalysisResult = {
+  id: number;
+  queue_item_id: number | null;
+  context_id: number | null;
+  file_id: number;
+  agent_name: string;
+  function_name: string;
+  hypothesis: string;
+  evidence: string;
+  disposition: string;
+  confidence: string;
+  finding_slug: string;
+  cwe_id: string;
+  slot_type: string;
+  notes: string;
+  audit_metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+// ── Code analysis API functions ─────────────────────────
+
+export function listCodeRepos(engagementKey: string) {
+  return request<CodeRepo[]>(`/engagements/${engagementKey}/assessment/code/repos`);
+}
+
+export function listCodeFiles(engagementKey: string, params?: { repo_id?: number; classification?: string; limit?: number }) {
+  const query = new URLSearchParams();
+  if (params?.repo_id != null) query.set("repo_id", String(params.repo_id));
+  if (params?.classification) query.set("classification", params.classification);
+  if (params?.limit != null) query.set("limit", String(params.limit));
+  const qs = query.toString();
+  return request<CodeFile[]>(`/engagements/${engagementKey}/assessment/code/files${qs ? `?${qs}` : ""}`);
+}
+
+export function listCodeModules(engagementKey: string, repoId?: number) {
+  const qs = repoId != null ? `?repo_id=${repoId}` : "";
+  return request<CodeModule[]>(`/engagements/${engagementKey}/assessment/code/modules${qs}`);
+}
+
+export function getCodeQueueStats(engagementKey: string) {
+  return request<CodeQueueStats>(`/engagements/${engagementKey}/assessment/code/analysis-queue/stats`);
+}
+
+export function getCodeCoverage(engagementKey: string, repoId?: number) {
+  const qs = repoId != null ? `?repo_id=${repoId}` : "";
+  return request<CodeCoverage>(`/engagements/${engagementKey}/assessment/code/coverage${qs}`);
+}
+
+export function listCodeAnalysisResults(engagementKey: string, params?: { file_id?: number; disposition?: string }) {
+  const query = new URLSearchParams();
+  if (params?.file_id != null) query.set("file_id", String(params.file_id));
+  if (params?.disposition) query.set("disposition", params.disposition);
+  const qs = query.toString();
+  return request<CodeAnalysisResult[]>(`/engagements/${engagementKey}/assessment/code/analysis-results${qs ? `?${qs}` : ""}`);
+}

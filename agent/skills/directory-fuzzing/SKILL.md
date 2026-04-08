@@ -91,6 +91,15 @@ ffuf -u https://TARGET/FUZZ -w wordlist.txt -ac -o /engagement/scans/dir_fuzz_re
 curl -sI https://TARGET/discovered_path  # Verify
 ```
 
+## What to Record
+
+- Discovered paths with status codes and response sizes
+- Sensitive files found (.env, .git, backups, config)
+- Admin/management interfaces discovered
+- Wordlists used and filter/matcher settings
+- Whether authenticated fuzzing was performed
+- New endpoints to feed into work buffer via `assess.py ingest-endpoints`
+
 ## Extended Resources
 
 - `agent/references/tools/fuzzing/ffuf.md` — ffuf flags, filter/matcher options, wordlist selection

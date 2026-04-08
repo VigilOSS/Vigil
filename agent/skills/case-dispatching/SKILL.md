@@ -18,8 +18,7 @@ This skill is coordination-only. Use it to inspect the work buffer, route batche
 
 ## The Consumption Loop
 
-**CRITICAL: Fetch work items by type SEPARATELY. Route per table below. NEVER mix types.
-NEVER send page/js/css/data to vulnerability-analyst. NEVER send api/form/upload to source-analyzer.**
+**Routing rule: Fetch work items by type separately and route per the table below. Each agent type is specialized — mixing types produces shallow analysis because vulnerability-analyst lacks the DOM/JS parsing context that source-analyzer has, and source-analyzer lacks the request-crafting methodology that vulnerability-analyst has.**
 
 Each iteration (set `DB="$DIR/cases.db"`):
 ```
@@ -61,7 +60,7 @@ Each iteration (set `DB="$DIR/cases.db"`):
 ## Progress Display (after EVERY batch)
 
 ```
-Phases: [x] Recon  [x] Collect  [>] Consume & Test  [ ] Exploit  [ ] Report
+Phases: [x] Recon (pass 1)  [x] Recon (gate ✓)  [x] Collect  [>] Consume & Test  [ ] Exploit  [ ] Report
 [work-buffer] 120/495 done (24%) | api: 15/21 | page: 98/464 | js: 7/10 | findings: 5
 ```
 ```bash
@@ -73,7 +72,7 @@ sqlite3 "$DB" ".timeout 5000" "
 
 ## Key Rules
 
-- ALWAYS use `./scripts/assess.py dispatch "$DB" <action>` for work-buffer ops (never read cases.db directly)
+- Use `./scripts/assess.py dispatch "$DB" <action>` for all work-buffer operations — reading cases.db directly bypasses the backend sync layer and can produce stale or inconsistent state
 - Treat this skill as host-side coordination only. All real target testing stays in Kali MCP.
 - Record findings in backend state immediately and keep findings.md synchronized
 - Re-ingest new endpoints through backend-first producers; let the work buffer mirror the resulting canonical ids

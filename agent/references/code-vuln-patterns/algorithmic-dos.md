@@ -313,10 +313,11 @@ or an out-of-bounds access in the formatting buffer. The size came from user inp
 via SQL query parameters, propagated through multiple internal functions before
 reaching the vulnerable allocation.
 
-### CVE-2021-22930 (Node.js — ReDoS in URL parser)
-Node.js's URL parser used a regular expression with catastrophic backtracking
-behavior on malformed URLs. An attacker could send a crafted URL that caused the
-event loop to block for seconds per request. Since Node.js is single-threaded, a
-single malicious request denied service to all concurrent connections. The regex
-was in a core module, not user code, making it impossible to work around without
-patching Node.js itself.
+### CVE-2024-22019 (Node.js — HTTP chunk extension ReDoS)
+Node.js's HTTP parser accepted unbounded chunk extension bytes in
+Transfer-Encoding: chunked requests. An attacker could send a single request
+with an extremely long chunk extension line, causing the parser to spend seconds
+in a tight read loop processing the extension data. Since Node.js is
+single-threaded, one malicious request blocked the event loop and denied service
+to all concurrent connections. The vulnerability was in the llhttp parser's
+chunk-extension handling, not in user code, requiring a Node.js patch to fix.

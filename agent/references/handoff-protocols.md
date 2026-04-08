@@ -13,26 +13,28 @@ General rule: use the "Use when:" lines in `agent/SKILL.md` to select the right 
 
 ## RECON-SPECIALIST → next agents
 
-recon outputs: endpoint list, technologies, JS file URLs, parameters, surface candidates
+recon outputs: endpoint list, technologies, JS file URLs, parameters, surface candidates, **coverage gaps**
 
 Operator does:
-1. Pass JS file URLs → dispatch source-analyzer — **bring `agent/skills/source-analysis/SKILL.md`**
-2. Import ALL endpoints → `assess.py ingest-endpoints` → orchestrator backend state (with the local queue only as transient batching)
-3. Record technology stack → durable finding/state update + intel.md
-4. Turn auth boundaries, framework clues, and proxy hints into explicit hypotheses for exploit or source-analysis follow-up
-5. Requestable endpoints, object references, auth inconsistencies → dispatch vulnerability-analyst — **bring the vuln-class skill from `agent/SKILL.md` matching the candidate surface**
-6. If obvious vulns found (default creds, open admin) → dispatch exploit-developer directly — **bring `agent/skills/auth-bypass/SKILL.md`** or the relevant skill for the specific path
+1. **Read `#### Coverage Gaps` first** — this drives the Recon Coverage Gate decision. If material gaps exist, re-dispatch recon-specialist with a targeted objective and specific skill before proceeding. See Phase 1 in the operator core prompt for the full gate checklist and re-dispatch recipes.
+2. Pass JS file URLs → dispatch source-analyzer — **bring `agent/skills/source-analysis/SKILL.md`**
+3. Import ALL endpoints → `assess.py ingest-endpoints` → orchestrator backend state (with the local queue only as transient batching)
+4. Record technology stack → durable finding/state update + intel.md
+5. Turn auth boundaries, framework clues, and proxy hints into explicit hypotheses for exploit or source-analysis follow-up
+6. Requestable endpoints, object references, auth inconsistencies → dispatch vulnerability-analyst — **bring the vuln-class skill from `agent/SKILL.md` matching the candidate surface**
+7. If obvious vulns found (default creds, open admin) → dispatch exploit-developer directly — **bring `agent/skills/auth-bypass/SKILL.md`** or the relevant skill for the specific path
 
 ## SOURCE-ANALYZER → work buffer + findings
 
-source outputs: new API endpoints, routes, secrets/tokens, config objects
+source outputs: new API endpoints, routes, secrets/tokens, config objects, **coverage gaps**
 
 Operator does:
-1. New requestable endpoints → `echo ... | ./scripts/assess.py ingest-endpoints "$DIR/cases.db" source-analysis`
-2. Secrets/tokens → durable findings immediately (HIGH/MEDIUM) + credential backend record with full secret value + intel.md Credentials table for preview/reference only
-3. API routes, object references, mutation paths → dispatch vulnerability-analyst — **bring the vuln-class skill from `agent/SKILL.md` matching the candidate** (e.g., `idor-testing` for object refs, `sqli-testing` for query params)
-4. Parameter names, format hints, upload paths → dispatch fuzzer — **bring `agent/skills/parameter-fuzzing/SKILL.md`**
-5. Exploitable secrets or high-confidence abuse paths → dispatch exploit-developer — **bring the skill matching the specific finding class**
+1. **Read `#### Coverage Gaps` first** — if JS analysis was incomplete (files behind auth, opaque minification), decide whether to re-dispatch source-analyzer with additional context before proceeding.
+2. New requestable endpoints → `echo ... | ./scripts/assess.py ingest-endpoints "$DIR/cases.db" source-analysis`
+3. Secrets/tokens → durable findings immediately (HIGH/MEDIUM) + credential backend record with full secret value + intel.md Credentials table for preview/reference only
+4. API routes, object references, mutation paths → dispatch vulnerability-analyst — **bring the vuln-class skill from `agent/SKILL.md` matching the candidate** (e.g., `idor-testing` for object refs, `sqli-testing` for query params)
+5. Parameter names, format hints, upload paths → dispatch fuzzer — **bring `agent/skills/parameter-fuzzing/SKILL.md`**
+6. Exploitable secrets or high-confidence abuse paths → dispatch exploit-developer — **bring the skill matching the specific finding class**
 
 ## VULNERABILITY-ANALYST → exploit-developer / fuzzer
 

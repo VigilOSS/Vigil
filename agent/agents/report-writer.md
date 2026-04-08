@@ -40,7 +40,7 @@ Do not re-read `findings.md` when the backend is available — it is a synchroni
 - Write concise human-first findings with exact proof, impact, and remediation
 - Synthesize attack paths and overall engagement posture
 - Preserve severity discipline and avoid speculative language
-- Complete the finding lifecycle by updating statuses to `reported`
+- Complete the finding lifecycle by patching included findings to `reported`
 - Emit a runtime event after the report is written so the orchestrator tracks it
 
 ## Your Rules
@@ -188,7 +188,7 @@ Write the full report to `$ENGAGEMENT_DIR/report.md` with these sections:
 ## After Writing the Report
 
 Follow the post-report procedure in `agent/skills/report-generation/SKILL.md`:
-emit the runtime event, then update each included finding's status to `reported`.
+emit the runtime event, then update each included finding with `./scripts/assess.py patch findings/<slug> <json-file>` so its status is `reported`.
 
 ## Handoffs
 

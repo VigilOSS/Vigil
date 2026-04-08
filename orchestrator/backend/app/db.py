@@ -514,6 +514,7 @@ def init_db() -> None:
                 analysis_status TEXT NOT NULL DEFAULT 'ingested',
                 threat_model_json TEXT NOT NULL DEFAULT '{}',
                 git_churn_json TEXT NOT NULL DEFAULT '{}',
+                lsp_config_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, repo_key),
@@ -589,6 +590,7 @@ def init_db() -> None:
                 cross_refs_json TEXT NOT NULL DEFAULT '[]',
                 guard_annotations_json TEXT NOT NULL DEFAULT '[]',
                 sink_annotations_json TEXT NOT NULL DEFAULT '[]',
+                audit_metadata_json TEXT NOT NULL DEFAULT '{}',
                 context_text TEXT NOT NULL DEFAULT '',
                 analysis_status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -612,6 +614,11 @@ def init_db() -> None:
                 disposition TEXT NOT NULL DEFAULT '',
                 analysis_notes TEXT NOT NULL DEFAULT '',
                 expansion_request_json TEXT NOT NULL DEFAULT '{}',
+                batch_theme TEXT NOT NULL DEFAULT '',
+                slot_types_json TEXT NOT NULL DEFAULT '[]',
+                guidance_hypotheses_json TEXT NOT NULL DEFAULT '[]',
+                cwe_coverage_json TEXT NOT NULL DEFAULT '[]',
+                cross_file_triggers_json TEXT NOT NULL DEFAULT '[]',
                 consumed_at TEXT,
                 completed_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -627,7 +634,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS code_analysis_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
-                queue_item_id INTEGER NOT NULL,
+                queue_item_id INTEGER,
                 context_id INTEGER,
                 file_id INTEGER NOT NULL,
                 agent_name TEXT NOT NULL DEFAULT '',
@@ -640,6 +647,9 @@ def init_db() -> None:
                 cwe_id TEXT NOT NULL DEFAULT '',
                 slot_type TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
+                audit_metadata_json TEXT NOT NULL DEFAULT '{}',
+                cwe_coverage_json TEXT NOT NULL DEFAULT '[]',
+                cross_file_triggers_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE CASCADE,
@@ -671,6 +681,39 @@ def init_db() -> None:
         for column_name, definition in finding_column_defaults.items():
             if column_name not in finding_columns:
                 connection.execute(f"ALTER TABLE assessment_findings ADD COLUMN {column_name} {definition}")
+
+        # Migrate code_repos: add lsp_config_json if missing
+        repo_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_repos)").fetchall()}
+        if repo_columns and "lsp_config_json" not in repo_columns:
+            connection.execute("ALTER TABLE code_repos ADD COLUMN lsp_config_json TEXT NOT NULL DEFAULT '{}'")
+
+        context_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_contexts)").fetchall()}
+        if context_columns and "audit_metadata_json" not in context_columns:
+            connection.execute("ALTER TABLE code_contexts ADD COLUMN audit_metadata_json TEXT NOT NULL DEFAULT '{}'")
+
+        result_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_analysis_results)").fetchall()}
+        if result_columns and "audit_metadata_json" not in result_columns:
+            connection.execute("ALTER TABLE code_analysis_results ADD COLUMN audit_metadata_json TEXT NOT NULL DEFAULT '{}'")
+
+        # Migrate code_analysis_queue: add file-direct queue columns
+        queue_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_analysis_queue)").fetchall()}
+        queue_new_columns = {
+            "batch_theme": "TEXT NOT NULL DEFAULT ''",
+            "slot_types_json": "TEXT NOT NULL DEFAULT '[]'",
+            "guidance_hypotheses_json": "TEXT NOT NULL DEFAULT '[]'",
+            "cwe_coverage_json": "TEXT NOT NULL DEFAULT '[]'",
+            "cross_file_triggers_json": "TEXT NOT NULL DEFAULT '[]'",
+        }
+        for col_name, col_def in queue_new_columns.items():
+            if queue_columns and col_name not in queue_columns:
+                connection.execute(f"ALTER TABLE code_analysis_queue ADD COLUMN {col_name} {col_def}")
+
+        # Migrate code_analysis_results: add cwe_coverage and cross_file_triggers
+        if result_columns and "cwe_coverage_json" not in result_columns:
+            connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cwe_coverage_json TEXT NOT NULL DEFAULT '[]'")
+        if result_columns and "cross_file_triggers_json" not in result_columns:
+            connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cross_file_triggers_json TEXT NOT NULL DEFAULT '[]'")
+
         connection.commit()
 
 

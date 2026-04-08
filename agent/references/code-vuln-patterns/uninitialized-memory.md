@@ -244,14 +244,15 @@ pattern mirrors C heap reuse — stale data from prior allocations.
 
 ## Real CVE Examples
 
-### CVE-2019-11815 (Linux kernel — RDS uninitialized memory)
-The RDS (Reliable Datagram Sockets) protocol implementation allocated a struct with
-`kmalloc` (no zeroing) and partially initialized it. Under specific error conditions,
-the initialization function returned early without setting all fields. The struct was
-then passed to a network send function that transmitted the entire struct — including
-uninitialized kernel heap bytes — to userspace. The partial initialization happened in
-one function; the transmission happened in a completely different subsystem. No single-
-function analysis could see the gap.
+### CVE-2017-7184 (Linux kernel — xfrm uninitialized kernel stack leak)
+The XFRM (IPsec) subsystem's netlink handler allocated a response structure on the
+kernel stack and partially populated it from the request. The `xfrm_replay_verify_len`
+function set most fields, but padding bytes and one trailing field were left
+uninitialized when the replay window size was smaller than the maximum. The response
+was then copied to userspace via `nla_put` in a separate function, transmitting the
+full structure including the uninitialized stack bytes. An unprivileged user could
+send crafted XFRM netlink messages to read kernel stack memory, potentially leaking
+KASLR addresses and other sensitive data from prior kernel function frames.
 
 ### CVE-2021-3501 (Linux kernel — KVM uninitialized stack variable)
 In KVM's handling of VMX instructions, a local variable was conditionally initialized
@@ -261,10 +262,13 @@ function, potentially leaking kernel ASLR addresses to the guest VM. The switch 
 dozens of cases, making it easy for a reviewer (and SAST) to miss the one uninitializing
 path.
 
-### CVE-2017-7494 (Samba — stack variable uninitialized in RPC handler)
-An RPC handler allocated a response structure on the stack and populated most fields
-from the request. One field was set only in the success path of an inner function call.
-On the error path, the field retained its stack value. The response was then marshalled
-and sent to the client, leaking stack memory that could contain pointers, session
-tokens, or other sensitive data from prior RPC handler invocations occupying the
-same stack region.
+### CVE-2019-11091 (Intel CPU — Microarchitectural Data Sampling / MDSUM)
+The Microarchitectural Data Sampling (MDS) class of vulnerabilities allowed processes
+to read stale data from CPU-internal buffers (fill buffers, load ports, store buffers)
+that had not been cleared between context switches. When a load encountered a fault or
+assist condition, the CPU's speculative execution could forward uninitialized data from
+these microarchitectural buffers to dependent instructions. The "initialization" (buffer
+clearing) was expected to happen during context switch in one kernel function, but the
+speculative read in the CPU pipeline operated before the architectural state was
+committed — a hardware-level cross-domain uninitialized data exposure that leaked
+memory across process, VM, and privilege boundaries.

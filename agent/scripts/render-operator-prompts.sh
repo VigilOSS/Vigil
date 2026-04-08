@@ -22,7 +22,6 @@ AGENT_NAMES=(
   osint-analyst
   report-writer
   code-architect
-  code-context-builder
   code-vuln-hunter
   code-variant-hunter
   code-vuln-verifier
@@ -39,7 +38,6 @@ agent_description() {
     osint-analyst) printf '%s\n' "External intelligence specialist for CVEs, disclosures, and context." ;;
     report-writer) printf '%s\n' "Human-first reporting specialist for concise, evidence-backed reporting." ;;
     code-architect) printf '%s\n' "Architecture reconnaissance, threat modeling, and file classification for source code repositories." ;;
-    code-context-builder) printf '%s\n' "Reads source code modules, extracts function context slices with call graphs and data flow annotations." ;;
     code-vuln-hunter) printf '%s\n' "Deep vulnerability analysis specialist for function-level code review and exploitability assessment." ;;
     code-variant-hunter) printf '%s\n' "Systematic variant scanner for confirmed code vulnerability patterns." ;;
     code-vuln-verifier) printf '%s\n' "False-positive elimination specialist for code findings using full entry-to-sink validation." ;;
@@ -100,11 +98,10 @@ render_code_agent_roster() {
 
 | Agent | Role | Dispatched When |
 |---|---|---|
-| `code-architect` | Architecture recon, threat modeling, file classification for source repos. | Code Phase 1 (Classify). |
-| `code-context-builder` | Function-level context extraction with call graphs and data flow annotations. | Code Phase 2 (Context), parallel per module. |
-| `code-vuln-hunter` | Deep vulnerability analysis using constrained attacker persona and taint tracing. | Code Phase 3 (Analyze), batched. |
-| `code-variant-hunter` | Systematic scanning for variant instances of confirmed bug patterns. | Code Phase 4 (Variant), parallel per finding. |
-| `code-vuln-verifier` | FP elimination via full entry-to-sink traces and attack chain synthesis. | Code Phase 5 (Verify). |
+| `code-architect` | Architecture recon, threat modeling, call graph, attack hypotheses for source repos. | Code Phase 1 (Classify+Map). |
+| `code-vuln-hunter` | Deep vulnerability analysis using TOB-style methodology on actual source code. | Code Phase 2 (Hunt), batched. |
+| `code-variant-hunter` | Systematic scanning for variant instances of confirmed bug patterns. | Code Phase 3 (Verify+Variant), parallel per finding. |
+| `code-vuln-verifier` | FP elimination via five-check protocol with devil's advocate verification. | Code Phase 3 (Verify+Variant), parallel. |
 
 EOF
 }
@@ -147,7 +144,6 @@ Use `@agent-name` when dispatching subagents:
 - `@osint-analyst`
 - `@report-writer`
 - `@code-architect`
-- `@code-context-builder`
 - `@code-vuln-hunter`
 - `@code-variant-hunter`
 - `@code-vuln-verifier`

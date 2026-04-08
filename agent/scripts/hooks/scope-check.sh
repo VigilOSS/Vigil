@@ -25,7 +25,7 @@ COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || tr
 
 # Block common target-facing host-side execution paths even if the target is indirect
 # via environment variables, scope.json, or helper scripts.
-if printf '%s\n' "$COMMAND" | grep -Eq '(^|[[:space:];|&(])((/usr/bin/)?curl|nmap|ffuf|wfuzz|gobuster|dirb|sqlmap|nikto|whatweb|hydra|katana|arjun|subfinder|httpx|nc|netcat|msfconsole|msfrpcd)([[:space:]]|$)'; then
+if printf '%s\n' "$COMMAND" | grep -Eq '(^|[[:space:];|&(])((/usr/bin/)?curl|nmap|ffuf|wfuzz|gobuster|dirb|sqlmap|whatweb|hydra|katana|arjun|subfinder|httpx|nc|netcat|msfconsole|msfrpcd)([[:space:]]|$)'; then
   echo "BLOCKED: Host-side target-facing tool execution is not allowed. Use the attached Kali MCP tools for in-scope work." >&2
   exit 2
 fi

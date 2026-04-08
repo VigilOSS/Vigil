@@ -13,6 +13,10 @@ _AGENT_PREFIX_MAP = {
     "recon-specialist": "RE",
     "fuzzer": "FZ",
     "osint-analyst": "OS",
+    "code-architect": "CA",
+    "code-vuln-hunter": "CH",
+    "code-variant-hunter": "CV",
+    "code-vuln-verifier": "VF",
 }
 
 _FINDING_ID_RE = re.compile(r"FINDING-([A-Z]{2})-(\d{3})")
@@ -53,8 +57,6 @@ def update_finding_count(findings_file: str) -> None:
     path = Path(findings_file)
     text = path.read_text(encoding="utf-8")
 
-    count = len(_FINDING_HEADING_RE.findall(text, re.MULTILINE))
-    # Actually count with multiline
     count = 0
     for line in text.splitlines():
         if _FINDING_HEADING_RE.match(line):

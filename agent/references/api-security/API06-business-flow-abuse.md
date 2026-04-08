@@ -1,6 +1,6 @@
 # API6:2023 — Unrestricted Access to Sensitive Business Flows
 
-> See also: [A06-insecure-design](../vuln-checklists/A06-insecure-design.md) | Skill: `business-logic-testing`
+> Skill: `business-logic-testing`
 
 ## Checkout & Purchase Abuse
 - [ ] Automate checkout flow via API without frontend: `curl -X POST https://api/checkout -d '{"item_id":1,"qty":1}'`
@@ -43,5 +43,13 @@
 - [ ] Test for negative transfer amounts to reverse fund direction
 - [ ] Check if transfer limits are enforced server-side vs client-side only
 
+## Race Conditions on Business Flows
+- [ ] Concurrent coupon redemption: send 20 parallel POST requests to apply the same coupon
+- [ ] Double-spend: send 20 parallel transfer requests with the same transaction
+- [ ] Inventory race: buy the last item with 10 concurrent checkout requests
+- [ ] OTP/token race: validate the same OTP code in parallel before server invalidates it
+- [ ] Idempotency key bypass: omit or modify the idempotency key to replay operations
+- See `race-condition-testing` skill for HTTP/2 single-packet technique and Python asyncio examples
+
 ---
-> Cross-reference: A06 checklist, `business-logic-testing` skill
+> Cross-reference: A06 checklist, `business-logic-testing` skill, `race-condition-testing` skill

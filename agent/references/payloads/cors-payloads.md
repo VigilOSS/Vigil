@@ -128,7 +128,7 @@ Simple requests (GET, POST with standard Content-Type) skip pre-flight OPTIONS c
 
 | Misconfiguration | Risk |
 |-----------------|------|
-| `Access-Control-Allow-Origin: *` with credentials | Browser blocks, but data still exposed to scripts |
+| `Access-Control-Allow-Origin: *` with credentials | Browser blocks entirely — response not accessible to scripts. Indicates server confusion; test for other CORS misconfigs. |
 | Origin reflection with `Allow-Credentials: true` | Full credential theft |
 | `null` origin allowed with credentials | Sandbox iframe exploitation |
 | Regex bypass (unescaped dot, prefix match) | Domain spoofing |

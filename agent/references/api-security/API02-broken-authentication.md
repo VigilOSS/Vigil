@@ -1,6 +1,6 @@
 # API2:2023 — Broken Authentication
 
-> See also: [A07-authentication-failures](../vuln-checklists/A07-authentication-failures.md) | Skill: `auth-bypass`
+> Skill: `auth-bypass`
 
 ## API Key Exposure
 - [ ] Search JavaScript bundles for API keys: `grep -r "api[_-]key\|apiKey\|API_KEY" *.js`
@@ -35,9 +35,7 @@
 - [ ] Check for credentials in request body without TLS
 
 ## Method-Based Auth Bypass
-- [ ] Test if changing HTTP method bypasses auth: `GET /admin` (blocked) vs `POST /admin` (allowed?)
-- [ ] Test `OPTIONS` and `HEAD` methods on authenticated endpoints
-- [ ] Test method override headers: `X-HTTP-Method-Override: GET` on a POST-only endpoint
+- See [API05 HTTP Method-Based Access Control Bypass](API05-broken-function-authz.md) for full method override and verb tampering tests
 
 ---
-> Cross-reference: A07 checklist, `auth-bypass` skill
+> Cross-reference: A07 checklist, API05 checklist, `auth-bypass` skill

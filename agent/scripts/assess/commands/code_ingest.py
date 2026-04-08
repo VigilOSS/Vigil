@@ -45,6 +45,97 @@ SKIP_EXTENSIONS = frozenset({
 })
 
 
+_C_EXTENSIONS = frozenset({'.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hh'})
+_PYTHON_EXTENSIONS = frozenset({'.py', '.pyx', '.pyi'})
+_JS_TS_EXTENSIONS = frozenset({'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'})
+
+
+def _which(binary: str) -> str | None:
+    """Find a binary on PATH, return full path or None."""
+    try:
+        result = subprocess.run(
+            ['which', binary], capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
+def _setup_ctags(repo_path: str) -> dict[str, object]:
+    """Generate ctags symbol index for a repository."""
+    config: dict[str, object] = {
+        'available': False,
+        'tags_path': '',
+        'universal': False,
+    }
+
+    ctags_path = _which('ctags')
+    if not ctags_path:
+        print("  ctags: not found", file=sys.stderr)
+        return config
+
+    # Detect Universal vs BSD ctags
+    try:
+        version_result = subprocess.run(
+            ['ctags', '--version'], capture_output=True, text=True, timeout=5,
+        )
+        is_universal = 'Universal' in version_result.stdout or 'Universal' in version_result.stderr
+    except (subprocess.TimeoutExpired, OSError):
+        is_universal = False
+
+    config['universal'] = is_universal
+
+    tags_path = os.path.join(repo_path, 'tags')
+
+    try:
+        if is_universal:
+            subprocess.run(
+                [
+                    'ctags', '-R',
+                    '--fields=+S+K+n',
+                    '--extras=+q',
+                    '--output-format=e-ctags',
+                    '-f', tags_path,
+                    repo_path,
+                ],
+                capture_output=True, timeout=120,
+            )
+        else:
+            # BSD ctags (macOS default) — limited, must list files explicitly
+            source_files = []
+            for dirpath, dirnames, filenames in os.walk(repo_path):
+                dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+                dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
+                for filename in filenames:
+                    if os.path.islink(os.path.join(dirpath, filename)):
+                        continue
+                    ext = Path(filename).suffix.lower()
+                    if ext in _C_EXTENSIONS or ext in _PYTHON_EXTENSIONS or ext in _JS_TS_EXTENSIONS:
+                        source_files.append(os.path.join(dirpath, filename))
+            if source_files:
+                subprocess.run(
+                    ['ctags', '-f', tags_path] + source_files,
+                    capture_output=True, timeout=120,
+                )
+
+        if os.path.isfile(tags_path):
+            with open(tags_path, 'r', encoding='utf-8', errors='replace') as f:
+                tag_count = sum(1 for line in f if not line.startswith('!'))
+            config['available'] = True
+            config['tags_path'] = 'tags'
+            kind = 'Universal' if is_universal else 'BSD (limited)'
+            print(f"  ctags: {tag_count} tags generated ({kind})")
+        else:
+            print("  ctags: generation failed", file=sys.stderr)
+
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"  ctags: error: {e}", file=sys.stderr)
+
+    return config
+
+
 def register(subparsers) -> None:
     p = subparsers.add_parser("code-ingest", help="Ingest a code repository for analysis")
     p.add_argument("repo_path", help="Path to the repository root")
@@ -282,6 +373,25 @@ def run(args) -> None:
     finally:
         client.close()
 
+    # Update scope.json with source_repos entry so operator-core-code.md can discover it
+    eng_dir = getattr(cfg, 'engagement_dir', None)
+    if eng_dir:
+        scope_path = os.path.join(eng_dir, 'scope.json')
+        if os.path.isfile(scope_path):
+            try:
+                with open(scope_path, 'r', encoding='utf-8') as f:
+                    scope = json.load(f)
+                source_repos = scope.get('source_repos', [])
+                repo_entry = {'repo_id': repo_id, 'name': repo_name, 'path': repo_path, 'language': args.language or ''}
+                # Avoid duplicates by repo_id
+                if not any(r.get('repo_id') == repo_id for r in source_repos):
+                    source_repos.append(repo_entry)
+                scope['source_repos'] = source_repos
+                with open(scope_path, 'w', encoding='utf-8') as f:
+                    json.dump(scope, f, indent=2, ensure_ascii=False)
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"Warning: could not update scope.json with source_repos: {e}", file=sys.stderr)
+
     # Print summary
     analyzable = len([f for f in files if f['language'] is not None])
     print(f"\n=== Code Ingest Summary ===")
@@ -300,3 +410,11 @@ def run(args) -> None:
 
     if security_files:
         print(f"\nFiles with security-related commit history: {len(security_files)}")
+
+    # Generate ctags symbol index (non-blocking — failure is OK)
+    try:
+        result = _setup_ctags(repo_path)
+        if not result.get('available'):
+            print("\nSymbol index: ctags not available (install Universal ctags for better cross-references)", file=sys.stderr)
+    except Exception:
+        print("\nSymbol index: ctags not available", file=sys.stderr)

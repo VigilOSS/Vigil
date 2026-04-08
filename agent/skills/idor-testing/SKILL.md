@@ -88,5 +88,4 @@ origin: AI Threat Hunting
 
 ## Extended Resources
 
-- `agent/references/vuln-checklists/A01-broken-access-control.md` — OWASP Top 10:2025 access control checklist
 - `agent/references/api-security/API01-broken-object-level-authz.md` — OWASP API Security Top 10:2023 BOLA checklist

