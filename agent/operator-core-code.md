@@ -34,7 +34,7 @@ analyzed or user signals stop:
 
 1. **ASSESS STATE** -- Read `code-scope.json` (or `scope.json` with `source_repos`). Check code coverage stats via `./scripts/assess.py code-coverage`. Check CWE effort matrix via `./scripts/assess.py code-coverage --cwe-matrix` when in Phase 2B. Backend state is canonical; use `--require-gate-pass` only for the final Phase 3 gate.
 2. **DECIDE NEXT ACTION** -- Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified, call graph complete, structural index generated). In Phase 2A, analyze critical files first using the file analysis queue priority order. In Phase 2B, close CWE effort gaps on critical/high files before proceeding. In Phase 3, drive aggressive FP elimination on all findings. Coverage gaps drive decisions.
-3. **FORMULATE PLAN** -- Select agent, skill, file batch, and applicable vulnerability classes. Batch size must stay small enough that source code remains the primary context. Use adaptive batching by module, entry-chain cluster, or sink family instead of a fixed-size handoff. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
+3. **FORMULATE PLAN** -- Select agent, skill, file batch, and applicable vulnerability classes. Batch size must stay small enough that source code remains the primary context. Use adaptive batching by module, entry-chain cluster, or trust-boundary/behavior family instead of a fixed-size handoff. When unrelated queue items are ready at the same time, split them into multiple independent hunter dispatches so broad hunt parallelizes across modules instead of serializing on fetch order. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
 4. **PRESENT OR PROCEED** -- Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.
 5. **USE SKILLS FIRST** -- Check `agent/SKILL.md` for the right skill.
    - **Phase 0 (Ingest + Index):** operator-mechanical, no agent dispatch needed
@@ -125,15 +125,17 @@ Phase 1 produces six deliverables. The call graph and attack hypotheses provide 
    Format: each edge records `{caller_func, caller_file, caller_line, callee_func, callee_file,
    callee_line, crosses_trust_boundary: bool, untrusted_data_label: string|null}`.
    The call graph focuses on entry-point chains: paths from external input (network, file, CLI)
-   through processing functions to security-sensitive sinks (memory allocation, command execution,
-   file I/O, auth decisions). Internal helper calls without security relevance can be omitted.
+   through processing functions to security-relevant decisions, state transitions, and
+   harm-bearing operations (memory allocation, command execution, file I/O, auth decisions,
+   resource-limit checks). Internal helper calls without security relevance can be omitted.
 
 5. **Attack hypotheses (guidance)** -- for each high-priority entry-point chain, a specific testable
-   hypothesis. Each hypothesis names the entry point, the function chain, the suspected defect
-   class, and the CWE. Hypotheses are guidance for hunters, not the sole work items -- they help
-   hunters prioritize within files, but files without hypotheses still receive full unconstrained
-   analysis during Phase 2. This prevents hypothesis anchoring where the analysis scope narrows
-   to what the architect predicted.
+   hypothesis. Each hypothesis names the entry point, the function chain, and the
+   security-relevant decision, state transition, or harm-bearing operation where the suspected
+   defect could emerge, plus the defect class and CWE. Hypotheses are guidance for hunters, not
+   the sole work items -- they help hunters prioritize within files, but files without
+   hypotheses still receive full unconstrained analysis during Phase 2. This prevents hypothesis
+   anchoring where the analysis scope narrows to what the architect predicted.
 
 6. **File analysis queue** -- every critical and high file queued for Phase 2 analysis regardless
    of whether a hypothesis names it. Files without hypotheses appear with an empty
@@ -164,7 +166,7 @@ cp <file-analysis-queue-json> "$DIR/tools/analysis-state/file-analysis-queue.jso
 
 **Before transitioning:** Review code-architect's `#### Coverage Gaps` output. Critical gaps to
 check before proceeding:
-- Unresolved entry-point chains (external input sources with no traced path to sinks)
+- Unresolved entry-point chains (external input sources with no traced path to a security-relevant decision, state transition, or harm-bearing operation)
 - Missing cross-module edges for security-critical paths (e.g., auth module calls into crypto
   module but the edge is not in the graph)
 - Unclassified directories that contain security-relevant code
@@ -235,6 +237,10 @@ resolving `file_path`; it is not part of the backend queue schema.
 The fetch size is a queue convenience, not a required prompt batch size. Split fetched items into
 smaller hunter dispatches whenever code volume, framework noise, or support metadata would make
 the prompt context heavier than the source files themselves.
+When fetched items belong to unrelated modules, entry chains, or trust boundaries, dispatch
+multiple hunters in parallel instead of handing one oversized mixed batch to a single agent.
+Independent batches do not benefit from shared context, and splitting them preserves depth while
+using the available subagent budget.
 
 **Dispatch `code-vuln-hunter`** with `agent/skills/code-vulnerability-analysis/SKILL.md` and:
 
@@ -639,6 +645,7 @@ Before every dispatch, verify:
 - [ ] For Phase 2: structural index excerpt or per-file JSON included (if available)
 - [ ] For Phase 2: adversarial framing preamble included (with actual entry points and chains)
 - [ ] For Phase 2: effort score thresholds included for the file's classification tier
+- [ ] For Phase 2: unrelated fetched groups split into separate hunter dispatches so independent modules run in parallel
 - [ ] For Phase 2B: cwe_directives and prior_effort included for CWE-directed re-analysis
 - [ ] Call graph excerpt included for Phase 2 dispatches
 - [ ] Supporting context clipped to the relevant files and chains; no unrelated JSON dumps
