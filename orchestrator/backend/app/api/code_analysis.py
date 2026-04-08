@@ -73,27 +73,7 @@ class CodeModulesBulkCreateRequest(BaseModel):
     modules: list[CodeModuleRecord]
 
 
-class CodeContextRecord(BaseModel):
-    file_id: int
-    function_name: str = Field(min_length=1, max_length=512)
-    start_line: int = Field(default=0, ge=0)
-    end_line: int = Field(default=0, ge=0)
-    slot_types: list[str] = Field(default_factory=list)
-    call_chain: dict[str, Any] = Field(default_factory=dict)
-    data_flow: dict[str, Any] = Field(default_factory=dict)
-    cross_refs: list[dict[str, Any]] = Field(default_factory=list)
-    guard_annotations: list[dict[str, Any]] = Field(default_factory=list)
-    sink_annotations: list[dict[str, Any]] = Field(default_factory=list)
-    audit_metadata: dict[str, Any] = Field(default_factory=dict)
-    context_text: str = Field(default="", max_length=100000)
-
-
-class CodeContextsBulkCreateRequest(BaseModel):
-    contexts: list[CodeContextRecord]
-
-
 class QueueItemRecord(BaseModel):
-    context_id: int | None = None
     file_id: int
     priority: int = Field(default=50, ge=0, le=100)
     batch_theme: str = Field(default="", max_length=256)
@@ -134,7 +114,6 @@ class QueueResetStaleRequest(BaseModel):
 
 class AnalysisResultRecord(BaseModel):
     queue_item_id: int | None = None
-    context_id: int | None = None
     file_id: int
     agent_name: str = Field(default="", max_length=128)
     function_name: str = Field(default="", max_length=512)
@@ -292,43 +271,6 @@ def list_modules(
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return code_analysis.list_code_modules(engagement.id, repo_id=repo_id)
-
-
-# ---------------------------------------------------------------------------
-# Context endpoints
-# ---------------------------------------------------------------------------
-
-@router.post("/contexts", status_code=status.HTTP_201_CREATED)
-async def bulk_create_contexts(engagement_key: str, request: CodeContextsBulkCreateRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.bulk_create_code_contexts(
-        engagement.id,
-        contexts=[c.model_dump() for c in request.contexts],
-    )
-    await _broadcast(engagement.key, "contexts", record)
-    return record
-
-
-@router.get("/contexts")
-def list_contexts(
-    engagement_key: str,
-    file_id: int | None = Query(default=None),
-    analysis_status: str | None = Query(default=None),
-) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    return code_analysis.list_code_contexts(
-        engagement.id,
-        file_id=file_id,
-        analysis_status=analysis_status,
-    )
-
-
-@router.patch("/contexts/{context_id}")
-async def update_context(engagement_key: str, context_id: int, request: dict[str, Any]) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.update_code_context(engagement.id, context_id, **request)
-    await _broadcast(engagement.key, "context", record)
-    return record
 
 
 # ---------------------------------------------------------------------------

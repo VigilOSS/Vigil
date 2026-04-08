@@ -11,7 +11,6 @@
   ],
   "examples": [
     {
-      "context_id": 42,
       "file_id": 15,
       "agent_name": "code-vuln-hunter",
       "function_name": "parseurl",
@@ -54,11 +53,6 @@
     "queue_item_id": {
       "type": ["integer", "null"],
       "description": "ID of the code_analysis_queue item this result corresponds to.",
-      "default": null
-    },
-    "context_id": {
-      "type": ["integer", "null"],
-      "description": "ID of the code_contexts record analyzed. Null if analysis was file-level without function context.",
       "default": null
     },
     "file_id": {

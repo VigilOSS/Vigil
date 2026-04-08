@@ -270,18 +270,6 @@ export function CodeAnalysisTab({
               )}
             </div>
 
-            {/* Function-level progress */}
-            {coverage.function_level.total_contexts > 0 && (
-              <div className="code-fn-progress">
-                <p className="eyebrow" style={{ marginTop: "16px" }}>Function Contexts</p>
-                <div className="code-fn-stats">
-                  <span>{coverage.function_level.total_contexts} total</span>
-                  <span>{coverage.function_level.analyzed} analyzed</span>
-                  <span>{coverage.function_level.needs_context} needs context</span>
-                  <span>{coverage.function_level.pending} pending</span>
-                </div>
-              </div>
-            )}
           </article>
 
           <article className="panel">
@@ -421,7 +409,7 @@ export function CodeAnalysisTab({
           {/* Results list */}
           <div className="code-results-list">
             {pageResults.map((r) => (
-              <article key={r.id} className="code-result-row">
+              <article key={r.id} className={`code-result-row ${r.finding_status === "false_positive" ? "code-result-row-suppressed" : ""}`}>
                 <div className="code-result-header">
                   <span className={`badge code-disposition-${r.disposition}`}>{r.disposition}</span>
                   <strong className="mono-text">{r.function_name || `file #${r.file_id}`}</strong>
@@ -445,6 +433,7 @@ export function CodeAnalysisTab({
                   <div className="code-result-detail">
                     <span className="code-result-label">Finding:</span>
                     <span className="mono-text">{r.finding_slug}</span>
+                    {r.finding_status && <span className={`badge status-${r.finding_status}`}>{r.finding_status}</span>}
                   </div>
                 )}
               </article>

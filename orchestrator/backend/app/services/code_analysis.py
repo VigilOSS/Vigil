@@ -58,24 +58,28 @@ def _hydrate_code_file(row: Any) -> dict[str, Any]:
     return payload
 
 
-def _hydrate_code_context(row: Any) -> dict[str, Any]:
-    payload = dict(row)
-    payload["slot_types"] = _json_decode(payload.get("slot_types_json"), [])
-    payload["call_chain"] = _json_decode(payload.get("call_chain_json"), {})
-    payload["data_flow"] = _json_decode(payload.get("data_flow_json"), {})
-    payload["cross_refs"] = _json_decode(payload.get("cross_refs_json"), [])
-    payload["guard_annotations"] = _json_decode(payload.get("guard_annotations_json"), [])
-    payload["sink_annotations"] = _json_decode(payload.get("sink_annotations_json"), [])
-    payload["audit_metadata"] = _json_decode(payload.get("audit_metadata_json"), {})
-    return payload
-
-
 def _hydrate_code_analysis_result(row: Any) -> dict[str, Any]:
     payload = dict(row)
     payload["audit_metadata"] = _json_decode(payload.get("audit_metadata_json"), {})
     payload["cwe_coverage"] = _json_decode(payload.get("cwe_coverage_json"), [])
     payload["cross_file_triggers"] = _json_decode(payload.get("cross_file_triggers_json"), [])
     return payload
+
+
+def _analysis_result_row(connection, result_id: int) -> Any:
+    return connection.execute(
+        """
+        SELECT
+            results.*,
+            findings.status AS finding_status
+        FROM code_analysis_results AS results
+        LEFT JOIN assessment_findings AS findings
+          ON findings.engagement_id = results.engagement_id
+         AND findings.slug = results.finding_slug
+        WHERE results.id = ?
+        """,
+        (result_id,),
+    ).fetchone()
 
 
 def _get_repo_row(connection, engagement_id: int, repo_id: int) -> dict[str, Any]:
@@ -116,20 +120,6 @@ def _get_file_rows(connection, engagement_id: int, file_ids: set[int]) -> dict[i
     return found
 
 
-def _get_context_rows(connection, engagement_id: int, context_ids: set[int]) -> dict[int, dict[str, Any]]:
-    if not context_ids:
-        return {}
-    placeholders = ",".join("?" for _ in context_ids)
-    rows = connection.execute(
-        f"SELECT * FROM code_contexts WHERE engagement_id = ? AND id IN ({placeholders})",
-        (engagement_id, *sorted(context_ids)),
-    ).fetchall()
-    found = {int(row["id"]): dict(row) for row in rows}
-    if len(found) != len(context_ids):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code context not found")
-    return found
-
-
 def _get_queue_rows(connection, engagement_id: int, item_ids: set[int]) -> dict[int, dict[str, Any]]:
     if not item_ids:
         return {}
@@ -145,12 +135,6 @@ def _get_queue_rows(connection, engagement_id: int, item_ids: set[int]) -> dict[
 
 
 def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> None:
-    total_contexts = _scalar_row(
-        connection,
-        "SELECT COUNT(*) FROM code_contexts WHERE engagement_id = ? AND file_id = ?",
-        (engagement_id, file_id),
-    )
-
     queue_rows = connection.execute(
         """
         SELECT status, COUNT(*) AS total
@@ -166,50 +150,19 @@ def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> 
     done_queue = queue_counts.get("done", 0)
     queue_needs_context = queue_counts.get("needs_context", 0)
 
-    if total_contexts == 0:
-        # File-direct mode: derive status from queue items alone
-        if not queue_counts:
-            return  # No contexts and no queue items — nothing to sync
-        if queue_needs_context > 0:
-            next_status = "needs_context"
-        elif pending_queue == 0 and processing_queue == 0 and done_queue > 0:
-            next_status = "analyzed"
-        elif processing_queue > 0 or done_queue > 0:
-            next_status = "in_progress"
-        elif pending_queue > 0:
-            next_status = "queued"
-        else:
-            next_status = "classified"
+    # File-direct mode: derive status from queue items alone
+    if not queue_counts:
+        return  # No queue items — nothing to sync
+    if queue_needs_context > 0:
+        next_status = "needs_context"
+    elif pending_queue == 0 and processing_queue == 0 and done_queue > 0:
+        next_status = "analyzed"
+    elif processing_queue > 0 or done_queue > 0:
+        next_status = "in_progress"
+    elif pending_queue > 0:
+        next_status = "queued"
     else:
-        analyzed_contexts = _scalar_row(
-            connection,
-            """
-            SELECT COUNT(*)
-            FROM code_contexts
-            WHERE engagement_id = ? AND file_id = ? AND analysis_status IN ('analyzed', 'done')
-            """,
-            (engagement_id, file_id),
-        )
-        needs_context = _scalar_row(
-            connection,
-            """
-            SELECT COUNT(*)
-            FROM code_contexts
-            WHERE engagement_id = ? AND file_id = ? AND analysis_status = 'needs_context'
-            """,
-            (engagement_id, file_id),
-        )
-
-        if needs_context > 0 or queue_needs_context > 0:
-            next_status = "needs_context"
-        elif analyzed_contexts == total_contexts and pending_queue == 0 and processing_queue == 0:
-            next_status = "analyzed"
-        elif processing_queue > 0 or analyzed_contexts > 0:
-            next_status = "in_progress"
-        elif pending_queue > 0:
-            next_status = "queued"
-        else:
-            next_status = "context_built"
+        next_status = "classified"
 
     connection.execute(
         """
@@ -743,158 +696,6 @@ def list_code_modules(
 
 
 # =========================================================================
-# Context Slices
-# =========================================================================
-
-def bulk_create_code_contexts(
-    engagement_id: int,
-    contexts: list[dict[str, Any]],
-) -> dict[str, Any]:
-    engagement = _engagement_or_404(engagement_id)
-    inserted = 0
-    skipped = 0
-    rows: list[dict[str, Any]] = []
-    with get_connection() as connection:
-        _get_file_rows(connection, engagement.id, {int(ctx["file_id"]) for ctx in contexts})
-        for ctx in contexts:
-            cursor = connection.execute(
-                """
-                INSERT OR IGNORE INTO code_contexts (
-                    engagement_id, file_id, function_name, start_line, end_line,
-                    slot_types_json, call_chain_json, data_flow_json,
-                    cross_refs_json, guard_annotations_json, sink_annotations_json,
-                    audit_metadata_json, context_text
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    engagement.id,
-                    ctx["file_id"],
-                    ctx["function_name"],
-                    ctx.get("start_line", 0),
-                    ctx.get("end_line", 0),
-                    _json_list_text(ctx.get("slot_types")),
-                    _json_text(ctx.get("call_chain")),
-                    _json_text(ctx.get("data_flow")),
-                    _json_list_text(ctx.get("cross_refs")),
-                    _json_list_text(ctx.get("guard_annotations")),
-                    _json_list_text(ctx.get("sink_annotations")),
-                    _json_text(ctx.get("audit_metadata")),
-                    ctx.get("context_text", ""),
-                ),
-            )
-            if cursor.rowcount > 0:
-                inserted += 1
-            else:
-                skipped += 1
-            row = connection.execute(
-                """
-                SELECT *
-                FROM code_contexts
-                WHERE engagement_id = ? AND file_id = ? AND function_name = ? AND start_line = ?
-                """,
-                (
-                    engagement.id,
-                    ctx["file_id"],
-                    ctx["function_name"],
-                    ctx.get("start_line", 0),
-                ),
-            ).fetchone()
-            assert row is not None
-            rows.append(_hydrate_code_context(row))
-            _sync_file_analysis_status(connection, engagement.id, int(ctx["file_id"]))
-    return {"inserted": inserted, "skipped": skipped, "total": len(contexts), "contexts": rows}
-
-
-def list_code_contexts(
-    engagement_id: int,
-    *,
-    file_id: int | None = None,
-    analysis_status: str | None = None,
-) -> list[dict[str, Any]]:
-    engagement = _engagement_or_404(engagement_id)
-    clauses = ["engagement_id = ?"]
-    params: list[Any] = [engagement.id]
-    if file_id is not None:
-        clauses.append("file_id = ?")
-        params.append(file_id)
-    if analysis_status is not None:
-        clauses.append("analysis_status = ?")
-        params.append(analysis_status)
-    query = f"SELECT * FROM code_contexts WHERE {' AND '.join(clauses)} ORDER BY id ASC"
-    with get_connection() as connection:
-        return [_hydrate_code_context(row) for row in connection.execute(query, tuple(params)).fetchall()]
-
-
-_CODE_CONTEXT_ALLOWED_FIELDS = frozenset({
-    "analysis_status", "slot_types_json", "call_chain_json", "data_flow_json",
-    "cross_refs_json", "guard_annotations_json", "sink_annotations_json",
-    "audit_metadata_json", "context_text",
-})
-
-
-def update_code_context(
-    engagement_id: int,
-    context_id: int,
-    **kwargs: Any,
-) -> dict[str, Any]:
-    engagement = _engagement_or_404(engagement_id)
-    if not kwargs:
-        with get_connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM code_contexts WHERE engagement_id = ? AND id = ?",
-                (engagement.id, context_id),
-            ).fetchone()
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code context not found")
-        return _hydrate_code_context(row)
-
-    json_list_fields = {"slot_types_json", "cross_refs_json", "guard_annotations_json", "sink_annotations_json"}
-    json_object_fields = {"call_chain_json", "data_flow_json", "audit_metadata_json"}
-
-    set_clauses = []
-    params: list[Any] = []
-    for key, value in kwargs.items():
-        if key not in _CODE_CONTEXT_ALLOWED_FIELDS:
-            continue  # silently ignore disallowed fields
-        if key in json_list_fields:
-            set_clauses.append(f"{key} = ?")
-            params.append(_json_list_text(value))
-        elif key in json_object_fields:
-            set_clauses.append(f"{key} = ?")
-            params.append(_json_text(value))
-        else:
-            set_clauses.append(f"{key} = ?")
-            params.append(value)
-
-    if not set_clauses:
-        with get_connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM code_contexts WHERE engagement_id = ? AND id = ?",
-                (engagement.id, context_id),
-            ).fetchone()
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code context not found")
-        return _hydrate_code_context(row)
-
-    set_clauses.append("updated_at = CURRENT_TIMESTAMP")
-    params.extend([engagement.id, context_id])
-
-    with get_connection() as connection:
-        connection.execute(
-            f"UPDATE code_contexts SET {', '.join(set_clauses)} WHERE engagement_id = ? AND id = ?",
-            tuple(params),
-        )
-        row = connection.execute(
-            "SELECT * FROM code_contexts WHERE engagement_id = ? AND id = ?",
-            (engagement.id, context_id),
-        ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code context not found")
-    return _hydrate_code_context(row)
-
-
-# =========================================================================
 # Analysis Queue
 # =========================================================================
 
@@ -907,28 +708,9 @@ def bulk_create_queue_items(
     with get_connection() as connection:
         _get_file_rows(connection, engagement.id, {int(item["file_id"]) for item in items})
 
-        # Collect only non-None context_ids for validation
-        context_ids_to_validate = {
-            int(item["context_id"]) for item in items if item.get("context_id") is not None
-        }
-        if context_ids_to_validate:
-            context_rows = _get_context_rows(connection, engagement.id, context_ids_to_validate)
-        else:
-            context_rows = {}
-
         for item in items:
             priority = max(0, min(100, int(item.get("priority", 50))))
             file_id = int(item["file_id"])
-            context_id = item.get("context_id")
-
-            if context_id is not None:
-                context_id = int(context_id)
-                context_row = context_rows[context_id]
-                if int(context_row["file_id"]) != file_id:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Queue item context does not belong to the specified file",
-                    )
 
             batch_theme = item.get("batch_theme", "")
             slot_types_json = _json_list_text(item.get("slot_types"))
@@ -937,14 +719,13 @@ def bulk_create_queue_items(
             cursor = connection.execute(
                 """
                 INSERT INTO code_analysis_queue (
-                    engagement_id, context_id, file_id, priority,
+                    engagement_id, file_id, priority,
                     batch_theme, slot_types_json, guidance_hypotheses_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     engagement.id,
-                    context_id,
                     file_id,
                     priority,
                     batch_theme,
@@ -954,15 +735,6 @@ def bulk_create_queue_items(
             )
             if cursor.rowcount > 0:
                 inserted += 1
-                if context_id is not None:
-                    connection.execute(
-                        """
-                        UPDATE code_contexts
-                        SET analysis_status = 'pending', updated_at = CURRENT_TIMESTAMP
-                        WHERE engagement_id = ? AND id = ?
-                        """,
-                        (engagement.id, context_id),
-                    )
                 _sync_file_analysis_status(connection, engagement.id, file_id)
                 _sync_trigger_status_for_file(connection, engagement.id, file_id)
         return {"inserted": inserted, "total": len(items)}
@@ -1034,13 +806,6 @@ def fetch_queue_items(
         file_rows = _get_file_rows(connection, engagement.id, {int(row["file_id"]) for row in rows})
         repo_rows = _get_repo_rows(connection, engagement.id, {int(file_rows[int(row["file_id"])]["repo_id"]) for row in rows})
 
-        # Only fetch contexts for rows that have a non-NULL context_id
-        context_ids_to_fetch = {int(row["context_id"]) for row in rows if row["context_id"] is not None}
-        if context_ids_to_fetch:
-            context_rows = _get_context_rows(connection, engagement.id, context_ids_to_fetch)
-        else:
-            context_rows = {}
-
         for file_id in {int(row["file_id"]) for row in rows}:
             _sync_file_analysis_status(connection, engagement.id, file_id)
         payload: list[dict[str, Any]] = []
@@ -1049,10 +814,6 @@ def fetch_queue_items(
             item["batch_theme"] = item.get("batch_theme", "")
             item["slot_types"] = _json_decode(item.get("slot_types_json"), [])
             item["guidance_hypotheses"] = _json_decode(item.get("guidance_hypotheses_json"), [])
-            if row["context_id"] is not None:
-                item["context"] = _hydrate_code_context(context_rows[int(row["context_id"])])
-            else:
-                item["context"] = None
             item["file"] = _hydrate_code_file(file_rows[int(row["file_id"])])
             item["repo"] = _hydrate_code_repo(repo_rows[int(file_rows[int(row["file_id"])]["repo_id"])])
             payload.append(item)
@@ -1323,16 +1084,6 @@ def complete_queue_items(
             (next_status, disposition, notes, cwe_coverage_text, now, engagement.id, *item_ids),
         )
         for row in queue_rows.values():
-            context_id = row["context_id"]
-            if context_id is not None:
-                connection.execute(
-                    """
-                    UPDATE code_contexts
-                    SET analysis_status = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE engagement_id = ? AND id = ?
-                    """,
-                    ("analyzed", engagement.id, context_id),
-                )
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
             _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
         return {"updated": cursor.rowcount, "total": len(item_ids)}
@@ -1387,15 +1138,6 @@ def needs_context_queue_items(
             (_json_text(expansion_request), engagement.id, *item_ids),
         )
         for row in queue_rows.values():
-            if row["context_id"] is not None:
-                connection.execute(
-                    """
-                    UPDATE code_contexts
-                    SET analysis_status = 'needs_context', updated_at = CURRENT_TIMESTAMP
-                    WHERE engagement_id = ? AND id = ?
-                    """,
-                    (engagement.id, row["context_id"]),
-                )
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
             _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
         return {"updated": cursor.rowcount, "total": len(item_ids)}
@@ -1452,8 +1194,6 @@ def create_analysis_result(
         ]
         normalized_cross_file_triggers = _normalize_cross_file_triggers(result.get("cross_file_triggers"))
 
-        context_id = result.get("context_id")
-
         if queue_item_id is not None:
             queue_row = _get_queue_rows(connection, engagement.id, {int(queue_item_id)})[
                 int(queue_item_id)
@@ -1463,34 +1203,21 @@ def create_analysis_result(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Analysis result file/context references do not match the queue item",
                 )
-            # Fall back to queue row's context_id if not provided
-            if context_id is None and queue_row["context_id"] is not None:
-                context_id = int(queue_row["context_id"])
-
-        if context_id is not None:
-            context_id = int(context_id)
-            context_row = _get_context_rows(connection, engagement.id, {context_id})[context_id]
-            if int(context_row["file_id"]) != int(file_row["id"]):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Analysis result file/context references do not match the queue item",
-                )
 
         cursor = connection.execute(
             """
             INSERT INTO code_analysis_results (
-                engagement_id, queue_item_id, context_id, file_id,
+                engagement_id, queue_item_id, file_id,
                 agent_name, function_name, hypothesis, evidence,
                 disposition, confidence, finding_slug, cwe_id,
                 slot_type, notes, audit_metadata_json,
                 cwe_coverage_json, cross_file_triggers_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
                 queue_item_id,
-                context_id,
                 result["file_id"],
                 result.get("agent_name", ""),
                 result.get("function_name", ""),
@@ -1507,21 +1234,8 @@ def create_analysis_result(
                 _json_list_text(normalized_cross_file_triggers),
             ),
         )
-        row = connection.execute(
-            "SELECT * FROM code_analysis_results WHERE id = ?",
-            (cursor.lastrowid,),
-        ).fetchone()
+        row = _analysis_result_row(connection, int(cursor.lastrowid))
         assert row is not None
-        if context_id is not None:
-            context_status = "needs_context" if result.get("disposition") == "needs_context" else "analyzed"
-            connection.execute(
-                """
-                UPDATE code_contexts
-                SET analysis_status = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE engagement_id = ? AND id = ?
-                """,
-                (context_status, engagement.id, int(context_id)),
-            )
         _record_cross_file_triggers(
             connection,
             engagement.id,
@@ -1548,7 +1262,17 @@ def list_analysis_results(
     if disposition is not None:
         clauses.append("disposition = ?")
         params.append(disposition)
-    query = f"SELECT * FROM code_analysis_results WHERE {' AND '.join(clauses)} ORDER BY id DESC"
+    query = f"""
+        SELECT
+            results.*,
+            findings.status AS finding_status
+        FROM code_analysis_results AS results
+        LEFT JOIN assessment_findings AS findings
+          ON findings.engagement_id = results.engagement_id
+         AND findings.slug = results.finding_slug
+        WHERE {' AND '.join(f'results.{clause}' for clause in clauses)}
+        ORDER BY results.id DESC
+    """
     with get_connection() as connection:
         return [_hydrate_code_analysis_result(row) for row in connection.execute(query, tuple(params)).fetchall()]
 
@@ -1661,49 +1385,25 @@ def code_coverage_summary(
         for row in status_rows:
             by_status[row["analysis_status"]] = int(row["total"])
 
-        # -- Function-level context stats --
-        # Build file_id filter for contexts if repo scoped
-        if repo_id is not None:
-            ctx_filter = (
-                " AND file_id IN (SELECT id FROM code_files WHERE engagement_id = ? AND repo_id = ?)"
-            )
-            ctx_params: tuple[Any, ...] = (engagement.id, repo_id)
-        else:
-            ctx_filter = ""
-            ctx_params = ()
-
-        total_contexts = _scalar_row(
-            connection,
-            f"SELECT COUNT(*) FROM code_contexts WHERE engagement_id = ?{ctx_filter}",
-            (engagement.id, *ctx_params),
-        )
-        analyzed_contexts = _scalar_row(
-            connection,
-            f"SELECT COUNT(*) FROM code_contexts WHERE engagement_id = ? AND analysis_status IN ('analyzed', 'done'){ctx_filter}",
-            (engagement.id, *ctx_params),
-        )
-        needs_context_contexts = _scalar_row(
-            connection,
-            f"SELECT COUNT(*) FROM code_contexts WHERE engagement_id = ? AND analysis_status = 'needs_context'{ctx_filter}",
-            (engagement.id, *ctx_params),
-        )
-        pending_contexts = _scalar_row(
-            connection,
-            f"SELECT COUNT(*) FROM code_contexts WHERE engagement_id = ? AND analysis_status = 'pending'{ctx_filter}",
-            (engagement.id, *ctx_params),
-        )
-
         # -- Findings summary (from assessment_findings where canonical_location starts with 'file:') --
         total_code_findings = _scalar_row(
             connection,
-            "SELECT COUNT(*) FROM assessment_findings WHERE engagement_id = ? AND canonical_location LIKE 'file:%'",
+            """
+            SELECT COUNT(*)
+            FROM assessment_findings
+            WHERE engagement_id = ?
+              AND canonical_location LIKE 'file:%'
+              AND status NOT IN ('merged', 'false_positive')
+            """,
             (engagement.id,),
         )
         severity_rows = connection.execute(
             """
             SELECT severity, COUNT(*) AS total
             FROM assessment_findings
-            WHERE engagement_id = ? AND canonical_location LIKE 'file:%'
+            WHERE engagement_id = ?
+              AND canonical_location LIKE 'file:%'
+              AND status NOT IN ('merged', 'false_positive')
             GROUP BY severity
             """,
             (engagement.id,),
@@ -1927,12 +1627,6 @@ def code_coverage_summary(
         "total_files": total_files,
         "by_classification": by_classification,
         "by_status": by_status,
-        "function_level": {
-            "total_contexts": total_contexts,
-            "analyzed": analyzed_contexts,
-            "needs_context": needs_context_contexts,
-            "pending": pending_contexts,
-        },
         "findings_summary": {
             "total_code_findings": total_code_findings,
             "by_severity": by_severity,
@@ -2130,10 +1824,10 @@ def requeue_triggered_files(
             cursor = connection.execute(
                 """
                 INSERT INTO code_analysis_queue (
-                    engagement_id, context_id, file_id, priority,
+                    engagement_id, file_id, priority,
                     batch_theme, slot_types_json, guidance_hypotheses_json
                 )
-                VALUES (?, NULL, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     engagement.id,

@@ -109,6 +109,17 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     )
     assert create_surface.status_code == 201
 
+    invalid_surface = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/surfaces",
+        json={
+            "surface_type": "web_application",
+            "target_descriptor": "https://example.com/",
+            "source_name": "source-analyzer",
+            "status": "covered",
+        },
+    )
+    assert invalid_surface.status_code == 422
+
     create_finding = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
@@ -238,6 +249,267 @@ def test_findings_patch_updates_existing_finding_by_slug(client, isolate_setting
     assert "Verified with adjacent object identifiers." in finding["notes"]
     assert json.loads(finding["details_json"])["impact"] == "Confirmed cross-tenant order read"
     assert json.loads(finding["provenance_json"])["verified_by"] == "code-vuln-verifier"
+
+
+def test_findings_patch_can_revive_false_positive_and_lower_severity(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-009",
+            "title": "Parser length overflow",
+            "severity": "high",
+            "status": "false_positive",
+            "defect_family": "integer-overflow",
+            "root_cause_key": "parser-length-overflow",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.c:91",
+            "summary": "Suppressed after verifier review.",
+            "evidence_ref": "tools/analysis-state/verifier.json",
+            "notes": "Killed during verification.",
+            "source_name": "code-vuln-verifier",
+            "details": {
+                "kill_check": 2,
+                "kill_reason": "validate_length() enforces an 8KB upper bound before arithmetic.",
+                "evidence": "validate_length() rejects oversized input.",
+                "impact": "Potential overflow avoided by guard.",
+            },
+            "provenance": {"verified_by": "code-vuln-verifier"},
+            "links": [],
+        },
+    )
+    assert created.status_code == 201
+
+    revived = client.patch(
+        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-009",
+        json={
+            "status": "confirmed",
+            "severity": "low",
+            "notes": "Operator reinstated after manual review.",
+            "provenance": {"reviewed_by": "operator"},
+        },
+    )
+    assert revived.status_code == 200
+    assert revived.json()["finding"]["status"] == "confirmed"
+    assert revived.json()["finding"]["severity"] == "low"
+
+
+def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-001",
+            "title": "Header length overflow in parser",
+            "severity": "high",
+            "status": "confirmed",
+            "defect_family": "integer-overflow",
+            "root_cause_key": "header-length-overflow",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.c:128",
+            "summary": "Header length appears to overflow before allocation.",
+            "evidence_ref": "tools/analysis-state/findings.json",
+            "notes": "Initial hunter report.",
+            "source_name": "code-vuln-hunter",
+            "details": {
+                "evidence": "len * 4 appears attacker-controlled",
+                "impact": "Potential heap corruption",
+            },
+            "provenance": {"agent_name": "code-vuln-hunter"},
+            "links": [],
+        },
+    )
+    assert created.status_code == 201
+
+    killed = client.patch(
+        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-001",
+        json={
+            "status": "false_positive",
+            "notes": "Check 2 KILL: upstream guard bounds header length to 8192 bytes.",
+            "details": {
+                "kill_check": 2,
+                "kill_reason": "upstream guard bounds header length to 8192 bytes.",
+                "evidence": "validate_header_length() rejects oversized input before arithmetic."
+            },
+            "provenance": {"verified_by": "code-vuln-verifier"},
+        },
+    )
+    assert killed.status_code == 200
+    assert killed.json()["finding"]["status"] == "false_positive"
+
+    summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
+    assert summary.status_code == 200
+    assert summary.json()["finding_count"] == 0
+    assert summary.json()["finding_statuses"]["false_positive"] == 1
+    assert summary.json()["top_findings"] == []
+
+    report_findings = client.get("/engagements/2026-03-30-120000-example/assessment/report-findings")
+    assert report_findings.status_code == 200
+    assert report_findings.json() == []
+
+    rediscovered = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "title": "Header length overflow in parser",
+            "severity": "critical",
+            "status": "confirmed",
+            "defect_family": "integer-overflow",
+            "root_cause_key": "header-length-overflow",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.c:128",
+            "summary": "Rediscovery attempt from later analysis pass.",
+            "evidence_ref": "tools/analysis-state/rediscovery.json",
+            "notes": "Re-raised by later LLM pass.",
+            "source_name": "code-vuln-hunter",
+            "details": {
+                "impact": "Potential heap corruption",
+            },
+            "provenance": {"agent_name": "code-vuln-hunter"},
+            "links": [],
+        },
+    )
+    assert rediscovered.status_code == 201
+    assert rediscovered.json()["finding"]["slug"] == "FINDING-CH-001"
+    assert rediscovered.json()["finding"]["status"] == "false_positive"
+
+    findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
+    assert findings.status_code == 200
+    payload = findings.json()
+    assert len(payload) == 1
+    assert payload[0]["status"] == "false_positive"
+    assert "Re-raised by later LLM pass." in payload[0]["notes"]
+    assert json.loads(payload[0]["details_json"])["kill_check"] == 2
+    assert json.loads(payload[0]["details_json"])["kill_reason"] == "upstream guard bounds header length to 8192 bytes."
+
+
+def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    original = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-020",
+            "title": "Shared parser bug title",
+            "severity": "medium",
+            "status": "false_positive",
+            "defect_family": "integer-overflow",
+            "root_cause_key": "overflow-a",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.c:128",
+            "summary": "Suppressed integer overflow hypothesis.",
+            "evidence_ref": "tools/analysis-state/a.json",
+            "notes": "Verifier killed the original hypothesis.",
+            "source_name": "code-vuln-verifier",
+            "details": {
+                "kill_check": 2,
+                "kill_reason": "size guard blocks the arithmetic path.",
+                "evidence": "validate_length() blocks the original path.",
+                "impact": "No live issue on this path.",
+            },
+            "provenance": {"verified_by": "code-vuln-verifier"},
+            "links": [],
+        },
+    )
+    assert original.status_code == 201
+
+    distinct = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "title": "Shared parser bug title",
+            "severity": "high",
+            "status": "confirmed",
+            "defect_family": "buffer-overflow",
+            "root_cause_key": "overflow-b",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.c:128",
+            "summary": "Different defect family at the same location.",
+            "evidence_ref": "tools/analysis-state/b.json",
+            "notes": "Newly verified buffer overwrite path.",
+            "source_name": "code-vuln-hunter",
+            "details": {
+                "evidence": "memcpy() uses unchecked attacker length.",
+                "impact": "Heap corruption",
+            },
+            "provenance": {"agent_name": "code-vuln-hunter"},
+            "links": [],
+        },
+    )
+    assert distinct.status_code == 201
+    assert distinct.json()["finding"]["slug"] != "FINDING-CH-020"
+    assert distinct.json()["finding"]["status"] == "confirmed"
+
+    findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
+    assert findings.status_code == 200
+    payload = findings.json()
+    assert len(payload) == 2
+    assert {item["status"] for item in payload} == {"false_positive", "confirmed"}
+
+
+def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    source = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-030",
+            "title": "Live parser issue",
+            "severity": "high",
+            "status": "confirmed",
+            "defect_family": "buffer-overflow",
+            "root_cause_key": "live-parser-issue",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.c:211",
+            "summary": "Live finding.",
+            "evidence_ref": "tools/analysis-state/live.json",
+            "notes": "Confirmed by hunter.",
+            "source_name": "code-vuln-hunter",
+            "details": {"evidence": "Unchecked copy", "impact": "Heap corruption"},
+            "provenance": {"agent_name": "code-vuln-hunter"},
+            "links": [],
+        },
+    )
+    assert source.status_code == 201
+
+    target = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-031",
+            "title": "Suppressed parser issue",
+            "severity": "medium",
+            "status": "false_positive",
+            "defect_family": "integer-overflow",
+            "root_cause_key": "suppressed-parser-issue",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.c:333",
+            "summary": "Suppressed by verifier.",
+            "evidence_ref": "tools/analysis-state/suppressed.json",
+            "notes": "Killed during verification.",
+            "source_name": "code-vuln-verifier",
+            "details": {
+                "kill_check": 5,
+                "kill_reason": "Build flag disables the path in production.",
+                "evidence": "Code is behind a debug-only build flag.",
+                "impact": "Not reachable in production.",
+            },
+            "provenance": {"verified_by": "code-vuln-verifier"},
+            "links": [],
+        },
+    )
+    assert target.status_code == 201
+
+    merge = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings/merge",
+        json={
+            "source_slug": "FINDING-CH-030",
+            "target_slug": "FINDING-CH-031",
+            "reason": "Attempted merge into suppressed target.",
+            "source_name": "operator",
+        },
+    )
+    assert merge.status_code == 400
+    assert "false_positive target" in merge.json()["detail"]
 
 
 def test_coverage_patch_rejects_unknown_status_values(client, isolate_settings):

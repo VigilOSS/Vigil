@@ -65,7 +65,7 @@
     },
     "status": {
       "type": "string",
-      "enum": ["draft", "confirmed", "exploited", "blocked", "merged", "reported"]
+      "enum": ["draft", "confirmed", "exploited", "blocked", "false_positive", "merged", "reported"]
     },
     "defect_family": {
       "type": "string",
@@ -128,6 +128,16 @@
           "type": "string",
           "minLength": 1,
           "description": "Exact response excerpt, artifact reference, or replayable proof"
+        },
+        "kill_reason": {
+          "type": "string",
+          "description": "Structured verifier rationale when a finding is marked false_positive"
+        },
+        "kill_check": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5,
+          "description": "Verification check number responsible for the false-positive verdict"
         },
         "impact": {
           "type": "string",

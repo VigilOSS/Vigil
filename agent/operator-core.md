@@ -151,8 +151,9 @@ DB="$DIR/cases.db"
 2. **COLLECT** → operator-orchestrated. Steps in order:
    a. Ingest all endpoints from Phase 1 into the backend: `cat endpoints.txt | ./scripts/assess.py ingest-endpoints "$DIR/cases.db" recon`
    b. Run Katana via Kali MCP to crawl from live targets (Katana is installed in the runtime container — invoke it through the MCP command-execution tool, not host-side):
-      `katana -u https://target.example -d 3 -jc -kf all -tlsv -o /tmp/katana_output.txt`
-      Use `-tlsv` to skip TLS verification for targets with expired, self-signed, or mismatched certificates. Without it, Katana will bail on invalid certs and produce minimal output.
+      `katana -u https://target.example -d 3 -jc -kf all -o /tmp/katana_output.txt`
+      Katana does not provide a TLS-verification-skip flag in the runtime this repo builds. Do not replace this with `-tls-impersonate`; that changes the TLS client hello fingerprint and does not bypass certificate validation.
+      If a target only responds behind an invalid, self-signed, expired, or mismatched certificate, use `curl -k` for spot validation/manual bootstrap and continue the rest of Collect (`gau`, spec ingestion, source-analyzer output) instead of relying on Katana to bypass TLS checks.
       If `auth.json` has `use_for_requests` set to `true` and `state` set to `available`, pass cookies/headers: `katana -u URL -H "Cookie: ..." -H "Authorization: ..." ...`
    c. Ingest Katana output into backend: `cat /tmp/katana_output.txt | ./scripts/assess.py ingest-endpoints "$DIR/cases.db" katana`
    d. **Historical URL enrichment** via Kali MCP — run `gau` to pull known URLs from Wayback Machine, AlienVault OTX, Common Crawl, and URLScan. This catches parameterized endpoints and old routes that Katana misses because the live sitemap no longer links to them:
@@ -166,7 +167,8 @@ DB="$DIR/cases.db"
    Update scope.json phase to `consume-test` when ingestion is complete.
 3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
    a. **Nuclei sweep** (once, before the work-buffer loop) — run nuclei via Kali MCP against all live targets for a broad CVE and misconfiguration check:
-      `nuclei -l /engagement/scans/live_targets.txt -severity critical,high -tags cve,misconfig,exposure -rate-limit 100 -jsonl -o /engagement/scans/nuclei_sweep.jsonl`
+      `nuclei -l /tmp/live_targets.txt -severity critical,high -tags cve,misconfig,exposure -rate-limit 100 -jsonl -o /tmp/nuclei_sweep.jsonl`
+      The shared Kali runtime does not mount `$ENGAGEMENT_DIR` at `/engagement`. Stage input files into `/tmp` inside the runtime, then persist any durable artifacts back into `$DIR/scans/` on the host before triage or ingestion.
       Triage results: critical/high hits become prioritized work-buffer entries or direct findings (after manual validation). Medium/low hits are intelligence. See `agent/skills/nuclei-scanning/SKILL.md` for triage rules.
    b. Reset stale work items: `./scripts/assess.py dispatch "$DB" reset-stale 10`
    c. Check stats: `./scripts/assess.py dispatch "$DB" stats`

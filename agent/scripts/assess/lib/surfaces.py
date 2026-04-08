@@ -29,12 +29,20 @@ def surface_file_path(engagement_dir: str) -> str:
 
 def validate_surface_type(surface_type: str) -> None:
     if surface_type not in VALID_SURFACE_TYPES:
-        raise SystemExit(f"invalid surface_type: {surface_type}")
+        valid = ", ".join(sorted(VALID_SURFACE_TYPES))
+        raise SystemExit(
+            f"invalid surface_type: {surface_type}. "
+            f"Valid types: {valid}"
+        )
 
 
 def validate_surface_status(status: str) -> None:
     if status not in VALID_STATUSES:
-        raise SystemExit(f"invalid surface status: {status}")
+        valid = ", ".join(sorted(VALID_STATUSES))
+        raise SystemExit(
+            f"invalid surface status: {status}. "
+            f"Valid statuses: {valid}"
+        )
 
 
 def ensure_surface_file(engagement_dir: str) -> None:
