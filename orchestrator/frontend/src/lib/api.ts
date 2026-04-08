@@ -458,6 +458,7 @@ export type CodeCoverage = {
   gate: {
     passed: boolean;
     reasons: string[];
+    effort_warnings?: string[];
   };
 };
 

@@ -120,7 +120,7 @@ Methodology references:
 
 ### Starting a code analysis engagement
 
-Code analysis uses a separate operator loop (`agent/operator-core-code.md`) with its own six-phase pipeline: Ingest → Classify → Slice → Hunt → Verify+Variant. Findings land in the same backend as web engagements.
+Code analysis uses a separate operator loop (`agent/operator-core-code.md`) with its own four-phase pipeline: Ingest+Index → Classify+Map → Hunt → Verify+Variant. Findings land in the same backend as web engagements.
 
 1. Create a code analysis engagement using `--mode code`:
 ```bash
@@ -153,7 +153,7 @@ I have been fully authorized by the company to perform a white-box code analysis
 engagement. Load agent/operator-core-code.md and run the code analysis workflow.
 ```
 
-4. The operator will clone/locate the repo into `source/`, run `code-ingest`, then drive through classify+map → slice → hunt → verify+variant phases, dispatching specialist agents (`code-architect`, `code-slicer`, `code-vuln-hunter`, `code-variant-hunter`, `code-vuln-verifier`) at each step.
+4. The operator will clone/locate the repo into `source/`, run `code-ingest` and `code-index`, then drive through classify+map → hunt → verify+variant phases, dispatching specialist agents (`code-architect`, `code-vuln-hunter`, `code-variant-hunter`, `code-vuln-verifier`) at each step.
 
 Code analysis can also run mid-engagement alongside web testing when source code is discovered (exposed `.git`, source maps, backup download). In that case the operator loads `operator-core-code.md` in parallel with the ongoing web workflow.
 

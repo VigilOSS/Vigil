@@ -11,12 +11,10 @@ import type {
 // ── Phase pipeline ──────────────────────────────────────
 
 const CODE_PHASES = [
-  { key: "ingest", label: "Ingest" },
-  { key: "classify", label: "Classify" },
-  { key: "context", label: "Context" },
-  { key: "analyze", label: "Analyze" },
-  { key: "variant", label: "Variant" },
-  { key: "verify", label: "Verify" },
+  { key: "ingest", label: "Ingest + Index" },
+  { key: "classify", label: "Classify + Map" },
+  { key: "hunt", label: "Hunt" },
+  { key: "verify", label: "Verify + Variant" },
 ] as const;
 
 type PhaseKey = (typeof CODE_PHASES)[number]["key"];
@@ -24,10 +22,10 @@ type PhaseKey = (typeof CODE_PHASES)[number]["key"];
 const STATUS_TO_PHASE: Record<string, PhaseKey> = {
   ingested: "ingest",
   classified: "classify",
-  context_built: "context",
-  queued: "analyze",
-  in_progress: "analyze",
-  analyzed: "variant",
+  context_built: "classify",
+  queued: "hunt",
+  in_progress: "hunt",
+  analyzed: "verify",
   variant_done: "verify",
   verified: "verify",
   complete: "verify",
@@ -37,20 +35,20 @@ function resolvePhase(repos: CodeRepo[], queueStats: CodeQueueStats | null): Pha
   if (repos.length === 0) return "ingest";
   // Use the most advanced repo status
   let best: PhaseKey = "ingest";
-  const order: PhaseKey[] = ["ingest", "classify", "context", "analyze", "variant", "verify"];
+  const order: PhaseKey[] = ["ingest", "classify", "hunt", "verify"];
   for (const repo of repos) {
     const phase = STATUS_TO_PHASE[repo.analysis_status] ?? "ingest";
     if (order.indexOf(phase) > order.indexOf(best)) best = phase;
   }
-  // If queue has active items, we're in analyze
-  if (queueStats && (queueStats.processing > 0 || queueStats.pending > 0) && order.indexOf(best) < order.indexOf("analyze")) {
-    best = "analyze";
+  // If queue has active items, we're in hunt
+  if (queueStats && (queueStats.processing > 0 || queueStats.pending > 0) && order.indexOf(best) < order.indexOf("hunt")) {
+    best = "hunt";
   }
   return best;
 }
 
 function phaseState(phase: PhaseKey, current: PhaseKey): "completed" | "active" | "pending" {
-  const order: PhaseKey[] = ["ingest", "classify", "context", "analyze", "variant", "verify"];
+  const order: PhaseKey[] = ["ingest", "classify", "hunt", "verify"];
   const pi = order.indexOf(phase);
   const ci = order.indexOf(current);
   if (pi < ci) return "completed";
@@ -300,8 +298,8 @@ export function CodeAnalysisTab({
             <div className="code-confidence">
               <p className="eyebrow" style={{ marginTop: "16px" }}>Confidence</p>
               <div className="code-fn-stats">
-                <span>Critical: {(coverage.confidence.critical_coverage_pct * 100).toFixed(0)}%</span>
-                <span>High: {(coverage.confidence.high_coverage_pct * 100).toFixed(0)}%</span>
+                <span>Critical: {coverage.confidence.critical_coverage_pct.toFixed(0)}%</span>
+                <span>High: {coverage.confidence.high_coverage_pct.toFixed(0)}%</span>
                 <span>LOC analyzed: {coverage.confidence.overall_loc_analyzed.toLocaleString()}</span>
               </div>
             </div>

@@ -822,8 +822,10 @@ def test_coverage_detail_cwe(client, isolate_settings):
             "disposition": "clean",
             "notes": "Pass 1",
             "cwe_coverage": [
-                {"family": "web-app-injection", "effort": 60, "entry_chains_traced": 2},
-                {"family": "ssrf", "effort": 80, "entry_chains_traced": 1},
+                {"family": "web-app-injection", "effort": 60, "entry_chains_traced": 2,
+                 "functions_analyzed": 5, "total_entry_chains": 8},
+                {"family": "ssrf", "effort": 80, "entry_chains_traced": 1,
+                 "functions_analyzed": 2, "total_entry_chains": 3},
             ],
         },
     )
@@ -841,8 +843,10 @@ def test_coverage_detail_cwe(client, isolate_settings):
             "disposition": "clean",
             "notes": "Pass 2",
             "cwe_coverage": [
-                {"family": "web-app-injection", "effort": 90, "entry_chains_traced": 3},
-                {"family": "ssrf", "effort": 70, "entry_chains_traced": 2},
+                {"family": "web-app-injection", "effort": 90, "entry_chains_traced": 3,
+                 "functions_analyzed": 7, "total_entry_chains": 8, "notes": "full trace"},
+                {"family": "ssrf", "effort": 70, "entry_chains_traced": 2,
+                 "functions_analyzed": 3, "total_entry_chains": 3},
             ],
         },
     )
@@ -866,12 +870,22 @@ def test_coverage_detail_cwe(client, isolate_settings):
     assert injection_entry["effort"] == 90
     # entry_chains_traced should be summed: 2 + 3 = 5
     assert injection_entry["entry_chains_traced"] == 5
+    # functions_analyzed takes max: max(5, 7) = 7
+    assert injection_entry["functions_analyzed"] == 7
+    # total_entry_chains takes max: max(8, 8) = 8
+    assert injection_entry["total_entry_chains"] == 8
+    # notes takes latest non-empty
+    assert injection_entry["notes"] == "full trace"
 
     # ssrf should be 80 (max of 80, 70)
     ssrf_entry = next(e for e in parser_entry["cwe_coverage"] if e["family"] == "ssrf")
     assert ssrf_entry["effort"] == 80
     # entry_chains_traced summed: 1 + 2 = 3
     assert ssrf_entry["entry_chains_traced"] == 3
+    # functions_analyzed takes max: max(2, 3) = 3
+    assert ssrf_entry["functions_analyzed"] == 3
+    # total_entry_chains takes max: max(3, 3) = 3
+    assert ssrf_entry["total_entry_chains"] == 3
 
     # Helper file should appear (classified as high) but with empty cwe_coverage
     helper_entry = next(f for f in payload["files"] if f["file_id"] == helper_file["id"])

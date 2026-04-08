@@ -1509,13 +1509,13 @@ def code_coverage_summary(
             f"Queue items still pending or processing: {unresolved_active_queue}"
         )
 
-    # -- Effort-threshold warnings (non-blocking) --
+    # -- Effort-threshold gate (blocking for critical/high files) --
     effort_warnings: list[str] = []
     with get_connection() as connection:
         effort_file_rows = connection.execute(
             f"""
             SELECT f.id AS file_id, f.file_path, f.classification, f.slot_types_json,
-                   q.cwe_coverage_json
+                   f.language, q.cwe_coverage_json
             FROM code_files f
             LEFT JOIN code_analysis_queue q ON q.file_id = f.id AND q.engagement_id = f.engagement_id AND q.status = 'done'
             WHERE f.engagement_id = ? AND f.classification IN ('critical', 'high'){repo_clause}
@@ -1532,6 +1532,7 @@ def code_coverage_summary(
                     "file_path": erow["file_path"],
                     "classification": erow["classification"],
                     "slot_types": _json_decode(erow["slot_types_json"], []),
+                    "language": erow["language"] or "",
                 }
             cwe_cov = _json_decode(erow["cwe_coverage_json"], [])
             if fid not in file_efforts:
@@ -1544,15 +1545,19 @@ def code_coverage_summary(
 
         for fid, meta in file_meta.items():
             threshold = 70 if meta["classification"] == "critical" else 50
-            applicable = _applicable_families_for_slots(meta["slot_types"])
+            applicable = _applicable_families_for_slots(meta["slot_types"], meta.get("language", ""))
             efforts = file_efforts.get(fid, {})
+            if not efforts:
+                continue  # No CWE coverage data yet — other gate checks handle unanalyzed files
             for family in applicable:
                 if efforts.get(family, 0) < threshold:
-                    effort_warnings.append(
+                    msg = (
                         f"{meta['classification'].capitalize()} file {meta['file_path']}: "
                         f"family '{family}' effort {efforts.get(family, 0):.0f} < {threshold}"
                     )
-                    break  # One warning per file is enough
+                    gate_reasons.append(msg)
+                    effort_warnings.append(msg)
+                    break  # One reason per file is enough
 
     gate_passed = len(gate_reasons) == 0
 
@@ -1611,13 +1616,30 @@ SLOT_VULN_CLASSES: dict[str, dict[str, list[str]]] = {
 }
 
 
-def _applicable_families_for_slots(slot_types: list[str]) -> list[str]:
-    """Compute the set of applicable vuln families from a list of slot types."""
+NATIVE_LANGUAGES = frozenset({"c", "c++", "cpp"})
+
+
+def _applicable_families_for_slots(slot_types: list[str], language: str = "") -> list[str]:
+    """Compute the set of applicable vuln families from a list of slot types.
+
+    When *language* is known, only include families for the matching language
+    group (native for C/C++, managed for everything else).  When unknown,
+    include all groups as a conservative fallback.
+    """
+    lang_lower = language.lower().strip()
+    is_native = lang_lower in NATIVE_LANGUAGES
+    lang_known = bool(lang_lower)
+
     families: set[str] = set()
     for slot in slot_types:
         mapping = SLOT_VULN_CLASSES.get(slot, {})
-        for group_families in mapping.values():
-            families.update(group_families)
+        for group, group_families in mapping.items():
+            if group == "all":
+                families.update(group_families)
+            elif group == "native" and (is_native or not lang_known):
+                families.update(group_families)
+            elif group == "managed" and (not is_native or not lang_known):
+                families.update(group_families)
     return sorted(families)
 
 
@@ -1659,7 +1681,20 @@ def requeue_triggered_files(
             priority = max(0, min(100, int(item.get("priority", 50))))
             batch_theme = item.get("batch_theme", "cross-file-trigger")
             slot_types_json = _json_list_text(item.get("slot_types"))
-            guidance_hypotheses_json = _json_list_text(item.get("guidance_hypotheses"))
+
+            # Preserve trigger context as guidance so the follow-up hunter
+            # sees why this file was requeued and which vuln class to target.
+            guidance = list(item.get("guidance_hypotheses") or [])
+            reason = item.get("reason", "")
+            trigger_ctx = item.get("trigger_context")
+            if reason or trigger_ctx:
+                hint: dict[str, Any] = {"source": "cross_file_trigger"}
+                if reason:
+                    hint["reason"] = reason
+                if isinstance(trigger_ctx, dict):
+                    hint.update(trigger_ctx)
+                guidance.append(hint)
+            guidance_hypotheses_json = _json_list_text(guidance)
 
             cursor = connection.execute(
                 """
@@ -1708,7 +1743,7 @@ def code_coverage_cwe_detail(
         file_rows = connection.execute(
             f"""
             SELECT f.id AS file_id, f.file_path, f.classification, f.slot_types_json,
-                   f.analysis_status, f.loc
+                   f.analysis_status, f.loc, f.language
             FROM code_files f
             WHERE f.engagement_id = ? AND f.classification IN ('critical', 'high'){repo_clause}
             ORDER BY f.analysis_priority DESC, f.id ASC
@@ -1745,16 +1780,26 @@ def code_coverage_cwe_detail(
                         # Max-effort merge
                         if float(entry.get("effort", 0)) > float(existing.get("effort", 0)):
                             existing["effort"] = entry["effort"]
-                        # Union entry_chains_traced
+                        # Sum entry_chains_traced (approximates union across passes)
                         existing_chains = int(existing.get("entry_chains_traced", 0))
                         new_chains = int(entry.get("entry_chains_traced", 0))
                         existing["entry_chains_traced"] = existing_chains + new_chains
+                        # Max for functions_analyzed and total_entry_chains
+                        for merge_key in ("functions_analyzed", "total_entry_chains"):
+                            new_val = int(entry.get(merge_key, 0))
+                            old_val = int(existing.get(merge_key, 0))
+                            if new_val > old_val:
+                                existing[merge_key] = new_val
+                        # Keep latest non-empty notes
+                        new_notes = entry.get("notes", "")
+                        if new_notes:
+                            existing["notes"] = new_notes
 
         files_detail: list[dict[str, Any]] = []
         for fr in file_rows:
             fid = int(fr["file_id"])
             slot_types = _json_decode(fr["slot_types_json"], [])
-            applicable = _applicable_families_for_slots(slot_types)
+            applicable = _applicable_families_for_slots(slot_types, fr["language"] or "")
             merged_entries = list(cwe_by_file.get(fid, {}).values())
             files_detail.append({
                 "file_id": fid,
