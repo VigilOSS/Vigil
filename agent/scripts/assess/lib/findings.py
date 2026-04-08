@@ -14,7 +14,6 @@ _AGENT_PREFIX_MAP = {
     "fuzzer": "FZ",
     "osint-analyst": "OS",
     "code-architect": "CA",
-    "code-context-builder": "CB",
     "code-vuln-hunter": "CH",
     "code-variant-hunter": "CV",
     "code-vuln-verifier": "VF",

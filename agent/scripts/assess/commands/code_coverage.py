@@ -92,28 +92,8 @@ def _run_cwe_matrix(cfg, args) -> None:
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
         result = client.get(endpoint)
-    except Exception:
-        # Gracefully fall back to standard coverage if the detail=cwe
-        # endpoint is not available on this backend
-        fallback_endpoint = 'code/coverage'
-        if args.repo_id:
-            fallback_endpoint = f'code/coverage?repo_id={args.repo_id}'
-        try:
-            result = client.get(fallback_endpoint)
-        finally:
-            client.close()
-        print("NOTE: Backend does not support detail=cwe; showing standard coverage.\n")
-        if isinstance(result, dict):
-            _print_coverage(result)
-        else:
-            print(json.dumps(result, indent=2, ensure_ascii=False))
-        return
     finally:
-        # close() may already have been called in the except branch
-        try:
-            client.close()
-        except Exception:
-            pass
+        client.close()
 
     if not isinstance(result, dict):
         print(json.dumps(result, indent=2, ensure_ascii=False))
