@@ -43,10 +43,11 @@ analyzed or user signals stop:
    - **Phase 3 (Verify + Variant):** `code-vuln-verifier` -> `agent/skills/code-finding-verification/SKILL.md` AND `code-variant-hunter` -> `agent/skills/code-variant-analysis/SKILL.md` (parallel)
 6. **HOST BASH FOR SOURCE READING** -- Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work -- Kali MCP is not needed for reading source files.
 7. **DISPATCH** -- Dispatch to the appropriate subagent for all analysis work. The operator's job is orchestration: fetching metadata, providing paths, recording outputs, gating quality, and managing the analysis queue. Subagents read source files directly and produce structured outputs. Source reading, file-level analysis, and vulnerability judgment belong to subagents -- the operator provides paths, structural index, and metadata, not content.
-8. **RECORD FINDINGS IMMEDIATELY** -- Code findings use the same `./scripts/assess.py record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
-9. **RECORD SURFACES** -- Code-specific surface types: `parser_entry`, `protocol_handler`, `crypto_operation`, `auth_check`, `file_io`, `memory_allocator`. Record via `./scripts/assess.py record-surface`.
-10. **TRACK COVERAGE** -- After each batch, run `./scripts/assess.py code-coverage`. During Phase 2B, use `./scripts/assess.py code-coverage --cwe-matrix` to check per-file CWE effort scores against thresholds. Before entering Phase 3 verification, verify the coverage gate passes with `./scripts/assess.py code-coverage --require-gate-pass` (all critical files analyzed, no unresolved needs-context, CWE effort thresholds met).
-11. **LOOP** -- Back to step 1.
+8. **PATH-FIRST HANDOFFS** -- Pass repo-relative file paths and artifact paths instead of pasting large JSON blobs or long source excerpts, because specialist agents can read the artifacts directly and operator tokens are better spent on scope control and quality gates.
+9. **RECORD FINDINGS IMMEDIATELY** -- Code findings use the same `./scripts/assess.py record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
+10. **RECORD SURFACES** -- Code-specific surface types: `parser_entry`, `protocol_handler`, `crypto_operation`, `auth_check`, `file_io`, `memory_allocator`. Record via `./scripts/assess.py record-surface`.
+11. **TRACK COVERAGE** -- After each batch, run `./scripts/assess.py code-coverage`. During Phase 2B, use `./scripts/assess.py code-coverage --cwe-matrix` to check per-file CWE effort scores against thresholds. Before entering Phase 3 verification, verify the coverage gate passes with `./scripts/assess.py code-coverage --require-gate-pass` (all critical files analyzed, no unresolved needs-context, no unprocessed triggers, CWE effort thresholds met).
+12. **LOOP** -- Back to step 1.
 
 ## Phase Flow
 
@@ -100,10 +101,10 @@ Exit: All files inventoried. ctags symbol index generated if ctags is available.
 Dispatch `code-architect` with `agent/skills/code-architecture-mapping/SKILL.md`.
 
 Provide:
-- Full file listing (from `./scripts/assess.py fetch "code/files?repo_id=<repo-id>&limit=5000"`)
-- Project documentation (README, SECURITY.md, build files -- read from source dir)
-- Git churn data (from code_repos.git_churn_json)
-- Structural index manifest (from `tools/analysis-state/structural-index-manifest.json`, if available) -- gives the architect pre-computed function counts, entry points, and sink statistics per file
+- Repo root path plus a file-list artifact or fetched JSON from `./scripts/assess.py fetch "code/files?repo_id=<repo-id>&limit=5000"` -- do not paste thousands of rows inline
+- Project documentation paths (README, SECURITY.md, build files) so the architect can read the source material directly
+- Git churn data as a short summary or artifact path from `code_repos.git_churn_json`
+- Structural index manifest path (from `tools/analysis-state/structural-index-manifest.json`, if available) -- gives the architect pre-computed function counts, entry points, and sink statistics per file
 
 Phase 1 produces six deliverables. The call graph and attack hypotheses provide navigational guidance for hunters. The file analysis queue ensures every critical/high file is analyzed regardless of hypothesis coverage.
 
@@ -258,17 +259,13 @@ the prompt context heavier than the source files themselves.
   performs unconstrained broad analysis first, then checks these hypotheses second. This
   ordering prevents hypothesis anchoring where the analysis scope narrows to the architect's
   predictions.
-- **Structural index** (if available) -- include the relevant per-file index data from
-  `tools/analysis-state/structural-index/`. For small batches, passing the full per-file JSON is fine.
-  For larger files, prefer a trimmed summary containing the function map, entry points,
-  relevant sink catalog, and the call sites touching the entry chains under review. Look up the
-  index filename for each file via `tools/analysis-state/structural-index-manifest.json`'s `path_to_index` mapping
-  using the file's relative path (e.g., `manifest["path_to_index"]["src/main.c"]` returns the
-  index filename). The hunter uses this as a navigation map and completeness checklist: every
-  catalogued sink still needs to be accounted for.
-- **Call graph excerpt** -- the subgraph for the target module showing entry-point chains and
-  trust boundary crossings from `tools/analysis-state/call-graph.json`. Include only the subgraph
-  relevant to the files and chains in this dispatch.
+- **Structural index** (if available) -- prefer passing the manifest path plus the relevant
+  per-file index paths from `tools/analysis-state/structural-index/`. Inline only the minimal
+  function/sink excerpt needed for prioritization. The hunter uses the index as a navigation map
+  and completeness checklist: every catalogued sink still needs to be accounted for.
+- **Call graph excerpt** -- give a short summary of the relevant entry chain plus the artifact path
+  to `tools/analysis-state/call-graph.json`. Inline only the edges that materially change the
+  hunter's reasoning for this dispatch.
 - **Threat model summary** -- trust boundaries, entry points, and high-value targets relevant
   to this batch from the Phase 1 threat model. Keep this short and file-local; do not dump the
   full Phase 1 artifact when a 3-8 bullet summary will do.
@@ -322,8 +319,8 @@ All references are under `agent/references/code-vuln-patterns/`. Include the ful
 # Record analysis results (with cwe_coverage and cross_file_triggers)
 ./scripts/assess.py code-record-analysis <analysis-json>
 
-# Mark items done with structured cwe_coverage
-./scripts/assess.py code-dispatch done "id1,id2,..." <disposition> "<notes>" <cwe-coverage-json>
+# Mark one file done with structured cwe_coverage
+./scripts/assess.py code-dispatch done <item-id> <disposition> <cwe-coverage-json> ["notes"]
 
 # Record any findings
 ./scripts/assess.py record-finding code-vuln-hunter <finding-json>
@@ -340,12 +337,15 @@ All references are under `agent/references/code-vuln-patterns/`. Include the ful
 3. If the gap is genuinely unresolvable from the filesystem (external library source needed,
    binary dependency, macro-generated code), re-queue the item with additional context about the
    external dependency.
-4. Re-queue the item for the next hunter batch.
+4. Re-queue the item with `./scripts/assess.py code-dispatch needs-context ...` -- do not use
+   `code-dispatch done needs_context`, because incomplete work must carry explicit expansion
+   metadata instead of looking complete in the queue history.
 
 **Cross-file triggers:** When analysis returns `cross_file_triggers`, these indicate that a
 finding or taint path in one file connects to another file that needs examination. Process
 them with `code-dispatch requeue-triggers` which adds the target files to the analysis queue
-if they are not already queued or completed.
+if they are not already queued or completed. Unprocessed triggers are gate-blocking workflow
+state: the phase does not pass until each trigger is queued or already completed.
 
 **Repeat** the fetch-dispatch-done loop until the queue is drained.
 
@@ -379,8 +379,8 @@ proceed directly to Phase 3.
 
 **Step 2: Process any remaining cross-file triggers:**
 ```bash
-# Check for pending triggers
-./scripts/assess.py code-dispatch stats
+# Check for pending triggers and queue blockers
+./scripts/assess.py code-coverage
 
 # Reset stale items
 ./scripts/assess.py code-dispatch reset-stale 10
@@ -418,7 +418,7 @@ directed vulnerability classes, and aims to raise effort scores to the target th
 **On return from CWE-directed re-dispatch:**
 ```bash
 # Mark done with updated cwe_coverage (backend uses max-effort merge)
-./scripts/assess.py code-dispatch done "id1,id2,..." <disposition> "<notes>" <cwe-coverage-json>
+./scripts/assess.py code-dispatch done <item-id> <disposition> <cwe-coverage-json> ["notes"]
 
 # Record any new findings
 ./scripts/assess.py record-finding code-vuln-hunter <finding-json>
@@ -472,12 +472,13 @@ findings, while the variant hunter scans for new instances of confirmed patterns
 **Coverage gate** -- must pass before proceeding:
 ```bash
 ./scripts/assess.py code-coverage --require-gate-pass
-# Must show: all critical files analyzed, all high files analyzed, no needs-context
+# Must show: all critical files analyzed, all high files analyzed, no needs-context, no pending triggers
 ```
 
 If the gate fails, resolve remaining items before proceeding:
 - `needs-context` items: dispatch additional file batches to Phase 2 with targeted context
 - Unanalyzed critical files: dispatch to Phase 2 (hunt) first
+- Pending cross-file triggers: requeue and analyze the target files before verification
 - CWE effort gaps on critical files: run Phase 2B re-dispatch loop
 - The gate must pass before proceeding -- unresolved items become permanently invisible to
   the report

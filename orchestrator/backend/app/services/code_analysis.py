@@ -221,6 +221,73 @@ def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> 
     )
 
 
+_TRIGGER_STATUS_PENDING = "pending"
+_TRIGGER_STATUS_QUEUED = "queued"
+_TRIGGER_STATUS_RESOLVED = "resolved"
+
+
+def _trigger_status_for_file(connection, engagement_id: int, file_id: int) -> str:
+    file_row = _get_file_rows(connection, engagement_id, {file_id})[file_id]
+    queue_rows = connection.execute(
+        """
+        SELECT status, COUNT(*) AS total
+        FROM code_analysis_queue
+        WHERE engagement_id = ? AND file_id = ?
+        GROUP BY status
+        """,
+        (engagement_id, file_id),
+    ).fetchall()
+    queue_counts = {str(row["status"]): int(row["total"]) for row in queue_rows}
+    if (
+        queue_counts.get("pending", 0) > 0
+        or queue_counts.get("processing", 0) > 0
+        or queue_counts.get("needs_context", 0) > 0
+        or str(file_row.get("analysis_status", "")) in {"queued", "in_progress", "needs_context"}
+    ):
+        return _TRIGGER_STATUS_QUEUED
+    if (
+        queue_counts.get("done", 0) > 0
+        or str(file_row.get("analysis_status", "")) in {"analyzed", "done"}
+    ):
+        return _TRIGGER_STATUS_RESOLVED
+    return _TRIGGER_STATUS_PENDING
+
+
+def _sync_trigger_status_for_file(connection, engagement_id: int, file_id: int) -> None:
+    file_row = _get_file_rows(connection, engagement_id, {file_id})[file_id]
+    next_status = _trigger_status_for_file(connection, engagement_id, file_id)
+    connection.execute(
+        """
+        UPDATE code_analysis_triggers
+        SET target_file_id = ?,
+            status = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE engagement_id = ?
+          AND (
+              target_file_id = ?
+              OR (
+                  target_file_id IS NULL
+                  AND target_file_path = ?
+                  AND source_file_id IN (
+                      SELECT id
+                      FROM code_files
+                      WHERE engagement_id = ? AND repo_id = ?
+                  )
+              )
+          )
+        """,
+        (
+            file_id,
+            next_status,
+            engagement_id,
+            file_id,
+            str(file_row["file_path"]),
+            engagement_id,
+            int(file_row["repo_id"]),
+        ),
+    )
+
+
 # =========================================================================
 # Repository Management
 # =========================================================================
@@ -897,6 +964,7 @@ def bulk_create_queue_items(
                         (engagement.id, context_id),
                     )
                 _sync_file_analysis_status(connection, engagement.id, file_id)
+                _sync_trigger_status_for_file(connection, engagement.id, file_id)
         return {"inserted": inserted, "total": len(items)}
 
 
@@ -991,7 +1059,222 @@ def fetch_queue_items(
     return payload
 
 
-_VALID_DISPOSITIONS = frozenset({"finding", "suspicious", "clean", "needs_context"})
+def _normalize_cwe_coverage(cwe_coverage: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    if not isinstance(cwe_coverage, list) or not cwe_coverage:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="cwe_coverage is required when completing a queue item",
+        )
+    normalized: list[dict[str, Any]] = []
+    seen_families: set[str] = set()
+    for idx, entry in enumerate(cwe_coverage):
+        if not isinstance(entry, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"cwe_coverage entry {idx} must be an object",
+            )
+        family = str(entry.get("family", "")).strip()
+        if not family:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"cwe_coverage entry {idx} is missing family",
+            )
+        if family in seen_families:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Duplicate cwe_coverage family '{family}'",
+            )
+        seen_families.add(family)
+        normalized_entry = dict(entry)
+        normalized_entry["family"] = family
+        normalized.append(normalized_entry)
+    return normalized
+
+
+def _validate_completion_coverage(file_row: dict[str, Any], cwe_coverage: list[dict[str, Any]]) -> None:
+    classification = str(file_row.get("classification", ""))
+    slot_types = _json_decode(file_row.get("slot_types_json"), [])
+    language = str(file_row.get("language", ""))
+
+    if classification in {"critical", "high"} and not slot_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot complete {classification} file {file_row['file_path']} without slot_types; "
+                "classification metadata is incomplete"
+            ),
+        )
+
+    applicable = _applicable_families_for_slots(slot_types, language)
+    if classification in {"critical", "high"} and not applicable:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot complete {classification} file {file_row['file_path']} without "
+                "applicable vulnerability families"
+            ),
+        )
+
+    provided = {str(entry.get("family", "")) for entry in cwe_coverage}
+    missing = [family for family in applicable if family not in provided]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Missing cwe_coverage families for {file_row['file_path']}: "
+                + ", ".join(missing)
+            ),
+        )
+
+
+def _normalize_cross_file_triggers(
+    cross_file_triggers: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if not cross_file_triggers:
+        return []
+    normalized_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for idx, trigger in enumerate(cross_file_triggers):
+        if not isinstance(trigger, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"cross_file_triggers entry {idx} must be an object",
+            )
+        file_path = str(trigger.get("file_path", "")).strip()
+        vuln_class = str(trigger.get("vuln_class", "")).strip()
+        reason = str(trigger.get("reason", "")).strip()
+        if not file_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"cross_file_triggers entry {idx} is missing file_path",
+            )
+        if not vuln_class:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"cross_file_triggers entry {idx} is missing vuln_class",
+            )
+        if not reason:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"cross_file_triggers entry {idx} is missing reason",
+            )
+        normalized = dict(trigger)
+        normalized["file_path"] = file_path
+        normalized["vuln_class"] = vuln_class
+        normalized["reason"] = reason
+        normalized_by_key[(file_path, vuln_class)] = normalized
+    return list(normalized_by_key.values())
+
+
+def _record_cross_file_triggers(
+    connection,
+    engagement_id: int,
+    *,
+    source_queue_item_id: int | None,
+    source_file_id: int,
+    cross_file_triggers: list[dict[str, Any]],
+) -> None:
+    if not cross_file_triggers:
+        return
+    source_file_row = _get_file_rows(connection, engagement_id, {source_file_id})[source_file_id]
+    source_repo_id = int(source_file_row["repo_id"])
+    for trigger in cross_file_triggers:
+        target_file_path = str(trigger["file_path"])
+        vuln_class = str(trigger["vuln_class"])
+        reason = str(trigger["reason"])
+        target_row = connection.execute(
+            """
+            SELECT id
+            FROM code_files
+            WHERE engagement_id = ? AND repo_id = ? AND file_path = ?
+            """,
+            (engagement_id, source_repo_id, target_file_path),
+        ).fetchone()
+        target_file_id = int(target_row["id"]) if target_row is not None else None
+        trigger_status = (
+            _trigger_status_for_file(connection, engagement_id, target_file_id)
+            if target_file_id is not None
+            else _TRIGGER_STATUS_PENDING
+        )
+
+        if target_file_id is not None:
+            existing = connection.execute(
+                """
+                SELECT id
+                FROM code_analysis_triggers
+                WHERE engagement_id = ? AND target_file_id = ? AND vuln_class = ?
+                """,
+                (engagement_id, target_file_id, vuln_class),
+            ).fetchone()
+        else:
+            existing = connection.execute(
+                """
+                SELECT id
+                FROM code_analysis_triggers
+                WHERE engagement_id = ? AND source_file_id = ? AND target_file_id IS NULL
+                  AND target_file_path = ? AND vuln_class = ?
+                """,
+                (engagement_id, source_file_id, target_file_path, vuln_class),
+            ).fetchone()
+
+        resolution_note = ""
+        if trigger_status == _TRIGGER_STATUS_QUEUED:
+            resolution_note = "Target file already queued or in progress"
+        elif trigger_status == _TRIGGER_STATUS_RESOLVED:
+            resolution_note = "Target file already analyzed"
+
+        if existing is None:
+            connection.execute(
+                """
+                INSERT INTO code_analysis_triggers (
+                    engagement_id, source_queue_item_id, source_file_id, target_file_id,
+                    target_file_path, vuln_class, reason, status, resolution_note
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    engagement_id,
+                    source_queue_item_id,
+                    source_file_id,
+                    target_file_id,
+                    target_file_path,
+                    vuln_class,
+                    reason,
+                    trigger_status,
+                    resolution_note,
+                ),
+            )
+            continue
+
+        connection.execute(
+            """
+            UPDATE code_analysis_triggers
+            SET source_queue_item_id = ?,
+                source_file_id = ?,
+                target_file_id = ?,
+                target_file_path = ?,
+                vuln_class = ?,
+                reason = ?,
+                status = ?,
+                resolution_note = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ?
+            """,
+            (
+                source_queue_item_id,
+                source_file_id,
+                target_file_id,
+                target_file_path,
+                vuln_class,
+                reason,
+                trigger_status,
+                resolution_note,
+                engagement_id,
+                int(existing["id"]),
+            ),
+        )
+
+
+_VALID_DISPOSITIONS = frozenset({"finding", "suspicious", "clean"})
 
 
 def complete_queue_items(
@@ -1000,23 +1283,32 @@ def complete_queue_items(
     disposition: str,
     notes: str = "",
     cwe_coverage: list[dict[str, Any]] | None = None,
-    cross_file_triggers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not item_ids:
         return {"updated": 0, "total": 0}
+    if len(item_ids) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="complete_queue_items accepts exactly one queue item per call",
+        )
     if disposition not in _VALID_DISPOSITIONS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid disposition '{disposition}'. Must be one of: {', '.join(sorted(_VALID_DISPOSITIONS))}",
         )
     now = _now_iso()
-    cwe_coverage_text = _json_list_text(cwe_coverage)
-    cross_file_triggers_text = _json_list_text(cross_file_triggers)
+    normalized_cwe_coverage = _normalize_cwe_coverage(cwe_coverage)
+    cwe_coverage_text = _json_list_text(normalized_cwe_coverage)
     placeholders = ",".join("?" for _ in item_ids)
     with get_connection() as connection:
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
-        next_status = "needs_context" if disposition == "needs_context" else "done"
+        queue_row = next(iter(queue_rows.values()))
+        file_row = _get_file_rows(connection, engagement.id, {int(queue_row["file_id"])})[
+            int(queue_row["file_id"])
+        ]
+        _validate_completion_coverage(file_row, normalized_cwe_coverage)
+        next_status = "done"
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
@@ -1024,26 +1316,25 @@ def complete_queue_items(
                 disposition = ?,
                 analysis_notes = ?,
                 cwe_coverage_json = ?,
-                cross_file_triggers_json = ?,
                 completed_at = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE engagement_id = ? AND id IN ({placeholders})
             """,
-            (next_status, disposition, notes, cwe_coverage_text, cross_file_triggers_text, now, engagement.id, *item_ids),
+            (next_status, disposition, notes, cwe_coverage_text, now, engagement.id, *item_ids),
         )
         for row in queue_rows.values():
             context_id = row["context_id"]
             if context_id is not None:
-                context_status = "needs_context" if disposition == "needs_context" else "analyzed"
                 connection.execute(
                     """
                     UPDATE code_contexts
                     SET analysis_status = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE engagement_id = ? AND id = ?
                     """,
-                    (context_status, engagement.id, context_id),
+                    ("analyzed", engagement.id, context_id),
                 )
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
+            _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
         return {"updated": cursor.rowcount, "total": len(item_ids)}
 
 
@@ -1070,6 +1361,7 @@ def error_queue_items(
         )
         for row in queue_rows.values():
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
+            _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
         return {"updated": cursor.rowcount, "total": len(item_ids)}
 
 
@@ -1105,6 +1397,7 @@ def needs_context_queue_items(
                     (engagement.id, row["context_id"]),
                 )
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
+            _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
         return {"updated": cursor.rowcount, "total": len(item_ids)}
 
 
@@ -1139,6 +1432,7 @@ def reset_stale_queue_items(
         )
         for row in stale_rows:
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
+            _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
         return {"reset": cursor.rowcount}
 
 
@@ -1156,6 +1450,7 @@ def create_analysis_result(
         file_row = _get_file_rows(connection, engagement.id, {int(result["file_id"])})[
             int(result["file_id"])
         ]
+        normalized_cross_file_triggers = _normalize_cross_file_triggers(result.get("cross_file_triggers"))
 
         context_id = result.get("context_id")
 
@@ -1209,7 +1504,7 @@ def create_analysis_result(
                 result.get("notes", ""),
                 _json_text(result.get("audit_metadata")),
                 _json_list_text(result.get("cwe_coverage")),
-                _json_list_text(result.get("cross_file_triggers")),
+                _json_list_text(normalized_cross_file_triggers),
             ),
         )
         row = connection.execute(
@@ -1227,6 +1522,13 @@ def create_analysis_result(
                 """,
                 (context_status, engagement.id, int(context_id)),
             )
+        _record_cross_file_triggers(
+            connection,
+            engagement.id,
+            source_queue_item_id=int(queue_item_id) if queue_item_id is not None else None,
+            source_file_id=int(file_row["id"]),
+            cross_file_triggers=normalized_cross_file_triggers,
+        )
         _sync_file_analysis_status(connection, engagement.id, int(file_row["id"]))
         return _hydrate_code_analysis_result(row)
 
@@ -1474,6 +1776,30 @@ def code_coverage_summary(
             ),
             (engagement.id,) if repo_id is None else (engagement.id, engagement.id, repo_id),
         )
+        trigger_rows = connection.execute(
+            (
+                """
+                SELECT status, COUNT(*) AS total
+                FROM code_analysis_triggers
+                WHERE engagement_id = ?
+                GROUP BY status
+                """
+                if repo_id is None
+                else """
+                SELECT t.status, COUNT(*) AS total
+                FROM code_analysis_triggers t
+                JOIN code_files sf
+                  ON sf.id = t.source_file_id
+                 AND sf.engagement_id = t.engagement_id
+                WHERE t.engagement_id = ? AND sf.repo_id = ?
+                GROUP BY t.status
+                """
+            ),
+            (engagement.id,) if repo_id is None else (engagement.id, repo_id),
+        ).fetchall()
+        trigger_counts: dict[str, int] = {}
+        for row in trigger_rows:
+            trigger_counts[str(row["status"])] = int(row["total"])
         skip_reason_rows = connection.execute(
             f"""
             SELECT skip_reason, COUNT(*) AS total
@@ -1508,13 +1834,17 @@ def code_coverage_summary(
         gate_reasons.append(
             f"Queue items still pending or processing: {unresolved_active_queue}"
         )
+    if trigger_counts.get(_TRIGGER_STATUS_PENDING, 0) > 0:
+        gate_reasons.append(
+            f"Unprocessed cross-file triggers: {trigger_counts[_TRIGGER_STATUS_PENDING]}"
+        )
 
     # -- Effort-threshold gate (blocking for critical/high files) --
     effort_warnings: list[str] = []
     with get_connection() as connection:
         effort_file_rows = connection.execute(
             f"""
-            SELECT f.id AS file_id, f.file_path, f.classification, f.slot_types_json,
+            SELECT f.id AS file_id, f.file_path, f.classification, f.analysis_status, f.slot_types_json,
                    f.language, q.cwe_coverage_json
             FROM code_files f
             LEFT JOIN code_analysis_queue q ON q.file_id = f.id AND q.engagement_id = f.engagement_id AND q.status = 'done'
@@ -1525,20 +1855,19 @@ def code_coverage_summary(
         # Accumulate max effort per family per file
         file_efforts: dict[int, dict[str, float]] = {}
         file_meta: dict[int, dict[str, Any]] = {}
-        files_with_done_items: set[int] = set()
         for erow in effort_file_rows:
             fid = int(erow["file_id"])
             if fid not in file_meta:
                 file_meta[fid] = {
                     "file_path": erow["file_path"],
                     "classification": erow["classification"],
+                    "analysis_status": erow["analysis_status"] or "",
+                    "has_done_item": False,
                     "slot_types": _json_decode(erow["slot_types_json"], []),
                     "language": erow["language"] or "",
                 }
-            # LEFT JOIN produces NULL cwe_coverage_json when no done queue item
-            # exists; a done item with empty coverage produces '[]'.
             if erow["cwe_coverage_json"] is not None:
-                files_with_done_items.add(fid)
+                file_meta[fid]["has_done_item"] = True
             cwe_cov = _json_decode(erow["cwe_coverage_json"], [])
             if fid not in file_efforts:
                 file_efforts[fid] = {}
@@ -1548,38 +1877,49 @@ def code_coverage_summary(
                 if family and effort > file_efforts[fid].get(family, 0):
                     file_efforts[fid][family] = effort
 
-        # Only enforce effort thresholds when the pipeline is producing CWE
-        # coverage data.  If at least one file has effort records, the
-        # engagement uses the new effort-reporting flow and all critical/high
-        # files are expected to have coverage.  Old-style context-based
-        # engagements produce no CWE data and skip this gate entirely.
-        any_effort_data = any(bool(efforts) for efforts in file_efforts.values())
+        for fid, meta in file_meta.items():
+            threshold = 70 if meta["classification"] == "critical" else 50
+            slot_types = meta["slot_types"]
+            if not slot_types:
+                msg = (
+                    f"{meta['classification'].capitalize()} file {meta['file_path']}: "
+                    "missing slot_types"
+                )
+                gate_reasons.append(msg)
+                effort_warnings.append(msg)
+                continue
 
-        if any_effort_data:
-            for fid, meta in file_meta.items():
-                threshold = 70 if meta["classification"] == "critical" else 50
-                applicable = _applicable_families_for_slots(meta["slot_types"], meta.get("language", ""))
-                efforts = file_efforts.get(fid, {})
-                if not efforts:
-                    if fid in files_with_done_items and applicable:
-                        # File has completed queue items but no CWE coverage —
-                        # analysis was done without effort reporting.
-                        msg = (
-                            f"{meta['classification'].capitalize()} file {meta['file_path']}: "
-                            f"analyzed but missing CWE coverage data"
-                        )
-                        gate_reasons.append(msg)
-                        effort_warnings.append(msg)
+            applicable = _applicable_families_for_slots(slot_types, meta.get("language", ""))
+            if not applicable:
+                msg = (
+                    f"{meta['classification'].capitalize()} file {meta['file_path']}: "
+                    "no applicable vulnerability families"
+                )
+                gate_reasons.append(msg)
+                effort_warnings.append(msg)
+                continue
+
+            efforts = file_efforts.get(fid, {})
+            if not efforts:
+                if meta["analysis_status"] not in {"analyzed", "done"} and not meta["has_done_item"]:
                     continue
-                for family in applicable:
-                    if efforts.get(family, 0) < threshold:
-                        msg = (
-                            f"{meta['classification'].capitalize()} file {meta['file_path']}: "
-                            f"family '{family}' effort {efforts.get(family, 0):.0f} < {threshold}"
-                        )
-                        gate_reasons.append(msg)
-                        effort_warnings.append(msg)
-                        break  # One reason per file is enough
+                msg = (
+                    f"{meta['classification'].capitalize()} file {meta['file_path']}: "
+                    "analyzed but missing CWE coverage data"
+                )
+                gate_reasons.append(msg)
+                effort_warnings.append(msg)
+                continue
+
+            for family in applicable:
+                if efforts.get(family, 0) < threshold:
+                    msg = (
+                        f"{meta['classification'].capitalize()} file {meta['file_path']}: "
+                        f"family '{family}' effort {efforts.get(family, 0):.0f} < {threshold}"
+                    )
+                    gate_reasons.append(msg)
+                    effort_warnings.append(msg)
+                    break  # One reason per file is enough
 
     gate_passed = len(gate_reasons) == 0
 
@@ -1604,7 +1944,13 @@ def code_coverage_summary(
             "overall_loc_analyzed": overall_loc_analyzed,
             "unresolved_needs_context": unresolved_needs_context,
             "active_queue_items": unresolved_active_queue,
+            "unprocessed_triggers": trigger_counts.get(_TRIGGER_STATUS_PENDING, 0),
             "skip_reasons": skip_reasons,
+        },
+        "trigger_summary": {
+            "pending": trigger_counts.get(_TRIGGER_STATUS_PENDING, 0),
+            "queued": trigger_counts.get(_TRIGGER_STATUS_QUEUED, 0),
+            "resolved": trigger_counts.get(_TRIGGER_STATUS_RESOLVED, 0),
         },
         "gate": {
             "passed": gate_passed,
@@ -1682,30 +2028,71 @@ def requeue_triggered_files(
     engagement = _engagement_or_404(engagement_id)
     inserted = 0
     not_found: list[str] = []
+    ambiguous: list[str] = []
+    already_queued = 0
+    already_completed = 0
     with get_connection() as connection:
+        aggregated: dict[int, dict[str, Any]] = {}
         for item in items:
-            file_id = item.get("file_id")
-            file_path = item.get("file_path")
-            if file_id is None and file_path is not None:
+            raw_file_id = item.get("file_id")
+            raw_file_path = str(item.get("file_path", "")).strip()
+            repo_id = item.get("repo_id")
+
+            file_id: int | None
+            if raw_file_id is not None:
                 row = connection.execute(
-                    "SELECT id FROM code_files WHERE engagement_id = ? AND file_path = ?",
-                    (engagement.id, file_path),
+                    "SELECT id FROM code_files WHERE engagement_id = ? AND id = ?",
+                    (engagement.id, int(raw_file_id)),
                 ).fetchone()
                 if row is None:
-                    not_found.append(str(file_path))
+                    not_found.append(str(raw_file_id))
                     continue
                 file_id = int(row["id"])
-            elif file_id is not None:
-                file_id = int(file_id)
+            elif raw_file_path:
+                rows = connection.execute(
+                    (
+                        "SELECT id FROM code_files WHERE engagement_id = ? AND file_path = ?"
+                        if repo_id is None
+                        else "SELECT id FROM code_files WHERE engagement_id = ? AND repo_id = ? AND file_path = ?"
+                    ),
+                    (engagement.id, raw_file_path)
+                    if repo_id is None
+                    else (engagement.id, int(repo_id), raw_file_path),
+                ).fetchall()
+                if not rows:
+                    not_found.append(raw_file_path)
+                    continue
+                if len(rows) > 1:
+                    ambiguous.append(raw_file_path)
+                    continue
+                file_id = int(rows[0]["id"])
             else:
                 continue
 
-            priority = max(0, min(100, int(item.get("priority", 50))))
-            batch_theme = item.get("batch_theme", "cross-file-trigger")
-            slot_types_json = _json_list_text(item.get("slot_types"))
+            bucket = aggregated.setdefault(
+                file_id,
+                {
+                    "priority": 0,
+                    "batch_theme": "cross-file-trigger",
+                    "slot_types": [],
+                    "guidance_hypotheses": [],
+                },
+            )
+            bucket["priority"] = max(
+                int(bucket["priority"]),
+                max(0, min(100, int(item.get("priority", 50)))),
+            )
+            batch_theme = str(item.get("batch_theme", "")).strip()
+            if batch_theme:
+                bucket["batch_theme"] = batch_theme
 
-            # Preserve trigger context as guidance so the follow-up hunter
-            # sees why this file was requeued and which vuln class to target.
+            existing_slots = {str(slot) for slot in bucket["slot_types"]}
+            for slot in item.get("slot_types") or []:
+                slot_name = str(slot).strip()
+                if slot_name and slot_name not in existing_slots:
+                    bucket["slot_types"].append(slot_name)
+                    existing_slots.add(slot_name)
+
             guidance = list(item.get("guidance_hypotheses") or [])
             reason = item.get("reason", "")
             trigger_ctx = item.get("trigger_context")
@@ -1716,7 +2103,29 @@ def requeue_triggered_files(
                 if isinstance(trigger_ctx, dict):
                     hint.update(trigger_ctx)
                 guidance.append(hint)
-            guidance_hypotheses_json = _json_list_text(guidance)
+
+            bucket_guidance = bucket["guidance_hypotheses"]
+            existing_guidance = {
+                json.dumps(entry, sort_keys=True, default=str)
+                for entry in bucket_guidance
+            }
+            for entry in guidance:
+                signature = json.dumps(entry, sort_keys=True, default=str)
+                if signature in existing_guidance:
+                    continue
+                bucket_guidance.append(entry)
+                existing_guidance.add(signature)
+
+        for file_id, item in aggregated.items():
+            current_status = _trigger_status_for_file(connection, engagement.id, file_id)
+            if current_status == _TRIGGER_STATUS_RESOLVED:
+                already_completed += 1
+                _sync_trigger_status_for_file(connection, engagement.id, file_id)
+                continue
+            if current_status == _TRIGGER_STATUS_QUEUED:
+                already_queued += 1
+                _sync_trigger_status_for_file(connection, engagement.id, file_id)
+                continue
 
             cursor = connection.execute(
                 """
@@ -1729,16 +2138,24 @@ def requeue_triggered_files(
                 (
                     engagement.id,
                     file_id,
-                    priority,
-                    batch_theme,
-                    slot_types_json,
-                    guidance_hypotheses_json,
+                    int(item["priority"]),
+                    str(item["batch_theme"]),
+                    _json_list_text(item["slot_types"]),
+                    _json_list_text(item["guidance_hypotheses"]),
                 ),
             )
             if cursor.rowcount > 0:
                 inserted += 1
                 _sync_file_analysis_status(connection, engagement.id, file_id)
-    return {"inserted": inserted, "total": len(items), "not_found": not_found}
+                _sync_trigger_status_for_file(connection, engagement.id, file_id)
+    return {
+        "inserted": inserted,
+        "total": len(items),
+        "not_found": not_found,
+        "ambiguous": ambiguous,
+        "already_queued": already_queued,
+        "already_completed": already_completed,
+    }
 
 
 # =========================================================================

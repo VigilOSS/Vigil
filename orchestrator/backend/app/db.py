@@ -658,6 +658,30 @@ def init_db() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_analysis_triggers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                source_queue_item_id INTEGER,
+                source_file_id INTEGER,
+                target_file_id INTEGER,
+                target_file_path TEXT NOT NULL DEFAULT '',
+                vuln_class TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                resolved_queue_item_id INTEGER,
+                resolution_note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(source_queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE CASCADE,
+                FOREIGN KEY(source_file_id) REFERENCES code_files(id) ON DELETE SET NULL,
+                FOREIGN KEY(target_file_id) REFERENCES code_files(id) ON DELETE SET NULL,
+                FOREIGN KEY(resolved_queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE SET NULL
+            )
+            """
+        )
         # ── End Code Analysis Tables ──────────────────────────────
 
         # Migrate secret_locator → secret in assessment_credentials

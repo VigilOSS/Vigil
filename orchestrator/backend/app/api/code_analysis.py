@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..services import code_analysis
 from ..services.engagements import get_engagement_or_404
@@ -111,11 +111,11 @@ class QueueFetchRequest(BaseModel):
 
 
 class QueueCompleteRequest(BaseModel):
-    item_ids: list[int]
+    model_config = ConfigDict(extra="forbid")
+    item_ids: list[int] = Field(min_length=1, max_length=1)
     disposition: str = Field(min_length=1, max_length=64)
     notes: str = Field(default="", max_length=20000)
     cwe_coverage: list[dict[str, Any]] = Field(default_factory=list)
-    cross_file_triggers: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class QueueErrorRequest(BaseModel):
@@ -373,7 +373,6 @@ async def complete_queue_items(engagement_key: str, request: QueueCompleteReques
         disposition=request.disposition,
         notes=request.notes,
         cwe_coverage=request.cwe_coverage,
-        cross_file_triggers=request.cross_file_triggers,
     )
     await _broadcast(engagement.key, "queue_done", record)
     return record

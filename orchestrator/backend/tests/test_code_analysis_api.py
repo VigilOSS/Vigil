@@ -125,6 +125,27 @@ def _classify_file(
     assert response.status_code == 200
 
 
+def _network_input_coverage(
+    *,
+    default_effort: int,
+    overrides: dict[str, dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    families = [
+        "web-app-injection",
+        "web-app-auth",
+        "ssrf",
+        "open-redirect",
+        "path-traversal",
+    ]
+    payload: list[dict[str, object]] = []
+    for family in families:
+        entry: dict[str, object] = {"family": family, "effort": default_effort}
+        if overrides and family in overrides:
+            entry.update(overrides[family])
+        payload.append(entry)
+    return payload
+
+
 def test_context_creation_returns_ids_and_queue_fetch_returns_joined_work_items(client, isolate_settings):
     engagement_key = "2026-04-04-code-queue"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
@@ -313,7 +334,12 @@ def test_analysis_completion_rolls_up_context_and_file_coverage(client, isolate_
 
     done = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={"item_ids": [queue_item["id"]], "disposition": "clean", "notes": "Reviewed"},
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "notes": "Reviewed",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+        },
     )
     assert done.status_code == 200
     assert done.json()["updated"] == 1
@@ -411,6 +437,18 @@ def test_coverage_gate_stays_closed_until_queue_items_are_completed(client, isol
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
         json={"item_ids": [queue_item["id"]], "disposition": "clean", "notes": "Reviewed"},
     )
+    assert done.status_code == 400
+    assert "cwe_coverage is required" in done.json()["detail"]
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "notes": "Reviewed",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+        },
+    )
     assert done.status_code == 200
 
     coverage_after_done = client.get(
@@ -418,6 +456,352 @@ def test_coverage_gate_stays_closed_until_queue_items_are_completed(client, isol
     )
     assert coverage_after_done.status_code == 200
     assert coverage_after_done.json()["gate"]["passed"] is True
+
+
+def test_queue_done_rejects_multi_item_completion(client, isolate_settings):
+    engagement_key = "2026-04-04-code-done-single-item"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="single-item-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+    _classify_file(client, engagement_key, int(helper_file["id"]), "high", 80)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={
+            "items": [
+                {"file_id": parser_file["id"], "priority": 100},
+                {"file_id": helper_file["id"], "priority": 80},
+            ]
+        },
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 2, "agent_name": "code-vuln-hunter"},
+    )
+    assert claimed.status_code == 200
+    queue_items = claimed.json()
+    assert len(queue_items) == 2
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_items[0]["id"], queue_items[1]["id"]],
+            "disposition": "clean",
+            "notes": "Reviewed",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+        },
+    )
+    assert done.status_code == 422
+
+
+def test_queue_done_rejects_needs_context_disposition(client, isolate_settings):
+    engagement_key = "2026-04-04-code-done-needs-context"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="done-needs-context-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    queue_item = claimed.json()[0]
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "needs_context",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+        },
+    )
+    assert done.status_code == 400
+    assert "Invalid disposition" in done.json()["detail"]
+
+
+def test_queue_done_rejects_legacy_trigger_payload(client, isolate_settings):
+    engagement_key = "2026-04-04-code-done-no-trigger-payload"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="done-no-trigger-payload-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    queue_item = claimed.json()[0]
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+            "cross_file_triggers": [
+                {
+                    "file_path": "src/helpers.py",
+                    "reason": "stale contract",
+                    "vuln_class": "web-app-injection",
+                }
+            ],
+        },
+    )
+    assert done.status_code == 422
+
+
+def test_cross_file_triggers_block_gate_until_requeued_and_dedupe_targets(client, isolate_settings):
+    engagement_key = "2026-04-04-code-triggers"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="trigger-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+    _classify_file(client, engagement_key, int(helper_file["id"]), "high", 80)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    queue_item = claimed.json()[0]
+
+    analysis_result = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json={
+            "queue_item_id": queue_item["id"],
+            "file_id": parser_file["id"],
+            "agent_name": "code-vuln-hunter",
+            "function_name": "parse_message",
+            "hypothesis": "Shared helper may carry taint into a sink path.",
+            "evidence": "parse_message delegates to helper before finishing validation.",
+            "disposition": "clean",
+            "confidence": "medium",
+            "notes": "Need helper follow-up",
+            "cross_file_triggers": [
+                {
+                    "file_path": "src/helpers.py",
+                    "reason": "shared parser helper",
+                    "vuln_class": "web-app-injection",
+                }
+            ],
+        },
+    )
+    assert analysis_result.status_code == 201
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "notes": "Reviewed parser",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+        },
+    )
+    assert done.status_code == 200
+
+    coverage_with_pending_trigger = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage_with_pending_trigger.status_code == 200
+    pending_payload = coverage_with_pending_trigger.json()
+    assert pending_payload["trigger_summary"]["pending"] == 1
+    assert any(
+        "unprocessed cross-file triggers" in reason.lower()
+        for reason in pending_payload["gate"]["reasons"]
+    )
+
+    requeue_payload = {
+        "items": [
+            {
+                "file_path": "src/helpers.py",
+                "priority": 88,
+                "reason": "shared parser helper",
+                "trigger_context": {"vuln_class": "web-app-injection"},
+            },
+            {
+                "file_path": "src/helpers.py",
+                "priority": 70,
+                "reason": "duplicate trigger for same helper",
+                "trigger_context": {"vuln_class": "web-app-injection"},
+            },
+        ]
+    }
+    requeue = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/requeue",
+        json=requeue_payload,
+    )
+    assert requeue.status_code == 201
+    requeue_result = requeue.json()
+    assert requeue_result["inserted"] == 1
+    assert requeue_result["already_queued"] == 0
+    assert requeue_result["already_completed"] == 0
+
+    coverage_with_queued_trigger = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    queued_payload = coverage_with_queued_trigger.json()
+    assert queued_payload["trigger_summary"]["pending"] == 0
+    assert queued_payload["trigger_summary"]["queued"] == 1
+
+    requeue_again = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/requeue",
+        json=requeue_payload,
+    )
+    assert requeue_again.status_code == 201
+    assert requeue_again.json()["inserted"] == 0
+    assert requeue_again.json()["already_queued"] == 1
+
+    helper_claim = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "follow-up-hunter"},
+    )
+    helper_item = helper_claim.json()[0]
+    assert helper_item["file"]["file_path"] == "src/helpers.py"
+
+    helper_done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [helper_item["id"]],
+            "disposition": "clean",
+            "notes": "Reviewed helper",
+            "cwe_coverage": _network_input_coverage(default_effort=60),
+        },
+    )
+    assert helper_done.status_code == 200
+
+    requeue_after_completion = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/requeue",
+        json=requeue_payload,
+    )
+    assert requeue_after_completion.status_code == 201
+    assert requeue_after_completion.json()["inserted"] == 0
+    assert requeue_after_completion.json()["already_completed"] == 1
+
+    final_coverage = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert final_coverage.status_code == 200
+    final_payload = final_coverage.json()
+    assert final_payload["trigger_summary"]["resolved"] == 1
+    assert final_payload["gate"]["passed"] is True
+
+
+def test_analysis_result_triggers_are_recorded_before_requeue(client, isolate_settings):
+    engagement_key = "2026-04-04-analysis-result-triggers"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="analysis-result-trigger-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+    _classify_file(client, engagement_key, int(helper_file["id"]), "high", 80)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    queue_item = claimed.json()[0]
+
+    analysis_result = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json={
+            "queue_item_id": queue_item["id"],
+            "file_id": parser_file["id"],
+            "agent_name": "code-vuln-hunter",
+            "function_name": "parse_message",
+            "hypothesis": "Shared helper may reintroduce taint.",
+            "evidence": "parse_message delegates to helper before sink handling.",
+            "disposition": "clean",
+            "confidence": "medium",
+            "notes": "Need helper follow-up",
+            "cross_file_triggers": [
+                {
+                    "file_path": "src/helpers.py",
+                    "reason": "helper normalizes attacker-controlled input",
+                    "vuln_class": "web-app-injection",
+                }
+            ],
+        },
+    )
+    assert analysis_result.status_code == 201
+
+    coverage_before_done = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage_before_done.status_code == 200
+    pending_payload = coverage_before_done.json()
+    assert pending_payload["trigger_summary"]["pending"] == 1
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "notes": "Reviewed parser",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+        },
+    )
+    assert done.status_code == 200
+
+    coverage_after_done = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage_after_done.status_code == 200
+    assert coverage_after_done.json()["trigger_summary"]["pending"] == 1
+
+    requeue = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/requeue",
+        json={
+            "items": [
+                {
+                    "file_path": "src/helpers.py",
+                    "priority": 90,
+                    "reason": "helper normalizes attacker-controlled input",
+                    "trigger_context": {"vuln_class": "web-app-injection"},
+                }
+            ]
+        },
+    )
+    assert requeue.status_code == 201
+    assert requeue.json()["inserted"] == 1
+
+    coverage_after_requeue = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage_after_requeue.status_code == 200
+    assert coverage_after_requeue.json()["trigger_summary"]["queued"] == 1
 
 
 def test_module_creation_assigns_files_and_supports_module_scoped_fetch(client, isolate_settings):
@@ -652,10 +1036,13 @@ def test_file_only_queue_create_and_fetch(client, isolate_settings):
     assert work_item["repo"]["id"] == repo["id"]
 
     # Complete with cwe_coverage payload
-    cwe_coverage_data = [
-        {"family": "web-app-injection", "effort": 85, "entry_chains_traced": 3},
-        {"family": "path-traversal", "effort": 70, "entry_chains_traced": 2},
-    ]
+    cwe_coverage_data = _network_input_coverage(
+        default_effort=70,
+        overrides={
+            "web-app-injection": {"effort": 85, "entry_chains_traced": 3},
+            "path-traversal": {"effort": 70, "entry_chains_traced": 2},
+        },
+    )
     done = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
         json={
@@ -663,7 +1050,6 @@ def test_file_only_queue_create_and_fetch(client, isolate_settings):
             "disposition": "clean",
             "notes": "Reviewed all sinks",
             "cwe_coverage": cwe_coverage_data,
-            "cross_file_triggers": [{"file_path": "src/helpers.py", "reason": "shared parser util"}],
         },
     )
     assert done.status_code == 200
@@ -710,10 +1096,13 @@ def test_cwe_coverage_passthrough_on_queue_done(client, isolate_settings):
     queue_item = claimed.json()[0]
 
     # Complete with cwe_coverage
-    cwe_coverage = [
-        {"family": "sql-injection", "effort": 90, "entry_chains_traced": 5},
-        {"family": "ssrf", "effort": 60, "entry_chains_traced": 1},
-    ]
+    cwe_coverage = _network_input_coverage(
+        default_effort=60,
+        overrides={
+            "web-app-injection": {"effort": 90, "entry_chains_traced": 5},
+            "ssrf": {"effort": 60, "entry_chains_traced": 1},
+        },
+    )
     done = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
         json={
@@ -738,7 +1127,7 @@ def test_cwe_coverage_passthrough_on_queue_done(client, isolate_settings):
     assert len(cwe_file["applicable_families"]) > 0
     # Check that the persisted cwe_coverage entries are present
     families_covered = {e["family"] for e in cwe_file["cwe_coverage"]}
-    assert "sql-injection" in families_covered
+    assert "web-app-injection" in families_covered
     assert "ssrf" in families_covered
 
 
@@ -766,7 +1155,13 @@ def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
             "slot_type": "NETWORK-INPUT",
             "notes": "Needs manual review",
             "cwe_coverage": [{"family": "buffer-overflow", "effort": 75}],
-            "cross_file_triggers": [{"file_path": "src/helpers.py"}],
+            "cross_file_triggers": [
+                {
+                    "file_path": "src/helpers.py",
+                    "reason": "helper receives attacker-controlled bytes",
+                    "vuln_class": "buffer-overflow",
+                }
+            ],
         },
     )
     assert result_response.status_code == 201
@@ -775,7 +1170,13 @@ def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
     assert result["context_id"] is None
     assert result["file_id"] == parser_file["id"]
     assert result["cwe_coverage"] == [{"family": "buffer-overflow", "effort": 75}]
-    assert result["cross_file_triggers"] == [{"file_path": "src/helpers.py"}]
+    assert result["cross_file_triggers"] == [
+        {
+            "file_path": "src/helpers.py",
+            "reason": "helper receives attacker-controlled bytes",
+            "vuln_class": "buffer-overflow",
+        }
+    ]
 
     # Verify it shows up in results listing
     results_list = client.get(
@@ -821,12 +1222,23 @@ def test_coverage_detail_cwe(client, isolate_settings):
             "item_ids": [item1["id"]],
             "disposition": "clean",
             "notes": "Pass 1",
-            "cwe_coverage": [
-                {"family": "web-app-injection", "effort": 60, "entry_chains_traced": 2,
-                 "functions_analyzed": 5, "total_entry_chains": 8},
-                {"family": "ssrf", "effort": 80, "entry_chains_traced": 1,
-                 "functions_analyzed": 2, "total_entry_chains": 3},
-            ],
+            "cwe_coverage": _network_input_coverage(
+                default_effort=70,
+                overrides={
+                    "web-app-injection": {
+                        "effort": 60,
+                        "entry_chains_traced": 2,
+                        "functions_analyzed": 5,
+                        "total_entry_chains": 8,
+                    },
+                    "ssrf": {
+                        "effort": 80,
+                        "entry_chains_traced": 1,
+                        "functions_analyzed": 2,
+                        "total_entry_chains": 3,
+                    },
+                },
+            ),
         },
     )
 
@@ -842,12 +1254,24 @@ def test_coverage_detail_cwe(client, isolate_settings):
             "item_ids": [item2["id"]],
             "disposition": "clean",
             "notes": "Pass 2",
-            "cwe_coverage": [
-                {"family": "web-app-injection", "effort": 90, "entry_chains_traced": 3,
-                 "functions_analyzed": 7, "total_entry_chains": 8, "notes": "full trace"},
-                {"family": "ssrf", "effort": 70, "entry_chains_traced": 2,
-                 "functions_analyzed": 3, "total_entry_chains": 3},
-            ],
+            "cwe_coverage": _network_input_coverage(
+                default_effort=70,
+                overrides={
+                    "web-app-injection": {
+                        "effort": 90,
+                        "entry_chains_traced": 3,
+                        "functions_analyzed": 7,
+                        "total_entry_chains": 8,
+                        "notes": "full trace",
+                    },
+                    "ssrf": {
+                        "effort": 70,
+                        "entry_chains_traced": 2,
+                        "functions_analyzed": 3,
+                        "total_entry_chains": 3,
+                    },
+                },
+            ),
         },
     )
 
