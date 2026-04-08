@@ -197,15 +197,22 @@ def _count_lines(filepath: str) -> int:
         return 0
 
 
-def _read_header(filepath: str, max_lines: int = 50) -> str:
-    """Read the first N lines of a file as a header snippet."""
+def _read_header(filepath: str, max_lines: int = 50, max_chars: int = 8192) -> str:
+    """Read the first N lines of a file as a bounded header snippet."""
     lines = []
+    char_count = 0
     try:
         with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
             for i, line in enumerate(f):
-                if i >= max_lines:
+                if i >= max_lines or char_count >= max_chars:
+                    break
+                remaining = max_chars - char_count
+                if len(line) > remaining:
+                    lines.append(line[:remaining])
+                    char_count = max_chars
                     break
                 lines.append(line)
+                char_count += len(line)
     except OSError:
         return ''
     return ''.join(lines)

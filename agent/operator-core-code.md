@@ -82,12 +82,12 @@ The `code-ingest` command:
 
 The `code-index` command:
 - Uses tree-sitter to parse each source file
-- Produces per-file JSON in `analysis-state/structural-index/` (filenames are `sha256(rel_path)[:16].json`) containing: function map (names, signatures, line ranges), entry points (main functions, request handlers, exported APIs), security sinks (memory operations, file I/O, command execution, crypto calls), and call sites
-- Writes a manifest at `analysis-state/structural-index-manifest.json` with aggregate statistics and a `path_to_index` mapping (file relative path -> index filename) so consumers can look up index files by path
+- Produces per-file JSON in `tools/analysis-state/structural-index/` (filenames are `sha256(rel_path)[:16].json`) containing: function map (names, signatures, line ranges), entry points (main functions, request handlers, exported APIs), security sinks (memory operations, file I/O, command execution, crypto calls), and call sites
+- Writes a manifest at `tools/analysis-state/structural-index-manifest.json` with aggregate statistics and a `path_to_index` mapping (file relative path -> index filename) so consumers can look up index files by path
 - If tree-sitter is not installed, exits cleanly with a warning -- downstream phases operate without it using manual triage as a fallback
 - The structural index accelerates Phase 2 hunting by giving the hunter a pre-built function map and sink catalog instead of requiring manual code triage
 
-Output: `analysis-state/structural-index/` directory with per-file JSON + manifest (when tree-sitter is available).
+Output: `tools/analysis-state/structural-index/` directory with per-file JSON + manifest (when tree-sitter is available).
 
 ```bash
 jq '.current_phase = "classify-map"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
@@ -103,7 +103,7 @@ Provide:
 - Full file listing (from `./scripts/assess.py fetch "code/files?repo_id=<repo-id>&limit=5000"`)
 - Project documentation (README, SECURITY.md, build files -- read from source dir)
 - Git churn data (from code_repos.git_churn_json)
-- Structural index manifest (from `analysis-state/structural-index-manifest.json`, if available) -- gives the architect pre-computed function counts, entry points, and sink statistics per file
+- Structural index manifest (from `tools/analysis-state/structural-index-manifest.json`, if available) -- gives the architect pre-computed function counts, entry points, and sink statistics per file
 
 Phase 1 produces six deliverables. The call graph and attack hypotheses provide navigational guidance for hunters. The file analysis queue ensures every critical/high file is analyzed regardless of hypothesis coverage.
 
@@ -111,7 +111,8 @@ Phase 1 produces six deliverables. The call graph and attack hypotheses provide 
 
 1. **File classifications** -- every file tagged with priority (critical/high/medium/low/skip) and
    slot types (NETWORK-INPUT, PROTOCOL-FIELD, CMD-ARGUMENT, URL-COMPONENT, FILE-CONTENT,
-   CALLBACK-DATA, ENV-VARIABLE). Same as before.
+   CALLBACK-DATA, ENV-VARIABLE). Each record must include backend `file_id`; `file_path` is
+   helper context, not the primary key.
 
 2. **Module map** -- logical groupings of related files. Same as before.
 
@@ -137,7 +138,8 @@ Phase 1 produces six deliverables. The call graph and attack hypotheses provide 
    of whether a hypothesis names it. Files without hypotheses appear with an empty
    `guidance_hypotheses` array. The queue is grouped by `batch_theme` (logical module) so the
    hunter can reason across related files in the same dispatch. Priority scores determine
-   dispatch order.
+   dispatch order. The on-disk queue artifact is a flat per-file JSON array -- no nested batch
+   wrappers or glob patterns.
 
 On return:
 ```bash
@@ -147,6 +149,8 @@ On return:
 ./scripts/assess.py code-record-threat-model <repo-id> <threat-model-json>
 # Record modules
 ./scripts/assess.py code-record-modules <repo-id> <modules-json>
+# Ensure analysis-state exists for Phase 2 handoff artifacts
+mkdir -p "$DIR/tools/analysis-state"
 # Store call graph in analysis-state/
 cp <call-graph-json> "$DIR/tools/analysis-state/call-graph.json"
 # Store attack hypotheses in analysis-state/
@@ -255,15 +259,15 @@ the prompt context heavier than the source files themselves.
   ordering prevents hypothesis anchoring where the analysis scope narrows to the architect's
   predictions.
 - **Structural index** (if available) -- include the relevant per-file index data from
-  `analysis-state/structural-index/`. For small batches, passing the full per-file JSON is fine.
+  `tools/analysis-state/structural-index/`. For small batches, passing the full per-file JSON is fine.
   For larger files, prefer a trimmed summary containing the function map, entry points,
   relevant sink catalog, and the call sites touching the entry chains under review. Look up the
-  index filename for each file via `structural-index-manifest.json`'s `path_to_index` mapping
+  index filename for each file via `tools/analysis-state/structural-index-manifest.json`'s `path_to_index` mapping
   using the file's relative path (e.g., `manifest["path_to_index"]["src/main.c"]` returns the
   index filename). The hunter uses this as a navigation map and completeness checklist: every
   catalogued sink still needs to be accounted for.
 - **Call graph excerpt** -- the subgraph for the target module showing entry-point chains and
-  trust boundary crossings from `analysis-state/call-graph.json`. Include only the subgraph
+  trust boundary crossings from `tools/analysis-state/call-graph.json`. Include only the subgraph
   relevant to the files and chains in this dispatch.
 - **Threat model summary** -- trust boundaries, entry points, and high-value targets relevant
   to this batch from the Phase 1 threat model. Keep this short and file-local; do not dump the
@@ -657,7 +661,7 @@ re-dispatch. If `needs-context` items exist, provide additional context and re-q
 
 Phase-specific resume actions:
 - **Phase 1 (classify-map)**: Check if call graph, attack hypotheses, and file analysis queue
-  exist in analysis-state/. If missing, the architect dispatch was interrupted. Re-dispatch.
+  exist in `tools/analysis-state/`. If missing, the architect dispatch was interrupted. Re-dispatch.
 - **Phase 2A (hunt)**: Check queue stats. Reset stale items and resume the fetch-dispatch-done
   loop for unprocessed file batches.
 - **Phase 2B (hunt -- CWE review)**: Run `code-coverage --cwe-matrix` to check current effort
@@ -706,7 +710,7 @@ degrades, and the engagement produces the exact failure modes seen in prior runs
 - Gate phase transitions on mandatory checklists -- reject and re-dispatch when gates fail
 - Manage the analysis queue (fetch, dispatch, done, reset-stale, requeue-triggers)
 - Review coverage gaps and CWE effort matrix to decide whether to re-dispatch or accept
-- Extract call graph excerpts and structural index data from analysis-state/ for dispatch context
+- Extract call graph excerpts and structural index data from `tools/analysis-state/` for dispatch context
 - Run the Phase 2B CWE coverage review loop to close effort gaps systematically
 
 **Source reading belongs to subagents** because they have the domain context to interpret what

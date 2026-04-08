@@ -1,6 +1,7 @@
 """assess.py code-dispatch — analysis queue dispatch engine for the code analysis pipeline."""
 from __future__ import annotations
 
+from fnmatch import fnmatch
 import json
 import sys
 from pathlib import Path
@@ -241,6 +242,188 @@ def _reset_stale(cfg, minutes: int) -> None:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
+def _fetch_code_files(cfg) -> list[dict]:
+    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    try:
+        result = client.get('code/files?limit=5000')
+    finally:
+        client.close()
+    if not isinstance(result, list):
+        print("Could not fetch code files for queue normalization", file=sys.stderr)
+        sys.exit(1)
+    return result
+
+
+def _normalize_string_list(value) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, list):
+        result: list[str] = []
+        for item in value:
+            if item in (None, ""):
+                continue
+            if isinstance(item, str):
+                result.append(item)
+            else:
+                result.append(json.dumps(item, ensure_ascii=False, sort_keys=True))
+        return result
+    if isinstance(value, str):
+        return [value]
+    return [json.dumps(value, ensure_ascii=False, sort_keys=True)]
+
+
+def _flatten_queue_specs(item, inherited: dict | None = None) -> list[dict]:
+    if not isinstance(item, dict):
+        print("Queue items must be JSON objects", file=sys.stderr)
+        sys.exit(1)
+
+    inherited_fields = dict(inherited or {})
+    for key in ('context_id', 'priority', 'batch_theme', 'slot_types', 'guidance_hypotheses', 'repo_id'):
+        if key in item and item[key] not in (None, ""):
+            inherited_fields[key] = item[key]
+
+    for collection_key in ('items', 'batches'):
+        if collection_key in item:
+            collection = item.get(collection_key)
+            if not isinstance(collection, list):
+                print(f"Queue field '{collection_key}' must be a JSON array", file=sys.stderr)
+                sys.exit(1)
+            flattened: list[dict] = []
+            for child in collection:
+                flattened.extend(_flatten_queue_specs(child, inherited_fields))
+            return flattened
+
+    if 'files' in item:
+        collection = item.get('files')
+        if not isinstance(collection, list):
+            print("Queue field 'files' must be a JSON array", file=sys.stderr)
+            sys.exit(1)
+        flattened = []
+        for child in collection:
+            if isinstance(child, str):
+                child_item = {'file_path': child}
+            elif isinstance(child, dict):
+                child_item = child
+            else:
+                print("Queue 'files' entries must be strings or JSON objects", file=sys.stderr)
+                sys.exit(1)
+            flattened.extend(_flatten_queue_specs(child_item, inherited_fields))
+        return flattened
+
+    if 'file_paths' in item:
+        collection = item.get('file_paths')
+        if not isinstance(collection, list):
+            print("Queue field 'file_paths' must be a JSON array", file=sys.stderr)
+            sys.exit(1)
+        flattened = []
+        for file_path in collection:
+            flattened.extend(_flatten_queue_specs({'file_path': file_path}, inherited_fields))
+        return flattened
+
+    if 'path' in item and 'file_path' not in item:
+        item = dict(item)
+        item['file_path'] = item.pop('path')
+    if 'glob' in item and 'file_path' not in item:
+        item = dict(item)
+        item['file_path'] = item.pop('glob')
+
+    if 'file_id' in item or 'file_path' in item:
+        leaf = dict(inherited_fields)
+        leaf.update(item)
+        return [leaf]
+
+    print("Queue item is missing file_id/file_path or a supported batch wrapper", file=sys.stderr)
+    sys.exit(1)
+
+
+def _resolve_queue_file_ids(item: dict, code_files: list[dict]) -> list[int]:
+    file_id = item.get('file_id')
+    if file_id not in (None, ""):
+        try:
+            return [int(file_id)]
+        except (TypeError, ValueError):
+            print(f"Invalid queue file_id: {file_id!r}", file=sys.stderr)
+            sys.exit(1)
+
+    file_path = str(item.get('file_path', '')).strip()
+    if not file_path:
+        print("Queue item must include file_id or file_path", file=sys.stderr)
+        sys.exit(1)
+
+    repo_id = item.get('repo_id')
+    if repo_id not in (None, ""):
+        try:
+            repo_id = int(repo_id)
+        except (TypeError, ValueError):
+            print(f"Invalid queue repo_id: {repo_id!r}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        repo_id = None
+
+    has_glob = any(ch in file_path for ch in "*?[")
+    matches: list[dict] = []
+    for row in code_files:
+        candidate = str(row.get('file_path', ''))
+        if has_glob:
+            if fnmatch(candidate, file_path):
+                matches.append(row)
+        elif candidate == file_path:
+            matches.append(row)
+
+    if repo_id is not None:
+        matches = [row for row in matches if int(row.get('repo_id', -1)) == repo_id]
+
+    if not matches:
+        print(f"No code file found for queue path: {file_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if not has_glob and len(matches) > 1:
+        print(
+            f"Ambiguous queue path {file_path!r}; include file_id or repo_id to disambiguate",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return [int(row['id']) for row in matches]
+
+
+def _normalize_queue_items(cfg, raw_items: list[dict]) -> list[dict]:
+    flattened: list[dict] = []
+    for item in raw_items:
+        flattened.extend(_flatten_queue_specs(item))
+
+    needs_lookup = any(entry.get('file_id') in (None, "") for entry in flattened)
+    code_files = _fetch_code_files(cfg) if needs_lookup else []
+
+    normalized: list[dict] = []
+    seen: set[str] = set()
+    for entry in flattened:
+        file_ids = _resolve_queue_file_ids(entry, code_files)
+        for file_id in file_ids:
+            normalized_item: dict = {
+                'file_id': file_id,
+                'priority': max(0, min(100, int(entry.get('priority', 50)))),
+                'batch_theme': str(entry.get('batch_theme', '')),
+                'slot_types': _normalize_string_list(entry.get('slot_types')),
+                'guidance_hypotheses': _normalize_string_list(entry.get('guidance_hypotheses')),
+            }
+            context_id = entry.get('context_id')
+            if context_id not in (None, ""):
+                try:
+                    normalized_item['context_id'] = int(context_id)
+                except (TypeError, ValueError):
+                    print(f"Invalid queue context_id: {context_id!r}", file=sys.stderr)
+                    sys.exit(1)
+
+            dedupe_key = json.dumps(normalized_item, sort_keys=True, ensure_ascii=False)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            normalized.append(normalized_item)
+
+    return normalized
+
+
 def _queue(cfg, queue_items_file: str) -> None:
     """Queue analysis items. Items can include batch_theme, slot_types, and
     guidance_hypotheses fields alongside the existing format — those are
@@ -258,17 +441,19 @@ def _queue(cfg, queue_items_file: str) -> None:
         print("Queue items file must contain a JSON array or object", file=sys.stderr)
         sys.exit(1)
 
+    normalized_items = _normalize_queue_items(cfg, items)
+
     submit_snapshot = write_json_snapshot(
         cfg.engagement_dir,
         category="code-queue-submit",
         label=fp.stem,
-        payload=items,
+        payload={"input": items, "normalized": normalized_items},
         source_path=str(fp),
-        metadata={"command": "code-dispatch queue", "count": len(items)},
+        metadata={"command": "code-dispatch queue", "count": len(normalized_items)},
     )
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
-        result = client.post('code/analysis-queue', {'items': items})
+        result = client.post('code/analysis-queue', {'items': normalized_items})
     finally:
         client.close()
 
@@ -278,9 +463,9 @@ def _queue(cfg, queue_items_file: str) -> None:
         label=fp.stem,
         payload=result,
         source_path=str(submit_snapshot),
-        metadata={"command": "code-dispatch queue", "count": len(items)},
+        metadata={"command": "code-dispatch queue", "count": len(normalized_items)},
     )
-    queued_count = result.get('queued', len(items)) if isinstance(result, dict) else len(items)
+    queued_count = result.get('queued', len(normalized_items)) if isinstance(result, dict) else len(normalized_items)
     print(f"Queued {queued_count} analysis item(s)")
     print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
     if isinstance(result, dict) and result:

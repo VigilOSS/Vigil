@@ -24,7 +24,7 @@ Before producing any output, confirm:
 - [ ] Project documentation (README, SECURITY.md, ARCHITECTURE.md, build files) is present in dispatch context
 - [ ] Full file listing from code-ingest is available with path, language, LOC, and file hash for every file
 - [ ] Git churn data attached (or confirmed unavailable)
-- [ ] Structural index checked — if `analysis-state/structural-index/` exists, it's loaded for call graph construction
+- [ ] Structural index checked — if `tools/analysis-state/structural-index/` exists, it's loaded for call graph construction
 - [ ] Threat model output template is clear — you know the exact sections to produce
 
 If any item is missing, stop and request it from the operator before proceeding.
@@ -85,7 +85,7 @@ reasoning in Phase 3 by showing how untrusted data flows across file and module 
 
 ### Structural Index Consumption
 
-If a structural index exists at `analysis-state/structural-index/`, use it as the foundation for call graph construction. The structural index provides pre-computed function definitions, call sites, entry points, and imports via tree-sitter parsing. Use this data to construct the call graph more accurately — focus on security interpretation (trust boundaries, data flow direction, untrusted-data annotations) rather than manually extracting function signatures from source headers. When the structural index is available, cross-reference it with grep/ctags results to resolve ambiguities. The structural index provides the mechanical extraction; the architect provides the security semantics that tree-sitter cannot infer.
+If a structural index exists at `tools/analysis-state/structural-index/`, use it as the foundation for call graph construction. The structural index provides pre-computed function definitions, call sites, entry points, and imports via tree-sitter parsing. Use this data to construct the call graph more accurately — focus on security interpretation (trust boundaries, data flow direction, untrusted-data annotations) rather than manually extracting function signatures from source headers. When the structural index is available, cross-reference it with grep/ctags results to resolve ambiguities. The structural index provides the mechanical extraction; the architect provides the security semantics that tree-sitter cannot infer.
 
 ### Methodology
 1. For each entry point identified during classification:
@@ -182,6 +182,8 @@ JSON structure grouping files into modules with descriptions:
 ]
 ```
 
+Use concrete repo-relative file paths in `files`. Do not use globs, ranges, or prose placeholders.
+
 ### `#### Threat Model`
 Structured document covering:
 - What the software does (one paragraph)
@@ -205,6 +207,8 @@ JSON array of per-file classifications:
 ]
 ```
 
+Every classification record must include backend `file_id`. `file_path` may be included as helper context, but path-only classifications are not acceptable.
+
 ### `#### Recommended Analysis Order`
 Prioritized list of modules to analyze first, with reasoning.
 
@@ -215,7 +219,7 @@ JSON adjacency list with entry-point chains and untrusted-data annotations.
 Prioritized list of specific vulnerability hypotheses for the file analysis queue.
 
 ### `#### File Analysis Queue`
-JSON array written to `analysis-state/file-analysis-queue.json`. Every critical and high file MUST appear in this queue. Files without hypotheses appear with an empty `guidance_hypotheses` array — the hunter provides unconstrained analysis first, then checks hypotheses. The queue is grouped by `batch_theme` (logical module) so the hunter can reason across related files in the same dispatch. Priority scores from Step 9 determine dispatch order.
+Flat JSON array written to `tools/analysis-state/file-analysis-queue.json`. Every critical and high file MUST appear in this queue. Files without hypotheses appear with an empty `guidance_hypotheses` array — the hunter provides unconstrained analysis first, then checks hypotheses. The queue is grouped by `batch_theme` (logical module) so the hunter can reason across related files in the same dispatch. Priority scores from Step 9 determine dispatch order.
 
 ```json
 [
@@ -231,6 +235,8 @@ JSON array written to `analysis-state/file-analysis-queue.json`. Every critical 
   }
 ]
 ```
+
+Emit one queue object per concrete file. Every queue object must include concrete `file_id` and `file_path`. Do not emit nested batch wrappers, and do not use globs in `file_path` or `related_files`.
 
 ### `#### Coverage Gaps`
 REQUIRED. Declare every self-check item you could NOT complete. If none, state "No coverage gaps — all self-check items completed."
