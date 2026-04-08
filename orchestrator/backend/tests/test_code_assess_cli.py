@@ -271,6 +271,76 @@ def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypa
     ]
 
 
+def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypatch, tmp_path):
+    module = _load_code_dispatch_module()
+
+    coverage_path = tmp_path / "coverage.json"
+    coverage_path.write_text(
+        json.dumps([{"family": "web-app-injection", "effort": 85}]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    def fake_snapshot(engagement_dir: str, category: str, label: str, payload, source_path=None, metadata=None):
+        path = tmp_path / f"{category}-{label}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(module, "write_json_snapshot", fake_snapshot)
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def post(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return {"updated": 1}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            action="done",
+            extra=["42", "clean", str(coverage_path), "Reviewed"],
+            engagement_dir=tmp_path,
+        )
+    )
+
+    assert captured["endpoint"] == "code/analysis-queue/done"
+    assert captured["payload"] == {
+        "item_ids": [42],
+        "disposition": "clean",
+        "notes": "Reviewed",
+        "cwe_coverage": [{"family": "web-app-injection", "effort": 85}],
+    }
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                action="done",
+                extra=["42,43", "clean", str(coverage_path)],
+                engagement_dir=tmp_path,
+            )
+        )
+    assert excinfo.value.code == 1
+
+
 def _load_code_audit_module():
     repo_root = Path(__file__).resolve().parents[3]
     scripts_root = repo_root / "agent" / "scripts"

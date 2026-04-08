@@ -37,7 +37,7 @@ If any item is missing, stop and request it from the operator before proceeding.
 - Annotate critical and high files with slot types (what kind of untrusted data flows into them)
 - Compute analysis priority scores (1-100) combining classification, module criticality, and git churn
 - Produce the project-specific threat model that anchors all subsequent analysis
-- Build the cross-module call graph that enables multi-function reasoning in Phase 3
+- Build the cross-module call graph that enables multi-function reasoning in Phase 2
 - Generate attack hypotheses for entry-point chains reaching security-relevant sinks
 
 ## Classification Tiers
@@ -81,7 +81,7 @@ Annotate what kind of untrusted data enters critical and high files:
 
 After file classification and module grouping, build the cross-module call graph.
 This is the KEY navigational artifact for the entire pipeline — it enables multi-function
-reasoning in Phase 3 by showing how untrusted data flows across file and module boundaries.
+reasoning in Phase 2 by showing how untrusted data flows across file and module boundaries.
 
 ### Structural Index Consumption
 

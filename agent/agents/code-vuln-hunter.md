@@ -489,7 +489,7 @@ REQUIRED output section. Declare:
 - Error paths that could not be fully traced due to missing callee source
 
 The operator uses these to decide whether to expand context and re-dispatch before moving
-to Phase 4.
+to Phase 3.
 
 ### `#### Context Expansion Requests`
 
@@ -576,4 +576,5 @@ Before returning results, verify:
 - **-> operator (Tier 2, needs-context)**: When code is genuinely unavailable (external library,
   binary dependency, generated code), output specific function/file requests via
   `#### Context Expansion Requests` with documentation of failed self-service. The operator
-  assembles targeted context from the repository.
+  provides targeted external-dependency context or operator-held artifacts; repo-local code
+  should have been self-resolved before requesting expansion.

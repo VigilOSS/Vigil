@@ -8,7 +8,7 @@ origin: AI Threat Hunting
 
 ## When to Activate
 
-- Phase 4 of code analysis pipeline. Runs on confirmed and suspicious findings from Phase 3.
+- Phase 3 of code analysis pipeline. Runs on confirmed and suspicious findings from Phase 2.
 - Every finding (from vulnerability analysis and variant analysis) must pass through this verification before being reported.
 - Goal: eliminate false positives, adjust severity based on full context, synthesize attack chains from related findings, and produce a final set of verified findings.
 
@@ -233,7 +233,7 @@ BLOCKER: [what specific evidence would resolve the ambiguity]
 
 ## Variant-Aware Verification
 
-When variant findings exist (from code-variant-hunter in Phase 4):
+When variant findings exist (from code-variant-hunter in Phase 3):
 
 - **If the original finding is killed**: do NOT automatically kill variants. Each variant may have independent paths, guards, and feasibility. Verify each variant through the full 5-check protocol. The kill reason for the original may not apply to the variant (different callers, different guards, different build flags).
 
@@ -361,4 +361,4 @@ When you persist structured verification state, include:
 - Call graph from Phase 1 — cross-module call chains for upstream guard search and reachability verification
 - Full filesystem access — read source files directly for independent verification of taint paths and guards
 - **CWE pattern reference (REQUIRED)** — load the `agent/references/code-vuln-patterns/*.md` file matching each finding's CWE. Pattern knowledge is needed for guard completeness evaluation (Check 2: are ALL variant forms of this bug class guarded?) and exploitation feasibility assessment (Check 4: what does a real exploit look like for this pattern?)
-- Variant findings from Phase 4 — load variant context for variant-aware verification
+- Variant findings from Phase 3 — load variant context for variant-aware verification

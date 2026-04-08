@@ -10,6 +10,8 @@ This document describes the backend API changes required to support effort-based
 - `queue_item_id` is now optional (nullable integer). Omitting it or passing `null` is valid.
 - Accepts optional `cwe_coverage` array — per-vulnerability-class effort records attached to the result.
 - Accepts optional `cross_file_triggers` array — files connected via call graph that need re-analysis.
+- `cross_file_triggers` are now first-class workflow state: recording them here creates pending
+  trigger records that block the coverage gate until the operator requeues or resolves them.
 
 **New fields in request body:**
 
@@ -41,18 +43,25 @@ This document describes the backend API changes required to support effort-based
 ### `POST code/analysis-queue/done`
 
 **Changes:**
-- Accepts optional `cwe_coverage` array in the payload alongside `item_ids`, `disposition`, and `notes`.
-- When `cwe_coverage` is present, the backend accumulates it against the relevant file(s) using max-effort semantics (see Accumulation below).
+- Accepts exactly one queue item per call.
+- Requires `cwe_coverage` in the payload alongside `item_ids`, `disposition`, and `notes`.
+- Valid dispositions are terminal dispositions only (`finding`, `suspicious`, `clean`). Use
+  `code/analysis-queue/needs-context` for incomplete work.
+- Does NOT accept `cross_file_triggers`; those belong on `code/analysis-results`, because
+  triggers are analysis output and must be recorded before queue completion.
+- The backend accumulates `cwe_coverage` against the relevant file using max-effort semantics
+  (see Accumulation below) and rejects completions that omit applicable vulnerability families.
 
 **Updated request body:**
 
 ```json
 {
-  "item_ids": [1, 2, 3],
-  "disposition": "analyzed",
+  "item_ids": [1],
+  "disposition": "clean",
   "notes": "Batch complete",
   "cwe_coverage": [
-    {"family": "sql-injection", "effort": 60, "functions_analyzed": 8}
+    {"family": "web-app-injection", "effort": 60, "functions_analyzed": 8},
+    {"family": "web-app-auth", "effort": 55, "functions_analyzed": 6}
   ]
 }
 ```
@@ -63,6 +72,8 @@ This document describes the backend API changes required to support effort-based
 - Response includes per-file `cwe_coverage` accumulation with effort scores when available.
 - Response includes per-file `applicable_families` list (derived from slot types and language).
 - Includes a `files` array when CWE data exists, containing per-file effort summaries.
+- Includes `trigger_summary` so the operator can see pending, queued, and resolved cross-file
+  trigger state directly from coverage output.
 
 **Updated response shape (additions):**
 

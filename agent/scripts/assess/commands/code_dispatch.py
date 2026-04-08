@@ -35,15 +35,14 @@ def run(args) -> None:
             sys.exit(1)
         _fetch(cfg, int(extra[0]), extra[1])
     elif action == "done":
-        if len(extra) < 2:
+        if len(extra) < 3:
             print(
-                "Usage: code-dispatch done <id1,id2,...> <disposition> [notes] [cwe-coverage-json-file]",
+                "Usage: code-dispatch done <item-id> <disposition> <cwe-coverage-json-file> [notes]",
                 file=sys.stderr,
             )
             sys.exit(1)
-        notes = extra[2] if len(extra) > 2 else ""
-        cwe_file = extra[3] if len(extra) > 3 else ""
-        _done(cfg, extra[0], extra[1], notes, cwe_file)
+        notes = extra[3] if len(extra) > 3 else ""
+        _done(cfg, extra[0], extra[1], extra[2], notes)
     elif action == "error":
         if not extra:
             print("Usage: code-dispatch error <id1,id2,...> [notes]", file=sys.stderr)
@@ -132,18 +131,22 @@ def _fetch(cfg, limit: int, agent_name: str) -> None:
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _done(cfg, id_list: str, disposition: str, notes: str = "", cwe_file: str = "") -> None:
+def _done(cfg, id_list: str, disposition: str, cwe_file: str, notes: str = "") -> None:
     ids = _validate_id_list(id_list)
+    if len(ids) != 1:
+        print("ERROR: code-dispatch done accepts exactly one queue item id", file=sys.stderr)
+        sys.exit(1)
+
+    cwe_path = Path(cwe_file)
+    if not cwe_path.is_file():
+        print(f"CWE coverage JSON file not found: {cwe_file}", file=sys.stderr)
+        sys.exit(1)
+    cwe_data = json.loads(cwe_path.read_text(encoding="utf-8"))
+
     payload: dict = {'item_ids': ids, 'disposition': disposition}
     if notes:
         payload['notes'] = notes
-    if cwe_file:
-        cwe_path = Path(cwe_file)
-        if not cwe_path.is_file():
-            print(f"CWE coverage JSON file not found: {cwe_file}", file=sys.stderr)
-            sys.exit(1)
-        cwe_data = json.loads(cwe_path.read_text(encoding="utf-8"))
-        payload['cwe_coverage'] = cwe_data
+    payload['cwe_coverage'] = cwe_data
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
         result = client.post('code/analysis-queue/done', payload)
