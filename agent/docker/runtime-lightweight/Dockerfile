@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     jq \
     ripgrep \
+    unzip \
     python3 \
     python3-pip \
     python3-aiohttp \
@@ -56,10 +57,22 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages \
     dpapick3 \
     aioquic \
     flask
-RUN curl -fsSL "https://github.com/jpillora/chisel/releases/download/v1.11.4/chisel_1.11.4_linux_amd64.gz" \
+RUN arch="$(dpkg --print-architecture)" && \
+    case "$arch" in \
+      amd64) release_arch=amd64 ;; \
+      arm64) release_arch=arm64 ;; \
+      *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/jpillora/chisel/releases/download/v1.11.4/chisel_1.11.4_linux_${release_arch}.gz" \
     | gunzip > /usr/local/bin/chisel && chmod +x /usr/local/bin/chisel
-RUN mkdir -p /tmp/ligolo && \
-    curl -fsSL "https://github.com/nicocha30/ligolo-ng/releases/download/v0.8.2/ligolo-ng_proxy_0.8.2_linux_amd64.tar.gz" \
+RUN arch="$(dpkg --print-architecture)" && \
+    case "$arch" in \
+      amd64) release_arch=amd64 ;; \
+      arm64) release_arch=arm64 ;; \
+      *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac && \
+    mkdir -p /tmp/ligolo && \
+    curl -fsSL "https://github.com/nicocha30/ligolo-ng/releases/download/v0.8.2/ligolo-ng_proxy_0.8.2_linux_${release_arch}.tar.gz" \
       | tar xzf - -C /tmp/ligolo && \
     find /tmp/ligolo -type f -perm /111 -exec mv {} /usr/local/bin/ligolo-proxy \; && \
     chmod +x /usr/local/bin/ligolo-proxy && \
@@ -83,8 +96,16 @@ RUN GOPATH=/root/go go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@
     GOPATH=/root/go go install github.com/d3mondev/puredns/v2@latest && \
     cp /root/go/bin/puredns /usr/local/bin/puredns && \
     rm -rf /root/go
-RUN curl -fsSL "https://github.com/epi052/feroxbuster/releases/latest/download/feroxbuster_amd64.deb.zip" \
-    -o /tmp/ferox.zip && unzip /tmp/ferox.zip -d /tmp && dpkg -i /tmp/feroxbuster_*_amd64.deb && rm -rf /tmp/ferox*
+RUN arch="$(dpkg --print-architecture)" && \
+    case "$arch" in \
+      amd64) ferox_arch=x86_64 ;; \
+      arm64) ferox_arch=aarch64 ;; \
+      *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac && \
+    mkdir -p /tmp/ferox && \
+    curl -fsSL "https://github.com/epi052/feroxbuster/releases/latest/download/${ferox_arch}-linux-feroxbuster.zip" \
+    -o /tmp/ferox/ferox.zip && unzip /tmp/ferox/ferox.zip -d /tmp/ferox && \
+    mv /tmp/ferox/feroxbuster /usr/local/bin/feroxbuster && chmod +x /usr/local/bin/feroxbuster && rm -rf /tmp/ferox
 
 RUN ln -sf /usr/share/wordlists /wordlists && \
     ln -sf /usr/share/seclists /seclists

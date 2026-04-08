@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, status
 from pydantic import BaseModel, Field
@@ -57,12 +57,21 @@ class ProbeRunRecordRequest(BaseModel):
 
 
 class SurfaceRecordRequest(BaseModel):
-    surface_type: str = Field(min_length=1, max_length=128)
+    surface_type: Literal[
+        "account_recovery",
+        "api_documentation",
+        "auth_entry",
+        "dynamic_render",
+        "file_handling",
+        "object_reference",
+        "privileged_write",
+        "workflow_token",
+    ]
     target_descriptor: str = Field(min_length=1, max_length=1024)
     source_name: str = Field(default="", max_length=128)
     rationale: str = Field(default="", max_length=4096)
     evidence_ref: str = Field(default="", max_length=1024)
-    status: str = Field(default="discovered", min_length=1, max_length=64)
+    status: Literal["covered", "deferred", "discovered", "not_applicable"] = "discovered"
 
 
 class AttackChainLinkRequest(BaseModel):
@@ -259,8 +268,9 @@ def get_findings(engagement_key: str) -> list[dict[str, Any]]:
 def get_report_findings(engagement_key: str) -> list[dict[str, Any]]:
     """Findings formatted for report generation.
 
-    Sorted by severity (critical first), excludes merged findings, and extracts
-    CVSS, remediation, CWE, and steps-to-reproduce from the details blob.
+    Sorted by severity (critical first), excludes merged and false-positive
+    findings, and extracts CVSS, remediation, CWE, and steps-to-reproduce from
+    the details blob.
     Each finding includes a ``report_id`` (e.g. ``FINDING-001``) for sequential
     report numbering and a ``slug`` field so the original backend ID remains
     available for cross-referencing.

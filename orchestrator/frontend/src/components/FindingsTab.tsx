@@ -51,6 +51,8 @@ function lifecycleLabel(finding: AssessmentFinding | AssessmentFindingDetail) {
       return "Exploited";
     case "blocked":
       return "Blocked during exploitation";
+    case "false_positive":
+      return "False positive";
     default:
       return finding.status;
   }
@@ -193,7 +195,7 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
             <button
               key={finding.slug}
               type="button"
-              className={`finding-row ${selected === finding.slug ? "finding-row-active" : ""}`}
+              className={`finding-row ${finding.status === "false_positive" ? "finding-row-suppressed" : ""} ${selected === finding.slug ? "finding-row-active" : ""}`}
               onClick={() => setSelected(finding.slug)}
             >
               <div className="finding-row-main">
@@ -333,6 +335,16 @@ export function FindingsTab({ findings, fallbackFindings, summary, chains, chain
                 <div>
                   <p className="eyebrow">Impact</p>
                   <p>{details.impact}</p>
+                </div>
+              )}
+
+              {details.kill_reason && (
+                <div>
+                  <p className="eyebrow">Kill reason</p>
+                  <p>
+                    {details.kill_check != null ? `Check ${details.kill_check}: ` : ""}
+                    {details.kill_reason}
+                  </p>
                 </div>
               )}
 

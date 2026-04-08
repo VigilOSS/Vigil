@@ -146,7 +146,7 @@ def _network_input_coverage(
     return payload
 
 
-def test_context_creation_returns_ids_and_queue_fetch_returns_joined_work_items(client, isolate_settings):
+def test_queue_fetch_returns_file_direct_work_items(client, isolate_settings):
     engagement_key = "2026-04-04-code-queue"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
     repo = _create_repo(client, engagement_key)
@@ -159,59 +159,9 @@ def test_context_creation_returns_ids_and_queue_fetch_returns_joined_work_items(
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
 
-    contexts_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/contexts",
-        json={
-            "contexts": [
-                {
-                    "file_id": parser_file["id"],
-                    "function_name": "parse_message",
-                    "start_line": 10,
-                    "end_line": 30,
-                    "slot_types": ["NETWORK-INPUT"],
-                    "call_chain": {"callers": [], "callees": [{"function": "sink"}]},
-                    "data_flow": {"untrusted_params": ["data"]},
-                    "cross_refs": [],
-                    "guard_annotations": [{"type": "length_check", "line": 12}],
-                    "sink_annotations": [{"type": "BUFFER-WRITE", "line": 22}],
-                    "audit_metadata": {"cross_ref_usage": {"tool": "grep", "queries": ["rg parse_message"]}},
-                    "context_text": "def parse_message(data):\n    sink(data)\n",
-                }
-            ]
-        },
-    )
-    assert contexts_response.status_code == 201
-    contexts_payload = contexts_response.json()
-    assert contexts_payload["inserted"] == 1
-    assert len(contexts_payload["contexts"]) == 1
-    context = contexts_payload["contexts"][0]
-    assert context["id"] > 0
-    assert context["audit_metadata"]["cross_ref_usage"]["tool"] == "grep"
-
-    file_after_context = client.get(
-        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
-    )
-    assert file_after_context.status_code == 200
-    assert file_after_context.json()["analysis_status"] == "context_built"
-
-    # File-only queue items (no context_id) are now valid for the file-direct flow
-    queue_without_context = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
-    )
-    assert queue_without_context.status_code == 201
-
     queue_response = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={
-            "items": [
-                {
-                    "context_id": context["id"],
-                    "file_id": parser_file["id"],
-                    "priority": 95,
-                }
-            ]
-        },
+        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
     )
     assert queue_response.status_code == 201
 
@@ -227,27 +177,15 @@ def test_context_creation_returns_ids_and_queue_fetch_returns_joined_work_items(
     )
     assert fetch_response.status_code == 200
     payload = fetch_response.json()
-    assert len(payload) == 2
+    assert len(payload) == 1
 
-    # One item should be file-only (context=None), the other has a context
-    file_only_item = next(item for item in payload if item["context"] is None)
-    context_item = next(item for item in payload if item["context"] is not None)
-
-    # Verify the file-only item
-    assert file_only_item["status"] == "processing"
-    assert file_only_item["file"]["id"] == parser_file["id"]
-    assert file_only_item["repo"]["id"] == repo["id"]
-
-    # Verify the context-backed item
-    assert context_item["status"] == "processing"
-    assert context_item["context"]["id"] == context["id"]
-    assert context_item["context"]["slot_types"] == ["NETWORK-INPUT"]
-    assert context_item["context"]["call_chain"]["callees"][0]["function"] == "sink"
-    assert context_item["context"]["audit_metadata"]["cross_ref_usage"]["tool"] == "grep"
-    assert context_item["file"]["id"] == parser_file["id"]
-    assert context_item["file"]["file_path"] == "src/parser.py"
-    assert context_item["repo"]["id"] == repo["id"]
-    assert context_item["repo"]["lsp_config"]["ctags"]["available"] is True
+    item = payload[0]
+    assert item["status"] == "processing"
+    assert item["file"]["id"] == parser_file["id"]
+    assert item["file"]["file_path"] == "src/parser.py"
+    assert item["repo"]["id"] == repo["id"]
+    assert item["repo"]["lsp_config"]["ctags"]["available"] is True
+    assert "context" not in item
 
     file_after_fetch = client.get(
         f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
@@ -256,7 +194,7 @@ def test_context_creation_returns_ids_and_queue_fetch_returns_joined_work_items(
     assert file_after_fetch.json()["analysis_status"] in ("queued", "in_progress")
 
 
-def test_analysis_completion_rolls_up_context_and_file_coverage(client, isolate_settings):
+def test_analysis_completion_rolls_up_file_coverage(client, isolate_settings):
     engagement_key = "2026-04-04-code-coverage"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
     repo = _create_repo(client, engagement_key, repo_key="coverage-repo")
@@ -264,35 +202,11 @@ def test_analysis_completion_rolls_up_context_and_file_coverage(client, isolate_
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
 
-    contexts_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/contexts",
-        json={
-            "contexts": [
-                {
-                    "file_id": parser_file["id"],
-                    "function_name": "parse_message",
-                    "start_line": 10,
-                    "end_line": 30,
-                    "slot_types": ["NETWORK-INPUT"],
-                    "call_chain": {"callers": [], "callees": []},
-                    "data_flow": {"untrusted_params": ["data"]},
-                    "cross_refs": [],
-                    "guard_annotations": [],
-                    "sink_annotations": [],
-                    "audit_metadata": {"cross_ref_usage": {"tool": "lsp", "queries": ["go-to-definition(parse_message)"]}},
-                    "context_text": "def parse_message(data):\n    return data\n",
-                }
-            ]
-        },
-    )
-    context = contexts_response.json()["contexts"][0]
-
     queue_response = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue",
         json={
             "items": [
                 {
-                    "context_id": context["id"],
                     "file_id": parser_file["id"],
                     "priority": 100,
                 }
@@ -311,7 +225,6 @@ def test_analysis_completion_rolls_up_context_and_file_coverage(client, isolate_
         f"/engagements/{engagement_key}/assessment/code/analysis-results",
         json={
             "queue_item_id": queue_item["id"],
-            "context_id": context["id"],
             "file_id": parser_file["id"],
             "agent_name": "code-vuln-hunter",
             "function_name": "parse_message",
@@ -344,12 +257,6 @@ def test_analysis_completion_rolls_up_context_and_file_coverage(client, isolate_
     assert done.status_code == 200
     assert done.json()["updated"] == 1
 
-    context_rows = client.get(
-        f"/engagements/{engagement_key}/assessment/code/contexts?file_id={parser_file['id']}"
-    )
-    assert context_rows.status_code == 200
-    assert context_rows.json()[0]["analysis_status"] == "analyzed"
-
     file_row = client.get(
         f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
     )
@@ -362,7 +269,6 @@ def test_analysis_completion_rolls_up_context_and_file_coverage(client, isolate_
     assert coverage.status_code == 200
     payload = coverage.json()
     assert payload["by_classification"]["critical"]["analyzed"] == 1
-    assert payload["function_level"]["analyzed"] == 1
     assert payload["gate"]["passed"] is True
 
 
@@ -374,31 +280,9 @@ def test_coverage_gate_stays_closed_until_queue_items_are_completed(client, isol
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
 
-    contexts_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/contexts",
-        json={
-            "contexts": [
-                {
-                    "file_id": parser_file["id"],
-                    "function_name": "parse_message",
-                    "start_line": 10,
-                    "end_line": 30,
-                    "slot_types": ["NETWORK-INPUT"],
-                    "call_chain": {"callers": [], "callees": []},
-                    "data_flow": {"untrusted_params": ["data"]},
-                    "cross_refs": [],
-                    "guard_annotations": [],
-                    "sink_annotations": [],
-                    "context_text": "def parse_message(data):\n    return data\n",
-                }
-            ]
-        },
-    )
-    context = contexts_response.json()["contexts"][0]
-
     queue_response = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"context_id": context["id"], "file_id": parser_file["id"], "priority": 100}]},
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
     )
     assert queue_response.status_code == 201
 
@@ -411,7 +295,6 @@ def test_coverage_gate_stays_closed_until_queue_items_are_completed(client, isol
         f"/engagements/{engagement_key}/assessment/code/analysis-results",
         json={
             "queue_item_id": queue_item["id"],
-            "context_id": context["id"],
             "file_id": parser_file["id"],
             "agent_name": "code-vuln-hunter",
             "function_name": "parse_message",
@@ -852,31 +735,9 @@ def test_code_analysis_endpoints_reject_foreign_engagement_ids(client, isolate_s
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, first_key, int(parser_file["id"]), "critical", 95)
 
-    contexts_response = client.post(
-        f"/engagements/{first_key}/assessment/code/contexts",
-        json={
-            "contexts": [
-                {
-                    "file_id": parser_file["id"],
-                    "function_name": "parse_message",
-                    "start_line": 1,
-                    "end_line": 2,
-                    "slot_types": ["NETWORK-INPUT"],
-                    "call_chain": {},
-                    "data_flow": {},
-                    "cross_refs": [],
-                    "guard_annotations": [],
-                    "sink_annotations": [],
-                    "context_text": "def parse_message(data):\n    return data\n",
-                }
-            ]
-        },
-    )
-    context = contexts_response.json()["contexts"][0]
-
     queue_response = client.post(
         f"/engagements/{first_key}/assessment/code/analysis-queue",
-        json={"items": [{"context_id": context["id"], "file_id": parser_file["id"], "priority": 90}]},
+        json={"items": [{"file_id": parser_file["id"], "priority": 90}]},
     )
     assert queue_response.status_code == 201
     queue_item = client.post(
@@ -903,31 +764,9 @@ def test_code_analysis_endpoints_reject_foreign_engagement_ids(client, isolate_s
     )
     assert foreign_files.status_code == 404
 
-    foreign_context = client.post(
-        f"/engagements/{second_key}/assessment/code/contexts",
-        json={
-            "contexts": [
-                {
-                    "file_id": parser_file["id"],
-                    "function_name": "foreign",
-                    "start_line": 1,
-                    "end_line": 1,
-                    "slot_types": [],
-                    "call_chain": {},
-                    "data_flow": {},
-                    "cross_refs": [],
-                    "guard_annotations": [],
-                    "sink_annotations": [],
-                    "context_text": "pass\n",
-                }
-            ]
-        },
-    )
-    assert foreign_context.status_code == 404
-
     foreign_queue = client.post(
         f"/engagements/{second_key}/assessment/code/analysis-queue",
-        json={"items": [{"context_id": context["id"], "file_id": parser_file["id"], "priority": 50}]},
+        json={"items": [{"file_id": parser_file["id"], "priority": 50}]},
     )
     assert foreign_queue.status_code == 404
 
@@ -941,7 +780,6 @@ def test_code_analysis_endpoints_reject_foreign_engagement_ids(client, isolate_s
         f"/engagements/{second_key}/assessment/code/analysis-results",
         json={
             "queue_item_id": queue_item["id"],
-            "context_id": context["id"],
             "file_id": parser_file["id"],
             "agent_name": "code-vuln-hunter",
             "function_name": "parse_message",
@@ -1027,7 +865,7 @@ def test_file_only_queue_create_and_fetch(client, isolate_settings):
     payload = fetch_response.json()
     assert len(payload) == 1
     work_item = payload[0]
-    assert work_item["context"] is None
+    assert "context" not in work_item
     assert work_item["batch_theme"] == "network-input-analysis"
     assert work_item["slot_types"] == ["NETWORK-INPUT", "FILE-CONTENT"]
     assert work_item["guidance_hypotheses"] == ["Check for buffer overflow in parse()"]
@@ -1167,7 +1005,6 @@ def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
     assert result_response.status_code == 201
     result = result_response.json()
     assert result["queue_item_id"] is None
-    assert result["context_id"] is None
     assert result["file_id"] == parser_file["id"]
     assert result["cwe_coverage"] == [{"family": "buffer-overflow", "effort": 75}]
     assert result["cross_file_triggers"] == [
@@ -1184,6 +1021,67 @@ def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
     )
     assert results_list.status_code == 200
     assert len(results_list.json()) == 1
+
+
+def test_analysis_results_include_linked_finding_status(client, isolate_settings):
+    engagement_key = "2026-04-04-analysis-result-finding-status"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="finding-status-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    finding = client.post(
+        f"/engagements/{engagement_key}/assessment/findings",
+        json={
+            "slug": "FINDING-CH-777",
+            "title": "Suppressed parser finding",
+            "severity": "medium",
+            "status": "false_positive",
+            "defect_family": "integer-overflow",
+            "root_cause_key": "suppressed-parser-finding",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.py:10",
+            "summary": "Verifier suppressed the finding.",
+            "evidence_ref": "tools/analysis-state/finding.json",
+            "notes": "Killed by verifier.",
+            "source_name": "code-vuln-verifier",
+            "details": {
+                "kill_check": 2,
+                "kill_reason": "Upper-bound guard is complete.",
+                "evidence": "validate_length() blocks the arithmetic path.",
+                "impact": "No live issue.",
+            },
+            "provenance": {"verified_by": "code-vuln-verifier"},
+            "links": [],
+        },
+    )
+    assert finding.status_code == 201
+
+    result_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json={
+            "file_id": parser_file["id"],
+            "agent_name": "code-vuln-hunter",
+            "function_name": "parse_message",
+            "hypothesis": "Potential parser overflow",
+            "evidence": "Attacker-controlled data reaches arithmetic.",
+            "disposition": "finding",
+            "confidence": "high",
+            "finding_slug": "FINDING-CH-777",
+            "cwe_id": "CWE-190",
+            "slot_type": "NETWORK-INPUT",
+            "notes": "Original hunt output.",
+        },
+    )
+    assert result_response.status_code == 201
+    assert result_response.json()["finding_status"] == "false_positive"
+
+    results_list = client.get(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results?file_id={parser_file['id']}"
+    )
+    assert results_list.status_code == 200
+    assert len(results_list.json()) == 1
+    assert results_list.json()[0]["finding_status"] == "false_positive"
 
 
 def test_coverage_detail_cwe(client, isolate_settings):

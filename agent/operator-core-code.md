@@ -45,7 +45,7 @@ analyzed or user signals stop:
 7. **DISPATCH** -- Dispatch to the appropriate subagent for all analysis work. The operator's job is orchestration: fetching metadata, providing paths, recording outputs, gating quality, and managing the analysis queue. Subagents read source files directly and produce structured outputs. Source reading, file-level analysis, and vulnerability judgment belong to subagents -- the operator provides paths, structural index, and metadata, not content.
 8. **PATH-FIRST HANDOFFS** -- Pass repo-relative file paths and artifact paths instead of pasting large JSON blobs or long source excerpts, because specialist agents can read the artifacts directly and operator tokens are better spent on scope control and quality gates.
 9. **RECORD FINDINGS IMMEDIATELY** -- Code findings use the same `./scripts/assess.py record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
-10. **RECORD SURFACES** -- Code-specific surface types: `parser_entry`, `protocol_handler`, `crypto_operation`, `auth_check`, `file_io`, `memory_allocator`. Record via `./scripts/assess.py record-surface`.
+10. **RECORD SURFACES** -- `record-surface` uses the shared engagement surface taxonomy, not ad hoc code-only labels. Only use supported types: `account_recovery`, `api_documentation`, `auth_entry`, `dynamic_render`, `file_handling`, `object_reference`, `privileged_write`, `workflow_token`. If none apply, do not invent a new surface type.
 11. **TRACK COVERAGE** -- After each batch, run `./scripts/assess.py code-coverage`. During Phase 2B, use `./scripts/assess.py code-coverage --cwe-matrix` to check per-file CWE effort scores against thresholds. Before entering Phase 3 verification, verify the coverage gate passes with `./scripts/assess.py code-coverage --require-gate-pass` (all critical files analyzed, no unresolved needs-context, no unprocessed triggers, CWE effort thresholds met).
 12. **LOOP** -- Back to step 1.
 
@@ -213,6 +213,12 @@ Adaptive batching is part of the method, not a convenience:
 # Check queue state
 ./scripts/assess.py code-dispatch stats
 ```
+
+Broad-hunt queue items are file-level only. Do not add `context_id` to the queue artifact. The
+queue carries `file_id` plus metadata such as `batch_theme`, `slot_types`, and
+`guidance_hypotheses`, while tree-sitter-derived structure lives under
+`tools/analysis-state/structural-index/`. `repo_id` is only a queue-normalization helper for
+resolving `file_path`; it is not part of the backend queue schema.
 
 **Fetch loop:**
 ```bash

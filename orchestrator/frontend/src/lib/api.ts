@@ -74,6 +74,8 @@ export type FindingDetails = {
   parameter?: string;
   request_method?: string;
   evidence?: string;
+  kill_reason?: string;
+  kill_check?: number;
   impact?: string;
   cvss_vector?: string;
   cvss_score?: number;
@@ -436,12 +438,6 @@ export type CodeCoverage = {
   total_files: number;
   by_classification: Record<string, { count: number; analyzed: number }>;
   by_status: Record<string, number>;
-  function_level: {
-    total_contexts: number;
-    analyzed: number;
-    needs_context: number;
-    pending: number;
-  };
   findings_summary: {
     total_code_findings: number;
     by_severity: Record<string, number>;
@@ -465,7 +461,6 @@ export type CodeCoverage = {
 export type CodeAnalysisResult = {
   id: number;
   queue_item_id: number | null;
-  context_id: number | null;
   file_id: number;
   agent_name: string;
   function_name: string;
@@ -477,6 +472,7 @@ export type CodeAnalysisResult = {
   cwe_id: string;
   slot_type: string;
   notes: string;
+  finding_status?: string | null;
   audit_metadata: Record<string, unknown>;
   created_at: string;
 };

@@ -14,12 +14,17 @@ origin: AI Threat Hunting
 ## Tools
 
 searchsploit, h8mail, theHarvester, bbot, amass, whois, dig,
-gau, waymore, curl, jq
+gau, curl, jq
+
+Optional when installed: `waymore`
 
 ## Methodology
 
 Treat OSINT as a hypothesis generator for realistic attack paths, not a passive appendix.
 Prioritize intel that changes exploit decisions, auth testing, chain construction, or log review.
+The shared Kali runtime does not mount `$ENGAGEMENT_DIR` at `/engagement`. Use `/tmp` for runtime-local
+output, then persist durable artifacts into `$ENGAGEMENT_DIR/scans/` on the host when they need to be
+ingested, reviewed, or handed off.
 
 ### 1. CVE & Exploit Lookup
 
@@ -79,10 +84,12 @@ From intel.md Domains & Infrastructure:
     amass enum -passive -d <domain> -o scans/osint_amass.txt
 
     # Historical URL discovery with gau (queries Wayback, AlienVault OTX, Common Crawl, URLScan)
-    gau <domain> --threads 5 --o /engagement/scans/osint_gau.txt
+    gau <domain> --threads 5 --o /tmp/osint_gau.txt
 
-    # waymore for deeper Wayback discovery with filtering
-    waymore -i <domain> -mode U -oU /engagement/scans/osint_waymore.txt
+    # Persist durable output back to $ENGAGEMENT_DIR/scans/ if you need it outside the runtime
+
+    # waymore for deeper Wayback discovery with filtering, when installed
+    waymore -i <domain> -mode U -oU /tmp/osint_waymore.txt
 
     # SecurityTrails API (requires API key in env)
     curl -s -H "APIKEY: $SECURITYTRAILS_API_KEY" \
@@ -100,7 +107,7 @@ From intel.md People & Organizations:
     theHarvester -d <domain> -b linkedin,google -f scans/osint_social.json
 
     # bbot recursive recon (modular, JSON output, pipeline-friendly)
-    bbot -t <domain> -p subdomain-enum email-enum -o /engagement/scans/osint_bbot/ --json
+    bbot -t <domain> -p subdomain-enum email-enum -o /tmp/osint_bbot/ --json
 
     # GitHub user/org search
     curl -s "https://api.github.com/search/users?q=<person>+<org>" \

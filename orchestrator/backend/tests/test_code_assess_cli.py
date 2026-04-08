@@ -271,6 +271,47 @@ def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypa
     ]
 
 
+def test_code_dispatch_queue_rejects_obsolete_context_id(monkeypatch, tmp_path):
+    module = _load_code_dispatch_module()
+
+    queue_path = tmp_path / "queue.json"
+    queue_path.write_text(
+        json.dumps(
+            [
+                {
+                    "file_id": 10,
+                    "context_id": 77,
+                    "priority": 91,
+                    "batch_theme": "auth-module",
+                    "slot_types": ["NETWORK-INPUT"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(base_url="http://example.test", engagement_key="eng", engagement_dir=str(tmp_path)),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(SimpleNamespace(action="queue", extra=[str(queue_path)], engagement_dir=tmp_path))
+
+    assert excinfo.value.code == 1
+
+
 def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypatch, tmp_path):
     module = _load_code_dispatch_module()
 

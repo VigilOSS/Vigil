@@ -292,7 +292,7 @@ reasons are specific and verifiable, not generic dismissals.
 |-------------|---------|---------------|
 | `confirmed` | Finding survives all 5 checks at stated severity | Include in report as-is |
 | `downgraded` | Finding survives but at lower severity | Include with adjusted severity + reasoning |
-| `killed` | Finding is a false positive | Exclude from report, record kill reason for audit |
+| `killed` | Finding is a false positive | Exclude from report, patch canonical finding status to `false_positive`, record kill reason for audit |
 | `voting` | Ambiguous — escalated to multi-perspective voting | Hold pending operator decision |
 
 ### Kill Reason Format (for audit trail)
@@ -313,6 +313,10 @@ Examples:
 - "Check 3 KILL: code inside `#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION`, not compiled in release"
 - "Check 4 KILL: overflow is 1 byte (null terminator), lands on padding between stack variables, no exploitable overwrite. Attempted to construct exploit — cannot overwrite return address or any function pointer."
 - "Check 5 KILL: git blame shows lines were refactored in commit abc123 specifically to add the size check. Test case `test_oversized_header` in test/http_tests.c exercises this exact path and asserts rejection. The implicit MAX_HEADER_SIZE constraint (checked via the `ENSURE_SIZE` macro at line 89, which expands to a bounds check) prevents the attacker input from reaching the vulnerable arithmetic."
+
+When you persist a false positive in structured finding state, include:
+- `details.kill_check` — integer 1-5 for the failed verification check
+- `details.kill_reason` — concise verifier rationale suitable for later query/reporting
 
 ## Output Format
 

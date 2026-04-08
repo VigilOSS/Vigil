@@ -17,6 +17,7 @@ IMAGE="${REDTEAM_IMAGE:-security-research:latest}"
 CONTAINER_NAME="${KALI_MCP_CONTAINER_NAME:-security-research}"
 DATA_DIR="${KALI_MCP_DATA_DIR:-$ROOT_DIR/.runtime-data}"
 RECREATE=0
+REQUIRED_TOOLS=(mcp-server katana gau nuclei)
 
 usage() {
   cat <<'EOF'
@@ -33,6 +34,26 @@ The root .env file is sourced before startup so shell-side defaults apply, then
 passed to docker with --env-file so the same values are available inside the
 runtime container.
 EOF
+}
+
+validate_runtime_tools() {
+  local missing=()
+  local tool
+  for tool in "${REQUIRED_TOOLS[@]}"; do
+    if ! docker exec "$CONTAINER_NAME" sh -lc "command -v '$tool' >/dev/null" >/dev/null 2>&1; then
+      missing+=("$tool")
+    fi
+  done
+
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    echo "[runtime] Runtime tool validation failed for container: $CONTAINER_NAME" >&2
+    echo "[runtime] Missing required tools: ${missing[*]}" >&2
+    echo "[runtime] The local image is likely stale relative to the checked-in Dockerfile." >&2
+    echo "[runtime] Rebuild and recreate the runtime, for example:" >&2
+    echo "  docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile ." >&2
+    echo "  ./agent/scripts/start_kali_mcp_runtime.sh --recreate" >&2
+    exit 1
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -68,6 +89,7 @@ if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
   if [[ "$RECREATE" -eq 0 ]]; then
     echo "[runtime] Shared Kali MCP runtime already running: $CONTAINER_NAME"
     echo "[runtime] Shared data mount: $DATA_DIR"
+    validate_runtime_tools
     exit 0
   fi
 fi
@@ -92,6 +114,8 @@ fi
 docker_args+=("$IMAGE")
 
 docker "${docker_args[@]}" >/dev/null
+
+validate_runtime_tools
 
 echo "[runtime] Shared Kali MCP runtime started: $CONTAINER_NAME"
 echo "[runtime] Shared data mount: $DATA_DIR"

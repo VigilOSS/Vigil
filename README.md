@@ -56,6 +56,7 @@ Start the shared runtime:
 ```
 
 This starts one shared container named `security-research`, mounts shared runtime data at `.runtime-data/`, and passes the root `.env` file into the runtime when present.
+It does not mount the active engagement directory into the container. Durable engagement artifacts stay on the host under `agent/engagements/<key>/`, while the runtime only gets the shared `/data` mount.
 
 Attach Claude Code or Codex over stdio after the runtime is up:
 
@@ -165,6 +166,7 @@ Code analysis can also run mid-engagement alongside web testing when source code
 
 - Kali MCP server
 - Katana and Chromium for authenticated crawling
+- ProjectDiscovery recon utilities including `httpx`, `dnsx`, `gau`, `katana`, `nuclei`, `dalfox`, and `puredns`
 - nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, WhatWeb, hydra, john, hashcat
 - post-access tooling such as evil-winrm, impacket, mitm6, chisel, ligolo-ng, proxychains-ng, Responder
 - pwncat-vl for interactive reverse shell handling, with tmux for session management

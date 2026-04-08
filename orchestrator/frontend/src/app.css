@@ -414,6 +414,11 @@ input {
   color: var(--pending);
 }
 
+.status-false_positive {
+  background: rgba(84, 88, 96, 0.12);
+  color: #4b5563;
+}
+
 .status-running,
 .status-in_progress {
   background: rgba(244, 162, 89, 0.18);
@@ -528,6 +533,15 @@ input {
 .finding-row-active {
   border-color: rgba(23, 53, 76, 0.2);
   background: rgba(255, 255, 255, 0.95);
+}
+
+.finding-row-suppressed {
+  opacity: 0.72;
+  border-style: dashed;
+}
+
+.finding-row-suppressed .finding-row-title {
+  text-decoration: line-through;
 }
 
 .finding-row-main {
@@ -1209,6 +1223,11 @@ input {
   border-radius: 14px;
   border: 1px solid rgba(0, 0, 0, 0.05);
   background: rgba(255, 255, 255, 0.6);
+}
+
+.code-result-row-suppressed {
+  opacity: 0.72;
+  border-style: dashed;
 }
 
 .code-result-header {

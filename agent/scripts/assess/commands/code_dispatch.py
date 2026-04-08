@@ -281,7 +281,7 @@ def _flatten_queue_specs(item, inherited: dict | None = None) -> list[dict]:
         sys.exit(1)
 
     inherited_fields = dict(inherited or {})
-    for key in ('context_id', 'priority', 'batch_theme', 'slot_types', 'guidance_hypotheses', 'repo_id'):
+    for key in ('priority', 'batch_theme', 'slot_types', 'guidance_hypotheses', 'repo_id'):
         if key in item and item[key] not in (None, ""):
             inherited_fields[key] = item[key]
 
@@ -401,6 +401,15 @@ def _normalize_queue_items(cfg, raw_items: list[dict]) -> list[dict]:
     normalized: list[dict] = []
     seen: set[str] = set()
     for entry in flattened:
+        if entry.get('context_id') not in (None, ""):
+            print(
+                "Queue item includes obsolete field `context_id`. "
+                "The hunt queue is file-level only and carries file_id plus metadata such as "
+                "batch_theme, slot_types, guidance_hypotheses, and structural-index context.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
         file_ids = _resolve_queue_file_ids(entry, code_files)
         for file_id in file_ids:
             normalized_item: dict = {
@@ -410,13 +419,6 @@ def _normalize_queue_items(cfg, raw_items: list[dict]) -> list[dict]:
                 'slot_types': _normalize_string_list(entry.get('slot_types')),
                 'guidance_hypotheses': _normalize_string_list(entry.get('guidance_hypotheses')),
             }
-            context_id = entry.get('context_id')
-            if context_id not in (None, ""):
-                try:
-                    normalized_item['context_id'] = int(context_id)
-                except (TypeError, ValueError):
-                    print(f"Invalid queue context_id: {context_id!r}", file=sys.stderr)
-                    sys.exit(1)
 
             dedupe_key = json.dumps(normalized_item, sort_keys=True, ensure_ascii=False)
             if dedupe_key in seen:

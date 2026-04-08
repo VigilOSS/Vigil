@@ -12,13 +12,14 @@ from ..db import get_connection
 from .events import _engagement_or_404
 
 SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
-FINDING_STATUSES = {"draft", "confirmed", "exploited", "blocked", "merged", "reported"}
+FINDING_STATUSES = {"draft", "confirmed", "exploited", "blocked", "false_positive", "merged", "reported"}
 FINDING_STATUS_RANK = {
     "draft": 0,
     "confirmed": 1,
     "blocked": 2,
     "exploited": 3,
     "reported": 4,
+    "false_positive": -2,
     "merged": -1,
 }
 _COVERAGE_STATUS_SYNONYMS = {
@@ -92,13 +93,19 @@ def _normalize_coverage_status(value: str) -> str:
     return status_value
 
 
-def _coalesce_finding_status(existing: str, incoming: str) -> str:
+def _coalesce_finding_status(existing: str, incoming: str, *, explicit_status_override: bool = False) -> str:
     existing_normalized = _normalize_finding_status(existing)
     incoming_normalized = _normalize_finding_status(incoming)
     if existing_normalized == "merged":
         return incoming_normalized
     if incoming_normalized == "merged":
         return incoming_normalized
+    if incoming_normalized == "false_positive":
+        return incoming_normalized
+    if existing_normalized == "false_positive" and not explicit_status_override:
+        # Keep prior verifier suppression sticky for semantic rediscovery so the same
+        # location/family does not silently resurrect as a new live finding.
+        return existing_normalized
     return incoming_normalized if FINDING_STATUS_RANK[incoming_normalized] >= FINDING_STATUS_RANK[existing_normalized] else existing_normalized
 
 
@@ -1084,7 +1091,7 @@ def _semantic_finding_match(
         SELECT *
         FROM assessment_findings
         WHERE engagement_id = ?
-          AND status != 'merged'
+          AND status NOT IN ('merged', 'false_positive')
           AND title = ?
           AND canonical_location = ?
           AND auth_context = ?
@@ -1162,6 +1169,8 @@ def create_finding(
     service_id: int | None,
     surface_id: int | None,
     links: list[dict[str, Any]] | None,
+    explicit_status_override: bool = False,
+    explicit_severity_override: bool = False,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     incoming_status = _normalize_finding_status(status_value)
@@ -1229,8 +1238,12 @@ def create_finding(
                 """,
                 (
                     title,
-                    _stronger_severity(existing["severity"], incoming_severity),
-                    _coalesce_finding_status(existing["status"], incoming_status),
+                    incoming_severity if explicit_severity_override else _stronger_severity(existing["severity"], incoming_severity),
+                    _coalesce_finding_status(
+                        existing["status"],
+                        incoming_status,
+                        explicit_status_override=explicit_status_override,
+                    ),
                     defect_family,
                     root_cause_key,
                     auth_context,
@@ -1312,6 +1325,8 @@ def update_finding(
         service_id=None,
         surface_id=None,
         links=None,
+        explicit_status_override=status_value is not None,
+        explicit_severity_override=severity is not None,
     )
     return result["finding"]
 
@@ -1363,6 +1378,8 @@ def patch_finding(
         service_id=None,
         surface_id=None,
         links=None,
+        explicit_status_override=status_value is not None,
+        explicit_severity_override=severity is not None,
     )
 
 
@@ -1388,6 +1405,11 @@ def merge_findings(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
         if source["id"] == target["id"]:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="cannot merge a finding into itself")
+        if target["status"] == "false_positive" and source["status"] != "false_positive":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="cannot merge a live finding into a false_positive target",
+            )
         source_confidence = _finding_confidence_tuple(source)
         target_confidence = _finding_confidence_tuple(target)
         source_stronger = source_confidence > target_confidence
@@ -1515,8 +1537,9 @@ def list_findings(engagement_id: int) -> list[dict[str, Any]]:
                     WHEN 'blocked' THEN 2
                     WHEN 'reported' THEN 3
                     WHEN 'draft' THEN 4
-                    WHEN 'merged' THEN 5
-                    ELSE 6
+                    WHEN 'false_positive' THEN 5
+                    WHEN 'merged' THEN 6
+                    ELSE 7
                 END,
                 findings.updated_at DESC,
                 findings.id DESC
@@ -1529,9 +1552,10 @@ def list_findings(engagement_id: int) -> list[dict[str, Any]]:
 def list_report_findings(engagement_id: int) -> list[dict[str, Any]]:
     """Return findings formatted for report generation.
 
-    Excludes merged findings, orders by severity (critical first), and extracts
-    CVSS/remediation/steps_to_reproduce from the ``details_json`` blob so the
-    report-writer has structured fields without manual JSON parsing.
+    Excludes merged and false-positive findings, orders by severity (critical
+    first), and extracts CVSS/remediation/steps_to_reproduce from the
+    ``details_json`` blob so the report-writer has structured fields without
+    manual JSON parsing.
     """
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
@@ -1540,7 +1564,7 @@ def list_report_findings(engagement_id: int) -> list[dict[str, Any]]:
             SELECT *
             FROM assessment_findings
             WHERE engagement_id = ?
-              AND status != 'merged'
+              AND status NOT IN ('merged', 'false_positive')
             ORDER BY
                 CASE severity
                     WHEN 'critical' THEN 0
@@ -2085,7 +2109,11 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
         request_observation_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_request_observations WHERE engagement_id = ?", (engagement.id,))
         coverage_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_coverage_items WHERE engagement_id = ?", (engagement.id,))
         probe_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_probe_runs WHERE engagement_id = ?", (engagement.id,))
-        finding_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_findings WHERE engagement_id = ?", (engagement.id,))
+        finding_count = _scalar_row(
+            connection,
+            "SELECT COUNT(*) FROM assessment_findings WHERE engagement_id = ? AND status NOT IN ('merged', 'false_positive')",
+            (engagement.id,),
+        )
         open_surface_count = _scalar_row(
             connection,
             "SELECT COUNT(*) FROM assessment_surfaces WHERE engagement_id = ? AND status IN ('discovered', 'deferred')",
@@ -2127,6 +2155,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
             SELECT slug, title, severity, status, canonical_location, summary, source_name, updated_at
             FROM assessment_findings
             WHERE engagement_id = ?
+              AND status NOT IN ('merged', 'false_positive')
             ORDER BY
                 CASE status
                     WHEN 'exploited' THEN 0
