@@ -448,7 +448,7 @@ def test_verify_finding_posts_verification_payload_and_syncs_markdown(monkeypatc
     assert "\"verified_false_positive\"" in capsys.readouterr().out
 
 
-def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypatch, tmp_path):
+def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypatch, tmp_path, capsys):
     module = _load_code_dispatch_module()
 
     queue_path = tmp_path / "queue.json"
@@ -510,7 +510,7 @@ def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypa
         def post(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
-            return {"queued": len(payload["items"])}
+            return {"inserted": len(payload["items"])}
 
         def close(self) -> None:
             return None
@@ -543,6 +543,77 @@ def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypa
             "guidance_hypotheses": ["Trace request handlers"],
         },
     ]
+    assert "Queued 3 analysis item(s)" in capsys.readouterr().out
+
+
+def test_code_dispatch_requeue_triggers_reports_partial_failures(monkeypatch, tmp_path, capsys):
+    module = _load_code_dispatch_module()
+
+    triggers_path = tmp_path / "triggers.json"
+    triggers_path.write_text(
+        json.dumps(
+            [
+                {
+                    "file_path": "src/parser.py",
+                    "repo_id": 7,
+                    "reason": "shared helper",
+                    "vuln_class": "web-app-injection",
+                },
+                {"file_path": "src/missing.py", "reason": "missing target", "vuln_class": "ssrf"},
+                {"file_path": "src/shared.py", "reason": "ambiguous target", "vuln_class": "xss"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    def fake_snapshot(engagement_dir: str, category: str, label: str, payload, source_path=None, metadata=None):
+        path = tmp_path / f"{category}-{label}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(module, "write_json_snapshot", fake_snapshot)
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def post(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return {
+                "inserted": 1,
+                "not_found": ["src/missing.py"],
+                "ambiguous": ["src/shared.py"],
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(SimpleNamespace(action="requeue-triggers", extra=[str(triggers_path)], engagement_dir=tmp_path))
+
+    assert captured["endpoint"] == "code/analysis-queue/requeue"
+    assert captured["payload"]["items"][0]["trigger_context"]["source"] == "cross_file_trigger"
+    assert captured["payload"]["items"][0]["repo_id"] == 7
+    assert "repo_id" not in captured["payload"]["items"][0]["trigger_context"]
+    output = capsys.readouterr().out
+    assert "Requeued 1 trigger item(s)" in output
+    assert "Not found: src/missing.py" in output
+    assert "Ambiguous without repo_id: src/shared.py" in output
 
 
 def test_code_dispatch_queue_rejects_obsolete_context_id(monkeypatch, tmp_path):

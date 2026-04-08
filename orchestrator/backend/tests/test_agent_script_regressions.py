@@ -131,7 +131,11 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(
         module,
         "load_config",
-        lambda engagement_dir: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
     )
 
     calls: list[tuple[str, dict[str, object]]] = []
@@ -175,3 +179,147 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
     assert "file_hash" in files_call["files"][0]
     assert "path" not in files_call["files"][0]
     assert "sha256" not in files_call["files"][0]
+
+
+def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, tmp_path: Path) -> None:
+    module = _load_script_module(
+        "test_merge_session_module",
+        "agent/scripts/assess/commands/merge_session.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    session_dir = engagement_dir / "sessions" / "session-a"
+    proposals_dir = session_dir / "proposals"
+    proposals_dir.mkdir(parents=True)
+    (proposals_dir / "proposals.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "finding_record",
+                "payload": {
+                    "title": "Parser trust boundary bypass",
+                    "status": "confirmed",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (engagement_dir / "sessions" / "index.json").write_text(
+        json.dumps([{"session_id": "session-a", "status": "open"}]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+    monkeypatch.setattr(module, "session_dir_path", lambda eng_dir, session_id: str(session_dir))
+    monkeypatch.setattr(module, "session_index_path", lambda eng_dir: str(engagement_dir / "sessions" / "index.json"))
+    monkeypatch.setattr(module, "finding_lock_path", lambda eng_dir: str(engagement_dir / ".findings.lock"))
+    monkeypatch.setattr(module, "next_finding_id", lambda eng_dir, source_name: "FINDING-EX-001")
+    monkeypatch.setattr(module, "sync_finding_markdown", lambda path, finding: None)
+    monkeypatch.setattr(module, "update_finding_count", lambda path: None)
+
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            captured.append((endpoint, payload))
+            return {"finding": {"slug": payload["slug"], "title": payload["title"]}}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(SimpleNamespace(engagement_dir=engagement_dir, session_id="session-a", yes=True))
+
+    endpoint, payload = captured[0]
+    assert endpoint == "findings"
+    assert payload["workflow_status"] == "active"
+    assert "status" not in payload
+
+
+def test_review_exploits_uses_workflow_status_filter(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_script_module(
+        "test_review_exploits_module",
+        "agent/scripts/assess/commands/review_exploits.py",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "load_scope",
+        lambda engagement_dir: {
+            "current_phase": "exploitation",
+            "exploit_policy": "selected",
+            "exploit_review_state": "pending",
+        },
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            assert endpoint == "findings"
+            return [
+                {
+                    "slug": "FINDING-ACTIVE-001",
+                    "severity": "high",
+                    "workflow_status": "active",
+                    "title": "Live issue",
+                    "canonical_location": "file:src/parser.py:10",
+                },
+                {
+                    "slug": "FINDING-DRAFT-001",
+                    "severity": "medium",
+                    "workflow_status": "draft",
+                    "title": "Needs triage",
+                    "canonical_location": "",
+                },
+                {
+                    "slug": "FINDING-FP-001",
+                    "severity": "critical",
+                    "workflow_status": "false_positive",
+                    "title": "Killed issue",
+                    "canonical_location": "",
+                },
+                {
+                    "slug": "FINDING-REPORTED-001",
+                    "severity": "low",
+                    "workflow_status": "reported",
+                    "title": "Already reported",
+                    "canonical_location": "",
+                },
+            ]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(SimpleNamespace(engagement_dir=tmp_path))
+
+    output = capsys.readouterr().out
+    assert "FINDING-ACTIVE-001 | high | active | Live issue" in output
+    assert "FINDING-DRAFT-001 | medium | draft | Needs triage" in output
+    assert "FINDING-FP-001" not in output
+    assert "FINDING-REPORTED-001" not in output

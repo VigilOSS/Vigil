@@ -470,8 +470,8 @@ def _queue(cfg, queue_items_file: str) -> None:
         source_path=str(submit_snapshot),
         metadata={"command": "code-dispatch queue", "count": len(normalized_items)},
     )
-    queued_count = result.get('queued', len(normalized_items)) if isinstance(result, dict) else len(normalized_items)
-    print(f"Queued {queued_count} analysis item(s)")
+    inserted_count = result.get('inserted', len(normalized_items)) if isinstance(result, dict) else len(normalized_items)
+    print(f"Queued {inserted_count} analysis item(s)")
     print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -515,9 +515,19 @@ def _requeue_triggers(cfg, triggers_file: str) -> None:
                 'source': 'cross_file_trigger',
             },
         }
+        passthrough_fields = {
+            'file_id',
+            'repo_id',
+            'priority',
+            'batch_theme',
+            'slot_types',
+            'guidance_hypotheses',
+        }
         # Pass through any extra fields from the trigger
         for key in trigger:
-            if key not in ('file_path', 'reason', 'vuln_class'):
+            if key in passthrough_fields:
+                item[key] = trigger[key]
+            elif key not in ('file_path', 'reason', 'vuln_class'):
                 item['trigger_context'][key] = trigger[key]
         items.append(item)
 
@@ -543,8 +553,15 @@ def _requeue_triggers(cfg, triggers_file: str) -> None:
         source_path=str(submit_snapshot),
         metadata={"command": "code-dispatch requeue-triggers", "count": len(items)},
     )
-    queued_count = result.get('queued', len(items)) if isinstance(result, dict) else len(items)
-    print(f"Requeued {queued_count} trigger item(s)")
+    inserted_count = result.get('inserted', len(items)) if isinstance(result, dict) else len(items)
+    print(f"Requeued {inserted_count} trigger item(s)")
+    if isinstance(result, dict):
+        not_found = result.get("not_found") or []
+        ambiguous = result.get("ambiguous") or []
+        if not_found:
+            print(f"Not found: {', '.join(str(item) for item in not_found)}")
+        if ambiguous:
+            print(f"Ambiguous without repo_id: {', '.join(str(item) for item in ambiguous)}")
     print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))

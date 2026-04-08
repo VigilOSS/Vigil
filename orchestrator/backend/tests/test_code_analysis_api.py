@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -382,6 +384,124 @@ def test_queue_done_rejects_multi_item_completion(client, isolate_settings):
     assert done.status_code == 422
 
 
+def test_queue_done_requires_processing_state(client, isolate_settings):
+    engagement_key = "2026-04-04-code-done-processing-only"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="processing-only-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queue_response.status_code == 201
+
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    with sqlite3.connect(str(db_path)) as connection:
+        queue_item_id = connection.execute(
+            "SELECT id FROM code_analysis_queue WHERE file_id = ? ORDER BY id DESC LIMIT 1",
+            (parser_file["id"],),
+        ).fetchone()[0]
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item_id],
+            "disposition": "clean",
+            "notes": "Reviewed",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+        },
+    )
+    assert done.status_code == 409
+    assert "unless they are processing" in done.json()["detail"]
+
+
+def test_analysis_result_requires_processing_queue_item(client, isolate_settings):
+    engagement_key = "2026-04-04-analysis-result-processing-only"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="analysis-result-processing-only-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queue_response.status_code == 201
+
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    with sqlite3.connect(str(db_path)) as connection:
+        queue_item_id = connection.execute(
+            "SELECT id FROM code_analysis_queue WHERE file_id = ? ORDER BY id DESC LIMIT 1",
+            (parser_file["id"],),
+        ).fetchone()[0]
+
+    analysis_result = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json={
+            "queue_item_id": queue_item_id,
+            "file_id": parser_file["id"],
+            "agent_name": "code-vuln-hunter",
+            "function_name": "parse_message",
+            "hypothesis": "Input is bounded.",
+            "evidence": "Reviewed sinks.",
+            "disposition": "clean",
+            "confidence": "high",
+            "notes": "",
+        },
+    )
+    assert analysis_result.status_code == 409
+    assert "unless they are processing" in analysis_result.json()["detail"]
+
+
+def test_reset_stale_queue_items_parses_iso_consumed_at(client, isolate_settings):
+    engagement_key = "2026-04-04-code-reset-stale"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="reset-stale-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    assert claimed.status_code == 200
+    queue_item = claimed.json()[0]
+
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    stale_iso = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+    with sqlite3.connect(str(db_path)) as connection:
+        connection.execute(
+            "UPDATE code_analysis_queue SET consumed_at = ? WHERE id = ?",
+            (stale_iso, queue_item["id"]),
+        )
+        connection.commit()
+
+    reset = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/reset-stale",
+        json={"minutes": 5},
+    )
+    assert reset.status_code == 200
+    assert reset.json()["reset"] == 1
+
+    claimed_again = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "queue-reclaimer"},
+    )
+    assert claimed_again.status_code == 200
+    assert claimed_again.json()[0]["id"] == queue_item["id"]
+
+
 def test_queue_done_rejects_needs_context_disposition(client, isolate_settings):
     engagement_key = "2026-04-04-code-done-needs-context"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
@@ -687,6 +807,197 @@ def test_analysis_result_triggers_are_recorded_before_requeue(client, isolate_se
     assert coverage_after_requeue.json()["trigger_summary"]["queued"] == 1
 
 
+def test_requeue_triggered_files_rejects_non_numeric_ids(client, isolate_settings):
+    engagement_key = "2026-04-04-code-requeue-invalid-ids"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="requeue-invalid-ids-repo")
+    _create_files(client, engagement_key, int(repo["id"]))
+
+    invalid_file_id = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/requeue",
+        json={"items": [{"file_id": "abc"}]},
+    )
+    assert invalid_file_id.status_code == 400
+    assert "file_id must be an integer" in invalid_file_id.json()["detail"]
+
+    invalid_repo_id = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/requeue",
+        json={"items": [{"file_path": "src/parser.py", "repo_id": "abc"}]},
+    )
+    assert invalid_repo_id.status_code == 400
+    assert "repo_id must be an integer" in invalid_repo_id.json()["detail"]
+
+
+def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(client, isolate_settings):
+    engagement_key = "2026-04-04-code-coverage-finding-scope"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo_a = _create_repo(client, engagement_key, repo_key="scope-repo-a")
+    repo_b = _create_repo(client, engagement_key, repo_key="scope-repo-b")
+    _create_files(client, engagement_key, int(repo_a["id"]))
+    _create_files(client, engagement_key, int(repo_b["id"]))
+    unique_files = client.post(
+        f"/engagements/{engagement_key}/assessment/code/files",
+        json={
+            "repo_id": repo_a["id"],
+            "files": [
+                {
+                    "file_path": "repo_a_only.py",
+                    "language": "python",
+                    "loc": 10,
+                    "file_hash": "repo-a-only",
+                    "header_snippet": "",
+                    "git_churn_score": 0,
+                    "has_past_cve_fix": False,
+                }
+            ],
+        },
+    )
+    assert unique_files.status_code == 201
+    unique_files = client.post(
+        f"/engagements/{engagement_key}/assessment/code/files",
+        json={
+            "repo_id": repo_b["id"],
+            "files": [
+                {
+                    "file_path": "repo_b_only.py",
+                    "language": "python",
+                    "loc": 10,
+                    "file_hash": "repo-b-only",
+                    "header_snippet": "",
+                    "git_churn_score": 0,
+                    "has_past_cve_fix": False,
+                }
+            ],
+        },
+    )
+    assert unique_files.status_code == 201
+
+    finding_a = client.post(
+        f"/engagements/{engagement_key}/assessment/findings",
+        json={
+            "slug": "FINDING-CODE-A-001",
+            "title": "Parser trust boundary bypass",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "trust-boundary-bypass",
+            "root_cause_key": "scope-repo-a-parser",
+            "auth_context": "anonymous",
+            "canonical_location": "file:repo_a_only.py:12",
+            "summary": "Repo A finding should stay scoped to repo A coverage.",
+            "evidence_ref": "findings.md",
+            "notes": "",
+            "source_name": "code-vuln-hunter",
+            "details": {"evidence": "A"},
+            "provenance": {"agent_name": "code-vuln-hunter"},
+            "links": [
+                {
+                    "link_kind": "variant_of",
+                    "target_kind": "finding",
+                    "target_ref": "ROOT-A",
+                }
+            ],
+        },
+    )
+    assert finding_a.status_code == 201
+
+    finding_b = client.post(
+        f"/engagements/{engagement_key}/assessment/findings",
+        json={
+            "slug": "FINDING-CODE-B-001",
+            "title": "Helper sink exposure",
+            "severity": "critical",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "sink-exposure",
+            "root_cause_key": "scope-repo-b-helper",
+            "auth_context": "anonymous",
+            "canonical_location": "file:repo_b_only.py:20",
+            "summary": "Repo B finding should stay scoped to repo B coverage.",
+            "evidence_ref": "findings.md",
+            "notes": "",
+            "source_name": "code-vuln-hunter",
+            "details": {"evidence": "B"},
+            "provenance": {"agent_name": "code-vuln-hunter"},
+            "links": [
+                {
+                    "link_kind": "variant_of",
+                    "target_kind": "finding",
+                    "target_ref": "ROOT-B",
+                }
+            ],
+        },
+    )
+    assert finding_b.status_code == 201
+
+    repo_a_coverage = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo_a['id']}"
+    )
+    assert repo_a_coverage.status_code == 200
+    repo_a_payload = repo_a_coverage.json()
+    assert repo_a_payload["findings_summary"]["total_code_findings"] == 1
+    assert repo_a_payload["findings_summary"]["by_severity"] == {"high": 1}
+    assert repo_a_payload["findings_summary"]["variant_count"] == 1
+
+    repo_b_coverage = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo_b['id']}"
+    )
+    assert repo_b_coverage.status_code == 200
+    repo_b_payload = repo_b_coverage.json()
+    assert repo_b_payload["findings_summary"]["total_code_findings"] == 1
+    assert repo_b_payload["findings_summary"]["by_severity"] == {"critical": 1}
+    assert repo_b_payload["findings_summary"]["variant_count"] == 1
+
+    missing_repo = client.get(f"/engagements/{engagement_key}/assessment/code/coverage?repo_id=999999")
+    assert missing_repo.status_code == 404
+
+
+def test_coverage_summary_tolerates_non_numeric_effort_values(client, isolate_settings):
+    engagement_key = "2026-04-04-code-coverage-nonnumeric-effort"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="nonnumeric-effort-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+
+    queued = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queued.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    assert claimed.status_code == 200
+    queue_item = claimed.json()[0]
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "notes": "Reviewed",
+            "cwe_coverage": _network_input_coverage(
+                default_effort=80,
+                overrides={"web-app-injection": {"effort": "unknown"}},
+            ),
+        },
+    )
+    assert done.status_code == 200
+
+    coverage = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage.status_code == 200
+    payload = coverage.json()
+    assert payload["gate"]["passed"] is False
+    assert any("web-app-injection" in reason for reason in payload["gate"]["reasons"])
+
+
 def test_module_creation_assigns_files_and_supports_module_scoped_fetch(client, isolate_settings):
     engagement_key = "2026-04-04-code-modules"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
@@ -722,6 +1033,41 @@ def test_module_creation_assigns_files_and_supports_module_scoped_fetch(client, 
     )
     assert scoped_files.status_code == 200
     assert {item["file_path"] for item in scoped_files.json()} == {"src/parser.py", "src/helpers.py"}
+
+
+def test_file_patch_rejects_module_ids_from_other_repos(client, isolate_settings):
+    engagement_key = "2026-04-04-code-module-patch-scope"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo_a = _create_repo(client, engagement_key, repo_key="repo-a")
+    repo_b = _create_repo(client, engagement_key, repo_key="repo-b")
+    files_a = _create_files(client, engagement_key, int(repo_a["id"]))
+    _create_files(client, engagement_key, int(repo_b["id"]))
+    parser_file = next(item for item in files_a if item["file_path"] == "src/parser.py")
+
+    modules = client.post(
+        f"/engagements/{engagement_key}/assessment/code/modules",
+        json={
+            "repo_id": repo_b["id"],
+            "modules": [
+                {
+                    "module_key": "foreign-module",
+                    "name": "Foreign Module",
+                    "description": "Owned by repo-b",
+                    "trust_boundary": "internal",
+                    "files": ["src/parser.py"],
+                }
+            ],
+        },
+    )
+    assert modules.status_code == 201
+    foreign_module = modules.json()[0]
+
+    patched = client.patch(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}",
+        json={"module_id": foreign_module["id"]},
+    )
+    assert patched.status_code == 400
+    assert "same repo" in patched.json()["detail"]
 
 
 def test_code_analysis_endpoints_reject_foreign_engagement_ids(client, isolate_settings):

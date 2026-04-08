@@ -88,7 +88,8 @@ def run(args) -> None:
                     payload["slug"] = candidate_slug
                     payload.setdefault("source_name", "exploit-developer")
                     payload.setdefault("severity", "medium")
-                    payload.setdefault("status", "confirmed")
+                    payload.pop("status", None)
+                    payload.setdefault("workflow_status", "active")
                     payload.setdefault("defect_family", payload.get("title", candidate_slug))
                     payload.setdefault("root_cause_key", "")
                     payload.setdefault("auth_context", "anonymous")

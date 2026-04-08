@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type {
   CodeAnalysisResult,
@@ -31,21 +31,46 @@ const STATUS_TO_PHASE: Record<string, PhaseKey> = {
   complete: "verify",
 };
 
-function resolvePhase(repos: CodeRepo[], queueStats: CodeQueueStats | null, coverage: CodeCoverage | null): PhaseKey {
+function resolvePhase(
+  repos: CodeRepo[],
+  queueStats: CodeQueueStats | null,
+  coverage: CodeCoverage | null,
+  results: CodeAnalysisResult[],
+): PhaseKey {
   if (repos.length === 0) return "ingest";
-  // Use the most advanced repo status
   let best: PhaseKey = "ingest";
   const order: PhaseKey[] = ["ingest", "classify", "hunt", "verify"];
+
   for (const repo of repos) {
     const phase = STATUS_TO_PHASE[repo.analysis_status] ?? "ingest";
     if (order.indexOf(phase) > order.indexOf(best)) best = phase;
   }
-  // If queue has active items, we're in hunt
-  if (queueStats && (queueStats.processing > 0 || queueStats.pending > 0) && order.indexOf(best) < order.indexOf("hunt")) {
+
+  if (coverage && coverage.total_files > 0 && order.indexOf(best) < order.indexOf("classify")) {
+    best = "classify";
+  }
+
+  const activeQueueItems =
+    (queueStats?.processing ?? 0) +
+    (queueStats?.pending ?? 0) +
+    (coverage?.confidence.active_queue_items ?? 0) +
+    (coverage?.confidence.unresolved_needs_context ?? 0);
+  const queuedOrInProgressFiles =
+    (coverage?.by_status.queued ?? 0) +
+    (coverage?.by_status.in_progress ?? 0) +
+    (coverage?.by_status.needs_context ?? 0);
+  if ((activeQueueItems > 0 || queuedOrInProgressFiles > 0) && order.indexOf(best) < order.indexOf("hunt")) {
     best = "hunt";
   }
-  // If coverage gate is failing, stay in hunt (Phase 2B) rather than
-  // advancing to verify — effort thresholds may still need re-dispatch.
+
+  const analyzedFiles =
+    (coverage?.by_status.analyzed ?? 0) +
+    (coverage?.by_status.done ?? 0) +
+    Object.values(coverage?.by_classification ?? {}).reduce((sum, entry) => sum + entry.analyzed, 0);
+  if ((results.length > 0 || analyzedFiles > 0) && order.indexOf(best) < order.indexOf("verify")) {
+    best = "verify";
+  }
+
   if (coverage && !coverage.gate.passed && order.indexOf(best) >= order.indexOf("verify")) {
     best = "hunt";
   }
@@ -80,7 +105,7 @@ export function CodeAnalysisTab({
   coverage,
   results,
 }: CodeAnalysisTabProps) {
-  const currentPhase = resolvePhase(repos, queueStats, coverage);
+  const currentPhase = resolvePhase(repos, queueStats, coverage, results);
   const [expandedModules, setExpandedModules] = useState<Set<number>>(new Set());
   const [resultFilter, setResultFilter] = useState<string>("all");
   const [resultPage, setResultPage] = useState(0);
@@ -102,6 +127,14 @@ export function CodeAnalysisTab({
   const PAGE_SIZE = 25;
   const totalResultPages = Math.max(1, Math.ceil(filteredResults.length / PAGE_SIZE));
   const pageResults = filteredResults.slice(resultPage * PAGE_SIZE, (resultPage + 1) * PAGE_SIZE);
+
+  useEffect(() => {
+    setResultPage(0);
+  }, [resultFilter]);
+
+  useEffect(() => {
+    setResultPage((current) => Math.min(current, totalResultPages - 1));
+  }, [totalResultPages]);
 
   const dispositionCounts = useMemo(() => {
     const counts: Record<string, number> = {};
