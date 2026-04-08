@@ -73,6 +73,8 @@ def _hydrate_code_context(row: Any) -> dict[str, Any]:
 def _hydrate_code_analysis_result(row: Any) -> dict[str, Any]:
     payload = dict(row)
     payload["audit_metadata"] = _json_decode(payload.get("audit_metadata_json"), {})
+    payload["cwe_coverage"] = _json_decode(payload.get("cwe_coverage_json"), [])
+    payload["cross_file_triggers"] = _json_decode(payload.get("cross_file_triggers_json"), [])
     return payload
 
 
@@ -148,27 +150,7 @@ def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> 
         "SELECT COUNT(*) FROM code_contexts WHERE engagement_id = ? AND file_id = ?",
         (engagement_id, file_id),
     )
-    if total_contexts == 0:
-        return
 
-    analyzed_contexts = _scalar_row(
-        connection,
-        """
-        SELECT COUNT(*)
-        FROM code_contexts
-        WHERE engagement_id = ? AND file_id = ? AND analysis_status IN ('analyzed', 'done')
-        """,
-        (engagement_id, file_id),
-    )
-    needs_context = _scalar_row(
-        connection,
-        """
-        SELECT COUNT(*)
-        FROM code_contexts
-        WHERE engagement_id = ? AND file_id = ? AND analysis_status = 'needs_context'
-        """,
-        (engagement_id, file_id),
-    )
     queue_rows = connection.execute(
         """
         SELECT status, COUNT(*) AS total
@@ -181,18 +163,53 @@ def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> 
     queue_counts = {str(row["status"]): int(row["total"]) for row in queue_rows}
     pending_queue = queue_counts.get("pending", 0)
     processing_queue = queue_counts.get("processing", 0)
+    done_queue = queue_counts.get("done", 0)
     queue_needs_context = queue_counts.get("needs_context", 0)
 
-    if needs_context > 0 or queue_needs_context > 0:
-        next_status = "needs_context"
-    elif analyzed_contexts == total_contexts and pending_queue == 0 and processing_queue == 0:
-        next_status = "analyzed"
-    elif processing_queue > 0 or analyzed_contexts > 0:
-        next_status = "in_progress"
-    elif pending_queue > 0:
-        next_status = "queued"
+    if total_contexts == 0:
+        # File-direct mode: derive status from queue items alone
+        if not queue_counts:
+            return  # No contexts and no queue items — nothing to sync
+        if queue_needs_context > 0:
+            next_status = "needs_context"
+        elif pending_queue == 0 and processing_queue == 0 and done_queue > 0:
+            next_status = "analyzed"
+        elif processing_queue > 0 or done_queue > 0:
+            next_status = "in_progress"
+        elif pending_queue > 0:
+            next_status = "queued"
+        else:
+            next_status = "classified"
     else:
-        next_status = "context_built"
+        analyzed_contexts = _scalar_row(
+            connection,
+            """
+            SELECT COUNT(*)
+            FROM code_contexts
+            WHERE engagement_id = ? AND file_id = ? AND analysis_status IN ('analyzed', 'done')
+            """,
+            (engagement_id, file_id),
+        )
+        needs_context = _scalar_row(
+            connection,
+            """
+            SELECT COUNT(*)
+            FROM code_contexts
+            WHERE engagement_id = ? AND file_id = ? AND analysis_status = 'needs_context'
+            """,
+            (engagement_id, file_id),
+        )
+
+        if needs_context > 0 or queue_needs_context > 0:
+            next_status = "needs_context"
+        elif analyzed_contexts == total_contexts and pending_queue == 0 and processing_queue == 0:
+            next_status = "analyzed"
+        elif processing_queue > 0 or analyzed_contexts > 0:
+            next_status = "in_progress"
+        elif pending_queue > 0:
+            next_status = "queued"
+        else:
+            next_status = "context_built"
 
     connection.execute(
         """
@@ -822,41 +839,63 @@ def bulk_create_queue_items(
     inserted = 0
     with get_connection() as connection:
         _get_file_rows(connection, engagement.id, {int(item["file_id"]) for item in items})
-        context_rows = _get_context_rows(connection, engagement.id, {int(item["context_id"]) for item in items})
+
+        # Collect only non-None context_ids for validation
+        context_ids_to_validate = {
+            int(item["context_id"]) for item in items if item.get("context_id") is not None
+        }
+        if context_ids_to_validate:
+            context_rows = _get_context_rows(connection, engagement.id, context_ids_to_validate)
+        else:
+            context_rows = {}
+
         for item in items:
             priority = max(0, min(100, int(item.get("priority", 50))))
             file_id = int(item["file_id"])
-            context_id = int(item["context_id"])
-            context_row = context_rows[context_id]
-            if int(context_row["file_id"]) != file_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Queue item context does not belong to the specified file",
-                )
+            context_id = item.get("context_id")
+
+            if context_id is not None:
+                context_id = int(context_id)
+                context_row = context_rows[context_id]
+                if int(context_row["file_id"]) != file_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Queue item context does not belong to the specified file",
+                    )
+
+            batch_theme = item.get("batch_theme", "")
+            slot_types_json = _json_list_text(item.get("slot_types"))
+            guidance_hypotheses_json = _json_list_text(item.get("guidance_hypotheses"))
+
             cursor = connection.execute(
                 """
                 INSERT INTO code_analysis_queue (
-                    engagement_id, context_id, file_id, priority
+                    engagement_id, context_id, file_id, priority,
+                    batch_theme, slot_types_json, guidance_hypotheses_json
                 )
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     engagement.id,
                     context_id,
                     file_id,
                     priority,
+                    batch_theme,
+                    slot_types_json,
+                    guidance_hypotheses_json,
                 ),
             )
             if cursor.rowcount > 0:
                 inserted += 1
-                connection.execute(
-                    """
-                    UPDATE code_contexts
-                    SET analysis_status = 'pending', updated_at = CURRENT_TIMESTAMP
-                    WHERE engagement_id = ? AND id = ?
-                    """,
-                    (engagement.id, context_id),
-                )
+                if context_id is not None:
+                    connection.execute(
+                        """
+                        UPDATE code_contexts
+                        SET analysis_status = 'pending', updated_at = CURRENT_TIMESTAMP
+                        WHERE engagement_id = ? AND id = ?
+                        """,
+                        (engagement.id, context_id),
+                    )
                 _sync_file_analysis_status(connection, engagement.id, file_id)
         return {"inserted": inserted, "total": len(items)}
 
@@ -926,13 +965,26 @@ def fetch_queue_items(
 
         file_rows = _get_file_rows(connection, engagement.id, {int(row["file_id"]) for row in rows})
         repo_rows = _get_repo_rows(connection, engagement.id, {int(file_rows[int(row["file_id"])]["repo_id"]) for row in rows})
-        context_rows = _get_context_rows(connection, engagement.id, {int(row["context_id"]) for row in rows})
+
+        # Only fetch contexts for rows that have a non-NULL context_id
+        context_ids_to_fetch = {int(row["context_id"]) for row in rows if row["context_id"] is not None}
+        if context_ids_to_fetch:
+            context_rows = _get_context_rows(connection, engagement.id, context_ids_to_fetch)
+        else:
+            context_rows = {}
+
         for file_id in {int(row["file_id"]) for row in rows}:
             _sync_file_analysis_status(connection, engagement.id, file_id)
         payload: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
-            item["context"] = _hydrate_code_context(context_rows[int(row["context_id"])])
+            item["batch_theme"] = item.get("batch_theme", "")
+            item["slot_types"] = _json_decode(item.get("slot_types_json"), [])
+            item["guidance_hypotheses"] = _json_decode(item.get("guidance_hypotheses_json"), [])
+            if row["context_id"] is not None:
+                item["context"] = _hydrate_code_context(context_rows[int(row["context_id"])])
+            else:
+                item["context"] = None
             item["file"] = _hydrate_code_file(file_rows[int(row["file_id"])])
             item["repo"] = _hydrate_code_repo(repo_rows[int(file_rows[int(row["file_id"])]["repo_id"])])
             payload.append(item)
@@ -947,6 +999,8 @@ def complete_queue_items(
     item_ids: list[int],
     disposition: str,
     notes: str = "",
+    cwe_coverage: list[dict[str, Any]] | None = None,
+    cross_file_triggers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not item_ids:
@@ -957,6 +1011,8 @@ def complete_queue_items(
             detail=f"Invalid disposition '{disposition}'. Must be one of: {', '.join(sorted(_VALID_DISPOSITIONS))}",
         )
     now = _now_iso()
+    cwe_coverage_text = _json_list_text(cwe_coverage)
+    cross_file_triggers_text = _json_list_text(cross_file_triggers)
     placeholders = ",".join("?" for _ in item_ids)
     with get_connection() as connection:
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
@@ -967,22 +1023,26 @@ def complete_queue_items(
             SET status = ?,
                 disposition = ?,
                 analysis_notes = ?,
+                cwe_coverage_json = ?,
+                cross_file_triggers_json = ?,
                 completed_at = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE engagement_id = ? AND id IN ({placeholders})
             """,
-            (next_status, disposition, notes, now, engagement.id, *item_ids),
+            (next_status, disposition, notes, cwe_coverage_text, cross_file_triggers_text, now, engagement.id, *item_ids),
         )
         for row in queue_rows.values():
-            context_status = "needs_context" if disposition == "needs_context" else "analyzed"
-            connection.execute(
-                """
-                UPDATE code_contexts
-                SET analysis_status = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE engagement_id = ? AND id = ?
-                """,
-                (context_status, engagement.id, row["context_id"]),
-            )
+            context_id = row["context_id"]
+            if context_id is not None:
+                context_status = "needs_context" if disposition == "needs_context" else "analyzed"
+                connection.execute(
+                    """
+                    UPDATE code_contexts
+                    SET analysis_status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND id = ?
+                    """,
+                    (context_status, engagement.id, context_id),
+                )
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
         return {"updated": cursor.rowcount, "total": len(item_ids)}
 
@@ -1035,14 +1095,15 @@ def needs_context_queue_items(
             (_json_text(expansion_request), engagement.id, *item_ids),
         )
         for row in queue_rows.values():
-            connection.execute(
-                """
-                UPDATE code_contexts
-                SET analysis_status = 'needs_context', updated_at = CURRENT_TIMESTAMP
-                WHERE engagement_id = ? AND id = ?
-                """,
-                (engagement.id, row["context_id"]),
-            )
+            if row["context_id"] is not None:
+                connection.execute(
+                    """
+                    UPDATE code_contexts
+                    SET analysis_status = 'needs_context', updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND id = ?
+                    """,
+                    (engagement.id, row["context_id"]),
+                )
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
         return {"updated": cursor.rowcount, "total": len(item_ids)}
 
@@ -1091,22 +1152,34 @@ def create_analysis_result(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        queue_row = _get_queue_rows(connection, engagement.id, {int(result["queue_item_id"])})[
-            int(result["queue_item_id"])
-        ]
+        queue_item_id = result.get("queue_item_id")
         file_row = _get_file_rows(connection, engagement.id, {int(result["file_id"])})[
             int(result["file_id"])
         ]
-        context_id = result.get("context_id")
-        if context_id is None:
-            context_id = int(queue_row["context_id"])
-        context_row = _get_context_rows(connection, engagement.id, {int(context_id)})[int(context_id)]
 
-        if int(queue_row["file_id"]) != int(file_row["id"]) or int(context_row["file_id"]) != int(file_row["id"]):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Analysis result file/context references do not match the queue item",
-            )
+        context_id = result.get("context_id")
+
+        if queue_item_id is not None:
+            queue_row = _get_queue_rows(connection, engagement.id, {int(queue_item_id)})[
+                int(queue_item_id)
+            ]
+            if int(queue_row["file_id"]) != int(file_row["id"]):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Analysis result file/context references do not match the queue item",
+                )
+            # Fall back to queue row's context_id if not provided
+            if context_id is None and queue_row["context_id"] is not None:
+                context_id = int(queue_row["context_id"])
+
+        if context_id is not None:
+            context_id = int(context_id)
+            context_row = _get_context_rows(connection, engagement.id, {context_id})[context_id]
+            if int(context_row["file_id"]) != int(file_row["id"]):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Analysis result file/context references do not match the queue item",
+                )
 
         cursor = connection.execute(
             """
@@ -1114,13 +1187,14 @@ def create_analysis_result(
                 engagement_id, queue_item_id, context_id, file_id,
                 agent_name, function_name, hypothesis, evidence,
                 disposition, confidence, finding_slug, cwe_id,
-                slot_type, notes, audit_metadata_json
+                slot_type, notes, audit_metadata_json,
+                cwe_coverage_json, cross_file_triggers_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
-                result["queue_item_id"],
+                queue_item_id,
                 context_id,
                 result["file_id"],
                 result.get("agent_name", ""),
@@ -1134,6 +1208,8 @@ def create_analysis_result(
                 result.get("slot_type", ""),
                 result.get("notes", ""),
                 _json_text(result.get("audit_metadata")),
+                _json_list_text(result.get("cwe_coverage")),
+                _json_list_text(result.get("cross_file_triggers")),
             ),
         )
         row = connection.execute(
@@ -1141,15 +1217,16 @@ def create_analysis_result(
             (cursor.lastrowid,),
         ).fetchone()
         assert row is not None
-        context_status = "needs_context" if result.get("disposition") == "needs_context" else "analyzed"
-        connection.execute(
-            """
-            UPDATE code_contexts
-            SET analysis_status = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE engagement_id = ? AND id = ?
-            """,
-            (context_status, engagement.id, int(context_id)),
-        )
+        if context_id is not None:
+            context_status = "needs_context" if result.get("disposition") == "needs_context" else "analyzed"
+            connection.execute(
+                """
+                UPDATE code_contexts
+                SET analysis_status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE engagement_id = ? AND id = ?
+                """,
+                (context_status, engagement.id, int(context_id)),
+            )
         _sync_file_analysis_status(connection, engagement.id, int(file_row["id"]))
         return _hydrate_code_analysis_result(row)
 
@@ -1431,6 +1508,52 @@ def code_coverage_summary(
         gate_reasons.append(
             f"Queue items still pending or processing: {unresolved_active_queue}"
         )
+
+    # -- Effort-threshold warnings (non-blocking) --
+    effort_warnings: list[str] = []
+    with get_connection() as connection:
+        effort_file_rows = connection.execute(
+            f"""
+            SELECT f.id AS file_id, f.file_path, f.classification, f.slot_types_json,
+                   q.cwe_coverage_json
+            FROM code_files f
+            LEFT JOIN code_analysis_queue q ON q.file_id = f.id AND q.engagement_id = f.engagement_id AND q.status = 'done'
+            WHERE f.engagement_id = ? AND f.classification IN ('critical', 'high'){repo_clause}
+            """,
+            (engagement.id, *repo_params),
+        ).fetchall()
+        # Accumulate max effort per family per file
+        file_efforts: dict[int, dict[str, float]] = {}
+        file_meta: dict[int, dict[str, Any]] = {}
+        for erow in effort_file_rows:
+            fid = int(erow["file_id"])
+            if fid not in file_meta:
+                file_meta[fid] = {
+                    "file_path": erow["file_path"],
+                    "classification": erow["classification"],
+                    "slot_types": _json_decode(erow["slot_types_json"], []),
+                }
+            cwe_cov = _json_decode(erow["cwe_coverage_json"], [])
+            if fid not in file_efforts:
+                file_efforts[fid] = {}
+            for entry in cwe_cov:
+                family = entry.get("family", "")
+                effort = float(entry.get("effort", 0))
+                if family and effort > file_efforts[fid].get(family, 0):
+                    file_efforts[fid][family] = effort
+
+        for fid, meta in file_meta.items():
+            threshold = 70 if meta["classification"] == "critical" else 50
+            applicable = _applicable_families_for_slots(meta["slot_types"])
+            efforts = file_efforts.get(fid, {})
+            for family in applicable:
+                if efforts.get(family, 0) < threshold:
+                    effort_warnings.append(
+                        f"{meta['classification'].capitalize()} file {meta['file_path']}: "
+                        f"family '{family}' effort {efforts.get(family, 0):.0f} < {threshold}"
+                    )
+                    break  # One warning per file is enough
+
     gate_passed = len(gate_reasons) == 0
 
     return {
@@ -1459,5 +1582,198 @@ def code_coverage_summary(
         "gate": {
             "passed": gate_passed,
             "reasons": gate_reasons,
+            "effort_warnings": effort_warnings,
         },
+    }
+
+
+# =========================================================================
+# Slot-to-vuln-class mapping (mirrors agent CLI SLOT_VULN_CLASSES)
+# =========================================================================
+
+SLOT_VULN_CLASSES: dict[str, dict[str, list[str]]] = {
+    "NETWORK-INPUT": {
+        "native": ["buffer-overflow", "integer-overflow", "format-string"],
+        "managed": ["web-app-injection", "web-app-auth", "ssrf", "open-redirect", "path-traversal"],
+    },
+    "PROTOCOL-FIELD": {
+        "native": ["buffer-overflow", "integer-overflow", "format-string"],
+        "managed": ["web-app-injection", "web-app-auth", "race-condition"],
+    },
+    "URL-COMPONENT": {"all": ["injection", "auth-bypass", "ssrf", "open-redirect", "web-app-auth"]},
+    "FILE-CONTENT": {"all": ["injection", "buffer-overflow", "type-confusion", "path-traversal", "xxe", "file-upload"]},
+    "CMD-ARGUMENT": {"all": ["injection", "format-string", "path-traversal"]},
+    "CALLBACK-DATA": {"all": ["use-after-free", "race-condition", "type-confusion", "deserialization"]},
+    "ENV-VARIABLE": {"all": ["injection", "path-traversal"]},
+    "_crypto": {"all": ["crypto-misuse"]},
+    "_auth": {"all": ["auth-bypass", "web-app-auth"]},
+    "_error": {"all": ["error-handling"]},
+}
+
+
+def _applicable_families_for_slots(slot_types: list[str]) -> list[str]:
+    """Compute the set of applicable vuln families from a list of slot types."""
+    families: set[str] = set()
+    for slot in slot_types:
+        mapping = SLOT_VULN_CLASSES.get(slot, {})
+        for group_families in mapping.values():
+            families.update(group_families)
+    return sorted(families)
+
+
+# =========================================================================
+# Requeue triggered files
+# =========================================================================
+
+def requeue_triggered_files(
+    engagement_id: int,
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Create new queue items for triggered files (cross-file analysis triggers).
+
+    Each item must have at least ``file_path`` (or ``file_id``).  Optional
+    fields: ``priority``, ``batch_theme``, ``slot_types``,
+    ``guidance_hypotheses``.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    inserted = 0
+    not_found: list[str] = []
+    with get_connection() as connection:
+        for item in items:
+            file_id = item.get("file_id")
+            file_path = item.get("file_path")
+            if file_id is None and file_path is not None:
+                row = connection.execute(
+                    "SELECT id FROM code_files WHERE engagement_id = ? AND file_path = ?",
+                    (engagement.id, file_path),
+                ).fetchone()
+                if row is None:
+                    not_found.append(str(file_path))
+                    continue
+                file_id = int(row["id"])
+            elif file_id is not None:
+                file_id = int(file_id)
+            else:
+                continue
+
+            priority = max(0, min(100, int(item.get("priority", 50))))
+            batch_theme = item.get("batch_theme", "cross-file-trigger")
+            slot_types_json = _json_list_text(item.get("slot_types"))
+            guidance_hypotheses_json = _json_list_text(item.get("guidance_hypotheses"))
+
+            cursor = connection.execute(
+                """
+                INSERT INTO code_analysis_queue (
+                    engagement_id, context_id, file_id, priority,
+                    batch_theme, slot_types_json, guidance_hypotheses_json
+                )
+                VALUES (?, NULL, ?, ?, ?, ?, ?)
+                """,
+                (
+                    engagement.id,
+                    file_id,
+                    priority,
+                    batch_theme,
+                    slot_types_json,
+                    guidance_hypotheses_json,
+                ),
+            )
+            if cursor.rowcount > 0:
+                inserted += 1
+                _sync_file_analysis_status(connection, engagement.id, file_id)
+    return {"inserted": inserted, "total": len(items), "not_found": not_found}
+
+
+# =========================================================================
+# CWE Coverage Detail
+# =========================================================================
+
+def code_coverage_cwe_detail(
+    engagement_id: int,
+    *,
+    repo_id: int | None = None,
+) -> dict[str, Any]:
+    """Return per-file coverage with accumulated CWE coverage from queue done
+    records, plus applicable_families computed from file slot_types."""
+    engagement = _engagement_or_404(engagement_id)
+
+    repo_clause = ""
+    repo_params: tuple[Any, ...] = ()
+    if repo_id is not None:
+        repo_clause = " AND f.repo_id = ?"
+        repo_params = (repo_id,)
+
+    with get_connection() as connection:
+        # Fetch critical/high files with their slot_types
+        file_rows = connection.execute(
+            f"""
+            SELECT f.id AS file_id, f.file_path, f.classification, f.slot_types_json,
+                   f.analysis_status, f.loc
+            FROM code_files f
+            WHERE f.engagement_id = ? AND f.classification IN ('critical', 'high'){repo_clause}
+            ORDER BY f.analysis_priority DESC, f.id ASC
+            """,
+            (engagement.id, *repo_params),
+        ).fetchall()
+
+        # Fetch all done queue items for these files to accumulate cwe_coverage
+        file_ids = [int(r["file_id"]) for r in file_rows]
+        cwe_by_file: dict[int, dict[str, dict[str, Any]]] = {}  # file_id -> family -> merged entry
+        if file_ids:
+            placeholders = ",".join("?" for _ in file_ids)
+            queue_done_rows = connection.execute(
+                f"""
+                SELECT file_id, cwe_coverage_json
+                FROM code_analysis_queue
+                WHERE engagement_id = ? AND status = 'done' AND file_id IN ({placeholders})
+                """,
+                (engagement.id, *file_ids),
+            ).fetchall()
+            for qr in queue_done_rows:
+                fid = int(qr["file_id"])
+                cwe_cov = _json_decode(qr["cwe_coverage_json"], [])
+                if fid not in cwe_by_file:
+                    cwe_by_file[fid] = {}
+                for entry in cwe_cov:
+                    family = entry.get("family", "")
+                    if not family:
+                        continue
+                    existing = cwe_by_file[fid].get(family)
+                    if existing is None:
+                        cwe_by_file[fid][family] = dict(entry)
+                    else:
+                        # Max-effort merge
+                        if float(entry.get("effort", 0)) > float(existing.get("effort", 0)):
+                            existing["effort"] = entry["effort"]
+                        # Union entry_chains_traced
+                        existing_chains = int(existing.get("entry_chains_traced", 0))
+                        new_chains = int(entry.get("entry_chains_traced", 0))
+                        existing["entry_chains_traced"] = existing_chains + new_chains
+
+        files_detail: list[dict[str, Any]] = []
+        for fr in file_rows:
+            fid = int(fr["file_id"])
+            slot_types = _json_decode(fr["slot_types_json"], [])
+            applicable = _applicable_families_for_slots(slot_types)
+            merged_entries = list(cwe_by_file.get(fid, {}).values())
+            files_detail.append({
+                "file_id": fid,
+                "file_path": fr["file_path"],
+                "classification": fr["classification"],
+                "analysis_status": fr["analysis_status"],
+                "loc": int(fr["loc"]),
+                "slot_types": slot_types,
+                "applicable_families": applicable,
+                "cwe_coverage": merged_entries,
+            })
+
+        # Also include the standard coverage summary fields
+        summary = code_coverage_summary(engagement_id, repo_id=repo_id)
+
+    return {
+        "files": files_detail,
+        "total_files": summary["total_files"],
+        "by_classification": summary["by_classification"],
+        "by_status": summary["by_status"],
+        "gate": summary["gate"],
     }

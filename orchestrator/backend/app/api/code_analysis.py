@@ -93,9 +93,12 @@ class CodeContextsBulkCreateRequest(BaseModel):
 
 
 class QueueItemRecord(BaseModel):
-    context_id: int
+    context_id: int | None = None
     file_id: int
     priority: int = Field(default=50, ge=0, le=100)
+    batch_theme: str = Field(default="", max_length=256)
+    slot_types: list[str] = Field(default_factory=list)
+    guidance_hypotheses: list[str] = Field(default_factory=list)
 
 
 class QueueItemsBulkCreateRequest(BaseModel):
@@ -111,6 +114,8 @@ class QueueCompleteRequest(BaseModel):
     item_ids: list[int]
     disposition: str = Field(min_length=1, max_length=64)
     notes: str = Field(default="", max_length=20000)
+    cwe_coverage: list[dict[str, Any]] = Field(default_factory=list)
+    cross_file_triggers: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class QueueErrorRequest(BaseModel):
@@ -128,7 +133,7 @@ class QueueResetStaleRequest(BaseModel):
 
 
 class AnalysisResultRecord(BaseModel):
-    queue_item_id: int
+    queue_item_id: int | None = None
     context_id: int | None = None
     file_id: int
     agent_name: str = Field(default="", max_length=128)
@@ -142,6 +147,12 @@ class AnalysisResultRecord(BaseModel):
     slot_type: str = Field(default="", max_length=128)
     notes: str = Field(default="", max_length=20000)
     audit_metadata: dict[str, Any] = Field(default_factory=dict)
+    cwe_coverage: list[dict[str, Any]] = Field(default_factory=list)
+    cross_file_triggers: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RequeueRequest(BaseModel):
+    items: list[dict[str, Any]]
 
 
 class ThreatModelRecordRequest(BaseModel):
@@ -361,6 +372,8 @@ async def complete_queue_items(engagement_key: str, request: QueueCompleteReques
         item_ids=request.item_ids,
         disposition=request.disposition,
         notes=request.notes,
+        cwe_coverage=request.cwe_coverage,
+        cross_file_triggers=request.cross_file_triggers,
     )
     await _broadcast(engagement.key, "queue_done", record)
     return record
@@ -398,6 +411,14 @@ async def reset_stale_queue_items(engagement_key: str, request: QueueResetStaleR
         minutes=request.minutes,
     )
     await _broadcast(engagement.key, "queue_reset_stale", record)
+    return record
+
+
+@router.post("/analysis-queue/requeue", status_code=status.HTTP_201_CREATED)
+async def requeue_triggered_files(engagement_key: str, request: RequeueRequest) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = code_analysis.requeue_triggered_files(engagement.id, items=request.items)
+    await _broadcast(engagement.key, "queue_requeue", record)
     return record
 
 
@@ -457,6 +478,9 @@ def get_threat_model(engagement_key: str, repo_id: int) -> dict[str, Any]:
 def get_coverage(
     engagement_key: str,
     repo_id: int | None = Query(default=None),
+    detail: str | None = Query(default=None),
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
+    if detail == "cwe":
+        return code_analysis.code_coverage_cwe_detail(engagement.id, repo_id=repo_id)
     return code_analysis.code_coverage_summary(engagement.id, repo_id=repo_id)

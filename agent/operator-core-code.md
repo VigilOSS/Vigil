@@ -82,8 +82,8 @@ The `code-ingest` command:
 
 The `code-index` command:
 - Uses tree-sitter to parse each source file
-- Produces per-file JSON in `analysis-state/structural-index/<file_id>.json` containing: function map (names, signatures, line ranges), entry points (main functions, request handlers, exported APIs), security sinks (memory operations, file I/O, command execution, crypto calls), and call sites
-- Writes a manifest at `analysis-state/structural-index-manifest.json` with aggregate statistics
+- Produces per-file JSON in `analysis-state/structural-index/` (filenames are `sha256(rel_path)[:16].json`) containing: function map (names, signatures, line ranges), entry points (main functions, request handlers, exported APIs), security sinks (memory operations, file I/O, command execution, crypto calls), and call sites
+- Writes a manifest at `analysis-state/structural-index-manifest.json` with aggregate statistics and a `path_to_index` mapping (file relative path -> index filename) so consumers can look up index files by path
 - If tree-sitter is not installed, exits cleanly with a warning -- downstream phases operate without it using manual triage as a fallback
 - The structural index accelerates Phase 2 hunting by giving the hunter a pre-built function map and sink catalog instead of requiring manual code triage
 
@@ -243,9 +243,11 @@ filesystem access to trace beyond the provided file batch when needed.
   ordering prevents hypothesis anchoring where the analysis scope narrows to the architect's
   predictions.
 - **Structural index** (if available) -- per-file function map, entry points, security sink
-  catalog, and call sites from `analysis-state/structural-index/<file_id>.json`. The hunter
-  uses this as a navigation map and completeness checklist: every catalogued sink must be
-  accounted for in the analysis.
+  catalog, and call sites from `analysis-state/structural-index/`. Look up the index filename
+  for each file via `structural-index-manifest.json`'s `path_to_index` mapping using the
+  file's relative path (e.g., `manifest["path_to_index"]["src/main.c"]` returns the index
+  filename). The hunter uses this as a navigation map and completeness checklist: every
+  catalogued sink must be accounted for in the analysis.
 - **Call graph excerpt** -- the subgraph for the target module showing entry-point chains and
   trust boundary crossings from `analysis-state/call-graph.json`.
 - **Threat model summary** -- trust boundaries, entry points, and high-value targets relevant

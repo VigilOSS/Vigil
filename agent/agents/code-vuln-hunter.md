@@ -39,7 +39,12 @@ Before producing any output, confirm:
 - [ ] **Applicable vulnerability classes listed** -- all classes requiring effort scores (from
       dispatch context `applicable_vuln_classes`)
 - [ ] Full filesystem access confirmed -- can Read, Grep, Glob beyond the file batch
-- [ ] CWE pattern reference loaded for each applicable vulnerability class
+- [ ] CWE pattern reference loaded for each applicable vulnerability class. For vulnerability
+      classes without dedicated pattern reference files (path-traversal, ssrf, open-redirect,
+      file-upload, xxe), use built-in knowledge combined with the nearest general reference
+      (`injection.md` for path-traversal/ssrf, `web-app-injection.md` for xss/open-redirect).
+      The absence of a dedicated reference file does not reduce the expected effort -- these
+      classes still require full entry-chain tracing.
 - [ ] Audit trail plan ready -- every analysis result will include `audit_metadata`
 
 If any item is missing -- especially the CWE pattern reference or file batch -- stop and
@@ -73,9 +78,12 @@ For every assumption about inputs that is NOT enforced by the code itself, note 
 
 For each file in the batch, build the analysis plan before diving into deep analysis:
 
-1. **Read the structural index** for this file (if available at
-   `analysis-state/structural-index/<file_id>.json`). The sink catalog IS the checklist --
-   account for every catalogued sink. If no structural index exists, fall back to manual
+1. **Read the structural index** for this file (if available). Look up the index filename in
+   `analysis-state/structural-index-manifest.json`'s `path_to_index` mapping using the file's
+   relative path, then read the corresponding JSON from `analysis-state/structural-index/`.
+   The sink catalog is a minimum checklist -- account for every catalogued sink, but also look
+   beyond the catalog for patterns tree-sitter cannot detect (semantic issues, multi-function
+   logic errors, trust boundary violations). If no structural index exists, fall back to manual
    triage from imports, exports, and class/function signatures.
 2. **Cross-reference with call graph**: identify entry-point chains reaching this file and
    untrusted data sources that flow into it.

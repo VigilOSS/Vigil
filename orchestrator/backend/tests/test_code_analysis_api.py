@@ -173,11 +173,12 @@ def test_context_creation_returns_ids_and_queue_fetch_returns_joined_work_items(
     assert file_after_context.status_code == 200
     assert file_after_context.json()["analysis_status"] == "context_built"
 
+    # File-only queue items (no context_id) are now valid for the file-direct flow
     queue_without_context = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue",
         json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
     )
-    assert queue_without_context.status_code == 422
+    assert queue_without_context.status_code == 201
 
     queue_response = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue",
@@ -201,27 +202,37 @@ def test_context_creation_returns_ids_and_queue_fetch_returns_joined_work_items(
 
     fetch_response = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+        json={"limit": 10, "agent_name": "code-vuln-hunter"},
     )
     assert fetch_response.status_code == 200
     payload = fetch_response.json()
-    assert len(payload) == 1
-    work_item = payload[0]
-    assert work_item["status"] == "processing"
-    assert work_item["context"]["id"] == context["id"]
-    assert work_item["context"]["slot_types"] == ["NETWORK-INPUT"]
-    assert work_item["context"]["call_chain"]["callees"][0]["function"] == "sink"
-    assert work_item["context"]["audit_metadata"]["cross_ref_usage"]["tool"] == "grep"
-    assert work_item["file"]["id"] == parser_file["id"]
-    assert work_item["file"]["file_path"] == "src/parser.py"
-    assert work_item["repo"]["id"] == repo["id"]
-    assert work_item["repo"]["lsp_config"]["ctags"]["available"] is True
+    assert len(payload) == 2
+
+    # One item should be file-only (context=None), the other has a context
+    file_only_item = next(item for item in payload if item["context"] is None)
+    context_item = next(item for item in payload if item["context"] is not None)
+
+    # Verify the file-only item
+    assert file_only_item["status"] == "processing"
+    assert file_only_item["file"]["id"] == parser_file["id"]
+    assert file_only_item["repo"]["id"] == repo["id"]
+
+    # Verify the context-backed item
+    assert context_item["status"] == "processing"
+    assert context_item["context"]["id"] == context["id"]
+    assert context_item["context"]["slot_types"] == ["NETWORK-INPUT"]
+    assert context_item["context"]["call_chain"]["callees"][0]["function"] == "sink"
+    assert context_item["context"]["audit_metadata"]["cross_ref_usage"]["tool"] == "grep"
+    assert context_item["file"]["id"] == parser_file["id"]
+    assert context_item["file"]["file_path"] == "src/parser.py"
+    assert context_item["repo"]["id"] == repo["id"]
+    assert context_item["repo"]["lsp_config"]["ctags"]["available"] is True
 
     file_after_fetch = client.get(
         f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
     )
     assert file_after_fetch.status_code == 200
-    assert file_after_fetch.json()["analysis_status"] == "queued" or file_after_fetch.json()["analysis_status"] == "in_progress"
+    assert file_after_fetch.json()["analysis_status"] in ("queued", "in_progress")
 
 
 def test_analysis_completion_rolls_up_context_and_file_coverage(client, isolate_settings):
@@ -586,3 +597,288 @@ def test_create_repo_upserts_existing_repo_key_within_engagement(client, isolate
     assert second_payload["repo_path"] == "/tmp/updated-same-repo"
     assert second_payload["branch"] == "release"
     assert second_payload["total_loc"] == 999
+
+
+def test_file_only_queue_create_and_fetch(client, isolate_settings):
+    """Queue items with only file_id (no context_id) + batch_theme + slot_types
+    should be created, fetched with context=None, and completed with cwe_coverage."""
+    engagement_key = "2026-04-04-file-only-queue"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="file-only-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+
+    # Create queue item with ONLY file_id (no context_id) + new fields
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={
+            "items": [
+                {
+                    "file_id": parser_file["id"],
+                    "priority": 90,
+                    "batch_theme": "network-input-analysis",
+                    "slot_types": ["NETWORK-INPUT", "FILE-CONTENT"],
+                    "guidance_hypotheses": ["Check for buffer overflow in parse()"],
+                }
+            ]
+        },
+    )
+    assert queue_response.status_code == 201
+    assert queue_response.json()["inserted"] == 1
+
+    # File status should transition to queued
+    file_after_queue = client.get(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
+    )
+    assert file_after_queue.status_code == 200
+    assert file_after_queue.json()["analysis_status"] == "queued"
+
+    # Fetch the item — context should be None, batch_theme preserved
+    fetch_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    assert fetch_response.status_code == 200
+    payload = fetch_response.json()
+    assert len(payload) == 1
+    work_item = payload[0]
+    assert work_item["context"] is None
+    assert work_item["batch_theme"] == "network-input-analysis"
+    assert work_item["slot_types"] == ["NETWORK-INPUT", "FILE-CONTENT"]
+    assert work_item["guidance_hypotheses"] == ["Check for buffer overflow in parse()"]
+    assert work_item["file"]["id"] == parser_file["id"]
+    assert work_item["file"]["file_path"] == "src/parser.py"
+    assert work_item["repo"]["id"] == repo["id"]
+
+    # Complete with cwe_coverage payload
+    cwe_coverage_data = [
+        {"family": "web-app-injection", "effort": 85, "entry_chains_traced": 3},
+        {"family": "path-traversal", "effort": 70, "entry_chains_traced": 2},
+    ]
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [work_item["id"]],
+            "disposition": "clean",
+            "notes": "Reviewed all sinks",
+            "cwe_coverage": cwe_coverage_data,
+            "cross_file_triggers": [{"file_path": "src/helpers.py", "reason": "shared parser util"}],
+        },
+    )
+    assert done.status_code == 200
+    assert done.json()["updated"] == 1
+
+    # File status should transition to analyzed (no contexts, all queue done)
+    file_after_done = client.get(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
+    )
+    assert file_after_done.status_code == 200
+    assert file_after_done.json()["analysis_status"] == "analyzed"
+
+
+def test_cwe_coverage_passthrough_on_queue_done(client, isolate_settings):
+    """Completing a queue item with cwe_coverage persists it and is visible
+    via the coverage detail endpoint."""
+    engagement_key = "2026-04-04-cwe-passthrough"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="cwe-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+
+    # Create and fetch a file-only queue item
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={
+            "items": [
+                {
+                    "file_id": parser_file["id"],
+                    "priority": 90,
+                    "batch_theme": "cwe-test-batch",
+                    "slot_types": ["NETWORK-INPUT"],
+                }
+            ]
+        },
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    queue_item = claimed.json()[0]
+
+    # Complete with cwe_coverage
+    cwe_coverage = [
+        {"family": "sql-injection", "effort": 90, "entry_chains_traced": 5},
+        {"family": "ssrf", "effort": 60, "entry_chains_traced": 1},
+    ]
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "notes": "All clear",
+            "cwe_coverage": cwe_coverage,
+        },
+    )
+    assert done.status_code == 200
+
+    # Verify via coverage detail endpoint
+    coverage = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}&detail=cwe"
+    )
+    assert coverage.status_code == 200
+    payload = coverage.json()
+    assert "files" in payload
+    cwe_file = next(f for f in payload["files"] if f["file_id"] == parser_file["id"])
+    assert cwe_file["classification"] == "critical"
+    assert "NETWORK-INPUT" in cwe_file["slot_types"]
+    assert len(cwe_file["applicable_families"]) > 0
+    # Check that the persisted cwe_coverage entries are present
+    families_covered = {e["family"] for e in cwe_file["cwe_coverage"]}
+    assert "sql-injection" in families_covered
+    assert "ssrf" in families_covered
+
+
+def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
+    """Analysis results can be recorded with queue_item_id=None."""
+    engagement_key = "2026-04-04-result-no-queue"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="result-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+
+    # Record an analysis result without a queue_item_id
+    result_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json={
+            "file_id": parser_file["id"],
+            "agent_name": "code-vuln-hunter",
+            "function_name": "parse_message",
+            "hypothesis": "Unchecked input from network socket",
+            "evidence": "No length validation before memcpy at line 42",
+            "disposition": "suspicious",
+            "confidence": "medium",
+            "cwe_id": "CWE-120",
+            "slot_type": "NETWORK-INPUT",
+            "notes": "Needs manual review",
+            "cwe_coverage": [{"family": "buffer-overflow", "effort": 75}],
+            "cross_file_triggers": [{"file_path": "src/helpers.py"}],
+        },
+    )
+    assert result_response.status_code == 201
+    result = result_response.json()
+    assert result["queue_item_id"] is None
+    assert result["context_id"] is None
+    assert result["file_id"] == parser_file["id"]
+    assert result["cwe_coverage"] == [{"family": "buffer-overflow", "effort": 75}]
+    assert result["cross_file_triggers"] == [{"file_path": "src/helpers.py"}]
+
+    # Verify it shows up in results listing
+    results_list = client.get(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results?file_id={parser_file['id']}"
+    )
+    assert results_list.status_code == 200
+    assert len(results_list.json()) == 1
+
+
+def test_coverage_detail_cwe(client, isolate_settings):
+    """GET coverage?detail=cwe returns files with applicable_families and
+    cwe_coverage, using max-effort merge semantics across multiple queue done calls."""
+    engagement_key = "2026-04-04-cwe-detail"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="cwe-detail-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    _classify_file(client, engagement_key, int(helper_file["id"]), "high", 70)
+
+    # Create two queue items for parser_file to test max-effort merge
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={
+            "items": [
+                {"file_id": parser_file["id"], "priority": 90, "slot_types": ["NETWORK-INPUT"]},
+                {"file_id": parser_file["id"], "priority": 85, "slot_types": ["NETWORK-INPUT"]},
+            ]
+        },
+    )
+    assert queue_response.status_code == 201
+
+    # Fetch and complete first item with partial coverage
+    claimed1 = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "hunter-a"},
+    )
+    item1 = claimed1.json()[0]
+    client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [item1["id"]],
+            "disposition": "clean",
+            "notes": "Pass 1",
+            "cwe_coverage": [
+                {"family": "web-app-injection", "effort": 60, "entry_chains_traced": 2},
+                {"family": "ssrf", "effort": 80, "entry_chains_traced": 1},
+            ],
+        },
+    )
+
+    # Fetch and complete second item with better coverage for one family
+    claimed2 = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "hunter-b"},
+    )
+    item2 = claimed2.json()[0]
+    client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [item2["id"]],
+            "disposition": "clean",
+            "notes": "Pass 2",
+            "cwe_coverage": [
+                {"family": "web-app-injection", "effort": 90, "entry_chains_traced": 3},
+                {"family": "ssrf", "effort": 70, "entry_chains_traced": 2},
+            ],
+        },
+    )
+
+    # Get CWE detail
+    coverage = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}&detail=cwe"
+    )
+    assert coverage.status_code == 200
+    payload = coverage.json()
+    assert "files" in payload
+
+    # Parser file should have max-effort merged coverage
+    parser_entry = next(f for f in payload["files"] if f["file_id"] == parser_file["id"])
+    assert parser_entry["classification"] == "critical"
+    assert "NETWORK-INPUT" in parser_entry["slot_types"]
+    assert len(parser_entry["applicable_families"]) > 0
+
+    # Check max-effort merge: web-app-injection should be 90 (max of 60, 90)
+    injection_entry = next(e for e in parser_entry["cwe_coverage"] if e["family"] == "web-app-injection")
+    assert injection_entry["effort"] == 90
+    # entry_chains_traced should be summed: 2 + 3 = 5
+    assert injection_entry["entry_chains_traced"] == 5
+
+    # ssrf should be 80 (max of 80, 70)
+    ssrf_entry = next(e for e in parser_entry["cwe_coverage"] if e["family"] == "ssrf")
+    assert ssrf_entry["effort"] == 80
+    # entry_chains_traced summed: 1 + 2 = 3
+    assert ssrf_entry["entry_chains_traced"] == 3
+
+    # Helper file should appear (classified as high) but with empty cwe_coverage
+    helper_entry = next(f for f in payload["files"] if f["file_id"] == helper_file["id"])
+    assert helper_entry["classification"] == "high"
+    assert helper_entry["cwe_coverage"] == []
+
+    # Standard coverage fields should still be present
+    assert "total_files" in payload
+    assert "by_classification" in payload
+    assert "gate" in payload
