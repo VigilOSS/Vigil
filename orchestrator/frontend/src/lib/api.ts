@@ -464,7 +464,7 @@ export type CodeCoverage = {
 
 export type CodeAnalysisResult = {
   id: number;
-  queue_item_id: number;
+  queue_item_id: number | null;
   context_id: number | null;
   file_id: number;
   agent_name: string;

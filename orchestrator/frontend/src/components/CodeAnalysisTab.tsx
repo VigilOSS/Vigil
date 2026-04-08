@@ -31,7 +31,7 @@ const STATUS_TO_PHASE: Record<string, PhaseKey> = {
   complete: "verify",
 };
 
-function resolvePhase(repos: CodeRepo[], queueStats: CodeQueueStats | null): PhaseKey {
+function resolvePhase(repos: CodeRepo[], queueStats: CodeQueueStats | null, coverage: CodeCoverage | null): PhaseKey {
   if (repos.length === 0) return "ingest";
   // Use the most advanced repo status
   let best: PhaseKey = "ingest";
@@ -42,6 +42,11 @@ function resolvePhase(repos: CodeRepo[], queueStats: CodeQueueStats | null): Pha
   }
   // If queue has active items, we're in hunt
   if (queueStats && (queueStats.processing > 0 || queueStats.pending > 0) && order.indexOf(best) < order.indexOf("hunt")) {
+    best = "hunt";
+  }
+  // If coverage gate is failing, stay in hunt (Phase 2B) rather than
+  // advancing to verify — effort thresholds may still need re-dispatch.
+  if (coverage && !coverage.gate.passed && order.indexOf(best) >= order.indexOf("verify")) {
     best = "hunt";
   }
   return best;
@@ -75,7 +80,7 @@ export function CodeAnalysisTab({
   coverage,
   results,
 }: CodeAnalysisTabProps) {
-  const currentPhase = resolvePhase(repos, queueStats);
+  const currentPhase = resolvePhase(repos, queueStats, coverage);
   const [expandedModules, setExpandedModules] = useState<Set<number>>(new Set());
   const [resultFilter, setResultFilter] = useState<string>("all");
   const [resultPage, setResultPage] = useState(0);

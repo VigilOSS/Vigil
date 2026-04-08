@@ -1525,6 +1525,7 @@ def code_coverage_summary(
         # Accumulate max effort per family per file
         file_efforts: dict[int, dict[str, float]] = {}
         file_meta: dict[int, dict[str, Any]] = {}
+        files_with_done_items: set[int] = set()
         for erow in effort_file_rows:
             fid = int(erow["file_id"])
             if fid not in file_meta:
@@ -1534,6 +1535,10 @@ def code_coverage_summary(
                     "slot_types": _json_decode(erow["slot_types_json"], []),
                     "language": erow["language"] or "",
                 }
+            # LEFT JOIN produces NULL cwe_coverage_json when no done queue item
+            # exists; a done item with empty coverage produces '[]'.
+            if erow["cwe_coverage_json"] is not None:
+                files_with_done_items.add(fid)
             cwe_cov = _json_decode(erow["cwe_coverage_json"], [])
             if fid not in file_efforts:
                 file_efforts[fid] = {}
@@ -1543,21 +1548,38 @@ def code_coverage_summary(
                 if family and effort > file_efforts[fid].get(family, 0):
                     file_efforts[fid][family] = effort
 
-        for fid, meta in file_meta.items():
-            threshold = 70 if meta["classification"] == "critical" else 50
-            applicable = _applicable_families_for_slots(meta["slot_types"], meta.get("language", ""))
-            efforts = file_efforts.get(fid, {})
-            if not efforts:
-                continue  # No CWE coverage data yet — other gate checks handle unanalyzed files
-            for family in applicable:
-                if efforts.get(family, 0) < threshold:
-                    msg = (
-                        f"{meta['classification'].capitalize()} file {meta['file_path']}: "
-                        f"family '{family}' effort {efforts.get(family, 0):.0f} < {threshold}"
-                    )
-                    gate_reasons.append(msg)
-                    effort_warnings.append(msg)
-                    break  # One reason per file is enough
+        # Only enforce effort thresholds when the pipeline is producing CWE
+        # coverage data.  If at least one file has effort records, the
+        # engagement uses the new effort-reporting flow and all critical/high
+        # files are expected to have coverage.  Old-style context-based
+        # engagements produce no CWE data and skip this gate entirely.
+        any_effort_data = any(bool(efforts) for efforts in file_efforts.values())
+
+        if any_effort_data:
+            for fid, meta in file_meta.items():
+                threshold = 70 if meta["classification"] == "critical" else 50
+                applicable = _applicable_families_for_slots(meta["slot_types"], meta.get("language", ""))
+                efforts = file_efforts.get(fid, {})
+                if not efforts:
+                    if fid in files_with_done_items and applicable:
+                        # File has completed queue items but no CWE coverage —
+                        # analysis was done without effort reporting.
+                        msg = (
+                            f"{meta['classification'].capitalize()} file {meta['file_path']}: "
+                            f"analyzed but missing CWE coverage data"
+                        )
+                        gate_reasons.append(msg)
+                        effort_warnings.append(msg)
+                    continue
+                for family in applicable:
+                    if efforts.get(family, 0) < threshold:
+                        msg = (
+                            f"{meta['classification'].capitalize()} file {meta['file_path']}: "
+                            f"family '{family}' effort {efforts.get(family, 0):.0f} < {threshold}"
+                        )
+                        gate_reasons.append(msg)
+                        effort_warnings.append(msg)
+                        break  # One reason per file is enough
 
     gate_passed = len(gate_reasons) == 0
 
