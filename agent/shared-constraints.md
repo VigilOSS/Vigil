@@ -161,6 +161,10 @@ When your output includes `#### Surface Candidates`, these must be synced by the
 ./scripts/assess.py record-surface <type> <target> <source> [--rationale TEXT] [--status STATUS]
 ```
 
+Use only the supported `record-surface` types: `account_recovery`, `api_documentation`,
+`auth_entry`, `dynamic_render`, `file_handling`, `object_reference`, `privileged_write`,
+`workflow_token`. Do not invent local taxonomy labels.
+
 Do not patch `surfaces.jsonl` by hand.
 
 ---

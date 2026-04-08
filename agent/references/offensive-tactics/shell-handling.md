@@ -75,7 +75,7 @@ cat /data/shell-4444.log        # full log
 ```
 
 Log files under `/data/` persist across tmux restarts because `/data` is the
-engagement volume mount point.
+shared runtime data mount point.
 
 ## Exposing Listeners Externally
 

@@ -93,7 +93,9 @@ def sync_finding_markdown(findings_file: str, finding: dict) -> None:
     slug = finding["slug"]
     title = finding["title"]
     severity = (finding.get("severity") or "medium").upper()
-    status = finding.get("status") or "confirmed"
+    workflow_status = finding.get("workflow_status") or "active"
+    verification_state = finding.get("verification_state") or "unreviewed"
+    verification_disposition = finding.get("verification_disposition") or "none"
     source_name = finding.get("source_name") or details.get("discovered_by") or "unknown"
     defect_family = finding.get("defect_family") or ""
     location = finding.get("canonical_location") or details.get("parameter") or ""
@@ -113,7 +115,8 @@ def sync_finding_markdown(findings_file: str, finding: dict) -> None:
         f"## [{slug}] {title}",
         f"- **Discovered by**: {source_name}",
         f"- **Severity**: {severity}",
-        f"- **Status**: {status}",
+        f"- **Workflow**: {workflow_status}",
+        f"- **Verification**: {verification_state} / {verification_disposition}",
     ]
     if defect_family:
         lines.append(f"- **Type**: {defect_family}")

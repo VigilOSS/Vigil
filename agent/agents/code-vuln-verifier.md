@@ -144,6 +144,12 @@ False positives are expected in any AI-assisted vulnerability pipeline. Do not f
 pressure to confirm findings. Killing a false positive is just as valuable as confirming
 a real vulnerability — both improve pipeline quality.
 
+When a finding is killed, persist that decision durably by patching the canonical
+`assessment_findings` row to `status: false_positive` with the kill reason in `notes`
+and the supporting evidence in `details`. The goal is suppression by identity: later
+rediscovery of the same `(defect_family, root_cause_key, canonical_location, auth_context)`
+should merge back into that false-positive record instead of reappearing as a live finding.
+
 Verification standards:
 - Apply ALL 5 checks to every finding without exception
 - Confirm findings ONLY when all checks pass with specific evidence
@@ -212,14 +218,35 @@ Stats: confirmed/downgraded/killed counts, confirmation rate, coverage percentag
 ## State Recording
 
 ```bash
-# Update finding status
-./scripts/assess.py patch findings/<slug> <status-update-json>
+# Persist a verification decision on the canonical finding
+./scripts/assess.py verify-finding <slug> <verification-json>
 
 # Record attack chains
 ./scripts/assess.py record-chain code-vuln-verifier <chain-json>
 
 # Record updated findings
 ./scripts/assess.py record-finding code-vuln-verifier <updated-finding-json>
+```
+
+For kills, use the verification payload:
+
+```json
+{
+  "disposition": "false_positive",
+  "reason_code": "check-2-guard",
+  "reason_text": "validate_header_length() bounds-checks to 8192 bytes before parse_header_value().",
+  "artifact_ref": "tools/analysis-state/code-verification/FINDING-CH-001.json",
+  "notes": "Check 2 KILL: validate_header_length() at http.c:92 bounds-checks to 8192 bytes on all paths before parse_header_value().",
+  "source_name": "code-vuln-verifier",
+  "details": {
+    "kill_check": 2,
+    "kill_reason": "validate_header_length() at http.c:92 bounds-checks to 8192 bytes on all paths before parse_header_value().",
+    "evidence": "validate_header_length() at http.c:92 rejects oversized input before the vulnerable arithmetic."
+  },
+  "provenance": {
+    "verified_by": "code-vuln-verifier"
+  }
+}
 ```
 
 ## Finding Prefix: VF

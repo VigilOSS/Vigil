@@ -290,6 +290,8 @@ def init_db() -> None:
                 title TEXT NOT NULL,
                 severity TEXT NOT NULL DEFAULT 'info',
                 status TEXT NOT NULL DEFAULT 'draft',
+                verification_state TEXT NOT NULL DEFAULT 'unreviewed',
+                verification_disposition TEXT NOT NULL DEFAULT 'none',
                 defect_family TEXT NOT NULL DEFAULT '',
                 root_cause_key TEXT NOT NULL DEFAULT '',
                 auth_context TEXT NOT NULL DEFAULT 'anonymous',
@@ -307,6 +309,32 @@ def init_db() -> None:
                 UNIQUE(engagement_id, slug),
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(merged_into_finding_id) REFERENCES assessment_findings(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_finding_transitions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                finding_id INTEGER NOT NULL,
+                actor TEXT NOT NULL DEFAULT '',
+                action TEXT NOT NULL DEFAULT '',
+                from_workflow_status TEXT,
+                to_workflow_status TEXT NOT NULL DEFAULT '',
+                from_verification_state TEXT,
+                to_verification_state TEXT NOT NULL DEFAULT '',
+                from_verification_disposition TEXT,
+                to_verification_disposition TEXT NOT NULL DEFAULT '',
+                from_severity TEXT,
+                to_severity TEXT NOT NULL DEFAULT '',
+                reason_code TEXT NOT NULL DEFAULT '',
+                reason_text TEXT NOT NULL DEFAULT '',
+                artifact_ref TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(finding_id) REFERENCES assessment_findings(id) ON DELETE CASCADE
             )
             """
         )
@@ -577,36 +605,9 @@ def init_db() -> None:
         )
         connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS code_contexts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                engagement_id INTEGER NOT NULL,
-                file_id INTEGER NOT NULL,
-                function_name TEXT NOT NULL,
-                start_line INTEGER NOT NULL DEFAULT 0,
-                end_line INTEGER NOT NULL DEFAULT 0,
-                slot_types_json TEXT NOT NULL DEFAULT '[]',
-                call_chain_json TEXT NOT NULL DEFAULT '{}',
-                data_flow_json TEXT NOT NULL DEFAULT '{}',
-                cross_refs_json TEXT NOT NULL DEFAULT '[]',
-                guard_annotations_json TEXT NOT NULL DEFAULT '[]',
-                sink_annotations_json TEXT NOT NULL DEFAULT '[]',
-                audit_metadata_json TEXT NOT NULL DEFAULT '{}',
-                context_text TEXT NOT NULL DEFAULT '',
-                analysis_status TEXT NOT NULL DEFAULT 'pending',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(engagement_id, file_id, function_name, start_line),
-                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
-                FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
-            )
-            """
-        )
-        connection.execute(
-            """
             CREATE TABLE IF NOT EXISTS code_analysis_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
-                context_id INTEGER,
                 file_id INTEGER NOT NULL,
                 priority INTEGER NOT NULL DEFAULT 50,
                 status TEXT NOT NULL DEFAULT 'pending',
@@ -624,7 +625,6 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
-                FOREIGN KEY(context_id) REFERENCES code_contexts(id) ON DELETE CASCADE,
                 FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
             )
             """
@@ -635,7 +635,6 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
                 queue_item_id INTEGER,
-                context_id INTEGER,
                 file_id INTEGER NOT NULL,
                 agent_name TEXT NOT NULL DEFAULT '',
                 function_name TEXT NOT NULL DEFAULT '',
@@ -653,7 +652,6 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE CASCADE,
-                FOREIGN KEY(context_id) REFERENCES code_contexts(id) ON DELETE SET NULL,
                 FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
             )
             """
@@ -691,6 +689,8 @@ def init_db() -> None:
 
         finding_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_findings)").fetchall()}
         finding_column_defaults = {
+            "verification_state": "TEXT NOT NULL DEFAULT 'unreviewed'",
+            "verification_disposition": "TEXT NOT NULL DEFAULT 'none'",
             "defect_family": "TEXT NOT NULL DEFAULT ''",
             "root_cause_key": "TEXT NOT NULL DEFAULT ''",
             "auth_context": "TEXT NOT NULL DEFAULT 'anonymous'",
@@ -706,14 +706,50 @@ def init_db() -> None:
             if column_name not in finding_columns:
                 connection.execute(f"ALTER TABLE assessment_findings ADD COLUMN {column_name} {definition}")
 
+        if finding_columns:
+            connection.execute(
+                """
+                UPDATE assessment_findings
+                SET verification_state = CASE status
+                    WHEN 'draft' THEN 'unreviewed'
+                    WHEN 'merged' THEN 'unreviewed'
+                    WHEN 'false_positive' THEN 'verified'
+                    ELSE 'verified'
+                END
+                WHERE status IN ('draft', 'merged', 'false_positive', 'confirmed', 'exploited', 'reported', 'blocked')
+                  AND (verification_state = '' OR verification_state = 'unreviewed')
+                """
+            )
+            connection.execute(
+                """
+                UPDATE assessment_findings
+                SET verification_disposition = CASE status
+                    WHEN 'confirmed' THEN 'confirmed'
+                    WHEN 'exploited' THEN 'confirmed'
+                    WHEN 'reported' THEN 'confirmed'
+                    WHEN 'blocked' THEN 'confirmed'
+                    WHEN 'false_positive' THEN 'false_positive'
+                    ELSE 'none'
+                END
+                WHERE status IN ('draft', 'merged', 'false_positive', 'confirmed', 'exploited', 'reported', 'blocked')
+                  AND (verification_disposition = '' OR verification_disposition = 'none')
+                """
+            )
+            connection.execute(
+                """
+                UPDATE assessment_findings
+                SET status = CASE status
+                    WHEN 'confirmed' THEN 'active'
+                    ELSE status
+                END
+                WHERE status = 'confirmed'
+                """
+            )
+
         # Migrate code_repos: add lsp_config_json if missing
         repo_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_repos)").fetchall()}
         if repo_columns and "lsp_config_json" not in repo_columns:
             connection.execute("ALTER TABLE code_repos ADD COLUMN lsp_config_json TEXT NOT NULL DEFAULT '{}'")
-
-        context_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_contexts)").fetchall()}
-        if context_columns and "audit_metadata_json" not in context_columns:
-            connection.execute("ALTER TABLE code_contexts ADD COLUMN audit_metadata_json TEXT NOT NULL DEFAULT '{}'")
 
         result_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_analysis_results)").fetchall()}
         if result_columns and "audit_metadata_json" not in result_columns:

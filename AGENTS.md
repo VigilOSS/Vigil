@@ -6,8 +6,25 @@ git commands will corrupt data, see ~/.codex/skills/jujutsu/SKILL.md always use 
 
 - `README.md` is the human/operator-facing setup and engagement guide.
 - `AGENTS.md` is for repo-local development workflow and verification expectations.
+- `CODE-MAP.md` is the concise repo structure map. Keep it factual, boundary-focused, and terse.
 - Backend work lives under `orchestrator/backend`.
 - Frontend work lives under `orchestrator/frontend`.
+
+# Code map maintenance
+
+If you make a change that would make `CODE-MAP.md` inaccurate, update `CODE-MAP.md` in the same change.
+
+Update it when you:
+- add, remove, rename, or move a stable entrypoint;
+- change which file owns a contract or subsystem boundary;
+- change a generation or sync relationship;
+- add or remove a durable API, service layer, tab, or CLI command family;
+- move a concern to a different canonical directory.
+
+Do not churn it for:
+- implementation-only edits inside an unchanged boundary;
+- field-level or helper-level changes that do not create a new durable seam;
+- caches, generated artifacts, vendor trees, or local-machine state.
 
 # Operator prompt regeneration
 

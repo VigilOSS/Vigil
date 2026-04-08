@@ -7,17 +7,23 @@ import sys
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
-from assess.lib.surfaces import upsert_surface_record
+from assess.lib.surfaces import (
+    VALID_STATUSES,
+    VALID_SURFACE_TYPES,
+    upsert_surface_record,
+)
 
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("record-surface", help="Record a surface candidate")
-    p.add_argument("type", help="Surface type (e.g. auth_entry, object_reference)")
+    valid_types = ", ".join(sorted(VALID_SURFACE_TYPES))
+    valid_statuses = ", ".join(sorted(VALID_STATUSES))
+    p.add_argument("type", help=f"Surface type ({valid_types})")
     p.add_argument("target", help="Target descriptor (URL or identifier)")
     p.add_argument("source", help="Source agent or process name")
     p.add_argument("--rationale", default="", help="Rationale for the surface")
     p.add_argument("--evidence-ref", default="", help="Evidence reference")
-    p.add_argument("--status", default="discovered", help="Surface status")
+    p.add_argument("--status", default="discovered", help=f"Surface status ({valid_statuses})")
     p.set_defaults(func=run)
 
 

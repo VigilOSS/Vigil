@@ -334,9 +334,9 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
 
           {activeTab === "findings" && (
             <FindingsTab
+              engagementKey={engagementKey}
               findings={displayFindings}
               fallbackFindings={displaySummary?.top_findings ?? []}
-              summary={displaySummary}
               chains={assessmentChains}
               chainLinks={assessmentChainLinks}
             />

@@ -19,6 +19,10 @@ origin: AI Threat Hunting
 
 ## Methodology
 
+The shared Kali runtime does not mount `$ENGAGEMENT_DIR` at `/engagement`. Use `/tmp` for runtime-local
+input/output, then persist durable artifacts into `$ENGAGEMENT_DIR/scans/` on the host before triage,
+ingestion, or handoff.
+
 ### 1. Update Templates
 ```bash
 nuclei -update-templates
@@ -28,10 +32,10 @@ Always update before an engagement to get the latest CVE and misconfiguration ch
 ### 2. Targeted Severity Scan
 ```bash
 # Critical and high severity only (fast, high-signal)
-nuclei -u https://TARGET -severity critical,high -o /engagement/scans/nuclei_crithigh.txt
+nuclei -u https://TARGET -severity critical,high -o /tmp/nuclei_crithigh.txt
 
 # All severities for thorough coverage
-nuclei -u https://TARGET -o /engagement/scans/nuclei_full.txt
+nuclei -u https://TARGET -o /tmp/nuclei_full.txt
 ```
 
 ### 3. Technology-Specific Scanning
@@ -47,11 +51,11 @@ nuclei -u https://TARGET -t cves/2024/ -severity critical,high
 ### 4. Bulk Target Scanning
 ```bash
 # Scan all live targets from recon
-nuclei -l /engagement/scans/live_targets.txt -severity critical,high \
-  -rate-limit 100 -o /engagement/scans/nuclei_bulk.txt -jsonl
+nuclei -l /tmp/live_targets.txt -severity critical,high \
+  -rate-limit 100 -o /tmp/nuclei_bulk.txt -jsonl
 
 # With concurrency control
-nuclei -l /engagement/scans/live_targets.txt -c 25 -rate-limit 50
+nuclei -l /tmp/live_targets.txt -c 25 -rate-limit 50
 ```
 
 ### 5. Misconfiguration and Exposure Checks
@@ -68,10 +72,10 @@ nuclei -u https://TARGET -tags file           # Sensitive file exposure
 ### 6. Output and Triage
 ```bash
 # JSON lines for structured processing
-nuclei -u https://TARGET -severity critical,high -jsonl -o /engagement/scans/nuclei.jsonl
+nuclei -u https://TARGET -severity critical,high -jsonl -o /tmp/nuclei.jsonl
 
 # Parse results
-cat /engagement/scans/nuclei.jsonl | jq '.info.name, .info.severity, .matched-at'
+cat /tmp/nuclei.jsonl | jq '.info.name, .info.severity, .matched-at'
 ```
 
 ## Triage Rules
