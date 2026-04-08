@@ -31,6 +31,14 @@ def _load_code_ingest_module():
     return _load_assess_module("code_ingest.py", "test_code_ingest_command")
 
 
+def _load_code_classify_module():
+    return _load_assess_module("code_classify.py", "test_code_classify_command")
+
+
+def _load_code_dispatch_module():
+    return _load_assess_module("code_dispatch.py", "test_code_dispatch_command")
+
+
 def test_code_coverage_is_informational_by_default(monkeypatch, capsys):
     module = _load_code_coverage_module()
 
@@ -100,6 +108,167 @@ def test_code_ingest_repo_key_uses_name_and_canonical_path_hash():
     assert first.startswith("demo-repo-")
     assert repeat == first
     assert second != first
+
+
+def test_code_ingest_header_snippet_is_capped(tmp_path):
+    module = _load_code_ingest_module()
+
+    css_file = tmp_path / "style.css"
+    css_file.write_text("data:" + ("A" * 9000) + "\nbody { color: red; }\n", encoding="utf-8")
+
+    snippet = module._read_header(str(css_file))
+
+    assert len(snippet) == 8192
+    assert snippet.startswith("data:")
+
+
+def test_code_classify_resolves_file_path_to_file_id(monkeypatch, tmp_path):
+    module = _load_code_classify_module()
+
+    payload_path = tmp_path / "classifications.json"
+    payload_path.write_text(
+        json.dumps([
+            {
+                "file_path": "src/parser.py",
+                "classification": "critical",
+                "role": "parser",
+                "slot_types": ["NETWORK-INPUT"],
+                "analysis_priority": 95,
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            assert endpoint == "code/files?limit=5000"
+            return [{"id": 42, "repo_id": 7, "file_path": "src/parser.py"}]
+
+        def post(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return {"updated": 1}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(SimpleNamespace(engagement_dir=tmp_path, classifications_json=str(payload_path)))
+
+    assert captured["endpoint"] == "code/files/bulk-classify"
+    posted = captured["payload"]["classifications"][0]
+    assert posted["file_id"] == 42
+    assert "file_path" not in posted
+
+
+def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypatch, tmp_path):
+    module = _load_code_dispatch_module()
+
+    queue_path = tmp_path / "queue.json"
+    queue_path.write_text(
+        json.dumps(
+            [
+                {
+                    "batch_theme": "auth-module",
+                    "priority": 91,
+                    "slot_types": ["NETWORK-INPUT"],
+                    "guidance_hypotheses": ["Check auth boundary first"],
+                    "files": [
+                        "src/parser.py",
+                        "src/helpers/*.py",
+                    ],
+                },
+                {
+                    "items": [
+                        {
+                            "file_path": "src/routes.py",
+                            "priority": 70,
+                            "guidance_hypotheses": ["Trace request handlers"],
+                        }
+                    ]
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(base_url="http://example.test", engagement_key="eng", engagement_dir=str(tmp_path)),
+    )
+
+    def fake_snapshot(engagement_dir: str, category: str, label: str, payload, source_path=None, metadata=None):
+        path = tmp_path / f"{category}-{label}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(module, "write_json_snapshot", fake_snapshot)
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            assert endpoint == "code/files?limit=5000"
+            return [
+                {"id": 10, "repo_id": 1, "file_path": "src/parser.py"},
+                {"id": 11, "repo_id": 1, "file_path": "src/helpers/auth.py"},
+                {"id": 12, "repo_id": 1, "file_path": "src/routes.py"},
+            ]
+
+        def post(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return {"queued": len(payload["items"])}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(SimpleNamespace(action="queue", extra=[str(queue_path)], engagement_dir=tmp_path))
+
+    assert captured["endpoint"] == "code/analysis-queue"
+    assert captured["payload"]["items"] == [
+        {
+            "file_id": 10,
+            "priority": 91,
+            "batch_theme": "auth-module",
+            "slot_types": ["NETWORK-INPUT"],
+            "guidance_hypotheses": ["Check auth boundary first"],
+        },
+        {
+            "file_id": 11,
+            "priority": 91,
+            "batch_theme": "auth-module",
+            "slot_types": ["NETWORK-INPUT"],
+            "guidance_hypotheses": ["Check auth boundary first"],
+        },
+        {
+            "file_id": 12,
+            "priority": 70,
+            "batch_theme": "",
+            "slot_types": [],
+            "guidance_hypotheses": ["Trace request handlers"],
+        },
+    ]
 
 
 def _load_code_audit_module():

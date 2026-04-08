@@ -217,7 +217,7 @@ Files scoring 50+ are dispatched first. Files scoring 30-49 are second wave. Fil
 The call graph is the navigational backbone for the entire pipeline. Without it,
 the hunter cannot trace multi-function vulnerability chains across file boundaries.
 
-When a structural index is available (`analysis-state/structural-index/`), use the pre-computed function definitions and call sites as the starting point for call graph construction. The structural index provides exact function boundaries, call site locations, and import statements — use these to resolve call graph edges more accurately than header-only grep. The architect then adds security annotations (trust boundaries, untrusted data flow, module boundary crossings) that tree-sitter cannot provide.
+When a structural index is available (`tools/analysis-state/structural-index/`), use the pre-computed function definitions and call sites as the starting point for call graph construction. The structural index provides exact function boundaries, call site locations, and import statements — use these to resolve call graph edges more accurately than header-only grep. The architect then adds security annotations (trust boundaries, untrusted data flow, module boundary crossings) that tree-sitter cannot provide.
 
 Using ctags + grep (supplemented by structural index when available):
 
@@ -315,12 +315,12 @@ Produce a structured architecture map containing:
 1. **Module Map**: module name, file list, description, primary slot types
 2. **Entry Point Catalog**: function, file, line, type (main/API/handler/callback/CLI)
 3. **Trust Boundary Map**: boundary name, entry function, data format, slot type
-4. **File Classification Table**: file path, classification tier, slot types, priority score
-5. **File Analysis Queue**: ordered list of files for Phase 2 (Hunt) dispatch, grouped by `batch_theme` for cross-file reasoning. Written to `analysis-state/file-analysis-queue.json`. Every critical/high file appears regardless of whether a hypothesis names it.
-6. **Call Graph**: JSON adjacency list with edges, entry points, and critical sinks. Written to analysis-state/call_graph.json.
+4. **File Classification Table**: JSON records keyed by backend `file_id` (with `file_path` as helper context when useful), plus classification tier, slot types, and priority score. Do not emit path-only classifications.
+5. **File Analysis Queue**: flat ordered list of concrete files for Phase 2 (Hunt) dispatch, grouped by `batch_theme` for cross-file reasoning. Written to `tools/analysis-state/file-analysis-queue.json`. Every critical/high file appears regardless of whether a hypothesis names it. Emit one object per file with concrete `file_id` and `file_path` — no nested batch wrappers, no globs.
+6. **Call Graph**: JSON adjacency list with edges, entry points, and critical sinks. Written to `tools/analysis-state/call-graph.json`.
 7. **Entry-Point Chains**: ranked list of complete data flow chains from entry to sink.
-8. **Attack Hypotheses**: prioritized list of specific vulnerability hypotheses. Each includes: entry point, chain, sink, CWE, concrete scenario, score. Written to analysis-state/attack_hypotheses.json.
-9. **Structural Index Integration**: when `analysis-state/structural-index/` exists, the call graph and entry-point chains incorporate tree-sitter-derived function definitions, call sites, and security sinks for higher accuracy.
+8. **Attack Hypotheses**: prioritized list of specific vulnerability hypotheses. Each includes: entry point, chain, sink, CWE, concrete scenario, score. Written to `tools/analysis-state/attack-hypotheses.json`.
+9. **Structural Index Integration**: when `tools/analysis-state/structural-index/` exists, the call graph and entry-point chains incorporate tree-sitter-derived function definitions, call sites, and security sinks for higher accuracy.
 
 ## Extended Resources
 
