@@ -320,6 +320,15 @@ def _print_coverage(data: dict) -> None:
         if variant_count:
             print(f"Variants: {variant_count}")
 
+    triggers = data.get('trigger_summary', {})
+    if triggers:
+        print(
+            "\nCross-File Triggers: "
+            f"{triggers.get('pending', 0)} pending, "
+            f"{triggers.get('queued', 0)} queued, "
+            f"{triggers.get('resolved', 0)} resolved"
+        )
+
     # Coverage Gate
     gate = data.get('gate', {})
     if isinstance(gate, dict):

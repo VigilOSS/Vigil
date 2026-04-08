@@ -8,19 +8,19 @@ origin: AI Threat Hunting
 
 ## When to Activate
 
-- Phase 4 of code analysis pipeline. Runs after vulnerability analysis has produced confirmed findings or suspicious patterns.
+- Phase 3 of code analysis pipeline. Runs after vulnerability analysis has produced confirmed findings or suspicious patterns.
 - Triggered once per confirmed finding or high-confidence suspicious pattern.
 - Goal: maximize yield by finding every instance of a proven bug pattern across the entire codebase, not just the module where it was first discovered.
 
 ## Tools
 
-- `rg` / `grep` — pattern matching for function names, code shapes, anti-patterns
-- Host-side file reading (`cat`) — read candidate files for detailed analysis
-- `find` — locate files matching naming or extension criteria
+- `rg` — pattern matching for function names, code shapes, and anti-patterns
+- `Read` — inspect candidate files for detailed analysis
+- `Glob` — locate files by naming or extension pattern
 
 Cross-reference tools:
 - **ctags index** — `grep '^<symbol>\t' <repo>/tags` to find definitions of vulnerable functions and their wrappers
-- **grep / rg** — find every call site of a vulnerable function across the entire codebase, trace incoming calls to identify all code paths that reach a vulnerable pattern
+- **rg** — find every call site of a vulnerable function across the entire codebase, trace incoming calls to identify all code paths that reach a vulnerable pattern
 
 ## Methodology
 

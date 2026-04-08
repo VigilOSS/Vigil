@@ -146,8 +146,42 @@ def test_code_analysis_prompt_uses_current_cli_contracts():
     assert 'fetch "code/files' in operator_prompt
     assert "code-record-threat-model <repo-id> <threat-model-json>" in operator_prompt
     assert "code-record-modules <repo-id> <modules-json>" in operator_prompt
-    assert 'code-dispatch done "id1,id2,..." <disposition>' in operator_prompt
+    assert "code-dispatch done <item-id> <disposition> <cwe-coverage-json>" in operator_prompt
+    assert "Pass repo-relative file paths and artifact paths instead of pasting large JSON blobs" in operator_prompt
+    assert "code-dispatch needs-context" in operator_prompt
+    assert "no pending triggers" in operator_prompt
     assert "--require-gate-pass" in operator_prompt
+
+
+def test_code_analysis_agents_use_current_phase_numbers():
+    repo_root = Path(__file__).resolve().parents[3]
+    architect_prompt = (repo_root / "agent" / "agents" / "code-architect.md").read_text(encoding="utf-8")
+    hunter_prompt = (repo_root / "agent" / "agents" / "code-vuln-hunter.md").read_text(encoding="utf-8")
+    verifier_prompt = (repo_root / "agent" / "agents" / "code-vuln-verifier.md").read_text(encoding="utf-8")
+
+    assert "enables multi-function reasoning in Phase 2" in architect_prompt
+    assert "moving\nto Phase 4" not in hunter_prompt
+    assert "to Phase 3." in hunter_prompt
+    assert "Phase 3 hunters" not in verifier_prompt
+    assert "Phase 2 hunters" in verifier_prompt
+
+
+def test_code_analysis_skills_use_current_phase_numbers_and_tools():
+    repo_root = Path(__file__).resolve().parents[3]
+    verification_skill = (
+        repo_root / "agent" / "skills" / "code-finding-verification" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    variant_skill = (
+        repo_root / "agent" / "skills" / "code-variant-analysis" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Phase 4 of code analysis pipeline" not in verification_skill
+    assert "Runs on confirmed and suspicious findings from Phase 2" in verification_skill
+    assert "Phase 4 of code analysis pipeline" not in variant_skill
+    assert "`cat`" not in variant_skill
+    assert "`find`" not in variant_skill
+    assert "`Read`" in variant_skill
+    assert "`Glob`" in variant_skill
 
 
 def test_code_analysis_codex_wrappers_exist():
