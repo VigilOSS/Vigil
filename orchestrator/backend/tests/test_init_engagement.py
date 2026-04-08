@@ -354,8 +354,9 @@ def test_init_engagement_code_mode_with_local_repo(tmp_path: Path) -> None:
 
     # Code-mode scope assertions
     assert scope["engagement_type"] == "code"
-    assert scope["repo"] == str(fake_repo)
-    assert scope["repo_name"] == "my-cool-project"
+    assert scope["repos"] == [{"path": str(fake_repo), "name": "my-cool-project"}]
+    assert "repo" not in scope
+    assert "repo_name" not in scope
     assert scope["hosts"] == []
     assert scope["current_phase"] == "ingest"
     assert scope["exploit_policy"] == "pause"
@@ -367,15 +368,16 @@ def test_init_engagement_code_mode_with_local_repo(tmp_path: Path) -> None:
     assert auth["state"] == "none"
     assert auth["use_for_requests"] is False
 
-    # Engagement manifest has repo fields, not target/hostname
-    assert manifest["repo"] == str(fake_repo)
-    assert manifest["repo_name"] == "my-cool-project"
+    # Engagement manifest has repos array, not target/hostname
+    assert manifest["repos"] == [{"path": str(fake_repo), "name": "my-cool-project"}]
+    assert "repo" not in manifest
+    assert "repo_name" not in manifest
     assert "target" not in manifest
     assert "hostname" not in manifest
 
     # Log reflects code analysis
     assert "Code Analysis" in log_text
-    assert "Repository" in log_text
+    assert "Repositories" in log_text
 
     # source/ directory created for repo checkout
     assert (engagement_dir / "source").is_dir()
@@ -412,11 +414,10 @@ def test_init_engagement_code_mode_with_clone_url(tmp_path: Path) -> None:
     manifest = json.loads((engagement_dir / "engagement.json").read_text(encoding="utf-8"))
 
     assert scope["engagement_type"] == "code"
-    assert scope["repo"] == "https://github.com/org/my-project.git"
-    assert scope["repo_name"] == "my-project"
+    assert scope["repos"] == [{"path": "https://github.com/org/my-project.git", "name": "my-project"}]
     assert scope["current_phase"] == "ingest"
     assert scope["hosts"] == []
-    assert manifest["repo_name"] == "my-project"
+    assert manifest["repos"] == [{"path": "https://github.com/org/my-project.git", "name": "my-project"}]
 
     # Directory name includes the repo label
     assert "my-project" in engagement_dir.name
@@ -450,8 +451,7 @@ def test_init_engagement_code_mode_positional_shorthand(tmp_path: Path) -> None:
     scope = json.loads((engagement_dir / "scope.json").read_text(encoding="utf-8"))
 
     assert scope["engagement_type"] == "code"
-    assert scope["repo"] == str(fake_repo)
-    assert scope["repo_name"] == "shorthand-repo"
+    assert scope["repos"] == [{"path": str(fake_repo), "name": "shorthand-repo"}]
     assert scope["current_phase"] == "ingest"
 
 

@@ -11,7 +11,8 @@ HOSTS_RAW=""
 AUTH_MODE=""
 EXPLOIT_POLICY=""
 MODE="web"
-REPO=""
+REPOS=()
+SKIP_PERMISSIONS=0
 
 normalize_target() {
   local raw="$1"
@@ -20,6 +21,41 @@ normalize_target() {
   else
     printf 'https://%s\n' "$raw"
   fi
+}
+
+derive_repo_name() {
+  local raw="$1"
+  python3 - <<'PY' "$raw"
+import sys, os
+from urllib.parse import urlparse
+
+raw = sys.argv[1]
+parsed = urlparse(raw)
+if parsed.scheme in ("http", "https", "ssh", "git"):
+    name = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+else:
+    name = os.path.basename(os.path.abspath(raw))
+name = name.removesuffix(".git")
+print(name or "repo")
+PY
+}
+
+repos_to_json_array() {
+  python3 - "$@" <<'PY'
+import json, sys, os
+from urllib.parse import urlparse
+
+repos = []
+for raw in sys.argv[1:]:
+    parsed = urlparse(raw)
+    if parsed.scheme in ("http", "https", "ssh", "git"):
+        name = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    else:
+        name = os.path.basename(os.path.abspath(raw))
+    name = name.removesuffix(".git") or "repo"
+    repos.append({"path": raw, "name": name})
+print(json.dumps(repos, ensure_ascii=True))
+PY
 }
 
 usage() {
@@ -34,7 +70,8 @@ Options:
   --hosts host1,host2,*.domain,...   Scope list. Use *.domain for subdomain enum.
   --auth-mode none|auth_json|manual|proxy_capture
   --exploit-policy pause|full_send|selected
-  --repo /path/to/repo|https://...   Repository path or clone URL (code mode)
+  --repo /path/to/repo|https://...   Repository path or clone URL (code mode, repeatable)
+  --skip-permissions                 Skip interactive permission prompts in launchers
 
 Any host NOT in --hosts is out of scope. Wildcard entries (*.example.com) enable
 subdomain enumeration and allow discovered subdomains of that domain in scope.
@@ -52,11 +89,17 @@ Examples:
   # Code analysis — local repository
   ./scripts/init_engagement.sh --mode code --repo /path/to/repo
 
+  # Code analysis — multiple repositories
+  ./scripts/init_engagement.sh --mode code --repo /path/to/repo1 --repo /path/to/repo2
+
   # Code analysis — clone URL
   ./scripts/init_engagement.sh --mode code --repo https://github.com/org/repo
 
-  # Code analysis — positional shorthand
+  # Code analysis — positional shorthand (single repo only)
   ./scripts/init_engagement.sh --mode code /path/to/repo
+
+  # Code analysis — skip permissions
+  ./scripts/init_engagement.sh --mode code --repo /path/to/repo --skip-permissions
 EOF
 }
 
@@ -215,9 +258,10 @@ EOF
 write_engagement_launchers() {
   local eng_dir="${1:?engagement dir required}"
   local client_kind="${2:?client kind required}"
+  local skip_perms="${3:-0}"
 
   if [[ "$client_kind" == "codex" || "$client_kind" == "both" ]]; then
-    cat > "$eng_dir/start_codex.sh" <<'EOF'
+    cat > "$eng_dir/start_codex.sh" <<'LAUNCHER_HEAD'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -252,13 +296,16 @@ if [[ -z "${ORCHESTRATOR_BASE_URL:-}" ]]; then
     fi
   done
 fi
-
-exec codex "$@"
-EOF
+LAUNCHER_HEAD
+    if [[ "$skip_perms" -eq 1 ]]; then
+      printf '\nexec codex --full-auto "$@"\n' >> "$eng_dir/start_codex.sh"
+    else
+      printf '\nexec codex "$@"\n' >> "$eng_dir/start_codex.sh"
+    fi
   fi
 
   if [[ "$client_kind" == "claude" || "$client_kind" == "both" ]]; then
-    cat > "$eng_dir/start_claude.sh" <<'EOF'
+    cat > "$eng_dir/start_claude.sh" <<'LAUNCHER_HEAD'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -293,9 +340,12 @@ if [[ -z "${ORCHESTRATOR_BASE_URL:-}" ]]; then
     fi
   done
 fi
-
-exec claude "$@"
-EOF
+LAUNCHER_HEAD
+    if [[ "$skip_perms" -eq 1 ]]; then
+      printf '\nexec claude --dangerously-skip-permissions "$@"\n' >> "$eng_dir/start_claude.sh"
+    else
+      printf '\nexec claude "$@"\n' >> "$eng_dir/start_claude.sh"
+    fi
   fi
 
   if [[ "$client_kind" == "codex" || "$client_kind" == "both" ]]; then
@@ -324,9 +374,13 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --repo)
-      REPO="${2:-}"
-      [[ -n "$REPO" ]] || { echo "--repo requires a value" >&2; exit 1; }
+      [[ -n "${2:-}" ]] || { echo "--repo requires a value" >&2; exit 1; }
+      REPOS+=("$2")
       shift 2
+      ;;
+    --skip-permissions)
+      SKIP_PERMISSIONS=1
+      shift
       ;;
     --hosts)
       HOSTS_RAW="${2:-}"
@@ -366,37 +420,38 @@ case "$MODE" in
     ;;
 esac
 
-# --- Code mode: resolve repo, force safe defaults for web-only fields ---
+# --- Code mode: resolve repo(s), force safe defaults for web-only fields ---
 if [[ "$MODE" == "code" ]]; then
-  # Accept repo from --repo or the positional arg
-  if [[ -n "$REPO" && -n "$TARGET" ]]; then
-    echo "In code mode, provide the repo via --repo or as a positional arg, not both" >&2
+  # Accept repo from --repo (repeatable) or the positional arg
+  if [[ ${#REPOS[@]} -gt 0 && -n "$TARGET" ]]; then
+    echo "In code mode, provide repos via --repo or as a positional arg, not both" >&2
     exit 1
   fi
-  if [[ -z "$REPO" && -n "$TARGET" ]]; then
-    REPO="$TARGET"
+  if [[ ${#REPOS[@]} -eq 0 && -n "$TARGET" ]]; then
+    REPOS+=("$TARGET")
     TARGET=""
   fi
-  if [[ -z "$REPO" ]]; then
+  if [[ ${#REPOS[@]} -eq 0 ]]; then
     require_interactive_or_die "repo"
-    REPO="$(prompt_text "Repository path or clone URL")"
+    while true; do
+      repo_input="$(prompt_text "Repository path or clone URL")"
+      if [[ -n "$repo_input" ]]; then
+        REPOS+=("$repo_input")
+        printf 'Added: %s\n' "$repo_input" >&2
+        printf 'Add another repository? [y/N]: ' >&2
+        read -r add_more
+        [[ "$add_more" =~ ^[Yy] ]] || break
+      else
+        break
+      fi
+    done
+  fi
+  if [[ ${#REPOS[@]} -eq 0 ]]; then
+    echo "At least one repository is required in code mode" >&2
+    exit 1
   fi
 
-  # Derive a label from the repo path/URL for directory naming
-  REPO_NAME=$(python3 - <<'PY' "$REPO"
-import sys, os
-from urllib.parse import urlparse
-
-raw = sys.argv[1]
-parsed = urlparse(raw)
-if parsed.scheme in ("http", "https", "ssh", "git"):
-    name = parsed.path.rstrip("/").rsplit("/", 1)[-1]
-else:
-    name = os.path.basename(os.path.abspath(raw))
-name = name.removesuffix(".git")
-print(name or "repo")
-PY
-  )
+  REPO_NAME="$(derive_repo_name "${REPOS[0]}")"
 
   # Web-only fields: force safe defaults
   HOSTS_RAW=""
@@ -407,6 +462,13 @@ PY
     else
       EXPLOIT_POLICY="pause"
     fi
+  fi
+
+  # Prompt for skip-permissions on launchers
+  if [[ "$SKIP_PERMISSIONS" -eq 0 && -t 0 ]]; then
+    printf 'Skip permissions? [y/N]: ' >&2
+    read -r skip_perms_input
+    [[ "$skip_perms_input" =~ ^[Yy] ]] && SKIP_PERMISSIONS=1
   fi
 fi
 
@@ -444,6 +506,13 @@ PY
       EXPLOIT_POLICY="pause"
     fi
   fi
+
+  # Prompt for skip-permissions on launchers
+  if [[ "$SKIP_PERMISSIONS" -eq 0 && -t 0 ]]; then
+    printf 'Skip permissions? [y/N]: ' >&2
+    read -r skip_perms_input
+    [[ "$skip_perms_input" =~ ^[Yy] ]] && SKIP_PERMISSIONS=1
+  fi
 fi
 
 case "$AUTH_MODE" in
@@ -470,17 +539,20 @@ TIME=$(date +%H%M%S)
 START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 if [[ "$MODE" == "code" ]]; then
-  # Code mode: directory named after repo, no web target
+  # Code mode: directory named after primary repo, no web target
   DIR_LABEL=$(printf '%s' "$REPO_NAME" | tr '.:/' '-' | tr -cd '[:alnum:]-')
   DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${DIR_LABEL}"
   ENGAGEMENT_KEY="$(basename "$DIR")"
   mkdir -p "$DIR/tools" "$DIR/downloads" "$DIR/scans" "$DIR/pids" "$DIR/sessions" "$DIR/source"
 
+  REPOS_JSON="$(repos_to_json_array "${REPOS[@]}")"
+  REPOS_DISPLAY=$(printf '%s, ' "${REPOS[@]}")
+  REPOS_DISPLAY="${REPOS_DISPLAY%, }"
+
   cat > "$DIR/scope.json" <<EOF
 {
   "engagement_type": "code",
-  "repo": "${REPO}",
-  "repo_name": "${REPO_NAME}",
+  "repos": ${REPOS_JSON},
   "hosts": [],
   "exploit_policy": "${EXPLOIT_POLICY}",
   "exploit_review_state": "pending",
@@ -495,7 +567,7 @@ EOF
 # Engagement Log
 
 - **Mode**: Code Analysis
-- **Repository**: ${REPO}
+- **Repositories**: ${REPOS_DISPLAY}
 - **Date**: ${DATE}
 - **Status**: In Progress
 - **Exploit Policy**: ${EXPLOIT_POLICY}
@@ -506,7 +578,7 @@ EOF
   cat > "$DIR/findings.md" <<EOF
 # Findings
 
-- **Repository**: ${REPO}
+- **Repositories**: ${REPOS_DISPLAY}
 - **Engagement Date**: ${DATE}
 - **Finding Count**: 0
 
@@ -516,7 +588,7 @@ EOF
   cat > "$DIR/report.md" <<EOF
 # Engagement Report
 
-- **Repository**: ${REPO}
+- **Repositories**: ${REPOS_DISPLAY}
 - **Engagement Date**: ${DATE}
 - **Status**: Pending — report not yet generated
 
@@ -526,8 +598,7 @@ EOF
   cat > "$DIR/engagement.json" <<EOF
 {
   "key": "${ENGAGEMENT_KEY}",
-  "repo": "${REPO}",
-  "repo_name": "${REPO_NAME}",
+  "repos": ${REPOS_JSON},
   "created_at": "${START_TIME}"
 }
 EOF
@@ -630,6 +701,6 @@ fi
 
 CLIENT_KIND="$(install_client_kind)"
 write_engagement_prompt_wrappers "$DIR" "$CLIENT_KIND"
-write_engagement_launchers "$DIR" "$CLIENT_KIND"
+write_engagement_launchers "$DIR" "$CLIENT_KIND" "$SKIP_PERMISSIONS"
 
 printf '%s\n' "$DIR"
