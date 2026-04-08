@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from assess.lib.client import AssessmentClient
@@ -48,6 +49,11 @@ SKIP_EXTENSIONS = frozenset({
 _C_EXTENSIONS = frozenset({'.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hh'})
 _PYTHON_EXTENSIONS = frozenset({'.py', '.pyx', '.pyi'})
 _JS_TS_EXTENSIONS = frozenset({'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'})
+_GIT_LOG_TIMEOUT_SECONDS = 120
+_GIT_REV_LIST_TIMEOUT_SECONDS = 30
+_GIT_LARGE_HISTORY_COMMIT_THRESHOLD = 50_000
+_GIT_SECURITY_LOOKBACK = '3years'
+_GIT_CHURN_LOOKBACK = '1year'
 
 
 def _which(binary: str) -> str | None:
@@ -109,11 +115,12 @@ def _setup_ctags(repo_path: str) -> dict[str, object]:
                 dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
                 dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
                 for filename in filenames:
-                    if os.path.islink(os.path.join(dirpath, filename)):
+                    filepath = os.path.join(dirpath, filename)
+                    if not _is_regular_file(filepath):
                         continue
                     ext = Path(filename).suffix.lower()
                     if ext in _C_EXTENSIONS or ext in _PYTHON_EXTENSIONS or ext in _JS_TS_EXTENSIONS:
-                        source_files.append(os.path.join(dirpath, filename))
+                        source_files.append(filepath)
             if source_files:
                 subprocess.run(
                     ['ctags', '-f', tags_path] + source_files,
@@ -158,6 +165,11 @@ def _should_skip_file(rel_path: str, filename: str) -> bool:
     if lower_name.endswith('.woff') or lower_name.endswith('.woff2'):
         return True
     return False
+
+
+def _is_regular_file(filepath: str) -> bool:
+    """Return True for regular repo files, excluding symlinks and special files."""
+    return os.path.isfile(filepath) and not os.path.islink(filepath)
 
 
 def _detect_language(filename: str) -> str | None:
@@ -218,60 +230,128 @@ def _read_header(filepath: str, max_lines: int = 50, max_chars: int = 8192) -> s
     return ''.join(lines)
 
 
-def _git_churn_scores(repo_path: str) -> dict[str, int]:
-    """Compute per-file churn scores from git log --numstat over the last year."""
-    churn: dict[str, int] = {}
+def _git_warn(message: str) -> None:
+    print(f"Warning: {message}", file=sys.stderr)
+
+
+def _git_commit_count(repo_path: str) -> int | None:
+    """Return the total commit count for *repo_path*, or None if unavailable."""
     try:
         result = subprocess.run(
-            ['git', 'log', '--numstat', '--since=1year', '--format=%H'],
-            capture_output=True, text=True, cwd=repo_path, timeout=120,
+            ['git', 'rev-list', '--count', '--all'],
+            capture_output=True, text=True, cwd=repo_path, timeout=_GIT_REV_LIST_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
-            return churn
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split('\t')
-            if len(parts) == 3:
-                added, deleted, filepath = parts
-                try:
-                    total = int(added) + int(deleted)
-                except ValueError:
-                    # Binary files show '-' for added/deleted
+            detail = result.stderr.strip()
+            suffix = f": {detail}" if detail else ""
+            _git_warn(f"could not count commits for {repo_path}{suffix}")
+            return None
+        return int(result.stdout.strip())
+    except subprocess.TimeoutExpired:
+        _git_warn(
+            f"timed out counting commits for {repo_path} after {_GIT_REV_LIST_TIMEOUT_SECONDS}s; "
+            "using default git history scan scope"
+        )
+    except (OSError, ValueError) as exc:
+        _git_warn(f"could not count commits for {repo_path}: {exc}")
+    return None
+
+
+def _git_security_history_args(commit_count: int | None) -> list[str]:
+    """Return the git log scope for security-history scanning."""
+    if commit_count is not None and commit_count > _GIT_LARGE_HISTORY_COMMIT_THRESHOLD:
+        return [f'--since={_GIT_SECURITY_LOOKBACK}']
+    return ['--all']
+
+
+def _git_churn_scores(repo_path: str, since: str = _GIT_CHURN_LOOKBACK) -> dict[str, int]:
+    """Compute per-file churn scores from git log --numstat over a bounded time window."""
+    churn: dict[str, int] = {}
+    try:
+        with tempfile.TemporaryFile(mode='w+t', encoding='utf-8') as stdout, tempfile.TemporaryFile(
+            mode='w+t', encoding='utf-8'
+        ) as stderr:
+            result = subprocess.run(
+                ['git', 'log', '--numstat', f'--since={since}', '--format=%H'],
+                stdout=stdout,
+                stderr=stderr,
+                text=True,
+                cwd=repo_path,
+                timeout=_GIT_LOG_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0:
+                stderr.seek(0)
+                detail = stderr.read().strip()
+                suffix = f": {detail}" if detail else ""
+                _git_warn(f"git churn scan failed for {repo_path}{suffix}")
+                return churn
+
+            stdout.seek(0)
+            for line in stdout:
+                line = line.strip()
+                if not line:
                     continue
-                churn[filepath] = churn.get(filepath, 0) + total
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+                parts = line.split('\t')
+                if len(parts) == 3:
+                    added, deleted, filepath = parts
+                    try:
+                        total = int(added) + int(deleted)
+                    except ValueError:
+                        # Binary files show '-' for added/deleted
+                        continue
+                    churn[filepath] = churn.get(filepath, 0) + total
+    except subprocess.TimeoutExpired:
+        _git_warn(
+            f"git churn scan timed out for {repo_path} after {_GIT_LOG_TIMEOUT_SECONDS}s; "
+            "git churn data will be incomplete"
+        )
+    except OSError as exc:
+        _git_warn(f"git churn scan failed for {repo_path}: {exc}")
     return churn
 
 
-def _git_security_files(repo_path: str) -> set[str]:
+def _git_security_files(repo_path: str, history_args: list[str] | None = None) -> set[str]:
     """Identify files with past security-related commits."""
     sec_files: set[str] = set()
+    history_args = history_args or ['--all']
     try:
-        result = subprocess.run(
-            [
-                'git', 'log', '--all',
-                '--grep=CVE\\|security\\|vulnerability\\|fix.*vuln\\|buffer.overflow\\|use.after.free',
-                '--oneline', '--name-only',
-            ],
-            capture_output=True, text=True, cwd=repo_path, timeout=120,
+        with tempfile.TemporaryFile(mode='w+t', encoding='utf-8') as stdout, tempfile.TemporaryFile(
+            mode='w+t', encoding='utf-8'
+        ) as stderr:
+            result = subprocess.run(
+                [
+                    'git', 'log',
+                    *history_args,
+                    '--grep=CVE\\|security\\|vulnerability\\|fix.*vuln\\|buffer.overflow\\|use.after.free',
+                    '--format=commit:%H',
+                    '--name-only',
+                ],
+                stdout=stdout,
+                stderr=stderr,
+                text=True,
+                cwd=repo_path,
+                timeout=_GIT_LOG_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0:
+                stderr.seek(0)
+                detail = stderr.read().strip()
+                suffix = f": {detail}" if detail else ""
+                _git_warn(f"git security-history scan failed for {repo_path}{suffix}")
+                return sec_files
+
+            stdout.seek(0)
+            for line in stdout:
+                line = line.strip()
+                if not line or line.startswith('commit:'):
+                    continue
+                sec_files.add(line)
+    except subprocess.TimeoutExpired:
+        _git_warn(
+            f"git security-history scan timed out for {repo_path} after {_GIT_LOG_TIMEOUT_SECONDS}s; "
+            "security-history annotations will be incomplete"
         )
-        if result.returncode != 0:
-            return sec_files
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            # Skip the oneline commit summary (contains a hash prefix)
-            if ' ' in line and len(line.split()[0]) >= 7:
-                # Likely a commit summary line like "abc1234 Fix security bug"
-                continue
-            # This is a filename
-            sec_files.add(line)
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+    except OSError as exc:
+        _git_warn(f"git security-history scan failed for {repo_path}: {exc}")
     return sec_files
 
 
@@ -289,8 +369,16 @@ def run(args) -> None:
     security_files: set[str] = set()
     if has_git:
         print("Scanning git history for churn and security commits...", file=sys.stderr)
+        commit_count = _git_commit_count(repo_path)
+        security_history_args = _git_security_history_args(commit_count)
+        if commit_count is not None and commit_count > _GIT_LARGE_HISTORY_COMMIT_THRESHOLD:
+            print(
+                f"  git history: {commit_count:,} commits detected; "
+                f"limiting security scan to current branch over the last {_GIT_SECURITY_LOOKBACK}",
+                file=sys.stderr,
+            )
         churn_scores = _git_churn_scores(repo_path)
-        security_files = _git_security_files(repo_path)
+        security_files = _git_security_files(repo_path, security_history_args)
 
     # Walk the directory tree
     files = []
@@ -307,8 +395,8 @@ def run(args) -> None:
         for filename in filenames:
             filepath = os.path.join(dirpath, filename)
 
-            # Skip symlinks — prevents traversal to /etc/passwd or outside the repo
-            if os.path.islink(filepath):
+            # Skip symlinks and special files (FIFOs, sockets, devices) that are not safe to read.
+            if not _is_regular_file(filepath):
                 skipped += 1
                 continue
 

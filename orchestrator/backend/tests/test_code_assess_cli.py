@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -37,6 +38,10 @@ def _load_code_classify_module():
 
 def _load_code_dispatch_module():
     return _load_assess_module("code_dispatch.py", "test_code_dispatch_command")
+
+
+def _load_code_index_module():
+    return _load_assess_module("code_index.py", "test_code_index_command")
 
 
 def test_code_coverage_is_informational_by_default(monkeypatch, capsys):
@@ -120,6 +125,81 @@ def test_code_ingest_header_snippet_is_capped(tmp_path):
 
     assert len(snippet) == 8192
     assert snippet.startswith("data:")
+
+
+def test_code_ingest_skips_named_pipes(monkeypatch, tmp_path):
+    module = _load_code_ingest_module()
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    os.mkfifo(repo_path / "blocked.py")
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path / "engagement"),
+        ),
+    )
+    monkeypatch.setattr(module, "_count_lines", lambda filepath: 1)
+    monkeypatch.setattr(module, "_sha256_file", lambda filepath: f"sha:{Path(filepath).name}")
+    monkeypatch.setattr(module, "_read_header", lambda filepath: f"header:{Path(filepath).name}")
+    monkeypatch.setattr(module, "_setup_ctags", lambda repo_path: {"available": False})
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def post(self, endpoint: str, payload: dict):
+            if endpoint == "code/repos":
+                captured["repo_payload"] = payload
+                return {"id": 7}
+            if endpoint == "code/files":
+                captured["files_payload"] = payload
+                return {"inserted": len(payload["files"])}
+            raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            repo_path=str(repo_path),
+            name="demo",
+            language=None,
+            repo_key=None,
+            engagement_dir=tmp_path / "engagement",
+        )
+    )
+
+    repo_payload = captured["repo_payload"]
+    assert repo_payload["total_files"] == 2
+    assert repo_payload["analyzable_files"] == 1
+
+    files_payload = captured["files_payload"]
+    assert files_payload["repo_id"] == 7
+    assert [entry["file_path"] for entry in files_payload["files"]] == ["app.py"]
+
+
+def test_code_index_walk_repo_skips_named_pipes(tmp_path):
+    module = _load_code_index_module()
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    os.mkfifo(repo_path / "blocked.py")
+
+    files = module._walk_repo(str(repo_path))
+
+    assert files == [{"file_path": "main.py", "language": "python"}]
 
 
 def test_code_classify_resolves_file_path_to_file_id(monkeypatch, tmp_path):
