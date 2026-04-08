@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   AssessmentCoverageItem,
   AssessmentService,
@@ -135,6 +135,26 @@ export function CoverageTab({
 
   function getPage(host: string) { return pages[host] ?? 0; }
   function setPage(host: string, page: number) { setPages((p) => ({ ...p, [host]: page })); }
+
+  useEffect(() => {
+    setPages((current) => {
+      const next: Record<string, number> = {};
+      let changed = false;
+      for (const { host, items } of hostGroups) {
+        const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+        const currentPage = current[host] ?? 0;
+        const clampedPage = Math.min(currentPage, totalPages - 1);
+        next[host] = clampedPage;
+        if (clampedPage !== currentPage) {
+          changed = true;
+        }
+      }
+      if (Object.keys(current).length !== Object.keys(next).length) {
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [hostGroups]);
 
   function splitEndpoint(item: AssessmentCoverageItem): { method: string; endpoint: string } {
     const method = item.method ?? "";

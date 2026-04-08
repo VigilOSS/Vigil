@@ -123,6 +123,8 @@ def _normalize_coverage_status(value: str) -> str:
 def _coalesce_workflow_status(existing: str, incoming: str, *, explicit_workflow_override: bool = False) -> str:
     existing_normalized = _normalize_workflow_status(existing)
     incoming_normalized = _normalize_workflow_status(incoming)
+    if explicit_workflow_override:
+        return incoming_normalized
     if existing_normalized == "merged":
         return incoming_normalized
     if incoming_normalized == "merged":

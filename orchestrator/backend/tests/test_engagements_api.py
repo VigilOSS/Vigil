@@ -385,6 +385,45 @@ def test_findings_patch_rejects_direct_verification_bypass(client, isolate_setti
     assert "must use POST /findings/{slug}/verify" in patched.json()["detail"]
 
 
+def test_findings_patch_allows_explicit_workflow_rollback(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-010A",
+            "title": "Workflow rollback candidate",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "idor",
+            "root_cause_key": "workflow-rollback-candidate",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/items/rollback",
+            "summary": "Active finding should be movable back to draft.",
+            "evidence_ref": "findings.md",
+            "notes": "Initial triage.",
+            "source_name": "vulnerability-analyst",
+            "details": {"evidence": "Initial request/response pair"},
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [],
+        },
+    )
+    assert created.status_code == 201
+
+    patched = client.patch(
+        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-010A",
+        json={
+            "workflow_status": "draft",
+            "reason_code": "needs-retriage",
+            "reason_text": "Pushed back for additional review before reactivation.",
+        },
+    )
+    assert patched.status_code == 200
+    assert patched.json()["finding"]["workflow_status"] == "draft"
+
+
 def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 

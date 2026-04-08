@@ -190,7 +190,6 @@ export function FindingsTab({
   }, [allFindings]);
 
   const filtered = useMemo(() => {
-    setPage(0);
     const visible = allFindings.filter((finding) => {
       if (severityFilter && finding.severity !== severityFilter) return false;
       if (workflowFilter && finding.workflow_status !== workflowFilter) return false;
@@ -202,6 +201,14 @@ export function FindingsTab({
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / FINDINGS_PAGE_SIZE));
   const pageFindings = filtered.slice(page * FINDINGS_PAGE_SIZE, (page + 1) * FINDINGS_PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(0);
+  }, [severityFilter, workflowFilter, verificationFilter]);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, totalPages - 1));
+  }, [totalPages]);
 
   const selectedFinding = useMemo(
     () => allFindings.find((finding) => finding.slug === selected) ?? null,

@@ -43,14 +43,19 @@ If any item is missing, stop and request it from the operator before proceeding.
 ## Classification Tiers
 
 ### critical (priority 80-100)
-Files that parse untrusted network input, handle URL/protocol parsing, process authentication,
-manage cryptographic operations, implement protocol state machines, or perform memory allocation
-controlled by untrusted sizes. These get function-level tracking in Phase 2+.
+Files that sit on or immediately behind a trust boundary and define what attacker-controlled
+input means. This includes files that accept, parse, normalize, validate, deserialize, route,
+or semantically interpret untrusted input from network, URL, protocol, file, environment, IPC,
+or callback sources. It also includes files that process authentication, manage cryptographic
+operations, implement protocol state machines, or make allocation/authorization/state decisions
+from attacker-influenced values. These get function-level tracking in Phase 2+.
 
 ### high (priority 50-79)
-Files that manage memory allocation with internal sizes, build command/query structures,
-handle file I/O with potentially user-influenced paths, implement configuration parsing,
-or contain complex state machine logic with security implications.
+Files that may not be the first trust-boundary parser, but still transform, propagate, or act on
+attacker-influenced data in ways that can affect control flow, resource bounds, authorization,
+filesystem paths, query/command construction, or security-relevant state. This includes helper
+parsers, validators, config loaders, file/path handlers, query builders, serializer/deserializer
+helpers, and state-machine components reached from critical entry paths.
 
 ### medium (priority 20-49)
 Internal utility functions, data structure implementations, string handling helpers,
