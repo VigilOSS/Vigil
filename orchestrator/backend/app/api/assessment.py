@@ -192,8 +192,6 @@ class FindingPatchRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=512)
     severity: str | None = Field(default=None, min_length=1, max_length=32)
     workflow_status: str | None = Field(default=None, min_length=1, max_length=32)
-    verification_state: str | None = Field(default=None, min_length=1, max_length=32)
-    verification_disposition: str | None = Field(default=None, min_length=1, max_length=32)
     defect_family: str | None = Field(default=None, max_length=128)
     root_cause_key: str | None = Field(default=None, max_length=256)
     auth_context: str | None = Field(default=None, min_length=1, max_length=128)
@@ -459,8 +457,6 @@ async def patch_finding(
         title=request.title,
         severity=request.severity,
         workflow_status=request.workflow_status,
-        verification_state=request.verification_state,
-        verification_disposition=request.verification_disposition,
         defect_family=request.defect_family,
         root_cause_key=request.root_cause_key,
         auth_context=request.auth_context,

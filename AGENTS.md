@@ -1,6 +1,6 @@
 # jujutsu VCS
 
-git commands will corrupt data, see ~/.codex/skills/jujutsu/SKILL.md always use jujustu before new changes.
+git commands will corrupt data, see ~/.codex/skills/jujutsu/SKILL.md always use jujustu before new changes. Meaning you always add a jj describe appending to the existing jj describe if one exists (jj st)
 
 # Repo conventions
 
