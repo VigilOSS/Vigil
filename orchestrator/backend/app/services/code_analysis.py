@@ -436,13 +436,14 @@ def list_code_files(
         clauses.append("analysis_status = ?")
         params.append(analysis_status)
     if search is not None:
-        clauses.append("file_path LIKE ?")
-        params.append(f"%{search}%")
+        clauses.append("file_path LIKE ? ESCAPE '\\'")
+        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params.append(f"%{escaped}%")
     query = f"SELECT * FROM code_files WHERE {' AND '.join(clauses)} ORDER BY analysis_priority DESC, id ASC"
     if limit is not None:
         query += f" LIMIT {int(limit)}"
-    if offset > 0:
-        query += f" OFFSET {int(offset)}"
+        if offset > 0:
+            query += f" OFFSET {int(offset)}"
     with get_connection() as connection:
         return [_hydrate_code_file(row) for row in connection.execute(query, tuple(params)).fetchall()]
 
