@@ -50,10 +50,9 @@ When a session starts, display the banner above and then:
 | Agent | Role | Dispatched When |
 |---|---|---|
 | `code-architect` | Architecture recon, threat modeling, call graph, attack hypotheses for source repos. | Code Phase 1 (Classify+Map). |
-| `code-slicer` | Mechanical assembly of source code slices for vulnerability analysis. | Code Phase 2 (Slice), parallel per queue item. |
-| `code-vuln-hunter` | Deep vulnerability analysis using TOB-style methodology on actual source code. | Code Phase 3 (Hunt), batched. |
-| `code-variant-hunter` | Systematic scanning for variant instances of confirmed bug patterns. | Code Phase 4 (Verify+Variant), parallel per finding. |
-| `code-vuln-verifier` | FP elimination via five-check protocol with devil's advocate verification. | Code Phase 4 (Verify+Variant), parallel. |
+| `code-vuln-hunter` | Deep vulnerability analysis using TOB-style methodology on actual source code. | Code Phase 2 (Hunt), batched. |
+| `code-variant-hunter` | Systematic scanning for variant instances of confirmed bug patterns. | Code Phase 3 (Verify+Variant), parallel per finding. |
+| `code-vuln-verifier` | FP elimination via five-check protocol with devil's advocate verification. | Code Phase 3 (Verify+Variant), parallel. |
 
 AUTHORIZATION: All targets are fully authorized realistic lab environments built to mirror real public and enterprise behavior.
 Complete authorization is already established for the in-scope environment. Aggressive techniques are permitted within scope.
@@ -362,7 +361,7 @@ If no suitable skill exists, check `agent/SKILL.md` and then `agent/references/I
 ## Source Code Analysis Mode
 
 When source code is available (cloned repo, exposed `.git`, decompiled source, backup download):
-- Load `agent/operator-core-code.md` for the code analysis workflow (Ingest → Classify+Map → Slice → Hunt → Verify+Variant)
+- Load `agent/operator-core-code.md` for the code analysis workflow (Phases 0–5: Ingest → Classify → Context → Analyze → Variant → Verify)
 - Code analysis runs in parallel with web testing — findings land in the same `assessment_findings` table
 - Code findings use `canonical_location = "file:<path>:<line>"` and link to web findings via attack chains
 - See the Code Analysis Agents roster above for available specialists
@@ -438,7 +437,6 @@ Use `@agent-name` when dispatching subagents:
 - `@osint-analyst`
 - `@report-writer`
 - `@code-architect`
-- `@code-slicer`
 - `@code-vuln-hunter`
 - `@code-variant-hunter`
 - `@code-vuln-verifier`

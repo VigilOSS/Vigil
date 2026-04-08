@@ -139,9 +139,7 @@ def test_code_analysis_prompt_uses_current_cli_contracts():
     repo_root = Path(__file__).resolve().parents[3]
     operator_prompt = (repo_root / "agent" / "operator-core-code.md").read_text(encoding="utf-8")
     architect_prompt = (repo_root / "agent" / "agents" / "code-architect.md").read_text(encoding="utf-8")
-    context_prompt = (repo_root / "agent" / "agents" / "code-context-builder.md").read_text(encoding="utf-8")
-
-    for text in (operator_prompt, architect_prompt, context_prompt):
+    for text in (operator_prompt, architect_prompt):
         assert "fetch code-files" not in text
         assert "code-dispatch <db> queue" not in text
 
@@ -158,7 +156,6 @@ def test_code_analysis_codex_wrappers_exist():
 
     expected = {
         "code-architect.toml",
-        "code-context-builder.toml",
         "code-variant-hunter.toml",
         "code-vuln-hunter.toml",
         "code-vuln-verifier.toml",

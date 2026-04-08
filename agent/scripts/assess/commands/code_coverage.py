@@ -54,7 +54,7 @@ def register(subparsers) -> None:
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
 
-    if args.cwe_matrix:
+    if getattr(args, 'cwe_matrix', False):
         _run_cwe_matrix(cfg, args)
         return
 
@@ -135,9 +135,16 @@ def _run_cwe_matrix(cfg, args) -> None:
 
 def _print_cwe_matrix(files: list[dict]) -> None:
     """Print the per-file CWE effort matrix table."""
-    # Collect all vuln families across files
+    # Collect all vuln families across files.
+    # First: collect from applicable_families (the ground truth of what SHOULD be tested)
     all_families: list[str] = []
     seen: set[str] = set()
+    for f in files:
+        for fam in f.get('applicable_families', []):
+            if fam and fam not in seen:
+                all_families.append(fam)
+                seen.add(fam)
+    # Second: add any reported families not already in the set (covers ad-hoc testing)
     for f in files:
         for cwe in f.get('cwe_coverage', []):
             fam = cwe.get('family', '')

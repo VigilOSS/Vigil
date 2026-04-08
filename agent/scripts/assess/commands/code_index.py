@@ -132,6 +132,7 @@ def run(args) -> None:
     sinks_by_cat: dict[str, int] = {}
     indexed = 0
     skipped_unsupported = 0
+    path_to_index: dict[str, str] = {}
 
     for entry in file_list:
         rel_path = entry["file_path"]
@@ -151,6 +152,7 @@ def run(args) -> None:
             json.dumps(idx, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+        path_to_index[rel_path] = f"{fid}.json"
 
         # Accumulate stats
         indexed += 1
@@ -174,6 +176,7 @@ def run(args) -> None:
         "total_entry_points": total_entry_points,
         "total_security_sinks": total_sinks,
         "sinks_by_category": sinks_by_cat,
+        "path_to_index": path_to_index,
     }
 
     manifest_path = out_base / "structural-index-manifest.json"

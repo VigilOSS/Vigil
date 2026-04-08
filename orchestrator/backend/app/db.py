@@ -614,6 +614,11 @@ def init_db() -> None:
                 disposition TEXT NOT NULL DEFAULT '',
                 analysis_notes TEXT NOT NULL DEFAULT '',
                 expansion_request_json TEXT NOT NULL DEFAULT '{}',
+                batch_theme TEXT NOT NULL DEFAULT '',
+                slot_types_json TEXT NOT NULL DEFAULT '[]',
+                guidance_hypotheses_json TEXT NOT NULL DEFAULT '[]',
+                cwe_coverage_json TEXT NOT NULL DEFAULT '[]',
+                cross_file_triggers_json TEXT NOT NULL DEFAULT '[]',
                 consumed_at TEXT,
                 completed_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -629,7 +634,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS code_analysis_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
-                queue_item_id INTEGER NOT NULL,
+                queue_item_id INTEGER,
                 context_id INTEGER,
                 file_id INTEGER NOT NULL,
                 agent_name TEXT NOT NULL DEFAULT '',
@@ -643,6 +648,8 @@ def init_db() -> None:
                 slot_type TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 audit_metadata_json TEXT NOT NULL DEFAULT '{}',
+                cwe_coverage_json TEXT NOT NULL DEFAULT '[]',
+                cross_file_triggers_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE CASCADE,
@@ -687,6 +694,25 @@ def init_db() -> None:
         result_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_analysis_results)").fetchall()}
         if result_columns and "audit_metadata_json" not in result_columns:
             connection.execute("ALTER TABLE code_analysis_results ADD COLUMN audit_metadata_json TEXT NOT NULL DEFAULT '{}'")
+
+        # Migrate code_analysis_queue: add file-direct queue columns
+        queue_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_analysis_queue)").fetchall()}
+        queue_new_columns = {
+            "batch_theme": "TEXT NOT NULL DEFAULT ''",
+            "slot_types_json": "TEXT NOT NULL DEFAULT '[]'",
+            "guidance_hypotheses_json": "TEXT NOT NULL DEFAULT '[]'",
+            "cwe_coverage_json": "TEXT NOT NULL DEFAULT '[]'",
+            "cross_file_triggers_json": "TEXT NOT NULL DEFAULT '[]'",
+        }
+        for col_name, col_def in queue_new_columns.items():
+            if queue_columns and col_name not in queue_columns:
+                connection.execute(f"ALTER TABLE code_analysis_queue ADD COLUMN {col_name} {col_def}")
+
+        # Migrate code_analysis_results: add cwe_coverage and cross_file_triggers
+        if result_columns and "cwe_coverage_json" not in result_columns:
+            connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cwe_coverage_json TEXT NOT NULL DEFAULT '[]'")
+        if result_columns and "cross_file_triggers_json" not in result_columns:
+            connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cross_file_triggers_json TEXT NOT NULL DEFAULT '[]'")
 
         connection.commit()
 
