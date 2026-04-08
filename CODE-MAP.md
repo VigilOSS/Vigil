@@ -43,7 +43,7 @@ Keep it light:
 
 - `agent/scripts/render-operator-prompts.sh` - prompt renderer. Why: generates the committed operator-facing wrappers from `operator-core.md` plus hardcoded roster/banner templates.
 - `agent/AGENTS.md` and `agent/CLAUDE.md` - generated operator wrappers. Why: committed outputs, not source-of-truth.
-- `agent/.codex/agents/` and `agent/.claude/agents/` - generated specialist wrappers. Why: thin client-specific entrypoints that should stay derived from the source prompts.
+- `agent/.codex/agents/` and `agent/.claude/agents/` - generated agent wrappers. Why: thin client-specific entrypoints that should stay derived from the source prompts.
 
 ### Runtime and CLI
 
@@ -98,7 +98,7 @@ Keep it light:
 - `orchestrator/frontend/src/components/CoverageTab.tsx` - coverage boundary. Why: tested surface by host/service/technique.
 - `orchestrator/frontend/src/components/CodeAnalysisTab.tsx` - code-analysis boundary. Why: separate file-centric review pipeline rendered in the same UI.
 - `orchestrator/frontend/src/components/ActivityTab.tsx` and `orchestrator/frontend/src/components/TaskTimeline.tsx` - activity/timeline views. Why: operator progress and session history.
-- `orchestrator/frontend/src/components/ArtifactViewer.tsx` - artifact inspection view. Why: read generated documents and exports without leaving the app.
+- `orchestrator/frontend/src/components/ArtifactViewer.tsx` - artifact inspection view. Why: read engagement artifacts without leaving the app.
 - `orchestrator/frontend/src/components/PhaseWaterfall.tsx` - phase visualization. Why: workflow phase is a first-class product concept.
 - `orchestrator/frontend/src/lib/api.ts` - shared client/types layer. Why: all REST helpers, websocket URL construction, and frontend-facing API types live here.
 - `orchestrator/frontend/src/app.css` - global styling system. Why: layout primitives, panel styles, status colors, severity vocabulary, and responsive rules are centralized here.

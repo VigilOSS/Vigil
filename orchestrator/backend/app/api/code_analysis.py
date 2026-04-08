@@ -210,7 +210,9 @@ def list_files(
     module_id: int | None = Query(default=None),
     classification: str | None = Query(default=None),
     analysis_status: str | None = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=5000),
+    search: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=10000),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return code_analysis.list_code_files(
@@ -219,7 +221,9 @@ def list_files(
         module_id=module_id,
         classification=classification,
         analysis_status=analysis_status,
+        search=search,
         limit=limit,
+        offset=offset,
     )
 
 
