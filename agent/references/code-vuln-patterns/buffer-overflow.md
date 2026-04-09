@@ -5,15 +5,17 @@
 
 ---
 
-## What SAST Already Catches (Skip These)
+## Baseline Patterns (Single-Function / Single-Scope)
+
+Toolchain-catchable patterns. Record as findings if encountered during orientation —
+on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
+Invest primary analysis time in the LLM-advantage patterns below.
 
 - Direct `strcpy(fixed_buf, user_input)` without length check
 - `sprintf` into a fixed-size buffer with user-controlled format arguments
 - Missing null terminator on a statically-sized `char[]`
 - `gets()` usage (any modern compiler warns)
 - Obvious stack buffer overflow in a single function scope
-
-These are solved problems. Every tool finds them. Move on.
 
 ---
 

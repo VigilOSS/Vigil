@@ -70,6 +70,10 @@ tail -50 /data/oob-server.log
 If `$DIR/.oob_url` was provided in your dispatch context, include the callback URL in blind
 payloads. A callback hit in the log confirms the vulnerability.
 
+If `$DIR/.oob_url` was not provided, fall back to time-based detection (sleep payloads). If
+time-based also fails and OOB would have been decisive, report back that OOB infrastructure
+is needed — the operator provisions it per `agent/references/offensive-tactics/frp-tunneling.md`.
+
 ## Handoffs
 
 - To `vulnerability-analyst`: anomalous responses and high-confidence candidate paths

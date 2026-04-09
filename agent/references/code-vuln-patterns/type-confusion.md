@@ -7,7 +7,11 @@
 
 ---
 
-## What SAST Already Catches (Skip These)
+## Baseline Patterns (Single-Function / Single-Scope)
+
+Toolchain-catchable patterns. Record as findings if encountered during orientation —
+on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
+Invest primary analysis time in the LLM-advantage patterns below.
 
 - Explicit `reinterpret_cast` between obviously incompatible pointer types in same function
 - Simple C-style cast from `float*` to `int*` with immediate dereference

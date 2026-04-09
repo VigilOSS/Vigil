@@ -8,7 +8,11 @@
 
 ---
 
-## What SAST Already Catches (Skip These)
+## Baseline Patterns (Single-Function / Single-Scope)
+
+Toolchain-catchable patterns. Record as findings if encountered during orientation —
+on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
+Invest primary analysis time in the LLM-advantage patterns below.
 
 - Basic XML External Entity (XXE) expansion (billion laughs with known entity pattern)
 - Obvious `while(true)` infinite loops with no break condition
