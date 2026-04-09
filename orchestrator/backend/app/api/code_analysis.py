@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 from fastapi import APIRouter, Query, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -13,6 +13,18 @@ router = APIRouter(
     prefix="/engagements/{engagement_key}/assessment/code",
     tags=["code-analysis"],
 )
+
+
+CodeSlotType: TypeAlias = Literal[
+    "NETWORK-INPUT",
+    "URL-COMPONENT",
+    "CMD-ARGUMENT",
+    "FILE-CONTENT",
+    "ENV-VARIABLE",
+    "CALLBACK-DATA",
+    "PROTOCOL-FIELD",
+    "SERIALIZED-DATA",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +65,8 @@ class CodeFileClassification(BaseModel):
     file_id: int
     classification: str = Field(min_length=1, max_length=32)  # critical/high/medium/low/skip
     role: str = Field(default="", max_length=128)
-    slot_types: list[str] = Field(default_factory=list)
+    slot_types: list[CodeSlotType] = Field(default_factory=list)
+    language: str | None = Field(default=None, max_length=64)
     analysis_priority: int = Field(default=50, ge=0, le=100)
 
 
@@ -79,7 +92,7 @@ class QueueItemRecord(BaseModel):
     file_id: int
     priority: int = Field(default=50, ge=0, le=100)
     batch_theme: str = Field(default="", max_length=256)
-    slot_types: list[str] = Field(default_factory=list)
+    slot_types: list[CodeSlotType] = Field(default_factory=list)
     guidance_hypotheses: list[str] = Field(default_factory=list)
 
 

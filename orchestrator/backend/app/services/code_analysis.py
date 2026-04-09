@@ -573,6 +573,59 @@ def get_code_file(engagement_id: int, file_id: int) -> dict[str, Any]:
 
 
 _VALID_CLASSIFICATIONS = frozenset({"critical", "high", "medium", "low", "skip"})
+_VALID_SLOT_TYPES = frozenset({
+    "NETWORK-INPUT",
+    "URL-COMPONENT",
+    "CMD-ARGUMENT",
+    "FILE-CONTENT",
+    "ENV-VARIABLE",
+    "CALLBACK-DATA",
+    "PROTOCOL-FIELD",
+    "SERIALIZED-DATA",
+})
+
+
+def _normalize_slot_types(value: Any, *, field_name: str) -> list[str]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must be a list of slot type strings",
+        )
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    invalid: list[str] = []
+    for raw_slot in value:
+        if not isinstance(raw_slot, str):
+            invalid.append(repr(raw_slot))
+            continue
+        slot = raw_slot.strip()
+        if slot not in _VALID_SLOT_TYPES:
+            invalid.append(slot or "<empty>")
+            continue
+        if slot not in seen:
+            normalized.append(slot)
+            seen.add(slot)
+
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"{field_name} contains invalid values: {', '.join(invalid)}. "
+                f"Allowed values: {', '.join(sorted(_VALID_SLOT_TYPES))}"
+            ),
+        )
+    return normalized
+
+
+def _require_slot_types_for_classification(classification: str, slot_types: list[str], *, field_name: str) -> None:
+    if classification in {"critical", "high"} and not slot_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} is required for {classification} classifications",
+        )
 
 
 def bulk_classify_code_files(
@@ -583,31 +636,71 @@ def bulk_classify_code_files(
     updated = 0
     with get_connection() as connection:
         affected_module_ids: set[int] = set()
-        for c in classifications:
-            classification = c.get("classification", "")
+        for idx, c in enumerate(classifications):
+            classification = str(c.get("classification", "")).strip()
             if classification not in _VALID_CLASSIFICATIONS:
-                continue
-            priority = max(0, min(100, int(c.get("analysis_priority", 0))))
-            cursor = connection.execute(
-                """
-                UPDATE code_files
-                SET classification = ?,
-                    role = ?,
-                    slot_types_json = ?,
-                    analysis_priority = ?,
-                    analysis_status = 'classified',
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE engagement_id = ? AND id = ?
-                """,
-                (
-                    classification,
-                    c.get("role", ""),
-                    _json_list_text(c.get("slot_types")),
-                    priority,
-                    engagement.id,
-                    c["file_id"],
-                ),
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"classifications[{idx}].classification must be one of: "
+                        f"{', '.join(sorted(_VALID_CLASSIFICATIONS))}"
+                    ),
+                )
+            slot_types = _normalize_slot_types(
+                c.get("slot_types"),
+                field_name=f"classifications[{idx}].slot_types",
             )
+            _require_slot_types_for_classification(
+                classification,
+                slot_types,
+                field_name=f"classifications[{idx}].slot_types",
+            )
+            language = c.get("language")
+            priority = max(0, min(100, int(c.get("analysis_priority", 0))))
+            if language is None:
+                cursor = connection.execute(
+                    """
+                    UPDATE code_files
+                    SET classification = ?,
+                        role = ?,
+                        slot_types_json = ?,
+                        analysis_priority = ?,
+                        analysis_status = 'classified',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND id = ?
+                    """,
+                    (
+                        classification,
+                        c.get("role", ""),
+                        _json_list_text(slot_types),
+                        priority,
+                        engagement.id,
+                        c["file_id"],
+                    ),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE code_files
+                    SET classification = ?,
+                        role = ?,
+                        slot_types_json = ?,
+                        language = ?,
+                        analysis_priority = ?,
+                        analysis_status = 'classified',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND id = ?
+                    """,
+                    (
+                        classification,
+                        c.get("role", ""),
+                        _json_list_text(slot_types),
+                        str(language).strip(),
+                        priority,
+                        engagement.id,
+                        c["file_id"],
+                    ),
+                )
             if cursor.rowcount > 0:
                 updated += 1
                 module_row = connection.execute(
@@ -624,7 +717,7 @@ def bulk_classify_code_files(
 _CODE_FILE_ALLOWED_FIELDS = frozenset({
     "classification", "role", "analysis_priority", "analysis_status",
     "analysis_depth", "skip_reason", "variant_check_status", "module_id",
-    "notes", "slot_types_json",
+    "notes", "slot_types_json", "language",
 })
 
 
@@ -671,6 +764,38 @@ def update_code_file(
                         detail="module_id must reference a module in the same repo",
                     )
                 normalized_kwargs["module_id"] = module_id
+
+        if "classification" in normalized_kwargs:
+            classification = str(normalized_kwargs["classification"]).strip()
+            if classification not in _VALID_CLASSIFICATIONS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "classification must be one of: "
+                        + ", ".join(sorted(_VALID_CLASSIFICATIONS))
+                    ),
+                )
+            normalized_kwargs["classification"] = classification
+
+        if "slot_types_json" in normalized_kwargs:
+            normalized_kwargs["slot_types_json"] = _normalize_slot_types(
+                normalized_kwargs["slot_types_json"],
+                field_name="slot_types_json",
+            )
+
+        effective_classification = str(
+            normalized_kwargs.get("classification", file_row["classification"] or "")
+        ).strip()
+        effective_slot_types = (
+            normalized_kwargs["slot_types_json"]
+            if "slot_types_json" in normalized_kwargs
+            else _json_decode(file_row["slot_types_json"], [])
+        )
+        _require_slot_types_for_classification(
+            effective_classification,
+            effective_slot_types,
+            field_name="slot_types_json",
+        )
 
         for key, value in normalized_kwargs.items():
             if key not in _CODE_FILE_ALLOWED_FIELDS:
@@ -861,7 +986,9 @@ def bulk_create_queue_items(
             file_id = int(item["file_id"])
 
             batch_theme = item.get("batch_theme", "")
-            slot_types_json = _json_list_text(item.get("slot_types"))
+            slot_types_json = _json_list_text(
+                _normalize_slot_types(item.get("slot_types"), field_name="slot_types")
+            )
             guidance_hypotheses_json = _json_list_text(item.get("guidance_hypotheses"))
 
             cursor = connection.execute(
@@ -964,6 +1091,11 @@ def fetch_queue_items(
             item["guidance_hypotheses"] = _json_decode(item.get("guidance_hypotheses_json"), [])
             item["file"] = _hydrate_code_file(file_rows[int(row["file_id"])])
             item["repo"] = _hydrate_code_repo(repo_rows[int(file_rows[int(row["file_id"])]["repo_id"])])
+            item["applicable_vuln_classes"] = _applicable_families_for_file(
+                item["file"].get("slot_types", []),
+                language=str(item["file"].get("language", "")),
+                role=str(item["file"].get("role", "")),
+            )
             payload.append(item)
     return payload
 
@@ -1004,6 +1136,7 @@ def _validate_completion_coverage(file_row: dict[str, Any], cwe_coverage: list[d
     classification = str(file_row.get("classification", ""))
     slot_types = _json_decode(file_row.get("slot_types_json"), [])
     language = str(file_row.get("language", ""))
+    role = str(file_row.get("role", ""))
 
     if classification in {"critical", "high"} and not slot_types:
         raise HTTPException(
@@ -1014,7 +1147,7 @@ def _validate_completion_coverage(file_row: dict[str, Any], cwe_coverage: list[d
             ),
         )
 
-    applicable = _applicable_families_for_slots(slot_types, language)
+    applicable = _applicable_families_for_file(slot_types, language=language, role=role)
     if classification in {"critical", "high"} and not applicable:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1787,7 +1920,7 @@ def code_coverage_summary(
         effort_file_rows = connection.execute(
             f"""
             SELECT f.id AS file_id, f.file_path, f.classification, f.analysis_status, f.slot_types_json,
-                   f.language, q.cwe_coverage_json
+                   f.language, f.role, q.cwe_coverage_json
             FROM code_files f
             LEFT JOIN code_analysis_queue q ON q.file_id = f.id AND q.engagement_id = f.engagement_id AND q.status = 'done'
             WHERE f.engagement_id = ? AND f.classification IN ('critical', 'high'){repo_clause}
@@ -1807,6 +1940,7 @@ def code_coverage_summary(
                     "has_done_item": False,
                     "slot_types": _json_decode(erow["slot_types_json"], []),
                     "language": erow["language"] or "",
+                    "role": erow["role"] or "",
                 }
             if erow["cwe_coverage_json"] is not None:
                 file_meta[fid]["has_done_item"] = True
@@ -1831,7 +1965,11 @@ def code_coverage_summary(
                 effort_warnings.append(msg)
                 continue
 
-            applicable = _applicable_families_for_slots(slot_types, meta.get("language", ""))
+            applicable = _applicable_families_for_file(
+                slot_types,
+                language=meta.get("language", ""),
+                role=meta.get("role", ""),
+            )
             if not applicable:
                 msg = (
                     f"{meta['classification'].capitalize()} file {meta['file_path']}: "
@@ -1897,7 +2035,7 @@ def code_coverage_summary(
 
 
 # =========================================================================
-# Slot-to-vuln-class mapping (mirrors agent CLI SLOT_VULN_CLASSES)
+# Slot-to-vuln-class mapping
 # =========================================================================
 
 SLOT_VULN_CLASSES: dict[str, dict[str, list[str]]] = {
@@ -1914,37 +2052,78 @@ SLOT_VULN_CLASSES: dict[str, dict[str, list[str]]] = {
     "CMD-ARGUMENT": {"all": ["injection", "format-string", "path-traversal"]},
     "CALLBACK-DATA": {"all": ["use-after-free", "race-condition", "type-confusion", "deserialization"]},
     "ENV-VARIABLE": {"all": ["injection", "path-traversal"]},
-    "_crypto": {"all": ["crypto-misuse"]},
-    "_auth": {"all": ["auth-bypass", "web-app-auth"]},
-    "_error": {"all": ["error-handling"]},
+    "SERIALIZED-DATA": {
+        "native": ["buffer-overflow", "integer-overflow", "type-confusion", "deserialization"],
+        "managed": ["deserialization"],
+    },
 }
 
 
 NATIVE_LANGUAGES = frozenset({"c", "c++", "cpp"})
 
+ROLE_CONTEXT_VULN_CLASSES: tuple[tuple[tuple[str, ...], dict[str, list[str]]], ...] = (
+    (("crypto", "cipher", "tls", "ssl", "digest", "hmac", "jwt", "x509"), {"all": ["crypto-misuse"]}),
+    (("auth", "oauth", "session", "login", "signin", "permission", "rbac", "acl", "sso"), {"all": ["auth-bypass", "web-app-auth"]}),
+    (("error", "exception", "fallback", "retry", "recovery"), {"all": ["error-handling"], "native": ["null-dereference"]}),
+    (("allocator", "allocation", "memory", "arena", "pool"), {"native": ["uninitialized-memory"], "all": ["algorithmic-dos"]}),
+    (("parser", "decoder", "deserializer", "deserialize", "serializer", "serialization", "codec", "marshal", "unmarshal", "regex", "regexp"), {"all": ["algorithmic-dos"]}),
+    (("graphql", "resolver", "serializer", "orm", "resource", "controller", "view"), {"managed": ["web-app-data-exposure"]}),
+    (("llm", "prompt", "rag", "mcp", "embedding"), {"all": ["ai-ml-security"]}),
+)
 
-def _applicable_families_for_slots(slot_types: list[str], language: str = "") -> list[str]:
-    """Compute the set of applicable vuln families from a list of slot types.
 
-    When *language* is known, only include families for the matching language
-    group (native for C/C++, managed for everything else).  When unknown,
-    include all groups as a conservative fallback.
-    """
+def _apply_grouped_families(
+    families: set[str],
+    mapping: dict[str, list[str]],
+    *,
+    is_native: bool,
+    lang_known: bool,
+) -> None:
+    for group, group_families in mapping.items():
+        if group == "all":
+            families.update(group_families)
+        elif group == "native" and (is_native or not lang_known):
+            families.update(group_families)
+        elif group == "managed" and (not is_native or not lang_known):
+            families.update(group_families)
+
+
+def _applicable_families_for_file(
+    slot_types: list[str],
+    *,
+    language: str = "",
+    role: str = "",
+) -> list[str]:
+    """Compute canonical applicable vulnerability classes for a classified file."""
     lang_lower = language.lower().strip()
     is_native = lang_lower in NATIVE_LANGUAGES
     lang_known = bool(lang_lower)
+    role_lower = role.lower().strip()
 
     families: set[str] = set()
     for slot in slot_types:
-        mapping = SLOT_VULN_CLASSES.get(slot, {})
-        for group, group_families in mapping.items():
-            if group == "all":
-                families.update(group_families)
-            elif group == "native" and (is_native or not lang_known):
-                families.update(group_families)
-            elif group == "managed" and (not is_native or not lang_known):
-                families.update(group_families)
+        _apply_grouped_families(
+            families,
+            SLOT_VULN_CLASSES.get(slot, {}),
+            is_native=is_native,
+            lang_known=lang_known,
+        )
+
+    for keywords, mapping in ROLE_CONTEXT_VULN_CLASSES:
+        if any(keyword in role_lower for keyword in keywords):
+            _apply_grouped_families(
+                families,
+                mapping,
+                is_native=is_native,
+                lang_known=lang_known,
+            )
+
     return sorted(families)
+
+
+def _applicable_families_for_slots(slot_types: list[str], language: str = "") -> list[str]:
+    """Backward-compatible slot-only family computation."""
+    return _applicable_families_for_file(slot_types, language=language)
 
 
 # =========================================================================
@@ -2028,6 +2207,14 @@ def requeue_triggered_files(
             existing_slots = {str(slot) for slot in bucket["slot_types"]}
             for slot in item.get("slot_types") or []:
                 slot_name = str(slot).strip()
+                if slot_name not in _VALID_SLOT_TYPES:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"slot_types contains invalid values: {slot_name}. "
+                            f"Allowed values: {', '.join(sorted(_VALID_SLOT_TYPES))}"
+                        ),
+                    )
                 if slot_name and slot_name not in existing_slots:
                     bucket["slot_types"].append(slot_name)
                     existing_slots.add(slot_name)
@@ -2123,7 +2310,7 @@ def code_coverage_cwe_detail(
         file_rows = connection.execute(
             f"""
             SELECT f.id AS file_id, f.file_path, f.classification, f.slot_types_json,
-                   f.analysis_status, f.loc, f.language
+                   f.analysis_status, f.loc, f.language, f.role
             FROM code_files f
             WHERE f.engagement_id = ? AND f.classification IN ('critical', 'high'){repo_clause}
             ORDER BY f.analysis_priority DESC, f.id ASC
@@ -2179,7 +2366,11 @@ def code_coverage_cwe_detail(
         for fr in file_rows:
             fid = int(fr["file_id"])
             slot_types = _json_decode(fr["slot_types_json"], [])
-            applicable = _applicable_families_for_slots(slot_types, fr["language"] or "")
+            applicable = _applicable_families_for_file(
+                slot_types,
+                language=fr["language"] or "",
+                role=fr["role"] or "",
+            )
             merged_entries = list(cwe_by_file.get(fid, {}).values())
             files_detail.append({
                 "file_id": fid,

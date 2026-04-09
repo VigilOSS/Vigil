@@ -178,6 +178,11 @@ For each critical and high file, annotate which Shannon slot types apply:
 | `SERIALIZED-DATA` | Binary/structured serialization formats | protobuf, ASN.1, flatbuffers, CBOR, MessagePack, BSON |
 
 A file may have multiple slot types. Record the primary slot type and any secondary ones.
+Use a precise role label for each critical/high file because the backend derives additional
+coverage families from role + language. Prefer labels like `auth_handler`, `crypto_impl`,
+`error_handler`, `memory_allocator`, `graphql_resolver`, `llm_orchestrator`, and
+`deserializer` over generic labels like `handler` or `utils`. If ingestion guessed the
+language wrong, emit a `language` correction in the classification record.
 
 ## Classification Decision Framework
 

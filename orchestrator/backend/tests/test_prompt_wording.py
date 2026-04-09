@@ -153,6 +153,8 @@ def test_code_analysis_prompt_uses_current_cli_contracts():
     assert "code-dispatch needs-context" in operator_prompt
     assert "no pending triggers" in operator_prompt
     assert "--require-gate-pass" in operator_prompt
+    assert "applicable_vuln_classes" in operator_prompt
+    assert "Every `critical` and `high` file has at least one slot-type annotation" in architect_prompt
 
 
 def test_code_analysis_agents_use_current_phase_numbers():
