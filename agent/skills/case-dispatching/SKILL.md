@@ -12,31 +12,30 @@ This skill is coordination-only. Use it to inspect the work buffer, route batche
 
 ## When to Activate
 
-- After `./scripts/init_engagement.sh ...` when `cases.db` is created
+- Phase 3 (Consume & Test) after surface-collector has populated the work buffer
 - When pending work items exist in the work buffer
 - When a producer has added new work items
 
 ## The Consumption Loop
 
-**CRITICAL: Fetch work items by type SEPARATELY. Route per table below. NEVER mix types.
-NEVER send page/js/css/data to vulnerability-analyst. NEVER send api/form/upload to source-analyzer.**
+**Routing rule: Fetch work items by type separately and route per the table below. Each agent type is specialized — mixing types produces shallow analysis because vulnerability-analyst lacks the DOM/JS parsing context that source-analyzer has, and source-analyzer lacks the request-crafting methodology that vulnerability-analyst has.**
 
-Each iteration:
+Each iteration (set `DB="$DIR/cases.db"`):
 ```
-1. Reset stale: ./scripts/dispatcher.sh $DB reset-stale 10
-2. Check stats: ./scripts/dispatcher.sh $DB stats
+1. Reset stale: ./scripts/assess.py dispatch "$DB" reset-stale 10
+2. Check stats: ./scripts/assess.py dispatch "$DB" stats
 3. Fetch and route by type (vulnerability-analyst and source-analyzer can run IN PARALLEL):
 
    vulnerability-analyst: api, api-spec, form, upload, graphql, websocket
    source-analyzer: page, javascript, stylesheet, data
 
-   ./scripts/dispatcher.sh $DB fetch <type> 10 <agent_name>
+   ./scripts/assess.py dispatch "$DB" fetch <type> 10 <agent_name>
 
 4. On subagent return:
-   - Done: ./scripts/dispatcher.sh $DB done "id1,id2,..."
-   - New endpoints: feed them back through `recon_ingest.sh` or `spec_ingest.sh` so backend state is created first
-   - Findings: write structured finding state first with `record_finding.sh`, then keep findings.md synchronized
-   - Errors: ./scripts/dispatcher.sh $DB error "id1,id2,..."
+   - Done: ./scripts/assess.py dispatch "$DB" done "id1,id2,..."
+   - New endpoints: feed them back through `assess.py ingest-endpoints "$DB" <source>` or `assess.py ingest-spec "$DB" <spec-file>` so backend state is created first
+   - Findings: write structured finding state first with `assess.py record-finding`, then keep findings.md synchronized
+   - Errors: ./scripts/assess.py dispatch "$DB" error "id1,id2,..."
 5. pending=0 and producers stopped → report completion
 6. Otherwise → loop back to step 1
 ```
@@ -61,7 +60,7 @@ Each iteration:
 ## Progress Display (after EVERY batch)
 
 ```
-Phases: [x] Recon  [x] Collect  [>] Consume & Test  [ ] Exploit  [ ] Report
+Phases: [x] Recon (pass 1)  [x] Recon (gate ✓)  [x] Collect  [>] Consume & Test  [ ] Exploit  [ ] Report
 [work-buffer] 120/495 done (24%) | api: 15/21 | page: 98/464 | js: 7/10 | findings: 5
 ```
 ```bash
@@ -73,7 +72,7 @@ sqlite3 "$DB" ".timeout 5000" "
 
 ## Key Rules
 
-- ALWAYS use `./scripts/dispatcher.sh` for work-buffer ops (never read cases.db directly)
+- Use `./scripts/assess.py dispatch "$DB" <action>` for all work-buffer operations — reading cases.db directly bypasses the backend sync layer and can produce stale or inconsistent state
 - Treat this skill as host-side coordination only. All real target testing stays in Kali MCP.
 - Record findings in backend state immediately and keep findings.md synchronized
 - Re-ingest new endpoints through backend-first producers; let the work buffer mirror the resulting canonical ids
@@ -85,12 +84,12 @@ sqlite3 "$DB" ".timeout 5000" "
 ## Dispatcher Quick Reference
 
 ```bash
-DB="<engagement_dir>/cases.db"
-./scripts/dispatcher.sh "$DB" stats
-./scripts/dispatcher.sh "$DB" fetch <type> <limit> <agent_name>
-./scripts/dispatcher.sh "$DB" done "id1,id2,id3"
-./scripts/dispatcher.sh "$DB" error "id1,id2,id3"
-./scripts/dispatcher.sh "$DB" reset-stale <minutes>
-echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | ./scripts/dispatcher.sh "$DB" requeue
-echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | ./scripts/dispatcher.sh "$DB" requeue
+DB="$DIR/cases.db"
+./scripts/assess.py dispatch "$DB" stats
+./scripts/assess.py dispatch "$DB" fetch <type> <limit> <agent_name>
+./scripts/assess.py dispatch "$DB" done "id1,id2,id3"
+./scripts/assess.py dispatch "$DB" error "id1,id2,id3"
+./scripts/assess.py dispatch "$DB" reset-stale <minutes>
+echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | ./scripts/assess.py dispatch "$DB" requeue
+echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | ./scripts/assess.py dispatch "$DB" requeue
 ```

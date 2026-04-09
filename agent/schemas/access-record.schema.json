@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/access-record.schema.json",
+  "title": "Assessment Access Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["access_key", "principal", "access_level", "target_ref"],
+  "properties": {
+    "access_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "credential_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "service_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "principal": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "access_level": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "target_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "status": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "evidence_ref": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

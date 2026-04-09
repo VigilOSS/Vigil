@@ -84,7 +84,6 @@ class CaseCollector:
     def __init__(self):
         self.db: sqlite3.Connection | None = None
         self.scope: list[str] = []
-        self.out_of_scope: list[str] = []
         self.engagement_dir: str = ""
         self.orchestrator_base_url = os.getenv("ORCHESTRATOR_BASE_URL", "").rstrip("/")
         self.backend_warning_emitted = False
@@ -155,30 +154,24 @@ class CaseCollector:
         try:
             with open(scope_path, "r") as fh:
                 data = json.load(fh)
-            if isinstance(data, list):
-                self.scope = data
-                self.out_of_scope = []
-            elif isinstance(data, dict):
-                raw_scope = []
-                raw_scope.extend([data.get("hostname", "")])
-                raw_scope.extend(data.get("scope_hosts", []) or [])
-                raw_scope.extend(data.get("scope", []) or [])
-                if data.get("scope_mode") == "wildcard" and data.get("hostname"):
-                    raw_scope.append(f"*.{data['hostname']}")
-                self.scope = [item for item in raw_scope if isinstance(item, str) and item]
-                self.out_of_scope = [
-                    item
-                    for item in (data.get("out_of_scope_hosts", []) or [])
-                    if isinstance(item, str) and item
-                ]
+            if isinstance(data, dict):
+                raw_hosts = []
+                for key in ("hosts", "scope_hosts", "scope"):
+                    value = data.get(key, [])
+                    if isinstance(value, list):
+                        raw_hosts.extend(value)
+                hostname = data.get("hostname")
+                if isinstance(hostname, str) and hostname:
+                    raw_hosts.append(hostname)
+                self.scope = list(dict.fromkeys(
+                    item for item in raw_hosts if isinstance(item, str) and item
+                ))
             else:
                 self.scope = []
-                self.out_of_scope = []
             ctx.log.info(f"proxy_addon: loaded {len(self.scope)} scope entries")
         except (FileNotFoundError, json.JSONDecodeError) as exc:
             ctx.log.warn(f"proxy_addon: cannot load scope — {exc}")
             self.scope = []
-            self.out_of_scope = []
 
     def _backend_configured(self) -> bool:
         return bool(self.orchestrator_base_url and self.engagement_dir)
@@ -205,18 +198,6 @@ class CaseCollector:
                     return True
             else:
                 if hostname == pattern:
-                    return True
-        return False
-
-    def _is_explicitly_out_of_scope(self, hostname: str) -> bool:
-        hostname = hostname.lower()
-        for pattern in self.out_of_scope:
-            pattern = pattern.lower()
-            if hostname == pattern:
-                return True
-            if pattern.startswith("*."):
-                suffix = pattern[1:]
-                if hostname == pattern[2:] or hostname.endswith(suffix):
                     return True
         return False
 
@@ -655,7 +636,7 @@ class CaseCollector:
         path = parsed.path or "/"
 
         # Scope check
-        if self._is_explicitly_out_of_scope(hostname) or not self._is_in_scope(hostname):
+        if not self._is_in_scope(hostname):
             return
 
         # Noise filter

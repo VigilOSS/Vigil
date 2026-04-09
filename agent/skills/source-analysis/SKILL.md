@@ -15,7 +15,9 @@ origin: AI Threat Hunting
 
 ## Tools
 
-`curl`, `grep`/`sed`/`awk`, `jq`
+- `LinkFinder` — automated endpoint extraction from JavaScript files
+- `SecretFinder` — scan JS files for API keys, tokens, and secrets
+- `curl`, `grep`/`sed`/`awk`, `jq` — manual extraction and verification
 
 ## Division of Labor
 
@@ -42,6 +44,30 @@ HTML comments, meta tags (canonical, CSRF, API base), inline config (`window.__C
 ```bash
 curl -sL <js-url> | grep -oE '["'"'"'](/[a-zA-Z0-9_/\-\.]+)["'"'"']' | sort -u
 ```
+
+#### Automated JS Endpoint Extraction
+
+```bash
+# LinkFinder — extract endpoints from JS (far more thorough than manual grep on minified code)
+python3 linkfinder.py -i https://TARGET/static/js/app.js -o cli
+
+# Batch all JS files discovered in step 1
+for js_url in $(cat /engagement/scans/js_files.txt); do
+  python3 linkfinder.py -i "$js_url" -o cli
+done | sort -u > /engagement/scans/js_endpoints.txt
+
+# SecretFinder — scan for API keys, tokens, credentials in JS
+python3 SecretFinder.py -i https://TARGET/static/js/app.js -o cli
+
+# Batch scan
+for js_url in $(cat /engagement/scans/js_files.txt); do
+  python3 SecretFinder.py -i "$js_url" -o cli
+done | sort -u > /engagement/scans/js_secrets.txt
+```
+
+Use LinkFinder and SecretFinder as the primary extraction pass. Fall back to manual grep
+for edge cases they miss (inline scripts, dynamically loaded chunks, non-standard patterns).
+
 - API calls: fetch(), axios, XHR, $.ajax patterns
 - SPA routes: React `path="/..."`, Vue `{ path: }`, Angular `{ path: }`
 - Secrets: api_key, token, secret, password assignments; AWS `AKIA[A-Z0-9]{16}`; JWT `eyJ...`
@@ -61,8 +87,8 @@ the backend ledger:
 
 ```bash
 curl -sL "https://TARGET/openapi.json" -o /engagement/scans/openapi.json
-./scripts/spec_ingest.sh "$ENGAGEMENT_DIR/cases.db" "$ENGAGEMENT_DIR/scans/openapi.json"
-./scripts/dispatcher.sh "$ENGAGEMENT_DIR/cases.db" stats
+./scripts/assess.py ingest-spec "$ENGAGEMENT_DIR/cases.db" "$ENGAGEMENT_DIR/scans/openapi.json"
+./scripts/assess.py dispatch "$ENGAGEMENT_DIR/cases.db" stats
 ```
 
 This creates durable request/service coverage candidates and, when the local buffer is in use,
@@ -85,3 +111,21 @@ Fetch .map → extract `sources` array → reconstruct original source for analy
 3. Frontend routes revealing app structure
 4. Hidden form fields and debug endpoints
 5. Source maps and debug artifacts
+
+## Supply Chain Checks
+
+- [ ] Identify internal/private package names from exposed manifests or JS source maps
+- [ ] Check if private package names exist on public registries (npm, PyPI, RubyGems)
+- [ ] Look for typosquatting candidates: common misspellings of popular packages in dependency lists
+- [ ] Check for scoped vs unscoped npm packages — `@company/pkg` vs `company-pkg`
+- [ ] Check for lockfile manipulation: does the app use lockfiles for reproducible builds?
+- [ ] Verify that `package-lock.json` registry URLs point to expected registries (not attacker-controlled)
+- [ ] Check for mixed registries in lockfiles (public + private pointing to wrong source)
+- [ ] Verify CDN-loaded scripts/styles have `integrity` attributes (SRI)
+- [ ] Check if `<script>` tags loading from third-party domains use SRI hashes
+- [ ] Test if missing SRI allows content injection via compromised CDN
+
+## Extended Resources
+
+- `agent/references/payloads/info-disclosure-probes.md` — standard probe endpoints, metadata paths, and environment file paths
+- `agent/references/tools/exploitation/dalfox.md` — for JS-discovered parameterized URLs that may be XSS candidates

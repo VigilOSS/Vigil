@@ -67,51 +67,103 @@ warn() { echo -e "  ${YELLOW}[WARN]${NC} $1"; }
 info() { echo -e "  ${BLUE}[INFO]${NC} $1"; }
 
 ERRORS=0
-PRESERVE_ROOT=""
+UPGRADE_IN_PROGRESS=false
 
 cleanup_on_failure() {
-  if [ -n "$PRESERVE_ROOT" ] && [ -d "$PRESERVE_ROOT" ]; then
+  if $UPGRADE_IN_PROGRESS; then
     echo "" >&2
-    fail "Install failed — preserved data is at: $PRESERVE_ROOT"
-    fail "Restore it manually or re-run the installer to retry."
+    warn "Install interrupted during upgrade."
+    info "User data (engagements, database) was not moved or deleted."
+    info "Re-run the installer to complete the upgrade."
   fi
 }
 trap cleanup_on_failure EXIT
 
+# copy_if_exists: copy src to dest. If dest is an existing directory, remove it
+# first to prevent cp -a from nesting (cp -a dir/ existing_dir/ → existing_dir/dir/).
 copy_if_exists() {
   local src="$1"
   local dest="$2"
   if [ -e "$src" ]; then
     mkdir -p "$(dirname "$dest")"
+    if [ -d "$src" ] && [ -d "$dest" ]; then
+      rm -rf "$dest" 2>/dev/null || true
+      # macOS race: Spotlight/Finder can hold files briefly — retry once
+      if [ -d "$dest" ]; then
+        sleep 0.5
+        rm -rf "$dest" 2>/dev/null || true
+      fi
+      # If dest still exists after retries, copy contents into it
+      if [ -d "$dest" ]; then
+        cp -a "$src/." "$dest/"
+        return
+      fi
+    fi
     cp -a "$src" "$dest"
   fi
 }
 
-preserve_install_path() {
-  local install_dir="$1"
-  local preserve_root="$2"
-  local relative_path="$3"
-  local src="$install_dir/$relative_path"
-  local dest="$preserve_root/$relative_path"
-
-  if [ -e "$src" ]; then
-    mkdir -p "$(dirname "$dest")"
-    mv "$src" "$dest"
+# rm_retry: remove a path with one macOS retry on transient "Directory not empty".
+rm_retry() {
+  rm -rf "$1" 2>/dev/null || true
+  if [ -e "$1" ]; then
+    sleep 0.5
+    rm -rf "$1" 2>/dev/null || true
   fi
 }
 
-restore_install_path() {
-  local install_dir="$1"
-  local preserve_root="$2"
-  local relative_path="$3"
-  local src="$preserve_root/$relative_path"
-  local dest="$install_dir/$relative_path"
+# copy_children_except: copy each immediate child of src_dir into dest_dir,
+# skipping any basenames listed in the remaining arguments.
+copy_children_except() {
+  local src_dir="$1"
+  local dest_dir="$2"
+  shift 2
+  local -a excludes=()
+  if [ $# -gt 0 ]; then excludes=("$@"); fi
 
-  if [ -e "$src" ]; then
-    mkdir -p "$(dirname "$dest")"
-    rm -rf "$dest"
-    mv "$src" "$dest"
-  fi
+  mkdir -p "$dest_dir"
+
+  local child name skip exc
+  for child in "$src_dir"/* "$src_dir"/.*; do
+    [ -e "$child" ] || continue
+    name="$(basename "$child")"
+    [ "$name" = "." ] || [ "$name" = ".." ] && continue
+    skip=false
+    for exc in "${excludes[@]+"${excludes[@]}"}"; do
+      if [ "$name" = "$exc" ]; then
+        skip=true
+        break
+      fi
+    done
+    $skip && continue
+    copy_if_exists "$child" "$dest_dir/$name"
+  done
+}
+
+# remove_children_except: delete each immediate child of dir except named basenames.
+remove_children_except() {
+  local dir="$1"
+  shift
+  local -a excludes=()
+  if [ $# -gt 0 ]; then excludes=("$@"); fi
+
+  [ -d "$dir" ] || return 0
+
+  local child name skip exc
+  for child in "$dir"/* "$dir"/.*; do
+    [ -e "$child" ] || continue
+    name="$(basename "$child")"
+    [ "$name" = "." ] || [ "$name" = ".." ] && continue
+    skip=false
+    for exc in "${excludes[@]+"${excludes[@]}"}"; do
+      if [ "$name" = "$exc" ]; then
+        skip=true
+        break
+      fi
+    done
+    $skip && continue
+    rm_retry "$child"
+  done
 }
 
 echo ""
@@ -167,21 +219,12 @@ echo ""
 echo "Step 2: Installing files to $INSTALL_DIR ..."
 echo ""
 
+IS_UPGRADE=false
+
 if $DRY_RUN; then
   info "[DRY RUN] Would install to $INSTALL_DIR"
 else
   mkdir -p "$INSTALL_DIR"
-
-  if [ -d "$INSTALL_DIR/.claude" ] || [ -d "$INSTALL_DIR/.codex" ] || [ -d "$INSTALL_DIR/agent" ] || [ -d "$INSTALL_DIR/docker" ] || [ -f "$INSTALL_DIR/install.sh" ]; then
-    warn "Existing installation detected in $INSTALL_DIR — upgrading"
-    PRESERVE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/security-research-preserve.XXXXXX")"
-    for keep in agent/engagements orchestrator/backend/data .runtime-data .env workspace runtime-home; do
-      preserve_install_path "$INSTALL_DIR" "$PRESERVE_ROOT" "$keep"
-    done
-    rm -rf "$INSTALL_DIR/.claude" "$INSTALL_DIR/.codex" "$INSTALL_DIR/agent" "$INSTALL_DIR/docker" \
-           "$INSTALL_DIR/orchestrator" "$INSTALL_DIR/tests" \
-           "$INSTALL_DIR/README.md" "$INSTALL_DIR/install.sh"
-  fi
 
   RESOLVED_SOURCE="$(cd "$SOURCE_ROOT" && pwd -P)"
   RESOLVED_INSTALL="$(cd "$INSTALL_DIR" && pwd -P)"
@@ -189,6 +232,43 @@ else
   if [ "$RESOLVED_SOURCE" = "$RESOLVED_INSTALL" ]; then
     info "Source and install directories are the same — skipping file copy"
   else
+
+  if [ -d "$INSTALL_DIR/.claude" ] || [ -d "$INSTALL_DIR/.codex" ] || [ -d "$INSTALL_DIR/agent" ] || [ -d "$INSTALL_DIR/docker" ] || [ -f "$INSTALL_DIR/install.sh" ]; then
+    IS_UPGRADE=true
+    UPGRADE_IN_PROGRESS=true
+    warn "Existing installation detected in $INSTALL_DIR — upgrading"
+
+    # Warn if the orchestrator backend appears to be running
+    if command -v lsof >/dev/null 2>&1 && lsof -ti :18000 >/dev/null 2>&1; then
+      warn "Orchestrator backend appears to be running on port 18000"
+      info "The database is preserved in place, but consider restarting the backend after the upgrade."
+    fi
+
+    # ── Selective cleanup ──────────────────────────────────────────
+    # Remove managed code while leaving user data (engagements, DB,
+    # .env, runtime-data) untouched on disk.  This avoids the inode-
+    # replacement problem: a running backend keeps the old DB inode
+    # open, so moving/deleting the file causes silent data loss.
+
+    # Root-level managed files
+    for _f in README.md install.sh CLAUDE.md AGENTS.md; do
+      rm -f "$INSTALL_DIR/$_f" 2>/dev/null || true
+    done
+
+    # Directories that contain no user data — delete entirely
+    for _d in .claude .codex docker tests; do
+      rm_retry "$INSTALL_DIR/$_d"
+    done
+
+    # agent/: remove everything except engagements/
+    remove_children_except "$INSTALL_DIR/agent" engagements
+
+    # orchestrator/: remove everything except backend/
+    remove_children_except "$INSTALL_DIR/orchestrator" backend
+    # orchestrator/backend/: remove everything except data/
+    remove_children_except "$INSTALL_DIR/orchestrator/backend" data
+  fi
+    # Product-specific config
     case "$PRODUCT" in
       claude)
         copy_if_exists "$AGENT_ROOT/.claude" "$INSTALL_DIR/.claude"
@@ -200,11 +280,28 @@ else
         ;;
     esac
 
-    for path in README.md docker orchestrator tests agent install.sh; do
-      copy_if_exists "$SOURCE_ROOT/$path" "$INSTALL_DIR/$path"
-    done
+    if $IS_UPGRADE; then
+      # Copy managed paths, skipping user-data directories in place
+      for _path in README.md docker tests install.sh; do
+        copy_if_exists "$SOURCE_ROOT/$_path" "$INSTALL_DIR/$_path"
+      done
+
+      # agent/: copy all children except engagements/ (kept in place)
+      copy_children_except "$SOURCE_ROOT/agent" "$INSTALL_DIR/agent" engagements
+
+      # orchestrator/: copy all children except backend/ (handled separately)
+      copy_children_except "$SOURCE_ROOT/orchestrator" "$INSTALL_DIR/orchestrator" backend
+      # orchestrator/backend/: copy all children except data/ (DB kept in place)
+      copy_children_except "$SOURCE_ROOT/orchestrator/backend" "$INSTALL_DIR/orchestrator/backend" data
+    else
+      # Fresh install: copy everything
+      for _path in README.md docker orchestrator tests agent install.sh; do
+        copy_if_exists "$SOURCE_ROOT/$_path" "$INSTALL_DIR/$_path"
+      done
+    fi
   fi
 
+  # Remove opposite product's config from agent/
   case "$PRODUCT" in
     claude)
       rm -rf "$INSTALL_DIR/agent/.codex"
@@ -216,13 +313,7 @@ else
       ;;
   esac
 
-  if [ -n "$PRESERVE_ROOT" ] && [ -d "$PRESERVE_ROOT" ]; then
-    for keep in agent/engagements orchestrator/backend/data .runtime-data .env workspace runtime-home; do
-      restore_install_path "$INSTALL_DIR" "$PRESERVE_ROOT" "$keep"
-    done
-    rm -rf "$PRESERVE_ROOT"
-    PRESERVE_ROOT=""
-  fi
+  UPGRADE_IN_PROGRESS=false
 
   if [ -f "$AGENT_ROOT/.env.example" ] && [ ! -f "$INSTALL_DIR/.env" ]; then
     cp "$AGENT_ROOT/.env.example" "$INSTALL_DIR/.env"
@@ -231,8 +322,15 @@ else
 
   if [ -d "$INSTALL_DIR/agent/scripts" ]; then
     chmod +x "$INSTALL_DIR/agent/scripts/"*.sh "$INSTALL_DIR/agent/scripts/lib/"*.sh "$INSTALL_DIR/agent/scripts/hooks/"*.sh 2>/dev/null || true
-    ok "Script permissions set"
+    chmod +x "$INSTALL_DIR/agent/scripts/assess.py" 2>/dev/null || true
   fi
+  chmod +x "$INSTALL_DIR/orchestrator/start_local.sh" 2>/dev/null || true
+  ok "Script permissions set"
+
+  # Ensure expected directories exist (fresh install or first upgrade)
+  mkdir -p "$INSTALL_DIR/.runtime-data"
+  mkdir -p "$INSTALL_DIR/agent/engagements"
+  mkdir -p "$INSTALL_DIR/orchestrator/backend/data"
 fi
 
 echo ""
@@ -245,7 +343,12 @@ elif [ "$SKIP_DOCKER_IMAGE_CHECKS" = "1" ]; then
   warn "Skipping Docker image build/verification (AI_THREAT_HUNTING_SKIP_DOCKER_IMAGE_CHECKS=1)"
 else
   cd "$INSTALL_DIR"
-  if $FORCE_REBUILD || ! docker inspect --type image security-research:latest >/dev/null 2>&1; then
+  _image_exists() {
+    docker inspect --type image "$1" >/dev/null 2>&1 \
+      || docker image inspect "$1" >/dev/null 2>&1 \
+      || [ -n "$(docker images -q "$1" 2>/dev/null)" ]
+  }
+  if $FORCE_REBUILD || ! _image_exists security-research:latest; then
     info "Building security-research runtime image..."
     if docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .; then
       ok "security-research image ready"

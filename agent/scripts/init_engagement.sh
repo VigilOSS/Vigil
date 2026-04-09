@@ -7,11 +7,12 @@ ROOT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 source "$SCRIPT_DIR/lib/auth.sh"
 
 TARGET=""
-SCOPE_MODE=""
-SCOPE_HOSTS_RAW=""
-OUT_OF_SCOPE_RAW=""
+HOSTS_RAW=""
 AUTH_MODE=""
 EXPLOIT_POLICY=""
+MODE="web"
+REPOS=()
+SKIP_PERMISSIONS=0
 
 normalize_target() {
   local raw="$1"
@@ -22,21 +23,83 @@ normalize_target() {
   fi
 }
 
+derive_repo_name() {
+  local raw="$1"
+  python3 - <<'PY' "$raw"
+import sys, os
+from urllib.parse import urlparse
+
+raw = sys.argv[1]
+parsed = urlparse(raw)
+if parsed.scheme in ("http", "https", "ssh", "git"):
+    name = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+else:
+    name = os.path.basename(os.path.abspath(raw))
+name = name.removesuffix(".git")
+print(name or "repo")
+PY
+}
+
+repos_to_json_array() {
+  python3 - "$@" <<'PY'
+import json, sys, os
+from urllib.parse import urlparse
+
+repos = []
+for raw in sys.argv[1:]:
+    parsed = urlparse(raw)
+    if parsed.scheme in ("http", "https", "ssh", "git"):
+        name = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    else:
+        name = os.path.basename(os.path.abspath(raw))
+    name = name.removesuffix(".git") or "repo"
+    repos.append({"path": raw, "name": name})
+print(json.dumps(repos, ensure_ascii=True))
+PY
+}
+
 usage() {
   cat <<'EOF'
-Usage: ./scripts/init_engagement.sh <target-url-or-host> [options]
+Usage: ./scripts/init_engagement.sh [target-url-or-host] [options]
+
+The positional target is optional when --hosts is provided; the first
+host becomes the target automatically.
 
 Options:
-  --scope-mode host_only|explicit_hosts|wildcard
-  --scope-hosts host1,host2,...
-  --out-of-scope-hosts host1,host2,...
+  --mode web|code                    Engagement type (default: web)
+  --hosts host1,host2,*.domain,...   Scope list. Use *.domain for subdomain enum.
   --auth-mode none|auth_json|manual|proxy_capture
   --exploit-policy pause|full_send|selected
+  --repo /path/to/repo|https://...   Repository path or clone URL (code mode, repeatable)
+  --skip-permissions                 Skip interactive permission prompts in launchers
+
+Any host NOT in --hosts is out of scope. Wildcard entries (*.example.com) enable
+subdomain enumeration and allow discovered subdomains of that domain in scope.
 
 Examples:
+  # Web engagement — single host
   ./scripts/init_engagement.sh https://example.com
-  ./scripts/init_engagement.sh app.example.com --scope-mode host_only --auth-mode none --exploit-policy pause
-  ./scripts/init_engagement.sh https://api.example.com --scope-mode explicit_hosts --scope-hosts api.example.com,admin.example.com --auth-mode proxy_capture --exploit-policy selected
+
+  # Web engagement — multiple hosts
+  ./scripts/init_engagement.sh --hosts app.example.com,api.example.com,admin.example.com
+
+  # Web engagement — subdomain enum
+  ./scripts/init_engagement.sh --hosts example.com,*.example.com
+
+  # Code analysis — local repository
+  ./scripts/init_engagement.sh --mode code --repo /path/to/repo
+
+  # Code analysis — multiple repositories
+  ./scripts/init_engagement.sh --mode code --repo /path/to/repo1 --repo /path/to/repo2
+
+  # Code analysis — clone URL
+  ./scripts/init_engagement.sh --mode code --repo https://github.com/org/repo
+
+  # Code analysis — positional shorthand (single repo only)
+  ./scripts/init_engagement.sh --mode code /path/to/repo
+
+  # Code analysis — skip permissions
+  ./scripts/init_engagement.sh --mode code --repo /path/to/repo --skip-permissions
 EOF
 }
 
@@ -157,7 +220,7 @@ This engagement directory is only the run-artifact root. When you start Codex he
 - Scripts: ${ROOT_DIR}/scripts
 
 Artifact sync:
-- Use ${ROOT_DIR}/scripts/record_finding.sh and ${ROOT_DIR}/scripts/append_surface.sh
+- Use ${ROOT_DIR}/scripts/assess.py for all assessment operations (record-finding, record-surface, fetch, post, etc.)
 - When a shared prompt references \`./scripts/...\`, resolve it against ${ROOT_DIR}/scripts from this engagement session
 - Start Codex for this engagement with ${eng_dir}/start_codex.sh so ENGAGEMENT_DIR is exported automatically
 - The local ${eng_dir}/.orchestrator.env provides the default orchestrator base URL for backend-sync scripts; install-root .env can override it
@@ -184,7 +247,7 @@ This engagement directory is only the run-artifact root. When you start Claude h
 - Scripts: ${ROOT_DIR}/scripts
 
 Artifact sync:
-- Use ${ROOT_DIR}/scripts/record_finding.sh and ${ROOT_DIR}/scripts/append_surface.sh
+- Use ${ROOT_DIR}/scripts/assess.py for all assessment operations (record-finding, record-surface, fetch, post, etc.)
 - When a shared prompt references \`./scripts/...\`, resolve it against ${ROOT_DIR}/scripts from this engagement session
 - Start Claude for this engagement with ${eng_dir}/start_claude.sh so ENGAGEMENT_DIR is exported automatically
 - The local ${eng_dir}/.orchestrator.env provides the default orchestrator base URL for backend-sync scripts; install-root .env can override it
@@ -195,43 +258,94 @@ EOF
 write_engagement_launchers() {
   local eng_dir="${1:?engagement dir required}"
   local client_kind="${2:?client kind required}"
+  local skip_perms="${3:-0}"
 
   if [[ "$client_kind" == "codex" || "$client_kind" == "both" ]]; then
-    cat > "$eng_dir/start_codex.sh" <<'EOF'
+    cat > "$eng_dir/start_codex.sh" <<'LAUNCHER_HEAD'
 #!/usr/bin/env bash
 set -euo pipefail
 
 ENGAGEMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export ENGAGEMENT_DIR
 AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
+INSTALL_ROOT="$(cd "$AGENT_ROOT/.." && pwd)"
 
-if [[ -f "$AGENT_ROOT/scripts/lib/orchestrator_env.sh" ]]; then
-  # shellcheck source=/dev/null
-  . "$AGENT_ROOT/scripts/lib/orchestrator_env.sh"
-  load_orchestrator_env "$ENGAGEMENT_DIR"
+resolve_env_var_from_file() {
+  local env_file="${1:?env file required}"
+  local key="${2:?key required}"
+  [[ -f "$env_file" ]] || return 0
+
+  (
+    unset "$key"
+    set -a
+    # shellcheck disable=SC1090
+    . "$env_file" >/dev/null 2>&1 || exit 0
+    printf '%s' "${!key:-}"
+  )
+}
+
+if [[ -z "${ORCHESTRATOR_BASE_URL:-}" ]]; then
+  for env_file in \
+    "$ENGAGEMENT_DIR/.orchestrator.env" \
+    "$INSTALL_ROOT/.orchestrator.env" \
+    "$INSTALL_ROOT/.env"
+  do
+    candidate="$(resolve_env_var_from_file "$env_file" ORCHESTRATOR_BASE_URL)"
+    if [[ -n "$candidate" ]]; then
+      export ORCHESTRATOR_BASE_URL="${candidate%/}"
+    fi
+  done
 fi
-
-exec codex "$@"
-EOF
+LAUNCHER_HEAD
+    if [[ "$skip_perms" -eq 1 ]]; then
+      printf '\nexec codex --full-auto "$@"\n' >> "$eng_dir/start_codex.sh"
+    else
+      printf '\nexec codex "$@"\n' >> "$eng_dir/start_codex.sh"
+    fi
   fi
 
   if [[ "$client_kind" == "claude" || "$client_kind" == "both" ]]; then
-    cat > "$eng_dir/start_claude.sh" <<'EOF'
+    cat > "$eng_dir/start_claude.sh" <<'LAUNCHER_HEAD'
 #!/usr/bin/env bash
 set -euo pipefail
 
 ENGAGEMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export ENGAGEMENT_DIR
 AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
+INSTALL_ROOT="$(cd "$AGENT_ROOT/.." && pwd)"
 
-if [[ -f "$AGENT_ROOT/scripts/lib/orchestrator_env.sh" ]]; then
-  # shellcheck source=/dev/null
-  . "$AGENT_ROOT/scripts/lib/orchestrator_env.sh"
-  load_orchestrator_env "$ENGAGEMENT_DIR"
+resolve_env_var_from_file() {
+  local env_file="${1:?env file required}"
+  local key="${2:?key required}"
+  [[ -f "$env_file" ]] || return 0
+
+  (
+    unset "$key"
+    set -a
+    # shellcheck disable=SC1090
+    . "$env_file" >/dev/null 2>&1 || exit 0
+    printf '%s' "${!key:-}"
+  )
+}
+
+if [[ -z "${ORCHESTRATOR_BASE_URL:-}" ]]; then
+  for env_file in \
+    "$ENGAGEMENT_DIR/.orchestrator.env" \
+    "$INSTALL_ROOT/.orchestrator.env" \
+    "$INSTALL_ROOT/.env"
+  do
+    candidate="$(resolve_env_var_from_file "$env_file" ORCHESTRATOR_BASE_URL)"
+    if [[ -n "$candidate" ]]; then
+      export ORCHESTRATOR_BASE_URL="${candidate%/}"
+    fi
+  done
 fi
-
-exec claude "$@"
-EOF
+LAUNCHER_HEAD
+    if [[ "$skip_perms" -eq 1 ]]; then
+      printf '\nexec claude --dangerously-skip-permissions "$@"\n' >> "$eng_dir/start_claude.sh"
+    else
+      printf '\nexec claude "$@"\n' >> "$eng_dir/start_claude.sh"
+    fi
   fi
 
   if [[ "$client_kind" == "codex" || "$client_kind" == "both" ]]; then
@@ -240,41 +354,6 @@ EOF
   if [[ "$client_kind" == "claude" || "$client_kind" == "both" ]]; then
     chmod +x "$eng_dir/start_claude.sh"
   fi
-}
-
-derive_scope_hosts_json() {
-  local hostname="${1:?hostname required}"
-  local scope_mode="${2:?scope_mode required}"
-  local explicit_hosts_raw="${3:-}"
-  python3 - <<'PY' "$hostname" "$scope_mode" "$explicit_hosts_raw"
-import json
-import sys
-
-hostname, scope_mode, explicit_hosts_raw = sys.argv[1:]
-hosts = []
-if scope_mode == "host_only":
-    hosts = [hostname]
-elif scope_mode == "wildcard":
-    hosts = [hostname, f"*.{hostname}"]
-elif scope_mode == "explicit_hosts":
-    for part in explicit_hosts_raw.split(","):
-        item = part.strip()
-        if item:
-            hosts.append(item)
-    if hostname not in hosts:
-        hosts.insert(0, hostname)
-else:
-    raise SystemExit(f"unsupported scope mode: {scope_mode}")
-
-deduped = []
-seen = set()
-for host in hosts:
-    lowered = host.lower()
-    if lowered not in seen:
-        seen.add(lowered)
-        deduped.append(host)
-print(json.dumps(deduped, ensure_ascii=True))
-PY
 }
 
 require_interactive_or_die() {
@@ -289,19 +368,23 @@ require_interactive_or_die() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --scope-mode)
-      SCOPE_MODE="${2:-}"
-      [[ -n "$SCOPE_MODE" ]] || { echo "--scope-mode requires a value" >&2; exit 1; }
+    --mode)
+      MODE="${2:-}"
+      [[ -n "$MODE" ]] || { echo "--mode requires a value" >&2; exit 1; }
       shift 2
       ;;
-    --scope-hosts)
-      SCOPE_HOSTS_RAW="${2:-}"
-      [[ -n "$SCOPE_HOSTS_RAW" ]] || { echo "--scope-hosts requires a value" >&2; exit 1; }
+    --repo)
+      [[ -n "${2:-}" ]] || { echo "--repo requires a value" >&2; exit 1; }
+      REPOS+=("$2")
       shift 2
       ;;
-    --out-of-scope-hosts)
-      OUT_OF_SCOPE_RAW="${2:-}"
-      [[ -n "${2:-}" ]] || { echo "--out-of-scope-hosts requires a value" >&2; exit 1; }
+    --skip-permissions)
+      SKIP_PERMISSIONS=1
+      shift
+      ;;
+    --hosts)
+      HOSTS_RAW="${2:-}"
+      [[ -n "$HOSTS_RAW" ]] || { echo "--hosts requires a value" >&2; exit 1; }
       shift 2
       ;;
     --auth-mode)
@@ -329,38 +412,109 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$TARGET" ]]; then
-  require_interactive_or_die "target"
-  TARGET="$(prompt_text "Target URL or host")"
-fi
-
-if [[ -z "$SCOPE_MODE" ]]; then
-  if [[ -t 0 ]]; then
-    SCOPE_MODE="$(prompt_choice "Scope mode" "host_only" "host_only" "explicit_hosts" "wildcard")"
-  else
-    SCOPE_MODE="host_only"
-  fi
-fi
-case "$SCOPE_MODE" in
-  host_only|explicit_hosts|wildcard) ;;
+case "$MODE" in
+  web|code) ;;
   *)
-    echo "--scope-mode must be one of: host_only, explicit_hosts, wildcard" >&2
+    echo "--mode must be one of: web, code" >&2
     exit 1
     ;;
 esac
 
-if [[ "$SCOPE_MODE" == "explicit_hosts" && -z "$SCOPE_HOSTS_RAW" ]]; then
-  require_interactive_or_die "scope hosts"
-  SCOPE_HOSTS_RAW="$(prompt_text "Comma-separated in-scope hosts")"
-fi
+# --- Code mode: resolve repo(s), force safe defaults for web-only fields ---
+if [[ "$MODE" == "code" ]]; then
+  # Accept repo from --repo (repeatable) or the positional arg
+  if [[ ${#REPOS[@]} -gt 0 && -n "$TARGET" ]]; then
+    echo "In code mode, provide repos via --repo or as a positional arg, not both" >&2
+    exit 1
+  fi
+  if [[ ${#REPOS[@]} -eq 0 && -n "$TARGET" ]]; then
+    REPOS+=("$TARGET")
+    TARGET=""
+  fi
+  if [[ ${#REPOS[@]} -eq 0 ]]; then
+    require_interactive_or_die "repo"
+    while true; do
+      repo_input="$(prompt_text "Repository path or clone URL")"
+      if [[ -n "$repo_input" ]]; then
+        REPOS+=("$repo_input")
+        printf 'Added: %s\n' "$repo_input" >&2
+        printf 'Add another repository? [y/N]: ' >&2
+        read -r add_more
+        [[ "$add_more" =~ ^[Yy] ]] || break
+      else
+        break
+      fi
+    done
+  fi
+  if [[ ${#REPOS[@]} -eq 0 ]]; then
+    echo "At least one repository is required in code mode" >&2
+    exit 1
+  fi
 
-if [[ -z "$AUTH_MODE" ]]; then
-  if [[ -t 0 ]]; then
-    AUTH_MODE="$(prompt_choice "Auth mode" "none" "none" "auth_json" "manual" "proxy_capture")"
-  else
-    AUTH_MODE="none"
+  REPO_NAME="$(derive_repo_name "${REPOS[0]}")"
+
+  # Web-only fields: force safe defaults
+  HOSTS_RAW=""
+  AUTH_MODE="none"
+  if [[ -z "$EXPLOIT_POLICY" ]]; then
+    if [[ -t 0 ]]; then
+      EXPLOIT_POLICY="$(prompt_choice "Exploit policy" "pause" "pause" "full_send" "selected")"
+    else
+      EXPLOIT_POLICY="pause"
+    fi
+  fi
+
+  # Prompt for skip-permissions on launchers
+  if [[ "$SKIP_PERMISSIONS" -eq 0 && -t 0 ]]; then
+    printf 'Skip permissions? [y/N]: ' >&2
+    read -r skip_perms_input
+    [[ "$skip_perms_input" =~ ^[Yy] ]] && SKIP_PERMISSIONS=1
   fi
 fi
+
+# --- Web mode: resolve target, hosts, auth mode ---
+if [[ "$MODE" == "web" ]]; then
+  # Derive target from --hosts when no positional target given
+  if [[ -z "$TARGET" && -n "$HOSTS_RAW" ]]; then
+    TARGET=$(python3 - <<'PY' "$HOSTS_RAW"
+import sys
+raw = sys.argv[1]
+hosts = [h.strip() for h in raw.split(",") if h.strip()]
+non_wild = [h for h in hosts if not h.startswith("*.")]
+print(non_wild[0] if non_wild else hosts[0].removeprefix("*.") if hosts else "")
+PY
+    )
+  fi
+
+  if [[ -z "$TARGET" ]]; then
+    require_interactive_or_die "target"
+    TARGET="$(prompt_text "Target URL or host")"
+  fi
+
+  if [[ -z "$AUTH_MODE" ]]; then
+    if [[ -t 0 ]]; then
+      AUTH_MODE="$(prompt_choice "Auth mode" "none" "none" "auth_json" "manual" "proxy_capture")"
+    else
+      AUTH_MODE="none"
+    fi
+  fi
+
+  if [[ -z "$EXPLOIT_POLICY" ]]; then
+    if [[ -t 0 ]]; then
+      EXPLOIT_POLICY="$(prompt_choice "Exploit policy" "pause" "pause" "full_send" "selected")"
+    else
+      EXPLOIT_POLICY="pause"
+    fi
+  fi
+
+  # Prompt for skip-permissions on launchers
+  if [[ "$SKIP_PERMISSIONS" -eq 0 && -t 0 ]]; then
+    printf 'Skip permissions? [y/N]: ' >&2
+    read -r skip_perms_input
+    [[ "$skip_perms_input" =~ ^[Yy] ]] && SKIP_PERMISSIONS=1
+  fi
+fi
+
 case "$AUTH_MODE" in
   none|auth_json|manual|proxy_capture) ;;
   *)
@@ -369,13 +523,6 @@ case "$AUTH_MODE" in
     ;;
 esac
 
-if [[ -z "$EXPLOIT_POLICY" ]]; then
-  if [[ -t 0 ]]; then
-    EXPLOIT_POLICY="$(prompt_choice "Exploit policy" "pause" "pause" "full_send" "selected")"
-  else
-    EXPLOIT_POLICY="pause"
-  fi
-fi
 case "$EXPLOIT_POLICY" in
   pause|full_send|selected) ;;
   *)
@@ -387,10 +534,81 @@ esac
 cd "$ROOT_DIR"
 mkdir -p engagements
 
-TARGET_NORMALIZED=$(normalize_target "$TARGET")
+DATE=$(date +%Y-%m-%d)
+TIME=$(date +%H%M%S)
+START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-HOSTNAME_RAW=$(
-  TARGET="$TARGET_NORMALIZED" python3 - <<'PY'
+if [[ "$MODE" == "code" ]]; then
+  # Code mode: directory named after primary repo, no web target
+  DIR_LABEL=$(printf '%s' "$REPO_NAME" | tr '.:/' '-' | tr -cd '[:alnum:]-')
+  DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${DIR_LABEL}"
+  ENGAGEMENT_KEY="$(basename "$DIR")"
+  mkdir -p "$DIR/tools" "$DIR/downloads" "$DIR/scans" "$DIR/pids" "$DIR/sessions" "$DIR/source"
+
+  REPOS_JSON="$(repos_to_json_array "${REPOS[@]}")"
+  REPOS_DISPLAY=$(printf '%s, ' "${REPOS[@]}")
+  REPOS_DISPLAY="${REPOS_DISPLAY%, }"
+
+  cat > "$DIR/scope.json" <<EOF
+{
+  "engagement_type": "code",
+  "repos": ${REPOS_JSON},
+  "hosts": [],
+  "exploit_policy": "${EXPLOIT_POLICY}",
+  "exploit_review_state": "pending",
+  "approved_findings": [],
+  "source_repos": [],
+  "status": "in_progress",
+  "current_phase": "ingest"
+}
+EOF
+
+  cat > "$DIR/log.md" <<EOF
+# Engagement Log
+
+- **Mode**: Code Analysis
+- **Repositories**: ${REPOS_DISPLAY}
+- **Date**: ${DATE}
+- **Status**: In Progress
+- **Exploit Policy**: ${EXPLOIT_POLICY}
+
+---
+EOF
+
+  cat > "$DIR/findings.md" <<EOF
+# Findings
+
+- **Repositories**: ${REPOS_DISPLAY}
+- **Engagement Date**: ${DATE}
+- **Finding Count**: 0
+
+---
+EOF
+
+  cat > "$DIR/report.md" <<EOF
+# Engagement Report
+
+- **Repositories**: ${REPOS_DISPLAY}
+- **Engagement Date**: ${DATE}
+- **Status**: Pending — report not yet generated
+
+---
+EOF
+
+  cat > "$DIR/engagement.json" <<EOF
+{
+  "key": "${ENGAGEMENT_KEY}",
+  "repos": ${REPOS_JSON},
+  "created_at": "${START_TIME}"
+}
+EOF
+
+else
+  # Web mode: original behavior
+  TARGET_NORMALIZED=$(normalize_target "$TARGET")
+
+  HOSTNAME_RAW=$(
+    TARGET="$TARGET_NORMALIZED" python3 - <<'PY'
 import os
 from urllib.parse import urlparse
 
@@ -398,31 +616,23 @@ target = os.environ["TARGET"]
 parsed = urlparse(target)
 print(parsed.hostname or target)
 PY
-)
+  )
 
-if [[ -z "$OUT_OF_SCOPE_RAW" && -t 0 ]]; then
-  OUT_OF_SCOPE_RAW="$(prompt_text "Optional comma-separated out-of-scope hosts" "")"
-fi
+  # If no --hosts given, the parsed hostname is the sole host
+  if [[ -z "$HOSTS_RAW" ]]; then
+    HOSTS_RAW="$HOSTNAME_RAW"
+  fi
 
-DATE=$(date +%Y-%m-%d)
-TIME=$(date +%H%M%S)
-START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  HOSTS_JSON="$(csv_to_json_array "$HOSTS_RAW")"
+  HOSTNAME_CLEAN=$(printf '%s' "$HOSTNAME_RAW" | tr '.:' '-' | tr -cd '[:alnum:]-')
+  DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${HOSTNAME_CLEAN}"
+  ENGAGEMENT_KEY="$(basename "$DIR")"
+  mkdir -p "$DIR/tools" "$DIR/downloads" "$DIR/scans" "$DIR/pids" "$DIR/sessions"
 
-HOSTNAME_CLEAN=$(printf '%s' "$HOSTNAME_RAW" | tr '.:' '-' | tr -cd '[:alnum:]-')
-DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${HOSTNAME_CLEAN}"
-ENGAGEMENT_KEY="$(basename "$DIR")"
-mkdir -p "$DIR/tools" "$DIR/downloads" "$DIR/scans" "$DIR/pids" "$DIR/sessions"
-
-SCOPE_HOSTS_JSON="$(derive_scope_hosts_json "$HOSTNAME_RAW" "$SCOPE_MODE" "$SCOPE_HOSTS_RAW")"
-OUT_OF_SCOPE_JSON="$(csv_to_json_array "$OUT_OF_SCOPE_RAW")"
-
-cat > "$DIR/scope.json" <<EOF
+  cat > "$DIR/scope.json" <<EOF
 {
   "hostname": "${HOSTNAME_RAW}",
-  "scope_mode": "${SCOPE_MODE}",
-  "scope_hosts": ${SCOPE_HOSTS_JSON},
-  "scope": ${SCOPE_HOSTS_JSON},
-  "out_of_scope_hosts": ${OUT_OF_SCOPE_JSON},
+  "hosts": ${HOSTS_JSON},
   "exploit_policy": "${EXPLOIT_POLICY}",
   "exploit_review_state": "pending",
   "approved_findings": [],
@@ -431,20 +641,20 @@ cat > "$DIR/scope.json" <<EOF
 }
 EOF
 
-cat > "$DIR/log.md" <<EOF
+  cat > "$DIR/log.md" <<EOF
 # Engagement Log
 
 - **Target**: ${TARGET_NORMALIZED}
 - **Date**: ${DATE}
 - **Status**: In Progress
-- **Scope Mode**: ${SCOPE_MODE}
+- **Hosts**: $(printf '%s' "$HOSTS_RAW" | tr ',' ', ')
 - **Auth Mode**: ${AUTH_MODE}
 - **Exploit Policy**: ${EXPLOIT_POLICY}
 
 ---
 EOF
 
-cat > "$DIR/findings.md" <<EOF
+  cat > "$DIR/findings.md" <<EOF
 # Findings
 
 - **Target**: ${TARGET_NORMALIZED}
@@ -454,7 +664,7 @@ cat > "$DIR/findings.md" <<EOF
 ---
 EOF
 
-cat > "$DIR/report.md" <<EOF
+  cat > "$DIR/report.md" <<EOF
 # Engagement Report
 
 - **Target**: ${TARGET_NORMALIZED}
@@ -464,13 +674,7 @@ cat > "$DIR/report.md" <<EOF
 ---
 EOF
 
-: > "$DIR/surfaces.jsonl"
-printf '[]\n' > "$DIR/intel-secrets.json"
-write_auth_scaffold "$DIR" "$AUTH_MODE" "$START_TIME"
-printf '[]\n' > "$DIR/sessions/index.json"
-printf '[]\n' > "$DIR/agent-registry.json"
-
-cat > "$DIR/engagement.json" <<EOF
+  cat > "$DIR/engagement.json" <<EOF
 {
   "key": "${ENGAGEMENT_KEY}",
   "target": "${TARGET_NORMALIZED}",
@@ -478,6 +682,12 @@ cat > "$DIR/engagement.json" <<EOF
   "created_at": "${START_TIME}"
 }
 EOF
+fi
+
+: > "$DIR/surfaces.jsonl"
+write_auth_scaffold "$DIR" "$AUTH_MODE" "$START_TIME"
+printf '[]\n' > "$DIR/sessions/index.json"
+printf '[]\n' > "$DIR/agent-registry.json"
 
 printf 'ORCHESTRATOR_BASE_URL=%q\n' "$(default_orchestrator_base_url)" > "$DIR/.orchestrator.env"
 
@@ -491,6 +701,6 @@ fi
 
 CLIENT_KIND="$(install_client_kind)"
 write_engagement_prompt_wrappers "$DIR" "$CLIENT_KIND"
-write_engagement_launchers "$DIR" "$CLIENT_KIND"
+write_engagement_launchers "$DIR" "$CLIENT_KIND" "$SKIP_PERMISSIONS"
 
 printf '%s\n' "$DIR"

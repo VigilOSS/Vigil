@@ -35,7 +35,7 @@ After every dispatch that returns an agentId, append to the registry:
 **Resume before re-dispatch.** Before spawning a new agent:
 1. Check `agent-registry.json` for `returned` entries matching the role
 2. **Resume** (via `SendMessage` to the existing `agent_id`) when ALL of:
-   - Same `scope_host` (the hostname from scope.json, not a single URL — agents work many endpoints at one host)
+   - Same target host (from the `hosts` array in scope.json, not a single URL — agents work many endpoints at one host)
    - At least one overlapping `finding_slug`, OR new task continues the same exploit chain
    - Dispatched within the current session (agents from prior sessions are stale — their context is gone)
 3. **Dispatch fresh** when ANY of:

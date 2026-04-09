@@ -303,3 +303,7 @@ other interface. The protocol doesn't matter — the differential response does.
 - **Confirmed valid users**: any usernames/emails/phones confirmed to exist
 - **Rate limiting**: whether the interface has brute-force protection
 - **Severity**: MEDIUM if enumerable + no rate limit, LOW if enumerable with rate limit
+
+## Extended Resources
+
+_(none — methodology in skill)_

