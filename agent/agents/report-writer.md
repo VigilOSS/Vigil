@@ -32,6 +32,15 @@ Pull canonical state from the orchestrator REST API before writing anything.
 The full query set, field descriptions, and generation procedure are in
 `agent/skills/report-generation/SKILL.md` — follow that procedure.
 
+Minimum backend pull set:
+
+```bash
+./scripts/assess.py fetch report-findings
+./scripts/assess.py fetch attack-chains
+./scripts/assess.py fetch surfaces
+./scripts/assess.py fetch summary
+```
+
 Do not re-read `findings.md` when the backend is available — it is a synchronized export, not the source of truth.
 
 ## Responsibilities

@@ -2,7 +2,7 @@
 
 These rules keep reports human-first, evidence-backed, and severity-disciplined.
 
-## 1. No speculative language
+## 1. State proven attacker outcomes directly
 
 State what the attacker can do — hedge language like "could potentially" or "may allow" signals that the finding has not been validated to the point of actionable certainty. If certainty is missing, validate further before reporting.
 
@@ -85,11 +85,19 @@ In addition to Rule 1 hedge phrases, these patterns are banned:
 - `During the course of our assessment` · `Upon further investigation`
 - `In conclusion` · `To summarize`
 
+Preferred alternatives:
+- Start with the proof or outcome sentence immediately
+- Use a short transition only when it adds meaning: `The same request also`, `The response then`, `A second request confirms`
+
 **Redundant structure:**
 - Restating the finding title in the first sentence of the description
 - Opening with `This finding describes...` or `This vulnerability allows...` — the finding *is* the description
 - Explaining what the vulnerability class is to the reader — the audience knows XSS, SQLi, IDOR, SSRF, and other standard classes; definitions waste space and patronize the reader
 - Closing paragraphs that restate what was just said
+
+Preferred alternatives:
+- Let the first sentence add the new proof, victim scope, or attacker outcome that the title does not carry
+- Move background that materially matters into `Vulnerability Details`, not the opener
 
 **Passive voice that hides the actor:**
 - `It was discovered that...` → name the endpoint and what it does
@@ -139,7 +147,7 @@ Remediation must name the technology, the control, and the fix:
 
 If you do not know the server-side technology, state the control that failed and the class of fix required, not a platitude.
 
-## 15. Do not pad findings
+## 15. Keep every sentence load-bearing
 
 Every sentence in a finding must contribute new information. If removing a sentence does not reduce the reader's understanding, remove it.
 

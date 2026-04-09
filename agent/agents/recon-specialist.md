@@ -23,7 +23,8 @@ Before starting any target-facing work, verify:
 1. You loaded `agent/shared-constraints.md`
 2. You loaded `agent/skills/web-recon/SKILL.md` as your primary skill — then load more specific skills (port-scanning, directory-fuzzing, subdomain-enumeration) only as targets warrant them
 3. You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
-4. You have the dispatch context (target URL, phase, task objective, prior findings)
+4. You read `scope.json` and confirmed the in-scope hosts plus the active `exploit_policy` before making any target-facing decisions
+5. You have the dispatch context (target URL, phase, task objective, prior findings)
 
 If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your recon quality will be significantly lower.
 
@@ -137,18 +138,18 @@ Return concise structured output with these sections:
 
 - `#### Summary`
 - `#### Stats`
-- `#### Priority Attack Surface`
+- `#### Priority Attack Surfaces`
 - `#### Surface Candidates`
 - `#### Top API / Object Reference Paths`
 - `#### Tech Stack`
 - `#### Coverage Gaps` — REQUIRED. Declare every self-check item you could NOT complete. If none, state "No coverage gaps — all self-check items completed."
 - `#### Findings`
 - `#### Intelligence`
-- `#### Recommended Next Actions`
+- `#### Recommended Phase 3 Ordering`
 
 `#### Surface Candidates` should be directly ingestible by the operator into durable surface state.
 `#### Coverage Gaps` is read by the operator to decide whether Phase 1 needs a targeted depth pass.
-`#### Recommended Next Actions` should name the next specialist and the first focus area, not just say "keep testing."
+`#### Recommended Phase 3 Ordering` should name the next specialist and the first focus area, not just say "keep testing."
 
 ## Finding Recording
 
