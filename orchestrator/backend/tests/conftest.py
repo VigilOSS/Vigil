@@ -11,7 +11,9 @@ backend_root = repo_root / "orchestrator" / "backend"
 sys.path.insert(0, str(backend_root))
 
 from app.config import settings
+from app import db as db_module
 from app.main import app
+from app.services import engagements as engagement_service
 
 
 @pytest.fixture(scope="session")
@@ -44,6 +46,10 @@ def isolate_settings(test_root):
     object.__setattr__(settings, "data_dir", data_dir)
     object.__setattr__(settings, "frontend_dist_dir", frontend_dist_dir)
     object.__setattr__(settings, "install_dir", install_dir)
+    original_db_fingerprint = db_module._startup_database_fingerprint
+    original_sync_signature = engagement_service._last_sync_signature
+    db_module._startup_database_fingerprint = None
+    engagement_service._last_sync_signature = None
 
     try:
         yield {
@@ -53,6 +59,8 @@ def isolate_settings(test_root):
             "engagements_dir": engagements_dir,
         }
     finally:
+        db_module._startup_database_fingerprint = original_db_fingerprint
+        engagement_service._last_sync_signature = original_sync_signature
         object.__setattr__(settings, "data_dir", original_data_dir)
         object.__setattr__(settings, "frontend_dist_dir", original_frontend_dist_dir)
         object.__setattr__(settings, "install_dir", original_install_dir)
@@ -60,8 +68,5 @@ def isolate_settings(test_root):
 
 @pytest.fixture
 def client(isolate_settings):
-    test_client = TestClient(app)
-    try:
+    with TestClient(app) as test_client:
         yield test_client
-    finally:
-        test_client.close()

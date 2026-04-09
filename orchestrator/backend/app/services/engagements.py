@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -27,6 +28,10 @@ class EngagementView:
     created_at: str
     updated_at: str
     session_count: int
+
+
+_sync_lock = Lock()
+_last_sync_signature: tuple[tuple[str, int, int | None, int | None], ...] | None = None
 
 
 def engagements_root() -> Path:
@@ -70,6 +75,34 @@ def _session_payload(index_row: dict[str, Any], session_dir: Path) -> dict[str, 
         "session_path": str(session_dir),
         "merged_at": merged_at,
     }
+
+
+def _safe_mtime_ns(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _engagements_signature() -> tuple[tuple[str, int, int | None, int | None], ...]:
+    root = engagements_root()
+    root.mkdir(parents=True, exist_ok=True)
+
+    signature: list[tuple[str, int, int | None, int | None]] = []
+    for engagement_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        scope_path = engagement_dir / "scope.json"
+        scope_mtime_ns = _safe_mtime_ns(scope_path)
+        if scope_mtime_ns is None:
+            continue
+        signature.append(
+            (
+                engagement_dir.name,
+                scope_mtime_ns,
+                _safe_mtime_ns(engagement_dir / "engagement.json"),
+                _safe_mtime_ns(engagement_dir / "sessions" / "index.json"),
+            )
+        )
+    return tuple(signature)
 
 
 def sync_engagements() -> None:
@@ -119,6 +152,21 @@ def sync_engagements() -> None:
             db.delete_engagement(engagement.id)
 
 
+def maybe_sync_engagements(force: bool = False) -> None:
+    global _last_sync_signature
+
+    signature = _engagements_signature()
+    if not force and signature == _last_sync_signature:
+        return
+
+    with _sync_lock:
+        signature = _engagements_signature()
+        if not force and signature == _last_sync_signature:
+            return
+        sync_engagements()
+        _last_sync_signature = signature
+
+
 def _scope_details(engagement_root: Path) -> tuple[str, str, str, list[str]]:
     scope = _json_file(engagement_root / "scope.json")
     current_phase = str(scope.get("current_phase") or "unknown")
@@ -149,12 +197,12 @@ def _view_for(engagement: Engagement) -> EngagementView:
 
 
 def list_engagements() -> list[EngagementView]:
-    sync_engagements()
+    maybe_sync_engagements()
     return [_view_for(engagement) for engagement in db.list_engagements()]
 
 
 def get_engagement_or_404(engagement_key: str) -> Engagement:
-    sync_engagements()
+    maybe_sync_engagements()
     engagement = db.get_engagement_by_key(engagement_key)
     if engagement is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Engagement not found")

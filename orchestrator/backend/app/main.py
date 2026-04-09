@@ -10,14 +10,14 @@ from .api.engagements import router as engagements_router
 from .api.events import router as events_router
 from .config import settings
 from .db import init_db
-from .services.engagements import get_engagement_or_404, sync_engagements
+from .services.engagements import get_engagement_or_404, maybe_sync_engagements
 from .ws import broadcaster
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    sync_engagements()
+    maybe_sync_engagements(force=True)
     yield
 
 

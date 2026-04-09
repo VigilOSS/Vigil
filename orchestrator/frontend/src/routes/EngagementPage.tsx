@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import {
   AssessmentAttackChainDetail,
@@ -86,11 +86,20 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactContent | null>(null);
   const activeEngagement = engagement?.key === engagementKey ? engagement : null;
+  const selectedNameRef = useRef<string | null>(selectedName);
+  const refreshInFlightRef = useRef<Promise<void> | null>(null);
+  const refreshQueuedRef = useRef(false);
+  const socketConnectedRef = useRef(false);
+  const hasConnectedOnceRef = useRef(false);
 
   // Keep state fetched for future use
   void assessmentFindingLinks;
   void assessmentSurfaces;
   void assessmentProbes;
+
+  useEffect(() => {
+    selectedNameRef.current = selectedName;
+  }, [selectedName]);
 
   function refreshArtifacts() {
     return listArtifacts(engagementKey).then((nextArtifacts) => {
@@ -109,7 +118,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   }
 
   function refreshSelectedArtifact(name: string) {
-    readArtifact(engagementKey, name)
+    return readArtifact(engagementKey, name)
       .then(setSelectedArtifact)
       .catch(() => setSelectedArtifact(null));
   }
@@ -154,125 +163,161 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
     ]);
   }
 
-  useEffect(() => {
-    let cancelled = false;
-    let refreshing = false;
-
-    async function refreshPage() {
-      if (refreshing) return;
-      refreshing = true;
+  const refreshPage = useEffectEvent(async () => {
+    try {
       try {
-        try {
-          await refreshEngagement();
-        } catch (error) {
-          if (cancelled) return;
-          const message = error instanceof Error ? error.message : "Failed to load engagement";
-          setLoadError(message);
-          setEngagement(null);
-          setSessions([]);
-          setEvents([]);
-          setArtifacts([]);
-          setAssessmentSummary(null);
-          setAssessmentSurfaces([]);
-          setAssessmentFindings([]);
-          setAssessmentFindingLinks([]);
-          setAssessmentProbes([]);
-          setAssessmentChains([]);
-          setAssessmentChainLinks([]);
-          setAssessmentTargets([]);
-          setAssessmentServices([]);
-          setAssessmentCoverageItems([]);
-          setCodeRepos([]);
-          setCodeModules([]);
-          setCodeQueueStats(null);
-          setCodeCoverage(null);
-          setCodeResults([]);
-          setSelectedName(null);
-          setSelectedArtifact(null);
-          return;
-        }
-
-        if (cancelled) return;
-
-        await Promise.all([refreshSessions(), refreshEvents(), refreshArtifacts(), refreshAssessment(), refreshCodeAnalysis()]);
+        await refreshEngagement();
       } catch (error) {
-        if (cancelled) return;
-        const message = error instanceof Error ? error.message : "Failed to load engagement details";
+        const message = error instanceof Error ? error.message : "Failed to load engagement";
         setLoadError(message);
-      } finally {
-        refreshing = false;
+        setEngagement(null);
+        setSessions([]);
+        setEvents([]);
+        setArtifacts([]);
+        setAssessmentSummary(null);
+        setAssessmentSurfaces([]);
+        setAssessmentFindings([]);
+        setAssessmentFindingLinks([]);
+        setAssessmentProbes([]);
+        setAssessmentChains([]);
+        setAssessmentChainLinks([]);
+        setAssessmentTargets([]);
+        setAssessmentServices([]);
+        setAssessmentCoverageItems([]);
+        setCodeRepos([]);
+        setCodeModules([]);
+        setCodeQueueStats(null);
+        setCodeCoverage(null);
+        setCodeResults([]);
+        setSelectedName(null);
+        setSelectedArtifact(null);
+        return;
       }
+
+      await Promise.all([refreshSessions(), refreshEvents(), refreshArtifacts(), refreshAssessment(), refreshCodeAnalysis()]);
+
+      const nextSelectedName = selectedNameRef.current;
+      if (activeTab === "artifacts" && nextSelectedName) {
+        await refreshSelectedArtifact(nextSelectedName);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to load engagement details";
+      setLoadError(message);
+    }
+  });
+
+  const requestRefresh = useEffectEvent(() => {
+    if (refreshInFlightRef.current) {
+      refreshQueuedRef.current = true;
+      return;
     }
 
-    void refreshPage();
+    const task = (async () => {
+      do {
+        refreshQueuedRef.current = false;
+        await refreshPage();
+      } while (refreshQueuedRef.current);
+    })().finally(() => {
+      refreshInFlightRef.current = null;
+    });
+    refreshInFlightRef.current = task;
+  });
 
-    return () => {
-      cancelled = true;
-    };
+  useEffect(() => {
+    requestRefresh();
   }, [engagementKey]);
 
   useEffect(() => {
-    if (!activeEngagement || !selectedName) {
+    if (!activeEngagement || !selectedName || activeTab !== "artifacts") {
       setSelectedArtifact(null);
       return;
     }
-    refreshSelectedArtifact(selectedName);
-  }, [activeEngagement, engagementKey, selectedName]);
+    void refreshSelectedArtifact(selectedName);
+  }, [activeEngagement?.key, engagementKey, selectedName, activeTab]);
 
   useEffect(() => {
     if (!activeEngagement) return;
 
-    const socket = new WebSocket(engagementWebSocketUrl(engagementKey));
-    socket.onerror = () => {
-      setLoadError((current) => current ?? "Live updates unavailable");
-    };
-    socket.onmessage = (message) => {
-      const payload = JSON.parse(message.data);
-      if (payload.type === "event.created") {
-        setEvents((current) => [...current, payload.event as EventRecord]);
-      }
-      if (payload.type === "assessment.updated") {
-        refreshAssessment();
-      }
-      if (payload.type === "code_analysis.updated") {
-        refreshCodeAnalysis();
-      }
-      refreshEngagement();
-      refreshSessions();
-      refreshArtifacts();
-      if (selectedName) {
-        refreshSelectedArtifact(selectedName);
-      }
+    let reconnectTimer: number | null = null;
+    let socket: WebSocket | null = null;
+    let cancelled = false;
+    let reconnectDelayMs = 1000;
+
+    const connect = () => {
+      if (cancelled) return;
+
+      socket = new WebSocket(engagementWebSocketUrl(engagementKey));
+      socket.onopen = () => {
+        socketConnectedRef.current = true;
+        reconnectDelayMs = 1000;
+        setLoadError((current) => current === "Live updates unavailable" ? null : current);
+        if (hasConnectedOnceRef.current) {
+          requestRefresh();
+        } else {
+          hasConnectedOnceRef.current = true;
+        }
+      };
+      socket.onerror = () => {
+        setLoadError((current) => current ?? "Live updates unavailable");
+      };
+      socket.onclose = () => {
+        socketConnectedRef.current = false;
+        if (cancelled) return;
+        reconnectTimer = window.setTimeout(() => {
+          connect();
+        }, reconnectDelayMs);
+        reconnectDelayMs = Math.min(reconnectDelayMs * 2, 30000);
+      };
+      socket.onmessage = (message) => {
+        const payload = JSON.parse(message.data);
+        if (payload.type === "event.created") {
+          setEvents((current) => {
+            const nextEvent = payload.event as EventRecord;
+            return current.at(-1)?.id === nextEvent.id ? current : [...current, nextEvent];
+          });
+        }
+        requestRefresh();
+      };
     };
 
-    return () => socket.close();
-  }, [activeEngagement, engagementKey, selectedName]);
+    connect();
+
+    return () => {
+      cancelled = true;
+      socketConnectedRef.current = false;
+      hasConnectedOnceRef.current = false;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
+      socket?.close();
+    };
+  }, [activeEngagement?.key, engagementKey]);
 
   useEffect(() => {
     if (!activeEngagement) return;
 
-    let refreshing = false;
     const interval = window.setInterval(() => {
-      if (refreshing) return;
-      refreshing = true;
-      void refreshEngagement()
-        .then(() => Promise.all([refreshSessions(), refreshEvents(), refreshArtifacts(), refreshAssessment(), refreshCodeAnalysis()]))
-        .then(() => {
-          if (selectedName) {
-            refreshSelectedArtifact(selectedName);
-          }
-        })
-        .catch((error) => {
-          const message = error instanceof Error ? error.message : "Failed to refresh engagement";
-          setLoadError(message);
-        })
-        .finally(() => {
-          refreshing = false;
-        });
-    }, 5000);
+      if (document.hidden || socketConnectedRef.current) {
+        return;
+      }
+      requestRefresh();
+    }, 30000);
 
     return () => window.clearInterval(interval);
-  }, [activeEngagement, engagementKey, selectedName]);
+  }, [activeEngagement?.key]);
+
+  useEffect(() => {
+    if (!activeEngagement) return;
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        requestRefresh();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [activeEngagement?.key]);
 
   const displayEvents = events;
   const displayFindings = assessmentFindings.length > 0 ? assessmentFindings : (assessmentSummary?.top_findings ?? []);
