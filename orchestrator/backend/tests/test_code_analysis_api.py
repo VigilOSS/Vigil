@@ -1525,6 +1525,105 @@ def test_queue_done_rejects_items_reset_out_of_processing(client, isolate_settin
     assert "pending" in done.json()["detail"]
 
 
+def test_queue_error_rejects_items_reclaimed_after_validation(client, isolate_settings, monkeypatch):
+    engagement_key = "2026-04-09-code-queue-error-race"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="queue-error-race-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 90}]},
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    assert claimed.status_code == 200
+    queue_item = claimed.json()[0]
+
+    from app.services import code_analysis as code_analysis_service
+
+    original_require_queue_status = code_analysis_service._require_queue_status
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+
+    def race(queue_rows, *, expected_status, action):
+        original_require_queue_status(queue_rows, expected_status=expected_status, action=action)
+        with sqlite3.connect(str(db_path)) as connection:
+            connection.execute(
+                "UPDATE code_analysis_queue SET status = 'pending', assigned_agent = '', consumed_at = NULL WHERE id = ?",
+                (queue_item["id"],),
+            )
+            connection.commit()
+
+    monkeypatch.setattr(code_analysis_service, "_require_queue_status", race)
+
+    error = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/error",
+        json={
+            "item_ids": [queue_item["id"]],
+            "notes": "Late worker should not mark reclaimed work as error",
+        },
+    )
+    assert error.status_code == 409
+    assert "changed state before error transition" in error.json()["detail"]
+
+
+def test_queue_needs_context_rejects_items_reclaimed_after_validation(client, isolate_settings, monkeypatch):
+    engagement_key = "2026-04-09-code-queue-needs-context-race"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="queue-needs-context-race-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 90}]},
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    assert claimed.status_code == 200
+    queue_item = claimed.json()[0]
+
+    from app.services import code_analysis as code_analysis_service
+
+    original_require_queue_status = code_analysis_service._require_queue_status
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+
+    def race(queue_rows, *, expected_status, action):
+        original_require_queue_status(queue_rows, expected_status=expected_status, action=action)
+        with sqlite3.connect(str(db_path)) as connection:
+            connection.execute(
+                "UPDATE code_analysis_queue SET status = 'pending', assigned_agent = '', consumed_at = NULL WHERE id = ?",
+                (queue_item["id"],),
+            )
+            connection.commit()
+
+    monkeypatch.setattr(code_analysis_service, "_require_queue_status", race)
+
+    needs_context = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/needs-context",
+        json={
+            "item_ids": [queue_item["id"]],
+            "expansion_request": {
+                "reason": "Need additional surrounding code to settle the path",
+                "functions": ["parse_message"],
+            },
+        },
+    )
+    assert needs_context.status_code == 409
+    assert "changed state before needs_context transition" in needs_context.json()["detail"]
+
+
 def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
     """Analysis results can be recorded with queue_item_id=None."""
     engagement_key = "2026-04-04-result-no-queue"

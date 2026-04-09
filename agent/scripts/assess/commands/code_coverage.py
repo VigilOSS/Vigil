@@ -114,13 +114,24 @@ def _run_cwe_matrix(cfg, args) -> None:
     if not files:
         print("NOTE: No CWE coverage data available from backend.\n")
         _print_coverage(result)
+        if args.require_gate_pass:
+            gate = result.get('gate', {})
+            if isinstance(gate, dict) and gate.get('passed') is not True:
+                sys.exit(1)
         return
 
     _print_cwe_matrix(files)
 
-    # Exit non-zero if any critical file has effort below threshold
+    gate_failed = False
+    if args.require_gate_pass:
+        gate = result.get('gate', {})
+        if isinstance(gate, dict):
+            gate_failed = gate.get('passed') is not True
+
+    # Exit non-zero if any critical file has effort below threshold, or if the
+    # caller requires the backend gate to pass for non-effort reasons.
     has_gap = _check_effort_gaps(files)
-    if has_gap:
+    if has_gap or gate_failed:
         sys.exit(1)
 
 
