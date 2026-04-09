@@ -145,8 +145,12 @@ When a code pattern looks suspicious, do not jump to conclusions. Interrogate it
 - **Why 5**: Why would an attacker target this? Is it reachable from an external entry
   point? Does exploitation yield meaningful impact? Is the trigger reliable?
 
-If any "Why" produces an answer that weakens the hypothesis, document that and either
-downgrade to `suspicious` or disposition as `clean` with the reasoning recorded.
+If any "Why" produces an answer that weakens the hypothesis, document the weakening
+evidence and decide between `suspicious` and `clean`:
+- **suspicious** — the weakening answer reduces confidence but does not eliminate the hypothesis. A guard exists but may be bypassable. A taint path is plausible but unresolved. The pattern matches a known CWE but a precondition is unclear. The verifier will investigate the gap you document.
+- **clean** — the weakening answer fully resolves the hypothesis. The guard is complete on all paths. The data is hardcoded, not attacker-controlled. The function is unreachable from any entry point. There is no remaining uncertainty.
+
+When in doubt between the two, prefer `suspicious` — it reaches the verifier with your hypothesis intact. A `clean` disposition removes the finding from the pipeline permanently with no downstream review.
 
 ### Phase D: 5 Hows for Each Potential Vulnerability
 
@@ -380,15 +384,9 @@ conditional branches, not just the one active in the current build configuration
 
 ## Confidence Scale
 
-- `high` -- Full taint path traced from entry point to sink, all guards evaluated on
-  all paths, exploit scenario concrete with specific input values and measurable impact
-- `medium` -- Taint path traced but some guards or callees unresolved; likely exploitable
-  but one missing link blocks full confirmation
-- `low` -- Pattern match suggests issue but full trace not possible with available context;
-  equivalent to SAST output quality, needs promotion via further analysis
-
-Only `high` confidence findings should be recorded as `confirmed`. Medium becomes `draft`.
-Low findings are queued for re-analysis with more context, not reported as-is.
+See skill file for the full confidence level table. Key mapping:
+- `high` → recorded as `confirmed`. `medium` → recorded as `draft`.
+- `low` → queued for re-analysis with more context, not reported as-is.
 
 ## Filesystem Self-Service
 

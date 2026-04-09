@@ -471,14 +471,22 @@ If gaps remain on critical files:
 - [ ] No pending cross-file triggers
 - [ ] Entry chain coverage: >= 80% of entry chains traced on critical files (from `cwe_coverage` `entry_chains_traced` / `total_entry_chains`)
 
-**Phase 2 exit:** both 2A and 2B gates pass.
+**Suspicious finding resolution:** Before leaving Phase 2, all `suspicious` findings must be
+resolved. Re-dispatch the hunter with targeted context to close each gap — the hunter's
+`suspicious` hypothesis documents exactly what was missing. After re-dispatch, the finding
+must reach `confirmed` (promoted to finding) or `clean` (hypothesis disproven). Do not pass
+unresolved suspicious findings to the verifier — the verifier's job is FP elimination on
+confirmed findings, not investigation of incomplete ones.
+
+**Phase 2 exit:** both 2A and 2B gates pass, AND no unresolved suspicious findings remain.
 
 ```bash
 jq '.current_phase = "verify-variant"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
 ```
 
 Exit: All critical/high files analyzed with effort thresholds met. CWE coverage gaps closed
-or documented. No unresolved needs-context. No pending triggers. Transition to Phase 3.
+or documented. No unresolved needs-context. No pending triggers. No unresolved suspicious
+findings. Transition to Phase 3.
 
 ### Phase 3: VERIFY + VARIANT
 
@@ -510,7 +518,8 @@ If the gate fails, resolve remaining items before proceeding:
 Dispatch `code-vuln-verifier` with `agent/skills/code-finding-verification/SKILL.md`.
 
 Provide:
-- All findings from Phase 2 (confirmed + suspicious)
+- All confirmed findings from Phase 2 (suspicious findings must be resolved by hunters
+  before Phase 3 — see Phase 2 exit gate)
 - Source code paths for each finding (the canonical file locations)
 - CWE pattern references matching each finding's defect family
 - Build system configuration for compile-time flag evaluation (Makefiles, CMakeLists,

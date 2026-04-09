@@ -8,7 +8,7 @@ origin: AI Threat Hunting
 
 ## When to Activate
 
-- Phase 3 of code analysis pipeline. Runs on confirmed and suspicious findings from Phase 2.
+- Phase 3 of code analysis pipeline. Runs on confirmed findings from Phase 2.
 - Every finding (from vulnerability analysis and variant analysis) must pass through this verification before being reported.
 - Goal: eliminate false positives, adjust severity based on full context, synthesize attack chains from related findings, and produce a final set of verified findings.
 
