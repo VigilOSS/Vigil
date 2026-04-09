@@ -241,9 +241,14 @@ Only proceed to report generation after validation passes or the operator resolv
    ```
 3. **Update finding workflow status to `reported`** for all findings included in the report:
    ```bash
-   # For each finding slug included in the report:
-   echo '{"workflow_status":"reported","notes":"Included in report.md","provenance":{"reported_by":"report-writer"}}' > /tmp/finding_patch.json
-   ./scripts/assess.py patch findings/FINDING-VA-003 /tmp/finding_patch.json
+   # For each finding slug included in the report, use the finding-specific helper so the
+   # workflow transition stays explicit at the command line:
+   ./scripts/assess.py update-finding FINDING-VA-003 \
+     --status reported \
+     --notes "Included in report.md" \
+     --reason "Included in the generated report deliverable." \
+     --source-name report-writer \
+     --provenance-inline '{"reported_by":"report-writer"}'
    ```
    This advances the workflow lifecycle after verification has already established the durable disposition.
 

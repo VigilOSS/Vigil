@@ -331,8 +331,11 @@ All references are under `agent/references/code-vuln-patterns/`. Include the ful
 # Record analysis results (with cwe_coverage and cross_file_triggers)
 ./scripts/assess.py code-record-analysis <analysis-json>
 
-# Mark one file done with structured cwe_coverage
-./scripts/assess.py code-dispatch done <item-id> <disposition> <cwe-coverage-json> ["notes"]
+# Preview the exact completion payload before committing queue history when unsure
+./scripts/assess.py code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
+
+# Mark one file done with structured cwe_coverage after the payload is correct
+./scripts/assess.py code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"]
 
 # Record any findings
 ./scripts/assess.py record-finding code-vuln-hunter <finding-json>
@@ -340,6 +343,10 @@ All references are under `agent/references/code-vuln-patterns/`. Include the ful
 # Process cross-file triggers (if analysis returned any)
 ./scripts/assess.py code-dispatch requeue-triggers <triggers-json>
 ```
+
+Use `code-dispatch done` with one of `clean`, `finding`, or `suspicious`, because the queue
+history is only useful if every completion records a valid disposition and a complete
+`cwe_coverage` array instead of a half-formed backend 422.
 
 **Handling needs-context returns:** When items return as `needs-context`:
 1. Review the request -- what function, file, or dependency is missing and why.
@@ -429,8 +436,11 @@ directed vulnerability classes, and aims to raise effort scores to the target th
 
 **On return from CWE-directed re-dispatch:**
 ```bash
+# Preview first when the updated effort matrix is large or hand-edited
+./scripts/assess.py code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
+
 # Mark done with updated cwe_coverage (backend uses max-effort merge)
-./scripts/assess.py code-dispatch done <item-id> <disposition> <cwe-coverage-json> ["notes"]
+./scripts/assess.py code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"]
 
 # Record any new findings
 ./scripts/assess.py record-finding code-vuln-hunter <finding-json>

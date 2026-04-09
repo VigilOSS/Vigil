@@ -10,6 +10,8 @@ from assess.lib.code_audit import write_json_snapshot
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
+_DONE_DISPOSITIONS = ("clean", "finding", "suspicious")
+
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("code-dispatch", help="Code analysis queue dispatch engine")
@@ -37,12 +39,22 @@ def run(args) -> None:
     elif action == "done":
         if len(extra) < 3:
             print(
-                "Usage: code-dispatch done <item-id> <disposition> <cwe-coverage-json-file> [notes]",
+                "Usage: code-dispatch done <item-id> <disposition> <cwe-coverage-json-file> [notes] [--dry-run]\n"
+                f"Valid dispositions: {', '.join(_DONE_DISPOSITIONS)}\n"
+                "CWE coverage must be a JSON array like "
+                "[{\"family\":\"ssrf\",\"effort\":80}]",
                 file=sys.stderr,
             )
             sys.exit(1)
-        notes = extra[3] if len(extra) > 3 else ""
-        _done(cfg, extra[0], extra[1], extra[2], notes)
+        notes_parts: list[str] = []
+        dry_run = False
+        for token in extra[3:]:
+            if token == "--dry-run":
+                dry_run = True
+            else:
+                notes_parts.append(token)
+        notes = " ".join(notes_parts)
+        _done(cfg, extra[0], extra[1], extra[2], notes, dry_run=dry_run)
     elif action == "error":
         if not extra:
             print("Usage: code-dispatch error <id1,id2,...> [notes]", file=sys.stderr)
@@ -131,10 +143,25 @@ def _fetch(cfg, limit: int, agent_name: str) -> None:
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _done(cfg, id_list: str, disposition: str, cwe_file: str, notes: str = "") -> None:
+def _done(
+    cfg,
+    id_list: str,
+    disposition: str,
+    cwe_file: str,
+    notes: str = "",
+    *,
+    dry_run: bool = False,
+) -> None:
     ids = _validate_id_list(id_list)
     if len(ids) != 1:
         print("ERROR: code-dispatch done accepts exactly one queue item id", file=sys.stderr)
+        sys.exit(1)
+    normalized_disposition = disposition.strip().lower()
+    if normalized_disposition not in _DONE_DISPOSITIONS:
+        print(
+            f"ERROR: invalid disposition {disposition!r}; expected one of: {', '.join(_DONE_DISPOSITIONS)}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     cwe_path = Path(cwe_file)
@@ -142,11 +169,35 @@ def _done(cfg, id_list: str, disposition: str, cwe_file: str, notes: str = "") -
         print(f"CWE coverage JSON file not found: {cwe_file}", file=sys.stderr)
         sys.exit(1)
     cwe_data = json.loads(cwe_path.read_text(encoding="utf-8"))
+    if not isinstance(cwe_data, list):
+        print("CWE coverage payload must be a JSON array", file=sys.stderr)
+        sys.exit(1)
+    for idx, entry in enumerate(cwe_data):
+        if not isinstance(entry, dict):
+            print(f"CWE coverage entry {idx} must be a JSON object", file=sys.stderr)
+            sys.exit(1)
+        family = str(entry.get("family", "")).strip()
+        if not family:
+            print(
+                f"CWE coverage entry {idx} is missing family; expected entries like "
+                "{\"family\":\"ssrf\",\"effort\":80}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        try:
+            float(entry.get("effort", 0))
+        except (TypeError, ValueError):
+            print(f"CWE coverage entry {idx} has a non-numeric effort", file=sys.stderr)
+            sys.exit(1)
 
-    payload: dict = {'item_ids': ids, 'disposition': disposition}
+    payload: dict = {'item_ids': ids, 'disposition': normalized_disposition}
     if notes:
         payload['notes'] = notes
     payload['cwe_coverage'] = cwe_data
+    if dry_run:
+        print("Dry run only; no queue state was changed.")
+        print(json.dumps({"endpoint": "code/analysis-queue/done", "payload": payload}, indent=2, ensure_ascii=False))
+        return
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
         result = client.post('code/analysis-queue/done', payload)
@@ -156,12 +207,12 @@ def _done(cfg, id_list: str, disposition: str, cwe_file: str, notes: str = "") -
     snapshot = write_json_snapshot(
         cfg.engagement_dir,
         category="code-queue-done",
-        label=disposition,
+        label=normalized_disposition,
         payload=result,
-        metadata={"command": "code-dispatch done", "item_ids": ids, "disposition": disposition},
+        metadata={"command": "code-dispatch done", "item_ids": ids, "disposition": normalized_disposition},
     )
     updated = result.get('updated', 0) if isinstance(result, dict) else result
-    print(f"Marked done ({disposition}): {updated} item(s)")
+    print(f"Marked done ({normalized_disposition}): {updated} item(s)")
     print(f"Saved audit snapshot: {snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))

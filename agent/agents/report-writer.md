@@ -188,7 +188,7 @@ Write the full report to `$ENGAGEMENT_DIR/report.md` with these sections:
 ## After Writing the Report
 
 Follow the post-report procedure in `agent/skills/report-generation/SKILL.md`:
-emit the runtime event, then update each included finding with `./scripts/assess.py patch findings/<slug> <json-file>` so its `workflow_status` is `reported`.
+emit the runtime event, then update each included finding with `./scripts/assess.py update-finding <slug> --status reported ...` so its `workflow_status` is `reported`. Use the finding-specific helper because report publication changes workflow state, not arbitrary endpoint data.
 
 ## Handoffs
 

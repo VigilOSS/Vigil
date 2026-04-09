@@ -127,6 +127,30 @@ def _classify_file(
     assert response.status_code == 200
 
 
+def test_bulk_classify_rejects_unknown_fields(client, isolate_settings):
+    engagement_key = "2026-04-09-code-classify-extra-fields"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="extra-fields-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/files/bulk-classify",
+        json={
+            "classifications": [
+                {
+                    "file_id": parser_file["id"],
+                    "classification": "high",
+                    "slot_types_json": ["NETWORK-INPUT"],
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+    assert "slot_types_json" in response.text
+
+
 def _network_input_coverage(
     *,
     default_effort: int,

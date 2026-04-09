@@ -6,6 +6,8 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> None:
+    from assess.lib.client import AssessError
+
     parser = argparse.ArgumentParser(
         prog="assess.py",
         description="AI Threat Hunting — assessment coordination CLI",
@@ -37,25 +39,33 @@ def main(argv: list[str] | None = None) -> None:
         fetch,
         ingest_endpoints,
         ingest_spec,
+        kill_finding,
         launch_session,
+        list_findings,
         log_entry,
         merge_finding,
         merge_session,
         patch,
+        reset_finding,
         post,
         record_chain,
         record_finding,
         record_proposal,
         record_surface,
         review_exploits,
+        update_finding,
         verify_finding,
     )
 
     for mod in (
         fetch,
+        list_findings,
         post,
         patch,
+        update_finding,
+        reset_finding,
         verify_finding,
+        kill_finding,
         emit_event,
         log_entry,
         record_finding,
@@ -88,4 +98,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.print_help()
         sys.exit(1)
 
-    args.func(args)
+    try:
+        args.func(args)
+    except AssessError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)

@@ -146,7 +146,7 @@ def test_code_analysis_prompt_uses_current_cli_contracts():
     assert 'fetch "code/files' in operator_prompt
     assert "code-record-threat-model <repo-id> <threat-model-json>" in operator_prompt
     assert "code-record-modules <repo-id> <modules-json>" in operator_prompt
-    assert "code-dispatch done <item-id> <disposition> <cwe-coverage-json>" in operator_prompt
+    assert "code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json>" in operator_prompt
     assert "Pass repo-relative file paths and artifact paths instead of pasting large JSON blobs" in operator_prompt
     assert "code-dispatch needs-context" in operator_prompt
     assert "no pending triggers" in operator_prompt
