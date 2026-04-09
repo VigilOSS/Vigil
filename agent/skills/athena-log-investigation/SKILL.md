@@ -5,7 +5,11 @@ description: Use Athena-backed logs as an optional final validation phase to det
 
 # Athena Log Investigation
 
-Use this skill after meaningful findings exist and Athena-accessible logs are available.
+## When to Activate
+
+- Meaningful findings exist from Phases 3-4 and you need to check for prior exploitation
+- AWS Athena-accessible logs are available (ALB, WAF, CloudTrail, application logs)
+- The operator has dispatched you for the optional post-exploit log investigation phase
 
 Best fit:
 - AWS Athena over ALB, WAF, CloudTrail, application, or custom security logs
@@ -71,7 +75,7 @@ For each meaningful result, record:
 
 Do not overstate certainty.
 
-Use this language model:
+Use this phrasing:
 - `Confirmed in logs` when exploitation evidence is strong and attributable
 - `Likely seen in logs` when behavior strongly matches but proof is partial
 - `No evidence observed in available Athena logs` when nothing surfaced in the searched window
@@ -91,3 +95,7 @@ Treat Athena as an optional final phase:
 - after checking whether the strongest findings or chains deserve log validation
 
 It should enrich the report, not replace technical validation.
+
+## Extended Resources
+
+None — this skill works from engagement findings and Athena query results.

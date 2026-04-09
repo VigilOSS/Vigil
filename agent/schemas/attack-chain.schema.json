@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/attack-chain.schema.json",
+  "title": "Assessment Attack Chain",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title"],
+  "properties": {
+    "chain_key": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "status": {
+      "type": "string",
+      "maxLength": 32
+    },
+    "severity": {
+      "type": "string",
+      "maxLength": 32
+    },
+    "narrative": {
+      "type": "string",
+      "maxLength": 20000
+    },
+    "evidence_ref": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["entity_kind"],
+        "properties": {
+          "relation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "entity_kind": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "entity_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "entity_ref": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "provenance": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  }
+}

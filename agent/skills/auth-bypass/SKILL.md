@@ -106,7 +106,15 @@ PUT /api/profile {"name":"test","role":"admin","is_staff":true}  # Mass assignme
 6. Check JWT/token security
 7. Test session lifecycle: fixation, expiration, invalidation
 
+## Fail-Open Testing
+
+- [ ] Test authentication when backend auth service is slow: does timeout grant access?
+- [ ] Send malformed auth tokens — does the app fail-open or fail-closed?
+- [ ] Test with empty `Authorization` header vs missing `Authorization` header (different behavior?)
+- [ ] Remove CSRF token entirely — does the request succeed? (fail-open CSRF)
+- [ ] Test with invalid session cookie — does it create a new authenticated session?
+- [ ] Check if rate limiter failure grants unlimited access instead of blocking
+
 ## Extended Resources
 
 - `agent/references/payloads/jwt-payloads.md` — alg:none, key confusion, JWK/kid injection, weak secret brute-force
-- `agent/references/vuln-checklists/A07-authentication-failures.md` — OWASP Top 10:2025 authentication failures checklist

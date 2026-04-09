@@ -14,7 +14,7 @@ origin: AI Threat Hunting
 
 ## Tools
 
-`ffuf` (primary), `curl` (verification), `arjun` (dedicated param discovery, if available)
+`ffuf` (primary), `curl` (verification), `arjun` (dedicated param discovery), `ParamSpider` (mine params from web archives)
 
 ## Methodology
 
@@ -80,7 +80,19 @@ arjun -u "https://TARGET/endpoint" -m GET    # or POST, JSON
 arjun -u "https://TARGET/endpoint" -w custom_params.txt
 ```
 
-### 9. Verification
+### 9. ParamSpider (Historical Parameter Mining)
+```bash
+# Mine parameters from web archives for the target domain
+paramspider -d TARGET_DOMAIN -o /engagement/scans/paramspider_output.txt
+
+# Feed discovered parameterized URLs into ffuf or manual testing
+cat /engagement/scans/paramspider_output.txt | \
+  grep "?" | sort -u > /engagement/scans/params_to_test.txt
+```
+ParamSpider pulls historically-known parameters from Wayback Machine and other archives.
+Use it to discover parameters that active fuzzing would miss.
+
+### 10. Verification
 ```bash
 curl -sv "https://TARGET/endpoint?discovered_param=test" 2>&1
 diff <(curl -s "https://TARGET/endpoint") <(curl -s "https://TARGET/endpoint?param=value")
@@ -89,4 +101,3 @@ diff <(curl -s "https://TARGET/endpoint") <(curl -s "https://TARGET/endpoint?par
 ## Extended Resources
 
 - `agent/references/tools/fuzzing/ffuf.md` — ffuf flags, filter/matcher options, wordlist selection
-- `agent/references/tools/fuzzing/wfuzz.md` — wfuzz advanced filtering and payload chaining

@@ -12,7 +12,10 @@ origin: AI Threat Hunting
 
 ## Tools
 
-`curl`, `whatweb`, `openssl`, `grep`/`sed`/`jq`
+- `httpx` — fast HTTP probing, tech detection, status codes, titles (primary for bulk host verification)
+- `whatweb` — deep web technology fingerprinting
+- `wafw00f` — WAF identification (identify before attempting bypass)
+- `curl`, `openssl`, `grep`/`sed`/`jq` — manual inspection and verification
 
 ## Methodology
 
@@ -34,6 +37,14 @@ expose reverse proxies, app servers, framework routing, and auth enforcement bou
 whatweb -a 3 https://TARGET
 curl -sL https://TARGET | grep -iE "generator|powered.by|built.with"
 curl -sL https://TARGET | grep -i '<meta' | head -20
+```
+
+```bash
+# httpx bulk probing — confirms live hosts and captures tech stack in one pass
+echo "https://TARGET" | httpx -silent -status-code -title -tech-detect -server -content-length
+
+# WAF detection — identify the WAF before attempting bypass payloads
+wafw00f https://TARGET
 ```
 
 ### 3. CMS Detection
@@ -86,9 +97,45 @@ curl -sL https://TARGET | grep -i 'type="hidden"'                         # Hidd
 curl -sL https://TARGET | grep -oE 'href="[^"]*"' | sed 's/href="//;s/"//' | sort -u  # Links
 ```
 
-### 8. Recon-to-Hypothesis Conversion
+### 8. API Surface Discovery
+
+```bash
+# OpenAPI/Swagger spec
+for path in /swagger.json /openapi.json /api-docs /swagger/v1/swagger.json /v2/api-docs /v3/api-docs; do
+  code=$(curl -s -o /dev/null -w "%{http_code}" "https://TARGET$path")
+  [ "$code" != "404" ] && echo "$path -> $code"
+done
+
+# GraphQL endpoint
+for path in /graphql /gql /api/graphql /graphql/console; do
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "https://TARGET$path" -H "Content-Type: application/json" -d '{"query":"{__typename}"}')
+  [ "$code" != "404" ] && echo "$path -> $code"
+done
+```
+
+### 9. Recon-to-Hypothesis Conversion
 
 - Reverse-proxy plus framework leakage: test for route normalization, cache confusion, and trust-boundary mistakes.
 - Auth-protected admin or internal-looking routes: treat them as realistic escalation paths, not dead ends.
 - Error traces, version strings, or verbose debug hints: validate in stages before attempting full exploitation.
 - Reused cookie scope, shared API prefixes, or odd host routing: look for cross-app chains and auth-context drift.
+
+## What to Record
+
+- Live targets with status codes, titles, and server headers
+- Technology stack (framework, CMS, server, WAF, CDN)
+- Authentication mechanism identified
+- API specs discovered (OpenAPI, GraphQL)
+- Admin/management endpoints found
+- TLS certificate details (SANs, CN, issuer)
+- JavaScript files queued for source-analyzer
+- Surface candidates for operator ingestion
+
+## Extended Resources
+
+- `agent/references/tools/recon/nmap.md` — port/service discovery, enumeration flags, output parsing
+- `agent/references/tools/recon/whatweb.md` — web technology fingerprinting depth levels
+- `agent/references/tools/recon/httpx.md` — HTTP probing, tech detection, live host confirmation
+- `agent/references/tools/recon/wafw00f.md` — WAF identification and fingerprinting
+- `agent/references/tools/recon/curl.md` — HTTP request crafting and manual inspection
+- `agent/references/payloads/info-disclosure-probes.md` — standard endpoint checklist (/metrics, /.env, /actuator, cloud metadata)

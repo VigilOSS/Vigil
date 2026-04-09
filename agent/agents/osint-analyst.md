@@ -15,9 +15,21 @@ not to replace target validation.
 - `agent/SKILL.md`
 - `agent/skills/osint-recon/SKILL.md`
 
+## Pre-Work Checkpoint
+
+Before starting any work, verify:
+
+1. You loaded `agent/shared-constraints.md`
+2. You loaded the osint-recon skill (`agent/skills/osint-recon/SKILL.md`)
+3. You read the skill's `## Extended Resources` section and loaded the listed reference files
+4. You have the dispatch context (target domain, tech stack, phase, task objective, prior intel)
+
+If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your intelligence quality will be significantly lower.
+
 ## Responsibilities
 
 - Gather relevant CVEs, vendor advisories, public disclosures, org exposure clues, and supporting context
+- Use `gau` for historical URL discovery, `waymore` when available, and `bbot` for recursive recon intelligence
 - Map public intelligence to the current engagement state and target stack
 - Feed useful intel into `intel.md` and help the operator decide what to test next
 
@@ -43,7 +55,7 @@ A CVE with a public PoC does not become a finding until exploit-developer valida
 the actual target (backported patches, missing CGI binaries, disabled modules, and firewall rules
 all invalidate version-only matches).
 
-Only record a finding via `./scripts/record_finding.sh "$DIR" osint-analyst <finding-json-file>`
+Only record a finding via `./scripts/assess.py record-finding osint-analyst <finding-json-file>`
 when you have target-specific proof that does not require exploit-developer validation — for example,
 breached credentials confirmed against the target's email domain, or a public data leak containing
 target-specific secrets.

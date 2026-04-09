@@ -2,10 +2,9 @@
 
 ## TCP Relay with Netcat
 ```bash
-# Relay traffic from port 4444 to port 22
-nc -lvvp 4444 | nc localhost 22
-# Send data through relay
-echo test | nc localhost 4444
+# Bidirectional relay (requires named pipe for two-way traffic)
+mkfifo /tmp/relay; nc -lvvp 4444 < /tmp/relay | nc localhost 22 > /tmp/relay
+# Cleanup: rm /tmp/relay
 ```
 
 ## SSH Tunneling

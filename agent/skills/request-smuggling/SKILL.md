@@ -125,4 +125,3 @@ origin: AI Threat Hunting
 ## Extended Resources
 
 - `agent/references/payloads/request-smuggling-payloads.md` — CL.TE, TE.CL, TE.TE obfuscation, HTTP/2 downgrade
-- `agent/references/vuln-checklists/A05-injection.md` — OWASP Top 10:2025 injection checklist

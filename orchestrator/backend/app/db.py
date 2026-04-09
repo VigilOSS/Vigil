@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -10,6 +11,16 @@ from .config import settings
 from .models.event import Event
 from .models.engagement_session import EngagementSession
 from .models.engagement import Engagement
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseFingerprint:
+    path: Path
+    device: int
+    inode: int
+
+
+_startup_database_fingerprint: DatabaseFingerprint | None = None
 
 
 def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
@@ -32,7 +43,7 @@ def _database_requires_reset(db_path: Path) -> bool:
 
             engagement_scoped_tables = {"engagement_sessions", "events"}
             engagement_scoped_tables.update(
-                table_name for table_name in tables if table_name.startswith("assessment_")
+                table_name for table_name in tables if table_name.startswith("assessment_") or table_name.startswith("code_")
             )
             for table_name in engagement_scoped_tables:
                 if table_name not in tables:
@@ -60,7 +71,38 @@ def database_path() -> Path:
     return settings.data_dir / "orchestrator.sqlite3"
 
 
+def _database_fingerprint(db_path: Path) -> DatabaseFingerprint:
+    stat_result = db_path.stat()
+    return DatabaseFingerprint(path=db_path.resolve(), device=stat_result.st_dev, inode=stat_result.st_ino)
+
+
+def _require_startup_database_fingerprint() -> DatabaseFingerprint:
+    if _startup_database_fingerprint is None:
+        raise RuntimeError("Orchestrator database has not been initialized for this process")
+    return _startup_database_fingerprint
+
+
+def _verify_database_fingerprint() -> Path:
+    expected = _require_startup_database_fingerprint()
+    db_path = database_path()
+    if db_path.resolve() != expected.path:
+        raise RuntimeError(
+            f"Orchestrator database path changed after startup: expected {expected.path}, got {db_path.resolve()}"
+        )
+    if not db_path.exists():
+        raise RuntimeError(f"Orchestrator database file disappeared after startup: {db_path}")
+    current = _database_fingerprint(db_path)
+    if current.device != expected.device or current.inode != expected.inode:
+        raise RuntimeError(
+            f"Orchestrator database file changed after startup: expected dev/inode "
+            f"{expected.device}/{expected.inode}, got {current.device}/{current.inode}"
+        )
+    return db_path
+
+
 def init_db() -> None:
+    global _startup_database_fingerprint
+
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     db_path = database_path()
     _reset_incompatible_database(db_path)
@@ -290,6 +332,8 @@ def init_db() -> None:
                 title TEXT NOT NULL,
                 severity TEXT NOT NULL DEFAULT 'info',
                 status TEXT NOT NULL DEFAULT 'draft',
+                verification_state TEXT NOT NULL DEFAULT 'unreviewed',
+                verification_disposition TEXT NOT NULL DEFAULT 'none',
                 defect_family TEXT NOT NULL DEFAULT '',
                 root_cause_key TEXT NOT NULL DEFAULT '',
                 auth_context TEXT NOT NULL DEFAULT 'anonymous',
@@ -307,6 +351,32 @@ def init_db() -> None:
                 UNIQUE(engagement_id, slug),
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(merged_into_finding_id) REFERENCES assessment_findings(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_finding_transitions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                finding_id INTEGER NOT NULL,
+                actor TEXT NOT NULL DEFAULT '',
+                action TEXT NOT NULL DEFAULT '',
+                from_workflow_status TEXT,
+                to_workflow_status TEXT NOT NULL DEFAULT '',
+                from_verification_state TEXT,
+                to_verification_state TEXT NOT NULL DEFAULT '',
+                from_verification_disposition TEXT,
+                to_verification_disposition TEXT NOT NULL DEFAULT '',
+                from_severity TEXT,
+                to_severity TEXT NOT NULL DEFAULT '',
+                reason_code TEXT NOT NULL DEFAULT '',
+                reason_text TEXT NOT NULL DEFAULT '',
+                artifact_ref TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(finding_id) REFERENCES assessment_findings(id) ON DELETE CASCADE
             )
             """
         )
@@ -375,7 +445,7 @@ def init_db() -> None:
                 credential_key TEXT NOT NULL,
                 kind TEXT NOT NULL DEFAULT 'password',
                 principal TEXT NOT NULL DEFAULT '',
-                secret_locator TEXT NOT NULL DEFAULT '',
+                secret TEXT NOT NULL DEFAULT '',
                 source_name TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'discovered',
                 notes TEXT NOT NULL DEFAULT '',
@@ -496,8 +566,173 @@ def init_db() -> None:
             )
             """
         )
+        # ── Code Analysis Tables ──────────────────────────────────
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_repos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                repo_key TEXT NOT NULL,
+                name TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT '',
+                repo_path TEXT NOT NULL,
+                total_files INTEGER NOT NULL DEFAULT 0,
+                analyzable_files INTEGER NOT NULL DEFAULT 0,
+                total_loc INTEGER NOT NULL DEFAULT 0,
+                commit_hash TEXT NOT NULL DEFAULT '',
+                branch TEXT NOT NULL DEFAULT '',
+                analysis_status TEXT NOT NULL DEFAULT 'ingested',
+                threat_model_json TEXT NOT NULL DEFAULT '{}',
+                git_churn_json TEXT NOT NULL DEFAULT '{}',
+                lsp_config_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, repo_key),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_modules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                repo_id INTEGER NOT NULL,
+                module_key TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                trust_boundary TEXT NOT NULL DEFAULT '',
+                file_count INTEGER NOT NULL DEFAULT 0,
+                critical_file_count INTEGER NOT NULL DEFAULT 0,
+                analysis_status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, repo_id, module_key),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                repo_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT '',
+                loc INTEGER NOT NULL DEFAULT 0,
+                file_hash TEXT NOT NULL DEFAULT '',
+                classification TEXT NOT NULL DEFAULT 'unclassified',
+                role TEXT NOT NULL DEFAULT '',
+                slot_types_json TEXT NOT NULL DEFAULT '[]',
+                analysis_priority INTEGER NOT NULL DEFAULT 0,
+                analysis_status TEXT NOT NULL DEFAULT 'unclassified',
+                analysis_depth TEXT NOT NULL DEFAULT 'none',
+                skip_reason TEXT NOT NULL DEFAULT '',
+                variant_check_status TEXT NOT NULL DEFAULT 'pending',
+                module_id INTEGER,
+                git_churn_score INTEGER NOT NULL DEFAULT 0,
+                has_past_cve_fix INTEGER NOT NULL DEFAULT 0,
+                header_snippet TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, repo_id, file_path),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE,
+                FOREIGN KEY(module_id) REFERENCES code_modules(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_analysis_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 50,
+                status TEXT NOT NULL DEFAULT 'pending',
+                assigned_agent TEXT NOT NULL DEFAULT '',
+                disposition TEXT NOT NULL DEFAULT '',
+                analysis_notes TEXT NOT NULL DEFAULT '',
+                expansion_request_json TEXT NOT NULL DEFAULT '{}',
+                batch_theme TEXT NOT NULL DEFAULT '',
+                slot_types_json TEXT NOT NULL DEFAULT '[]',
+                guidance_hypotheses_json TEXT NOT NULL DEFAULT '[]',
+                cwe_coverage_json TEXT NOT NULL DEFAULT '[]',
+                cross_file_triggers_json TEXT NOT NULL DEFAULT '[]',
+                consumed_at TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_analysis_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                queue_item_id INTEGER,
+                file_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL DEFAULT '',
+                function_name TEXT NOT NULL DEFAULT '',
+                hypothesis TEXT NOT NULL DEFAULT '',
+                evidence TEXT NOT NULL DEFAULT '',
+                disposition TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'medium',
+                finding_slug TEXT NOT NULL DEFAULT '',
+                cwe_id TEXT NOT NULL DEFAULT '',
+                slot_type TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                audit_metadata_json TEXT NOT NULL DEFAULT '{}',
+                cwe_coverage_json TEXT NOT NULL DEFAULT '[]',
+                cross_file_triggers_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE CASCADE,
+                FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_analysis_triggers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                source_queue_item_id INTEGER,
+                source_file_id INTEGER,
+                target_file_id INTEGER,
+                target_file_path TEXT NOT NULL DEFAULT '',
+                vuln_class TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                resolved_queue_item_id INTEGER,
+                resolution_note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(source_queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE CASCADE,
+                FOREIGN KEY(source_file_id) REFERENCES code_files(id) ON DELETE SET NULL,
+                FOREIGN KEY(target_file_id) REFERENCES code_files(id) ON DELETE SET NULL,
+                FOREIGN KEY(resolved_queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE SET NULL
+            )
+            """
+        )
+        # ── End Code Analysis Tables ──────────────────────────────
+
+        # Migrate secret_locator → secret in assessment_credentials
+        cred_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_credentials)").fetchall()}
+        if "secret_locator" in cred_columns and "secret" not in cred_columns:
+            connection.execute("ALTER TABLE assessment_credentials RENAME COLUMN secret_locator TO secret")
+
         finding_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_findings)").fetchall()}
         finding_column_defaults = {
+            "verification_state": "TEXT NOT NULL DEFAULT 'unreviewed'",
+            "verification_disposition": "TEXT NOT NULL DEFAULT 'none'",
             "defect_family": "TEXT NOT NULL DEFAULT ''",
             "root_cause_key": "TEXT NOT NULL DEFAULT ''",
             "auth_context": "TEXT NOT NULL DEFAULT 'anonymous'",
@@ -512,19 +747,84 @@ def init_db() -> None:
         for column_name, definition in finding_column_defaults.items():
             if column_name not in finding_columns:
                 connection.execute(f"ALTER TABLE assessment_findings ADD COLUMN {column_name} {definition}")
+
+        if finding_columns:
+            connection.execute(
+                """
+                UPDATE assessment_findings
+                SET verification_state = CASE status
+                    WHEN 'draft' THEN 'unreviewed'
+                    WHEN 'merged' THEN 'unreviewed'
+                    WHEN 'false_positive' THEN 'verified'
+                    ELSE 'verified'
+                END
+                WHERE status IN ('draft', 'merged', 'false_positive', 'confirmed', 'exploited', 'reported', 'blocked')
+                  AND (verification_state = '' OR verification_state = 'unreviewed')
+                """
+            )
+            connection.execute(
+                """
+                UPDATE assessment_findings
+                SET verification_disposition = CASE status
+                    WHEN 'confirmed' THEN 'confirmed'
+                    WHEN 'exploited' THEN 'confirmed'
+                    WHEN 'reported' THEN 'confirmed'
+                    WHEN 'blocked' THEN 'confirmed'
+                    WHEN 'false_positive' THEN 'false_positive'
+                    ELSE 'none'
+                END
+                WHERE status IN ('draft', 'merged', 'false_positive', 'confirmed', 'exploited', 'reported', 'blocked')
+                  AND (verification_disposition = '' OR verification_disposition = 'none')
+                """
+            )
+            connection.execute(
+                """
+                UPDATE assessment_findings
+                SET status = CASE status
+                    WHEN 'confirmed' THEN 'active'
+                    ELSE status
+                END
+                WHERE status = 'confirmed'
+                """
+            )
+
+        # Migrate code_repos: add lsp_config_json if missing
+        repo_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_repos)").fetchall()}
+        if repo_columns and "lsp_config_json" not in repo_columns:
+            connection.execute("ALTER TABLE code_repos ADD COLUMN lsp_config_json TEXT NOT NULL DEFAULT '{}'")
+
+        result_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_analysis_results)").fetchall()}
+        if result_columns and "audit_metadata_json" not in result_columns:
+            connection.execute("ALTER TABLE code_analysis_results ADD COLUMN audit_metadata_json TEXT NOT NULL DEFAULT '{}'")
+
+        # Migrate code_analysis_queue: add file-direct queue columns
+        queue_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_analysis_queue)").fetchall()}
+        queue_new_columns = {
+            "batch_theme": "TEXT NOT NULL DEFAULT ''",
+            "slot_types_json": "TEXT NOT NULL DEFAULT '[]'",
+            "guidance_hypotheses_json": "TEXT NOT NULL DEFAULT '[]'",
+            "cwe_coverage_json": "TEXT NOT NULL DEFAULT '[]'",
+            "cross_file_triggers_json": "TEXT NOT NULL DEFAULT '[]'",
+        }
+        for col_name, col_def in queue_new_columns.items():
+            if queue_columns and col_name not in queue_columns:
+                connection.execute(f"ALTER TABLE code_analysis_queue ADD COLUMN {col_name} {col_def}")
+
+        # Migrate code_analysis_results: add cwe_coverage and cross_file_triggers
+        if result_columns and "cwe_coverage_json" not in result_columns:
+            connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cwe_coverage_json TEXT NOT NULL DEFAULT '[]'")
+        if result_columns and "cross_file_triggers_json" not in result_columns:
+            connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cross_file_triggers_json TEXT NOT NULL DEFAULT '[]'")
+
         connection.commit()
+
+    _startup_database_fingerprint = _database_fingerprint(db_path)
 
 
 @contextmanager
 def get_connection() -> Iterator[sqlite3.Connection]:
-    init_db()
-    db_path = database_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        connection = sqlite3.connect(str(db_path), cached_statements=0)
-    except sqlite3.OperationalError:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(db_path), cached_statements=0)
+    db_path = _verify_database_fingerprint()
+    connection = sqlite3.connect(str(db_path), cached_statements=0)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     try:
@@ -585,8 +885,9 @@ def update_engagement_identity(engagement_id: int, target: str, status: str, eng
             UPDATE engagements
             SET target = ?, status = ?, engagement_root = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
+              AND (target != ? OR status != ? OR engagement_root != ?)
             """,
-            (target, status, engagement_root, engagement_id),
+            (target, status, engagement_root, engagement_id, target, status, engagement_root),
         )
         row = connection.execute(
             """

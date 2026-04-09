@@ -1,0 +1,1095 @@
+"""Tree-sitter structural indexing for code analysis.
+
+Parses source files using tree-sitter to extract function/method definitions,
+class structures, import statements, entry points, security sinks, and call
+sites.  All tree-sitter imports are guarded so the module remains importable
+(returning empty/degraded results) when tree-sitter packages are absent.
+"""
+from __future__ import annotations
+
+import re
+import sys
+import warnings
+from pathlib import Path
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# Guarded tree-sitter imports
+# ---------------------------------------------------------------------------
+
+_TS_AVAILABLE = False
+
+try:
+    import tree_sitter  # type: ignore[import-untyped]
+    _TS_AVAILABLE = True
+except ImportError:
+    tree_sitter = None  # type: ignore[assignment]
+
+# Per-language grammar loaders (also guarded)
+_GRAMMAR_MODULES: dict[str, Any] = {}
+
+def _try_import_grammar(mod_name: str, key: str) -> None:
+    try:
+        import importlib
+        _GRAMMAR_MODULES[key] = importlib.import_module(mod_name)
+    except ImportError:
+        pass
+
+_try_import_grammar("tree_sitter_java", "java")
+_try_import_grammar("tree_sitter_c", "c")
+_try_import_grammar("tree_sitter_cpp", "cpp")
+_try_import_grammar("tree_sitter_python", "python")
+_try_import_grammar("tree_sitter_javascript", "javascript")
+_try_import_grammar("tree_sitter_typescript", "typescript")
+
+
+# ---------------------------------------------------------------------------
+# Extension → language mapping (for tree-sitter supported families only)
+# ---------------------------------------------------------------------------
+
+EXTENSION_LANG_MAP: dict[str, str] = {
+    ".java": "java",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
+    ".hh": "cpp",
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+}
+
+SUPPORTED_LANGUAGES = frozenset({"java", "c", "cpp", "python", "javascript", "typescript"})
+
+
+# ---------------------------------------------------------------------------
+# Lazy grammar / parser cache
+# ---------------------------------------------------------------------------
+
+_PARSERS: dict[str, Any] = {}  # lang -> tree_sitter.Parser
+
+
+def _get_parser(language: str) -> Any | None:
+    """Return a tree-sitter Parser for *language*, loading the grammar lazily."""
+    if not _TS_AVAILABLE:
+        return None
+
+    if language in _PARSERS:
+        return _PARSERS[language]
+
+    # TypeScript needs special handling: the grammar module exposes
+    # language_typescript() and language_tsx() as separate entry points.
+    ts_lang = language
+    if language == "typescript":
+        gram = _GRAMMAR_MODULES.get("typescript")
+        if gram is None:
+            return None
+        # Prefer language_typescript(); fall back to language()
+        lang_fn = getattr(gram, "language_typescript", None) or getattr(gram, "language", None)
+        if lang_fn is None:
+            return None
+        lang_obj = tree_sitter.Language(lang_fn())
+    elif language == "tsx":
+        gram = _GRAMMAR_MODULES.get("typescript")
+        if gram is None:
+            return None
+        lang_fn = getattr(gram, "language_tsx", None)
+        if lang_fn is None:
+            return None
+        lang_obj = tree_sitter.Language(lang_fn())
+    else:
+        gram = _GRAMMAR_MODULES.get(language)
+        if gram is None:
+            return None
+        lang_fn = getattr(gram, "language", None)
+        if lang_fn is None:
+            return None
+        lang_obj = tree_sitter.Language(lang_fn())
+
+    parser = tree_sitter.Parser(lang_obj)
+    _PARSERS[language] = parser
+    return parser
+
+
+# ---------------------------------------------------------------------------
+# Tree-sitter query strings per language (functions, classes, imports)
+# ---------------------------------------------------------------------------
+
+_FUNCTION_QUERIES: dict[str, str] = {
+    "java": """
+        (method_declaration) @func
+        (constructor_declaration) @func
+    """,
+    "c": """
+        (function_definition) @func
+    """,
+    "cpp": """
+        (function_definition) @func
+    """,
+    "python": """
+        (function_definition) @func
+    """,
+    "javascript": """
+        (function_declaration) @func
+        (method_definition) @func
+    """,
+    "typescript": """
+        (function_declaration) @func
+        (method_definition) @func
+    """,
+}
+
+_CLASS_QUERIES: dict[str, str] = {
+    "java": """(class_declaration) @cls""",
+    "cpp": """
+        (class_specifier) @cls
+        (struct_specifier) @cls
+    """,
+    "python": """(class_definition) @cls""",
+    "javascript": """(class_declaration) @cls""",
+    "typescript": """(class_declaration) @cls""",
+}
+
+_IMPORT_QUERIES: dict[str, str] = {
+    "java": """(import_declaration) @imp""",
+    "c": """(preproc_include) @imp""",
+    "cpp": """(preproc_include) @imp""",
+    "python": """
+        (import_statement) @imp
+        (import_from_statement) @imp
+    """,
+    "javascript": """(import_statement) @imp""",
+    "typescript": """(import_statement) @imp""",
+}
+
+
+# ---------------------------------------------------------------------------
+# Security sink patterns per vulnerability class
+# ---------------------------------------------------------------------------
+
+SinkPattern = dict[str, Any]  # {"kind", "patterns": {lang: [regex_str,...]}, "vuln_classes": [...]}
+
+_SINK_DEFINITIONS: list[SinkPattern] = [
+    {
+        "kind": "file_path",
+        "vuln_classes": ["path-traversal"],
+        "patterns": {
+            "java": [r"\bnew\s+File\s*\(", r"\bFileInputStream\s*\(", r"\bFileOutputStream\s*\(",
+                     r"\bPaths\.get\s*\(", r"\bFileUtils\.copy"],
+            "c": [r"\bfopen\s*\(", r"\bopen\s*\(", r"\baccess\s*\(", r"\bstat\s*\("],
+            "cpp": [r"\bfopen\s*\(", r"\bopen\s*\(", r"\baccess\s*\(", r"\bstat\s*\("],
+            "python": [r"\bopen\s*\(", r"\bos\.path\.join\s*\(", r"\bPath\s*\("],
+            "javascript": [r"\bfs\.readFile\w*\s*\(", r"\bfs\.writeFile\w*\s*\(", r"\bpath\.join\s*\("],
+            "typescript": [r"\bfs\.readFile\w*\s*\(", r"\bfs\.writeFile\w*\s*\(", r"\bpath\.join\s*\("],
+        },
+    },
+    {
+        "kind": "sql_exec",
+        "vuln_classes": ["sql-injection"],
+        "patterns": {
+            "java": [r"\bcreateStatement\s*\(", r"\.execute\s*\(", r"\.executeQuery\s*\(",
+                     r"\.executeUpdate\s*\("],
+            "c": [r"\bsqlite3_exec\s*\("],
+            "cpp": [r"\bsqlite3_exec\s*\("],
+            "python": [r"\bcursor\.execute\s*\(", r"\.execute\s*\("],
+            "javascript": [r"\.query\s*\(", r"\.execute\s*\("],
+            "typescript": [r"\.query\s*\(", r"\.execute\s*\("],
+        },
+    },
+    {
+        "kind": "process_exec",
+        "vuln_classes": ["injection"],
+        "patterns": {
+            "java": [r"\bRuntime\.\w*exec\s*\(", r"\bProcessBuilder\s*\("],
+            "c": [r"\bsystem\s*\(", r"\bpopen\s*\(", r"\bexecve\s*\("],
+            "cpp": [r"\bsystem\s*\(", r"\bpopen\s*\(", r"\bexecve\s*\("],
+            "python": [r"\bos\.system\s*\(", r"\bsubprocess\.run\s*\(", r"\bsubprocess\.Popen\s*\(",
+                       r"\bsubprocess\.call\s*\("],
+            "javascript": [r"\bchild_process\.exec\s*\(", r"\bchild_process\.spawn\s*\("],
+            "typescript": [r"\bchild_process\.exec\s*\(", r"\bchild_process\.spawn\s*\("],
+        },
+    },
+    {
+        "kind": "url_fetch",
+        "vuln_classes": ["ssrf"],
+        "patterns": {
+            "java": [r"\bnew\s+URL\s*\(", r"\bHttpURLConnection\b", r"\bHttpClient\.send\s*\("],
+            "python": [r"\brequests\.get\s*\(", r"\burllib\.request\.urlopen\s*\("],
+            "javascript": [r"\bfetch\s*\(", r"\bhttp\.request\s*\(", r"\baxios\."],
+            "typescript": [r"\bfetch\s*\(", r"\bhttp\.request\s*\(", r"\baxios\."],
+        },
+    },
+    {
+        "kind": "deserialization",
+        "vuln_classes": ["deserialization"],
+        "patterns": {
+            "java": [r"\bObjectInputStream\b", r"\breadObject\s*\(", r"\bXMLDecoder\b"],
+            "python": [r"\bpickle\.loads?\s*\(", r"\byaml\.load\s*\(", r"\bmarshal\.loads?\s*\("],
+        },
+    },
+    {
+        "kind": "eval_exec",
+        "vuln_classes": ["injection"],
+        "patterns": {
+            "java": [r"\bScriptEngine\.eval\s*\("],
+            "python": [r"\beval\s*\(", r"\bexec\s*\(", r"\bcompile\s*\("],
+            "javascript": [r"\beval\s*\(", r"\bFunction\s*\(", r"\bsetTimeout\s*\("],
+            "typescript": [r"\beval\s*\(", r"\bFunction\s*\(", r"\bsetTimeout\s*\("],
+        },
+    },
+    {
+        "kind": "crypto",
+        "vuln_classes": ["crypto-misuse"],
+        "patterns": {
+            "java": [r"\bCipher\.getInstance\s*\(", r"\bSecretKeySpec\s*\(", r"\bMessageDigest\s*\("],
+            "c": [r"\bEVP_Cipher\w*\s*\(", r"\bAES_encrypt\s*\("],
+            "cpp": [r"\bEVP_Cipher\w*\s*\(", r"\bAES_encrypt\s*\("],
+            "python": [r"\bhashlib\.", r"\bCrypto\.Cipher\."],
+            "javascript": [r"\bcrypto\.createCipher\w*\s*\(", r"\bcrypto\.createHash\s*\("],
+            "typescript": [r"\bcrypto\.createCipher\w*\s*\(", r"\bcrypto\.createHash\s*\("],
+        },
+    },
+    {
+        "kind": "auth",
+        "vuln_classes": ["auth-bypass", "web-app-auth"],
+        "patterns": {
+            "java": [r"\bgetSession\s*\(", r"\bsetAttribute\s*\(", r"\bisUserInRole\s*\(",
+                     r"\bauthenticate\s*\("],
+            "python": [r"\blogin\s*\(", r"\bsession\s*\[", r"@login_required\b"],
+            "javascript": [r"\breq\.session\b", r"\bpassport\.authenticate\s*\("],
+            "typescript": [r"\breq\.session\b", r"\bpassport\.authenticate\s*\("],
+        },
+    },
+    {
+        "kind": "xss_output",
+        "vuln_classes": ["web-app-injection"],
+        "patterns": {
+            "java": [r"\bgetWriter\s*\(\s*\)\.write\s*\("],
+            "javascript": [r"\.innerHTML\b", r"\.outerHTML\b", r"\bdocument\.write\s*\("],
+            "typescript": [r"\.innerHTML\b", r"\.outerHTML\b", r"\bdocument\.write\s*\("],
+        },
+    },
+    {
+        "kind": "redirect",
+        "vuln_classes": ["open-redirect"],
+        "patterns": {
+            "java": [r"\bsendRedirect\s*\(", r'\bsetHeader\s*\(\s*"Location"'],
+            "python": [r"\bredirect\s*\(", r"\bHttpResponseRedirect\s*\("],
+            "javascript": [r"\bres\.redirect\s*\("],
+            "typescript": [r"\bres\.redirect\s*\("],
+        },
+    },
+    {
+        "kind": "xml_parse",
+        "vuln_classes": ["xxe"],
+        "patterns": {
+            "java": [r"\bDocumentBuilderFactory\b", r"\bSAXParserFactory\b", r"\bXMLReader\b"],
+            "c": [r"\bxmlParseFile\s*\("],
+            "cpp": [r"\bxmlParseFile\s*\("],
+            "python": [r"\bxml\.etree\.ElementTree\.parse\s*\(", r"\blxml\.etree\.parse\s*\("],
+        },
+    },
+    {
+        "kind": "memory",
+        "vuln_classes": ["buffer-overflow", "use-after-free"],
+        "patterns": {
+            "c": [r"\bmemcpy\s*\(", r"\bstrcpy\s*\(", r"\bsprintf\s*\(", r"\bmalloc\s*\(",
+                  r"\bfree\s*\(", r"\brealloc\s*\("],
+            "cpp": [r"\bmemcpy\s*\(", r"\bstrcpy\s*\(", r"\bsprintf\s*\(", r"\bmalloc\s*\(",
+                    r"\bfree\s*\(", r"\brealloc\s*\("],
+        },
+    },
+    {
+        "kind": "format_string",
+        "vuln_classes": ["format-string"],
+        "patterns": {
+            "c": [r"\bprintf\s*\(", r"\bfprintf\s*\(", r"\bsprintf\s*\(", r"\bsnprintf\s*\("],
+            "cpp": [r"\bprintf\s*\(", r"\bfprintf\s*\(", r"\bsprintf\s*\(", r"\bsnprintf\s*\("],
+        },
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Entry-point detection patterns
+# ---------------------------------------------------------------------------
+
+# Annotation / decorator strings that mark entry points, keyed by language.
+_ENTRY_ANNOTATIONS: dict[str, list[dict[str, str]]] = {
+    "java": [
+        {"pattern": r"@WebServlet\b", "kind": "servlet_annotation"},
+        {"pattern": r"@RequestMapping\b", "kind": "spring_mapping"},
+        {"pattern": r"@GetMapping\b", "kind": "spring_mapping"},
+        {"pattern": r"@PostMapping\b", "kind": "spring_mapping"},
+        {"pattern": r"@PutMapping\b", "kind": "spring_mapping"},
+        {"pattern": r"@DeleteMapping\b", "kind": "spring_mapping"},
+        {"pattern": r"@PatchMapping\b", "kind": "spring_mapping"},
+        {"pattern": r"@Path\b", "kind": "jaxrs_annotation"},
+        {"pattern": r"@Scheduled\b", "kind": "scheduled_task"},
+    ],
+    "python": [
+        {"pattern": r"@app\.route\b", "kind": "flask_route"},
+        {"pattern": r"@app\.get\b", "kind": "fastapi_route"},
+        {"pattern": r"@app\.post\b", "kind": "fastapi_route"},
+        {"pattern": r"@blueprint\.route\b", "kind": "flask_blueprint"},
+        {"pattern": r"@api_view\b", "kind": "drf_view"},
+        {"pattern": r"@router\.\w+\b", "kind": "fastapi_router"},
+        {"pattern": r"@celery\.task\b", "kind": "celery_task"},
+    ],
+}
+
+# Method names that indicate entry points when in the right class context.
+_ENTRY_METHOD_NAMES: dict[str, list[dict[str, str]]] = {
+    "java": [
+        {"name": "doGet", "kind": "servlet_override"},
+        {"name": "doPost", "kind": "servlet_override"},
+        {"name": "doFilter", "kind": "filter_override"},
+        {"name": "doPut", "kind": "servlet_override"},
+        {"name": "doDelete", "kind": "servlet_override"},
+        {"name": "main", "kind": "main_method"},
+    ],
+}
+
+# String patterns scanned against source lines to detect framework registrations.
+_ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
+    "javascript": [
+        {"pattern": r"\bapp\.get\s*\(", "kind": "express_route"},
+        {"pattern": r"\bapp\.post\s*\(", "kind": "express_route"},
+        {"pattern": r"\bapp\.put\s*\(", "kind": "express_route"},
+        {"pattern": r"\bapp\.delete\s*\(", "kind": "express_route"},
+        {"pattern": r"\brouter\.get\s*\(", "kind": "express_router"},
+        {"pattern": r"\brouter\.post\s*\(", "kind": "express_router"},
+        {"pattern": r"\brouter\.put\s*\(", "kind": "express_router"},
+        {"pattern": r"\brouter\.delete\s*\(", "kind": "express_router"},
+        {"pattern": r"\bexport\s+default\s+function\b", "kind": "default_export"},
+        {"pattern": r"\bmodule\.exports\b", "kind": "module_exports"},
+    ],
+    "typescript": [
+        {"pattern": r"\bapp\.get\s*\(", "kind": "express_route"},
+        {"pattern": r"\bapp\.post\s*\(", "kind": "express_route"},
+        {"pattern": r"\bapp\.put\s*\(", "kind": "express_route"},
+        {"pattern": r"\bapp\.delete\s*\(", "kind": "express_route"},
+        {"pattern": r"\brouter\.get\s*\(", "kind": "express_router"},
+        {"pattern": r"\brouter\.post\s*\(", "kind": "express_router"},
+        {"pattern": r"\brouter\.put\s*\(", "kind": "express_router"},
+        {"pattern": r"\brouter\.delete\s*\(", "kind": "express_router"},
+        {"pattern": r"\bexport\s+default\s+function\b", "kind": "default_export"},
+        {"pattern": r"\bmodule\.exports\b", "kind": "module_exports"},
+    ],
+    "python": [
+        {"pattern": r"if\s+__name__\s*==\s*['\"]__main__['\"]", "kind": "main_guard"},
+    ],
+    "c": [
+        {"pattern": r"\b\w+_handler\s*\(", "kind": "handler_callback"},
+        {"pattern": r"\b\w+_callback\s*\(", "kind": "handler_callback"},
+    ],
+    "cpp": [
+        {"pattern": r"\b\w+_handler\s*\(", "kind": "handler_callback"},
+        {"pattern": r"\b\w+_callback\s*\(", "kind": "handler_callback"},
+    ],
+}
+
+
+# ---------------------------------------------------------------------------
+# Call-site detection regex (simple heuristic)
+# ---------------------------------------------------------------------------
+
+_CALL_RE = re.compile(r"\b([a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*)\s*\(")
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _node_text(node: Any, source: bytes) -> str:
+    """Extract the source text of a tree-sitter node."""
+    return source[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+
+def _node_lines(node: Any) -> tuple[int, int]:
+    """Return 1-based (start_line, end_line) for a tree-sitter node."""
+    return (node.start_point[0] + 1, node.end_point[0] + 1)
+
+
+def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[str, Any]]:
+    """Extract function/method definitions using tree-sitter queries."""
+    query_str = _FUNCTION_QUERIES.get(language)
+    if not query_str:
+        return []
+
+    parser = _get_parser(language)
+    if parser is None:
+        return []
+
+    lang_obj = parser.language
+    try:
+        query = lang_obj.query(query_str)
+    except Exception:
+        return []
+
+    captures = query.captures(tree.root_node)
+    functions: list[dict[str, Any]] = []
+    seen_ranges: set[tuple[int, int]] = set()
+
+    # captures is a dict: {capture_name: [nodes]}
+    nodes = captures.get("func", [])
+
+    for node in nodes:
+        start_line, end_line = _node_lines(node)
+        if (start_line, end_line) in seen_ranges:
+            continue
+        seen_ranges.add((start_line, end_line))
+
+        func_info = _parse_function_node(node, language, source)
+        if func_info:
+            functions.append(func_info)
+
+    return functions
+
+
+def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, Any] | None:
+    """Parse a single function/method tree-sitter node into a structured dict."""
+    start_line, end_line = _node_lines(node)
+    name = ""
+    params: list[str] = []
+    modifiers: list[str] = []
+    annotations: list[str] = []
+
+    if language == "java":
+        for child in node.children:
+            if child.type == "identifier":
+                name = _node_text(child, source)
+            elif child.type == "formal_parameters":
+                params = _extract_params(child, source)
+            elif child.type == "modifiers":
+                for mod in child.children:
+                    txt = _node_text(mod, source)
+                    if txt.startswith("@"):
+                        annotations.append(txt.split("(")[0])
+                    else:
+                        modifiers.append(txt)
+    elif language in ("c", "cpp"):
+        decl = node.child_by_field_name("declarator")
+        if decl:
+            # function_declarator -> identifier + parameter_list
+            for child in decl.children:
+                if child.type == "identifier":
+                    name = _node_text(child, source)
+                elif child.type == "parameter_list":
+                    params = _extract_params(child, source)
+                elif child.type == "field_identifier":
+                    name = _node_text(child, source)
+                # Handle qualified identifiers (ns::func)
+                elif child.type == "qualified_identifier":
+                    name = _node_text(child, source)
+    elif language == "python":
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        params_node = node.child_by_field_name("parameters")
+        if params_node:
+            params = _extract_params(params_node, source)
+        # Check for decorators
+        parent = node.parent
+        if parent and parent.type == "decorated_definition":
+            for child in parent.children:
+                if child.type == "decorator":
+                    annotations.append(_node_text(child, source).strip())
+    elif language in ("javascript", "typescript"):
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        params_node = node.child_by_field_name("parameters")
+        if params_node:
+            params = _extract_params(params_node, source)
+
+    if not name:
+        return None
+
+    return {
+        "name": name,
+        "qualified_name": name,  # enriched later with class context
+        "line_start": start_line,
+        "line_end": end_line,
+        "params": params,
+        "modifiers": modifiers,
+        "annotations": annotations,
+        "is_entry_point": False,  # set during entry-point detection pass
+    }
+
+
+def _extract_params(params_node: Any, source: bytes) -> list[str]:
+    """Extract parameter text from a parameters node."""
+    params: list[str] = []
+    for child in params_node.children:
+        if child.type in ("formal_parameter", "parameter", "spread_element",
+                          "required_parameter", "optional_parameter",
+                          "typed_parameter", "default_parameter",
+                          "identifier", "typed_default_parameter"):
+            params.append(_node_text(child, source).strip())
+    return params
+
+
+def _extract_classes_ts(tree: Any, language: str, source: bytes) -> list[dict[str, Any]]:
+    """Extract class/struct definitions using tree-sitter queries."""
+    query_str = _CLASS_QUERIES.get(language)
+    if not query_str:
+        return []
+
+    parser = _get_parser(language)
+    if parser is None:
+        return []
+
+    lang_obj = parser.language
+    try:
+        query = lang_obj.query(query_str)
+    except Exception:
+        return []
+
+    captures = query.captures(tree.root_node)
+    classes: list[dict[str, Any]] = []
+
+    nodes = captures.get("cls", [])
+
+    for node in nodes:
+        start_line, end_line = _node_lines(node)
+        cls_info = _parse_class_node(node, language, source)
+        if cls_info:
+            classes.append(cls_info)
+
+    return classes
+
+
+def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any] | None:
+    """Parse a class/struct tree-sitter node."""
+    start_line, end_line = _node_lines(node)
+    name = ""
+    extends: str = ""
+    implements: list[str] = []
+
+    if language == "java":
+        for child in node.children:
+            if child.type == "identifier":
+                name = _node_text(child, source)
+            elif child.type == "superclass":
+                for sc in child.children:
+                    if sc.type == "type_identifier":
+                        extends = _node_text(sc, source)
+            elif child.type == "super_interfaces":
+                for si in child.children:
+                    if si.type == "type_list":
+                        for ti in si.children:
+                            if ti.type == "type_identifier":
+                                implements.append(_node_text(ti, source))
+    elif language in ("c", "cpp"):
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        # Base classes (C++)
+        for child in node.children:
+            if child.type == "base_class_clause":
+                for base in child.children:
+                    if base.type == "type_identifier":
+                        extends = _node_text(base, source)
+    elif language == "python":
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        superclasses = node.child_by_field_name("superclasses")
+        if superclasses:
+            for child in superclasses.children:
+                if child.type == "identifier" or child.type == "attribute":
+                    txt = _node_text(child, source)
+                    if not extends:
+                        extends = txt
+                    else:
+                        implements.append(txt)
+    elif language in ("javascript", "typescript"):
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        # heritage / extends
+        for child in node.children:
+            if child.type == "class_heritage":
+                for hc in child.children:
+                    if hc.type == "identifier" or hc.type == "member_expression":
+                        extends = _node_text(hc, source)
+
+    if not name:
+        return None
+
+    return {
+        "name": name,
+        "extends": extends,
+        "implements": implements,
+        "line_start": start_line,
+        "line_end": end_line,
+    }
+
+
+def _extract_imports_ts(tree: Any, language: str, source: bytes) -> list[str]:
+    """Extract import/include strings using tree-sitter queries."""
+    query_str = _IMPORT_QUERIES.get(language)
+    if not query_str:
+        return []
+
+    parser = _get_parser(language)
+    if parser is None:
+        return []
+
+    lang_obj = parser.language
+    try:
+        query = lang_obj.query(query_str)
+    except Exception:
+        return []
+
+    captures = query.captures(tree.root_node)
+    imports: list[str] = []
+
+    nodes = captures.get("imp", [])
+
+    for node in nodes:
+        text = _node_text(node, source).strip().rstrip(";")
+        # Collapse to the essential import path
+        if language == "java":
+            # "import java.io.File" -> "java.io.File"
+            text = text.removeprefix("import").strip()
+            text = text.removeprefix("static").strip()
+        elif language in ("c", "cpp"):
+            # #include <stdio.h> or #include "header.h"
+            m = re.search(r'[<"](.+?)[>"]', text)
+            if m:
+                text = m.group(1)
+        elif language == "python":
+            # Keep as-is: "from os.path import join" or "import sys"
+            pass
+        elif language in ("javascript", "typescript"):
+            # Keep as-is for now
+            pass
+        imports.append(text)
+
+    return imports
+
+
+def _detect_entry_points(
+    functions: list[dict[str, Any]],
+    classes: list[dict[str, Any]],
+    language: str,
+    source_lines: list[str],
+) -> list[dict[str, Any]]:
+    """Identify entry-point functions via annotations, names, and line patterns."""
+    entry_points: list[dict[str, Any]] = []
+
+    # Build class-membership lookup: line -> class name
+    class_for_line: dict[int, dict[str, Any]] = {}
+    for cls in classes:
+        for line in range(cls["line_start"], cls["line_end"] + 1):
+            class_for_line[line] = cls
+
+    annotation_defs = _ENTRY_ANNOTATIONS.get(language, [])
+    method_name_defs = _ENTRY_METHOD_NAMES.get(language, [])
+    line_pattern_defs = _ENTRY_LINE_PATTERNS.get(language, [])
+
+    for func in functions:
+        matched = False
+
+        # Check annotations / decorators
+        for ann_def in annotation_defs:
+            for ann in func.get("annotations", []):
+                if re.search(ann_def["pattern"], ann):
+                    entry_points.append({
+                        "name": func["name"],
+                        "line": func["line_start"],
+                        "kind": ann_def["kind"],
+                        "annotation": ann.split("(")[0],
+                    })
+                    func["is_entry_point"] = True
+                    matched = True
+                    break
+            if matched:
+                break
+
+        if matched:
+            continue
+
+        # Check method name patterns (Java servlet overrides, main, etc.)
+        for mdef in method_name_defs:
+            if func["name"] == mdef["name"]:
+                # For servlet methods, verify class extends HttpServlet/Filter
+                if mdef["kind"] in ("servlet_override", "filter_override"):
+                    cls = class_for_line.get(func["line_start"])
+                    if cls and cls.get("extends") in ("HttpServlet", "Filter", "GenericServlet"):
+                        entry_points.append({
+                            "name": func["name"],
+                            "line": func["line_start"],
+                            "kind": mdef["kind"],
+                            "annotation": "@Override",
+                        })
+                        func["is_entry_point"] = True
+                        matched = True
+                elif mdef["name"] == "main":
+                    # Verify "public static void main" signature
+                    if "public" in func.get("modifiers", []) and "static" in func.get("modifiers", []):
+                        entry_points.append({
+                            "name": func["name"],
+                            "line": func["line_start"],
+                            "kind": "main_method",
+                            "annotation": "",
+                        })
+                        func["is_entry_point"] = True
+                        matched = True
+                else:
+                    entry_points.append({
+                        "name": func["name"],
+                        "line": func["line_start"],
+                        "kind": mdef["kind"],
+                        "annotation": "",
+                    })
+                    func["is_entry_point"] = True
+                    matched = True
+            if matched:
+                break
+
+        if matched:
+            continue
+
+        # Check source-line patterns within function body
+        for lp in line_pattern_defs:
+            start_idx = max(0, func["line_start"] - 1)
+            end_idx = min(len(source_lines), func["line_end"])
+            # Also check a few lines before for decorators
+            check_start = max(0, start_idx - 3)
+            for line_no in range(check_start, end_idx):
+                if re.search(lp["pattern"], source_lines[line_no]):
+                    entry_points.append({
+                        "name": func["name"],
+                        "line": func["line_start"],
+                        "kind": lp["kind"],
+                        "annotation": "",
+                    })
+                    func["is_entry_point"] = True
+                    matched = True
+                    break
+            if matched:
+                break
+
+    # Also detect C/C++ main()
+    if language in ("c", "cpp"):
+        for func in functions:
+            if func["name"] == "main" and not func["is_entry_point"]:
+                entry_points.append({
+                    "name": "main",
+                    "line": func["line_start"],
+                    "kind": "main_function",
+                    "annotation": "",
+                })
+                func["is_entry_point"] = True
+
+    return entry_points
+
+
+def _detect_sinks(
+    functions: list[dict[str, Any]],
+    language: str,
+    source_lines: list[str],
+) -> list[dict[str, Any]]:
+    """Detect security-sensitive API calls within function bodies using regex."""
+    sinks: list[dict[str, Any]] = []
+
+    for func in functions:
+        start_idx = max(0, func["line_start"] - 1)
+        end_idx = min(len(source_lines), func["line_end"])
+
+        for sink_def in _SINK_DEFINITIONS:
+            lang_patterns = sink_def["patterns"].get(language, [])
+            for pat in lang_patterns:
+                compiled = re.compile(pat)
+                for line_idx in range(start_idx, end_idx):
+                    line_text = source_lines[line_idx]
+                    # Skip comment-only lines
+                    stripped = line_text.strip()
+                    if stripped.startswith("//") or stripped.startswith("#") or stripped.startswith("*"):
+                        continue
+                    m = compiled.search(line_text)
+                    if m:
+                        snippet = line_text.strip()
+                        if len(snippet) > 120:
+                            snippet = snippet[:117] + "..."
+                        sinks.append({
+                            "kind": sink_def["kind"],
+                            "line": line_idx + 1,
+                            "function": func["name"],
+                            "snippet": snippet,
+                            "vuln_classes": list(sink_def["vuln_classes"]),
+                        })
+                        # One match per pattern per function is enough
+                        break
+
+    return sinks
+
+
+def _detect_call_sites(
+    functions: list[dict[str, Any]],
+    source_lines: list[str],
+) -> list[dict[str, Any]]:
+    """Detect function calls within each function body using regex."""
+    # Build set of known function names for filtering
+    known_names = {f["name"] for f in functions}
+
+    # Common language keywords to exclude from call-site detection
+    noise = frozenset({
+        "if", "else", "for", "while", "switch", "case", "return", "throw",
+        "new", "delete", "try", "catch", "finally", "import", "from",
+        "class", "def", "function", "var", "let", "const", "static",
+        "public", "private", "protected", "void", "int", "float",
+        "double", "long", "short", "char", "boolean", "String",
+        "True", "False", "None", "null", "undefined", "this", "self",
+        "typeof", "instanceof", "sizeof", "assert", "print", "println",
+    })
+
+    calls: list[dict[str, Any]] = []
+    for func in functions:
+        start_idx = max(0, func["line_start"] - 1)
+        end_idx = min(len(source_lines), func["line_end"])
+        seen_callees: set[str] = set()
+
+        for line_idx in range(start_idx, end_idx):
+            line_text = source_lines[line_idx]
+            stripped = line_text.strip()
+            if stripped.startswith("//") or stripped.startswith("#") or stripped.startswith("*"):
+                continue
+            for m in _CALL_RE.finditer(line_text):
+                callee = m.group(1)
+                # Use the last component for qualified calls (obj.method)
+                simple_name = callee.rsplit(".", 1)[-1]
+                if simple_name in noise:
+                    continue
+                if simple_name == func["name"]:
+                    continue  # skip self-recursion noise
+                if simple_name in seen_callees:
+                    continue
+                seen_callees.add(simple_name)
+                calls.append({
+                    "caller": func["name"],
+                    "callee": callee,
+                    "line": line_idx + 1,
+                })
+
+    return calls
+
+
+def _enrich_qualified_names(
+    functions: list[dict[str, Any]],
+    classes: list[dict[str, Any]],
+) -> None:
+    """Set qualified_name to ClassName.method for methods inside classes."""
+    for cls in classes:
+        for func in functions:
+            if cls["line_start"] <= func["line_start"] <= func["line_end"] <= cls["line_end"]:
+                func["qualified_name"] = f"{cls['name']}.{func['name']}"
+
+
+# ---------------------------------------------------------------------------
+# Arrow function detection for JS/TS (assigned to variable)
+# ---------------------------------------------------------------------------
+
+_ARROW_RE = re.compile(
+    r"(?:const|let|var)\s+([a-zA-Z_$]\w*)\s*=\s*(?:async\s+)?\(.*?\)\s*=>"
+)
+
+
+def _detect_arrow_functions(source_lines: list[str]) -> list[dict[str, Any]]:
+    """Detect arrow functions assigned to named variables (JS/TS)."""
+    arrows: list[dict[str, Any]] = []
+    for idx, line in enumerate(source_lines):
+        m = _ARROW_RE.search(line)
+        if m:
+            arrows.append({
+                "name": m.group(1),
+                "qualified_name": m.group(1),
+                "line_start": idx + 1,
+                "line_end": idx + 1,  # approximate; refined below if possible
+                "params": [],
+                "modifiers": [],
+                "annotations": [],
+                "is_entry_point": False,
+            })
+    return arrows
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def language_for_file(file_path: str) -> str | None:
+    """Return the tree-sitter language key for a file, or None if unsupported."""
+    ext = Path(file_path).suffix.lower()
+    return EXTENSION_LANG_MAP.get(ext)
+
+
+def index_file(
+    file_path: str,
+    language: str,
+    source: bytes | None = None,
+) -> dict[str, Any]:
+    """Parse a single file and return a structural index dict.
+
+    If tree-sitter is not available, returns a minimal stub with only line
+    counts and language metadata (no functions, sinks, etc.).
+    """
+    if source is None:
+        try:
+            with open(file_path, "rb") as fh:
+                source = fh.read()
+        except OSError as exc:
+            warnings.warn(f"Cannot read {file_path}: {exc}")
+            return _empty_index(file_path, language)
+
+    source_lines = source.decode("utf-8", errors="replace").splitlines()
+    total_lines = len(source_lines)
+
+    if not _TS_AVAILABLE:
+        warnings.warn(
+            "tree-sitter is not installed; returning degraded index without "
+            "structural analysis. Install tree-sitter and language grammars "
+            "for full indexing.",
+            stacklevel=2,
+        )
+        return _empty_index(file_path, language, total_lines=total_lines)
+
+    if language not in SUPPORTED_LANGUAGES:
+        return _empty_index(file_path, language, total_lines=total_lines)
+
+    # For .tsx files, use the tsx parser variant
+    parse_lang = language
+    if file_path.endswith(".tsx"):
+        parse_lang = "tsx"
+
+    parser = _get_parser(parse_lang)
+    if parser is None:
+        warnings.warn(
+            f"tree-sitter grammar for '{language}' not available; returning "
+            "degraded index.",
+            stacklevel=2,
+        )
+        return _empty_index(file_path, language, total_lines=total_lines)
+
+    tree = parser.parse(source)
+
+    # Extract structural elements
+    functions = _extract_functions_ts(tree, parse_lang if parse_lang != "tsx" else "typescript", source)
+    classes = _extract_classes_ts(tree, parse_lang if parse_lang != "tsx" else "typescript", source)
+    imports = _extract_imports_ts(tree, parse_lang if parse_lang != "tsx" else "typescript", source)
+
+    # For JS/TS, also find arrow functions assigned to variables
+    effective_lang = "typescript" if parse_lang == "tsx" else language
+    if effective_lang in ("javascript", "typescript"):
+        arrows = _detect_arrow_functions(source_lines)
+        # Merge arrows that are not already captured
+        existing_names = {(f["name"], f["line_start"]) for f in functions}
+        for arrow in arrows:
+            if (arrow["name"], arrow["line_start"]) not in existing_names:
+                functions.append(arrow)
+
+    # Enrich qualified names with class context
+    _enrich_qualified_names(functions, classes)
+
+    # Detect entry points
+    entry_points = _detect_entry_points(functions, classes, effective_lang, source_lines)
+
+    # Detect security sinks
+    sinks = _detect_sinks(functions, effective_lang, source_lines)
+
+    # Detect call sites
+    call_sites = _detect_call_sites(functions, source_lines)
+
+    return {
+        "file_path": file_path,
+        "language": language,
+        "total_functions": len(functions),
+        "total_lines": total_lines,
+        "functions": functions,
+        "entry_points": entry_points,
+        "security_sinks": sinks,
+        "call_sites": call_sites,
+        "imports": imports,
+        "classes": classes,
+    }
+
+
+def _empty_index(
+    file_path: str,
+    language: str,
+    total_lines: int = 0,
+) -> dict[str, Any]:
+    """Return an empty structural index stub."""
+    return {
+        "file_path": file_path,
+        "language": language,
+        "total_functions": 0,
+        "total_lines": total_lines,
+        "functions": [],
+        "entry_points": [],
+        "security_sinks": [],
+        "call_sites": [],
+        "imports": [],
+        "classes": [],
+    }
+
+
+def index_repo(
+    repo_path: str,
+    file_list: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Index all supported files in *file_list* and return (indices, manifest).
+
+    Each entry in *file_list* must have at least ``file_path`` (relative to
+    *repo_path*) and optionally ``language``.
+    """
+    indices: list[dict[str, Any]] = []
+    lang_counts: dict[str, int] = {}
+    total_functions = 0
+    total_entry_points = 0
+    total_sinks = 0
+    sinks_by_cat: dict[str, int] = {}
+    skipped = 0
+
+    for entry in file_list:
+        rel_path = entry["file_path"]
+        abs_path = str(Path(repo_path) / rel_path)
+        lang = entry.get("language") or language_for_file(rel_path)
+        if not lang or lang not in SUPPORTED_LANGUAGES:
+            skipped += 1
+            continue
+
+        idx = index_file(abs_path, lang)
+        idx["file_path"] = rel_path  # keep relative
+        indices.append(idx)
+
+        lang_counts[lang] = lang_counts.get(lang, 0) + 1
+        total_functions += idx["total_functions"]
+        total_entry_points += len(idx["entry_points"])
+        total_sinks += len(idx["security_sinks"])
+        for sink in idx["security_sinks"]:
+            kind = sink["kind"]
+            sinks_by_cat[kind] = sinks_by_cat.get(kind, 0) + 1
+
+    manifest = {
+        "repo_path": repo_path,
+        "total_files": len(file_list),
+        "indexed_files": len(indices),
+        "skipped_unsupported": skipped,
+        "languages": lang_counts,
+        "total_functions": total_functions,
+        "total_entry_points": total_entry_points,
+        "total_security_sinks": total_sinks,
+        "sinks_by_category": sinks_by_cat,
+    }
+
+    return indices, manifest

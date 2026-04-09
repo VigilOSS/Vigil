@@ -17,7 +17,7 @@ origin: AI Threat Hunting
 
 - `curl` (header inspection, file probing)
 - Burp Suite (passive scanning, response analysis)
-- `gobuster` / `ffuf` (file and directory brute-force)
+- `ffuf` / `feroxbuster` (file and directory brute-force)
 - GitTools (extract .git repositories)
 - trufflehog / gitleaks (secret scanning)
 
@@ -108,7 +108,15 @@ origin: AI Threat Hunting
 - Chain potential: how disclosure enables further attacks
 - Remediation: custom error pages, remove debug endpoints, restrict files, strip headers
 
+## Exception Trigger Payloads
+
+- [ ] Send `null` in numeric fields (valid JSON); send strings `"undefined"`, `"NaN"`, `"Infinity"` to test type coercion
+- [ ] Test with empty arrays `[]` and objects `{}` where scalar values expected
+- [ ] Send extremely long strings (10K+ chars) in each parameter
+- [ ] Test with special float values: `1e308`, `-1e308`, `1e-324`
+- [ ] Send deeply nested JSON objects (100+ levels) to test stack depth limits
+- [ ] Test with circular reference patterns in JSON (if custom parser)
+
 ## Extended Resources
 
 - `agent/references/payloads/info-disclosure-probes.md` — standard endpoints checklist (/metrics, /.env, /actuator, cloud metadata)
-- `agent/references/vuln-checklists/A02-security-misconfiguration.md` — OWASP Top 10:2025 security misconfiguration checklist

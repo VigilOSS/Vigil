@@ -6,26 +6,9 @@ On-demand reference library. Read specific files when needed — do NOT load eve
 
 1. Check this index to find the relevant reference file
 2. Use the listed path under `references/` to load only the specific file you need
-3. Example: testing for SQL injection? Read `references/vuln-checklists/A05-injection.md`
+3. Example: testing for SQL injection? Read `references/payloads/sqli-payloads.md`
 
 ---
-
-## vuln-checklists/ — OWASP Top 10:2025
-
-Testing checklists per vulnerability category. Used by: vulnerability-analyst, exploit-developer, operator.
-
-| File | Category |
-|------|----------|
-| `vuln-checklists/A01-broken-access-control.md` | IDOR, privilege escalation, CORS, CSRF, JWT tampering |
-| `vuln-checklists/A02-security-misconfiguration.md` | Default creds, verbose errors, directory listing, missing headers |
-| `vuln-checklists/A03-supply-chain-failures.md` | Outdated components, known CVEs, exposed .git, dependency confusion |
-| `vuln-checklists/A04-cryptographic-failures.md` | Weak TLS, hardcoded secrets, weak hashing, insecure random |
-| `vuln-checklists/A05-injection.md` | SQLi, XSS, command injection, SSTI, NoSQL, LDAP injection |
-| `vuln-checklists/A06-insecure-design.md` | Logic flaws, rate limiting, business logic bypass |
-| `vuln-checklists/A07-authentication-failures.md` | Credential stuffing, session fixation, MFA bypass, user enumeration |
-| `vuln-checklists/A08-integrity-failures.md` | Insecure deserialization, CI/CD exposure, unsigned updates |
-| `vuln-checklists/A09-logging-failures.md` | Log injection, missing audit trails (observational) |
-| `vuln-checklists/A10-exceptional-conditions.md` | Error disclosure, fail-open, transaction rollback, resource exhaustion |
 
 ## api-security/ — OWASP API Security Top 10:2023
 
@@ -72,11 +55,12 @@ Attack techniques organized by kill chain phase. Used by: operator, exploit-deve
 | `offensive-tactics/lateral-movement/rdp-lateral.md` | RDP hijacking (tscon), SharpRDP headless |
 | `offensive-tactics/lateral-movement/tunneling-relaying.md` | SSH tunneling, netcat relay, NTLM relay, port forwarding |
 
-### offensive-tactics/ (shell handling)
+### offensive-tactics/ (shell handling & tunneling)
 
 | File | Techniques |
 |------|-----------|
-| `offensive-tactics/shell-handling.md` | pwncat-vl listeners, tmux session management, ngrok/chisel exposure, reverse shell payloads, log tailing for LLM visibility |
+| `offensive-tactics/shell-handling.md` | pwncat-vl listeners, tmux session management, reverse shell payloads, log tailing for LLM visibility |
+| `offensive-tactics/frp-tunneling.md` | frp SSH tunnel setup (HTTP + TCP modes), interactsh OOB callback servers, tunnel logging, standard engagement tunnels (reverse shell, OOB DNS/HTTPS/HTTP) |
 
 ### offensive-tactics/persistence/
 
@@ -151,6 +135,40 @@ Copy-pasteable payloads organized by attack type. Used by: exploit-developer, vu
 | `payloads/business-logic-payloads.md` | Negative quantity, coupon abuse, payment bypass, mass assignment |
 | `payloads/info-disclosure-probes.md` | Standard endpoints checklist (/metrics, /.env, /actuator, cloud metadata) |
 
+## code-vuln-patterns/ — SAST-Surviving Vulnerability Patterns
+
+Source code vulnerability patterns that require multi-function reasoning and semantic understanding.
+Used by: code-vuln-hunter, code-variant-hunter, code-vuln-verifier.
+
+These are NOT traditional SAST patterns. They focus on bugs that survive CodeQL, Semgrep, and OSS-Fuzz —
+multi-function chains, combinatorial arithmetic, state machine bugs, and incomplete patches.
+
+| File | Focus | Languages |
+|------|-------|-----------|
+| `code-vuln-patterns/buffer-overflow.md` | Cross-function size propagation, incomplete bounds checks, realloc chains | C/C++, Python, JS |
+| `code-vuln-patterns/integer-overflow.md` | Combinatorial arithmetic, signed/unsigned confusion across boundaries, encoding expansion | C/C++, Python, JS |
+| `code-vuln-patterns/format-string.md` | Indirect format control, multi-source format construction, callback chains | C/C++, Python, JS |
+| `code-vuln-patterns/use-after-free.md` | Cross-module lifetime reasoning, refcount errors, async cleanup races | C/C++, Python, JS |
+| `code-vuln-patterns/injection.md` | Semantic context escaping, multi-stage sanitization failures, protocol injection | C/C++, Python, JS |
+| `code-vuln-patterns/race-condition.md` | State machine bugs, async refactoring artifacts, signal handler races | C/C++, Python, JS |
+| `code-vuln-patterns/crypto-misuse.md` | Subtle mode/parameter misuse, timing leaks, non-obvious randomness issues | C/C++, Python, JS |
+| `code-vuln-patterns/auth-bypass.md` | Generic/C auth gaps, fallback bypasses, token validation gaps. Framework-specific → see `web-app-auth.md` | C/C++ (frameworks → web-app-auth) |
+| `code-vuln-patterns/path-traversal.md` | Canonicalization bypass, archive extraction writes, symlink and separator confusion | C/C++, Python, JS |
+| `code-vuln-patterns/ssrf.md` | URL parser confusion, DNS rebinding, internal metadata reachability, cross-protocol fetches | C/C++, Python, JS |
+| `code-vuln-patterns/open-redirect.md` | Redirect validation bypass, OAuth redirect theft, local-vs-absolute URL confusion | Python, JS, Java, Go |
+| `code-vuln-patterns/file-upload.md` | Validation/storage drift, archive smuggling, upload-to-parser and upload-to-execution chains | Python, JS, Java, Go |
+| `code-vuln-patterns/xxe.md` | External entity fetches, SSRF/file-read pivots, parser configuration regressions | Python, JS, Java, Go |
+| `code-vuln-patterns/deserialization.md` | Trust-boundary object materialization, type-tag abuse, post-decode gadget reachability | C/C++, Python, JS, Java |
+| `code-vuln-patterns/uninitialized-memory.md` | Conditional initialization, cross-function partial init, stack/heap info leaks | C/C++, Python, JS |
+| `code-vuln-patterns/type-confusion.md` | void* casts, union abuse, tagged union errors, inheritance downcasts | C/C++, Python, JS |
+| `code-vuln-patterns/null-dereference.md` | Cross-function NULL propagation, optional field assumptions, race-to-NULL | C/C++, Python, JS |
+| `code-vuln-patterns/algorithmic-dos.md` | Hash collision, ReDoS, parser bombs, unbounded allocation, zip bombs | C/C++, Python, JS |
+| `code-vuln-patterns/error-handling.md` | Fail-open, unchecked returns, cleanup double-free, exception swallowing, resource leaks | C/C++, Python, JS |
+| `code-vuln-patterns/web-app-auth.md` | Middleware ordering, decorator bypass, role check logic, path normalization, OAuth implementation flaws | C/C++, Python, JS, Java, Go |
+| `code-vuln-patterns/web-app-injection.md` | ORM bypass, second-order injection, template injection, deserialization in web contexts, NoSQL injection | Python, JS, Java, Ruby |
+| `code-vuln-patterns/web-app-data-exposure.md` | IDOR in ORM queries, mass assignment, serializer over-exposure, GraphQL field auth, bulk endpoints | Python, JS, Java, Ruby, Go |
+| `code-vuln-patterns/ai-ml-security.md` | Prompt injection, MCP tool poisoning, RAG poisoning, unsafe tool execution, cross-user context leakage | Python, JS, Java |
+
 ## tools/ — CLI Tool Cheatsheets
 
 Quick-reference per tool, organized by usage phase.
@@ -161,25 +179,37 @@ Quick-reference per tool, organized by usage phase.
 |------|------|
 | `tools/recon/nmap.md` | Port/service discovery and enumeration |
 | `tools/recon/whatweb.md` | Web technology fingerprinting |
-| `tools/recon/nikto.md` | Web server vulnerability scanning |
+| `tools/recon/httpx.md` | HTTP probing, tech detection, live host confirmation |
+| `tools/recon/nuclei.md` | Template-based vulnerability scanning (CVEs, misconfigs, exposures) |
+| `tools/recon/wafw00f.md` | WAF identification and fingerprinting |
 | `tools/recon/curl.md` | HTTP request crafting and testing |
-| `tools/recon/nuclei.md` | Vulnerability scanning with templates |
+| `tools/recon/puredns.md` | Active DNS brute-force with wildcard filtering |
+| `tools/recon/dnsx.md` | Bulk DNS resolution and record enumeration |
+| `tools/recon/gau.md` | Historical URL discovery (Wayback, OTX, Common Crawl, URLScan) |
 
 ### tools/fuzzing/ — Used by: fuzzer, recon-specialist
 
 | File | Tool |
 |------|------|
-| `tools/fuzzing/ffuf.md` | Web fuzzing (directories, parameters, vhosts) |
-| `tools/fuzzing/gobuster.md` | Directory and DNS brute-forcing |
-| `tools/fuzzing/wfuzz.md` | Web fuzzing with advanced filtering |
-| `tools/fuzzing/dirb.md` | Web directory brute-forcing |
+| `tools/fuzzing/ffuf.md` | Web fuzzing (parameters, vhosts, targeted directory work) |
+| `tools/fuzzing/feroxbuster.md` | Recursive content discovery (primary for directory scanning) |
+| `tools/fuzzing/dirb.md` | URL brute-forcing with wordlists |
+| `tools/fuzzing/gobuster.md` | Directory/file, DNS, and vhost brute-forcing |
+| `tools/fuzzing/wfuzz.md` | Web fuzzer for parameters, headers, and paths |
 
-### tools/exploitation/ — Used by: exploit-developer
+### tools/exploitation/ — Used by: exploit-developer, vulnerability-analyst
 
 | File | Tool |
 |------|------|
 | `tools/exploitation/sqlmap.md` | SQL injection detection and exploitation |
 | `tools/exploitation/hydra.md` | Online password brute-forcing |
+| `tools/exploitation/dalfox.md` | XSS scanning with parameter analysis and blind XSS |
+
+### tools/reporting/ — Used by: report-writer, operator
+
+| File | Tool |
+|------|------|
+| `tools/reporting/jira-api.md` | Jira REST API v3: authentication, issue CRUD, ADF formatting for security findings |
 
 ### tools/cracking/ — Used by: exploit-developer
 
@@ -194,7 +224,7 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 
 | File | Purpose |
 |------|---------|
-| `engagement-methodology.md` | Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase |
-| `subagent-registry.md` | Registry schema, resume-vs-dispatch decision tree, and examples for `agent-registry.json` |
+| `runtime-guides/engagement-methodology.md` | Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase |
+| `runtime-guides/subagent-registry.md` | Registry schema, resume-vs-dispatch decision tree, and examples for `agent-registry.json` |
 | `handoff-protocols.md` | Agent-to-agent handoff rules and expected downstream actions |
-| `wildcard-mode.md` | Wildcard target enumeration, prioritization, and sliding-window execution rules |
+| `subdomain-enumeration.md` | Subdomain enumeration (when `*.domain` in hosts), prioritization, and sliding-window execution rules |
