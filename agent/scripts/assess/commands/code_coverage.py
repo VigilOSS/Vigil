@@ -35,6 +35,17 @@ EFFORT_THRESHOLDS = {
 }
 
 
+def _coerce_effort(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _format_effort(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:g}"
+
+
 def register(subparsers) -> None:
     p = subparsers.add_parser("code-coverage", help="Display code analysis coverage summary")
     p.add_argument("--repo-id", default=None, help="Filter by repository ID")
@@ -160,9 +171,9 @@ def _print_cwe_matrix(files: list[dict]) -> None:
         display_name = display_name[:name_width]
 
         # Build effort lookup for this file
-        effort_map: dict[str, int] = {}
+        effort_map: dict[str, float] = {}
         for cwe in f.get('cwe_coverage', []):
-            effort_map[cwe.get('family', '')] = cwe.get('effort', 0)
+            effort_map[cwe.get('family', '')] = _coerce_effort(cwe.get('effort', 0))
 
         # Determine applicable families for this file
         applicable = f.get('applicable_families', set())
@@ -178,7 +189,7 @@ def _print_cwe_matrix(files: list[dict]) -> None:
             elif fam in effort_map:
                 val = effort_map[fam]
                 marker = "!" if threshold > 0 and val < threshold else ""
-                cell = f"{val}{marker}"
+                cell = f"{_format_effort(val)}{marker}"
             else:
                 # Family is applicable but untested
                 cell = "0!" if threshold > 0 else "0"
@@ -200,9 +211,9 @@ def _check_effort_gaps(files: list[dict]) -> bool:
         if isinstance(applicable, list):
             applicable = set(applicable)
 
-        effort_map: dict[str, int] = {}
+        effort_map: dict[str, float] = {}
         for cwe in f.get('cwe_coverage', []):
-            effort_map[cwe.get('family', '')] = cwe.get('effort', 0)
+            effort_map[cwe.get('family', '')] = _coerce_effort(cwe.get('effort', 0))
 
         for fam in applicable:
             effort = effort_map.get(fam, 0)
@@ -238,9 +249,9 @@ def _print_vuln_class_summary(data: dict) -> None:
                 zero_tested += 1
             continue
 
-        effort_map: dict[str, int] = {}
+        effort_map: dict[str, float] = {}
         for cwe in cwe_coverage:
-            effort_map[cwe.get('family', '')] = cwe.get('effort', 0)
+            effort_map[cwe.get('family', '')] = _coerce_effort(cwe.get('effort', 0))
 
         threshold = EFFORT_THRESHOLDS.get(classification, 0)
         has_zero = False
