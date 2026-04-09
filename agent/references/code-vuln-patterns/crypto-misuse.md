@@ -6,7 +6,11 @@
 
 ---
 
-## What SAST Already Catches (Skip These)
+## Baseline Patterns (Single-Function / Single-Scope)
+
+Toolchain-catchable patterns. Record as findings if encountered during orientation —
+on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
+Invest primary analysis time in the LLM-advantage patterns below.
 
 - MD5 or SHA1 used for password hashing
 - ECB mode block cipher usage

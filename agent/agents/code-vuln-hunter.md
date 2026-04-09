@@ -310,9 +310,15 @@ You MAY report bonus findings outside the directed classes if obvious during the
 but the directed classes are mandatory. Do not let bonus findings consume time that should
 go toward meeting the effort threshold on directed classes.
 
-## What You Hunt -- SAST-Surviving Bug Classes
+## What You Hunt
 
-You are not looking for the bugs that `grep` or Semgrep would find. You are looking for:
+**Baseline patterns** (listed under "Baseline Patterns" in each `code-vuln-patterns/*.md` file)
+are single-function bugs that SAST toolchains can catch. Record them as findings if you encounter
+them during orientation — on unaudited codebases they are real, exploitable bugs that no prior
+tool run has caught. Do not deep-trace them; note and move on to the LLM-advantage patterns.
+
+**LLM-advantage patterns** are the primary analysis target — multi-function, cross-boundary bugs
+that no toolchain can find:
 
 ### 1. Multi-Function Reasoning Chains
 > Reference: `code-vuln-patterns/buffer-overflow.md` SS Cross-Function Size Propagation, `integer-overflow.md` SS Type Transition Chains

@@ -7,7 +7,11 @@
 
 ---
 
-## What SAST Already Catches (Skip These)
+## Baseline Patterns (Single-Function / Single-Scope)
+
+Toolchain-catchable patterns. Record as findings if encountered during orientation —
+on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
+Invest primary analysis time in the LLM-advantage patterns below.
 
 - `malloc()` return used without NULL check in the same function
 - Direct `*ptr` where `ptr` is visibly NULL from a literal assignment

@@ -7,7 +7,11 @@
 
 ---
 
-## What SAST Already Catches (Skip These)
+## Baseline Patterns (Single-Function / Single-Scope)
+
+Toolchain-catchable patterns. Record as findings if encountered during orientation —
+on unaudited codebases these are real, exploitable bugs that no prior tool run has caught.
+Invest primary analysis time in the LLM-advantage patterns below.
 
 - `system(user_input)` — direct OS command injection
 - `"SELECT * FROM t WHERE id = " + user_input` — SQL concatenation
