@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -10,6 +11,16 @@ from .config import settings
 from .models.event import Event
 from .models.engagement_session import EngagementSession
 from .models.engagement import Engagement
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseFingerprint:
+    path: Path
+    device: int
+    inode: int
+
+
+_startup_database_fingerprint: DatabaseFingerprint | None = None
 
 
 def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
@@ -60,7 +71,38 @@ def database_path() -> Path:
     return settings.data_dir / "orchestrator.sqlite3"
 
 
+def _database_fingerprint(db_path: Path) -> DatabaseFingerprint:
+    stat_result = db_path.stat()
+    return DatabaseFingerprint(path=db_path.resolve(), device=stat_result.st_dev, inode=stat_result.st_ino)
+
+
+def _require_startup_database_fingerprint() -> DatabaseFingerprint:
+    if _startup_database_fingerprint is None:
+        raise RuntimeError("Orchestrator database has not been initialized for this process")
+    return _startup_database_fingerprint
+
+
+def _verify_database_fingerprint() -> Path:
+    expected = _require_startup_database_fingerprint()
+    db_path = database_path()
+    if db_path.resolve() != expected.path:
+        raise RuntimeError(
+            f"Orchestrator database path changed after startup: expected {expected.path}, got {db_path.resolve()}"
+        )
+    if not db_path.exists():
+        raise RuntimeError(f"Orchestrator database file disappeared after startup: {db_path}")
+    current = _database_fingerprint(db_path)
+    if current.device != expected.device or current.inode != expected.inode:
+        raise RuntimeError(
+            f"Orchestrator database file changed after startup: expected dev/inode "
+            f"{expected.device}/{expected.inode}, got {current.device}/{current.inode}"
+        )
+    return db_path
+
+
 def init_db() -> None:
+    global _startup_database_fingerprint
+
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     db_path = database_path()
     _reset_incompatible_database(db_path)
@@ -776,17 +818,13 @@ def init_db() -> None:
 
         connection.commit()
 
+    _startup_database_fingerprint = _database_fingerprint(db_path)
+
 
 @contextmanager
 def get_connection() -> Iterator[sqlite3.Connection]:
-    init_db()
-    db_path = database_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        connection = sqlite3.connect(str(db_path), cached_statements=0)
-    except sqlite3.OperationalError:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(db_path), cached_statements=0)
+    db_path = _verify_database_fingerprint()
+    connection = sqlite3.connect(str(db_path), cached_statements=0)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     try:
@@ -847,8 +885,9 @@ def update_engagement_identity(engagement_id: int, target: str, status: str, eng
             UPDATE engagements
             SET target = ?, status = ?, engagement_root = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
+              AND (target != ? OR status != ? OR engagement_root != ?)
             """,
-            (target, status, engagement_root, engagement_id),
+            (target, status, engagement_root, engagement_id, target, status, engagement_root),
         )
         row = connection.execute(
             """

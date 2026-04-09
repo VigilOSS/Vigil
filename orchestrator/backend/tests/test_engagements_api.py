@@ -4,6 +4,11 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+from app import db as db_module
+from app.services import engagements as engagement_service
+
 
 def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-example") -> Path:
     engagement_dir = engagements_dir / key
@@ -64,6 +69,58 @@ def test_list_engagements_discovers_filesystem_engagements(client, isolate_setti
     assert payload[0]["key"] == "2026-03-30-120000-example"
     assert payload[0]["current_phase"] == "exploit"
     assert payload[0]["session_count"] == 1
+
+
+def test_maybe_sync_engagements_skips_repeated_resync_without_filesystem_changes(isolate_settings, monkeypatch):
+    write_engagement(isolate_settings["engagements_dir"])
+    db_module.init_db()
+
+    monkeypatch.setattr(engagement_service, "_last_sync_signature", None)
+    call_count = 0
+    original_sync = engagement_service.sync_engagements
+
+    def counted_sync() -> None:
+        nonlocal call_count
+        call_count += 1
+        original_sync()
+
+    monkeypatch.setattr(engagement_service, "sync_engagements", counted_sync)
+
+    engagement_service.maybe_sync_engagements()
+    engagement_service.maybe_sync_engagements()
+
+    assert call_count == 1
+
+    write_engagement(isolate_settings["engagements_dir"], key="2026-03-30-120500-example")
+    engagement_service.maybe_sync_engagements()
+
+    assert call_count == 2
+
+
+def test_get_connection_requires_startup_initialized_database(isolate_settings, monkeypatch):
+    monkeypatch.setattr(db_module, "_startup_database_fingerprint", None)
+
+    with pytest.raises(RuntimeError, match="has not been initialized"):
+        with db_module.get_connection():
+            pass
+
+
+def test_get_connection_rejects_database_file_replacement(isolate_settings, monkeypatch):
+    db_module.init_db()
+    original_path = db_module.database_path()
+    fingerprint = db_module._startup_database_fingerprint
+    assert fingerprint is not None
+
+    replacement_path = isolate_settings["data_dir"] / "replacement.sqlite3"
+    with sqlite3.connect(str(replacement_path)) as connection:
+        connection.execute("CREATE TABLE replacement_marker (id INTEGER PRIMARY KEY)")
+
+    original_path.unlink()
+    replacement_path.replace(original_path)
+
+    with pytest.raises(RuntimeError, match="database file changed after startup"):
+        with db_module.get_connection():
+            pass
 
 
 def test_engagement_artifacts_and_sessions_are_scoped_by_engagement_key(client, isolate_settings):
@@ -1184,7 +1241,7 @@ def test_coverage_patch_rejects_unknown_status_values(client, isolate_settings):
     assert "invalid coverage status" in patch.json()["detail"]
 
 
-def test_incompatible_local_database_is_reset(client, isolate_settings):
+def test_incompatible_local_database_is_reset(isolate_settings):
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     with sqlite3.connect(str(db_path)) as connection:
         connection.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT)")
@@ -1208,11 +1265,10 @@ def test_incompatible_local_database_is_reset(client, isolate_settings):
         )
         connection.commit()
 
+    db_module.init_db()
     write_engagement(isolate_settings["engagements_dir"])
-
-    response = client.get("/engagements")
-    assert response.status_code == 200
-    assert response.json()[0]["key"] == "2026-03-30-120000-example"
+    engagement_service.maybe_sync_engagements(force=True)
+    assert engagement_service.list_engagements()[0].key == "2026-03-30-120000-example"
 
     with sqlite3.connect(str(db_path)) as connection:
         table_names = {

@@ -34,6 +34,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (engagementRoute) {
+      return;
+    }
+
     let cancelled = false;
     let refreshing = false;
 
@@ -53,17 +57,24 @@ export default function App() {
     }
 
     void refreshEngagements();
-    const interval = engagementRoute
-      ? null
-      : window.setInterval(() => {
-          void refreshEngagements();
-        }, 5000);
+    const interval = window.setInterval(() => {
+      if (document.hidden) {
+        return;
+      }
+      void refreshEngagements();
+    }, 5000);
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        void refreshEngagements();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       cancelled = true;
-      if (interval !== null) {
-        window.clearInterval(interval);
-      }
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [engagementRoute]);
 
