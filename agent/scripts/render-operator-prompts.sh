@@ -16,6 +16,7 @@ AGENT_NAMES=(
   operator
   recon-specialist
   source-analyzer
+  surface-collector
   vulnerability-analyst
   exploit-developer
   fuzzer
@@ -32,6 +33,7 @@ agent_description() {
     operator) printf '%s\n' "Lead red team operator. Drives methodology, coordinates phases, and manages state." ;;
     recon-specialist) printf '%s\n' "Initial web and service reconnaissance specialist." ;;
     source-analyzer) printf '%s\n' "Frontend and client-source analysis specialist." ;;
+    surface-collector) printf '%s\n' "URL collection, deduplication, and intelligent triage specialist for Phase 2." ;;
     vulnerability-analyst) printf '%s\n' "Validation-focused analyst for attackability and evidence quality." ;;
     exploit-developer) printf '%s\n' "Exploitation and chain-building specialist." ;;
     fuzzer) printf '%s\n' "High-volume fuzzing specialist for bounded payload families." ;;
@@ -83,6 +85,7 @@ render_agent_roster() {
 | `operator` | Lead red team operator. Drives methodology, coordinates phases, manages state. | Always active. Entry point. |
 | `recon-specialist` | Network recon: fingerprinting, directory fuzzing, tech stack, port scanning. | Phase 1. |
 | `source-analyzer` | Deep static analysis of HTML/JS/CSS for hidden routes, API endpoints, secrets. | Phase 1 (parallel with recon). |
+| `surface-collector` | URL collection, dedup, intelligent triage, work-buffer population. | Phase 2. |
 | `vulnerability-analyst` | Validates endpoints, kills weak findings, and prepares durable evidence. | Phase 3 consumption loop. |
 | `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 3 (HIGH/MEDIUM) + Phase 4. |
 | `fuzzer` | High-volume parameter/directory/protocol fuzzing with bounded objectives. | When FUZZER_NEEDED. |
@@ -138,6 +141,7 @@ EOF
 Use `@agent-name` when dispatching subagents:
 - `@recon-specialist`
 - `@source-analyzer`
+- `@surface-collector`
 - `@vulnerability-analyst`
 - `@exploit-developer`
 - `@fuzzer`

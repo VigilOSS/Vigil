@@ -21,6 +21,7 @@ def test_rendered_operator_prompts_match_operator_core():
         "operator",
         "recon-specialist",
         "source-analyzer",
+        "surface-collector",
         "vulnerability-analyst",
         "exploit-developer",
         "fuzzer",
@@ -125,6 +126,7 @@ def test_specialist_agent_sources_exist_for_public_roster():
     expected = {
         "recon-specialist.md",
         "source-analyzer.md",
+        "surface-collector.md",
         "vulnerability-analyst.md",
         "exploit-developer.md",
         "fuzzer.md",

@@ -23,8 +23,12 @@ Read `agent/shared-constraints.md` first, then select from this index.
   **Use when:** Analyzing HTML/JS/CSS for routes, secrets, API bases, SPA bundles, source maps.
   **Paired references:** `references/payloads/info-disclosure-probes.md`, `references/tools/exploitation/dalfox.md` _(for JS-discovered parameterized URLs)_
 
+- `agent/skills/surface-collection/SKILL.md`
+  **Use when:** Phase 2 (Collect); running Katana + gau + historical URL enrichment, intelligent URL triage, and work-buffer population.
+  **Paired references:** `references/tools/recon/gau.md`, `references/tools/recon/httpx.md`
+
 - `agent/skills/case-dispatching/SKILL.md`
-  **Use when:** Operator needs to coordinate the Phase 2/3 work-buffer loop (reset-stale → stats → fetch → dispatch → done → requeue).
+  **Use when:** Operator needs to coordinate the Phase 3 work-buffer consumption loop (reset-stale → stats → fetch → dispatch → done → requeue).
   **Paired references:** _(none — coordination logic only)_
 
 - `agent/skills/report-generation/SKILL.md`

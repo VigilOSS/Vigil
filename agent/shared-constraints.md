@@ -99,6 +99,7 @@ script are considered lost data.
 | recon-specialist | RE | FINDING-RE-001 |
 | fuzzer | FZ | FINDING-FZ-001 |
 | osint-analyst | OS | FINDING-OS-001 |
+| surface-collector | SC | FINDING-SC-001 |
 
 **Title formula:** `[Bug Class] in [endpoint] allows [attacker role] to [impact] [victim/scope]`
 Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous attacker to read any user's PII."

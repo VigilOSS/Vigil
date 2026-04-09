@@ -11,18 +11,25 @@ rule for downstream agents.
 General rule: use the "Use when:" lines in `agent/SKILL.md` to select the right skill when the handoff says
 "bring the matching vuln-class skill" or "bring the skill matching the finding class."
 
-## RECON-SPECIALIST → next agents
+## RECON-SPECIALIST / SOURCE-ANALYZER → SURFACE-COLLECTOR (Phase 1 → Phase 2)
+
+recon and source outputs: endpoint lists, JS file URLs, surface candidates, **coverage gaps**
+
+Operator does:
+1. **Read `#### Coverage Gaps` from both agents first** — re-dispatch if material gaps exist before proceeding to Phase 2.
+2. Dispatch surface-collector with Phase 1 endpoint artifacts (paths to `endpoints.txt` and source-analyzer output in `scans/`), targets from scope.json, auth.json state, and `$DIR/cases.db` path — **bring `agent/skills/surface-collection/SKILL.md`**
+3. Surface-collector runs Katana + gau + spec ingestion, deduplicates, performs intelligent triage, records surfaces and findings, and populates the work buffer
+4. On return: append intelligence to intel.md, review priority attack surfaces for Phase 3 dispatch ordering
+
+## RECON-SPECIALIST → next agents (direct handoffs during Phase 1)
 
 recon outputs: endpoint list, technologies, JS file URLs, parameters, surface candidates, **coverage gaps**
 
 Operator does:
 1. **Read `#### Coverage Gaps` first** — this drives the Recon Coverage Gate decision. If material gaps exist, re-dispatch recon-specialist with a targeted objective and specific skill before proceeding. See Phase 1 in the operator core prompt for the full gate checklist and re-dispatch recipes.
 2. Pass JS file URLs → dispatch source-analyzer — **bring `agent/skills/source-analysis/SKILL.md`**
-3. Import ALL endpoints → `assess.py ingest-endpoints` → orchestrator backend state (with the local queue only as transient batching)
-4. Record technology stack → durable finding/state update + intel.md
-5. Turn auth boundaries, framework clues, and proxy hints into explicit hypotheses for exploit or source-analysis follow-up
-6. Requestable endpoints, object references, auth inconsistencies → dispatch vulnerability-analyst — **bring the vuln-class skill from `agent/SKILL.md` matching the candidate surface**
-7. If obvious vulns found (default creds, open admin) → dispatch exploit-developer directly — **bring `agent/skills/auth-bypass/SKILL.md`** or the relevant skill for the specific path
+3. Record technology stack → durable finding/state update + intel.md
+4. Turn auth boundaries, framework clues, and proxy hints into explicit hypotheses for exploit or source-analysis follow-up
 
 ## SOURCE-ANALYZER → work buffer + findings
 
