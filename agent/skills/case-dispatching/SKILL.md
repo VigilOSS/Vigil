@@ -12,7 +12,7 @@ This skill is coordination-only. Use it to inspect the work buffer, route batche
 
 ## When to Activate
 
-- After `./scripts/init_engagement.sh ...` when `cases.db` is created
+- Phase 3 (Consume & Test) after surface-collector has populated the work buffer
 - When pending work items exist in the work buffer
 - When a producer has added new work items
 
