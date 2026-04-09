@@ -73,12 +73,48 @@ reading the file, and continuing your analysis. You have full filesystem access 
 Code analysis findings record in the **same** `assessment_findings` table as web findings.
 Use `./scripts/assess.py record-finding <agent-name> <finding-json-file>` to record.
 
+**Code finding prefixes:**
+
+| Agent | Prefix | Example |
+|---|---|---|
+| `code-architect` | `CA` | `FINDING-CA-001` |
+| `code-vuln-hunter` | `CH` | `FINDING-CH-001` |
+| `code-variant-hunter` | `CV` | `FINDING-CV-001` |
+| `code-vuln-verifier` | `VF` | `FINDING-VF-001` |
+
+**Title formula:** `[Bug Class] in [file:line or component] allows [attacker role] to [impact]`
+
+**CVSS<->severity must match:**
+
+| Severity | CVSS range |
+|---|---|
+| `critical` | 9.0-10.0 |
+| `high` | 7.0-8.9 |
+| `medium` | 4.0-6.9 |
+| `low` | 0.1-3.9 |
+| `info` | 0.0 |
+
+If your CVSS score does not fall within the matching severity range, adjust one or the other
+before recording. A memory corruption primitive with attacker-controlled reachability needs the
+same severity discipline as a web auth bug because the report pipeline consumes one shared
+finding table.
+
 **Code finding conventions:**
 - `canonical_location` format: `file:<relative-path>:<line-number>` (e.g., `file:lib/url.c:547`)
 - `defect_family` uses CWE-based names: `buffer-overflow`, `integer-overflow`, `use-after-free`, `injection`, `race-condition`, `crypto-misuse`, `auth-bypass`, `format-string`
 - `details.cwe_id` must be a specific CWE ID (e.g., `CWE-122`, not generic `CWE-119`)
 - `source_name` is your agent name (e.g., `code-vuln-hunter`)
 - `evidence` must include: the vulnerable code snippet, the taint path from untrusted input to sink, and why existing guards are insufficient
+
+**Deduplication:** Before recording, query existing findings via `./scripts/assess.py fetch report-findings`.
+If the same root cause at the same canonical location already exists, update or merge that finding
+instead of creating a duplicate. Variant instances in different files or materially different sink
+sites are new findings; repeated commentary on the same `file:path:line` is not.
+
+**The `notes` field must contain replayable proof commands** such as the exact build flags, PoC
+input file generation, sanitizer invocation, unit-test repro command, or debugger invocation used
+to confirm the bug. The goal is reproduction without rediscovery: another analyst should be able to
+rerun the proof from `notes` plus the referenced source files alone.
 
 ---
 
@@ -109,6 +145,9 @@ Coverage must be explicit, but write-up depth can be proportional:
   do not hide sinks, trust-boundary assumptions, or material error behavior.
 
 Record dispositions via `./scripts/assess.py code-record-analysis`.
+`finding` dispositions record durable finding state through `record-finding`; `suspicious`,
+`clean`, and `needs-context` still record through `code-record-analysis` so backend coverage knows
+which functions were reviewed and why the queue can advance or re-dispatch.
 
 ---
 
@@ -158,7 +197,18 @@ Only improvise after confirming the reference set is genuinely insufficient for 
 
 ---
 
-## 9. Recording Format
+## 9. Script Path Convention
+
+All assessment operations use `./scripts/assess.py <subcommand>` resolved from the agent workspace
+root after `cd agent`. JSON payloads belong in files, not inline shell arguments, because payload
+files are auditable and avoid shell escaping damage.
+
+Do not hardcode absolute paths. Set `ENGAGEMENT_DIR` before calling assess helpers, or pass
+`--engagement-dir` when the helper supports it.
+
+---
+
+## 10. Recording Format
 
 Use the standard finding JSON schema. Code-specific fields:
 
