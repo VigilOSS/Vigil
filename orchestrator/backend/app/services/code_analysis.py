@@ -1262,10 +1262,15 @@ def error_queue_items(
             SET status = 'error',
                 analysis_notes = ?,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE engagement_id = ? AND id IN ({placeholders})
+            WHERE engagement_id = ? AND status = 'processing' AND id IN ({placeholders})
             """,
             (notes, engagement.id, *item_ids),
         )
+        if cursor.rowcount != len(item_ids):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="queue items changed state before error transition; refetch and retry",
+            )
         for row in queue_rows.values():
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
             _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
@@ -1290,10 +1295,15 @@ def needs_context_queue_items(
             SET status = 'needs_context',
                 expansion_request_json = ?,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE engagement_id = ? AND id IN ({placeholders})
+            WHERE engagement_id = ? AND status = 'processing' AND id IN ({placeholders})
             """,
             (_json_text(expansion_request), engagement.id, *item_ids),
         )
+        if cursor.rowcount != len(item_ids):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="queue items changed state before needs_context transition; refetch and retry",
+            )
         for row in queue_rows.values():
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
             _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
