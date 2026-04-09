@@ -424,6 +424,63 @@ def test_findings_patch_allows_explicit_workflow_rollback(client, isolate_settin
     assert patched.json()["finding"]["workflow_status"] == "draft"
 
 
+def test_findings_patch_rejects_records_merged_after_validation(client, isolate_settings, monkeypatch):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-010B",
+            "title": "Patch/merge race candidate",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "defect_family": "idor",
+            "root_cause_key": "patch-merge-race",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/orders/{id}",
+            "summary": "Patch should fail if the finding is merged after validation.",
+            "evidence_ref": "findings.md",
+            "notes": "Created for stale patch race coverage.",
+            "source_name": "vulnerability-analyst",
+            "details": {"evidence": "Object id is user-controlled", "impact": "Cross-tenant read"},
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [],
+        },
+    )
+    assert created.status_code == 201
+
+    from app.services import state_manager
+
+    original_create_finding = state_manager.create_finding
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+
+    def race(*args, **kwargs):
+        with sqlite3.connect(str(db_path)) as connection:
+            connection.execute(
+                """
+                UPDATE assessment_findings
+                SET status = 'merged',
+                    merged_into_finding_id = id,
+                    updated_at = '2099-01-01 00:00:00'
+                WHERE slug = 'FINDING-CH-010B'
+                """
+            )
+            connection.commit()
+        return original_create_finding(*args, **kwargs)
+
+    monkeypatch.setattr(state_manager, "create_finding", race)
+
+    patched = client.patch(
+        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-010B",
+        json={"notes": "Late patch should not overwrite a merged finding."},
+    )
+
+    assert patched.status_code == 409
+    assert "changed since it was loaded" in patched.json()["detail"]
+
+
 def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
@@ -872,6 +929,76 @@ def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
     assert all(item["slug"] != "FINDING-CH-041" for item in report_findings.json())
 
 
+def test_findings_verify_rejects_records_merged_after_validation(client, isolate_settings, monkeypatch):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-042",
+            "title": "Verify/merge race candidate",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "auth-bypass",
+            "root_cause_key": "verify-merge-race",
+            "auth_context": "user",
+            "canonical_location": "https://example.com/api/export",
+            "summary": "Verify should fail if the finding is merged after validation.",
+            "evidence_ref": "findings.md",
+            "notes": "Created for stale verify race coverage.",
+            "source_name": "code-vuln-hunter",
+            "details": {"evidence": "Export endpoint skips tenant check", "impact": "Cross-tenant export"},
+            "provenance": {"agent_name": "code-vuln-hunter"},
+            "links": [],
+        },
+    )
+    assert created.status_code == 201
+
+    from app.services import state_manager
+
+    original_patch_finding = state_manager.patch_finding
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+
+    def race(*args, **kwargs):
+        with sqlite3.connect(str(db_path)) as connection:
+            connection.execute(
+                """
+                UPDATE assessment_findings
+                SET status = 'merged',
+                    merged_into_finding_id = id,
+                    updated_at = '2099-01-01 00:00:00'
+                WHERE slug = 'FINDING-CH-042'
+                """
+            )
+            connection.commit()
+        return original_patch_finding(*args, **kwargs)
+
+    monkeypatch.setattr(state_manager, "patch_finding", race)
+
+    verify = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-042/verify",
+        json={
+            "disposition": "confirmed",
+            "reason_code": "validated",
+            "reason_text": "Late verify should not overwrite a merged finding.",
+            "artifact_ref": "tools/analysis-state/code-verification/FINDING-CH-042.json",
+            "evidence_ref": "tools/analysis-state/code-verification/FINDING-CH-042.json",
+            "notes": "Verification raced with a merge.",
+            "source_name": "code-vuln-verifier",
+            "details": {
+                "evidence": "Tenant check is bypassable with crafted export ids.",
+                "impact": "Cross-tenant export remains reachable.",
+            },
+            "provenance": {"verified_by": "code-vuln-verifier"},
+        },
+    )
+
+    assert verify.status_code == 409
+    assert "changed since it was loaded" in verify.json()["detail"]
+
+
 def test_findings_verify_rejects_merged_records(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
@@ -945,6 +1072,95 @@ def test_findings_verify_rejects_merged_records(client, isolate_settings):
     )
     assert verify.status_code == 400
     assert "merged findings cannot be re-verified" in verify.json()["detail"]
+
+
+def test_merge_findings_rejects_target_changed_after_snapshot(client, isolate_settings, monkeypatch):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    source = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-052",
+            "title": "First duplicate",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "defect_family": "idor",
+            "root_cause_key": "merge-race-source",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/source",
+            "summary": "Source finding before merge.",
+            "evidence_ref": "findings.md",
+            "notes": "Created for merge race coverage.",
+            "source_name": "vulnerability-analyst",
+            "details": {"evidence": "source evidence", "impact": "source impact"},
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [],
+        },
+    )
+    assert source.status_code == 201
+
+    target = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-053",
+            "title": "Second duplicate",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "defect_family": "idor",
+            "root_cause_key": "merge-race-target",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/target",
+            "summary": "Target finding before merge.",
+            "evidence_ref": "findings.md",
+            "notes": "Created for merge race coverage.",
+            "source_name": "vulnerability-analyst",
+            "details": {"evidence": "target evidence", "impact": "target impact"},
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [],
+        },
+    )
+    assert target.status_code == 201
+
+    from app.services import state_manager
+
+    original_append_notes = state_manager._append_notes
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    injected = False
+
+    def race(existing: str, incoming: str) -> str:
+        nonlocal injected
+        if not injected and incoming.startswith("Merged FINDING-CH-052"):
+            injected = True
+            with sqlite3.connect(str(db_path)) as connection:
+                connection.execute(
+                    """
+                    UPDATE assessment_findings
+                    SET notes = notes || '\nConcurrent merge writer',
+                        updated_at = '2099-01-01 00:00:00'
+                    WHERE slug = 'FINDING-CH-053'
+                    """
+                )
+                connection.commit()
+        return original_append_notes(existing, incoming)
+
+    monkeypatch.setattr(state_manager, "_append_notes", race)
+
+    merge = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings/merge",
+        json={
+            "source_slug": "FINDING-CH-052",
+            "target_slug": "FINDING-CH-053",
+            "reason": "Stale merge should not overwrite a concurrently updated target.",
+            "source_name": "operator",
+        },
+    )
+
+    assert merge.status_code == 409
+    assert "changed since it was loaded" in merge.json()["detail"]
 
 
 def test_coverage_patch_rejects_unknown_status_values(client, isolate_settings):

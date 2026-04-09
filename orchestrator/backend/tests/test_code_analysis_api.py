@@ -1624,6 +1624,68 @@ def test_queue_needs_context_rejects_items_reclaimed_after_validation(client, is
     assert "changed state before needs_context transition" in needs_context.json()["detail"]
 
 
+def test_analysis_result_rejects_queue_item_reclaimed_after_validation(client, isolate_settings, monkeypatch):
+    engagement_key = "2026-04-09-analysis-result-race"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="analysis-result-race-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 90}]},
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    assert claimed.status_code == 200
+    queue_item = claimed.json()[0]
+
+    from app.services import code_analysis as code_analysis_service
+
+    original_require_queue_status = code_analysis_service._require_queue_status
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+
+    def race(queue_rows, *, expected_status, action):
+        original_require_queue_status(queue_rows, expected_status=expected_status, action=action)
+        with sqlite3.connect(str(db_path)) as connection:
+            connection.execute(
+                """
+                UPDATE code_analysis_queue
+                SET status = 'pending',
+                    assigned_agent = '',
+                    consumed_at = NULL,
+                    updated_at = '2099-01-01 00:00:00'
+                WHERE id = ?
+                """,
+                (queue_item["id"],),
+            )
+            connection.commit()
+
+    monkeypatch.setattr(code_analysis_service, "_require_queue_status", race)
+
+    result = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json={
+            "queue_item_id": queue_item["id"],
+            "file_id": parser_file["id"],
+            "agent_name": "code-vuln-hunter",
+            "function_name": "parse_message",
+            "hypothesis": "Late worker should not attach results to reclaimed work.",
+            "evidence": "Queue row was reclaimed after validation.",
+            "disposition": "clean",
+            "confidence": "medium",
+            "notes": "Should reject stale result writes.",
+        },
+    )
+    assert result.status_code == 409
+    assert "changed state before recording analysis result" in result.json()["detail"]
+
+
 def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
     """Analysis results can be recorded with queue_item_id=None."""
     engagement_key = "2026-04-04-result-no-queue"
@@ -1670,12 +1732,59 @@ def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
         }
     ]
 
+
+def test_analysis_results_dedupe_cross_file_triggers_across_writers(client, isolate_settings):
+    engagement_key = "2026-04-09-analysis-result-trigger-dedupe"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="trigger-dedupe-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    _classify_file(client, engagement_key, int(helper_file["id"]), "high", 80)
+
+    payload = {
+        "file_id": parser_file["id"],
+        "agent_name": "code-vuln-hunter",
+        "function_name": "parse_message",
+        "hypothesis": "Shared helper may reintroduce taint.",
+        "evidence": "helper normalizes attacker-controlled bytes.",
+        "disposition": "clean",
+        "confidence": "medium",
+        "notes": "follow-up helper review needed",
+        "cross_file_triggers": [
+            {
+                "file_path": "src/helpers.py",
+                "reason": "shared parser helper",
+                "vuln_class": "web-app-injection",
+            }
+        ],
+    }
+
+    first = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json=payload,
+    )
+    assert first.status_code == 201
+
+    second = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json=payload | {"notes": "second writer confirmed the same follow-up"},
+    )
+    assert second.status_code == 201
+
+    coverage = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage.status_code == 200
+    assert coverage.json()["trigger_summary"]["pending"] == 1
+
     # Verify it shows up in results listing
     results_list = client.get(
         f"/engagements/{engagement_key}/assessment/code/analysis-results?file_id={parser_file['id']}"
     )
     assert results_list.status_code == 200
-    assert len(results_list.json()) == 1
+    assert len(results_list.json()) == 2
 
 
 def test_analysis_results_include_linked_finding_lifecycle(client, isolate_settings):
