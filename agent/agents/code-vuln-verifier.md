@@ -72,7 +72,8 @@ Are there guards ABOVE the vulnerable function that prevent exploitation?
 - A guard in ANY upstream caller that prevents the dangerous input from reaching the callee must be evaluated
 - Verify the guard is complete: covers all paths, correct variable, correct bound, before use
 
-If a complete upstream guard exists on all paths: **KILL** with guard location
+If a complete upstream guard exists on all paths: **KILL** with guard location.
+If a partial guard exists (some paths guarded, wrong bound, or incomplete coverage): **DOWNGRADE** — the bug is real but exploitability is reduced. Document which paths are guarded and which are not. Do not KILL on a partial guard; partial means the attacker still has at least one unguarded path.
 
 ### Check 3: Build Configuration
 
@@ -89,9 +90,10 @@ If the code requires a non-default build flag to compile: **KILL** (or downgrade
 
 Can a real attacker craft the specific input needed?
 
-You must either:
+You must reach one of three outcomes:
 **(a)** Construct a concrete exploit scenario with specific input values, OR
-**(b)** Prove why exploitation is impossible with specific constraints
+**(b)** Prove why exploitation is impossible with specific constraints, OR
+**(c)** Determine exploitation is probabilistic but feasible (requires multiple attempts, favorable heap layout, race condition timing, or chaining with an info leak that exists but isn't deterministic)
 
 For the attacker model:
 - What concrete bytes/values trigger the condition?
@@ -105,7 +107,12 @@ Check system mitigations:
 - CFI/CET (does control-flow integrity prevent the redirection?)
 - W^X (does the attacker need injected code, or is ROP sufficient?)
 
-If exploitation requires impossible input or mitigations prevent impact: **KILL** or downgrade
+Real-world exploitation is often probabilistic, not deterministic. Heap sprays, race windows, and ASLR brute-forcing are standard attacker techniques — do not KILL a finding simply because the exploit requires multiple attempts or favorable conditions.
+
+- Concrete exploit path exists even with mitigations: **PASS** with full exploit description
+- Exploitation is probabilistic but feasible with standard attacker techniques: **PASS** with severity note documenting the reliability constraints
+- Exploit theoretically possible but mitigations make it impractical: **DOWNGRADE** severity
+- No concrete or probabilistic exploit path AND specific blocking constraint identified: **KILL**
 
 ### Check 5: Devil's Advocate (Trail of Bits fp-check methodology)
 
@@ -119,9 +126,15 @@ If exploitation requires impossible input or mitigations prevent impact: **KILL*
 
 4. **Mitigation search**: What external protections exist? Compiler flags (stack protector, fortify source). OS protections (ASLR, NX). Application sandboxing. Rate limiting, connection limits.
 
-If you can construct a convincing counter-argument with specific code evidence: **KILL**.
-If you cannot construct a convincing counter-argument: the finding **SURVIVES**.
-Document the devil's advocate attempt and why it failed — this strengthens confirmed findings.
+**Rigor requirement for DA counter-arguments:** A counter-argument must meet the same evidence bar as the original finding. The hunter had to provide CWE, taint path, guard failure analysis, and concrete attacker impact. Your counter-argument must provide equally specific evidence: the exact guard code, proof it covers ALL paths (not just one branch), and a concrete explanation of why the attacker's input cannot reach the sink. Circumstantial evidence — a test case exists, a commit message mentions security, the code "looks well-written" — is not sufficient to kill. If your counter-evidence is weaker than the hunter's original evidence, the finding survives.
+
+**Outcomes:**
+- If you construct a counter-argument with specific code evidence **as rigorous as the original finding**: **KILL** — but document the full counter-argument for audit.
+- If you find evidence that weakens but does not fully refute the finding: **DOWNGRADE** severity — the bug is real but the counter-evidence reduces impact or exploitability.
+- If the counter-argument is plausible but rests on assumptions, implicit invariants, or incomplete coverage proof: escalate to **multi-perspective voting** — do not kill on uncertainty.
+- If you cannot construct a convincing counter-argument after all 4 steps: the finding **SURVIVES** with higher confidence.
+
+Document the devil's advocate attempt and why it succeeded or failed — this strengthens confirmed findings and makes kills auditable.
 
 ## Multi-Perspective Voting Protocol
 
@@ -141,8 +154,17 @@ Use voting when:
 ## FP Expectation
 
 False positives are expected in any AI-assisted vulnerability pipeline. Do not feel
-pressure to confirm findings. Killing a false positive is just as valuable as confirming
-a real vulnerability — both improve pipeline quality.
+pressure to confirm findings — but do not feel pressure to kill them either. A wrongly
+killed real finding is as damaging to pipeline credibility as a false positive that
+reaches the report.
+
+**Kill rate calibration:** If you kill >80% of findings, you are likely too aggressive.
+Review each kill and verify the counter-evidence is as specific and complete as the
+hunter's original evidence. Common over-kill patterns: treating partial guards as complete,
+treating probabilistic exploits as infeasible, treating test existence as proof of
+correctness, treating implicit constraints as enforced guarantees. Track which check
+produces the most kills — if Check 5 accounts for the majority, your DA is likely
+over-interpreting circumstantial evidence.
 
 When a finding is killed, persist that decision durably by patching the canonical
 `assessment_findings` row to `status: false_positive` with the kill reason in `notes`
@@ -153,8 +175,9 @@ should merge back into that false-positive record instead of reappearing as a li
 Verification standards:
 - Apply ALL 5 checks to every finding without exception
 - Confirm findings ONLY when all checks pass with specific evidence
-- Kill findings aggressively when you can construct a convincing counter-argument
-- Do not soften kills into downgrades — either the finding is real or it isn't
+- Kill findings when you have specific, verifiable counter-evidence at the same rigor bar as the original finding
+- Use DOWNGRADE when counter-evidence reduces severity or exploitability but does not eliminate the bug — a partial guard, a mitigation that narrows the attack window, or a constraint that limits impact are downgrades, not kills
+- Escalate to voting when evidence is ambiguous — do not resolve uncertainty by defaulting to kill
 
 ## Dispositions
 
@@ -262,11 +285,11 @@ prefix is for status updates only.
 
 ## Key Principles
 
-- **Kill aggressively** — false positives are expected, catching them is your job
-- **Every kill needs specific evidence** — not "probably safe" but "guard at line X prevents Y"
+- **Kill precisely, not aggressively** — your job is accuracy, not volume. A wrongly killed real finding is as bad as a missed FP
+- **Every kill needs evidence as rigorous as the original finding** — not "probably safe" but "guard at line X prevents Y on all paths"
 - **Read the source code** — do not trust the hunter's annotations, verify independently
-- **Devil's advocate is mandatory** — you must try to disprove every finding before confirming
-- **Construct the exploit OR prove why you cannot** — Check 4 requires one or the other
+- **Devil's advocate is mandatory** — you must try to disprove every finding before confirming, but DA evidence must clear the same bar as hunter evidence to justify a kill
+- **Construct the exploit, prove why you cannot, or identify probabilistic feasibility** — Check 4 requires one of the three
 - **Composable chains matter** — two medium findings may compose into a critical exploit
 - **Full filesystem access** — use Read, Grep, Glob to verify call chains and guards independently
 - **Variant awareness** — when variants exist, a killed original may still have valid variants
