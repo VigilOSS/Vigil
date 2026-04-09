@@ -663,6 +663,91 @@ def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):
     assert "false_positive target" in merge.json()["detail"]
 
 
+def test_merge_false_positive_source_preserves_live_target(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    source = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-032",
+            "title": "Suppressed parser duplicate",
+            "severity": "medium",
+            "workflow_status": "false_positive",
+            "verification_state": "verified",
+            "verification_disposition": "false_positive",
+            "defect_family": "integer-overflow",
+            "root_cause_key": "suppressed-parser-duplicate",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.c:211",
+            "summary": "Duplicate was previously suppressed by verifier.",
+            "evidence_ref": "tools/analysis-state/suppressed-duplicate.json",
+            "notes": "Killed during verification.",
+            "source_name": "code-vuln-verifier",
+            "details": {
+                "kill_check": 6,
+                "kill_reason": "Old triage considered the path dead.",
+                "evidence": "Verifier marked the duplicate as unreachable.",
+                "impact": "No separate issue remained.",
+            },
+            "provenance": {"verified_by": "code-vuln-verifier"},
+            "links": [],
+        },
+    )
+    assert source.status_code == 201
+
+    target = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-033",
+            "title": "Live parser issue",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "defect_family": "buffer-overflow",
+            "root_cause_key": "live-parser-target",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.c:211",
+            "summary": "Target finding is still live.",
+            "evidence_ref": "tools/analysis-state/live-target.json",
+            "notes": "Confirmed by hunter.",
+            "source_name": "code-vuln-hunter",
+            "details": {"evidence": "Unchecked copy", "impact": "Heap corruption"},
+            "provenance": {"agent_name": "code-vuln-hunter"},
+            "links": [],
+        },
+    )
+    assert target.status_code == 201
+
+    merge = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings/merge",
+        json={
+            "source_slug": "FINDING-CH-032",
+            "target_slug": "FINDING-CH-033",
+            "reason": "Suppressed duplicate should merge into the live target without downgrading it.",
+            "source_name": "operator",
+        },
+    )
+    assert merge.status_code == 200
+    merge_payload = merge.json()
+    assert merge_payload["target"]["workflow_status"] == "active"
+    assert merge_payload["target"]["verification_state"] == "verified"
+    assert merge_payload["target"]["verification_disposition"] == "confirmed"
+    assert merge_payload["source"]["workflow_status"] == "merged"
+    assert merge_payload["source"]["verification_state"] == "unreviewed"
+    assert merge_payload["source"]["verification_disposition"] == "none"
+
+    findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
+    assert findings.status_code == 200
+    by_slug = {item["slug"]: item for item in findings.json()}
+    assert by_slug["FINDING-CH-033"]["workflow_status"] == "active"
+    assert by_slug["FINDING-CH-033"]["verification_state"] == "verified"
+    assert by_slug["FINDING-CH-033"]["verification_disposition"] == "confirmed"
+    assert by_slug["FINDING-CH-032"]["workflow_status"] == "merged"
+    assert by_slug["FINDING-CH-032"]["verification_state"] == "unreviewed"
+    assert by_slug["FINDING-CH-032"]["verification_disposition"] == "none"
+
+
 def test_findings_verify_downgrade_records_previous_severity_transition(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 

@@ -33,7 +33,7 @@ After code analysis engagement initialization completes, repeat until all critic
 analyzed or user signals stop:
 
 1. **ASSESS STATE** -- Read `code-scope.json` (or `scope.json` with `source_repos`). Check code coverage stats via `./scripts/assess.py code-coverage`. Check CWE effort matrix via `./scripts/assess.py code-coverage --cwe-matrix` when in Phase 2B. Backend state is canonical; use `--require-gate-pass` only for the final Phase 3 gate.
-2. **DECIDE NEXT ACTION** -- Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified, call graph complete, structural index generated). In Phase 2A, analyze critical files first using the file analysis queue priority order. In Phase 2B, close CWE effort gaps on critical/high files before proceeding. In Phase 3, drive aggressive FP elimination on all findings. Coverage gaps drive decisions.
+2. **DECIDE NEXT ACTION** -- Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified, call graph complete, structural index generated). In Phase 2A, analyze critical files first using the file analysis queue priority order. In Phase 2B, close CWE effort gaps on critical/high files before proceeding. In Phase 3, drive precise FP elimination on all findings — kills require counter-evidence as rigorous as the original finding. Coverage gaps drive decisions.
 3. **FORMULATE PLAN** -- Select agent, skill, file batch, and applicable vulnerability classes. Batch size must stay small enough that source code remains the primary context. Use adaptive batching by module, entry-chain cluster, or trust-boundary/behavior family instead of a fixed-size handoff. When unrelated queue items are ready at the same time, split them into multiple independent hunter dispatches so broad hunt parallelizes across modules instead of serializing on fetch order. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
 4. **PRESENT OR PROCEED** -- Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.
 5. **USE SKILLS FIRST** -- Check `agent/SKILL.md` for the right skill.
@@ -471,14 +471,22 @@ If gaps remain on critical files:
 - [ ] No pending cross-file triggers
 - [ ] Entry chain coverage: >= 80% of entry chains traced on critical files (from `cwe_coverage` `entry_chains_traced` / `total_entry_chains`)
 
-**Phase 2 exit:** both 2A and 2B gates pass.
+**Suspicious finding resolution:** Before leaving Phase 2, all `suspicious` findings must be
+resolved. Re-dispatch the hunter with targeted context to close each gap — the hunter's
+`suspicious` hypothesis documents exactly what was missing. After re-dispatch, the finding
+must reach `confirmed` (promoted to finding) or `clean` (hypothesis disproven). Do not pass
+unresolved suspicious findings to the verifier — the verifier's job is FP elimination on
+confirmed findings, not investigation of incomplete ones.
+
+**Phase 2 exit:** both 2A and 2B gates pass, AND no unresolved suspicious findings remain.
 
 ```bash
 jq '.current_phase = "verify-variant"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
 ```
 
 Exit: All critical/high files analyzed with effort thresholds met. CWE coverage gaps closed
-or documented. No unresolved needs-context. No pending triggers. Transition to Phase 3.
+or documented. No unresolved needs-context. No pending triggers. No unresolved suspicious
+findings. Transition to Phase 3.
 
 ### Phase 3: VERIFY + VARIANT
 
@@ -510,15 +518,18 @@ If the gate fails, resolve remaining items before proceeding:
 Dispatch `code-vuln-verifier` with `agent/skills/code-finding-verification/SKILL.md`.
 
 Provide:
-- All findings from Phase 2 (confirmed + suspicious)
+- All confirmed findings from Phase 2 (suspicious findings must be resolved by hunters
+  before Phase 3 — see Phase 2 exit gate)
 - Source code paths for each finding (the canonical file locations)
 - CWE pattern references matching each finding's defect family
 - Build system configuration for compile-time flag evaluation (Makefiles, CMakeLists,
   configure scripts, feature flags)
 
-The verifier's job is aggressive FP elimination. False positives are expected in any
-AI-assisted vulnerability pipeline. A killed finding is a good outcome -- it means the
-verification stage is doing its job.
+The verifier's job is precise FP elimination. False positives are expected in any
+AI-assisted vulnerability pipeline, but so are wrongly killed real findings. A killed
+finding is only a good outcome when the counter-evidence is as rigorous as the original
+finding. If the verifier kills >80% of findings, review whether kills are based on
+specific code evidence or circumstantial reasoning.
 
 The verifier:
 - Traces the full entry-to-sink path for each finding, reading source directly

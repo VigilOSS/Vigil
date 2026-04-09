@@ -8,7 +8,7 @@ origin: AI Threat Hunting
 
 ## When to Activate
 
-- Phase 3 of code analysis pipeline. Runs on confirmed and suspicious findings from Phase 2.
+- Phase 3 of code analysis pipeline. Runs on confirmed findings from Phase 2.
 - Every finding (from vulnerability analysis and variant analysis) must pass through this verification before being reported.
 - Goal: eliminate false positives, adjust severity based on full context, synthesize attack chains from related findings, and produce a final set of verified findings.
 
@@ -33,7 +33,7 @@ Audit trail requirement:
 
 ## Methodology — Five-Check Protocol
 
-Every finding must survive all 5 checks. Failure at any check results in KILL or DOWNGRADE. This protocol is adversarial toward the finding — assume it is a false positive and force it to prove otherwise.
+Every finding must survive all 5 checks. Failure at any check results in KILL, DOWNGRADE, or escalation to voting. This protocol stress-tests the finding — but a kill requires counter-evidence at the same rigor bar as the original finding. Circumstantial or assumption-based counter-arguments produce downgrades or voting escalations, not kills.
 
 ### Check 1: Reachability from External Entry
 
@@ -75,7 +75,7 @@ The vulnerability analysis (Phase 3) evaluated guards within the vulnerable func
 
 **Decision:**
 - Complete guard found upstream that covers all paths: **KILL** ("upstream guard in `validate_request()` at request.c:85 bounds-checks length before passing to vulnerable function")
-- Partial guard found (some paths, wrong bound): finding survives but note the partial guard — it may affect severity
+- Partial guard found (some paths guarded, wrong bound, incomplete coverage): **DOWNGRADE** — the bug is real but exploitability is reduced. Document which paths are guarded and which remain unguarded. Do not KILL on a partial guard; partial means the attacker still has at least one unguarded path.
 - No upstream guard found: **PASS**
 
 **Common upstream guard locations:**
@@ -117,7 +117,7 @@ rg "FEATURE_NAME" .config defconfig
 
 ### Check 4: Exploitation Feasibility (PoC-or-Proof Required)
 
-Apply the constrained attacker persona with maximum rigor. This check has a hard requirement: you must either construct a concrete exploit scenario OR prove why exploitation is impossible. "Unclear" is not an acceptable outcome.
+Apply the constrained attacker persona with maximum rigor. You must reach one of three outcomes — "unclear" is not acceptable, but "probabilistic" is a valid and common result.
 
 **Process:**
 
@@ -132,12 +132,17 @@ Apply the constrained attacker persona with maximum rigor. This check has a hard
      - Auth bypass: what access does the attacker gain?
      - Injection: what command/query executes, with what privileges?
 
-2. **OR prove exploitation is impossible** (if you cannot construct the exploit):
+2. **OR determine exploitation is probabilistic but feasible:**
+   - Does exploitation require multiple attempts, favorable heap layout, race condition timing, or chaining with a separate info leak?
+   - Are these standard attacker techniques (heap spray, ASLR brute-force, race window widening)?
+   - Real-world exploitation is often probabilistic, not deterministic — do not KILL a finding simply because the exploit requires multiple attempts or favorable conditions.
+
+3. **OR prove exploitation is impossible** (if you cannot construct any exploit path):
    - What specific constraint prevents the attacker input from reaching the sink?
    - What specific mitigation prevents the impact even if the sink is reached?
    - What specific system property makes the exploit non-functional?
 
-3. **Check system mitigations** (either way):
+4. **Check system mitigations** (either way):
    - ASLR: does the attack require knowing addresses? Is there an info leak to defeat ASLR?
    - Stack canaries: is the overflow on the stack? Does the canary protect the overwritten data?
    - Seccomp/sandbox: does the sandbox prevent the attacker's desired operation?
@@ -146,8 +151,9 @@ Apply the constrained attacker persona with maximum rigor. This check has a hard
 
 **Decision:**
 - Concrete exploit path exists even with mitigations: **PASS** with full exploit description
+- Exploitation is probabilistic but feasible with standard attacker techniques: **PASS** with severity note documenting reliability constraints
 - Exploit theoretically possible but mitigations make it impractical: **DOWNGRADE** severity + document mitigation effectiveness
-- No concrete exploit path constructable AND specific blocking constraint identified: **KILL** ("exploitation requires [specific impossible condition]")
+- No concrete or probabilistic exploit path AND specific blocking constraint identified: **KILL** ("exploitation requires [specific impossible condition]")
 
 ### Check 5: Devil's Advocate (Trail of Bits fp-check methodology)
 
@@ -191,10 +197,13 @@ What external protections exist?
 - Network protections: rate limiting, connection limits, WAF rules
 - Deployment configuration: read-only filesystem, dropped capabilities
 
+**Rigor requirement:** A DA counter-argument must meet the same evidence bar as the original finding. The hunter provided CWE, taint path, guard failure analysis, and concrete attacker impact. Your counter-argument must be equally specific: the exact guard code, proof it covers ALL paths (not just one branch), and a concrete explanation of why the attacker's input cannot reach the sink. Circumstantial evidence — a test case exists, a commit message mentions security, the code "looks well-written" — is not sufficient to kill.
+
 **Outcome:**
-- If you construct a convincing counter-argument with specific code evidence: **KILL** with full counter-argument documentation
-- If you cannot construct a convincing counter-argument after all 4 steps: the finding **SURVIVES** with higher confidence
-- If the counter-argument is plausible but not conclusive: escalate to **multi-perspective voting**
+- Counter-argument with specific code evidence **as rigorous as the original finding**: **KILL** with full counter-argument documentation
+- Counter-evidence weakens but does not fully refute the finding: **DOWNGRADE** severity — the bug is real but the counter-evidence reduces impact or exploitability
+- Counter-argument plausible but rests on assumptions, implicit invariants, or incomplete coverage proof: escalate to **multi-perspective voting** — do not kill on uncertainty
+- No convincing counter-argument after all 4 steps: the finding **SURVIVES** with higher confidence
 
 Document: what you tried to disprove, what evidence you found for and against, and the final determination. This documentation strengthens confirmed findings and makes kills auditable.
 
@@ -279,12 +288,17 @@ Record chains via `./scripts/assess.py record-chain code-vuln-verifier <chain-js
 False positives are expected in any AI-assisted vulnerability pipeline. Your verification
 standards:
 - Confirm findings ONLY when ALL 5 checks pass with specific evidence
-- Kill findings when you can construct a convincing counter-argument with code evidence
-- Do not soften kills into downgrades — either the finding is real or it isn't
+- Kill findings when you have specific, verifiable counter-evidence at the same rigor bar as the original finding
+- Use DOWNGRADE when counter-evidence reduces severity or exploitability but does not eliminate the bug — partial guards, mitigations that narrow the attack window, or constraints that limit impact are downgrades, not kills
+- Escalate to voting when evidence is ambiguous — do not resolve uncertainty by defaulting to kill
 - Apply equal rigor to high-confidence and low-confidence findings alike
 
-Conversely, if you kill >95% of findings, you may be too aggressive — verify that your kill
-reasons are specific and verifiable, not generic dismissals.
+**Kill rate calibration:** If you kill >80% of findings, you are likely too aggressive. Review
+each kill and verify the counter-evidence is as specific and complete as the hunter's original
+evidence. Common over-kill patterns: treating partial guards as complete, treating probabilistic
+exploits as infeasible, treating test existence as proof of correctness, treating implicit
+constraints as enforced guarantees. Track which check produces the most kills — if Check 5
+accounts for the majority, your DA is likely over-interpreting circumstantial evidence.
 
 ## Dispositions
 

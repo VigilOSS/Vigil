@@ -221,6 +221,71 @@ def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> 
         """,
         (next_status, engagement_id, file_id),
     )
+    module_row = connection.execute(
+        "SELECT module_id FROM code_files WHERE engagement_id = ? AND id = ?",
+        (engagement_id, file_id),
+    ).fetchone()
+    module_id = None if module_row is None else module_row["module_id"]
+    if module_id is not None:
+        _sync_module_rollup(connection, engagement_id, int(module_id))
+
+
+def _derive_module_analysis_status(status_counts: dict[str, int]) -> str:
+    if not status_counts:
+        return "pending"
+    analyzed_total = status_counts.get("analyzed", 0) + status_counts.get("done", 0)
+    total_files = sum(status_counts.values())
+    if status_counts.get("needs_context", 0) > 0:
+        return "needs_context"
+    if total_files > 0 and analyzed_total == total_files:
+        return "analyzed"
+    if status_counts.get("in_progress", 0) > 0 or analyzed_total > 0:
+        return "in_progress"
+    if status_counts.get("queued", 0) > 0:
+        return "queued"
+    if status_counts.get("classified", 0) > 0:
+        return "classified"
+    return "pending"
+
+
+def _sync_module_rollup(connection, engagement_id: int, module_id: int) -> None:
+    status_rows = connection.execute(
+        """
+        SELECT analysis_status, COUNT(*) AS total
+        FROM code_files
+        WHERE engagement_id = ? AND module_id = ?
+        GROUP BY analysis_status
+        """,
+        (engagement_id, module_id),
+    ).fetchall()
+    status_counts = {str(row["analysis_status"]): int(row["total"]) for row in status_rows}
+    file_count = sum(status_counts.values())
+    critical_file_count = _scalar_row(
+        connection,
+        """
+        SELECT COUNT(*)
+        FROM code_files
+        WHERE engagement_id = ? AND module_id = ? AND classification = 'critical'
+        """,
+        (engagement_id, module_id),
+    )
+    connection.execute(
+        """
+        UPDATE code_modules
+        SET file_count = ?,
+            critical_file_count = ?,
+            analysis_status = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE engagement_id = ? AND id = ?
+        """,
+        (
+            file_count,
+            critical_file_count,
+            _derive_module_analysis_status(status_counts),
+            engagement_id,
+            module_id,
+        ),
+    )
 
 
 _TRIGGER_STATUS_PENDING = "pending"
@@ -517,6 +582,7 @@ def bulk_classify_code_files(
     engagement = _engagement_or_404(engagement_id)
     updated = 0
     with get_connection() as connection:
+        affected_module_ids: set[int] = set()
         for c in classifications:
             classification = c.get("classification", "")
             if classification not in _VALID_CLASSIFICATIONS:
@@ -544,6 +610,14 @@ def bulk_classify_code_files(
             )
             if cursor.rowcount > 0:
                 updated += 1
+                module_row = connection.execute(
+                    "SELECT module_id FROM code_files WHERE engagement_id = ? AND id = ?",
+                    (engagement.id, c["file_id"]),
+                ).fetchone()
+                if module_row is not None and module_row["module_id"] is not None:
+                    affected_module_ids.add(int(module_row["module_id"]))
+        for module_id in affected_module_ids:
+            _sync_module_rollup(connection, engagement.id, module_id)
     return {"updated": updated, "total": len(classifications)}
 
 
@@ -617,14 +691,22 @@ def update_code_file(
         set_clauses.append("updated_at = CURRENT_TIMESTAMP")
         params.extend([engagement.id, file_id])
 
+        previous_module_id = file_row["module_id"]
         connection.execute(
             f"UPDATE code_files SET {', '.join(set_clauses)} WHERE engagement_id = ? AND id = ?",
             tuple(params),
         )
+        module_ids_to_sync: set[int] = set()
+        if previous_module_id is not None:
+            module_ids_to_sync.add(int(previous_module_id))
         row = connection.execute(
             "SELECT * FROM code_files WHERE engagement_id = ? AND id = ?",
             (engagement.id, file_id),
         ).fetchone()
+        if row is not None and row["module_id"] is not None:
+            module_ids_to_sync.add(int(row["module_id"]))
+        for module_id in module_ids_to_sync:
+            _sync_module_rollup(connection, engagement.id, module_id)
     return _hydrate_code_file(row)
 
 
@@ -729,28 +811,7 @@ def bulk_create_code_modules(
             ).fetchall()
         ]
         for module_id in repo_module_ids:
-            file_count = _scalar_row(
-                connection,
-                "SELECT COUNT(*) FROM code_files WHERE engagement_id = ? AND module_id = ?",
-                (engagement.id, module_id),
-            )
-            critical_file_count = _scalar_row(
-                connection,
-                """
-                SELECT COUNT(*)
-                FROM code_files
-                WHERE engagement_id = ? AND module_id = ? AND classification = 'critical'
-                """,
-                (engagement.id, module_id),
-            )
-            connection.execute(
-                """
-                UPDATE code_modules
-                SET file_count = ?, critical_file_count = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE engagement_id = ? AND id = ?
-                """,
-                (file_count, critical_file_count, engagement.id, module_id),
-            )
+            _sync_module_rollup(connection, engagement.id, module_id)
 
         rows = []
         for module_id in created:
@@ -776,6 +837,9 @@ def list_code_modules(
         query = "SELECT * FROM code_modules WHERE engagement_id = ? ORDER BY id ASC"
         params = (engagement.id,)
     with get_connection() as connection:
+        module_rows = connection.execute(query, params).fetchall()
+        for row in module_rows:
+            _sync_module_rollup(connection, engagement.id, int(row["id"]))
         return _fetch_all(connection, query, params)
 
 
@@ -1165,10 +1229,15 @@ def complete_queue_items(
                 cwe_coverage_json = ?,
                 completed_at = ?,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE engagement_id = ? AND id IN ({placeholders})
+            WHERE engagement_id = ? AND status = 'processing' AND id IN ({placeholders})
             """,
             (next_status, disposition, notes, cwe_coverage_text, now, engagement.id, *item_ids),
         )
+        if cursor.rowcount != len(item_ids):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="queue items changed state before completion; refetch and retry",
+            )
         for row in queue_rows.values():
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
             _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
@@ -1552,6 +1621,7 @@ def code_coverage_summary(
              AND f.engagement_id = links.engagement_id
             WHERE links.engagement_id = ?
               AND links.link_kind = 'variant_of'
+              AND f.status NOT IN ('merged', 'false_positive')
             """
             + repo_scoped_finding_clause,
             repo_scoped_variant_params,
