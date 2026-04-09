@@ -8,26 +8,6 @@ from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
 
-# Source of truth: which vulnerability classes apply to which slot types.
-SLOT_VULN_CLASSES = {
-    "NETWORK-INPUT": {
-        "native": ["buffer-overflow", "integer-overflow", "format-string"],
-        "managed": ["web-app-injection", "web-app-auth", "ssrf", "open-redirect", "path-traversal"],
-    },
-    "PROTOCOL-FIELD": {
-        "native": ["buffer-overflow", "integer-overflow", "format-string"],
-        "managed": ["web-app-injection", "web-app-auth", "race-condition"],
-    },
-    "URL-COMPONENT": {"all": ["injection", "auth-bypass", "ssrf", "open-redirect", "web-app-auth"]},
-    "FILE-CONTENT": {"all": ["injection", "buffer-overflow", "type-confusion", "path-traversal", "xxe", "file-upload"]},
-    "CMD-ARGUMENT": {"all": ["injection", "format-string", "path-traversal"]},
-    "CALLBACK-DATA": {"all": ["use-after-free", "race-condition", "type-confusion", "deserialization"]},
-    "ENV-VARIABLE": {"all": ["injection", "path-traversal"]},
-    "_crypto": {"all": ["crypto-misuse"]},
-    "_auth": {"all": ["auth-bypass", "web-app-auth"]},
-    "_error": {"all": ["error-handling"]},
-}
-
 EFFORT_THRESHOLDS = {
     "critical": 70,
     "high": 50,

@@ -5,6 +5,8 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from app.services import code_analysis
+
 
 def write_engagement(engagements_dir: Path, key: str) -> Path:
     engagement_dir = engagements_dir / key
@@ -151,6 +153,111 @@ def test_bulk_classify_rejects_unknown_fields(client, isolate_settings):
     assert "slot_types_json" in response.text
 
 
+def test_bulk_classify_rejects_invalid_slot_type(client, isolate_settings):
+    engagement_key = "2026-04-09-code-classify-invalid-slot"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="invalid-slot-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/files/bulk-classify",
+        json={
+            "classifications": [
+                {
+                    "file_id": parser_file["id"],
+                    "classification": "high",
+                    "role": "parser",
+                    "slot_types": ["NETWORK_INPUT"],
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+    assert "NETWORK_INPUT" in response.text
+
+
+def test_bulk_classify_rejects_high_without_slot_types(client, isolate_settings):
+    engagement_key = "2026-04-09-code-classify-missing-slots"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="missing-slots-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/files/bulk-classify",
+        json={
+            "classifications": [
+                {
+                    "file_id": parser_file["id"],
+                    "classification": "high",
+                    "role": "parser",
+                    "slot_types": [],
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 400
+    assert "slot_types" in response.json()["detail"]
+
+
+def test_applicable_families_include_serialization_and_role_derived_contexts():
+    serialized = code_analysis._applicable_families_for_file(
+        ["SERIALIZED-DATA"],
+        language="python",
+        role="deserializer",
+    )
+    assert "deserialization" in serialized
+    assert "algorithmic-dos" in serialized
+
+    crypto = code_analysis._applicable_families_for_file(
+        ["NETWORK-INPUT"],
+        language="python",
+        role="crypto_impl",
+    )
+    assert "crypto-misuse" in crypto
+
+    auth = code_analysis._applicable_families_for_file(
+        ["NETWORK-INPUT"],
+        language="python",
+        role="auth_handler",
+    )
+    assert "auth-bypass" in auth
+    assert "web-app-auth" in auth
+
+    error_handler = code_analysis._applicable_families_for_file(
+        ["NETWORK-INPUT"],
+        language="c",
+        role="error_handler",
+    )
+    assert "error-handling" in error_handler
+    assert "null-dereference" in error_handler
+
+    allocator = code_analysis._applicable_families_for_file(
+        ["NETWORK-INPUT"],
+        language="c",
+        role="memory_allocator",
+    )
+    assert "uninitialized-memory" in allocator
+    assert "algorithmic-dos" in allocator
+
+    graphql = code_analysis._applicable_families_for_file(
+        ["URL-COMPONENT"],
+        language="python",
+        role="graphql_resolver",
+    )
+    assert "web-app-data-exposure" in graphql
+
+    llm = code_analysis._applicable_families_for_file(
+        ["NETWORK-INPUT"],
+        language="python",
+        role="llm_orchestrator",
+    )
+    assert "ai-ml-security" in llm
+
+
 def _network_input_coverage(
     *,
     default_effort: int,
@@ -162,6 +269,7 @@ def _network_input_coverage(
         "ssrf",
         "open-redirect",
         "path-traversal",
+        "algorithmic-dos",
     ]
     payload: list[dict[str, object]] = []
     for family in families:
@@ -211,6 +319,8 @@ def test_queue_fetch_returns_file_direct_work_items(client, isolate_settings):
     assert item["file"]["file_path"] == "src/parser.py"
     assert item["repo"]["id"] == repo["id"]
     assert item["repo"]["lsp_config"]["ctags"]["available"] is True
+    assert "applicable_vuln_classes" in item
+    assert "web-app-injection" in item["applicable_vuln_classes"]
     assert "context" not in item
 
     file_after_fetch = client.get(
@@ -218,6 +328,50 @@ def test_queue_fetch_returns_file_direct_work_items(client, isolate_settings):
     )
     assert file_after_fetch.status_code == 200
     assert file_after_fetch.json()["analysis_status"] in ("queued", "in_progress")
+
+
+def test_queue_fetch_uses_backend_applicable_classes_with_role_and_language_overrides(client, isolate_settings):
+    engagement_key = "2026-04-09-code-queue-applicable-vulns"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="queue-applicable-vulns-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    classify = client.post(
+        f"/engagements/{engagement_key}/assessment/code/files/bulk-classify",
+        json={
+            "classifications": [
+                {
+                    "file_id": parser_file["id"],
+                    "classification": "critical",
+                    "role": "crypto_impl",
+                    "language": "c++",
+                    "slot_types": ["SERIALIZED-DATA"],
+                    "analysis_priority": 95,
+                }
+            ]
+        },
+    )
+    assert classify.status_code == 200
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
+    )
+    assert queue_response.status_code == 201
+
+    fetch_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    assert fetch_response.status_code == 200
+    item = fetch_response.json()[0]
+
+    assert item["file"]["language"] == "c++"
+    assert "crypto-misuse" in item["applicable_vuln_classes"]
+    assert "deserialization" in item["applicable_vuln_classes"]
+    assert "buffer-overflow" in item["applicable_vuln_classes"]
+    assert "web-app-injection" not in item["applicable_vuln_classes"]
 
 
 def test_analysis_completion_rolls_up_file_coverage(client, isolate_settings):

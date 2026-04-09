@@ -249,9 +249,10 @@ using the available subagent budget.
 - **Batch theme** -- the logical module grouping from the file analysis queue. Files in the same
   batch share a module context, enabling cross-file reasoning within the batch.
 - **Slot types** -- the slot type annotations for each file from Phase 1 classification.
-- **Applicable vulnerability classes** -- ALL vulnerability classes for this file's slot types
-  from `SLOT_VULN_CLASSES`. The hunter must evaluate every applicable class, not just the ones
-  named in hypotheses. Use the slot-type to vulnerability class mapping:
+- **Applicable vulnerability classes** -- copy `applicable_vuln_classes` from the backend queue
+  fetch payload when it is present. The backend computes this canonically from slot types, role,
+  and language. The hunter must evaluate every applicable class, not just the ones named in
+  hypotheses. Only if the backend field is missing, fall back to the mapping below:
 
   | Slot Type | Native (C/C++) | Managed (Python/JS/Java/Go) |
   |---|---|---|
@@ -262,9 +263,14 @@ using the available subagent budget.
   | CMD-ARGUMENT | injection, format-string, path-traversal | (same) |
   | CALLBACK-DATA | use-after-free, race-condition, type-confusion, deserialization | (same) |
   | ENV-VARIABLE | injection, path-traversal | (same) |
-  | _crypto (any + crypto) | crypto-misuse | (always) |
-  | _auth (any + auth) | auth-bypass, web-app-auth | (always) |
-  | _error (any + error) | error-handling | (always) |
+  | SERIALIZED-DATA | buffer-overflow, integer-overflow, type-confusion, deserialization | deserialization |
+  | Role contains crypto | crypto-misuse | (always) |
+  | Role contains auth/session | auth-bypass, web-app-auth | (always) |
+  | Role contains error/exception | error-handling, null-dereference | error-handling, null-dereference |
+  | Role contains memory/allocator | uninitialized-memory, algorithmic-dos | algorithmic-dos |
+  | Role contains parser/decoder/deserializer | algorithmic-dos | algorithmic-dos |
+  | Role contains graphql/resolver/serializer/orm/controller/view | web-app-data-exposure | web-app-data-exposure |
+  | Role contains llm/prompt/rag/mcp | ai-ml-security | ai-ml-security |
 
 - **Guidance hypotheses** -- labeled "check AFTER broad analysis" in the dispatch context.
   These are the attack hypotheses from Phase 1 that touch files in this batch. The hunter
@@ -318,8 +324,9 @@ Include the pattern references matching the batch's slot types and language when
 | CMD-ARGUMENT | `injection.md` | `format-string.md` if logging sinks |
 | CALLBACK-DATA | `use-after-free.md`, `race-condition.md` | `type-confusion.md` if void*/interface{} casts |
 | PROTOCOL-FIELD + state machine | `race-condition.md` | `use-after-free.md` if connection lifecycle |
+| SERIALIZED-DATA | `deserialization.md` | `type-confusion.md` if unions/variant decoding; `algorithmic-dos.md` for parser bombs |
 | Any + crypto operations | `crypto-misuse.md` | Always |
-| Any + auth/session logic | `auth-bypass.md`, `web-app-auth.md` | Always |
+| Any + auth/session logic | `auth-bypass.md`, `web-app-auth.md` | `web-app-data-exposure.md` if serializers, resolvers, or ORM exposure are in scope |
 | Any + error handling paths | `error-handling.md` | `null-dereference.md` if pointer/optional types |
 | Any + memory allocation | `buffer-overflow.md`, `integer-overflow.md` | `uninitialized-memory.md`, `algorithmic-dos.md` |
 | Any + AI/ML/LLM code | `ai-ml-security.md` | Always for LangChain/LlamaIndex/MCP code |
@@ -660,7 +667,7 @@ Before every dispatch, verify:
 - [ ] Current phase stated with specific task objective (not just "analyze this")
 - [ ] Skill to load identified from `agent/SKILL.md`
 - [ ] For Phase 2: file paths from queue items included (NOT context IDs, NOT JSON metadata)
-- [ ] For Phase 2: applicable vulnerability classes listed (ALL from SLOT_VULN_CLASSES for these slot types)
+- [ ] For Phase 2: applicable vulnerability classes copied from backend `applicable_vuln_classes` when present; otherwise derived from slot types + role/language fallback rules
 - [ ] For Phase 2: CWE pattern references selected via slot-type mapping table
 - [ ] For Phase 2: guidance hypotheses included and labeled "check AFTER broad analysis"
 - [ ] For Phase 2: structural index excerpt or per-file JSON included (if available)

@@ -13,6 +13,7 @@
     {
       "file_id": 42,
       "classification": "critical",
+      "language": "c++",
       "role": "protocol_parser",
       "slot_types": ["NETWORK-INPUT", "PROTOCOL-FIELD"],
       "analysis_priority": 95
@@ -33,6 +34,10 @@
       "description": "Functional role of the file (e.g., protocol_parser, auth_handler, crypto_impl, entry_point, memory_allocator, config_parser, utility, test, build, documentation).",
       "default": ""
     },
+    "language": {
+      "type": "string",
+      "description": "Optional language correction when ingestion guessed wrong. Omit when the stored language is already correct."
+    },
     "slot_types": {
       "type": "array",
       "items": {
@@ -48,7 +53,7 @@
           "SERIALIZED-DATA"
         ]
       },
-      "description": "Types of untrusted data that flow into this file. Required for critical and high files.",
+      "description": "Types of untrusted data that flow into this file. Required for critical and high files. Allowed values are the 8 public slot types; context-specific families like auth, crypto, and error handling are derived from role/language by the backend.",
       "default": []
     },
     "analysis_priority": {

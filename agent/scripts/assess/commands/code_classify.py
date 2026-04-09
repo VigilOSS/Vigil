@@ -8,6 +8,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.schema_validation import load_schema
 
 _CODE_FILE_LOOKUP_PAGE_SIZE = 10000
 _ALLOWED_CLASSIFICATION_KEYS = frozenset(
@@ -18,8 +19,16 @@ _ALLOWED_CLASSIFICATION_KEYS = frozenset(
         "classification",
         "role",
         "slot_types",
+        "language",
         "analysis_priority",
     }
+)
+_CLASSIFICATION_SCHEMA = load_schema("code-file-classification.schema.json")
+_VALID_CLASSIFICATIONS = frozenset(
+    _CLASSIFICATION_SCHEMA["properties"]["classification"]["enum"]
+)
+_VALID_SLOT_TYPES = frozenset(
+    _CLASSIFICATION_SCHEMA["properties"]["slot_types"]["items"]["enum"]
 )
 
 
@@ -115,6 +124,60 @@ def _normalize_classifications(payload: list[dict], code_files: list[dict]) -> l
     return normalized
 
 
+def _validate_classification_payload(payload: list[dict]) -> list[str]:
+    errors: list[str] = []
+
+    for i, item in enumerate(payload):
+        if not isinstance(item, dict):
+            errors.append(f"Item {i} is not a JSON object")
+            continue
+
+        unknown_keys = sorted(set(item) - _ALLOWED_CLASSIFICATION_KEYS)
+        if unknown_keys:
+            if "slot_types_json" in unknown_keys:
+                errors.append(
+                    f"Item {i} uses unsupported field 'slot_types_json'; use 'slot_types' instead"
+                )
+            else:
+                errors.append(f"Item {i} has unsupported fields: {', '.join(unknown_keys)}")
+
+        if 'file_id' not in item and 'file_path' not in item:
+            errors.append(f"Item {i} missing required field 'file_id' or 'file_path'")
+
+        classification = item.get("classification")
+        if classification is None:
+            errors.append(f"Item {i} missing required field 'classification'")
+            continue
+        if not isinstance(classification, str) or classification not in _VALID_CLASSIFICATIONS:
+            errors.append(
+                f"Item {i} classification must be one of: {', '.join(sorted(_VALID_CLASSIFICATIONS))}"
+            )
+            continue
+
+        slot_types = item.get("slot_types", [])
+        if slot_types is None:
+            slot_types = []
+        if not isinstance(slot_types, list):
+            errors.append(f"Item {i} slot_types must be a JSON array")
+            continue
+        invalid_slots = [
+            slot
+            for slot in slot_types
+            if not isinstance(slot, str) or slot not in _VALID_SLOT_TYPES
+        ]
+        if invalid_slots:
+            invalid_display = ", ".join(repr(slot) for slot in invalid_slots)
+            errors.append(
+                f"Item {i} slot_types contains invalid values: {invalid_display}. "
+                f"Allowed values: {', '.join(sorted(_VALID_SLOT_TYPES))}"
+            )
+
+        if classification in {"critical", "high"} and not slot_types:
+            errors.append(f"Item {i} slot_types is required for {classification} classifications")
+
+    return errors
+
+
 def run(args) -> None:
     json_path = Path(args.classifications_json)
     if not json_path.is_file():
@@ -130,27 +193,11 @@ def run(args) -> None:
         print("No classifications to submit.", file=sys.stderr)
         sys.exit(0)
 
-    # Validate required fields
-    for i, item in enumerate(payload):
-        if not isinstance(item, dict):
-            print(f"Item {i} is not a JSON object", file=sys.stderr)
-            sys.exit(1)
-        unknown_keys = sorted(set(item) - _ALLOWED_CLASSIFICATION_KEYS)
-        if unknown_keys:
-            if "slot_types_json" in unknown_keys:
-                print(
-                    f"Item {i} uses unsupported field 'slot_types_json'; use 'slot_types' instead",
-                    file=sys.stderr,
-                )
-            else:
-                print(f"Item {i} has unsupported fields: {', '.join(unknown_keys)}", file=sys.stderr)
-            sys.exit(1)
-        if 'file_id' not in item and 'file_path' not in item:
-            print(f"Item {i} missing required field 'file_id' or 'file_path'", file=sys.stderr)
-            sys.exit(1)
-        if 'classification' not in item:
-            print(f"Item {i} missing required field 'classification'", file=sys.stderr)
-            sys.exit(1)
+    errors = _validate_classification_payload(payload)
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        sys.exit(1)
 
     cfg = load_config(args.engagement_dir)
     normalized_payload = payload

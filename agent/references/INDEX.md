@@ -153,6 +153,12 @@ multi-function chains, combinatorial arithmetic, state machine bugs, and incompl
 | `code-vuln-patterns/race-condition.md` | State machine bugs, async refactoring artifacts, signal handler races | C/C++, Python, JS |
 | `code-vuln-patterns/crypto-misuse.md` | Subtle mode/parameter misuse, timing leaks, non-obvious randomness issues | C/C++, Python, JS |
 | `code-vuln-patterns/auth-bypass.md` | Generic/C auth gaps, fallback bypasses, token validation gaps. Framework-specific → see `web-app-auth.md` | C/C++ (frameworks → web-app-auth) |
+| `code-vuln-patterns/path-traversal.md` | Canonicalization bypass, archive extraction writes, symlink and separator confusion | C/C++, Python, JS |
+| `code-vuln-patterns/ssrf.md` | URL parser confusion, DNS rebinding, internal metadata reachability, cross-protocol fetches | C/C++, Python, JS |
+| `code-vuln-patterns/open-redirect.md` | Redirect validation bypass, OAuth redirect theft, local-vs-absolute URL confusion | Python, JS, Java, Go |
+| `code-vuln-patterns/file-upload.md` | Validation/storage drift, archive smuggling, upload-to-parser and upload-to-execution chains | Python, JS, Java, Go |
+| `code-vuln-patterns/xxe.md` | External entity fetches, SSRF/file-read pivots, parser configuration regressions | Python, JS, Java, Go |
+| `code-vuln-patterns/deserialization.md` | Trust-boundary object materialization, type-tag abuse, post-decode gadget reachability | C/C++, Python, JS, Java |
 | `code-vuln-patterns/uninitialized-memory.md` | Conditional initialization, cross-function partial init, stack/heap info leaks | C/C++, Python, JS |
 | `code-vuln-patterns/type-confusion.md` | void* casts, union abuse, tagged union errors, inheritance downcasts | C/C++, Python, JS |
 | `code-vuln-patterns/null-dereference.md` | Cross-function NULL propagation, optional field assumptions, race-to-NULL | C/C++, Python, JS |

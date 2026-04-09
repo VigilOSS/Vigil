@@ -60,6 +60,13 @@ Annotate what kind of untrusted data enters critical and high files. See skill f
 `CALLBACK-DATA`, `PROTOCOL-FIELD`, `SERIALIZED-DATA`.
 
 A file may have multiple slot types. Record primary and secondary.
+Use an explicit role label that preserves the security context — examples:
+`auth_handler`, `crypto_impl`, `error_handler`, `memory_allocator`,
+`graphql_resolver`, `llm_orchestrator`, `deserializer`.
+The backend derives additional applicable vulnerability classes from role + language, so
+vague roles like `handler` or `utils` lose coverage signal.
+If ingestion guessed the language wrong, include a `language` correction on the
+classification record.
 
 ## Call Graph Production
 
@@ -185,6 +192,7 @@ JSON array of per-file classifications:
   {
     "file_id": 42,
     "classification": "critical",
+    "language": "c++",
     "role": "protocol_parser",
     "slot_types": ["NETWORK-INPUT", "PROTOCOL-FIELD"],
     "analysis_priority": 95,
@@ -276,8 +284,9 @@ downstream agents cannot recover from. Declare gaps explicitly.
 - [ ] Trust boundaries explicitly named — where does untrusted data cross into trusted processing?
 
 ### Classification Quality
-- [ ] Every `critical` file has at least one slot-type annotation
+- [ ] Every `critical` and `high` file has at least one slot-type annotation
 - [ ] Every `high` file has a reasoning string explaining why (not just "security relevant")
+- [ ] Role labels are explicit enough for backend-derived coverage (`auth_handler`, `crypto_impl`, `error_handler`, `memory_allocator`, `graphql_resolver`, `llm_orchestrator`, etc.)
 - [ ] No large source files (>500 LOC) classified as `skip` without explicit review of their includes/exports
 - [ ] Protocol parsers, serialization handlers, and authentication code are classified `critical`
 
