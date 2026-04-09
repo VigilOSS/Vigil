@@ -52,6 +52,14 @@ def run(args) -> None:
     else:
         approved_slugs = approved
 
+    session_dir = Path(session_dir_path(eng_dir, session_id))
+    ensure_session_index(eng_dir)
+    index_path = Path(session_index_path(eng_dir))
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    if session_dir.exists() or any(row.get("session_id") == session_id for row in index):
+        print(f"session already exists: {session_id}", file=sys.stderr)
+        sys.exit(1)
+
     # Fetch findings from backend
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
@@ -72,11 +80,9 @@ def run(args) -> None:
             sys.exit(1)
 
     # Create session directory structure
-    session_dir = session_dir_path(eng_dir, session_id)
-    proposals_dir = Path(session_dir) / "proposals"
-    artifacts_dir = Path(session_dir) / "artifacts"
-    notes_dir = Path(session_dir) / "notes"
-    ensure_session_index(eng_dir)
+    proposals_dir = session_dir / "proposals"
+    artifacts_dir = session_dir / "artifacts"
+    notes_dir = session_dir / "notes"
 
     for d in (proposals_dir, artifacts_dir, notes_dir):
         d.mkdir(parents=True, exist_ok=True)
@@ -112,15 +118,14 @@ def run(args) -> None:
         "Assigned findings:",
     ]
     for row in assigned_findings:
-        prompt_lines.append(f"- {row['slug']} | {row.get('severity', '')} | {row.get('status', '')} | {row.get('title', '')}")
+        prompt_lines.append(
+            f"- {row['slug']} | {row.get('severity', '')} | {row.get('workflow_status', '')} | {row.get('title', '')}"
+        )
 
-    prompt_file = Path(session_dir) / "prompt.md"
+    prompt_file = session_dir / "prompt.md"
     prompt_file.write_text("\n".join(prompt_lines) + "\n", encoding="utf-8")
 
     # Update session index
-    index_path = Path(session_index_path(eng_dir))
-    index = json.loads(index_path.read_text(encoding="utf-8"))
-    index = [row for row in index if row.get("session_id") != session_id]
     index.append({
         "session_id": session_id,
         "created_at": timestamp,
