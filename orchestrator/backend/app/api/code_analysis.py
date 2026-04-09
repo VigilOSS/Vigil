@@ -48,6 +48,8 @@ class CodeFilesBulkCreateRequest(BaseModel):
 
 
 class CodeFileClassification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     file_id: int
     classification: str = Field(min_length=1, max_length=32)  # critical/high/medium/low/skip
     role: str = Field(default="", max_length=128)

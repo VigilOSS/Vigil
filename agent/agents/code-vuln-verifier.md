@@ -218,8 +218,13 @@ Stats: confirmed/downgraded/killed counts, confirmation rate, coverage percentag
 ## State Recording
 
 ```bash
-# Persist a verification decision on the canonical finding
+# Persist confirm/downgrade/dispute decisions through the verification endpoint, because the
+# audit ledger must capture verifier intent rather than a generic patch
 ./scripts/assess.py verify-finding <slug> <verification-json>
+
+# Persist kills with the dedicated helper when working from shell notes, because it enforces
+# details.kill_reason and details.kill_check before the request leaves the CLI
+./scripts/assess.py kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 
 # Record attack chains
 ./scripts/assess.py record-chain code-vuln-verifier <chain-json>
@@ -228,7 +233,7 @@ Stats: confirmed/downgraded/killed counts, confirmation rate, coverage percentag
 ./scripts/assess.py record-finding code-vuln-verifier <updated-finding-json>
 ```
 
-For kills, use the verification payload:
+For kills, use the false-positive verification contract:
 
 ```json
 {

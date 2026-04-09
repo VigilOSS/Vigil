@@ -49,6 +49,36 @@ def _load_verify_finding_module():
     return _load_assess_module("verify_finding.py", "test_verify_finding_command")
 
 
+def _load_post_module():
+    return _load_assess_module("post.py", "test_post_command")
+
+
+def _load_update_finding_module():
+    return _load_assess_module("update_finding.py", "test_update_finding_command")
+
+
+def _load_reset_finding_module():
+    return _load_assess_module("reset_finding.py", "test_reset_finding_command")
+
+
+def _load_kill_finding_module():
+    return _load_assess_module("kill_finding.py", "test_kill_finding_command")
+
+
+def _load_list_findings_module():
+    return _load_assess_module("list_findings.py", "test_list_findings_command")
+
+
+def _load_cli_module():
+    repo_root = Path(__file__).resolve().parents[3]
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    import assess.cli as cli_module
+
+    return cli_module
+
+
 def test_code_coverage_is_informational_by_default(monkeypatch, capsys):
     module = _load_code_coverage_module()
 
@@ -725,6 +755,388 @@ def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypa
             )
         )
     assert excinfo.value.code == 1
+
+
+def test_post_accepts_inline_json_payload(monkeypatch, capsys):
+    module = _load_post_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def post(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return {"ok": True}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=Path("/tmp/eng"),
+            endpoint="findings",
+            payload='{"title":"Inline finding"}',
+            inline_payload=None,
+        )
+    )
+
+    assert captured["endpoint"] == "findings"
+    assert captured["payload"] == {"title": "Inline finding"}
+    assert '"ok": true' in capsys.readouterr().out.lower()
+
+
+def test_kill_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_path, capsys):
+    module = _load_kill_finding_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def post(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return {"finding": {"slug": "FINDING-VA-001", "title": "Parser issue"}}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=tmp_path,
+            finding_slug="FINDING-VA-001",
+            payload=None,
+            inline_payload=None,
+            reason_text="Guard blocks the path",
+            reason_code="manual-kill",
+            kill_reason="validate_length() enforces an 8KB cap",
+            kill_check=2,
+            evidence_ref="findings.md",
+            artifact_ref="audit.json",
+            notes="Rechecked manually",
+            source_name="operator",
+            details_inline=None,
+            provenance_inline='{"reviewed_by":"operator"}',
+        )
+    )
+
+    assert captured["endpoint"] == "findings/FINDING-VA-001/verify"
+    assert captured["payload"]["disposition"] == "false_positive"
+    assert captured["payload"]["details"]["kill_reason"] == "validate_length() enforces an 8KB cap"
+    assert captured["payload"]["details"]["kill_check"] == 2
+    assert "FINDING-VA-001" in capsys.readouterr().out
+
+
+def test_update_finding_patches_by_slug_from_flags(monkeypatch, tmp_path):
+    module = _load_update_finding_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def patch(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return {"finding": {"slug": "FINDING-VA-002", "title": "Updated"}}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=tmp_path,
+            finding_slug="FINDING-VA-002",
+            payload=None,
+            inline_payload=None,
+            title=None,
+            severity="low",
+            workflow_status="active",
+            defect_family=None,
+            root_cause_key=None,
+            auth_context=None,
+            canonical_location=None,
+            summary=None,
+            evidence_ref="findings.md",
+            notes="Manual review lowered impact",
+            source_name="operator",
+            reason_code="manual-override",
+            reason_text="Reproduced with lower impact",
+            artifact_ref="review.json",
+            details_inline='{"impact":"limited"}',
+            provenance_inline='{"reviewed_by":"operator"}',
+        )
+    )
+
+    assert captured["endpoint"] == "findings/FINDING-VA-002"
+    assert captured["payload"]["workflow_status"] == "active"
+    assert captured["payload"]["severity"] == "low"
+    assert captured["payload"]["details"] == {"impact": "limited"}
+
+
+def test_reset_finding_reopens_to_draft(monkeypatch, tmp_path):
+    module = _load_reset_finding_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def patch(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return {"finding": {"slug": "FINDING-VA-003", "title": "Reset"}}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=tmp_path,
+            finding_slug="FINDING-VA-003",
+            workflow_status="draft",
+            severity=None,
+            reason_text="Needs another review pass",
+            reason_code="retriage",
+            artifact_ref="review.json",
+            notes="Undoing prior false positive",
+            source_name="operator",
+            provenance_inline='{"reviewed_by":"operator"}',
+        )
+    )
+
+    assert captured["endpoint"] == "findings/FINDING-VA-003"
+    assert captured["payload"]["workflow_status"] == "draft"
+    assert captured["payload"]["reason_text"] == "Needs another review pass"
+
+
+def test_list_findings_filters_by_status_and_severity(monkeypatch, capsys):
+    module = _load_list_findings_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            assert endpoint == "findings"
+            return [
+                {
+                    "slug": "FINDING-ACTIVE-001",
+                    "severity": "high",
+                    "workflow_status": "active",
+                    "verification_state": "unreviewed",
+                    "verification_disposition": "none",
+                    "title": "Live issue",
+                    "summary": "",
+                    "canonical_location": "",
+                    "source_name": "vulnerability-analyst",
+                },
+                {
+                    "slug": "FINDING-DRAFT-001",
+                    "severity": "high",
+                    "workflow_status": "draft",
+                    "verification_state": "unreviewed",
+                    "verification_disposition": "none",
+                    "title": "Needs work",
+                    "summary": "",
+                    "canonical_location": "",
+                    "source_name": "vulnerability-analyst",
+                },
+            ]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=Path("/tmp/eng"),
+            severity="high",
+            workflow_status="active",
+            verification_state=None,
+            verification_disposition=None,
+            source_name=None,
+            slug=None,
+            search=None,
+            json=False,
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert "FINDING-ACTIVE-001" in output
+    assert "FINDING-DRAFT-001" not in output
+
+
+def test_code_dispatch_done_supports_dry_run(monkeypatch, tmp_path, capsys):
+    module = _load_code_dispatch_module()
+    coverage_path = tmp_path / "coverage.json"
+    coverage_path.write_text(json.dumps([{"family": "ssrf", "effort": 80}]), encoding="utf-8")
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            raise AssertionError("dry-run should not create a client")
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=tmp_path,
+            action="done",
+            extra=["42", "clean", str(coverage_path), "--dry-run"],
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert "Dry run only" in output
+    assert '"endpoint": "code/analysis-queue/done"' in output
+
+
+def test_code_dispatch_done_rejects_invalid_disposition(monkeypatch, tmp_path, capsys):
+    module = _load_code_dispatch_module()
+    coverage_path = tmp_path / "coverage.json"
+    coverage_path.write_text(json.dumps([{"family": "ssrf", "effort": 80}]), encoding="utf-8")
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=tmp_path,
+                action="done",
+                extra=["42", "done", str(coverage_path)],
+            )
+        )
+
+    assert excinfo.value.code == 1
+    assert "expected one of: clean, finding, suspicious" in capsys.readouterr().err
+
+
+def test_code_classify_rejects_slot_types_json_field(tmp_path, capsys):
+    module = _load_code_classify_module()
+    payload_path = tmp_path / "classify.json"
+    payload_path.write_text(
+        json.dumps(
+            [
+                {
+                    "file_id": 7,
+                    "classification": "high",
+                    "slot_types_json": ["NETWORK-INPUT"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=tmp_path,
+                classifications_json=str(payload_path),
+            )
+        )
+
+    assert excinfo.value.code == 1
+    assert "use 'slot_types' instead" in capsys.readouterr().err
+
+
+def test_cli_main_prints_assesserror_without_traceback(monkeypatch, capsys):
+    cli_module = _load_cli_module()
+    from assess.commands import fetch as fetch_command
+    from assess.lib.client import AssessError
+
+    monkeypatch.setattr(
+        fetch_command,
+        "run",
+        lambda args: (_ for _ in ()).throw(AssessError('HTTP 422:\n{"detail":"bad"}')),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli_module.main(["fetch", "summary"])
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "ERROR: HTTP 422" in err
+    assert "Traceback" not in err
 
 
 def _load_code_audit_module():
