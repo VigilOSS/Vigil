@@ -21,6 +21,7 @@ def test_rendered_operator_prompts_match_operator_core():
         "operator",
         "recon-specialist",
         "source-analyzer",
+        "surface-collector",
         "vulnerability-analyst",
         "exploit-developer",
         "fuzzer",
@@ -112,7 +113,7 @@ def test_phase_two_methodology_guidance_is_present_in_skills_and_references():
     assert "read between the lines" in engagement_methodology.lower()
     assert "prove it in stages" in engagement_methodology.lower()
     assert "hypothesis" in web_recon.lower()
-    assert "durable backend" in osint_recon.lower()
+    assert "canonical destination" in osint_recon.lower()
     assert "optional final phase" in athena_skill.lower()
     assert "ctf scope" not in api04.lower()
     assert "authorized realistic lab" in install_script.lower()
@@ -125,6 +126,7 @@ def test_specialist_agent_sources_exist_for_public_roster():
     expected = {
         "recon-specialist.md",
         "source-analyzer.md",
+        "surface-collector.md",
         "vulnerability-analyst.md",
         "exploit-developer.md",
         "fuzzer.md",
@@ -133,3 +135,77 @@ def test_specialist_agent_sources_exist_for_public_roster():
     }
 
     assert expected <= {path.name for path in agent_dir.glob("*.md")}
+
+
+def test_code_analysis_prompt_uses_current_cli_contracts():
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_prompt = (repo_root / "agent" / "operator-core-code.md").read_text(encoding="utf-8")
+    architect_prompt = (repo_root / "agent" / "agents" / "code-architect.md").read_text(encoding="utf-8")
+    for text in (operator_prompt, architect_prompt):
+        assert "fetch code-files" not in text
+        assert "code-dispatch <db> queue" not in text
+
+    assert 'fetch "code/files' in operator_prompt
+    assert "code-record-threat-model <repo-id> <threat-model-json>" in operator_prompt
+    assert "code-record-modules <repo-id> <modules-json>" in operator_prompt
+    assert "code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json>" in operator_prompt
+    assert "Pass repo-relative file paths and artifact paths instead of pasting large JSON blobs" in operator_prompt
+    assert "code-dispatch needs-context" in operator_prompt
+    assert "no pending triggers" in operator_prompt
+    assert "--require-gate-pass" in operator_prompt
+    assert "applicable_vuln_classes" in operator_prompt
+    assert "Every `critical` and `high` file has at least one slot-type annotation" in architect_prompt
+
+
+def test_code_analysis_agents_use_current_phase_numbers():
+    repo_root = Path(__file__).resolve().parents[3]
+    architect_prompt = (repo_root / "agent" / "agents" / "code-architect.md").read_text(encoding="utf-8")
+    hunter_prompt = (repo_root / "agent" / "agents" / "code-vuln-hunter.md").read_text(encoding="utf-8")
+    verifier_prompt = (repo_root / "agent" / "agents" / "code-vuln-verifier.md").read_text(encoding="utf-8")
+
+    assert "enables multi-function reasoning in Phase 2" in architect_prompt
+    assert "moving\nto Phase 4" not in hunter_prompt
+    assert "to Phase 3." in hunter_prompt
+    assert "Phase 3 hunters" not in verifier_prompt
+    assert "Phase 2 hunters" in verifier_prompt
+
+
+def test_code_analysis_skills_use_current_phase_numbers_and_tools():
+    repo_root = Path(__file__).resolve().parents[3]
+    verification_skill = (
+        repo_root / "agent" / "skills" / "code-finding-verification" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    variant_skill = (
+        repo_root / "agent" / "skills" / "code-variant-analysis" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Phase 4 of code analysis pipeline" not in verification_skill
+    assert "Runs on confirmed findings from Phase 2" in verification_skill
+    assert "Phase 4 of code analysis pipeline" not in variant_skill
+    assert "`cat`" not in variant_skill
+    assert "`find`" not in variant_skill
+    assert "`Read`" in variant_skill
+    assert "`Glob`" in variant_skill
+
+
+def test_code_analysis_codex_wrappers_exist():
+    repo_root = Path(__file__).resolve().parents[3]
+    codex_dir = repo_root / "agent" / ".codex" / "agents"
+
+    expected = {
+        "code-architect.toml",
+        "code-variant-hunter.toml",
+        "code-vuln-hunter.toml",
+        "code-vuln-verifier.toml",
+    }
+
+    assert expected <= {path.name for path in codex_dir.glob("*.toml")}
+
+
+def test_exploit_developer_prompt_uses_workflow_status_for_findings_examples():
+    repo_root = Path(__file__).resolve().parents[3]
+    exploit_prompt = (repo_root / "agent" / "agents" / "exploit-developer.md").read_text(encoding="utf-8")
+
+    assert '.status | IN("confirmed","exploited","draft")' not in exploit_prompt
+    assert '.workflow_status | IN("active","exploited","draft")' in exploit_prompt
+    assert "{slug, title, severity, workflow_status, defect_family, canonical_location, auth_context}" in exploit_prompt

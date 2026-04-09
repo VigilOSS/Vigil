@@ -7,7 +7,9 @@
   "required": [
     "title",
     "severity",
-    "status",
+    "workflow_status",
+    "verification_state",
+    "verification_disposition",
     "defect_family",
     "root_cause_key",
     "auth_context",
@@ -21,7 +23,9 @@
     {
       "title": "Blind SQL injection in search",
       "severity": "high",
-      "status": "confirmed",
+      "workflow_status": "active",
+      "verification_state": "verified",
+      "verification_disposition": "confirmed",
       "defect_family": "sql-injection",
       "root_cause_key": "search-id-sqli",
       "auth_context": "anonymous",
@@ -63,9 +67,17 @@
       "type": "string",
       "enum": ["info", "low", "medium", "high", "critical"]
     },
-    "status": {
+    "workflow_status": {
       "type": "string",
-      "enum": ["draft", "confirmed", "exploited", "blocked", "merged", "reported"]
+      "enum": ["draft", "active", "exploited", "blocked", "false_positive", "merged", "reported"]
+    },
+    "verification_state": {
+      "type": "string",
+      "enum": ["unreviewed", "verified", "disputed"]
+    },
+    "verification_disposition": {
+      "type": "string",
+      "enum": ["none", "confirmed", "downgraded", "false_positive"]
     },
     "defect_family": {
       "type": "string",
@@ -128,6 +140,16 @@
           "type": "string",
           "minLength": 1,
           "description": "Exact response excerpt, artifact reference, or replayable proof"
+        },
+        "kill_reason": {
+          "type": "string",
+          "description": "Structured verifier rationale when a finding is marked false_positive"
+        },
+        "kill_check": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5,
+          "description": "Verification check number responsible for the false-positive verdict"
         },
         "impact": {
           "type": "string",

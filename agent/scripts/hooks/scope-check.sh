@@ -25,7 +25,7 @@ COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || tr
 
 # Block common target-facing host-side execution paths even if the target is indirect
 # via environment variables, scope.json, or helper scripts.
-if printf '%s\n' "$COMMAND" | grep -Eq '(^|[[:space:];|&(])((/usr/bin/)?curl|nmap|ffuf|wfuzz|gobuster|dirb|sqlmap|nikto|whatweb|hydra|katana|arjun|subfinder|httpx|nc|netcat|msfconsole|msfrpcd)([[:space:]]|$)'; then
+if printf '%s\n' "$COMMAND" | grep -Eq '(^|[[:space:];|&(])((/usr/bin/)?curl|nmap|ffuf|wfuzz|gobuster|dirb|sqlmap|whatweb|hydra|katana|arjun|subfinder|httpx|nc|netcat|msfconsole|msfrpcd)([[:space:]]|$)'; then
   echo "BLOCKED: Host-side target-facing tool execution is not allowed. Use the attached Kali MCP tools for in-scope work." >&2
   exit 2
 fi
@@ -47,7 +47,7 @@ esac
 
 # Also skip by first non-variable command in compound statements
 case "$COMMAND" in
-  *dispatcher.sh*|*schema.sql*) exit 0 ;;
+  *dispatcher.sh*|*assess.py*|*schema.sql*) exit 0 ;;
   *"cat "*|*"mkdir "*|*"jq "*|*"sqlite3 "*|*"grep "*|*"sed "*) exit 0 ;;
 esac
 
@@ -73,15 +73,16 @@ done < <(scope_entries "$ENG_DIR")
   echo "BLOCKED: Scope metadata is empty; cannot validate host targets safely." >&2
   exit 2
 }
+
 OUT_OF_SCOPE_LIST=()
-while IFS= read -r blocked_entry; do
-  [ -n "$blocked_entry" ] && OUT_OF_SCOPE_LIST+=("$blocked_entry")
+while IFS= read -r scope_entry; do
+  [ -n "$scope_entry" ] && OUT_OF_SCOPE_LIST+=("$scope_entry")
 done < <(out_of_scope_entries "$ENG_DIR")
 
 # Check each host against scope
 for HOST in "${HOST_LIST[@]}"; do
   AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "operator"' 2>/dev/null || echo "unknown")
-  if host_explicitly_out_of_scope "$HOST" "${OUT_OF_SCOPE_LIST[@]}"; then
+  if [ "${#OUT_OF_SCOPE_LIST[@]}" -gt 0 ] && host_in_scope "$HOST" "${OUT_OF_SCOPE_LIST[@]}"; then
     echo "BLOCKED: Host '$HOST' is explicitly out of scope. (agent: $AGENT_TYPE)" >&2
     echo "Allowed scope: ${SCOPE_LIST[*]}" >&2
     exit 2

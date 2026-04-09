@@ -14,7 +14,7 @@ origin: AI Threat Hunting
 
 ## Tools
 
-`ffuf` (primary), `gobuster` (fallback), `curl` (verification)
+`ffuf` (primary — parameter/vhost fuzzing), `feroxbuster` (recursive content discovery), `curl` (verification)
 
 ## Methodology
 
@@ -27,7 +27,6 @@ curl -s -o /dev/null -w "Code: %{http_code}, Size: %{size_download}" https://TAR
 ```bash
 ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt -fc 404
 ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt -ac  # Auto-calibrate
-gobuster dir -u https://TARGET -w /usr/share/wordlists/dirb/common.txt -t 50  # Fallback
 ```
 
 ### 3. Extension Fuzzing
@@ -47,7 +46,15 @@ ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt \
 
 ### 5. Recursive Discovery
 ```bash
-ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt -ac -recursion -recursion-depth 2
+# feroxbuster for recursive content discovery (faster, auto-recurses, Rust-based)
+feroxbuster -u https://TARGET -w /usr/share/wordlists/dirb/common.txt --smart --auto-tune \
+  -d 3 -t 50 -o /engagement/scans/ferox_results.txt
+
+# feroxbuster with extensions
+feroxbuster -u https://TARGET -w /usr/share/wordlists/dirb/common.txt \
+  -x php,html,js,txt,bak -d 2 --auto-tune
+
+# ffuf for targeted sub-path fuzzing after feroxbuster finds interesting directories
 ffuf -u https://TARGET/admin/FUZZ -w /usr/share/wordlists/dirb/common.txt -ac
 ```
 
@@ -84,7 +91,16 @@ ffuf -u https://TARGET/FUZZ -w wordlist.txt -ac -o /engagement/scans/dir_fuzz_re
 curl -sI https://TARGET/discovered_path  # Verify
 ```
 
+## What to Record
+
+- Discovered paths with status codes and response sizes
+- Sensitive files found (.env, .git, backups, config)
+- Admin/management interfaces discovered
+- Wordlists used and filter/matcher settings
+- Whether authenticated fuzzing was performed
+- New endpoints to feed into work buffer via `assess.py ingest-endpoints`
+
 ## Extended Resources
 
 - `agent/references/tools/fuzzing/ffuf.md` — ffuf flags, filter/matcher options, wordlist selection
-- `agent/references/tools/fuzzing/gobuster.md` — gobuster dir/dns/vhost mode reference
+- `agent/references/tools/fuzzing/feroxbuster.md` — feroxbuster recursive scanning, auto-tune, smart mode

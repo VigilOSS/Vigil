@@ -29,7 +29,6 @@ ARTIFACT_SPECS = {
     "findings.md": ("findings.md", "text/markdown", False),
     "report.md": ("report.md", "text/markdown", False),
     "intel.md": ("intel.md", "text/markdown", False),
-    "intel-secrets.json": ("intel-secrets.json", "application/json", True),
     "auth.json": ("auth.json", "application/json", True),
     "surfaces.jsonl": ("surfaces.jsonl", "text/plain", False),
     "engagement.json": ("engagement.json", "application/json", False),

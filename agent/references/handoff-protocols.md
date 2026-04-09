@@ -1,114 +1,116 @@
 # Agent Handoff Protocols
 
-Detailed rules for how each agent's output flows to the next through the operator.
+Quick-reference for processing each agent's return output. These rules are subordinate
+to the Phase Flow in `operator-core.md` — agent output is processed within the current
+phase, then queued for later phases where appropriate. Exploit-developer dispatch is
+governed by `exploit_policy` in scope.json and belongs to Phase 4, not earlier phases.
 
 ## Skill Passing Protocol
 
-Every handoff specifies **which skill the next agent should load**. The operator is responsible for including
-this in the dispatch context. Each agent's `## Handoffs` section names the specific skill or skill-selection
-rule for downstream agents.
+Every handoff specifies **which skill the next agent should load**. The operator includes
+this in the dispatch context. Each agent's `## Handoffs` section names the specific skill
+or skill-selection rule. Use the "Use when:" lines in `agent/SKILL.md` to select the right
+skill when the handoff says "bring the matching vuln-class skill."
 
-General rule: use the "Use when:" lines in `agent/SKILL.md` to select the right skill when the handoff says
-"bring the matching vuln-class skill" or "bring the skill matching the finding class."
+## Phase 1 Returns
 
-## RECON-SPECIALIST → next agents
+### RECON-SPECIALIST
 
-recon outputs: endpoint list, technologies, JS file URLs, parameters, surface candidates
+Output: endpoint lists, technologies, JS file URLs, parameters, surface candidates, coverage gaps
 
-Operator does:
-1. Pass JS file URLs → dispatch source-analyzer — **bring `agent/skills/source-analysis/SKILL.md`**
-2. Import ALL endpoints → `recon_ingest.sh` → orchestrator backend state (with the local queue only as transient batching)
-3. Record technology stack → durable finding/state update + intel.md
-4. Turn auth boundaries, framework clues, and proxy hints into explicit hypotheses for exploit or source-analysis follow-up
-5. Requestable endpoints, object references, auth inconsistencies → dispatch vulnerability-analyst — **bring the vuln-class skill from `agent/SKILL.md` matching the candidate surface**
-6. If obvious vulns found (default creds, open admin) → dispatch exploit-developer directly — **bring `agent/skills/auth-bypass/SKILL.md`** or the relevant skill for the specific path
+1. **Read `#### Coverage Gaps` first** — this drives the Recon Coverage Gate. If material gaps exist, re-dispatch recon-specialist with a targeted objective and specific skill before proceeding. See Phase 1 gate checklist in operator-core.
+2. Pass JS file URLs → dispatch source-analyzer (if not already running in parallel) — **bring `agent/skills/source-analysis/SKILL.md`**
+3. Record technology stack → durable state update + intel.md
+4. Turn auth boundaries, framework clues, and proxy hints into hypotheses for Phase 3/4
 
-## SOURCE-ANALYZER → work buffer + findings
+### SOURCE-ANALYZER
 
-source outputs: new API endpoints, routes, secrets/tokens, config objects
+Output: new API endpoints, routes, secrets/tokens, config objects, coverage gaps
 
-Operator does:
-1. New requestable endpoints → `echo ... | ./scripts/recon_ingest.sh "$ENGAGEMENT_DIR/cases.db" source-analysis`
-2. Secrets/tokens → durable findings immediately (HIGH/MEDIUM) + `intel-secrets.json` for full values + intel.md Credentials table for preview/reference only
-3. API routes, object references, mutation paths → dispatch vulnerability-analyst — **bring the vuln-class skill from `agent/SKILL.md` matching the candidate** (e.g., `idor-testing` for object refs, `sqli-testing` for query params)
-4. Parameter names, format hints, upload paths → dispatch fuzzer — **bring `agent/skills/parameter-fuzzing/SKILL.md`**
-5. Exploitable secrets or high-confidence abuse paths → dispatch exploit-developer — **bring the skill matching the specific finding class**
+1. **Read `#### Coverage Gaps` first** — if JS analysis was incomplete (files behind auth, opaque minification), re-dispatch with additional context before proceeding.
+2. New requestable endpoints → `./scripts/assess.py ingest-endpoints "$DIR/cases.db" source-analysis`
+3. Secrets/tokens → durable findings immediately via `assess.py record-finding` + credential backend record + intel.md Credentials table
+4. API routes, object references, mutation paths, parameter names → queued for Phase 3 dispatch (these enter the work buffer via endpoint ingestion, not via immediate agent dispatch)
 
-## VULNERABILITY-ANALYST → exploit-developer / fuzzer
+### Phase 1 → Phase 2 Transition
 
-### During CONSUME & TEST:
+After both recon-specialist and source-analyzer return:
+1. Verify coverage gaps are resolved or accepted
+2. Dispatch surface-collector with Phase 1 endpoint artifacts, targets from scope.json, auth.json state, and `$DIR/cases.db` path — **bring `agent/skills/surface-collection/SKILL.md`**
 
-vuln-analyst returns: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED blocks
+## Phase 2 Returns
 
-Operator does:
-1. HIGH/MEDIUM confidence → IMMEDIATELY dispatch exploit-developer with finding slug(s) and objective — **bring the skill matching the finding class** (e.g., `agent/skills/ssrf-testing/SKILL.md` for SSRF, `agent/skills/idor-testing/SKILL.md` for IDOR, `agent/skills/xss-testing/SKILL.md` for XSS). The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `fetch_assessment_record.sh` — do not pre-filter B candidates (chain-target endpoints) for it.
-2. LOW confidence → record as durable draft finding, do NOT dispatch yet
-3. FUZZER_NEEDED → dispatch fuzzer — **bring `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md`** as appropriate, feed results back through vuln-analyst
-4. Report-ready findings → dispatch report-writer (only after durable + evidenced + severity-disciplined) — **bring `agent/skills/report-generation/SKILL.md`**
+### SURFACE-COLLECTOR
 
-### During EXPLOIT phase:
+Output: priority manifest, work-buffer stats, intelligence, coverage gaps, recorded surfaces and findings
 
-1. Dispatch exploit-developer with finding slug(s) and objective plus the matching skill. The agent queries the backend for the full engagement landscape (findings, request-variants, surfaces, services, coverage gaps) before building chains.
-2. Exploit ALL remaining findings (including LOW and INFO)
-3. Identify chains (multiple INFO/LOW → combined HIGH impact)
-4. Reassess severity based on actual exploitation
+1. Append `#### Intelligence` to intel.md
+2. Review `#### Priority Attack Surfaces` for Phase 3 dispatch ordering
+3. Inspect work-buffer stats: `./scripts/assess.py dispatch "$DIR/cases.db" stats`
+4. Update scope.json phase to `consume-test`
 
-## FUZZER → vuln-analyst / findings
+## Phase 3 Returns (CONSUME & TEST)
 
-fuzzer outputs: discovered paths, valid parameters, anomalous responses
+### VULNERABILITY-ANALYST
 
-Operator does:
-1. New paths/endpoints → ingest into backend request/service coverage state; use the local queue only if batching is helpful
-2. Anomalous responses → dispatch vuln-analyst for analysis
-3. Confirmed findings (e.g., valid credentials) → durable findings directly
+Output: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED signals
 
-## EXPLOIT-DEVELOPER → findings + next steps
+1. Record all findings durably via `assess.py record-finding` — this is the immediate obligation
+2. HIGH/MEDIUM findings → queued for Phase 4 exploit dispatch (governed by `exploit_policy` in scope.json)
+3. LOW findings → record as draft, do not queue for exploit yet
+4. FUZZER_NEEDED → dispatch fuzzer within Phase 3 — **bring `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md`**, feed results back through vuln-analyst
+5. Mark work-buffer batch done: `./scripts/assess.py dispatch "$DB" done "id1,id2,..."`
+6. Continue the Phase 3 consumption loop (steps b–f in Phase Flow)
 
-exploit outputs: CONFIRMED/PARTIAL/FAILED status, extracted data, PoC
+### FUZZER
 
-Operator does:
-1. CONFIRMED → durable finding update with full evidence (HIGH severity)
-2. CONFIRMED + credentials / access / credential tests → verify exploit-developer recorded them via the assessment API, then run the credential auto-use workflow (see operator prompt)
-3. CONFIRMED + multi-step chain → verify exploit-developer recorded the chain via `record_attack_chain.sh` and linked the finding steps
-4. CONFIRMED + new attack surface → ingest auth-aware variants and retest obligations into backend state
+Output: discovered paths, valid parameters, anomalous responses, confirmed findings
+
+1. New paths/endpoints → ingest into backend coverage state via `assess.py ingest-endpoints`
+2. Anomalous responses → dispatch vuln-analyst for analysis within Phase 3
+3. Confirmed findings (e.g., valid credentials) → durable findings directly via `assess.py record-finding`
+
+## Phase 4 Returns (EXPLOIT)
+
+Exploit-developer dispatch is gated by `exploit_policy` in scope.json:
+- `pause` → present confirmed findings to the human, ask which are approved
+- `selected` → exploit only the approved finding slugs
+- `full_send` → dispatch exploit-developer immediately
+
+### EXPLOIT-DEVELOPER
+
+Output: CONFIRMED/PARTIAL/FAILED status, extracted data, PoC, chains, credentials
+
+1. CONFIRMED → durable finding update with full evidence
+2. CONFIRMED + credentials/access/credential tests → verify exploit-developer recorded them, then run the credential auto-use workflow (see operator-core)
+3. CONFIRMED + multi-step chain → verify `assess.py record-chain` was called and steps are linked
+4. CONFIRMED + new attack surface → ingest auth-aware variants and retest obligations
 5. PARTIAL → record as MEDIUM, validate partial signals in stages before giving up
 6. FAILED → log.md, move to next finding
-7. Report-ready → dispatch report-writer — **bring `agent/skills/report-generation/SKILL.md`**
-8. Needs OSINT context → dispatch osint-analyst — **bring `agent/skills/osint-recon/SKILL.md`**
-9. Exploit branch failed, lead needs retest → dispatch back to vulnerability-analyst — **bring the same vuln-class skill used for the original finding**
+7. Needs OSINT context → dispatch osint-analyst within Phase 4 — **bring `agent/skills/osint-recon/SKILL.md`**
+8. Exploit failed, lead needs targeted re-evaluation → dispatch vulnerability-analyst for a single-finding retest (this is a Phase 4 feedback loop, not a return to the Phase 3 work-buffer consumption loop) — **bring the same vuln-class skill**
 
-## OSINT-ANALYST → operator → exploit-developer
+### OSINT-ANALYST
 
-osint-analyst writes intel.md only. Promote intel to findings through the durable backend path when it becomes actionable.
+Output: intel.md updates (technology, CVE, breach, credential intel)
 
-Operator does after completion:
 1. Read Intelligence Assessment section
-2. HIGH-value CVE + PoC match → dispatch exploit-developer to **validate** against the live target — **bring the skill matching the CVE/finding class from `agent/SKILL.md`**. Do NOT record a finding until exploit-developer confirms exploitability. Version-only CVE matches are intel, not findings (backported patches, missing binaries, and disabled modules routinely invalidate them).
-3. Breached credentials with target-specific proof → write finding + dispatch exploit-developer to test access
-4. Historical endpoints → ingest into backend coverage state, preserving provenance and auth context
-5. MEDIUM/LOW intel without target proof → keep in intel.md only, do not promote to findings
+2. HIGH-value CVE + PoC match → dispatch exploit-developer to **validate** against the live target — **bring the matching skill from `agent/SKILL.md`**. Do NOT record a finding until exploit-developer confirms exploitability. Version-only CVE matches are intel, not findings.
+3. Breached credentials with target-specific proof → record finding + dispatch exploit-developer to test access
+4. Historical endpoints → ingest into backend coverage state
+5. MEDIUM/LOW intel without target proof → keep in intel.md only
 
-## REPORT-WRITER ← backend API (self-service)
+## Phase 6 (REPORT)
 
-Report-writer queries the backend directly via `fetch_assessment_record.sh report-findings`, `attack-chains`, `surfaces`, and `summary`. The operator does not need to manually assemble findings context.
+### REPORT-WRITER ← backend API (self-service)
 
-Engagement directory path with: scope.json, log.md, findings.md, intel.md, plus canonical orchestrator backend findings, coverage, services, and chain state.
+Report-writer queries the backend directly via `assess.py fetch report-findings`, `attack-chains`,
+`surfaces`, and `summary`. The operator does not pre-assemble findings context.
 
-## Cross-Agent Finding Deduplication
-
-When multiple agents report findings against the same endpoint, defect family, or root cause:
-
-1. The operator checks for duplicate `root_cause_key` or overlapping `canonical_location` + `defect_family`
-   across all agent findings before dispatching the next phase.
-2. Use `./scripts/merge_finding.sh "$DIR" <source-slug> <target-slug> <reason>` to merge
-   the weaker finding into the stronger one. The merge preserves evidence and notes from both.
-3. Always merge duplicates before dispatching `report-writer` to ensure `report-findings` returns a clean set.
-4. The source finding's status becomes `merged` and is excluded from `report-findings`.
-
-Dedup triggers:
-- Same `root_cause_key` across different agent prefixes (e.g., FINDING-VA-001 and FINDING-EX-001)
-- Same `canonical_location` + `defect_family` combination
-- Operator judgment that two findings describe the same underlying issue
+Before dispatching report-writer, merge duplicates so `report-findings` returns a clean set:
+- Check for overlapping `root_cause_key` or `canonical_location` + `defect_family` across agent findings
+- `./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"`
+- The source finding's status becomes `merged` and is excluded from `report-findings`
 
 ## Wildcard Mode Specifics
 

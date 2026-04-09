@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS work_items (
     created_at TEXT DEFAULT (datetime('now')),
     consumed_at TEXT,
 
-    -- Legacy helper fields kept for compatibility/debugging
+    -- Dedup signature: hash of sorted query/body param KEYS
     params_key_sig TEXT,
 
     UNIQUE(queue_key)

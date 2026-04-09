@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   AssessmentCoverageItem,
   AssessmentService,
@@ -13,34 +13,161 @@ type CoverageTabProps = {
   coverageItems: AssessmentCoverageItem[];
 };
 
+const PAGE_SIZE = 50;
+
+function extractHost(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
+function uniqueSorted(values: (string | null | undefined)[]): string[] {
+  const set = new Set<string>();
+  for (const v of values) {
+    if (v) set.add(v);
+  }
+  return Array.from(set).sort();
+}
+
+type HostGroup = {
+  host: string;
+  items: AssessmentCoverageItem[];
+  serviceCount: number;
+};
+
 export function CoverageTab({
   summary,
   targets,
   services,
   coverageItems,
 }: CoverageTabProps) {
-  const [expandedTarget, setExpandedTarget] = useState<number | null>(null);
+  const [expandedHost, setExpandedHost] = useState<string | null>(null);
+  const [pages, setPages] = useState<Record<string, number>>({});
+
+  // Column filters
+  const [methodFilter, setMethodFilter] = useState<string | null>(null);
+  const [attackFamilyFilter, setAttackFamilyFilter] = useState<string | null>(null);
+  const [inputSlotFilter, setInputSlotFilter] = useState<string | null>(null);
+  const [authFilter, setAuthFilter] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
 
   const coverageStatuses = summary?.coverage_statuses ?? {};
   const totalCoverage = Object.values(coverageStatuses).reduce((a, b) => a + b, 0);
-
-  const servicesByTarget = useMemo(() => {
-    const map = new Map<number, typeof services>();
-    services.forEach((svc) => {
-      const list = map.get(svc.target_id) ?? [];
-      list.push(svc);
-      map.set(svc.target_id, list);
-    });
-    return map;
-  }, [services]);
-
-  const filteredCoverage = useMemo(() => {
-    if (!statusFilter) return coverageItems;
-    return coverageItems.filter((item) => item.status === statusFilter);
-  }, [coverageItems, statusFilter]);
-
   const statusKeys = useMemo(() => Object.keys(coverageStatuses), [coverageStatuses]);
+
+  // Build lookup: service_id → target host
+  const serviceHostMap = useMemo(() => {
+    const targetHostById = new Map<number, string>();
+    for (const t of targets) targetHostById.set(t.id, t.host || t.hostname || t.identity);
+
+    const map = new Map<number, string>();
+    for (const svc of services) {
+      const targetHost = targetHostById.get(svc.target_id);
+      map.set(svc.id, targetHost || extractHost(svc.endpoint));
+    }
+    return map;
+  }, [targets, services]);
+
+  // Services count per host
+  const serviceCountByHost = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const svc of services) {
+      const host = serviceHostMap.get(svc.id) ?? "unknown";
+      counts.set(host, (counts.get(host) ?? 0) + 1);
+    }
+    return counts;
+  }, [services, serviceHostMap]);
+
+  // Apply column filters
+  const filteredItems = useMemo(() => {
+    return coverageItems.filter((item) => {
+      if (methodFilter && (item.method ?? "") !== methodFilter) return false;
+      if (attackFamilyFilter && item.attack_family !== attackFamilyFilter) return false;
+      if (inputSlotFilter && item.input_slot !== inputSlotFilter) return false;
+      if (authFilter && item.auth_context !== authFilter) return false;
+      if (statusFilter && item.status !== statusFilter) return false;
+      return true;
+    });
+  }, [coverageItems, methodFilter, attackFamilyFilter, inputSlotFilter, authFilter, statusFilter]);
+
+  // Group filtered items by host
+  const hostGroups = useMemo(() => {
+    const map = new Map<string, AssessmentCoverageItem[]>();
+
+    for (const item of filteredItems) {
+      let host = "unknown";
+      if (item.service_id != null) {
+        host = serviceHostMap.get(item.service_id) ?? "unknown";
+      } else if (item.canonical_url) {
+        host = extractHost(item.canonical_url);
+      } else if (item.service_endpoint) {
+        host = extractHost(item.service_endpoint);
+      }
+      const list = map.get(host) ?? [];
+      list.push(item);
+      map.set(host, list);
+    }
+
+    // Also include target hosts with zero coverage items
+    for (const t of targets) {
+      const host = t.host || t.hostname || t.identity;
+      if (!map.has(host)) map.set(host, []);
+    }
+
+    const groups: HostGroup[] = [];
+    for (const [host, items] of map) {
+      groups.push({ host, items, serviceCount: serviceCountByHost.get(host) ?? 0 });
+    }
+    groups.sort((a, b) => b.items.length - a.items.length || a.host.localeCompare(b.host));
+    return groups;
+  }, [filteredItems, serviceHostMap, serviceCountByHost, targets]);
+
+  // Unique values for filter dropdowns
+  const allMethods = useMemo(() => uniqueSorted(coverageItems.map((i) => i.method)), [coverageItems]);
+  const allAttackFamilies = useMemo(() => uniqueSorted(coverageItems.map((i) => i.attack_family)), [coverageItems]);
+  const allInputSlots = useMemo(() => uniqueSorted(coverageItems.map((i) => i.input_slot)), [coverageItems]);
+  const allAuthContexts = useMemo(() => uniqueSorted(coverageItems.map((i) => i.auth_context)), [coverageItems]);
+  const allStatuses = useMemo(() => uniqueSorted(coverageItems.map((i) => i.status)), [coverageItems]);
+
+  const hasAnyFilter = methodFilter || attackFamilyFilter || inputSlotFilter || authFilter || statusFilter;
+
+  function getPage(host: string) { return pages[host] ?? 0; }
+  function setPage(host: string, page: number) { setPages((p) => ({ ...p, [host]: page })); }
+
+  useEffect(() => {
+    setPages((current) => {
+      const next: Record<string, number> = {};
+      let changed = false;
+      for (const { host, items } of hostGroups) {
+        const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+        const currentPage = current[host] ?? 0;
+        const clampedPage = Math.min(currentPage, totalPages - 1);
+        next[host] = clampedPage;
+        if (clampedPage !== currentPage) {
+          changed = true;
+        }
+      }
+      if (Object.keys(current).length !== Object.keys(next).length) {
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [hostGroups]);
+
+  function splitEndpoint(item: AssessmentCoverageItem): { method: string; endpoint: string } {
+    const method = item.method ?? "";
+    if (item.canonical_url) {
+      try {
+        const url = new URL(item.canonical_url);
+        return { method, endpoint: url.pathname + url.search };
+      } catch {
+        return { method, endpoint: item.canonical_url };
+      }
+    }
+    return { method, endpoint: item.service_endpoint || "—" };
+  }
 
   return (
     <>
@@ -81,47 +208,95 @@ export function CoverageTab({
         )}
       </section>
 
-      {/* Targets & services */}
+      {/* Unified attack surface */}
       <section className="panel">
         <div className="panel-header">
           <h2>Attack surface</h2>
-          <p className="meta-text">{targets.length} target{targets.length !== 1 ? "s" : ""}, {services.length} service{services.length !== 1 ? "s" : ""}</p>
+          <p className="meta-text">
+            {targets.length} host{targets.length !== 1 ? "s" : ""}, {filteredItems.length}{hasAnyFilter ? ` of ${coverageItems.length}` : ""} item{filteredItems.length !== 1 ? "s" : ""}
+          </p>
         </div>
-        {targets.length > 0 ? (
-          <div className="coverage-tree">
-            {targets.map((target) => {
-              const targetServices = servicesByTarget.get(target.id) ?? [];
-              const isExpanded = expandedTarget === target.id;
+
+        {/* Column filters */}
+        {coverageItems.length > 0 && (
+          <div className="coverage-filters">
+            <FilterSelect label="Method" value={methodFilter} options={allMethods} onChange={setMethodFilter} />
+            <FilterSelect label="Attack family" value={attackFamilyFilter} options={allAttackFamilies} onChange={setAttackFamilyFilter} />
+            <FilterSelect label="Input slot" value={inputSlotFilter} options={allInputSlots} onChange={setInputSlotFilter} />
+            <FilterSelect label="Auth" value={authFilter} options={allAuthContexts} onChange={setAuthFilter} />
+            <FilterSelect label="Status" value={statusFilter} options={allStatuses} onChange={setStatusFilter} />
+            {hasAnyFilter && (
+              <button
+                type="button"
+                className="filter-chip filter-active"
+                onClick={() => { setMethodFilter(null); setAttackFamilyFilter(null); setInputSlotFilter(null); setAuthFilter(null); setStatusFilter(null); }}
+              >
+                Clear all
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Host groups */}
+        {hostGroups.length > 0 ? (
+          <div className="coverage-tree" style={{ marginTop: "14px" }}>
+            {hostGroups.map(({ host, items, serviceCount }) => {
+              const isExpanded = expandedHost === host;
+              const page = getPage(host);
+              const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+              const pageItems = items.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
               return (
-                <div key={target.id} className="coverage-tree-node">
+                <div key={host} className="coverage-tree-node">
                   <button
                     type="button"
                     className="coverage-tree-header"
-                    onClick={() => setExpandedTarget(isExpanded ? null : target.id)}
+                    onClick={() => { setExpandedHost(isExpanded ? null : host); }}
                   >
                     <span>{isExpanded ? "▾" : "▸"}</span>
-                    <strong>{target.identity}</strong>
-                    <span className="badge">{target.kind}</span>
-                    {target.hostname && <span className="meta-text">{target.hostname}</span>}
-                    {target.ip_address && <span className="meta-text">{target.ip_address}</span>}
-                    <span className="meta-text" style={{ marginLeft: "auto" }}>
-                      {targetServices.length} service{targetServices.length !== 1 ? "s" : ""}
+                    <strong>{host}</strong>
+                    <span className="meta-text">
+                      {items.length} item{items.length !== 1 ? "s" : ""}
+                      {serviceCount > 0 ? `, ${serviceCount} service${serviceCount !== 1 ? "s" : ""}` : ""}
                     </span>
                   </button>
                   {isExpanded && (
-                    <div className="coverage-tree-children">
-                      {targetServices.map((svc) => (
-                        <div key={svc.id} className="service-row">
-                          <div style={{ display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" }}>
-                            <strong>{svc.endpoint || `${svc.protocol}/${svc.port}`}</strong>
-                            <span className={`badge coverage-badge-${svc.coverage_status}`}>{svc.coverage_status}</span>
-                            {svc.service && <span className="meta-text">{svc.service}</span>}
+                    <div style={{ padding: "0 14px 14px" }}>
+                      {items.length > 0 ? (
+                        <>
+                          <div className="coverage-items-grid">
+                            <div className="coverage-items-header coverage-items-6col">
+                              <span>Method</span>
+                              <span>Endpoint</span>
+                              <span>Attack family</span>
+                              <span>Input slot</span>
+                              <span>Auth</span>
+                              <span>Status</span>
+                            </div>
+                            {pageItems.map((item) => {
+                              const { method, endpoint } = splitEndpoint(item);
+                              return (
+                                <div key={item.id} className="coverage-items-row coverage-items-6col">
+                                  <span className="mono-text">{method || "—"}</span>
+                                  <span className="mono-text" title={item.canonical_url || item.service_endpoint || ""}>{endpoint}</span>
+                                  <span>{item.attack_family}</span>
+                                  <span>{item.input_slot}</span>
+                                  <span>{item.auth_context}</span>
+                                  <span className={`badge coverage-badge-${item.status}`}>{item.status}</span>
+                                </div>
+                              );
+                            })}
                           </div>
-                          {svc.banner && <p className="meta-text">{svc.banner}</p>}
-                        </div>
-                      ))}
-                      {targetServices.length === 0 && (
-                        <p className="meta-text" style={{ padding: "8px 0" }}>No services discovered for this target.</p>
+                          {totalPages > 1 && (
+                            <div className="pager">
+                              <button type="button" className="pager-button" disabled={page === 0} onClick={() => setPage(host, page - 1)}>Prev</button>
+                              <span className="meta-text">Page {page + 1} of {totalPages}</span>
+                              <button type="button" className="pager-button" disabled={page >= totalPages - 1} onClick={() => setPage(host, page + 1)}>Next</button>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <p className="meta-text" style={{ padding: "8px 0" }}>No coverage items for this host.</p>
                       )}
                     </div>
                   )}
@@ -130,64 +305,38 @@ export function CoverageTab({
             })}
           </div>
         ) : (
-          <p className="meta-text">No targets discovered yet.</p>
+          <p className="meta-text" style={{ marginTop: "8px" }}>No targets discovered yet.</p>
         )}
       </section>
-
-      {/* Coverage items */}
-      {coverageItems.length > 0 && (
-        <section className="panel">
-          <div className="panel-header">
-            <h2>Coverage items</h2>
-            <div className="filter-group" style={{ gap: "4px" }}>
-              <button
-                type="button"
-                className={`filter-chip ${statusFilter === null ? "filter-active" : ""}`}
-                onClick={() => setStatusFilter(null)}
-              >
-                All
-              </button>
-              {statusKeys.map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  className={`filter-chip ${statusFilter === s ? "filter-active" : ""}`}
-                  onClick={() => setStatusFilter(statusFilter === s ? null : s)}
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="coverage-items-grid">
-            <div className="coverage-items-header">
-              <span>Endpoint</span>
-              <span>Attack family</span>
-              <span>Input slot</span>
-              <span>Auth</span>
-              <span>Status</span>
-            </div>
-            {filteredCoverage.slice(0, 100).map((item) => (
-              <div key={item.id} className="coverage-items-row">
-                <span className="mono-text">
-                  {item.method && item.canonical_url
-                    ? `${item.method} ${item.canonical_url}`
-                    : item.service_endpoint || "—"}
-                </span>
-                <span>{item.attack_family}</span>
-                <span>{item.input_slot}</span>
-                <span>{item.auth_context}</span>
-                <span className={`badge coverage-badge-${item.status}`}>{item.status}</span>
-              </div>
-            ))}
-            {filteredCoverage.length > 100 && (
-              <p className="meta-text" style={{ padding: "8px" }}>
-                Showing 100 of {filteredCoverage.length} items.
-              </p>
-            )}
-          </div>
-        </section>
-      )}
     </>
+  );
+}
+
+function FilterSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string | null;
+  options: string[];
+  onChange: (value: string | null) => void;
+}) {
+  if (options.length === 0) return null;
+  return (
+    <div className="filter-select-group">
+      <label className="filter-label">{label}</label>
+      <select
+        className="filter-select"
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value || null)}
+      >
+        <option value="">All</option>
+        {options.map((opt) => (
+          <option key={opt} value={opt}>{opt}</option>
+        ))}
+      </select>
+    </div>
   );
 }

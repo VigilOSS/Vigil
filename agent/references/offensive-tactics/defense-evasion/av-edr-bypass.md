@@ -27,7 +27,7 @@ SysNtCreateFile endp
 - Metasploit: use custom templates to change binary signature
 - Modify 1-2 bytes in shellcode launcher to break static signatures
 
-## Software Packing (T1045)
+## Software Packing (T1027.002)
 ```cmd
 upx.exe -9 -o packed.exe original.exe
 ```

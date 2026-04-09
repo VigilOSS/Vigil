@@ -40,12 +40,8 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
             "bash",
             str(sandbox_root / "scripts" / "init_engagement.sh"),
             "https://app.example.com",
-            "--scope-mode",
-            "explicit_hosts",
-            "--scope-hosts",
+            "--hosts",
             "app.example.com,admin.example.com",
-            "--out-of-scope-hosts",
-            "beta.example.com",
             "--auth-mode",
             "manual",
             "--exploit-policy",
@@ -64,10 +60,8 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
     orchestrator_env = (engagement_dir / ".orchestrator.env").read_text(encoding="utf-8")
     agents_wrapper = (engagement_dir / "AGENTS.md").read_text(encoding="utf-8")
 
-    assert scope["scope_mode"] == "explicit_hosts"
-    assert scope["scope_hosts"] == ["app.example.com", "admin.example.com"]
-    assert scope["scope"] == ["app.example.com", "admin.example.com"]
-    assert scope["out_of_scope_hosts"] == ["beta.example.com"]
+    assert scope["hostname"] == "app.example.com"
+    assert scope["hosts"] == ["app.example.com", "admin.example.com"]
     assert scope["exploit_policy"] == "selected"
     assert scope["exploit_review_state"] == "pending"
     assert scope["approved_findings"] == []
@@ -128,9 +122,8 @@ def test_init_engagement_uses_safe_defaults_in_noninteractive_mode(tmp_path: Pat
     auth = json.loads((engagement_dir / "auth.json").read_text(encoding="utf-8"))
     orchestrator_env = (engagement_dir / ".orchestrator.env").read_text(encoding="utf-8")
 
-    assert scope["scope_mode"] == "host_only"
-    assert scope["scope_hosts"] == ["app.example.com"]
-    assert scope["out_of_scope_hosts"] == []
+    assert scope["hostname"] == "app.example.com"
+    assert scope["hosts"] == ["app.example.com"]
     assert scope["exploit_policy"] == "pause"
     assert "parallelism" not in scope
     assert "confirm_mode" not in scope
@@ -200,10 +193,11 @@ def test_init_engagement_uses_install_root_env_override_for_orchestrator_url(tmp
     start_codex = (engagement_dir / "start_codex.sh").read_text(encoding="utf-8")
 
     assert "ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000" in orchestrator_env
-    assert "load_orchestrator_env" in start_codex
 
 
 def test_orchestrator_env_loader_prefers_install_root_env_over_engagement_default(tmp_path: Path) -> None:
+    """Verify that assess.py's config module resolves ORCHESTRATOR_BASE_URL from
+    install-root .env before falling back to the engagement-dir default."""
     repo_root = Path(__file__).resolve().parents[3]
     agent_root = repo_root / "agent"
     install_root = tmp_path / "install-root"
@@ -227,14 +221,17 @@ def test_orchestrator_env_loader_prefers_install_root_env_over_engagement_defaul
     )
 
     engagement_dir = Path(result.stdout.strip())
+
+    # Use the Python config module to resolve the base URL (same path assess.py uses)
     resolved = subprocess.run(
         [
-            "bash",
-            "-lc",
+            "python3",
+            "-c",
             (
-                f'source "{sandbox_root / "scripts" / "lib" / "orchestrator_env.sh"}"; '
-                f'load_orchestrator_env "{engagement_dir}"; '
-                'printf "%s" "$ORCHESTRATOR_BASE_URL"'
+                "import sys; "
+                f"sys.path.insert(0, {str(sandbox_root / 'scripts')!r}); "
+                "from assess.lib.config import resolve_base_url; "
+                f"print(resolve_base_url({str(engagement_dir)!r}, {str(sandbox_root)!r}))"
             ),
         ],
         text=True,
@@ -272,6 +269,190 @@ def test_init_engagement_writes_claude_only_launchers_for_claude_install(tmp_pat
     assert (engagement_dir / "CLAUDE.md").exists()
     assert not (engagement_dir / "AGENTS.md").exists()
     assert str(sandbox_root / "CLAUDE.md") in claude_wrapper
+
+
+def test_start_codex_exports_engagement_orchestrator_url(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    agent_root = repo_root / "agent"
+    install_root = tmp_path / "install-root"
+    sandbox_root = install_root / "agent"
+    _copy_init_fixture_tree(agent_root, sandbox_root, client="codex")
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=https://override.example.test/\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(sandbox_root / "scripts" / "init_engagement.sh"),
+            "https://app.example.com",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=str(sandbox_root),
+    )
+    engagement_dir = Path(result.stdout.strip())
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "codex").write_text(
+        "#!/usr/bin/env bash\n"
+        "printf 'ENGAGEMENT_DIR=%s\\n' \"${ENGAGEMENT_DIR:-}\"\n"
+        "printf 'ORCHESTRATOR_BASE_URL=%s\\n' \"${ORCHESTRATOR_BASE_URL:-}\"\n",
+        encoding="utf-8",
+    )
+    os.chmod(bin_dir / "codex", 0o755)
+
+    launch = subprocess.run(
+        [str(engagement_dir / "start_codex.sh")],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=str(engagement_dir),
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
+
+    assert f"ENGAGEMENT_DIR={engagement_dir}" in launch.stdout
+    assert "ORCHESTRATOR_BASE_URL=https://override.example.test" in launch.stdout
+
+
+def test_init_engagement_code_mode_with_local_repo(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    agent_root = repo_root / "agent"
+    sandbox_root = tmp_path / "agent"
+    _copy_init_fixture_tree(agent_root, sandbox_root, client="claude")
+
+    # Create a fake local repo directory for the --repo flag
+    fake_repo = tmp_path / "my-cool-project"
+    fake_repo.mkdir()
+    (fake_repo / "main.py").write_text("print('hello')\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(sandbox_root / "scripts" / "init_engagement.sh"),
+            "--mode",
+            "code",
+            "--repo",
+            str(fake_repo),
+            "--exploit-policy",
+            "pause",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=str(sandbox_root),
+    )
+
+    engagement_dir = Path(result.stdout.strip())
+    scope = json.loads((engagement_dir / "scope.json").read_text(encoding="utf-8"))
+    auth = json.loads((engagement_dir / "auth.json").read_text(encoding="utf-8"))
+    manifest = json.loads((engagement_dir / "engagement.json").read_text(encoding="utf-8"))
+    log_text = (engagement_dir / "log.md").read_text(encoding="utf-8")
+
+    # Code-mode scope assertions
+    assert scope["engagement_type"] == "code"
+    assert scope["repos"] == [{"path": str(fake_repo), "name": "my-cool-project"}]
+    assert "repo" not in scope
+    assert "repo_name" not in scope
+    assert scope["hosts"] == []
+    assert scope["current_phase"] == "ingest"
+    assert scope["exploit_policy"] == "pause"
+    assert scope["source_repos"] == []
+    assert "hostname" not in scope
+
+    # Auth forced to none
+    assert auth["mode"] == "none"
+    assert auth["state"] == "none"
+    assert auth["use_for_requests"] is False
+
+    # Engagement manifest has repos array, not target/hostname
+    assert manifest["repos"] == [{"path": str(fake_repo), "name": "my-cool-project"}]
+    assert "repo" not in manifest
+    assert "repo_name" not in manifest
+    assert "target" not in manifest
+    assert "hostname" not in manifest
+
+    # Log reflects code analysis
+    assert "Code Analysis" in log_text
+    assert "Repositories" in log_text
+
+    # source/ directory created for repo checkout
+    assert (engagement_dir / "source").is_dir()
+
+    # Standard directories still present
+    assert (engagement_dir / "tools").is_dir()
+    assert (engagement_dir / "scans").is_dir()
+    assert (engagement_dir / "sessions").is_dir()
+
+
+def test_init_engagement_code_mode_with_clone_url(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    agent_root = repo_root / "agent"
+    sandbox_root = tmp_path / "agent"
+    _copy_init_fixture_tree(agent_root, sandbox_root, client="claude")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(sandbox_root / "scripts" / "init_engagement.sh"),
+            "--mode",
+            "code",
+            "--repo",
+            "https://github.com/org/my-project.git",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=str(sandbox_root),
+    )
+
+    engagement_dir = Path(result.stdout.strip())
+    scope = json.loads((engagement_dir / "scope.json").read_text(encoding="utf-8"))
+    manifest = json.loads((engagement_dir / "engagement.json").read_text(encoding="utf-8"))
+
+    assert scope["engagement_type"] == "code"
+    assert scope["repos"] == [{"path": "https://github.com/org/my-project.git", "name": "my-project"}]
+    assert scope["current_phase"] == "ingest"
+    assert scope["hosts"] == []
+    assert manifest["repos"] == [{"path": "https://github.com/org/my-project.git", "name": "my-project"}]
+
+    # Directory name includes the repo label
+    assert "my-project" in engagement_dir.name
+
+
+def test_init_engagement_code_mode_positional_shorthand(tmp_path: Path) -> None:
+    """--mode code /path/to/repo (positional arg used as repo)."""
+    repo_root = Path(__file__).resolve().parents[3]
+    agent_root = repo_root / "agent"
+    sandbox_root = tmp_path / "agent"
+    _copy_init_fixture_tree(agent_root, sandbox_root, client="claude")
+
+    fake_repo = tmp_path / "shorthand-repo"
+    fake_repo.mkdir()
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(sandbox_root / "scripts" / "init_engagement.sh"),
+            "--mode",
+            "code",
+            str(fake_repo),
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=str(sandbox_root),
+    )
+
+    engagement_dir = Path(result.stdout.strip())
+    scope = json.loads((engagement_dir / "scope.json").read_text(encoding="utf-8"))
+
+    assert scope["engagement_type"] == "code"
+    assert scope["repos"] == [{"path": str(fake_repo), "name": "shorthand-repo"}]
+    assert scope["current_phase"] == "ingest"
 
 
 def test_install_upgrade_preserves_agent_engagements(tmp_path: Path) -> None:
