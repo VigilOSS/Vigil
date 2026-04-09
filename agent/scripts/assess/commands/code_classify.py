@@ -9,6 +9,7 @@ from pathlib import Path
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
+_CODE_FILE_LOOKUP_PAGE_SIZE = 10000
 _ALLOWED_CLASSIFICATION_KEYS = frozenset(
     {
         "file_id",
@@ -31,7 +32,18 @@ def register(subparsers) -> None:
 def _fetch_code_files(cfg) -> list[dict]:
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
-        result = client.get('code/files?limit=5000')
+        rows: list[dict] = []
+        offset = 0
+        while True:
+            page = client.get(f'code/files?limit={_CODE_FILE_LOOKUP_PAGE_SIZE}&offset={offset}')
+            if not isinstance(page, list):
+                result = page
+                break
+            rows.extend(page)
+            if len(page) < _CODE_FILE_LOOKUP_PAGE_SIZE:
+                result = rows
+                break
+            offset += _CODE_FILE_LOOKUP_PAGE_SIZE
     finally:
         client.close()
     if not isinstance(result, list):

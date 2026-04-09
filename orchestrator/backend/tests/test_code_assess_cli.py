@@ -138,6 +138,22 @@ def test_code_coverage_can_enforce_gate_failures(monkeypatch):
     assert excinfo.value.code == 1
 
 
+def test_code_coverage_cwe_matrix_coerces_non_numeric_effort_values():
+    module = _load_code_coverage_module()
+
+    has_gap = module._check_effort_gaps(
+        [
+            {
+                "classification": "critical",
+                "applicable_families": ["ssrf"],
+                "cwe_coverage": [{"family": "ssrf", "effort": "unknown"}],
+            }
+        ]
+    )
+
+    assert has_gap is True
+
+
 def test_code_ingest_repo_key_uses_name_and_canonical_path_hash():
     module = _load_code_ingest_module()
 
@@ -375,7 +391,7 @@ def test_code_classify_resolves_file_path_to_file_id(monkeypatch, tmp_path):
             self.engagement_key = engagement_key
 
         def get(self, endpoint: str):
-            assert endpoint == "code/files?limit=5000"
+            assert endpoint == "code/files?limit=10000&offset=0"
             return [{"id": 42, "repo_id": 7, "file_path": "src/parser.py"}]
 
         def post(self, endpoint: str, payload: dict):
@@ -394,6 +410,70 @@ def test_code_classify_resolves_file_path_to_file_id(monkeypatch, tmp_path):
     posted = captured["payload"]["classifications"][0]
     assert posted["file_id"] == 42
     assert "file_path" not in posted
+
+
+def test_code_classify_resolves_file_path_from_later_pages(monkeypatch, tmp_path):
+    module = _load_code_classify_module()
+    monkeypatch.setattr(module, "_CODE_FILE_LOOKUP_PAGE_SIZE", 2)
+
+    payload_path = tmp_path / "classifications.json"
+    payload_path.write_text(
+        json.dumps(
+            [
+                {
+                    "file_path": "src/routes.py",
+                    "classification": "high",
+                    "role": "handler",
+                    "slot_types": ["NETWORK-INPUT"],
+                    "analysis_priority": 75,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+    )
+
+    captured: dict[str, object] = {"requests": []}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            captured["requests"].append(endpoint)
+            if endpoint == "code/files?limit=2&offset=0":
+                return [
+                    {"id": 40, "repo_id": 7, "file_path": "src/parser.py"},
+                    {"id": 41, "repo_id": 7, "file_path": "src/helpers.py"},
+                ]
+            if endpoint == "code/files?limit=2&offset=2":
+                return [{"id": 42, "repo_id": 7, "file_path": "src/routes.py"}]
+            raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+        def post(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return {"updated": 1}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(SimpleNamespace(engagement_dir=tmp_path, classifications_json=str(payload_path)))
+
+    assert captured["requests"] == [
+        "code/files?limit=2&offset=0",
+        "code/files?limit=2&offset=2",
+    ]
+    posted = captured["payload"]["classifications"][0]
+    assert posted["file_id"] == 42
 
 
 def test_verify_finding_posts_verification_payload_and_syncs_markdown(monkeypatch, tmp_path, capsys):
@@ -530,7 +610,7 @@ def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypa
             self.engagement_key = engagement_key
 
         def get(self, endpoint: str):
-            assert endpoint == "code/files?limit=5000"
+            assert endpoint == "code/files?limit=10000&offset=0"
             return [
                 {"id": 10, "repo_id": 1, "file_path": "src/parser.py"},
                 {"id": 11, "repo_id": 1, "file_path": "src/helpers/auth.py"},
@@ -574,6 +654,86 @@ def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypa
         },
     ]
     assert "Queued 3 analysis item(s)" in capsys.readouterr().out
+
+
+def test_code_dispatch_queue_resolves_file_path_from_later_pages(monkeypatch, tmp_path):
+    module = _load_code_dispatch_module()
+    monkeypatch.setattr(module, "_CODE_FILE_LOOKUP_PAGE_SIZE", 2)
+
+    queue_path = tmp_path / "queue.json"
+    queue_path.write_text(
+        json.dumps(
+            [
+                {
+                    "file_path": "src/routes.py",
+                    "priority": 70,
+                    "guidance_hypotheses": ["Trace request handlers"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    def fake_snapshot(engagement_dir: str, category: str, label: str, payload, source_path=None, metadata=None):
+        path = tmp_path / f"{category}-{label}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(module, "write_json_snapshot", fake_snapshot)
+
+    captured: dict[str, object] = {"requests": []}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            captured["requests"].append(endpoint)
+            if endpoint == "code/files?limit=2&offset=0":
+                return [
+                    {"id": 10, "repo_id": 1, "file_path": "src/parser.py"},
+                    {"id": 11, "repo_id": 1, "file_path": "src/helpers/auth.py"},
+                ]
+            if endpoint == "code/files?limit=2&offset=2":
+                return [{"id": 12, "repo_id": 1, "file_path": "src/routes.py"}]
+            raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+        def post(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return {"inserted": len(payload["items"])}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(SimpleNamespace(action="queue", extra=[str(queue_path)], engagement_dir=tmp_path))
+
+    assert captured["requests"] == [
+        "code/files?limit=2&offset=0",
+        "code/files?limit=2&offset=2",
+    ]
+    assert captured["payload"]["items"] == [
+        {
+            "file_id": 12,
+            "priority": 70,
+            "batch_theme": "",
+            "slot_types": [],
+            "guidance_hypotheses": ["Trace request handlers"],
+        }
+    ]
 
 
 def test_code_dispatch_requeue_triggers_reports_partial_failures(monkeypatch, tmp_path, capsys):

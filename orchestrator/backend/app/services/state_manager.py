@@ -1843,6 +1843,12 @@ def merge_findings(
         source_confidence = _finding_confidence_tuple(source)
         target_confidence = _finding_confidence_tuple(target)
         source_stronger = source_confidence > target_confidence
+        source_workflow = _row_workflow_status(source)
+        target_workflow = _row_workflow_status(target)
+        source_verification_state = _row_verification_state(source)
+        target_verification_state = _row_verification_state(target)
+        source_verification_disposition = _row_verification_disposition(source)
+        target_verification_disposition = _row_verification_disposition(target)
         source_before = _finding_state_snapshot(source)
         target_before = _finding_state_snapshot(target)
         merged_notes = _append_notes(
@@ -1906,9 +1912,25 @@ def merge_findings(
             """,
             (
                 _stronger_severity(target["severity"], source["severity"]),
-                _coalesce_workflow_status(_row_workflow_status(target), _row_workflow_status(source)),
-                _coalesce_verification_state(_row_verification_state(target), _row_verification_state(source)),
-                _coalesce_verification_disposition(_row_verification_disposition(target), _row_verification_disposition(source)),
+                (
+                    target_workflow
+                    if source_workflow == "false_positive" and target_workflow != "false_positive"
+                    else _coalesce_workflow_status(target_workflow, source_workflow)
+                ),
+                (
+                    target_verification_state
+                    if source_workflow == "false_positive" and target_workflow != "false_positive"
+                    else _coalesce_verification_state(target_verification_state, source_verification_state)
+                ),
+                (
+                    target_verification_disposition
+                    if source_verification_disposition == "false_positive"
+                    and target_verification_disposition != "false_positive"
+                    else _coalesce_verification_disposition(
+                        target_verification_disposition,
+                        source_verification_disposition,
+                    )
+                ),
                 source["source_name"],
                 1 if source_stronger else 0,
                 source["source_name"],

@@ -1022,6 +1022,72 @@ def test_coverage_summary_tolerates_non_numeric_effort_values(client, isolate_se
     assert any("web-app-injection" in reason for reason in payload["gate"]["reasons"])
 
 
+def test_coverage_summary_excludes_false_positive_variants(client, isolate_settings):
+    engagement_key = "2026-04-09-code-coverage-variant-filter"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="variant-filter-repo")
+    _create_files(client, engagement_key, int(repo["id"]))
+
+    finding = client.post(
+        f"/engagements/{engagement_key}/assessment/findings",
+        json={
+            "slug": "FINDING-CODE-VARIANT-001",
+            "title": "Parser variant",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "trust-boundary-bypass",
+            "root_cause_key": "variant-filter-parser",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.py:12",
+            "summary": "Variant should disappear from coverage after suppression.",
+            "evidence_ref": "findings.md",
+            "notes": "",
+            "source_name": "code-vuln-hunter",
+            "details": {"evidence": "A"},
+            "provenance": {"agent_name": "code-vuln-hunter"},
+            "links": [
+                {
+                    "link_kind": "variant_of",
+                    "target_kind": "finding",
+                    "target_ref": "ROOT-PARSER",
+                }
+            ],
+        },
+    )
+    assert finding.status_code == 201
+
+    baseline = client.get(f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}")
+    assert baseline.status_code == 200
+    assert baseline.json()["findings_summary"]["variant_count"] == 1
+
+    verify = client.post(
+        f"/engagements/{engagement_key}/assessment/findings/FINDING-CODE-VARIANT-001/verify",
+        json={
+            "disposition": "false_positive",
+            "reason_code": "guarded-path",
+            "reason_text": "Guard closes the variant in production.",
+            "artifact_ref": "tools/analysis-state/code-verification/FINDING-CODE-VARIANT-001.json",
+            "source_name": "code-vuln-verifier",
+            "details": {
+                "kill_check": 4,
+                "kill_reason": "Guard closes the path in production.",
+                "evidence": "Validation rejects the attacker-controlled branch.",
+                "impact": "No reachable issue remains.",
+            },
+            "provenance": {"verified_by": "code-vuln-verifier"},
+        },
+    )
+    assert verify.status_code == 200
+
+    suppressed = client.get(f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}")
+    assert suppressed.status_code == 200
+    payload = suppressed.json()
+    assert payload["findings_summary"]["total_code_findings"] == 0
+    assert payload["findings_summary"]["variant_count"] == 0
+
+
 def test_module_creation_assigns_files_and_supports_module_scoped_fetch(client, isolate_settings):
     engagement_key = "2026-04-04-code-modules"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
@@ -1057,6 +1123,76 @@ def test_module_creation_assigns_files_and_supports_module_scoped_fetch(client, 
     )
     assert scoped_files.status_code == 200
     assert {item["file_path"] for item in scoped_files.json()} == {"src/parser.py", "src/helpers.py"}
+
+
+def test_module_analysis_status_tracks_file_progress(client, isolate_settings):
+    engagement_key = "2026-04-09-code-module-status"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="module-status-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+
+    modules = client.post(
+        f"/engagements/{engagement_key}/assessment/code/modules",
+        json={
+            "repo_id": repo["id"],
+            "modules": [
+                {
+                    "module_key": "input-parser",
+                    "name": "Input Parser",
+                    "description": "Parses network input",
+                    "trust_boundary": "Untrusted request data",
+                    "files": ["src/parser.py"],
+                }
+            ],
+        },
+    )
+    assert modules.status_code == 201
+    module = modules.json()[0]
+    assert module["analysis_status"] == "classified"
+
+    queued = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
+    )
+    assert queued.status_code == 201
+
+    queued_modules = client.get(
+        f"/engagements/{engagement_key}/assessment/code/modules?repo_id={repo['id']}"
+    )
+    assert queued_modules.status_code == 200
+    assert queued_modules.json()[0]["analysis_status"] == "queued"
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    assert claimed.status_code == 200
+    queue_item = claimed.json()[0]
+
+    in_progress_modules = client.get(
+        f"/engagements/{engagement_key}/assessment/code/modules?repo_id={repo['id']}"
+    )
+    assert in_progress_modules.status_code == 200
+    assert in_progress_modules.json()[0]["analysis_status"] == "in_progress"
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "notes": "Reviewed parser module",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+        },
+    )
+    assert done.status_code == 200
+
+    analyzed_modules = client.get(
+        f"/engagements/{engagement_key}/assessment/code/modules?repo_id={repo['id']}"
+    )
+    assert analyzed_modules.status_code == 200
+    assert analyzed_modules.json()[0]["analysis_status"] == "analyzed"
 
 
 def test_file_patch_rejects_module_ids_from_other_repos(client, isolate_settings):
@@ -1337,6 +1473,56 @@ def test_cwe_coverage_passthrough_on_queue_done(client, isolate_settings):
     families_covered = {e["family"] for e in cwe_file["cwe_coverage"]}
     assert "web-app-injection" in families_covered
     assert "ssrf" in families_covered
+
+
+def test_queue_done_rejects_items_reset_out_of_processing(client, isolate_settings):
+    engagement_key = "2026-04-09-code-queue-completion-race"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="queue-race-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 90}]},
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    assert claimed.status_code == 200
+    queue_item = claimed.json()[0]
+
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    with sqlite3.connect(str(db_path)) as connection:
+        connection.execute(
+            "UPDATE code_analysis_queue SET consumed_at = ? WHERE id = ?",
+            ("2020-01-01T00:00:00Z", queue_item["id"]),
+        )
+        connection.commit()
+
+    reset = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/reset-stale",
+        json={"minutes": 30},
+    )
+    assert reset.status_code == 200
+    assert reset.json()["reset"] == 1
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "notes": "Stale worker should not complete this item",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+        },
+    )
+    assert done.status_code == 409
+    assert "unless they are processing" in done.json()["detail"]
+    assert "pending" in done.json()["detail"]
 
 
 def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
