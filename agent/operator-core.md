@@ -21,14 +21,14 @@ After engagement initialization completes, repeat until all attack paths exhaust
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
 5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide the payload libraries and checklists that make skills actionable. Always check `agent/SKILL.md` for the right skill, then check `agent/references/INDEX.md` for payload and checklist depth — references are not a fallback, they are the methodology library.
    - **Phase 1 (Recon):** `recon-specialist` → `agent/skills/web-recon/SKILL.md`; `source-analyzer` → `agent/skills/source-analysis/SKILL.md`
-   - **Phase 2 (Collect):** operator → `agent/skills/case-dispatching/SKILL.md` for work-buffer coordination
+   - **Phase 2 (Collect):** `surface-collector` → `agent/skills/surface-collection/SKILL.md` for URL collection, triage, and work-buffer population
    - **Phase 3 (Test):** `vulnerability-analyst` → load the vuln-class skill from `agent/SKILL.md` matching the candidate (e.g., `sqli-testing`, `idor-testing`, `xss-testing`); `fuzzer` → `agent/skills/directory-fuzzing/SKILL.md` or `agent/skills/parameter-fuzzing/SKILL.md`
    - **Phase 4 (Exploit):** `exploit-developer` → load the skill matching the confirmed finding class from `agent/SKILL.md` using the "Use when:" criteria; `osint-analyst` → `agent/skills/osint-recon/SKILL.md`
    - **Phase 5 (Report):** `report-writer` → `agent/skills/report-generation/SKILL.md`
    If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, agents, rules, skill index, skills, references, and scripts before claiming no suitable skill exists.
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Route all in-scope target work through the Kali MCP command-execution tool — host Bash, `docker run`, `docker exec`, and ad hoc wrappers bypass the runtime's network isolation. If Kali MCP has a runtime or reachability gap, pause target-facing work and debug the runtime from the host — host-side probes against scoped targets break the isolation boundary.
 7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis, testing, validation, and exploitation work. The operator's job is orchestration: phase control, specialist selection, state review, and synchronized artifact handling — analysis and testing belong to specialist agents because they carry the skill context and methodology depth that the operator prompt lacks.
-   **Operator-executed exceptions** (via Kali MCP, not host-side): Collect-phase pipeline commands (Katana crawl, endpoint ingestion) and quick credential validation (single login test to confirm working/not-working). These are mechanical pipeline steps, not analysis. Dispatch a specialist once the pipeline step produces actionable state.
+   **Operator-executed exceptions** (via Kali MCP, not host-side): quick credential validation (single login test to confirm working/not-working). This is a mechanical pipeline step, not analysis.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/assess.py record-finding` or the assessment API so findings.md remains a synchronized export, not the authoritative store.
    **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. They go to intel.md only. Dispatch exploit-developer to validate before recording. This reconciles "record immediately" with "no theoretical findings."
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/assess.py record-surface` so the backend and readable export stay in sync. Use `./scripts/assess.py record-surface` for all surface writes — calling `scripts/lib/surfaces.sh` directly or patching `surfaces.jsonl` by hand bypasses the backend sync that keeps the readable export consistent. After each surface update batch, wait for the command to finish and then verify `surfaces.jsonl` with a fresh read. If the first verification read does not reflect the expected change, re-read once before assuming failure. Only treat it as a real helper/backend problem if the command completed successfully and a second fresh read still disagrees; in that case, stop and report the sync issue instead of editing the artifact manually.
@@ -100,6 +100,7 @@ per `frp-tunneling.md`, records the address, and then resumes the agent.
 |-------|------|------|
 | recon-specialist | Fingerprinting, tech stacks, directory/file discovery, initial non-web service triage | Phase 1 (parallel with source-analyzer) |
 | source-analyzer | HTML/JS/CSS analysis for hidden routes, secrets | Phase 1 (parallel with recon) |
+| surface-collector | URL collection, dedup, intelligent triage, work-buffer population | Phase 2 |
 | vulnerability-analyst | Quick triage: 1-2 probes per vuln, prioritized list | Phase 3 consumption loop |
 | exploit-developer | Exploit confirmed vulns, chain analysis, impact | Phase 3 (HIGH/MEDIUM) + Phase 4 |
 | fuzzer | High-volume testing (100+ payloads) | When FUZZER_NEEDED |
@@ -148,22 +149,14 @@ DB="$DIR/cases.db"
 ```
 
 1. **RECON** → dispatch recon-specialist + source-analyzer in parallel. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and then continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 rather than keeping that work on the operator.
-2. **COLLECT** → operator-orchestrated. Steps in order:
-   a. Ingest all endpoints from Phase 1 into the backend: `cat endpoints.txt | ./scripts/assess.py ingest-endpoints "$DIR/cases.db" recon`
-   b. Run Katana via Kali MCP to crawl from live targets (Katana is installed in the runtime container — invoke it through the MCP command-execution tool, not host-side):
-      `katana -u https://target.example -d 3 -jc -kf all -o /tmp/katana_output.txt`
-      Katana does not provide a TLS-verification-skip flag in the runtime this repo builds. Do not replace this with `-tls-impersonate`; that changes the TLS client hello fingerprint and does not bypass certificate validation.
-      If a target only responds behind an invalid, self-signed, expired, or mismatched certificate, use `curl -k` for spot validation/manual bootstrap and continue the rest of Collect (`gau`, spec ingestion, source-analyzer output) instead of relying on Katana to bypass TLS checks.
-      If `auth.json` has `use_for_requests` set to `true` and `state` set to `available`, pass cookies/headers: `katana -u URL -H "Cookie: ..." -H "Authorization: ..." ...`
-   c. Ingest Katana output into backend: `cat /tmp/katana_output.txt | ./scripts/assess.py ingest-endpoints "$DIR/cases.db" katana`
-   d. **Historical URL enrichment** via Kali MCP — run `gau` to pull known URLs from Wayback Machine, AlienVault OTX, Common Crawl, and URLScan. This catches parameterized endpoints and old routes that Katana misses because the live sitemap no longer links to them:
-      `gau TARGET_DOMAIN --threads 5 --blacklist png,jpg,gif,css,woff,svg --o /tmp/gau_output.txt`
-      Ingest: `cat /tmp/gau_output.txt | ./scripts/assess.py ingest-endpoints "$DIR/cases.db" gau`
-   e. If Phase 1 discovered OpenAPI/Swagger specs, ingest them:
-      `./scripts/assess.py ingest-spec "$DIR/cases.db" "$DIR/scans/openapi.json"`
-      This creates `api-spec` work items and durable request/service coverage candidates. source-analyzer may have saved specs to `scans/` during Phase 1; check before skipping.
-   f. Inspect work-buffer stats: `./scripts/assess.py dispatch "$DIR/cases.db" stats`
-   g. Inspect coverage gaps: `./scripts/assess.py fetch summary`
+2. **COLLECT** → dispatch surface-collector with `agent/skills/surface-collection/SKILL.md`.
+   Provide: targets from scope.json, Phase 1 endpoint artifacts (paths to `endpoints.txt` and any source-analyzer output in `scans/`), auth.json state, and `$DIR/cases.db` path.
+   On return:
+   - Append `#### Intelligence` to intel.md
+   - Review `#### Priority Attack Surfaces` for Phase 3 dispatch ordering — surface-collector's triage signals override the default type-based dispatch order when risk-informed prioritization is available
+   - Inspect work-buffer stats: `./scripts/assess.py dispatch "$DIR/cases.db" stats`
+   - Inspect coverage gaps: `./scripts/assess.py fetch summary`
+   Surface-collector records surfaces via `assess.py record-surface` and findings via `assess.py record-finding` before returning.
    Update scope.json phase to `consume-test` when ingestion is complete.
 3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
    a. **Nuclei sweep** (once, before the work-buffer loop) — run nuclei via Kali MCP against all live targets for a broad CVE and misconfiguration check:
@@ -212,12 +205,12 @@ When ANY agent discovers credentials, the operator coordinates these steps:
    - If login **fails** → record result in log.md, continue anonymously. Do not dispatch a specialist for a failed login.
    - If login **succeeds** → continue to step 2.
 2. **Operator writes to auth.json** — populate cookies, headers, or token fields from the successful login response. Set `state` to `available` and `use_for_requests` to `true`. This is local file work.
-3. **Operator re-runs Collect** — re-invoke Katana via Kali MCP with auth headers to discover authenticated-only endpoints. Re-ingest through `assess.py ingest-endpoints` with the new auth context. This is the POST-AUTH RE-COLLECTION step.
+3. **Operator re-dispatches surface-collector** — dispatch surface-collector with updated auth.json to re-run the collection pipeline (Katana + gau + ingestion) with authenticated context. Surface-collector handles auth-aware crawling and ingests authenticated-only endpoints into the work buffer. This is the POST-AUTH RE-COLLECTION step.
 4. **Dispatch exploit-developer** — to test authenticated surfaces discovered in step 3. The agent maps what authenticated access grants and tests for privilege escalation, IDOR, and auth-boundary issues across the newly discovered endpoints. This is the analysis work that requires a specialist.
 
 Auth handling rules:
 - `auth.json` is the live auth contract. It may contain cookies, headers, `auth_context`, `use_for_requests`, and optional `expires_at`.
-- If `auth.json` is present and usable, Katana and ingestion should use its auth context automatically.
+- If `auth.json` is present and usable, surface-collector passes auth headers to Katana and tags ingestion with the authenticated context automatically.
 - If `auth.json` is missing material or marked expired, warn and continue anonymously rather than halting the engagement.
 - The human may update `auth.json` directly or use mitmproxy-assisted login capture to refresh it.
 
@@ -258,8 +251,9 @@ Agents use PREFIXED IDs:
 | recon-specialist | RE | FINDING-RE-001 |
 | fuzzer | FZ | FINDING-FZ-001 |
 | osint-analyst | OS | FINDING-OS-001 |
+| surface-collector | SC | FINDING-SC-001 |
 
-Prefix mnemonics: EX=exploit, VA=vuln-analyst, SA=source-analyzer, RE=recon, FZ=fuzzer, OS=osint. The prefix is the agent mnemonic assigned by `assess.py record-finding`, not the initials of the full agent name.
+Prefix mnemonics: EX=exploit, VA=vuln-analyst, SA=source-analyzer, RE=recon, FZ=fuzzer, OS=osint, SC=surface-collector. The prefix is the agent mnemonic assigned by `assess.py record-finding`, not the initials of the full agent name.
 
 Finding IDs are allocated by `assess.py record-finding` under a lock to prevent collisions — hand-allocating IDs risks duplicates and breaks the slug registry. Create a structured JSON finding payload matching `schemas/finding-record.schema.json`, then record it via:
 `./scripts/assess.py record-finding <agent-name> <finding-json-file>`

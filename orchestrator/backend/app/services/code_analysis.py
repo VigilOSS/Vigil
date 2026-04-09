@@ -1262,10 +1262,15 @@ def error_queue_items(
             SET status = 'error',
                 analysis_notes = ?,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE engagement_id = ? AND id IN ({placeholders})
+            WHERE engagement_id = ? AND status = 'processing' AND id IN ({placeholders})
             """,
             (notes, engagement.id, *item_ids),
         )
+        if cursor.rowcount != len(item_ids):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="queue items changed state before error transition; refetch and retry",
+            )
         for row in queue_rows.values():
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
             _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
@@ -1290,10 +1295,15 @@ def needs_context_queue_items(
             SET status = 'needs_context',
                 expansion_request_json = ?,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE engagement_id = ? AND id IN ({placeholders})
+            WHERE engagement_id = ? AND status = 'processing' AND id IN ({placeholders})
             """,
             (_json_text(expansion_request), engagement.id, *item_ids),
         )
+        if cursor.rowcount != len(item_ids):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="queue items changed state before needs_context transition; refetch and retry",
+            )
         for row in queue_rows.values():
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
             _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
@@ -1355,6 +1365,8 @@ def create_analysis_result(
         )
     with get_connection() as connection:
         queue_item_id = result.get("queue_item_id")
+        if queue_item_id is None:
+            connection.execute("BEGIN IMMEDIATE")
         file_row = _get_file_rows(connection, engagement.id, {int(result["file_id"])})[
             int(result["file_id"])
         ]
@@ -1374,6 +1386,19 @@ def create_analysis_result(
                 expected_status="processing",
                 action="record analysis results for",
             )
+            cursor = connection.execute(
+                """
+                UPDATE code_analysis_queue
+                SET updated_at = updated_at
+                WHERE engagement_id = ? AND id = ? AND file_id = ? AND status = 'processing'
+                """,
+                (engagement.id, int(queue_item_id), int(file_row["id"])),
+            )
+            if cursor.rowcount != 1:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="queue item changed state before recording analysis result; refetch and retry",
+                )
 
         cursor = connection.execute(
             """

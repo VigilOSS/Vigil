@@ -154,6 +154,50 @@ def test_code_coverage_cwe_matrix_coerces_non_numeric_effort_values():
     assert has_gap is True
 
 
+def test_code_coverage_cwe_matrix_require_gate_pass_honors_backend_gate(monkeypatch):
+    module = _load_code_coverage_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            return {
+                "gate": {"passed": False, "reasons": ["pending queue items remain"]},
+                "files": [
+                    {
+                        "file_path": "src/parser.py",
+                        "classification": "critical",
+                        "applicable_families": ["ssrf"],
+                        "cwe_coverage": [{"family": "ssrf", "effort": 95}],
+                    }
+                ],
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=Path("/tmp/eng"),
+                repo_id=None,
+                require_gate_pass=True,
+                cwe_matrix=True,
+            )
+        )
+    assert excinfo.value.code == 1
+
+
 def test_code_ingest_repo_key_uses_name_and_canonical_path_hash():
     module = _load_code_ingest_module()
 

@@ -123,9 +123,9 @@ def _normalize_coverage_status(value: str) -> str:
 def _coalesce_workflow_status(existing: str, incoming: str, *, explicit_workflow_override: bool = False) -> str:
     existing_normalized = _normalize_workflow_status(existing)
     incoming_normalized = _normalize_workflow_status(incoming)
-    if explicit_workflow_override:
-        return incoming_normalized
     if existing_normalized == "merged":
+        return existing_normalized
+    if explicit_workflow_override:
         return incoming_normalized
     if incoming_normalized == "merged":
         return incoming_normalized
@@ -179,6 +179,13 @@ def _legacy_verification_defaults(workflow_status: str) -> tuple[str, str]:
     if normalized_workflow == "active":
         return ("unreviewed", "none")
     return ("unreviewed", "none")
+
+
+def _raise_stale_finding_conflict() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="finding changed since it was loaded; refetch and retry",
+    )
 
 
 def _row_workflow_status(row: dict[str, Any] | Any) -> str:
@@ -1426,6 +1433,7 @@ def create_finding(
     transition_reason_text: str = "",
     transition_artifact_ref: str = "",
     transition_metadata: dict[str, Any] | None = None,
+    expected_updated_at: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     incoming_workflow_status = _normalize_workflow_status(workflow_status)
@@ -1433,6 +1441,7 @@ def create_finding(
     incoming_verification_disposition = _normalize_verification_disposition(verification_disposition)
     incoming_severity = _normalize_severity(severity)
     with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
         existing = _semantic_finding_match(
             connection,
             engagement.id,
@@ -1476,6 +1485,8 @@ def create_finding(
             )
             row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (cursor.lastrowid,)).fetchone()
         else:
+            if expected_updated_at is not None and str(existing["updated_at"]) != expected_updated_at:
+                _raise_stale_finding_conflict()
             existing_workflow = _row_workflow_status(existing)
             existing_verification_state = _row_verification_state(existing)
             existing_verification_disposition = _row_verification_disposition(existing)
@@ -1659,6 +1670,7 @@ def patch_finding(
     transition_artifact_ref: str = "",
     transition_metadata: dict[str, Any] | None = None,
     allow_verification_mutation: bool = False,
+    expected_updated_at: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
@@ -1670,6 +1682,7 @@ def patch_finding(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
 
     existing_workflow = _row_workflow_status(existing)
+    current_updated_at = str(existing["updated_at"])
 
     if not allow_verification_mutation:
         if verification_state is not None or verification_disposition is not None:
@@ -1724,6 +1737,7 @@ def patch_finding(
         transition_reason_text=transition_reason_text,
         transition_artifact_ref=transition_artifact_ref,
         transition_metadata=transition_metadata,
+        expected_updated_at=expected_updated_at or current_updated_at,
     )
 
 
@@ -1758,6 +1772,7 @@ def verify_finding(
     if existing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
 
+    expected_updated_at = str(existing["updated_at"])
     existing_workflow = _row_workflow_status(existing)
     if existing_workflow == "merged":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="merged findings cannot be re-verified")
@@ -1810,6 +1825,7 @@ def verify_finding(
         transition_artifact_ref=artifact_ref or evidence_ref,
         transition_metadata=transition_metadata or None,
         allow_verification_mutation=True,
+        expected_updated_at=expected_updated_at,
     )
 
 
@@ -1842,6 +1858,8 @@ def merge_findings(
             )
         source_confidence = _finding_confidence_tuple(source)
         target_confidence = _finding_confidence_tuple(target)
+        source_updated_at = str(source["updated_at"])
+        target_updated_at = str(target["updated_at"])
         source_stronger = source_confidence > target_confidence
         source_workflow = _row_workflow_status(source)
         target_workflow = _row_workflow_status(target)
@@ -1868,7 +1886,7 @@ def merge_findings(
             "SELECT * FROM assessment_finding_links WHERE engagement_id = ? AND finding_id = ?",
             (engagement.id, source["id"]),
         ).fetchall()
-        connection.execute(
+        source_cursor = connection.execute(
             """
             UPDATE assessment_findings
             SET status = 'merged',
@@ -1877,11 +1895,13 @@ def merge_findings(
                 merged_into_finding_id = ?,
                 notes = ?,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = ? AND updated_at = ?
             """,
-            (target["id"], _append_notes(source["notes"], reason), source["id"]),
+            (target["id"], _append_notes(source["notes"], reason), source["id"], source_updated_at),
         )
-        connection.execute(
+        if source_cursor.rowcount != 1:
+            _raise_stale_finding_conflict()
+        target_cursor = connection.execute(
             """
             UPDATE assessment_findings
             SET severity = ?,
@@ -1908,7 +1928,7 @@ def merge_findings(
                 provenance_json = ?,
                 updated_at = CURRENT_TIMESTAMP,
                 last_seen_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = ? AND updated_at = ?
             """,
             (
                 _stronger_severity(target["severity"], source["severity"]),
@@ -1946,8 +1966,11 @@ def merge_findings(
                 merged_details,
                 _json_text(merged_provenance_payload),
                 target["id"],
+                target_updated_at,
             ),
         )
+        if target_cursor.rowcount != 1:
+            _raise_stale_finding_conflict()
         for row in source_links:
             _upsert_finding_link(
                 connection,
@@ -2140,6 +2163,7 @@ def create_finding_link(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
         finding = connection.execute(
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, finding_slug),
@@ -2235,6 +2259,7 @@ def create_attack_chain(
     engagement = _engagement_or_404(engagement_id)
     resolved_key = chain_key or _slugify(title)
     with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
         connection.execute(
             """
             INSERT INTO assessment_attack_chains (
@@ -2288,6 +2313,7 @@ def create_attack_chain_link(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
         chain = connection.execute(
             "SELECT * FROM assessment_attack_chains WHERE engagement_id = ? AND chain_key = ?",
             (engagement.id, chain_key),
