@@ -1547,7 +1547,7 @@ def code_coverage_summary(
             _get_repo_row(connection, engagement.id, repo_id)
 
         repo_scoped_finding_clause = ""
-        repo_scoped_variant_params: tuple[Any, ...] = (engagement.id,)
+        repo_scoped_finding_params: tuple[Any, ...] = (engagement.id,)
         if repo_id is not None:
             repo_scoped_finding_clause = """
               AND EXISTS (
@@ -1561,9 +1561,16 @@ def code_coverage_summary(
                         length(f.canonical_location) = 5 + length(cf.file_path)
                         OR substr(f.canonical_location, 6 + length(cf.file_path), 1) = ':'
                     )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM code_files other_cf
+                        WHERE other_cf.engagement_id = cf.engagement_id
+                          AND other_cf.file_path = cf.file_path
+                          AND other_cf.id != cf.id
+                    )
               )
             """
-            repo_scoped_variant_params = (engagement.id, repo_id)
+            repo_scoped_finding_params = (engagement.id, repo_id)
 
         # -- Total files --
         total_files = _scalar_row(
@@ -1616,7 +1623,7 @@ def code_coverage_summary(
               AND f.status NOT IN ('merged', 'false_positive')
             """
             + repo_scoped_finding_clause,
-            repo_scoped_variant_params,
+            repo_scoped_finding_params,
         )
         severity_rows = connection.execute(
             """
@@ -1630,7 +1637,7 @@ def code_coverage_summary(
             + """
             GROUP BY f.severity
             """,
-            repo_scoped_variant_params,
+            repo_scoped_finding_params,
         ).fetchall()
         by_severity: dict[str, int] = {}
         for row in severity_rows:
@@ -1646,10 +1653,11 @@ def code_coverage_summary(
              AND f.engagement_id = links.engagement_id
             WHERE links.engagement_id = ?
               AND links.link_kind = 'variant_of'
+              AND f.canonical_location LIKE 'file:%'
               AND f.status NOT IN ('merged', 'false_positive')
             """
             + repo_scoped_finding_clause,
-            repo_scoped_variant_params,
+            repo_scoped_finding_params,
         )
 
         # -- Confidence metrics --

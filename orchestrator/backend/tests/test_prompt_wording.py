@@ -178,7 +178,7 @@ def test_code_analysis_skills_use_current_phase_numbers_and_tools():
     ).read_text(encoding="utf-8")
 
     assert "Phase 4 of code analysis pipeline" not in verification_skill
-    assert "Runs on confirmed and suspicious findings from Phase 2" in verification_skill
+    assert "Runs on confirmed findings from Phase 2" in verification_skill
     assert "Phase 4 of code analysis pipeline" not in variant_skill
     assert "`cat`" not in variant_skill
     assert "`find`" not in variant_skill
@@ -198,3 +198,12 @@ def test_code_analysis_codex_wrappers_exist():
     }
 
     assert expected <= {path.name for path in codex_dir.glob("*.toml")}
+
+
+def test_exploit_developer_prompt_uses_workflow_status_for_findings_examples():
+    repo_root = Path(__file__).resolve().parents[3]
+    exploit_prompt = (repo_root / "agent" / "agents" / "exploit-developer.md").read_text(encoding="utf-8")
+
+    assert '.status | IN("confirmed","exploited","draft")' not in exploit_prompt
+    assert '.workflow_status | IN("active","exploited","draft")' in exploit_prompt
+    assert "{slug, title, severity, workflow_status, defect_family, canonical_location, auth_context}" in exploit_prompt
