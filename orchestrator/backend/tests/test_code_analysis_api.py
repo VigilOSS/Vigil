@@ -1088,6 +1088,137 @@ def test_coverage_summary_excludes_false_positive_variants(client, isolate_setti
     assert payload["findings_summary"]["variant_count"] == 0
 
 
+def test_coverage_summary_excludes_non_code_variants(client, isolate_settings):
+    engagement_key = "2026-04-09-code-coverage-noncode-variants"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="noncode-variant-repo")
+    _create_files(client, engagement_key, int(repo["id"]))
+
+    finding = client.post(
+        f"/engagements/{engagement_key}/assessment/findings",
+        json={
+            "slug": "FINDING-WEB-VARIANT-001",
+            "title": "HTTP variant",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "authz-bypass",
+            "root_cause_key": "http-variant",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/api/export",
+            "summary": "Non-code finding should not inflate code variant counts.",
+            "evidence_ref": "findings.md",
+            "notes": "",
+            "source_name": "vulnerability-analyst",
+            "details": {"evidence": "A"},
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [
+                {
+                    "link_kind": "variant_of",
+                    "target_kind": "finding",
+                    "target_ref": "ROOT-HTTP",
+                }
+            ],
+        },
+    )
+    assert finding.status_code == 201
+
+    coverage = client.get(f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}")
+    assert coverage.status_code == 200
+    assert coverage.json()["findings_summary"]["variant_count"] == 0
+
+
+def test_repo_scoped_coverage_excludes_ambiguous_shared_file_paths(client, isolate_settings):
+    engagement_key = "2026-04-09-code-coverage-ambiguous-shared-paths"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo_a = _create_repo(client, engagement_key, repo_key="shared-path-repo-a")
+    repo_b = _create_repo(client, engagement_key, repo_key="shared-path-repo-b")
+
+    shared_files_a = client.post(
+        f"/engagements/{engagement_key}/assessment/code/files",
+        json={
+            "repo_id": repo_a["id"],
+            "files": [
+                {
+                    "file_path": "src/shared.py",
+                    "language": "python",
+                    "loc": 30,
+                    "file_hash": "shared-a",
+                    "header_snippet": "",
+                    "git_churn_score": 0,
+                    "has_past_cve_fix": False,
+                }
+            ],
+        },
+    )
+    assert shared_files_a.status_code == 201
+    shared_files_b = client.post(
+        f"/engagements/{engagement_key}/assessment/code/files",
+        json={
+            "repo_id": repo_b["id"],
+            "files": [
+                {
+                    "file_path": "src/shared.py",
+                    "language": "python",
+                    "loc": 45,
+                    "file_hash": "shared-b",
+                    "header_snippet": "",
+                    "git_churn_score": 0,
+                    "has_past_cve_fix": False,
+                }
+            ],
+        },
+    )
+    assert shared_files_b.status_code == 201
+
+    finding = client.post(
+        f"/engagements/{engagement_key}/assessment/findings",
+        json={
+            "slug": "FINDING-SHARED-PATH-001",
+            "title": "Shared path finding",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "trust-boundary-bypass",
+            "root_cause_key": "shared-path-finding",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/shared.py:12",
+            "summary": "Ambiguous file-path findings should not be double-attributed across repos.",
+            "evidence_ref": "findings.md",
+            "notes": "",
+            "source_name": "code-vuln-hunter",
+            "details": {"evidence": "A"},
+            "provenance": {"agent_name": "code-vuln-hunter"},
+            "links": [
+                {
+                    "link_kind": "variant_of",
+                    "target_kind": "finding",
+                    "target_ref": "ROOT-SHARED",
+                }
+            ],
+        },
+    )
+    assert finding.status_code == 201
+
+    repo_a_coverage = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo_a['id']}"
+    )
+    assert repo_a_coverage.status_code == 200
+    repo_a_payload = repo_a_coverage.json()
+    assert repo_a_payload["findings_summary"]["total_code_findings"] == 0
+    assert repo_a_payload["findings_summary"]["variant_count"] == 0
+
+    repo_b_coverage = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo_b['id']}"
+    )
+    assert repo_b_coverage.status_code == 200
+    repo_b_payload = repo_b_coverage.json()
+    assert repo_b_payload["findings_summary"]["total_code_findings"] == 0
+    assert repo_b_payload["findings_summary"]["variant_count"] == 0
+
+
 def test_module_creation_assigns_files_and_supports_module_scoped_fetch(client, isolate_settings):
     engagement_key = "2026-04-04-code-modules"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)

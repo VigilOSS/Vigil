@@ -55,8 +55,11 @@ When exploitation requires a listener, tunnel, or OOB callback:
 
 Agents CAN read log files via Kali MCP to check for activity:
 - `/data/shell-*.log` — shell session I/O (verify shell connected)
-- `/data/oob-server.log` — interactsh callback hits (confirm blind vulns)
+- `/data/oob-client.log` — correlated interactsh callback hits (preferred for confirming blind vulns — filters AWS noise)
+- `/data/oob-server.log` — raw interactsh log (noisy, includes health check traffic — use only when client log is unavailable)
 - `/data/frpc.log` — tunnel connection status
+
+Full OOB setup, verification, and log interpretation: `agent/references/offensive-tactics/frp-tunneling.md`
 
 Agents CANNOT start, stop, or restart listener, tunnel, or OOB processes.
 

@@ -83,14 +83,15 @@ per `frp-tunneling.md`, records the address, and then resumes the agent.
 2. If available → use the callback URL in blind payloads (SSRF, XXE, XSS, SQLi)
 3. If not available → fall back to time-based detection (sleep payloads) and note in output that OOB was unavailable
 4. If time-based also fails and OOB would have been decisive → stop and ask the operator to provision interactsh + frp tunnels per `frp-tunneling.md`
-5. After sending blind payloads, agents check OOB logs via Kali MCP: `tail -50 /data/oob-server.log`
+5. After sending blind payloads, agents check OOB logs via Kali MCP: `tail -50 /data/oob-client.log` (preferred, correlated hits only) or `tail -50 /data/oob-server.log` (raw, noisy)
 
 **Files agents read (never write):**
 - `$DIR/.listener_url` — tunnel address (`host:port`) for reverse shell payloads
 - `$DIR/.oob_url` — callback URL for blind vulnerability detection
 
 **Log files agents check for hits (via Kali MCP):**
-- `/data/oob-server.log` — interactsh callback hits
+- `/data/oob-client.log` — correlated interactsh callback hits (preferred — filters AWS noise)
+- `/data/oob-server.log` — raw interactsh log (noisy, includes health check traffic)
 - `/data/shell-*.log` — shell session I/O
 - `/data/frpc.log` — tunnel connection status
 
