@@ -40,12 +40,9 @@ Before producing any output, confirm:
 - [ ] **Applicable vulnerability classes listed** -- all classes requiring effort scores (from
       dispatch context `applicable_vuln_classes`)
 - [ ] Full filesystem access confirmed -- can Read, Grep, Glob beyond the file batch
-- [ ] CWE pattern reference loaded for each applicable vulnerability class. For vulnerability
-      classes without dedicated pattern reference files (path-traversal, ssrf, open-redirect,
-      file-upload, xxe), use built-in knowledge combined with the nearest general reference
-      (`injection.md` for path-traversal/ssrf, `web-app-injection.md` for xss/open-redirect).
-      The absence of a dedicated reference file does not reduce the expected effort -- these
-      classes still require full entry-chain tracing.
+- [ ] CWE pattern reference loaded for each applicable vulnerability class. If a niche class
+      lacks a dedicated pattern file, use the nearest general reference and keep the same depth;
+      missing a dedicated file never reduces the expected effort.
 - [ ] Audit trail plan ready -- every analysis result will include `audit_metadata`
 
 If any item is missing -- especially the CWE pattern reference or file batch -- stop and

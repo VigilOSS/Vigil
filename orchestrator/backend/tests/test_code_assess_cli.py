@@ -1323,6 +1323,43 @@ def test_code_classify_rejects_slot_types_json_field(tmp_path, capsys):
     assert "use 'slot_types' instead" in capsys.readouterr().err
 
 
+def test_code_classify_reports_all_validation_errors(tmp_path, capsys):
+    module = _load_code_classify_module()
+    payload_path = tmp_path / "classify.json"
+    payload_path.write_text(
+        json.dumps(
+            [
+                {
+                    "file_id": 7,
+                    "classification": "high",
+                    "slot_types": [],
+                },
+                {
+                    "file_id": 8,
+                    "classification": "critical",
+                    "slot_types": ["NETWORK_INPUT"],
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=tmp_path,
+                classifications_json=str(payload_path),
+            )
+        )
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "Item 0" in err
+    assert "slot_types" in err
+    assert "Item 1" in err
+    assert "NETWORK_INPUT" in err
+
+
 def test_cli_main_prints_assesserror_without_traceback(monkeypatch, capsys):
     cli_module = _load_cli_module()
     from assess.commands import fetch as fetch_command
