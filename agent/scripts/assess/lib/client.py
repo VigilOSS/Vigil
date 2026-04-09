@@ -100,15 +100,14 @@ class AssessmentClient:
 
                 # Non-retryable error — report it
                 if resp.status == 422:
-                    # Pydantic validation error — print detail
                     try:
                         detail = json.loads(resp_body)
                         msg = json.dumps(detail, indent=2)
                     except (json.JSONDecodeError, TypeError):
                         msg = resp_body
-                    raise AssessError(f"Validation error (422):\n{msg}")
+                    raise AssessError(f"HTTP 422 validation error:\n{msg}")
 
-                raise AssessError(f"HTTP {resp.status}: {resp_body[:500]}")
+                raise AssessError(f"HTTP {resp.status}:\n{resp_body}")
 
             except AssessError:
                 raise

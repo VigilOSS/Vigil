@@ -329,8 +329,6 @@ def test_findings_patch_can_revive_false_positive_and_lower_severity(client, iso
         "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-009",
         json={
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "downgraded",
             "severity": "low",
             "notes": "Operator reinstated after manual review.",
             "reason_code": "manual-override",
@@ -340,10 +338,90 @@ def test_findings_patch_can_revive_false_positive_and_lower_severity(client, iso
     )
     assert revived.status_code == 200
     assert revived.json()["finding"]["workflow_status"] == "active"
-    assert revived.json()["finding"]["verification_state"] == "verified"
-    assert revived.json()["finding"]["verification_disposition"] == "downgraded"
+    assert revived.json()["finding"]["verification_state"] == "unreviewed"
+    assert revived.json()["finding"]["verification_disposition"] == "none"
     assert revived.json()["finding"]["severity"] == "low"
     assert revived.json()["transition"]["action"] == "operator_override"
+
+
+def test_findings_patch_rejects_direct_verification_bypass(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-010",
+            "title": "Direct patch bypass",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "idor",
+            "root_cause_key": "direct-patch-bypass",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/items/7",
+            "summary": "Patch should not be able to persist verifier outcomes.",
+            "evidence_ref": "findings.md",
+            "notes": "Initial triage.",
+            "source_name": "vulnerability-analyst",
+            "details": {
+                "evidence": "Initial request/response pair",
+                "impact": "Potential unauthorized access",
+            },
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [],
+        },
+    )
+    assert created.status_code == 201
+
+    patched = client.patch(
+        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-010",
+        json={
+            "workflow_status": "false_positive",
+            "reason_text": "Bypass verifier checks",
+        },
+    )
+    assert patched.status_code == 400
+    assert "must use POST /findings/{slug}/verify" in patched.json()["detail"]
+
+
+def test_findings_patch_allows_explicit_workflow_rollback(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-010A",
+            "title": "Workflow rollback candidate",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "idor",
+            "root_cause_key": "workflow-rollback-candidate",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/items/rollback",
+            "summary": "Active finding should be movable back to draft.",
+            "evidence_ref": "findings.md",
+            "notes": "Initial triage.",
+            "source_name": "vulnerability-analyst",
+            "details": {"evidence": "Initial request/response pair"},
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [],
+        },
+    )
+    assert created.status_code == 201
+
+    patched = client.patch(
+        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-010A",
+        json={
+            "workflow_status": "draft",
+            "reason_code": "needs-retriage",
+            "reason_text": "Pushed back for additional review before reactivation.",
+        },
+    )
+    assert patched.status_code == 200
+    assert patched.json()["finding"]["workflow_status"] == "draft"
 
 
 def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, isolate_settings):
@@ -703,6 +781,85 @@ def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
     assert payload["finding"]["verification_state"] == "disputed"
     assert payload["finding"]["verification_disposition"] == "none"
     assert payload["transition"]["action"] == "verification_disputed"
+
+    report_findings = client.get("/engagements/2026-03-30-120000-example/assessment/report-findings")
+    assert report_findings.status_code == 200
+    assert all(item["slug"] != "FINDING-CH-041" for item in report_findings.json())
+
+
+def test_findings_verify_rejects_merged_records(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    source = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-050",
+            "title": "Merged source",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "defect_family": "idor",
+            "root_cause_key": "merged-source",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/source",
+            "summary": "Source finding before merge.",
+            "evidence_ref": "findings.md",
+            "notes": "Created for merge test.",
+            "source_name": "vulnerability-analyst",
+            "details": {"evidence": "source evidence", "impact": "source impact"},
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [],
+        },
+    )
+    assert source.status_code == 201
+
+    target = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-CH-051",
+            "title": "Merge target",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "defect_family": "idor",
+            "root_cause_key": "merge-target",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/target",
+            "summary": "Target finding before merge.",
+            "evidence_ref": "findings.md",
+            "notes": "Created for merge test.",
+            "source_name": "vulnerability-analyst",
+            "details": {"evidence": "target evidence", "impact": "target impact"},
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [],
+        },
+    )
+    assert target.status_code == 201
+
+    merge = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings/merge",
+        json={
+            "source_slug": "FINDING-CH-050",
+            "target_slug": "FINDING-CH-051",
+            "reason": "Merged duplicate.",
+            "source_name": "operator",
+        },
+    )
+    assert merge.status_code == 200
+
+    verify = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-050/verify",
+        json={
+            "disposition": "confirmed",
+            "reason_text": "Should not revive merged finding.",
+            "source_name": "code-vuln-verifier",
+            "details": {"evidence": "n/a", "impact": "n/a"},
+        },
+    )
+    assert verify.status_code == 400
+    assert "merged findings cannot be re-verified" in verify.json()["detail"]
 
 
 def test_coverage_patch_rejects_unknown_status_values(client, isolate_settings):

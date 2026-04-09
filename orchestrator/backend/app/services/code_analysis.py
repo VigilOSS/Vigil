@@ -44,6 +44,30 @@ def _json_decode(value: Any, default: Any) -> Any:
     return default
 
 
+def _coerce_int(value: Any, *, field_name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must be an integer",
+        ) from exc
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _hydrate_code_repo(row: Any) -> dict[str, Any]:
     payload = dict(row)
     payload["lsp_config"] = _json_decode(payload.get("lsp_config_json"), {})
@@ -134,6 +158,29 @@ def _get_queue_rows(connection, engagement_id: int, item_ids: set[int]) -> dict[
     if len(found) != len(item_ids):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Queue item not found")
     return found
+
+
+def _require_queue_status(
+    queue_rows: dict[int, dict[str, Any]],
+    *,
+    expected_status: str,
+    action: str,
+) -> None:
+    invalid = {
+        item_id: str(row.get("status", ""))
+        for item_id, row in queue_rows.items()
+        if str(row.get("status", "")) != expected_status
+    }
+    if not invalid:
+        return
+    details = ", ".join(
+        f"{item_id}={row_status or 'unknown'}"
+        for item_id, row_status in sorted(invalid.items())
+    )
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=f"Cannot {action} queue items unless they are {expected_status}: {details}",
+    )
 
 
 def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> None:
@@ -436,13 +483,14 @@ def list_code_files(
         clauses.append("analysis_status = ?")
         params.append(analysis_status)
     if search is not None:
-        clauses.append("file_path LIKE ?")
-        params.append(f"%{search}%")
+        clauses.append("file_path LIKE ? ESCAPE '\\'")
+        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params.append(f"%{escaped}%")
     query = f"SELECT * FROM code_files WHERE {' AND '.join(clauses)} ORDER BY analysis_priority DESC, id ASC"
     if limit is not None:
         query += f" LIMIT {int(limit)}"
-    if offset > 0:
-        query += f" OFFSET {int(offset)}"
+        if offset > 0:
+            query += f" OFFSET {int(offset)}"
     with get_connection() as connection:
         return [_hydrate_code_file(row) for row in connection.execute(query, tuple(params)).fetchall()]
 
@@ -520,26 +568,55 @@ def update_code_file(
     json_list_fields = {"slot_types_json"}
     json_object_fields: set[str] = set()
 
-    for key, value in kwargs.items():
-        if key not in _CODE_FILE_ALLOWED_FIELDS:
-            continue  # silently ignore disallowed fields
-        if key in json_list_fields:
-            set_clauses.append(f"{key} = ?")
-            params.append(_json_list_text(value))
-        elif key in json_object_fields:
-            set_clauses.append(f"{key} = ?")
-            params.append(_json_text(value))
-        else:
-            set_clauses.append(f"{key} = ?")
-            params.append(value)
-
-    if not set_clauses:
-        return get_code_file(engagement_id, file_id)
-
-    set_clauses.append("updated_at = CURRENT_TIMESTAMP")
-    params.extend([engagement.id, file_id])
-
     with get_connection() as connection:
+        file_row = connection.execute(
+            "SELECT * FROM code_files WHERE engagement_id = ? AND id = ?",
+            (engagement.id, file_id),
+        ).fetchone()
+        if file_row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code file not found")
+
+        normalized_kwargs = dict(kwargs)
+        if "module_id" in normalized_kwargs:
+            raw_module_id = normalized_kwargs["module_id"]
+            if raw_module_id in ("", None):
+                normalized_kwargs["module_id"] = None
+            else:
+                module_id = _coerce_int(raw_module_id, field_name="module_id")
+                module_row = connection.execute(
+                    """
+                    SELECT id
+                    FROM code_modules
+                    WHERE engagement_id = ? AND id = ? AND repo_id = ?
+                    """,
+                    (engagement.id, module_id, int(file_row["repo_id"])),
+                ).fetchone()
+                if module_row is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="module_id must reference a module in the same repo",
+                    )
+                normalized_kwargs["module_id"] = module_id
+
+        for key, value in normalized_kwargs.items():
+            if key not in _CODE_FILE_ALLOWED_FIELDS:
+                continue  # silently ignore disallowed fields
+            if key in json_list_fields:
+                set_clauses.append(f"{key} = ?")
+                params.append(_json_list_text(value))
+            elif key in json_object_fields:
+                set_clauses.append(f"{key} = ?")
+                params.append(_json_text(value))
+            else:
+                set_clauses.append(f"{key} = ?")
+                params.append(value)
+
+        if not set_clauses:
+            return get_code_file(engagement_id, file_id)
+
+        set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+        params.extend([engagement.id, file_id])
+
         connection.execute(
             f"UPDATE code_files SET {', '.join(set_clauses)} WHERE engagement_id = ? AND id = ?",
             tuple(params),
@@ -548,8 +625,6 @@ def update_code_file(
             "SELECT * FROM code_files WHERE engagement_id = ? AND id = ?",
             (engagement.id, file_id),
         ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code file not found")
     return _hydrate_code_file(row)
 
 
@@ -1045,6 +1120,7 @@ def _record_cross_file_triggers(
 
 
 _VALID_DISPOSITIONS = frozenset({"finding", "suspicious", "clean"})
+_VALID_ANALYSIS_RESULT_DISPOSITIONS = frozenset({"finding", "suspicious", "clean", "needs_context"})
 
 
 def complete_queue_items(
@@ -1073,6 +1149,7 @@ def complete_queue_items(
     placeholders = ",".join("?" for _ in item_ids)
     with get_connection() as connection:
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
+        _require_queue_status(queue_rows, expected_status="processing", action="complete")
         queue_row = next(iter(queue_rows.values()))
         file_row = _get_file_rows(connection, engagement.id, {int(queue_row["file_id"])})[
             int(queue_row["file_id"])
@@ -1109,6 +1186,7 @@ def error_queue_items(
     placeholders = ",".join("?" for _ in item_ids)
     with get_connection() as connection:
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
+        _require_queue_status(queue_rows, expected_status="processing", action="mark as error")
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
@@ -1136,6 +1214,7 @@ def needs_context_queue_items(
     placeholders = ",".join("?" for _ in item_ids)
     with get_connection() as connection:
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
+        _require_queue_status(queue_rows, expected_status="processing", action="mark as needs_context")
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
@@ -1164,7 +1243,7 @@ def reset_stale_queue_items(
             FROM code_analysis_queue
             WHERE engagement_id = ?
               AND status = 'processing'
-              AND (consumed_at < datetime('now', ? || ' minutes') OR consumed_at IS NULL)
+              AND (consumed_at IS NULL OR datetime(consumed_at) < datetime('now', ? || ' minutes'))
             """,
             (engagement.id, f"-{minutes}"),
         ).fetchall()
@@ -1177,7 +1256,7 @@ def reset_stale_queue_items(
                 updated_at = CURRENT_TIMESTAMP
             WHERE engagement_id = ?
               AND status = 'processing'
-              AND (consumed_at < datetime('now', ? || ' minutes') OR consumed_at IS NULL)
+              AND (consumed_at IS NULL OR datetime(consumed_at) < datetime('now', ? || ' minutes'))
             """,
             (engagement.id, f"-{minutes}"),
         )
@@ -1196,6 +1275,15 @@ def create_analysis_result(
     result: dict[str, Any],
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    disposition = str(result.get("disposition", "")).strip()
+    if disposition not in _VALID_ANALYSIS_RESULT_DISPOSITIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Invalid disposition '{disposition}'. Must be one of: "
+                f"{', '.join(sorted(_VALID_ANALYSIS_RESULT_DISPOSITIONS))}"
+            ),
+        )
     with get_connection() as connection:
         queue_item_id = result.get("queue_item_id")
         file_row = _get_file_rows(connection, engagement.id, {int(result["file_id"])})[
@@ -1212,6 +1300,11 @@ def create_analysis_result(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Analysis result file/context references do not match the queue item",
                 )
+            _require_queue_status(
+                {int(queue_item_id): queue_row},
+                expected_status="processing",
+                action="record analysis results for",
+            )
 
         cursor = connection.execute(
             """
@@ -1232,7 +1325,7 @@ def create_analysis_result(
                 result.get("function_name", ""),
                 result.get("hypothesis", ""),
                 result.get("evidence", ""),
-                result.get("disposition", ""),
+                disposition,
                 result.get("confidence", "medium"),
                 result.get("finding_slug", ""),
                 result.get("cwe_id", ""),
@@ -1356,6 +1449,28 @@ def code_coverage_summary(
         repo_params = (repo_id,)
 
     with get_connection() as connection:
+        if repo_id is not None:
+            _get_repo_row(connection, engagement.id, repo_id)
+
+        repo_scoped_finding_clause = ""
+        repo_scoped_variant_params: tuple[Any, ...] = (engagement.id,)
+        if repo_id is not None:
+            repo_scoped_finding_clause = """
+              AND EXISTS (
+                  SELECT 1
+                  FROM code_files cf
+                  WHERE cf.engagement_id = f.engagement_id
+                    AND cf.repo_id = ?
+                    AND substr(f.canonical_location, 1, 5) = 'file:'
+                    AND substr(f.canonical_location, 6, length(cf.file_path)) = cf.file_path
+                    AND (
+                        length(f.canonical_location) = 5 + length(cf.file_path)
+                        OR substr(f.canonical_location, 6 + length(cf.file_path), 1) = ':'
+                    )
+              )
+            """
+            repo_scoped_variant_params = (engagement.id, repo_id)
+
         # -- Total files --
         total_files = _scalar_row(
             connection,
@@ -1401,23 +1516,27 @@ def code_coverage_summary(
             connection,
             """
             SELECT COUNT(*)
-            FROM assessment_findings
-            WHERE engagement_id = ?
-              AND canonical_location LIKE 'file:%'
-              AND status NOT IN ('merged', 'false_positive')
-            """,
-            (engagement.id,),
+            FROM assessment_findings AS f
+            WHERE f.engagement_id = ?
+              AND f.canonical_location LIKE 'file:%'
+              AND f.status NOT IN ('merged', 'false_positive')
+            """
+            + repo_scoped_finding_clause,
+            repo_scoped_variant_params,
         )
         severity_rows = connection.execute(
             """
-            SELECT severity, COUNT(*) AS total
-            FROM assessment_findings
-            WHERE engagement_id = ?
-              AND canonical_location LIKE 'file:%'
-              AND status NOT IN ('merged', 'false_positive')
-            GROUP BY severity
+            SELECT f.severity, COUNT(*) AS total
+            FROM assessment_findings AS f
+            WHERE f.engagement_id = ?
+              AND f.canonical_location LIKE 'file:%'
+              AND f.status NOT IN ('merged', 'false_positive')
+            """
+            + repo_scoped_finding_clause
+            + """
+            GROUP BY f.severity
             """,
-            (engagement.id,),
+            repo_scoped_variant_params,
         ).fetchall()
         by_severity: dict[str, int] = {}
         for row in severity_rows:
@@ -1425,8 +1544,17 @@ def code_coverage_summary(
 
         variant_count = _scalar_row(
             connection,
-            "SELECT COUNT(*) FROM assessment_finding_links WHERE engagement_id = ? AND link_kind = 'variant_of'",
-            (engagement.id,),
+            """
+            SELECT COUNT(*)
+            FROM assessment_finding_links AS links
+            JOIN assessment_findings AS f
+              ON f.id = links.finding_id
+             AND f.engagement_id = links.engagement_id
+            WHERE links.engagement_id = ?
+              AND links.link_kind = 'variant_of'
+            """
+            + repo_scoped_finding_clause,
+            repo_scoped_variant_params,
         )
 
         # -- Confidence metrics --
@@ -1584,7 +1712,7 @@ def code_coverage_summary(
                 file_efforts[fid] = {}
             for entry in cwe_cov:
                 family = entry.get("family", "")
-                effort = float(entry.get("effort", 0))
+                effort = _coerce_float(entry.get("effort", 0))
                 if family and effort > file_efforts[fid].get(family, 0):
                     file_efforts[fid][family] = effort
 
@@ -1742,12 +1870,14 @@ def requeue_triggered_files(
             raw_file_id = item.get("file_id")
             raw_file_path = str(item.get("file_path", "")).strip()
             repo_id = item.get("repo_id")
+            validated_repo_id = _coerce_int(repo_id, field_name="repo_id") if repo_id is not None else None
 
             file_id: int | None
             if raw_file_id is not None:
+                validated_file_id = _coerce_int(raw_file_id, field_name="file_id")
                 row = connection.execute(
                     "SELECT id FROM code_files WHERE engagement_id = ? AND id = ?",
-                    (engagement.id, int(raw_file_id)),
+                    (engagement.id, validated_file_id),
                 ).fetchone()
                 if row is None:
                     not_found.append(str(raw_file_id))
@@ -1757,12 +1887,12 @@ def requeue_triggered_files(
                 rows = connection.execute(
                     (
                         "SELECT id FROM code_files WHERE engagement_id = ? AND file_path = ?"
-                        if repo_id is None
+                        if validated_repo_id is None
                         else "SELECT id FROM code_files WHERE engagement_id = ? AND repo_id = ? AND file_path = ?"
                     ),
                     (engagement.id, raw_file_path)
-                    if repo_id is None
-                    else (engagement.id, int(repo_id), raw_file_path),
+                    if validated_repo_id is None
+                    else (engagement.id, validated_repo_id, raw_file_path),
                 ).fetchall()
                 if not rows:
                     not_found.append(raw_file_path)
@@ -1783,9 +1913,10 @@ def requeue_triggered_files(
                     "guidance_hypotheses": [],
                 },
             )
+            priority = _coerce_int(item.get("priority", 50), field_name="priority")
             bucket["priority"] = max(
                 int(bucket["priority"]),
-                max(0, min(100, int(item.get("priority", 50)))),
+                max(0, min(100, priority)),
             )
             batch_theme = str(item.get("batch_theme", "")).strip()
             if batch_theme:
@@ -1883,6 +2014,8 @@ def code_coverage_cwe_detail(
         repo_params = (repo_id,)
 
     with get_connection() as connection:
+        if repo_id is not None:
+            _get_repo_row(connection, engagement.id, repo_id)
         # Fetch critical/high files with their slot_types
         file_rows = connection.execute(
             f"""
@@ -1922,16 +2055,16 @@ def code_coverage_cwe_detail(
                         cwe_by_file[fid][family] = dict(entry)
                     else:
                         # Max-effort merge
-                        if float(entry.get("effort", 0)) > float(existing.get("effort", 0)):
+                        if _coerce_float(entry.get("effort", 0)) > _coerce_float(existing.get("effort", 0)):
                             existing["effort"] = entry["effort"]
                         # Sum entry_chains_traced (approximates union across passes)
-                        existing_chains = int(existing.get("entry_chains_traced", 0))
-                        new_chains = int(entry.get("entry_chains_traced", 0))
+                        existing_chains = _safe_int(existing.get("entry_chains_traced", 0))
+                        new_chains = _safe_int(entry.get("entry_chains_traced", 0))
                         existing["entry_chains_traced"] = existing_chains + new_chains
                         # Max for functions_analyzed and total_entry_chains
                         for merge_key in ("functions_analyzed", "total_entry_chains"):
-                            new_val = int(entry.get(merge_key, 0))
-                            old_val = int(existing.get(merge_key, 0))
+                            new_val = _safe_int(entry.get(merge_key, 0))
+                            old_val = _safe_int(existing.get(merge_key, 0))
                             if new_val > old_val:
                                 existing[merge_key] = new_val
                         # Keep latest non-empty notes

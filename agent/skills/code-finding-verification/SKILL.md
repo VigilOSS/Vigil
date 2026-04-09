@@ -317,7 +317,8 @@ Examples:
 When you persist a false positive in structured finding state, include:
 - `details.kill_check` — integer 1-5 for the failed verification check
 - `details.kill_reason` — concise verifier rationale suitable for later query/reporting
-- Use `./scripts/assess.py verify-finding <slug> <verification-json>` instead of a generic finding patch so the verification transition is recorded in the audit ledger
+- Use `./scripts/assess.py kill-finding <slug> ...` when you already have the kill rationale in hand, because it enforces the required false-positive fields before the request leaves the CLI
+- Use `./scripts/assess.py verify-finding <slug> <verification-json>` for confirm/downgrade/dispute flows or when the verification payload already exists on disk, because the verification transition belongs in the audit ledger rather than a generic finding patch
 
 ## Output Format
 

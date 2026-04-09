@@ -123,6 +123,8 @@ def _normalize_coverage_status(value: str) -> str:
 def _coalesce_workflow_status(existing: str, incoming: str, *, explicit_workflow_override: bool = False) -> str:
     existing_normalized = _normalize_workflow_status(existing)
     incoming_normalized = _normalize_workflow_status(incoming)
+    if explicit_workflow_override:
+        return incoming_normalized
     if existing_normalized == "merged":
         return incoming_normalized
     if incoming_normalized == "merged":
@@ -1656,6 +1658,7 @@ def patch_finding(
     transition_reason_text: str = "",
     transition_artifact_ref: str = "",
     transition_metadata: dict[str, Any] | None = None,
+    allow_verification_mutation: bool = False,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
@@ -1665,6 +1668,30 @@ def patch_finding(
         ).fetchone()
     if existing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
+
+    existing_workflow = _row_workflow_status(existing)
+
+    if not allow_verification_mutation:
+        if verification_state is not None or verification_disposition is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="verification lifecycle changes must use POST /findings/{slug}/verify",
+            )
+        if workflow_status in {"false_positive", "merged"}:
+            detail = (
+                "false_positive workflow changes must use POST /findings/{slug}/verify"
+                if workflow_status == "false_positive"
+                else "merged workflow changes must use POST /findings/merge"
+            )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+        if existing_workflow == "merged" and workflow_status is not None and workflow_status != "merged":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="merged findings cannot be reopened via patch",
+            )
+        if existing_workflow == "false_positive" and workflow_status is not None and workflow_status != "false_positive":
+            verification_state = "unreviewed"
+            verification_disposition = "none"
 
     return create_finding(
         engagement.id,
@@ -1732,6 +1759,8 @@ def verify_finding(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
 
     existing_workflow = _row_workflow_status(existing)
+    if existing_workflow == "merged":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="merged findings cannot be re-verified")
     target_workflow = existing_workflow if existing_workflow not in {"false_positive", "merged"} else "active"
     target_verification_state = "verified"
     target_severity = str(existing["severity"])
@@ -1780,6 +1809,7 @@ def verify_finding(
         transition_reason_text=reason_text,
         transition_artifact_ref=artifact_ref or evidence_ref,
         transition_metadata=transition_metadata or None,
+        allow_verification_mutation=True,
     )
 
 
@@ -2012,6 +2042,7 @@ def list_report_findings(engagement_id: int) -> list[dict[str, Any]]:
             FROM assessment_findings
             WHERE engagement_id = ?
               AND status NOT IN ('merged', 'false_positive')
+              AND verification_state != 'disputed'
             ORDER BY
                 CASE severity
                     WHEN 'critical' THEN 0

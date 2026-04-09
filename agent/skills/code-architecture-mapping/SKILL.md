@@ -142,13 +142,13 @@ For each boundary, record: entry function, data format, size constraints (if any
 
 Assign each file to exactly one classification tier:
 
-**Critical** — Parses untrusted input, authentication/authorization logic, cryptographic operations, protocol state machines, privilege boundary enforcement.
-- Decision: Does this file directly handle data from a trust boundary AND make security-relevant decisions?
-- Examples: TLS handshake parser, HTTP header parser, authentication module, certificate validator, access control checker
+**Critical** — Files that sit on or immediately behind a trust boundary and define what attacker-controlled data means.
+- Decision: Does this file accept, parse, normalize, validate, deserialize, route, or semantically interpret untrusted input, or make authentication/authorization/crypto/state decisions from attacker-influenced values?
+- Examples: TLS handshake parser, HTTP header parser, authentication module, certificate validator, access control checker, protocol state machine
 
-**High** — Memory management, command/query building, file I/O with external data, serialization/deserialization, string manipulation on untrusted input.
-- Decision: Does this file manipulate untrusted data or manage resources that untrusted data flows through?
-- Examples: memory allocator, SQL query builder, XML parser, JSON deserializer, buffer management
+**High** — Files that may not be the first parser but still transform, propagate, or act on attacker-influenced data in security-relevant ways.
+- Decision: Does this file manipulate untrusted data or manage resources that attacker-influenced data can steer through control flow, resource bounds, filesystem paths, queries, commands, or security state?
+- Examples: memory allocator, SQL query builder, XML parser, JSON deserializer, buffer management, helper validators, file/path handling utilities
 
 **Medium** — Utility functions, string handling without direct untrusted input, platform abstraction layers, internal data structures.
 - Decision: Does this file provide infrastructure that critical/high files depend on, but does not itself touch trust boundaries?
@@ -231,7 +231,7 @@ Using ctags + grep (supplemented by structural index when available):
    f. Note if edge crosses a module boundary (from Step 6)
    g. Recurse into callee (up to depth 3 from entry point)
 
-2. **Reverse trace from critical sinks**:
+2. **Reverse trace from critical functions and security-relevant operations**:
    For each critical/high file's exported functions:
    a. grep/rg to find all callers across the codebase
    b. Record reverse edges
@@ -249,8 +249,8 @@ Using ctags + grep (supplemented by structural index when available):
          "edge_type": "direct|callback|vtable"
        }
      ],
-     "entry_points": [...],
-     "critical_sinks": [...]
+    "entry_points": [...],
+    "critical_targets": [...]
    }
    ```
 
@@ -263,12 +263,12 @@ Record every ctags/grep lookup used in audit_metadata.
 
 ### Step 12: Identify Entry-Point Chains
 
-From the call graph, extract complete chains from entry points to sinks:
+From the call graph, extract complete chains from entry points to security-relevant targets:
 
 1. For each entry point: depth-first traversal following callee edges
-2. At each node: check if it reaches a critical/high function
+2. At each node: check if it reaches a critical/high function, security-relevant decision, or harm-bearing operation
 3. If yes: record the complete chain with untrusted data annotations
-4. Rank chains by: sink severity x number of trust boundary crossings
+4. Rank chains by: impact severity x number of trust boundary crossings
 
 Output format:
 ```json
@@ -281,8 +281,8 @@ Output format:
         {"function": "upload_pack", "file": "upload-pack.c", "untrusted_data": ["pack_request"]},
         {"function": "receive_needs", "file": "upload-pack.c", "untrusted_data": ["shallow_lines"]}
       ],
-      "sink": {"function": "assign_shallow_commits_to_refs", "file": "shallow.c"},
-      "sink_type": "integer_arithmetic",
+      "target": {"function": "assign_shallow_commits_to_refs", "file": "shallow.c"},
+      "target_type": "integer_arithmetic",
       "boundary_crossings": 2
     }
   ]
@@ -291,23 +291,24 @@ Output format:
 
 ### Step 13: Generate Attack Hypotheses
 
-For each entry-point chain with a high-severity sink, generate 2-3 specific
+For each entry-point chain with a high-severity decision point, state transition, or
+harm-bearing operation, generate 2-3 specific
 attack hypotheses. Hypotheses attach to file-analysis-queue entries as `guidance_hypotheses`. Files without hypotheses still appear in the queue with an empty array — the hunter provides unconstrained analysis first, then checks hypotheses. This prevents hypothesis anchoring where the analysis scope gets limited to what the architect predicted.
 
 Each hypothesis specifies:
 1. **Entry point**: where untrusted data enters and what the attacker controls
 2. **Chain**: the sequence of functions through which data flows
-3. **Sink**: the specific operation that could cause harm
+3. **Target**: the specific decision point, state transition, or operation that could cause harm
 4. **CWE**: the vulnerability class that would apply
 5. **Concrete scenario**: "If the attacker sends [specific input], it reaches [function]
    where [specific operation] occurs without [specific guard], causing [specific harm]"
 
 Prioritize by:
 - entry_point_reachability: unauthenticated_network(4) > authenticated(3) > local_config(2) > CLI(1)
-- sink_severity: code_execution(4) > memory_corruption(3) > auth_bypass(3) > info_leak(2) > DoS(1)
+- impact_severity: code_execution(4) > memory_corruption(3) > auth_bypass(3) > state_corruption(2) > info_leak(2) > DoS(1)
 - guard_absence: no_guard(4) > partial(3) > most_paths(2) > all_paths(1)
 
-Score = reachability x severity x guard_absence. Include hypotheses scoring >= 16.
+Score = reachability x impact_severity x guard_absence. Include hypotheses scoring >= 16.
 
 ## Output Format
 
@@ -317,10 +318,10 @@ Produce a structured architecture map containing:
 3. **Trust Boundary Map**: boundary name, entry function, data format, slot type
 4. **File Classification Table**: JSON records keyed by backend `file_id` (with `file_path` as helper context when useful), plus classification tier, slot types, and priority score. Do not emit path-only classifications.
 5. **File Analysis Queue**: flat ordered list of concrete files for Phase 2 (Hunt) dispatch, grouped by `batch_theme` for cross-file reasoning. Written to `tools/analysis-state/file-analysis-queue.json`. Every critical/high file appears regardless of whether a hypothesis names it. Emit one object per file with concrete `file_id` and `file_path` — no nested batch wrappers, no globs. Do not emit `context_id`; the queue is file-level and the supporting structure comes from metadata plus `tools/analysis-state/structural-index/`.
-6. **Call Graph**: JSON adjacency list with edges, entry points, and critical sinks. Written to `tools/analysis-state/call-graph.json`.
-7. **Entry-Point Chains**: ranked list of complete data flow chains from entry to sink.
-8. **Attack Hypotheses**: prioritized list of specific vulnerability hypotheses. Each includes: entry point, chain, sink, CWE, concrete scenario, score. Written to `tools/analysis-state/attack-hypotheses.json`.
-9. **Structural Index Integration**: when `tools/analysis-state/structural-index/` exists, the call graph and entry-point chains incorporate tree-sitter-derived function definitions, call sites, and security sinks for higher accuracy.
+6. **Call Graph**: JSON adjacency list with edges, entry points, and critical targets. Written to `tools/analysis-state/call-graph.json`.
+7. **Entry-Point Chains**: ranked list of complete data flow chains from entry to target.
+8. **Attack Hypotheses**: prioritized list of specific vulnerability hypotheses. Each includes: entry point, chain, target, CWE, concrete scenario, score. Written to `tools/analysis-state/attack-hypotheses.json`.
+9. **Structural Index Integration**: when `tools/analysis-state/structural-index/` exists, the call graph and entry-point chains incorporate tree-sitter-derived function definitions, call sites, and security-relevant operations for higher accuracy.
 
 ## Extended Resources
 

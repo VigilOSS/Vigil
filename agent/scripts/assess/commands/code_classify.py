@@ -9,6 +9,18 @@ from pathlib import Path
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
+_ALLOWED_CLASSIFICATION_KEYS = frozenset(
+    {
+        "file_id",
+        "file_path",
+        "repo_id",
+        "classification",
+        "role",
+        "slot_types",
+        "analysis_priority",
+    }
+)
+
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("code-classify", help="Bulk-classify code files for analysis prioritization")
@@ -110,6 +122,16 @@ def run(args) -> None:
     for i, item in enumerate(payload):
         if not isinstance(item, dict):
             print(f"Item {i} is not a JSON object", file=sys.stderr)
+            sys.exit(1)
+        unknown_keys = sorted(set(item) - _ALLOWED_CLASSIFICATION_KEYS)
+        if unknown_keys:
+            if "slot_types_json" in unknown_keys:
+                print(
+                    f"Item {i} uses unsupported field 'slot_types_json'; use 'slot_types' instead",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"Item {i} has unsupported fields: {', '.join(unknown_keys)}", file=sys.stderr)
             sys.exit(1)
         if 'file_id' not in item and 'file_path' not in item:
             print(f"Item {i} missing required field 'file_id' or 'file_path'", file=sys.stderr)

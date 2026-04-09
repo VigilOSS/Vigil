@@ -38,19 +38,25 @@ If any item is missing, stop and request it from the operator before proceeding.
 - Compute analysis priority scores (1-100) combining classification, module criticality, and git churn
 - Produce the project-specific threat model that anchors all subsequent analysis
 - Build the cross-module call graph that enables multi-function reasoning in Phase 2
-- Generate attack hypotheses for entry-point chains reaching security-relevant sinks
+- Generate attack hypotheses for entry-point chains reaching security-relevant decisions,
+  state transitions, or harm-bearing operations
 
 ## Classification Tiers
 
 ### critical (priority 80-100)
-Files that parse untrusted network input, handle URL/protocol parsing, process authentication,
-manage cryptographic operations, implement protocol state machines, or perform memory allocation
-controlled by untrusted sizes. These get function-level tracking in Phase 2+.
+Files that sit on or immediately behind a trust boundary and define what attacker-controlled
+input means. This includes files that accept, parse, normalize, validate, deserialize, route,
+or semantically interpret untrusted input from network, URL, protocol, file, environment, IPC,
+or callback sources. It also includes files that process authentication, manage cryptographic
+operations, implement protocol state machines, or make allocation/authorization/state decisions
+from attacker-influenced values. These get function-level tracking in Phase 2+.
 
 ### high (priority 50-79)
-Files that manage memory allocation with internal sizes, build command/query structures,
-handle file I/O with potentially user-influenced paths, implement configuration parsing,
-or contain complex state machine logic with security implications.
+Files that may not be the first trust-boundary parser, but still transform, propagate, or act on
+attacker-influenced data in ways that can affect control flow, resource bounds, authorization,
+filesystem paths, query/command construction, or security-relevant state. This includes helper
+parsers, validators, config loaders, file/path handlers, query builders, serializer/deserializer
+helpers, and state-machine components reached from critical entry paths.
 
 ### medium (priority 20-49)
 Internal utility functions, data structure implementations, string handling helpers,
@@ -122,7 +128,8 @@ If a structural index exists at `tools/analysis-state/structural-index/`, use it
    ```
 
 4. Identify entry-point chains:
-   Trace each entry point forward to leaf functions or sinks.
+   Trace each entry point forward to leaf functions, security-relevant decisions,
+   state transitions, or sinks.
    Record the complete chain with untrusted data flow annotations.
    Example: handle() -> run_service() -> upload_pack() -> receive_needs() -> assign_shallow()
 
@@ -130,14 +137,15 @@ If a structural index exists at `tools/analysis-state/structural-index/`, use it
 
 Attack hypotheses are guidance for hunters, not the sole work items. Every critical and high file enters the file analysis queue regardless of whether a hypothesis names it — hypotheses help hunters prioritize within files, but files without hypotheses are still fully analyzed during the unconstrained broad analysis pass. This prevents hypothesis anchoring where the analysis scope gets limited to what the architect predicted.
 
-For each entry-point chain that reaches a critical/high function through security-relevant
-sinks, generate 2-3 specific attack hypotheses.
+For each high-priority entry-point chain that reaches a critical/high function, trust-boundary
+transition, security-relevant decision, state transition, or harm-bearing operation, generate
+2-3 specific attack hypotheses.
 
 ### Format
 Each hypothesis specifies:
 - The entry point where untrusted data enters
 - The chain of functions through which it flows
-- The specific sink where harm could occur
+- The specific decision point, state transition, or operation where harm could occur
 - The CWE pattern that would apply
 - The concrete attack scenario
 
@@ -153,9 +161,9 @@ STARTTLS negotiation is capability-dependent — test for MITM stripping STARTTL
 capability to force cleartext credential transmission (CWE-319)."
 
 ### Prioritization
-Rank hypotheses by: entry_point_reachability x sink_severity x guard_absence
+Rank hypotheses by: entry_point_reachability x impact_severity x guard_absence
 - Reachability: unauthenticated network > authenticated > local config > CLI
-- Sink severity: code execution > memory corruption > auth bypass > info leak > DoS
+- Impact severity: code execution > memory corruption > auth bypass > state corruption > info leak > DoS
 - Guard absence: no guard > partial guard > guard on some paths > guard on all paths
 
 ## Input
