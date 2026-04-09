@@ -47,6 +47,17 @@ cd ~/security-research-claude
 
 To switch clients, stop using the current engagement, install the other client into a different directory, and start a new engagement there.
 
+### Updating after a `git pull`
+
+After pulling new changes from the repository, re-run the installer to push updates to your working directory:
+
+```bash
+# from the repo checkout
+./install.sh claude   # or codex
+```
+
+The installer upgrades in place — engagements, the orchestrator database, and `.env` are never moved or deleted. Code, prompts, skills, and scripts are replaced with the latest versions from the repo.
+
 ### 1. Kali MCP runtime
 
 Start the shared runtime:
