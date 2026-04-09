@@ -43,45 +43,23 @@ If any item is missing, stop and request it from the operator before proceeding.
 
 ## Classification Tiers
 
-### critical (priority 80-100)
-Files that sit on or immediately behind a trust boundary and define what attacker-controlled
-input means. This includes files that accept, parse, normalize, validate, deserialize, route,
-or semantically interpret untrusted input from network, URL, protocol, file, environment, IPC,
-or callback sources. It also includes files that process authentication, manage cryptographic
-operations, implement protocol state machines, or make allocation/authorization/state decisions
-from attacker-influenced values. These get function-level tracking in Phase 2+.
+See skill file (Step 9) for full tier descriptions with decision questions and examples,
+and the Classification Decision Framework flowchart. The five tiers and priority ranges:
 
-### high (priority 50-79)
-Files that may not be the first trust-boundary parser, but still transform, propagate, or act on
-attacker-influenced data in ways that can affect control flow, resource bounds, authorization,
-filesystem paths, query/command construction, or security-relevant state. This includes helper
-parsers, validators, config loaders, file/path handlers, query builders, serializer/deserializer
-helpers, and state-machine components reached from critical entry paths.
-
-### medium (priority 20-49)
-Internal utility functions, data structure implementations, string handling helpers,
-platform abstraction layers that process data from higher-priority callers.
-
-### low (priority 5-19)
-Build system files, test infrastructure, example programs, documentation generators,
-pure UI code with no security-relevant data handling.
-
-### skip (priority 0)
-Generated files, test fixtures/data, images/assets, vendored third-party code,
-pure documentation (README, CHANGELOG, man pages). Record a `skip_reason` for each.
+- **critical** (80-100) — Trust boundary files: parsers, auth, crypto, protocol state machines, allocation/authorization decisions from attacker-influenced values. Function-level tracking in Phase 2+.
+- **high** (50-79) — Files that transform/propagate attacker-influenced data affecting control flow, resource bounds, filesystem paths, queries, or security state.
+- **medium** (20-49) — Internal utilities, data structures, platform abstraction.
+- **low** (5-19) — Build system, test infrastructure, examples, documentation generators.
+- **skip** (0) — Generated files, test fixtures, assets, vendored code. Record `skip_reason`.
 
 ## Slot Types (Shannon's Classification)
 
-Annotate what kind of untrusted data enters critical and high files:
+Annotate what kind of untrusted data enters critical and high files. See skill file
+(Step 10) for the full slot type table with descriptions and examples. The 8 types are:
+`NETWORK-INPUT`, `URL-COMPONENT`, `CMD-ARGUMENT`, `FILE-CONTENT`, `ENV-VARIABLE`,
+`CALLBACK-DATA`, `PROTOCOL-FIELD`, `SERIALIZED-DATA`.
 
-- `NETWORK-INPUT` — Data from remote servers (HTTP headers, response bodies, TLS data, DNS responses)
-- `URL-COMPONENT` — User-supplied URL components (scheme, host, path, query, fragment)
-- `CMD-ARGUMENT` — Command-line arguments and configuration values
-- `FILE-CONTENT` — Data read from files (config files, cookie jars, certificate stores)
-- `ENV-VARIABLE` — Environment variable values
-- `CALLBACK-DATA` — Data passed through callback interfaces from other modules
-- `PROTOCOL-FIELD` — Protocol-specific parsed fields (HTTP chunked encoding sizes, Content-Length, etc.)
-- `SERIALIZED-DATA` — Binary/structured serialization formats (protobuf, ASN.1, flatbuffers, CBOR, MessagePack, BSON)
+A file may have multiple slot types. Record primary and secondary.
 
 ## Call Graph Production
 
