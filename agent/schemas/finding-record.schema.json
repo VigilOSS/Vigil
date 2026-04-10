@@ -132,6 +132,10 @@
           "type": "string",
           "description": "Affected parameter name or input vector"
         },
+        "slot_type": {
+          "type": "string",
+          "description": "Code-analysis slot type or attack input class associated with the finding"
+        },
         "request_method": {
           "type": "string",
           "description": "HTTP method or triggering action (e.g., GET, POST, PUT, DELETE)"
@@ -150,6 +154,14 @@
           "minimum": 1,
           "maximum": 5,
           "description": "Verification check number responsible for the false-positive verdict"
+        },
+        "taint_path": {
+          "type": "string",
+          "description": "Ordered attacker-controlled data flow from entry point to sink"
+        },
+        "guards_evaluated": {
+          "type": "string",
+          "description": "Guard analysis showing which checks exist and why they fail or can be bypassed"
         },
         "impact": {
           "type": "string",
@@ -174,6 +186,14 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Ordered reproduction steps, one string per step"
+        },
+        "variant_of": {
+          "type": "string",
+          "description": "Finding slug of the original finding when this record is a verified variant"
+        },
+        "original_pattern": {
+          "type": "string",
+          "description": "Abstract pattern signature copied from the original finding during variant analysis"
         }
       }
     },

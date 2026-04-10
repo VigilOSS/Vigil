@@ -49,8 +49,20 @@ def _load_verify_finding_module():
     return _load_assess_module("verify_finding.py", "test_verify_finding_command")
 
 
+def _load_contract_module():
+    return _load_assess_module("contract.py", "test_contract_command")
+
+
 def _load_post_module():
     return _load_assess_module("post.py", "test_post_command")
+
+
+def _load_patch_module():
+    return _load_assess_module("patch.py", "test_patch_command")
+
+
+def _load_record_finding_module():
+    return _load_assess_module("record_finding.py", "test_record_finding_command")
 
 
 def _load_update_finding_module():
@@ -990,15 +1002,105 @@ def test_post_accepts_inline_json_payload(monkeypatch, capsys):
     module.run(
         SimpleNamespace(
             engagement_dir=Path("/tmp/eng"),
-            endpoint="findings",
-            payload='{"title":"Inline finding"}',
+            endpoint="credentials",
+            payload='{"credential_key":"demo","kind":"token","principal":"api-user"}',
             inline_payload=None,
         )
     )
 
-    assert captured["endpoint"] == "findings"
-    assert captured["payload"] == {"title": "Inline finding"}
+    assert captured["endpoint"] == "credentials"
+    assert captured["payload"] == {
+        "credential_key": "demo",
+        "kind": "token",
+        "principal": "api-user",
+    }
     assert '"ok": true' in capsys.readouterr().out.lower()
+
+
+def test_post_rejects_raw_finding_creation_and_points_to_helper(capsys):
+    module = _load_post_module()
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=Path("/tmp/eng"),
+                endpoint="findings",
+                payload='{"title":"Inline finding"}',
+                inline_payload=None,
+            )
+        )
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "record-finding" in err
+    assert "assess.py contract record-finding" in err
+
+
+def test_post_rejects_raw_verify_endpoint_and_points_to_helper(capsys):
+    module = _load_post_module()
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=Path("/tmp/eng"),
+                endpoint="findings/FINDING-VA-001/verify",
+                payload='{"disposition":"confirmed","reason_text":"reproduced"}',
+                inline_payload=None,
+            )
+        )
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "verify-finding" in err
+    assert "kill-finding" in err
+    assert "assess.py contract verify-finding" in err
+
+
+def test_patch_rejects_raw_finding_patch_and_points_to_helper(capsys):
+    module = _load_patch_module()
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=Path("/tmp/eng"),
+                endpoint="findings/FINDING-VA-001",
+                payload='{"workflow_status":"draft"}',
+                inline_payload=None,
+            )
+        )
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "update-finding" in err
+    assert "reset-finding" in err
+    assert "assess.py contract update-finding" in err
+    assert "assess.py contract reset-finding" in err
+
+
+def test_contract_prints_record_finding_contract(capsys):
+    module = _load_contract_module()
+
+    module.run(SimpleNamespace(name="record-finding"))
+
+    out = capsys.readouterr().out
+    assert "Command: record-finding" in out
+    assert "Schema: finding-record.schema.json" in out
+    assert "Helper defaults:" in out
+    assert "workflow_status = active" in out
+    assert "verification_state = unreviewed" in out
+    assert "verification_disposition = none" in out
+    assert "Examples:" in out
+
+
+def test_contract_prints_reset_finding_contract(capsys):
+    module = _load_contract_module()
+
+    module.run(SimpleNamespace(name="reset-finding"))
+
+    out = capsys.readouterr().out
+    assert "Command: reset-finding" in out
+    assert "reopen" in out.lower()
+    assert "assess.py reset-finding <slug>" in out
 
 
 def test_kill_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_path, capsys):
@@ -1055,6 +1157,63 @@ def test_kill_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_
     assert captured["payload"]["details"]["kill_reason"] == "validate_length() enforces an 8KB cap"
     assert captured["payload"]["details"]["kill_check"] == 2
     assert "FINDING-VA-001" in capsys.readouterr().out
+
+
+def test_record_finding_reports_normalized_contract_errors_before_backend(monkeypatch, tmp_path, capsys):
+    module = _load_record_finding_module()
+
+    findings_file = tmp_path / "findings.md"
+    findings_file.write_text("# Findings\n", encoding="utf-8")
+    payload_path = tmp_path / "finding.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "title": "Legacy payload",
+                "severity": "high",
+                "status": "confirmed",
+                "confidence": "high",
+                "description": "stale prompt field",
+                "details": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            raise AssertionError("record-finding should fail before contacting the backend")
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=tmp_path,
+                agent_name="code-vuln-hunter",
+                json_file=str(payload_path),
+            )
+        )
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "finding payload invalid after helper defaults" in err
+    assert "payload.status is not allowed" in err
+    assert "payload.confidence is not allowed" in err
+    assert "payload.description is not allowed" in err
+    assert "payload.details.evidence is required" in err
+    assert "payload.details.impact is required" in err
+    assert "workflow_status = active" in err
+    assert "assess.py contract record-finding" in err
 
 
 def test_update_finding_patches_by_slug_from_flags(monkeypatch, tmp_path):

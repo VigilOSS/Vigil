@@ -11,6 +11,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.contracts import common_mistake_hints, render_contract
 from assess.lib.findings import (
     finding_lock_path,
     next_finding_id,
@@ -18,13 +19,72 @@ from assess.lib.findings import (
     update_finding_count,
 )
 from assess.lib.locking import file_lock
+from assess.lib.schema_validation import collect_validation_errors, load_schema
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("record-finding", help="Record a structured finding")
+    p = subparsers.add_parser(
+        "record-finding",
+        help="Record a structured finding",
+        epilog="See `assess.py contract record-finding` for the canonical payload shape and examples.",
+    )
     p.add_argument("agent_name", help="Agent name (e.g. vulnerability-analyst)")
     p.add_argument("json_file", help="Path to finding JSON file")
     p.set_defaults(func=run)
+
+
+_FINDING_SCHEMA = load_schema("finding-record.schema.json")
+
+
+def _normalize_payload(payload: dict, *, agent_name: str, candidate_slug: str) -> dict:
+    normalized = dict(payload)
+    normalized["slug"] = candidate_slug
+    normalized.setdefault("source_name", agent_name)
+    normalized.setdefault("severity", "medium")
+    normalized.setdefault("workflow_status", "active")
+    normalized.setdefault("verification_state", "unreviewed")
+    normalized.setdefault("verification_disposition", "none")
+    normalized.setdefault("defect_family", normalized.get("title", candidate_slug))
+    normalized.setdefault("root_cause_key", "")
+    normalized.setdefault("auth_context", "anonymous")
+    normalized.setdefault("canonical_location", "")
+    normalized.setdefault("summary", normalized.get("title", candidate_slug))
+    normalized.setdefault("evidence_ref", "")
+    normalized.setdefault("notes", "")
+
+    details = normalized.get("details") or {}
+    if not isinstance(details, dict):
+        details = {}
+    details.setdefault("discovered_by", agent_name)
+    normalized["details"] = details
+
+    provenance = normalized.get("provenance") or {}
+    if not isinstance(provenance, dict):
+        provenance = {}
+    provenance.setdefault("agent_name", agent_name)
+    provenance.setdefault("artifact", "findings.md")
+    normalized["provenance"] = provenance
+
+    normalized.setdefault("links", [])
+    return normalized
+
+
+def _report_validation_errors(payload: dict, errors: list[str]) -> None:
+    print("finding payload invalid after helper defaults:", file=sys.stderr)
+    for error in errors:
+        print(f"  - {error}", file=sys.stderr)
+
+    hints = common_mistake_hints("record-finding", payload)
+    if hints:
+        print("Common legacy-field fixes:", file=sys.stderr)
+        for hint in hints:
+            print(f"  - {hint}", file=sys.stderr)
+
+    print("", file=sys.stderr)
+    print("Run `assess.py contract record-finding` for the canonical helper contract.", file=sys.stderr)
+    print("", file=sys.stderr)
+    print(render_contract("record-finding"), file=sys.stderr)
+    sys.exit(1)
 
 
 def run(args) -> None:
@@ -56,35 +116,10 @@ def run(args) -> None:
         if not candidate_slug:
             candidate_slug = next_finding_id(eng_dir, agent_name)
 
-        # Inject defaults
-        payload["slug"] = candidate_slug
-        payload.setdefault("source_name", agent_name)
-        payload.setdefault("severity", "medium")
-        payload.setdefault("workflow_status", "active")
-        payload.setdefault("verification_state", "unreviewed")
-        payload.setdefault("verification_disposition", "none")
-        payload.setdefault("defect_family", payload.get("title", candidate_slug))
-        payload.setdefault("root_cause_key", "")
-        payload.setdefault("auth_context", "anonymous")
-        payload.setdefault("canonical_location", "")
-        payload.setdefault("summary", payload.get("title", candidate_slug))
-        payload.setdefault("evidence_ref", "")
-        payload.setdefault("notes", "")
-
-        details = payload.get("details") or {}
-        if not isinstance(details, dict):
-            details = {}
-        details.setdefault("discovered_by", agent_name)
-        payload["details"] = details
-
-        provenance = payload.get("provenance") or {}
-        if not isinstance(provenance, dict):
-            provenance = {}
-        provenance.setdefault("agent_name", agent_name)
-        provenance.setdefault("artifact", "findings.md")
-        payload["provenance"] = provenance
-
-        payload.setdefault("links", [])
+        payload = _normalize_payload(payload, agent_name=agent_name, candidate_slug=candidate_slug)
+        validation_errors = collect_validation_errors(payload, _FINDING_SCHEMA)
+        if validation_errors:
+            _report_validation_errors(payload, validation_errors)
 
         # POST to backend (backend does Pydantic validation)
         client = AssessmentClient(cfg.base_url, cfg.engagement_key)

@@ -24,7 +24,9 @@ def register(subparsers) -> None:
             "  assess.py update-finding FINDING-VA-001 --status active --severity low "
             "--reason \"Manual review reduced impact\"\n"
             "  assess.py patch-finding FINDING-VA-001 --inline "
-            "'{\"workflow_status\":\"draft\",\"reason_text\":\"Needs more evidence\"}'"
+            "'{\"workflow_status\":\"draft\",\"reason_text\":\"Needs more evidence\"}'\n\n"
+            "See also:\n"
+            "  assess.py contract update-finding"
         ),
     )
     p.add_argument("finding_slug", help="Canonical finding slug")

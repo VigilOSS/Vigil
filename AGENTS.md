@@ -35,6 +35,62 @@ Validate prompt wording and renderer drift with:
 uv run --directory orchestrator/backend pytest tests/test_prompt_wording.py
 ```
 
+# Prompt system flow
+
+Use this section when editing prompts. It is intentionally architectural rather than field-specific.
+`CODE-MAP.md` documents file ownership; this section documents how the prompt layers fit together
+so edits land in the right place and do not create drift.
+
+## Prompt layers
+
+- `agent/operator-core.md` is the source-of-truth operator loop for web/runtime engagements.
+  It defines phase flow, dispatch rules, recording rules, and backend-vs-artifact truth boundaries.
+- `agent/operator-core-code.md` is a mode overlay for white-box code analysis. It reuses the same
+  backend and CLI, but changes phases, dispatch context, and specialist responsibilities.
+- `agent/AGENTS.md` and `agent/CLAUDE.md` are generated operator wrappers. They are committed outputs,
+  not authoring surfaces. If they need semantic changes, edit the source prompt and rerender.
+- `agent/agents/*.md` are role prompts. They define agent identity, responsibilities, handoffs,
+  and examples for a specific specialist. They should not become an independent source of backend
+  contract truth.
+- `agent/shared-constraints.md` and `agent/shared-constraints-code.md` are the first-load
+  specialist contract layer. Rules that must hold across many specialists belong here or in the
+  CLI, not in only one role prompt.
+- `agent/rules/*.md` are always-active behavioral rules. They shape methodology and writing style;
+  they are not the place to define endpoint ownership or payload schemas.
+- `agent/scripts/assess.py` and its helper subcommands are the agent-facing contract surface for
+  durable state. If a helper owns a lifecycle transition, prompts should point to that helper
+  instead of teaching raw endpoint payloads from memory.
+
+## Editing rules
+
+- Put workflow and orchestration changes in `operator-core.md` or `operator-core-code.md`,
+  because those files define how the system moves between phases and specialists.
+- Put cross-specialist constraints in `shared-constraints*.md`, because that is where subagents
+  load durable recording and scope rules before role-specific instructions.
+- Put role-specific reasoning guidance in `agent/agents/*.md`, because that is where identity,
+  examples, and handoff semantics live.
+- Put payload-shape and lifecycle truth in CLI helpers when possible. Prompts should reference
+  helper commands such as `assess.py contract`, `record-finding`, `verify-finding`, `kill-finding`,
+  `reset-finding`, and `update-finding` rather than duplicating raw schema details.
+- Treat generated artifacts as drift detectors, not authoring targets. If you edit a generated
+  prompt directly, the next render will overwrite it.
+
+## Prompt edit checklist
+
+When changing any finding, lifecycle, or dispatch wording, review these files together before
+editing so the change stays coherent across layers:
+
+1. `agent/operator-core.md`
+2. `agent/operator-core-code.md` if code analysis is involved
+3. Relevant `agent/agents/*.md` role prompts
+4. `agent/shared-constraints.md` or `agent/shared-constraints-code.md`
+5. The owning `assess.py` helper command and its tests
+6. Generated operator wrappers after rerendering
+
+If a change affects prompt generation, rerender and run `tests/test_prompt_wording.py`.
+If a change affects CLI ownership or lifecycle behavior, run the relevant backend CLI and API tests,
+not just the prompt test.
+
 # Orchestrator backend
 
 The backend is Python 3.11+ and `uv`-first. Use `uv`, not ad hoc `pip` installs:
