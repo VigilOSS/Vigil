@@ -599,7 +599,11 @@ If the verifier's clean-file spot-check discovers a missed vulnerability:
 
 ```bash
 # Record verification results (updates existing findings)
-./scripts/assess.py record-finding code-vuln-verifier <updated-finding-json>
+./scripts/assess.py verify-finding <slug> <verification-json>
+# Or use the dedicated false-positive helper when you already have the kill rationale
+./scripts/assess.py kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
+# Reopen a previously verified or false-positive finding when new evidence requires re-triage
+./scripts/assess.py reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
 # Record variant findings (new findings)
 ./scripts/assess.py record-finding code-variant-hunter <variant-finding-json>
 ```

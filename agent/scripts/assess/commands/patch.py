@@ -8,6 +8,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.contracts import raw_endpoint_error
 from assess.lib.findings import sync_finding_markdown, update_finding_count
 from assess.lib.json_inputs import parse_json_argument
 
@@ -20,7 +21,7 @@ def register(subparsers) -> None:
         epilog=(
             "Examples:\n"
             "  assess.py patch coverage-items/42 payload.json\n"
-            "  assess.py patch findings/FINDING-VA-001 --inline '{\"workflow_status\":\"draft\"}'"
+            "  assess.py patch coverage-items/42 --inline '{\"status\":\"covered\"}'"
         ),
     )
     p.add_argument("endpoint", help="e.g. coverage-items/42 or findings/FINDING-VA-001")
@@ -45,6 +46,10 @@ def run(args) -> None:
         sys.exit(1)
     if not isinstance(payload, dict):
         print("PATCH payload must be a JSON object", file=sys.stderr)
+        sys.exit(1)
+    error = raw_endpoint_error("PATCH", args.endpoint, payload)
+    if error:
+        print(error, file=sys.stderr)
         sys.exit(1)
     cfg = load_config(args.engagement_dir)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)

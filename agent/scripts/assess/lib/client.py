@@ -100,11 +100,7 @@ class AssessmentClient:
 
                 # Non-retryable error — report it
                 if resp.status == 422:
-                    try:
-                        detail = json.loads(resp_body)
-                        msg = json.dumps(detail, indent=2)
-                    except (json.JSONDecodeError, TypeError):
-                        msg = resp_body
+                    msg = _format_validation_error(resp_body)
                     raise AssessError(f"HTTP 422 validation error:\n{msg}")
 
                 raise AssessError(f"HTTP {resp.status}:\n{resp_body}")
@@ -163,3 +159,30 @@ class AssessmentClient:
     def close(self) -> None:
         """Close the underlying connection."""
         self._reset_conn()
+
+
+def _format_validation_error(resp_body: str) -> str:
+    try:
+        detail = json.loads(resp_body)
+    except (json.JSONDecodeError, TypeError):
+        return resp_body
+
+    if isinstance(detail, dict):
+        validation_items = detail.get("detail")
+        if isinstance(validation_items, list):
+            lines = ["Validation errors:"]
+            for item in validation_items:
+                if not isinstance(item, dict):
+                    lines.append(f"  - {item}")
+                    continue
+                loc = ".".join(str(part) for part in item.get("loc", []))
+                msg = str(item.get("msg", "invalid value"))
+                if loc:
+                    lines.append(f"  - {loc}: {msg}")
+                else:
+                    lines.append(f"  - {msg}")
+            return "\n".join(lines)
+        detail_value = detail.get("detail")
+        if isinstance(detail_value, str):
+            return detail_value
+    return json.dumps(detail, indent=2)

@@ -7,6 +7,7 @@ import sys
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.contracts import raw_endpoint_error
 from assess.lib.json_inputs import parse_json_argument
 
 
@@ -18,7 +19,7 @@ def register(subparsers) -> None:
         epilog=(
             "Examples:\n"
             "  assess.py post credentials payload.json\n"
-            "  assess.py post findings --inline '{\"title\":\"Auth bypass\",\"severity\":\"high\"}'"
+            "  assess.py post blocked-techniques payload.json"
         ),
     )
     p.add_argument("endpoint", help="e.g. credentials, credential-tests, access-records, blocked-techniques, probe-runs")
@@ -40,6 +41,10 @@ def run(args) -> None:
         )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
+        sys.exit(1)
+    error = raw_endpoint_error("POST", args.endpoint, payload)
+    if error:
+        print(error, file=sys.stderr)
         sys.exit(1)
     cfg = load_config(args.engagement_dir)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)

@@ -50,8 +50,8 @@ Keep it light:
 - `agent/scripts/init_engagement.sh` - engagement bootstrap. Why: creates run directories, seeds local wrappers, and initializes scope/auth/runtime scaffolding.
 - `agent/scripts/assess.py` - CLI entrypoint. Why: stable shell surface into the assessment and code-analysis workflows.
 - `agent/scripts/assess/cli.py` - subcommand registry. Why: authoritative map of supported operator/backend actions.
-- `agent/scripts/assess/commands/` - command families. Why: fetch/post/patch, filtered finding listing plus finding lifecycle helpers (`verify-finding`, `kill-finding`, `update-finding`, `reset-finding`), record-*, dispatch/ingest, exploit/session, and `code-*` flows are split here.
-- `agent/scripts/assess/lib/` - shared plumbing. Why: API client, locking, auth, scope, DB helpers, schema validation, sessions, and tree-sitter indexing live here.
+- `agent/scripts/assess/commands/` - command families. Why: fetch/post/patch, filtered finding listing plus finding lifecycle helpers (`verify-finding`, `kill-finding`, `update-finding`, `reset-finding`), helper contract introspection (`contract`), record-*, dispatch/ingest, exploit/session, and `code-*` flows are split here.
+- `agent/scripts/assess/lib/` - shared plumbing. Why: API client, helper contract metadata, locking, auth, scope, DB helpers, schema validation, sessions, and tree-sitter indexing live here.
 - `agent/schemas/` - JSON payload contracts. Why: durable record formats for findings, chains, credentials, access records, probe runs, proposals, and code-analysis outputs.
 - `agent/scripts/schema.sql` - transient local queue schema. Why: local case/work-item buffering, not orchestrator backend state.
 - `agent/scripts/proxy_addon.py` - mitmproxy collector. Why: converts captured traffic into the transient work buffer.
