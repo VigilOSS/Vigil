@@ -35,6 +35,22 @@ Validate prompt wording and renderer drift with:
 uv run --directory orchestrator/backend pytest tests/test_prompt_wording.py
 ```
 
+# Assess schema regeneration
+
+Backend-backed schemas in `agent/schemas/` are generated from backend request models plus explicit
+agent-side overlays in `orchestrator/backend/scripts/generate_agent_schemas.py`. Regenerate them
+when you change assessment/code-analysis request models or the agent-side schema overlays:
+
+```bash
+uv run --directory orchestrator/backend python scripts/generate_agent_schemas.py
+```
+
+Check for schema drift with:
+
+```bash
+uv run --directory orchestrator/backend python scripts/generate_agent_schemas.py --check
+```
+
 # Prompt system flow
 
 Use this section when editing prompts. It is intentionally architectural rather than field-specific.
