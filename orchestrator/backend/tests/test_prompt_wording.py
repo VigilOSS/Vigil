@@ -188,6 +188,16 @@ def test_code_analysis_skills_use_current_phase_numbers_and_tools():
     assert "`Glob`" in variant_skill
 
 
+def test_code_variant_hunter_example_matches_record_finding_contract():
+    repo_root = Path(__file__).resolve().parents[3]
+    hunter_prompt = (repo_root / "agent" / "agents" / "code-variant-hunter.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Include `details.impact` in every finding payload" in hunter_prompt
+    assert '"impact": "Remote attackers can trigger heap corruption in the FTP path parser with an overlong path"' in hunter_prompt
+
+
 def test_code_analysis_codex_wrappers_exist():
     repo_root = Path(__file__).resolve().parents[3]
     codex_dir = repo_root / "agent" / ".codex" / "agents"
