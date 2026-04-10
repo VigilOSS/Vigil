@@ -116,6 +116,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         preferred_invocations=(
             "assess.py verify-finding <slug> <verification-json>",
             'assess.py verify-finding <slug> --disposition downgraded --reason "..." --new-severity low',
+            'assess.py verify-finding <slug> --disposition false_positive --reason "..." --kill-reason "..." --kill-check 2',
         ),
         author_supplied_fields=(
             "disposition",
@@ -178,6 +179,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         preferred_invocations=(
             "assess.py update-finding <slug> <patch-json-file>",
             'assess.py update-finding <slug> --status reported --reason "Published in report"',
+            'assess.py update-finding <slug> --inline \'{"workflow_status":"draft","reason_text":"Needs more evidence"}\'',
         ),
         author_supplied_fields=(
             "at least one patch field",
@@ -341,6 +343,24 @@ def render_contract(name: str) -> str:
         for example in contract.examples:
             lines.append(json.dumps(example, indent=2, ensure_ascii=False))
 
+    return "\n".join(lines)
+
+
+def render_contract_epilog(name: str) -> str:
+    contract = get_contract(name)
+    if contract is None:
+        available = ", ".join(contract_names())
+        raise ValueError(f"Unknown contract '{name}'. Available contracts: {available}")
+
+    lines = ["Examples:"]
+    lines.extend(f"  {entry}" for entry in contract.preferred_invocations)
+    lines.extend(
+        [
+            "",
+            "See also:",
+            f"  assess.py contract {contract.name}",
+        ]
+    )
     return "\n".join(lines)
 
 

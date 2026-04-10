@@ -1103,6 +1103,31 @@ def test_contract_prints_reset_finding_contract(capsys):
     assert "assess.py reset-finding <slug>" in out
 
 
+def test_verify_finding_help_is_rendered_from_contract_registry(capsys):
+    cli = _load_cli_module()
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["verify-finding", "--help"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "assess.py verify-finding <slug> <verification-json>" in out
+    assert "assess.py contract verify-finding" in out
+    assert "Contract:" not in out
+
+
+def test_update_finding_help_drops_patch_finding_alias(capsys):
+    cli = _load_cli_module()
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["update-finding", "--help"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "assess.py update-finding <slug> --inline" in out
+    assert "patch-finding" not in out
+
+
 def test_kill_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_path, capsys):
     module = _load_kill_finding_module()
 
