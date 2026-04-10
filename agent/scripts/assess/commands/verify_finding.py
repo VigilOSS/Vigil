@@ -30,7 +30,9 @@ def register(subparsers) -> None:
             "  assess.py verify-finding FINDING-VA-001 --disposition downgraded --reason "
             "\"Impact is lower after retest\" --new-severity low\n"
             "  assess.py verify-finding FINDING-VA-001 --disposition false_positive --reason "
-            "\"Guard blocks the path\" --kill-reason \"validate_length() rejects oversized input\" --kill-check 2"
+            "\"Guard blocks the path\" --kill-reason \"validate_length() rejects oversized input\" --kill-check 2\n\n"
+            "See also:\n"
+            "  assess.py contract verify-finding"
         ),
     )
     p.add_argument("finding_slug", help="Canonical finding slug to verify")

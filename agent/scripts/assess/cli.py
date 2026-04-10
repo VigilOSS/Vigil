@@ -26,6 +26,7 @@ def main(argv: list[str] | None = None) -> None:
         approve_exploit,
         check_coverage,
         check_exploit_gate,
+        contract,
         code_classify,
         code_coverage,
         code_dispatch,
@@ -90,6 +91,7 @@ def main(argv: list[str] | None = None) -> None:
         code_dispatch,
         code_record_analysis,
         code_coverage,
+        contract,
     ):
         mod.register(sub)
 

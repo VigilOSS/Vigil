@@ -20,7 +20,9 @@ def register(subparsers) -> None:
         epilog=(
             "Examples:\n"
             "  assess.py reset-finding FINDING-VA-001 --reason \"Retest disproved the kill\" --status active\n"
-            "  assess.py reset-finding FINDING-VA-001 --reason \"Needs another look\""
+            "  assess.py reset-finding FINDING-VA-001 --reason \"Needs another look\"\n\n"
+            "See also:\n"
+            "  assess.py contract reset-finding"
         ),
     )
     p.add_argument("finding_slug", help="Canonical finding slug")

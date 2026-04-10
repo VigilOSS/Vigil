@@ -18,15 +18,29 @@ def load_schema(schema_name: str) -> dict[str, Any]:
     return json.loads(schema_path.read_text(encoding="utf-8"))
 
 
-def validate_payload(payload: Any, schema: dict[str, Any], *, path: str = "payload") -> None:
+def collect_validation_errors(payload: Any, schema: dict[str, Any], *, path: str = "payload") -> list[str]:
     errors: list[str] = []
     _validate_value(payload, schema, path, errors)
+    return errors
+
+
+def validate_payload(payload: Any, schema: dict[str, Any], *, path: str = "payload") -> None:
+    errors = collect_validation_errors(payload, schema, path=path)
     if errors:
         raise SchemaValidationError(errors[0])
 
 
 def _validate_value(value: Any, schema: dict[str, Any], path: str, errors: list[str]) -> None:
     expected_type = schema.get("type")
+    if isinstance(expected_type, list):
+        if any(_matches_json_type(value, item) for item in expected_type):
+            expected_type = next(
+                (item for item in expected_type if _matches_json_type(value, item)),
+                expected_type[0],
+            )
+        else:
+            errors.append(f"{path} must be one of the allowed types: {expected_type}")
+            return
     if expected_type == "object":
         if not isinstance(value, dict):
             errors.append(f"{path} must be an object")
@@ -90,3 +104,21 @@ def _validate_value(value: Any, schema: dict[str, Any], path: str, errors: list[
         maximum = schema.get("maximum")
         if maximum is not None and value > maximum:
             errors.append(f"{path} must be <= {maximum}")
+
+
+def _matches_json_type(value: Any, expected_type: str) -> bool:
+    if expected_type == "object":
+        return isinstance(value, dict)
+    if expected_type == "array":
+        return isinstance(value, list)
+    if expected_type == "string":
+        return isinstance(value, str)
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected_type == "boolean":
+        return isinstance(value, bool)
+    if expected_type == "null":
+        return value is None
+    return False

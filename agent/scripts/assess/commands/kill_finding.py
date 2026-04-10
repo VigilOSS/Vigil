@@ -22,7 +22,9 @@ def register(subparsers) -> None:
             "  assess.py kill-finding FINDING-VA-001 --reason \"Guard blocks the path\" "
             "--kill-reason \"validate_length() enforces an 8KB cap\" --kill-check 2\n"
             "  assess.py kill-finding FINDING-VA-001 --inline "
-            "'{\"disposition\":\"false_positive\",\"reason_text\":\"Guard holds\",\"details\":{\"kill_reason\":\"bound check\",\"kill_check\":2}}'"
+            "'{\"disposition\":\"false_positive\",\"reason_text\":\"Guard holds\",\"details\":{\"kill_reason\":\"bound check\",\"kill_check\":2}}'\n\n"
+            "See also:\n"
+            "  assess.py contract kill-finding"
         ),
     )
     p.add_argument("finding_slug", help="Canonical finding slug")
