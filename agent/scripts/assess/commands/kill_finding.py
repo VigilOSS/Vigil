@@ -8,6 +8,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.contracts import render_contract_epilog
 from assess.lib.findings import sync_finding_markdown, update_finding_count
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 
@@ -17,15 +18,7 @@ def register(subparsers) -> None:
         "kill-finding",
         help="Verify a finding as false_positive without writing a JSON file",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  assess.py kill-finding FINDING-VA-001 --reason \"Guard blocks the path\" "
-            "--kill-reason \"validate_length() enforces an 8KB cap\" --kill-check 2\n"
-            "  assess.py kill-finding FINDING-VA-001 --inline "
-            "'{\"disposition\":\"false_positive\",\"reason_text\":\"Guard holds\",\"details\":{\"kill_reason\":\"bound check\",\"kill_check\":2}}'\n\n"
-            "See also:\n"
-            "  assess.py contract kill-finding"
-        ),
+        epilog=render_contract_epilog("kill-finding"),
     )
     p.add_argument("finding_slug", help="Canonical finding slug")
     p.add_argument("payload", nargs="?", help="Path to a JSON verification payload or inline JSON object")
