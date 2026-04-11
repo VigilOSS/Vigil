@@ -410,14 +410,15 @@ Record every self-service lookup in `audit_metadata.cross_ref_usage`.
 
 ### `#### Findings`
 
-Structured finding JSON payloads matching `schemas/finding-record.schema.json` with
-code-specific extensions:
+Structured finding JSON payloads matching `schemas/finding-record.schema.json`.
+If you need the canonical field list or examples, run `./scripts/assess.py contract record-finding`.
+Do not invent lifecycle fields from memory — `record-finding` fills the initial finding lifecycle
+defaults when omitted.
 
 ```json
 {
   "title": "Brief descriptive title with CWE",
   "severity": "high|medium|low",
-  "status": "confirmed|draft",
   "defect_family": "buffer-overflow|injection|...",
   "canonical_location": "file:<path>:<line>",
   "summary": "One-sentence description of the vulnerability",

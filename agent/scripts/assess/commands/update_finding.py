@@ -8,6 +8,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.contracts import render_contract_epilog
 from assess.lib.findings import sync_finding_markdown, update_finding_count
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 
@@ -15,17 +16,9 @@ from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_js
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "update-finding",
-        aliases=["patch-finding"],
         help="PATCH a finding by slug using a payload file, inline JSON, or common flags",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  assess.py update-finding FINDING-VA-001 payload.json\n"
-            "  assess.py update-finding FINDING-VA-001 --status active --severity low "
-            "--reason \"Manual review reduced impact\"\n"
-            "  assess.py patch-finding FINDING-VA-001 --inline "
-            "'{\"workflow_status\":\"draft\",\"reason_text\":\"Needs more evidence\"}'"
-        ),
+        epilog=render_contract_epilog("update-finding"),
     )
     p.add_argument("finding_slug", help="Canonical finding slug")
     p.add_argument("payload", nargs="?", help="Path to JSON patch payload or inline JSON object")

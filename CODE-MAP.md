@@ -50,9 +50,9 @@ Keep it light:
 - `agent/scripts/init_engagement.sh` - engagement bootstrap. Why: creates run directories, seeds local wrappers, and initializes scope/auth/runtime scaffolding.
 - `agent/scripts/assess.py` - CLI entrypoint. Why: stable shell surface into the assessment and code-analysis workflows.
 - `agent/scripts/assess/cli.py` - subcommand registry. Why: authoritative map of supported operator/backend actions.
-- `agent/scripts/assess/commands/` - command families. Why: fetch/post/patch, filtered finding listing plus finding lifecycle helpers (`verify-finding`, `kill-finding`, `update-finding`, `reset-finding`), record-*, dispatch/ingest, exploit/session, and `code-*` flows are split here.
-- `agent/scripts/assess/lib/` - shared plumbing. Why: API client, locking, auth, scope, DB helpers, schema validation, sessions, and tree-sitter indexing live here.
-- `agent/schemas/` - JSON payload contracts. Why: durable record formats for findings, chains, credentials, access records, probe runs, proposals, and code-analysis outputs.
+- `agent/scripts/assess/commands/` - command families. Why: fetch/post/patch, filtered finding listing plus finding lifecycle helpers (`verify-finding`, `kill-finding`, `update-finding`, `reset-finding`), helper contract introspection (`contract`), record-*, dispatch/ingest, exploit/session, and `code-*` flows are split here.
+- `agent/scripts/assess/lib/` - shared plumbing. Why: API client, helper contract metadata, locking, auth, scope, DB helpers, schema validation, sessions, and tree-sitter indexing live here.
+- `agent/schemas/` - JSON payload contracts. Why: durable record formats for findings, chains, credentials, access records, probe runs, proposals, and code-analysis outputs live here; backend-backed schemas are generated from backend request models plus explicit agent-side overlays, while `session-proposal.schema.json` remains local because it has no backend model.
 - `agent/scripts/schema.sql` - transient local queue schema. Why: local case/work-item buffering, not orchestrator backend state.
 - `agent/scripts/proxy_addon.py` - mitmproxy collector. Why: converts captured traffic into the transient work buffer.
 - `agent/scripts/start_kali_mcp_runtime.sh` - shared runtime bootstrap. Why: starts and validates the canonical Kali MCP container.
@@ -65,6 +65,7 @@ Keep it light:
 ### Sync rules worth remembering
 
 - `agent/operator-core.md` -> `agent/AGENTS.md`, `agent/CLAUDE.md`, `agent/.codex/agents/*`, `agent/.claude/agents/*` via `agent/scripts/render-operator-prompts.sh`.
+- `orchestrator/backend/app/api/assessment.py` and `orchestrator/backend/app/api/code_analysis.py` -> backend-backed `agent/schemas/*.json` via `orchestrator/backend/scripts/generate_agent_schemas.py`.
 - Backend state is canonical for findings, coverage, services, and chains; readable artifacts are synchronized exports.
 - `agent/scripts/schema.sql` is not the orchestrator schema. It only defines the transient local queue DB.
 
@@ -78,6 +79,7 @@ Keep it light:
 - `orchestrator/backend/app/api/artifacts.py` - artifact read API. Why: allowlisted artifact exposure instead of arbitrary file serving.
 - `orchestrator/backend/app/api/assessment.py` - runtime assessment API. Why: canonical live state interface for recon, surfaces, coverage, findings, finding verification/transitions, chains, credentials, and blocked techniques.
 - `orchestrator/backend/app/api/code_analysis.py` - code-analysis API. Why: repo/file/module ingestion, analysis queue, results, threat model, coverage gate, and triggers live here.
+- `orchestrator/backend/scripts/generate_agent_schemas.py` - schema bundle generator. Why: derives the committed backend-backed `agent/schemas/*.json` bundle from request models plus the stricter agent-side overlays used by the local CLI validator.
 - `orchestrator/backend/app/services/engagements.py` - filesystem-to-DB sync. Why: `agent/engagements/*` starts on disk, but the UI needs queryable state.
 - `orchestrator/backend/app/services/events.py` - event domain logic. Why: timeline projection and summarization stay out of routers.
 - `orchestrator/backend/app/services/artifacts.py` - artifact policy layer. Why: file exposure rules stay explicit.

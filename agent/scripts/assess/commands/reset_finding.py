@@ -8,6 +8,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.contracts import render_contract_epilog
 from assess.lib.findings import sync_finding_markdown, update_finding_count
 from assess.lib.json_inputs import parse_optional_inline_json
 
@@ -17,11 +18,7 @@ def register(subparsers) -> None:
         "reset-finding",
         help="Reset a finding out of false_positive/verified state back into the workflow",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  assess.py reset-finding FINDING-VA-001 --reason \"Retest disproved the kill\" --status active\n"
-            "  assess.py reset-finding FINDING-VA-001 --reason \"Needs another look\""
-        ),
+        epilog=render_contract_epilog("reset-finding"),
     )
     p.add_argument("finding_slug", help="Canonical finding slug")
     p.add_argument("--workflow-status", "--status", dest="workflow_status", default="draft")

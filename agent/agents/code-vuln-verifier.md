@@ -91,11 +91,13 @@ See skill file for the full disposition table and kill reason format with exampl
 
 ## FP Persistence
 
-When a finding is killed, persist that decision durably by patching the canonical
-`assessment_findings` row to `status: false_positive` with the kill reason in `notes`
-and the supporting evidence in `details`. The goal is suppression by identity: later
+When a finding is killed, persist that decision durably through the finding verification
+lifecycle. Use `kill-finding` for direct false-positive decisions and `verify-finding` for
+confirm, downgrade, or dispute outcomes. The goal is suppression by identity: later
 rediscovery of the same `(defect_family, root_cause_key, canonical_location, auth_context)`
 should merge back into that false-positive record instead of reappearing as a live finding.
+If later evidence disproves a kill or verified verdict, reopen the finding with `reset-finding`
+so the backend clears the prior verification state and the finding returns to active triage.
 
 ## State Recording
 
@@ -106,18 +108,20 @@ should merge back into that false-positive record instead of reappearing as a li
 # Persist kills with the dedicated helper (enforces kill_reason + kill_check fields)
 ./scripts/assess.py kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 
+# Reopen a previously verified or false-positive finding when retest disproves the prior verdict
+./scripts/assess.py reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
+
 # Record attack chains
 ./scripts/assess.py record-chain code-vuln-verifier <chain-json>
 
-# Record updated findings
-./scripts/assess.py record-finding code-vuln-verifier <updated-finding-json>
+# Only use record-finding when the verifier discovers a net-new spot-check bug
+./scripts/assess.py record-finding code-vuln-verifier <new-finding-json>
 ```
 
 ## Finding Prefix: VF
 
-Your role is to update existing findings (confirm, downgrade, kill) and create attack chains
-linking them. New finding creation belongs to the hunter and variant-hunter phases. The VF
-prefix is for status updates only.
+Your primary role is to update existing findings (confirm, downgrade, kill) and create attack
+chains linking them. Only net-new spot-check findings should create fresh `VF` finding slugs.
 
 ## Key Principles
 

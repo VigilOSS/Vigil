@@ -188,6 +188,16 @@ def test_code_analysis_skills_use_current_phase_numbers_and_tools():
     assert "`Glob`" in variant_skill
 
 
+def test_code_variant_hunter_example_matches_record_finding_contract():
+    repo_root = Path(__file__).resolve().parents[3]
+    hunter_prompt = (repo_root / "agent" / "agents" / "code-variant-hunter.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Include `details.impact` in every finding payload" in hunter_prompt
+    assert '"impact": "Remote attackers can trigger heap corruption in the FTP path parser with an overlong path"' in hunter_prompt
+
+
 def test_code_analysis_codex_wrappers_exist():
     repo_root = Path(__file__).resolve().parents[3]
     codex_dir = repo_root / "agent" / ".codex" / "agents"
@@ -209,3 +219,36 @@ def test_exploit_developer_prompt_uses_workflow_status_for_findings_examples():
     assert '.status | IN("confirmed","exploited","draft")' not in exploit_prompt
     assert '.workflow_status | IN("active","exploited","draft")' in exploit_prompt
     assert "{slug, title, severity, workflow_status, defect_family, canonical_location, auth_context}" in exploit_prompt
+
+
+def test_code_agent_prompts_use_current_finding_lifecycle_contracts():
+    repo_root = Path(__file__).resolve().parents[3]
+    hunter_prompt = (repo_root / "agent" / "agents" / "code-vuln-hunter.md").read_text(encoding="utf-8")
+    verifier_prompt = (repo_root / "agent" / "agents" / "code-vuln-verifier.md").read_text(encoding="utf-8")
+    operator_prompt = (repo_root / "agent" / "operator-core-code.md").read_text(encoding="utf-8")
+    verification_skill = (
+        repo_root / "agent" / "skills" / "code-finding-verification" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert '"status": "confirmed|draft"' not in hunter_prompt
+    assert "status: false_positive" not in verifier_prompt
+    assert "record-finding code-vuln-verifier <updated-finding-json>" not in verifier_prompt
+    assert "record-finding code-vuln-verifier <updated-finding-json>" not in operator_prompt
+    assert "verify-finding <slug> <verification-json>" in verifier_prompt
+    assert "kill-finding <slug>" in verifier_prompt
+    assert "verify-finding <slug> <verification-json>" in operator_prompt
+    assert "kill-finding <slug>" in operator_prompt
+    assert "reset-finding <slug>" in verifier_prompt
+    assert "reset-finding <slug>" in operator_prompt
+    assert "reset-finding <slug>" in verification_skill
+
+
+def test_operator_prompt_outputs_reference_helper_contracts_for_findings():
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+    agents_prompt = (repo_root / "agent" / "AGENTS.md").read_text(encoding="utf-8")
+    claude_prompt = (repo_root / "agent" / "CLAUDE.md").read_text(encoding="utf-8")
+
+    for text in (operator_core, agents_prompt, claude_prompt):
+        assert "assess.py contract record-finding" in text
+        assert "reset-finding" in text
