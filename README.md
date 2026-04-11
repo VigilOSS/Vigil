@@ -134,24 +134,27 @@ Methodology references:
 
 Code analysis uses a separate operator loop (`agent/operator-core-code.md`) with its own four-phase pipeline: Ingest+Index → Classify+Map → Hunt → Verify+Variant. Findings land in the same backend as web engagements.
 
-1. Create a code analysis engagement using `--mode code`:
+1. Create a code analysis engagement using `--type code`:
 ```bash
 cd agent
 
-# Local repository
-./scripts/init_engagement.sh --mode code --repo /path/to/repo
+# Name only — add source code to the engagement later
+./scripts/init_engagement.sh --type code my-project
 
-# Clone URL
-./scripts/init_engagement.sh --mode code --repo https://github.com/org/repo
+# Name with a local repository
+./scripts/init_engagement.sh --type code --name my-project --repo /path/to/repo
 
-# Positional shorthand
-./scripts/init_engagement.sh --mode code /path/to/repo
+# Name with a clone URL
+./scripts/init_engagement.sh --type code --name my-project --repo https://github.com/org/repo
 
 # With explicit exploit policy
-./scripts/init_engagement.sh --mode code --repo /path/to/repo --exploit-policy pause
+./scripts/init_engagement.sh --type code --name my-project --repo /path/to/repo --exploit-policy pause
+
+# Combined web + code engagement
+./scripts/init_engagement.sh --type both --name my-project --hosts app.example.com --repo /path/to/repo
 ```
 
-This creates an engagement with `current_phase: "ingest"`, a `source/` directory for the repo checkout, and no web-target scaffolding (no hosts, no auth prompting). The engagement directory name is derived from the repository name.
+This creates an engagement with `current_phase: "ingest"`, a `source/` directory for the repo checkout, and no web-target scaffolding (no hosts, no auth prompting). The engagement directory name is derived from the engagement name. Repositories are optional — source code can be cloned or placed into the `source/` directory after creation.
 
 2. Start the client from the printed engagement directory:
 ```bash

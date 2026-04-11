@@ -205,6 +205,12 @@ Quick-reference per tool, organized by usage phase.
 | `tools/exploitation/hydra.md` | Online password brute-forcing |
 | `tools/exploitation/dalfox.md` | XSS scanning with parameter analysis and blind XSS |
 
+### tools/proxy/ — Used by: operator
+
+| File | Tool |
+|------|------|
+| `tools/proxy/mitmproxy.md` | Mitmproxy session capture: setup, CA cert install, FoxyProxy config, login capture workflow, troubleshooting |
+
 ### tools/reporting/ — Used by: report-writer, operator
 
 | File | Tool |
