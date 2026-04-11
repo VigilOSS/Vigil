@@ -491,6 +491,7 @@ export type CodeAnalysisResult = {
   id: number;
   queue_item_id: number | null;
   file_id: number;
+  file_path?: string | null;
   agent_name: string;
   function_name: string;
   hypothesis: string;

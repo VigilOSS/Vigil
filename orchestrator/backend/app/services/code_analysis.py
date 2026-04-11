@@ -1596,11 +1596,14 @@ def list_analysis_results(
             results.*,
             findings.status AS finding_workflow_status,
             findings.verification_state AS finding_verification_state,
-            findings.verification_disposition AS finding_verification_disposition
+            findings.verification_disposition AS finding_verification_disposition,
+            files.file_path AS file_path
         FROM code_analysis_results AS results
         LEFT JOIN assessment_findings AS findings
           ON findings.engagement_id = results.engagement_id
          AND findings.slug = results.finding_slug
+        LEFT JOIN code_files AS files
+          ON files.id = results.file_id
         WHERE {' AND '.join(f'results.{clause}' for clause in clauses)}
         ORDER BY results.id DESC
     """
