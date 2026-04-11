@@ -355,9 +355,21 @@ def _is_suppressed_workflow_status(workflow_status: str) -> bool:
 
 def _serialize_finding_record(row: dict[str, Any] | Any) -> dict[str, Any]:
     record = dict(row) if not isinstance(row, dict) else dict(row)
-    record["workflow_status"] = _row_workflow_status(record)
-    record["verification_state"] = _row_verification_state(record)
-    record["verification_disposition"] = _row_verification_disposition(record)
+    # Read-path serialization must not crash on invalid DB values.
+    # Validation belongs on write paths; here we pass through raw data
+    # so the frontend can still display the finding.
+    try:
+        record["workflow_status"] = _row_workflow_status(record)
+    except HTTPException:
+        record["workflow_status"] = str(record.get("status", "draft")).strip().lower()
+    try:
+        record["verification_state"] = _row_verification_state(record)
+    except HTTPException:
+        record["verification_state"] = str(record.get("verification_state", "unreviewed") or "unreviewed").strip().lower()
+    try:
+        record["verification_disposition"] = _row_verification_disposition(record)
+    except HTTPException:
+        record["verification_disposition"] = str(record.get("verification_disposition", "none") or "none").strip().lower()
     record.pop("status", None)
     return record
 
