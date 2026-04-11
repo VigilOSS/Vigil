@@ -10,7 +10,8 @@ TARGET=""
 HOSTS_RAW=""
 AUTH_MODE=""
 EXPLOIT_POLICY=""
-MODE="web"
+MODE=""
+NAME=""
 REPOS=()
 SKIP_PERMISSIONS=0
 
@@ -60,46 +61,48 @@ PY
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/init_engagement.sh [target-url-or-host] [options]
+Usage: ./scripts/init_engagement.sh [options] [positional-arg]
 
-The positional target is optional when --hosts is provided; the first
-host becomes the target automatically.
+When run interactively, the script prompts for engagement type first
+(web, code, or both). The positional argument is the target URL/host
+for web engagements, or the engagement name for code/both engagements.
 
 Options:
-  --mode web|code                    Engagement type (default: web)
+  --type web|code|both               Engagement type (prompted interactively if omitted)
+  --name engagement-name             Engagement name (required for code/both)
   --hosts host1,host2,*.domain,...   Scope list. Use *.domain for subdomain enum.
   --auth-mode none|auth_json|manual|proxy_capture
   --exploit-policy pause|full_send|selected
-  --repo /path/to/repo|https://...   Repository path or clone URL (code mode, repeatable)
+  --repo /path/to/repo|https://...   Repository path or clone URL (optional, repeatable)
   --skip-permissions                 Skip interactive permission prompts in launchers
 
 Any host NOT in --hosts is out of scope. Wildcard entries (*.example.com) enable
 subdomain enumeration and allow discovered subdomains of that domain in scope.
 
 Examples:
+  # Interactive — prompts for type, then context-appropriate questions
+  ./scripts/init_engagement.sh
+
   # Web engagement — single host
-  ./scripts/init_engagement.sh https://example.com
+  ./scripts/init_engagement.sh --type web https://example.com
 
   # Web engagement — multiple hosts
-  ./scripts/init_engagement.sh --hosts app.example.com,api.example.com,admin.example.com
+  ./scripts/init_engagement.sh --type web --hosts app.example.com,api.example.com
 
-  # Web engagement — subdomain enum
-  ./scripts/init_engagement.sh --hosts example.com,*.example.com
+  # Code analysis — name only (add source later inside the engagement)
+  ./scripts/init_engagement.sh --type code my-project
 
-  # Code analysis — local repository
-  ./scripts/init_engagement.sh --mode code --repo /path/to/repo
+  # Code analysis — name with repositories
+  ./scripts/init_engagement.sh --type code --name my-project --repo /path/to/repo
 
-  # Code analysis — multiple repositories
-  ./scripts/init_engagement.sh --mode code --repo /path/to/repo1 --repo /path/to/repo2
+  # Both — web target + code analysis
+  ./scripts/init_engagement.sh --type both --name my-project --hosts app.example.com
 
-  # Code analysis — clone URL
-  ./scripts/init_engagement.sh --mode code --repo https://github.com/org/repo
+  # Both — with repos
+  ./scripts/init_engagement.sh --type both --name my-project --hosts app.example.com --repo /path/to/repo
 
-  # Code analysis — positional shorthand (single repo only)
-  ./scripts/init_engagement.sh --mode code /path/to/repo
-
-  # Code analysis — skip permissions
-  ./scripts/init_engagement.sh --mode code --repo /path/to/repo --skip-permissions
+  # Skip permissions
+  ./scripts/init_engagement.sh --type code --name my-project --skip-permissions
 EOF
 }
 
@@ -368,9 +371,14 @@ require_interactive_or_die() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --mode)
+    --type|--mode)
       MODE="${2:-}"
-      [[ -n "$MODE" ]] || { echo "--mode requires a value" >&2; exit 1; }
+      [[ -n "$MODE" ]] || { echo "--type requires a value" >&2; exit 1; }
+      shift 2
+      ;;
+    --name)
+      NAME="${2:-}"
+      [[ -n "$NAME" ]] || { echo "--name requires a value" >&2; exit 1; }
       shift 2
       ;;
     --repo)
@@ -412,68 +420,65 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# --- Prompt for engagement type if not provided ---
+if [[ -z "$MODE" ]]; then
+  require_interactive_or_die "type"
+  MODE="$(prompt_choice "Engagement type" "web" "web" "code" "both")"
+fi
+
 case "$MODE" in
-  web|code) ;;
+  web|code|both) ;;
   *)
-    echo "--mode must be one of: web, code" >&2
+    echo "--type must be one of: web, code, both" >&2
     exit 1
     ;;
 esac
 
-# --- Code mode: resolve repo(s), force safe defaults for web-only fields ---
-if [[ "$MODE" == "code" ]]; then
-  # Accept repo from --repo (repeatable) or the positional arg
-  if [[ ${#REPOS[@]} -gt 0 && -n "$TARGET" ]]; then
-    echo "In code mode, provide repos via --repo or as a positional arg, not both" >&2
-    exit 1
-  fi
-  if [[ ${#REPOS[@]} -eq 0 && -n "$TARGET" ]]; then
-    REPOS+=("$TARGET")
+# --- Code/both mode: resolve name and optional repo(s) ---
+if [[ "$MODE" == "code" || "$MODE" == "both" ]]; then
+  # In code mode, the positional arg is the engagement name (not a repo)
+  if [[ -z "$NAME" && -n "$TARGET" ]]; then
+    NAME="$TARGET"
     TARGET=""
   fi
-  if [[ ${#REPOS[@]} -eq 0 ]]; then
-    require_interactive_or_die "repo"
-    while true; do
-      repo_input="$(prompt_text "Repository path or clone URL")"
-      if [[ -n "$repo_input" ]]; then
-        REPOS+=("$repo_input")
-        printf 'Added: %s\n' "$repo_input" >&2
-        printf 'Add another repository? [y/N]: ' >&2
-        read -r add_more
-        [[ "$add_more" =~ ^[Yy] ]] || break
-      else
-        break
-      fi
-    done
+  if [[ -z "$NAME" ]]; then
+    require_interactive_or_die "name"
+    NAME="$(prompt_text "Engagement name")"
   fi
-  if [[ ${#REPOS[@]} -eq 0 ]]; then
-    echo "At least one repository is required in code mode" >&2
+  if [[ -z "$NAME" ]]; then
+    echo "An engagement name is required for code/both engagements" >&2
     exit 1
   fi
 
-  REPO_NAME="$(derive_repo_name "${REPOS[0]}")"
-
-  # Web-only fields: force safe defaults
-  HOSTS_RAW=""
-  AUTH_MODE="none"
-  if [[ -z "$EXPLOIT_POLICY" ]]; then
-    if [[ -t 0 ]]; then
-      EXPLOIT_POLICY="$(prompt_choice "Exploit policy" "pause" "pause" "full_send" "selected")"
-    else
-      EXPLOIT_POLICY="pause"
+  # Repos are optional — source can be added to the engagement later
+  if [[ ${#REPOS[@]} -eq 0 && -t 0 ]]; then
+    printf 'Add a repository now? [y/N]: ' >&2
+    read -r add_repo_input
+    if [[ "$add_repo_input" =~ ^[Yy] ]]; then
+      while true; do
+        repo_input="$(prompt_text "Repository path or clone URL")"
+        if [[ -n "$repo_input" ]]; then
+          REPOS+=("$repo_input")
+          printf 'Added: %s\n' "$repo_input" >&2
+          printf 'Add another repository? [y/N]: ' >&2
+          read -r add_more
+          [[ "$add_more" =~ ^[Yy] ]] || break
+        else
+          break
+        fi
+      done
     fi
   fi
 
-  # Prompt for skip-permissions on launchers
-  if [[ "$SKIP_PERMISSIONS" -eq 0 && -t 0 ]]; then
-    printf 'Skip permissions? [y/N]: ' >&2
-    read -r skip_perms_input
-    [[ "$skip_perms_input" =~ ^[Yy] ]] && SKIP_PERMISSIONS=1
+  # For code-only, force safe defaults for web-only fields
+  if [[ "$MODE" == "code" ]]; then
+    HOSTS_RAW=""
+    AUTH_MODE="none"
   fi
 fi
 
-# --- Web mode: resolve target, hosts, auth mode ---
-if [[ "$MODE" == "web" ]]; then
+# --- Web/both mode: resolve target, hosts, auth mode ---
+if [[ "$MODE" == "web" || "$MODE" == "both" ]]; then
   # Derive target from --hosts when no positional target given
   if [[ -z "$TARGET" && -n "$HOSTS_RAW" ]]; then
     TARGET=$(python3 - <<'PY' "$HOSTS_RAW"
@@ -499,20 +504,26 @@ PY
     fi
   fi
 
-  if [[ -z "$EXPLOIT_POLICY" ]]; then
-    if [[ -t 0 ]]; then
-      EXPLOIT_POLICY="$(prompt_choice "Exploit policy" "pause" "pause" "full_send" "selected")"
-    else
-      EXPLOIT_POLICY="pause"
-    fi
-  fi
+fi
 
-  # Prompt for skip-permissions on launchers
-  if [[ "$SKIP_PERMISSIONS" -eq 0 && -t 0 ]]; then
-    printf 'Skip permissions? [y/N]: ' >&2
-    read -r skip_perms_input
-    [[ "$skip_perms_input" =~ ^[Yy] ]] && SKIP_PERMISSIONS=1
+# --- Shared prompts: exploit policy, skip-permissions ---
+if [[ -z "$EXPLOIT_POLICY" ]]; then
+  if [[ -t 0 ]]; then
+    EXPLOIT_POLICY="$(prompt_choice "Exploit policy" "pause" "pause" "full_send" "selected")"
+  else
+    EXPLOIT_POLICY="pause"
   fi
+fi
+
+if [[ "$SKIP_PERMISSIONS" -eq 0 && -t 0 ]]; then
+  printf 'Skip permissions? [y/N]: ' >&2
+  read -r skip_perms_input
+  [[ "$skip_perms_input" =~ ^[Yy] ]] && SKIP_PERMISSIONS=1
+fi
+
+# --- Ensure auth mode has a default for code-only ---
+if [[ -z "$AUTH_MODE" ]]; then
+  AUTH_MODE="none"
 fi
 
 case "$AUTH_MODE" in
@@ -538,73 +549,8 @@ DATE=$(date +%Y-%m-%d)
 TIME=$(date +%H%M%S)
 START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-if [[ "$MODE" == "code" ]]; then
-  # Code mode: directory named after primary repo, no web target
-  DIR_LABEL=$(printf '%s' "$REPO_NAME" | tr '.:/' '-' | tr -cd '[:alnum:]-')
-  DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${DIR_LABEL}"
-  ENGAGEMENT_KEY="$(basename "$DIR")"
-  mkdir -p "$DIR/tools" "$DIR/downloads" "$DIR/scans" "$DIR/pids" "$DIR/sessions" "$DIR/source"
-
-  REPOS_JSON="$(repos_to_json_array "${REPOS[@]}")"
-  REPOS_DISPLAY=$(printf '%s, ' "${REPOS[@]}")
-  REPOS_DISPLAY="${REPOS_DISPLAY%, }"
-
-  cat > "$DIR/scope.json" <<EOF
-{
-  "engagement_type": "code",
-  "repos": ${REPOS_JSON},
-  "hosts": [],
-  "exploit_policy": "${EXPLOIT_POLICY}",
-  "exploit_review_state": "pending",
-  "approved_findings": [],
-  "source_repos": [],
-  "status": "in_progress",
-  "current_phase": "ingest"
-}
-EOF
-
-  cat > "$DIR/log.md" <<EOF
-# Engagement Log
-
-- **Mode**: Code Analysis
-- **Repositories**: ${REPOS_DISPLAY}
-- **Date**: ${DATE}
-- **Status**: In Progress
-- **Exploit Policy**: ${EXPLOIT_POLICY}
-
----
-EOF
-
-  cat > "$DIR/findings.md" <<EOF
-# Findings
-
-- **Repositories**: ${REPOS_DISPLAY}
-- **Engagement Date**: ${DATE}
-- **Finding Count**: 0
-
----
-EOF
-
-  cat > "$DIR/report.md" <<EOF
-# Engagement Report
-
-- **Repositories**: ${REPOS_DISPLAY}
-- **Engagement Date**: ${DATE}
-- **Status**: Pending — report not yet generated
-
----
-EOF
-
-  cat > "$DIR/engagement.json" <<EOF
-{
-  "key": "${ENGAGEMENT_KEY}",
-  "repos": ${REPOS_JSON},
-  "created_at": "${START_TIME}"
-}
-EOF
-
-else
-  # Web mode: original behavior
+# --- Resolve web-side variables when applicable ---
+if [[ "$MODE" == "web" || "$MODE" == "both" ]]; then
   TARGET_NORMALIZED=$(normalize_target "$TARGET")
 
   HOSTNAME_RAW=$(
@@ -618,19 +564,64 @@ print(parsed.hostname or target)
 PY
   )
 
-  # If no --hosts given, the parsed hostname is the sole host
   if [[ -z "$HOSTS_RAW" ]]; then
     HOSTS_RAW="$HOSTNAME_RAW"
   fi
 
   HOSTS_JSON="$(csv_to_json_array "$HOSTS_RAW")"
+fi
+
+# --- Resolve code-side variables when applicable ---
+if [[ "$MODE" == "code" || "$MODE" == "both" ]]; then
+  if [[ ${#REPOS[@]} -gt 0 ]]; then
+    REPOS_JSON="$(repos_to_json_array "${REPOS[@]}")"
+    REPOS_DISPLAY=$(printf '%s, ' "${REPOS[@]}")
+    REPOS_DISPLAY="${REPOS_DISPLAY%, }"
+  else
+    REPOS_JSON="[]"
+    REPOS_DISPLAY="(none — add source to ./source/)"
+  fi
+fi
+
+# --- Create engagement directory ---
+if [[ "$MODE" == "web" ]]; then
   HOSTNAME_CLEAN=$(printf '%s' "$HOSTNAME_RAW" | tr '.:' '-' | tr -cd '[:alnum:]-')
   DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${HOSTNAME_CLEAN}"
-  ENGAGEMENT_KEY="$(basename "$DIR")"
-  mkdir -p "$DIR/tools" "$DIR/downloads" "$DIR/scans" "$DIR/pids" "$DIR/sessions"
+else
+  # code and both use the engagement name
+  DIR_LABEL=$(printf '%s' "$NAME" | tr '.:/ ' '-' | tr -cd '[:alnum:]-')
+  DIR="$ROOT_DIR/engagements/${DATE}-${TIME}-${DIR_LABEL}"
+fi
+ENGAGEMENT_KEY="$(basename "$DIR")"
 
+SUBDIRS="tools downloads scans pids sessions"
+if [[ "$MODE" == "code" || "$MODE" == "both" ]]; then
+  SUBDIRS="$SUBDIRS source"
+fi
+for d in $SUBDIRS; do
+  mkdir -p "$DIR/$d"
+done
+
+# --- Write scope.json ---
+if [[ "$MODE" == "code" ]]; then
   cat > "$DIR/scope.json" <<EOF
 {
+  "engagement_type": "code",
+  "name": "${NAME}",
+  "repos": ${REPOS_JSON},
+  "hosts": [],
+  "exploit_policy": "${EXPLOIT_POLICY}",
+  "exploit_review_state": "pending",
+  "approved_findings": [],
+  "source_repos": [],
+  "status": "in_progress",
+  "current_phase": "ingest"
+}
+EOF
+elif [[ "$MODE" == "web" ]]; then
+  cat > "$DIR/scope.json" <<EOF
+{
+  "engagement_type": "web",
   "hostname": "${HOSTNAME_RAW}",
   "hosts": ${HOSTS_JSON},
   "exploit_policy": "${EXPLOIT_POLICY}",
@@ -640,10 +631,44 @@ PY
   "current_phase": "recon"
 }
 EOF
+else
+  # both
+  cat > "$DIR/scope.json" <<EOF
+{
+  "engagement_type": "both",
+  "name": "${NAME}",
+  "hostname": "${HOSTNAME_RAW}",
+  "hosts": ${HOSTS_JSON},
+  "repos": ${REPOS_JSON},
+  "exploit_policy": "${EXPLOIT_POLICY}",
+  "exploit_review_state": "pending",
+  "approved_findings": [],
+  "source_repos": [],
+  "status": "in_progress",
+  "current_phase": "recon"
+}
+EOF
+fi
 
+# --- Write log.md ---
+if [[ "$MODE" == "code" ]]; then
   cat > "$DIR/log.md" <<EOF
 # Engagement Log
 
+- **Type**: Code Analysis
+- **Name**: ${NAME}
+- **Repositories**: ${REPOS_DISPLAY}
+- **Date**: ${DATE}
+- **Status**: In Progress
+- **Exploit Policy**: ${EXPLOIT_POLICY}
+
+---
+EOF
+elif [[ "$MODE" == "web" ]]; then
+  cat > "$DIR/log.md" <<EOF
+# Engagement Log
+
+- **Type**: Web
 - **Target**: ${TARGET_NORMALIZED}
 - **Date**: ${DATE}
 - **Status**: In Progress
@@ -653,7 +678,37 @@ EOF
 
 ---
 EOF
+else
+  cat > "$DIR/log.md" <<EOF
+# Engagement Log
 
+- **Type**: Web + Code
+- **Name**: ${NAME}
+- **Target**: ${TARGET_NORMALIZED}
+- **Repositories**: ${REPOS_DISPLAY}
+- **Date**: ${DATE}
+- **Status**: In Progress
+- **Hosts**: $(printf '%s' "$HOSTS_RAW" | tr ',' ', ')
+- **Auth Mode**: ${AUTH_MODE}
+- **Exploit Policy**: ${EXPLOIT_POLICY}
+
+---
+EOF
+fi
+
+# --- Write findings.md ---
+if [[ "$MODE" == "code" ]]; then
+  cat > "$DIR/findings.md" <<EOF
+# Findings
+
+- **Name**: ${NAME}
+- **Repositories**: ${REPOS_DISPLAY}
+- **Engagement Date**: ${DATE}
+- **Finding Count**: 0
+
+---
+EOF
+elif [[ "$MODE" == "web" ]]; then
   cat > "$DIR/findings.md" <<EOF
 # Findings
 
@@ -663,7 +718,32 @@ EOF
 
 ---
 EOF
+else
+  cat > "$DIR/findings.md" <<EOF
+# Findings
 
+- **Name**: ${NAME}
+- **Target**: ${TARGET_NORMALIZED}
+- **Engagement Date**: ${DATE}
+- **Finding Count**: 0
+
+---
+EOF
+fi
+
+# --- Write report.md ---
+if [[ "$MODE" == "code" ]]; then
+  cat > "$DIR/report.md" <<EOF
+# Engagement Report
+
+- **Name**: ${NAME}
+- **Repositories**: ${REPOS_DISPLAY}
+- **Engagement Date**: ${DATE}
+- **Status**: Pending — report not yet generated
+
+---
+EOF
+elif [[ "$MODE" == "web" ]]; then
   cat > "$DIR/report.md" <<EOF
 # Engagement Report
 
@@ -673,12 +753,46 @@ EOF
 
 ---
 EOF
+else
+  cat > "$DIR/report.md" <<EOF
+# Engagement Report
 
+- **Name**: ${NAME}
+- **Target**: ${TARGET_NORMALIZED}
+- **Engagement Date**: ${DATE}
+- **Status**: Pending — report not yet generated
+
+---
+EOF
+fi
+
+# --- Write engagement.json ---
+if [[ "$MODE" == "code" ]]; then
+  cat > "$DIR/engagement.json" <<EOF
+{
+  "key": "${ENGAGEMENT_KEY}",
+  "name": "${NAME}",
+  "repos": ${REPOS_JSON},
+  "created_at": "${START_TIME}"
+}
+EOF
+elif [[ "$MODE" == "web" ]]; then
   cat > "$DIR/engagement.json" <<EOF
 {
   "key": "${ENGAGEMENT_KEY}",
   "target": "${TARGET_NORMALIZED}",
   "hostname": "${HOSTNAME_RAW}",
+  "created_at": "${START_TIME}"
+}
+EOF
+else
+  cat > "$DIR/engagement.json" <<EOF
+{
+  "key": "${ENGAGEMENT_KEY}",
+  "name": "${NAME}",
+  "target": "${TARGET_NORMALIZED}",
+  "hostname": "${HOSTNAME_RAW}",
+  "repos": ${REPOS_JSON},
   "created_at": "${START_TIME}"
 }
 EOF
