@@ -317,6 +317,8 @@ Finding IDs are allocated by `assess.py record-finding` under a lock to prevent 
 `./scripts/assess.py record-finding <agent-name> <finding-json-file>`
 
 This allocates or reuses the canonical slug under a lock, writes backend state first, and then synchronizes the markdown export. If an agent only produced markdown, stop and convert it to the required JSON shape.
+If you need the canonical field list or examples, run `./scripts/assess.py contract record-finding` instead of guessing payload fields from memory.
+Use the lifecycle helpers for later state changes instead of raw `post` or `patch`: `verify-finding` / `kill-finding` for verification outcomes, `reset-finding` to reopen a previously verified or false-positive finding, and `update-finding` for non-verification metadata or workflow updates.
 
 report-writer uses the `report-findings` backend endpoint which assigns sequential `FINDING-001~N` report IDs automatically. Each report finding includes both the `report_id` and the original `slug` for cross-referencing.
 
