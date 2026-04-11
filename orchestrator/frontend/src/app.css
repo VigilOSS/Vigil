@@ -71,6 +71,7 @@ input {
   backdrop-filter: blur(8px);
   box-shadow: 0 20px 60px rgba(38, 38, 32, 0.08);
   padding: 20px;
+  min-width: 0;
 }
 
 /* ── Header & actions ───────────────────────────────────── */
@@ -1072,7 +1073,7 @@ input {
 
 .code-phase-pipeline {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 8px;
   margin-top: 12px;
 }
@@ -1117,6 +1118,8 @@ input {
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .code-repos-grid {
@@ -1354,10 +1357,6 @@ input {
     grid-template-columns: 1fr;
   }
 
-  .code-phase-pipeline {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .stats-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -1404,10 +1403,6 @@ input {
 
   .waterfall {
     grid-template-columns: 1fr;
-  }
-
-  .code-phase-pipeline {
-    grid-template-columns: 1fr 1fr;
   }
 
   .finding-meta-grid {
