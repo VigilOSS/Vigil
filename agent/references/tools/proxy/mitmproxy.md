@@ -1,0 +1,109 @@
+# Mitmproxy Session Capture
+
+Intercept browser traffic to capture authenticated sessions (cookies, tokens, headers) into `auth.json` for use by engagement agents.
+
+## Quick Start
+
+```bash
+# From inside an engagement directory, or with ENGAGEMENT_DIR set:
+./scripts/start_mitmproxy.sh
+
+# Or explicitly:
+ENGAGEMENT_DIR=/path/to/engagement ./scripts/start_mitmproxy.sh
+```
+
+## Browser Proxy Setup (FoxyProxy)
+
+1. Install FoxyProxy browser extension
+2. Add a new proxy:
+   - **Type: HTTP** (not HTTPS -- this is the most common mistake)
+   - **Host:** `127.0.0.1`
+   - **Port:** `8080`
+   - Do NOT set anything in the HTTPS/SSL proxy field
+3. Enable the proxy profile
+
+**Why HTTP, not HTTPS?** The browser sends a plaintext HTTP `CONNECT` request to the proxy, which then handles TLS interception internally. Setting the proxy type to HTTPS double-wraps TLS around the CONNECT tunnel, which breaks mitmproxy's interception.
+
+## CA Certificate Installation (First Time Only)
+
+The CA cert must be trusted by your browser/OS for HTTPS interception to work.
+
+### Option A: Browser Install
+
+1. With the proxy active, navigate to **http://mitm.it** (note: **http**, not https)
+2. If the page says "traffic is not passing through mitmproxy" -- verify FoxyProxy is set to HTTP mode
+3. Download the macOS certificate
+4. Open **Keychain Access** > search `mitmproxy`
+5. Double-click the cert > expand **Trust** > set to **Always Trust**
+6. **Quit and reopen your browser** (browsers cache cert decisions per session)
+
+### Option B: Terminal Install
+
+```bash
+docker cp security-research-proxy:/root/.mitmproxy/mitmproxy-ca-cert.pem ~/Desktop/mitmproxy-ca-cert.pem
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Desktop/mitmproxy-ca-cert.pem
+```
+
+Restart the browser after trusting.
+
+### CA Key Persistence
+
+The launcher stores CA keys in a named Docker volume (`mitmproxy-ca`). Container restarts and rebuilds reuse the same CA keys, so you only need to install and trust the certificate once.
+
+If you need to regenerate the CA (e.g., compromise, rotation):
+```bash
+docker volume rm mitmproxy-ca
+./scripts/start_mitmproxy.sh
+# Re-install the new cert using Option A or B above
+```
+
+## Login Capture Workflow
+
+1. Start the proxy: `./scripts/start_mitmproxy.sh`
+2. Configure browser proxy (see above)
+3. Navigate to the target login page and authenticate
+4. Browse a few authenticated pages (admin, settings, API endpoints)
+5. The proxy addon auto-detects login flows and writes cookies/tokens to `auth.json`
+6. Disable the proxy in FoxyProxy when done
+
+If auto-capture misses the session (addon error, non-standard login flow):
+- Check proxy logs: `docker logs security-research-proxy 2>&1 | tail -30`
+- Fall back to manual cookie extraction from browser DevTools
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `http://mitm.it` says "traffic not passing through mitmproxy" | FoxyProxy is set to HTTPS mode -- change to HTTP |
+| Certificate errors after proxy restart | Check if the `mitmproxy-ca` volume exists: `docker volume ls \| grep mitmproxy`. If missing, the CA was regenerated -- re-install the cert |
+| Proxy container exits immediately | Check logs: `docker logs security-research-proxy 2>&1 \| tail -20`. Common: port 8080 already in use |
+| `auth.json` not updated after login | Check for addon errors in logs. The `_detect_login` function looks for `set-cookie` headers and token fields in response bodies |
+| Browser still shows cert errors after trusting | Quit browser fully and reopen. macOS may also need: System Settings > Network > clear DNS cache |
+
+## Container Management
+
+```bash
+# Status
+docker ps --filter name=security-research-proxy
+
+# Logs
+docker logs -f security-research-proxy
+
+# Stop
+docker stop security-research-proxy
+
+# Restart (reuses same CA cert from volume)
+./scripts/start_mitmproxy.sh
+
+# Custom port
+MITMPROXY_PORT=9090 ./scripts/start_mitmproxy.sh
+```
+
+## How It Works
+
+The proxy runs `mitmdump` with `proxy_addon.py`, which:
+- Filters noise (analytics, CDNs, tracking pixels)
+- Classifies requests by type (API, form, page, JS, GraphQL, WebSocket, etc.)
+- Detects login flows and captures session material to `auth.json`
+- Records intercepted traffic to `cases.db` for work-buffer ingestion
+- Posts request observations to the orchestrator backend (when available)

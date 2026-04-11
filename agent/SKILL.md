@@ -185,6 +185,10 @@ Load the relevant skill before starting validation or exploitation of a candidat
   **Use when:** Application parses XML input (file upload, SOAP API, SVG, DOCX, RSS feed).
   **Paired references:** `references/payloads/xxe-payloads.md`
 
+- `agent/skills/cicd-security/SKILL.md`
+  **Use when:** Target has public GitHub repositories with `.github/workflows/` files; recon discovers GitHub org; code analysis encounters CI/CD workflow YAML. Covers expression injection, untrusted checkout, artifact/cache poisoning, supply chain attacks, self-hosted runner exploitation, and AI agent security.
+  **Paired references:** `references/code-vuln-patterns/injection.md`, `references/payloads/command-injection-payloads.md`
+
 ---
 
 ## Code Analysis Skills
