@@ -74,6 +74,8 @@ Each variant becomes a separate finding linked to the original:
 - Same CWE as original
 - Own severity assessment (same pattern in less-reachable code may be lower severity)
 - Link kind: `variant_of`
+- Include `details.impact` in every finding payload because `record-finding` requires both
+  `details.evidence` and `details.impact`
 
 ## Output Sections
 
@@ -89,6 +91,7 @@ New finding JSON payloads, each with a link to the original:
     "cwe_id": "CWE-122",
     "variant_of": "FINDING-CH-001",
     "original_pattern": "memcpy with attacker-controlled size from URL component without bounds check",
+    "impact": "Remote attackers can trigger heap corruption in the FTP path parser with an overlong path",
     "evidence": "Same pattern as FINDING-CH-001 but in FTP path parsing...",
     "taint_path": "...",
     "remediation": "Apply same fix as FINDING-CH-001: add bounds check before memcpy"

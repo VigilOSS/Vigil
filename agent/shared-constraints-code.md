@@ -210,15 +210,21 @@ Do not hardcode absolute paths. Set `ENGAGEMENT_DIR` before calling assess helpe
 
 ## 10. Recording Format
 
-Use the standard finding JSON schema. Code-specific fields:
+Use the standard finding JSON schema. If you need the canonical field list or examples, run
+`./scripts/assess.py contract record-finding`. Do not invent lifecycle fields from memory —
+`record-finding` fills the initial lifecycle defaults (`workflow_status=active`,
+`verification_state=unreviewed`, `verification_disposition=none`) when omitted.
+For later finding lifecycle changes, use the dedicated helpers instead of raw `post` or `patch`:
+`verify-finding` for confirm/downgrade/dispute decisions, `kill-finding` for false-positive
+verification with kill metadata, `reset-finding` to reopen a previously verified or false-positive
+finding, and `update-finding` for non-verification metadata or workflow updates.
+
+Code-specific fields:
 
 ```json
 {
   "title": "Heap buffer overflow in URL parser via overlong scheme",
   "severity": "high",
-  "workflow_status": "active",
-  "verification_state": "verified",
-  "verification_disposition": "confirmed",
   "defect_family": "buffer-overflow",
   "canonical_location": "file:lib/urlapi.c:342",
   "summary": "Attacker-controlled URL scheme exceeding 64 bytes overflows stack buffer in parseurl()",

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.contracts import render_contract_epilog
 from assess.lib.findings import sync_finding_markdown, update_finding_count
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 
@@ -17,21 +18,7 @@ def register(subparsers) -> None:
         "verify-finding",
         help="Verify a finding with a JSON payload file, inline JSON, or explicit flags",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Contract:\n"
-            "  disposition: confirmed | downgraded | false_positive | disputed\n"
-            "  reason_text: required for every verification\n"
-            "  downgraded requires new_severity\n"
-            "  false_positive requires details.kill_reason and details.kill_check\n\n"
-            "Examples:\n"
-            "  assess.py verify-finding FINDING-VA-001 payload.json\n"
-            "  assess.py verify-finding FINDING-VA-001 --inline "
-            "'{\"disposition\":\"confirmed\",\"reason_text\":\"Reproduced as written.\"}'\n"
-            "  assess.py verify-finding FINDING-VA-001 --disposition downgraded --reason "
-            "\"Impact is lower after retest\" --new-severity low\n"
-            "  assess.py verify-finding FINDING-VA-001 --disposition false_positive --reason "
-            "\"Guard blocks the path\" --kill-reason \"validate_length() rejects oversized input\" --kill-check 2"
-        ),
+        epilog=render_contract_epilog("verify-finding"),
     )
     p.add_argument("finding_slug", help="Canonical finding slug to verify")
     p.add_argument("payload", nargs="?", help="Path to JSON verification payload or inline JSON object")

@@ -5,16 +5,16 @@ todos:
     content: "Add backend-owned exploit, coverage, and final-report readiness projections on top of the landed workflow+verification lifecycle"
     status: pending
   - id: "cli-gates"
-    content: "Rewire exploit review/session launch and coverage/report gate commands to consume backend canonical state instead of local or legacy status views"
+    content: "Rewire exploit review/session launch and coverage/report gate commands to consume backend readiness projections instead of raw local or ad hoc state"
     status: pending
   - id: "prompt-alignment"
-    content: "Align operator, shared constraints, exploit, vuln, handoff, and report prompts with the current lifecycle contract and positive ownership rules"
+    content: "Finish the remaining prompt drift in operator, shared constraints, vuln, handoff, and report guidance after the recent workflow-consistency prompt updates"
     status: pending
   - id: "frontend-alignment"
     content: "Expose readiness signals and fix remaining lifecycle/UI drift without adding a new workflow surface"
     status: pending
   - id: "validation"
-    content: "Rerender generated prompts and run focused backend, prompt-wording, CLI, and frontend verification"
+    content: "Rerender generated prompts and run focused backend, prompt-wording, agent-script regression, CLI, and frontend verification"
     status: pending
 isProject: false
 ---
@@ -26,7 +26,14 @@ The backend has already moved to the real lifecycle model:
 - `verification_state` and `verification_disposition` are first-class fields.
 - verification and merge already have dedicated mutation paths and transition history.
 
-What is still broken is everything around that backend contract: prompts, exploit review/session helpers, coverage gates, dedup guidance, and a few UI surfaces still assume the old single-axis `status` model or trust local exports over backend state.
+Recent `jj` history changed the picture: part of the prompt/CLI migration already landed on `main`
+in `Align agent prompts and shared constraints for workflow consistency`. In particular, the repo
+already moved some exploit/session wording and tests onto `workflow_status`.
+
+What is still broken is the residual drift around that backend contract: exploit review and
+approval still infer eligibility locally, coverage gating still trusts `surfaces.jsonl`, dedup
+guidance still points to `report-findings`, and final-report readiness still lives in operator
+folklore instead of backend projections.
 
 ```170:172:orchestrator/backend/app/api/assessment.py
 workflow_status: str = Field(default="active", min_length=1, max_length=32)
@@ -34,18 +41,25 @@ verification_state: str = Field(default="unreviewed", min_length=1, max_length=3
 verification_disposition: str = Field(default="none", min_length=1, max_length=32)
 ```
 
-```37:43:agent/scripts/assess/commands/review_exploits.py
+```33:39:agent/scripts/assess/commands/review_exploits.py
+actionable_workflow_statuses = {"draft", "active"}
 candidates = [
-    row for row in findings
-    if row.get("status") in {"draft", "confirmed"}
+    row
+    for row in findings
+    if str(row.get("workflow_status") or "").strip().lower() in actionable_workflow_statuses
 ]
 ```
 
-```25:28:agent/scripts/assess/commands/check_coverage.py
+```1:4:agent/scripts/assess/commands/check_coverage.py
 """assess.py check-coverage — read surfaces.jsonl, report unresolved surfaces."""
 ```
 
-This replacement plan treats the problem as lifecycle alignment, not another lifecycle redesign.
+```122:122:agent/shared-constraints.md
+**Deduplication:** Before recording, query existing findings via `assess.py fetch report-findings`.
+```
+
+This replacement plan treats the problem as lifecycle alignment, not another lifecycle redesign,
+and narrows the remaining work to what has not already landed.
 
 ## Chosen Policy
 - The backend workflow+verification split and `assessment_finding_transitions` ledger are canonical. Do not add a parallel status model.
@@ -57,6 +71,10 @@ This replacement plan treats the problem as lifecycle alignment, not another lif
 - Low/info chain starters remain eligible for exploit review when they are chain-relevant. Exploit gating must not collapse to severity-only rules.
 - Final-report gating belongs to backend projections plus helper commands and operator flow. Report-writer may still produce interim output when explicitly requested; it should not become the sole policy enforcer.
 - Prompt constraints should be written as positive ownership rules. The operator dispatches and approves exceptions; helper commands and specialist agents do the routine state work.
+- Do not re-plan work that already landed on `main`:
+  - exploit-developer examples already use `workflow_status`,
+  - `launch-session` already renders `workflow_status` in the session prompt,
+  - prompt wording tests already pin part of this migration.
 
 ## Target State
 - Specialists record durable findings against the canonical backend schema using `workflow_status`, `verification_state`, and `verification_disposition`.
@@ -100,9 +118,9 @@ This replacement plan treats the problem as lifecycle alignment, not another lif
 - `agent/schemas/finding-record.schema.json`: document the chain metadata contract so specialist agents emit it consistently.
 
 ### 3. CLI gates and exploit/session helpers
-- `agent/scripts/assess/commands/review_exploits.py`: stop filtering on `row.get("status")`. Query the new backend exploit-candidate projection and display lifecycle fields plus candidate reason.
+- `agent/scripts/assess/commands/review_exploits.py`: stop locally deriving exploitability from `draft`/`active` findings. Query the new backend exploit-candidate projection and display lifecycle fields plus candidate reason.
 - `agent/scripts/assess/commands/check_exploit_gate.py`: keep the human approval policy from `scope.json`, but validate approved slugs against backend exploit candidates instead of blindly echoing `approved_findings`.
-- `agent/scripts/assess/commands/launch_session.py`: only allow session launch for backend-approved exploit candidates. Render the assigned findings with `workflow_status`, `verification_state`, and `verification_disposition`, not the removed `status` field.
+- `agent/scripts/assess/commands/launch_session.py`: only allow session launch for backend-approved exploit candidates. Keep the existing workflow-status prompt rendering, but stop treating scope approval alone as sufficient.
 - `agent/scripts/assess/commands/check_coverage.py`: replace local `surfaces.jsonl` gating with backend `coverage-readiness` or canonical `coverage-items` / summary queries. If local artifacts are retained, treat them as drift diagnostics only.
 - Add `agent/scripts/assess/commands/check_report_readiness.py`: query the backend final-report readiness projection and exit non-zero with a concise blocker list.
 - `agent/scripts/assess/commands/record_finding.py`: keep the current backend-aligned defaults (`active`, `unreviewed`, `none`). Do not reintroduce CLI-side defaults that silently create old-style `confirmed` findings.
@@ -116,11 +134,12 @@ This replacement plan treats the problem as lifecycle alignment, not another lif
   - use `check-report-readiness` before final report dispatch.
 - `agent/operator-core.md`: remove requirements to manually re-read synced local exports after backend writes when the backend is already canonical.
 - `agent/shared-constraints.md` and `agent/agents/vulnerability-analyst.md`: change dedup guidance from `fetch report-findings` to `fetch findings` plus merge/transition review.
-- `agent/agents/exploit-developer.md`: stop bootstrapping from `.status IN (...)`. Use the exploit-candidate helper and require lifecycle-aware updates through the existing patch/verify paths.
+- `agent/agents/exploit-developer.md`: keep the new `workflow_status` language, but switch startup guidance over to the shared exploit-candidate helper once it exists so prompt and CLI eligibility stay consistent.
 - `agent/skills/report-generation/SKILL.md` and `agent/agents/report-writer.md`: keep `report-findings` as the writer’s content source, but make final-report gate ownership explicit:
   - operator/helper checks final readiness before a final report;
   - writer can still be used for interim drafts when explicitly requested.
 - `agent/references/handoff-protocols.md`: align exploit handoff language with the canonical lifecycle and the new chain metadata contract.
+- `agent/agents/source-analyzer.md`: keep the recent backend sync clarifications; do not expand this pass back into a larger source-analysis contract rewrite unless a concrete lifecycle gap shows up.
 - Across prompt files, rewrite dense “do not” lists into positive ownership rules with reasoning, following the repo’s `AGENTS.md` authoring standard.
 
 ### 5. Frontend and UI alignment
@@ -131,6 +150,7 @@ This replacement plan treats the problem as lifecycle alignment, not another lif
 
 ### 6. Validation
 - `orchestrator/backend/tests/test_engagements_api.py`: add coverage for exploit-candidate selection, report-readiness blockers, and coverage-readiness blockers.
+- `orchestrator/backend/tests/test_agent_script_regressions.py`: extend the existing regression suite so the new readiness helpers replace the current local/implicit exploit and coverage logic without regressing the already-landed `workflow_status` prompt fixes.
 - Add or update CLI tests for:
   - `review-exploits`
   - `check-exploit-gate`
@@ -153,6 +173,7 @@ cd agent
 
 ```bash
 uv run --directory orchestrator/backend pytest orchestrator/backend/tests/test_engagements_api.py
+uv run --directory orchestrator/backend pytest orchestrator/backend/tests/test_agent_script_regressions.py
 uv run --directory orchestrator/backend pytest tests/test_prompt_wording.py
 cd orchestrator/frontend && npm run build
 ```
@@ -166,6 +187,7 @@ cd orchestrator/frontend && npm run build
 
 ## Notes For The Implementing Agent
 - Treat this as an alignment pass around the lifecycle that already exists.
+- Recent prompt/CLI migrations already landed on `main`; preserve those wins and narrow follow-up work to the remaining readiness, dedup, and gate seams.
 - Prefer backend projections and helper commands over stuffing more bookkeeping into operator-core.
 - Preserve the current verify/merge mutation boundaries; do not reopen verification writes through generic patch paths.
 - If you discover that finding-scoped exploit/session metadata is no longer sufficient, split that rename into its own coordinated migration rather than mixing it into the readiness/gating work.

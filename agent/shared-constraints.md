@@ -128,6 +128,8 @@ Record every finding with:
 
 The JSON payload must match `schemas/finding-record.schema.json`.
 Do not produce markdown findings — convert to JSON before recording.
+If you need the canonical field list or examples, run `./scripts/assess.py contract record-finding`.
+Do not invent lifecycle fields from memory — `record-finding` fills the initial finding lifecycle defaults.
 
 **CVSS and remediation** go in `details` as structured fields:
 ```json
