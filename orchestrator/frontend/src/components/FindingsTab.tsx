@@ -534,7 +534,7 @@ export function FindingsTab({
                               </>
                             )}
                           </p>
-                          {(transition.from_severity || transition.to_severity) && (
+                          {(isCreation || transition.from_severity !== transition.to_severity) && (
                             <p className="meta-text">
                               {isCreation
                                 ? `Severity: ${transition.to_severity}`

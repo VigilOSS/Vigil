@@ -295,7 +295,7 @@ export function CodeAnalysisTab({
                   </div>
                 );
               })}
-              {coverage.by_status.unclassified > 0 && (
+              {(coverage.by_status.unclassified ?? 0) > 0 && (
                 <div className="code-classification-row">
                   <span className="badge">unclassified</span>
                   <span className="code-classification-count">{coverage.by_status.unclassified}</span>
