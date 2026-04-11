@@ -85,7 +85,6 @@ function rowMeta(finding: AssessmentFinding | AssessmentFindingDetail) {
   if (finding.source_name) {
     parts.push(finding.source_name);
   }
-  parts.push(verificationLabel(finding));
   if (finding.workflow_status !== "active") {
     parts.push(workflowLabel(finding));
   }
@@ -314,7 +313,9 @@ export function FindingsTab({
                 )}
                 <span className={`badge severity-${finding.severity}`}>{finding.severity}</span>
                 <span className={`badge status-${finding.workflow_status}`}>{finding.workflow_status}</span>
-                <span className={`badge status-${verificationKey(finding)}`}>{verificationLabel(finding)}</span>
+                {verificationKey(finding) !== "unreviewed" && (
+                  <span className={`badge status-${verificationKey(finding)}`}>{verificationLabel(finding)}</span>
+                )}
               </div>
             </button>
           ))}
@@ -343,8 +344,6 @@ export function FindingsTab({
               </div>
               <div className="finding-modal-actions">
                 <span className={`badge severity-${selectedFinding.severity}`}>{selectedFinding.severity}</span>
-                <span className={`badge status-${selectedFinding.workflow_status}`}>{selectedFinding.workflow_status}</span>
-                <span className={`badge status-${verificationKey(selectedFinding)}`}>{verificationLabel(selectedFinding)}</span>
                 <button type="button" className="ghost-button" onClick={() => setSelected(null)}>Close</button>
               </div>
             </div>
@@ -495,31 +494,60 @@ export function FindingsTab({
                 )}
                 {!transitionsLoading && !transitionsError && transitions.length > 0 && (
                   <div className="finding-transitions">
-                    {transitions.map((transition) => (
-                      <div key={transition.id} className="finding-transition-row">
-                        <div className="finding-transition-header">
-                          <strong>{transition.action}</strong>
-                          <span className="meta-text">{transition.actor || "system"}</span>
-                          <span className="meta-text">{transition.created_at}</span>
-                        </div>
-                        <p className="meta-text">
-                          Workflow: {transition.from_workflow_status ?? "none"} → {transition.to_workflow_status}
-                          {" · "}
-                          Verification: {transition.from_verification_state ?? "none"} / {transition.from_verification_disposition ?? "none"}
-                          {" → "}
-                          {transition.to_verification_state} / {transition.to_verification_disposition}
-                        </p>
-                        {(transition.from_severity || transition.to_severity) && (
+                    {transitions.map((transition) => {
+                      const isCreation = transition.action === "created" || !transition.from_workflow_status;
+                      const verificationChanged =
+                        transition.from_verification_state !== transition.to_verification_state ||
+                        transition.from_verification_disposition !== transition.to_verification_disposition;
+
+                      function formatVerification(state: string, disposition: string) {
+                        if (state === "disputed") return "disputed";
+                        if (disposition && disposition !== "none") return `${state} (${disposition.replace(/_/g, " ")})`;
+                        return state;
+                      }
+
+                      return (
+                        <div key={transition.id} className="finding-transition-row">
+                          <div className="finding-transition-header">
+                            <strong>{transition.action}</strong>
+                            <span className="meta-text">{transition.actor || "system"}</span>
+                            <span className="meta-text">{transition.created_at}</span>
+                          </div>
                           <p className="meta-text">
-                            Severity: {transition.from_severity ?? "none"} → {transition.to_severity}
+                            {isCreation ? (
+                              <>
+                                Workflow: {transition.to_workflow_status}
+                                {" · "}
+                                Verification: {formatVerification(transition.to_verification_state, transition.to_verification_disposition)}
+                              </>
+                            ) : (
+                              <>
+                                Workflow: {transition.from_workflow_status} → {transition.to_workflow_status}
+                                {verificationChanged && (
+                                  <>
+                                    {" · "}
+                                    Verification: {formatVerification(transition.from_verification_state ?? "unreviewed", transition.from_verification_disposition ?? "none")}
+                                    {" → "}
+                                    {formatVerification(transition.to_verification_state, transition.to_verification_disposition)}
+                                  </>
+                                )}
+                              </>
+                            )}
                           </p>
-                        )}
-                        {transition.reason_text && <p>{transition.reason_text}</p>}
-                        {transition.artifact_ref && (
-                          <p className="meta-text finding-mono">{transition.artifact_ref}</p>
-                        )}
-                      </div>
-                    ))}
+                          {(transition.from_severity || transition.to_severity) && (
+                            <p className="meta-text">
+                              {isCreation
+                                ? `Severity: ${transition.to_severity}`
+                                : `Severity: ${transition.from_severity} → ${transition.to_severity}`}
+                            </p>
+                          )}
+                          {transition.reason_text && <p>{transition.reason_text}</p>}
+                          {transition.artifact_ref && (
+                            <p className="meta-text finding-mono">{transition.artifact_ref}</p>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>

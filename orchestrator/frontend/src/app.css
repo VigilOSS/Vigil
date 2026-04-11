@@ -1072,7 +1072,7 @@ input {
 
 .code-phase-pipeline {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin-top: 12px;
 }
@@ -1275,6 +1275,14 @@ input {
   color: #4b4a42;
   display: flex;
   gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.code-result-detail > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .code-result-label {
@@ -1347,7 +1355,7 @@ input {
   }
 
   .code-phase-pipeline {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .stats-grid {
@@ -1399,7 +1407,7 @@ input {
   }
 
   .code-phase-pipeline {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr 1fr;
   }
 
   .finding-meta-grid {
