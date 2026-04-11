@@ -420,10 +420,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --- Prompt for engagement type if not provided ---
+# --- Resolve engagement type ---
+# If not explicitly set, infer from context or prompt interactively.
+# A positional target that looks like a URL/host implies web mode for
+# backward compatibility with: init_engagement.sh https://example.com
 if [[ -z "$MODE" ]]; then
-  require_interactive_or_die "type"
-  MODE="$(prompt_choice "Engagement type" "web" "web" "code" "both")"
+  if [[ -n "$TARGET" && "$TARGET" == *"."* ]]; then
+    MODE="web"
+  elif [[ -n "$HOSTS_RAW" ]]; then
+    MODE="web"
+  elif [[ ${#REPOS[@]} -gt 0 ]]; then
+    MODE="code"
+  else
+    require_interactive_or_die "type"
+    MODE="$(prompt_choice "Engagement type" "web" "web" "code" "both")"
+  fi
 fi
 
 case "$MODE" in
