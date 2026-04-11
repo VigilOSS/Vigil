@@ -5,11 +5,8 @@ import {
   AssessmentAttackChainLink,
   AssessmentCoverageItem,
   AssessmentFindingDetail,
-  AssessmentFindingLink,
-  AssessmentProbeDetail,
   AssessmentService,
   AssessmentSummary,
-  AssessmentSurface,
   AssessmentTarget,
   Artifact,
   ArtifactContent,
@@ -30,11 +27,8 @@ import {
   listAssessmentAttackChainLinks,
   listAssessmentAttackChains,
   listAssessmentCoverageItems,
-  listAssessmentFindingLinks,
   listAssessmentFindings,
-  listAssessmentProbes,
   listAssessmentServices,
-  listAssessmentSurfaces,
   listAssessmentTargets,
   listCodeAnalysisResults,
   listCodeModules,
@@ -69,10 +63,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [assessmentSummary, setAssessmentSummary] = useState<AssessmentSummary | null>(null);
-  const [assessmentSurfaces, setAssessmentSurfaces] = useState<AssessmentSurface[]>([]);
   const [assessmentFindings, setAssessmentFindings] = useState<AssessmentFindingDetail[]>([]);
-  const [assessmentFindingLinks, setAssessmentFindingLinks] = useState<AssessmentFindingLink[]>([]);
-  const [assessmentProbes, setAssessmentProbes] = useState<AssessmentProbeDetail[]>([]);
   const [assessmentChains, setAssessmentChains] = useState<AssessmentAttackChainDetail[]>([]);
   const [assessmentChainLinks, setAssessmentChainLinks] = useState<AssessmentAttackChainLink[]>([]);
   const [assessmentTargets, setAssessmentTargets] = useState<AssessmentTarget[]>([]);
@@ -91,11 +82,8 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const refreshQueuedRef = useRef(false);
   const socketConnectedRef = useRef(false);
   const hasConnectedOnceRef = useRef(false);
-
-  // Keep state fetched for future use
-  void assessmentFindingLinks;
-  void assessmentSurfaces;
-  void assessmentProbes;
+  const lastWsRefreshRef = useRef(0);
+  const wsThrottleTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     selectedNameRef.current = selectedName;
@@ -138,21 +126,6 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
     return listEvents(engagementKey).then(setEvents);
   }
 
-  function refreshAssessment() {
-    return Promise.all([
-      getAssessmentSummary(engagementKey).then(setAssessmentSummary),
-      listAssessmentSurfaces(engagementKey).then(setAssessmentSurfaces),
-      listAssessmentFindings(engagementKey).then(setAssessmentFindings),
-      listAssessmentFindingLinks(engagementKey).then(setAssessmentFindingLinks),
-      listAssessmentProbes(engagementKey).then(setAssessmentProbes),
-      listAssessmentAttackChains(engagementKey).then(setAssessmentChains),
-      listAssessmentAttackChainLinks(engagementKey).then(setAssessmentChainLinks),
-      listAssessmentTargets(engagementKey).then(setAssessmentTargets),
-      listAssessmentServices(engagementKey).then(setAssessmentServices),
-      listAssessmentCoverageItems(engagementKey).then(setAssessmentCoverageItems),
-    ]);
-  }
-
   function refreshCodeAnalysis() {
     return Promise.all([
       listCodeRepos(engagementKey).then(setCodeRepos).catch(() => setCodeRepos([])),
@@ -175,10 +148,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
         setEvents([]);
         setArtifacts([]);
         setAssessmentSummary(null);
-        setAssessmentSurfaces([]);
         setAssessmentFindings([]);
-        setAssessmentFindingLinks([]);
-        setAssessmentProbes([]);
         setAssessmentChains([]);
         setAssessmentChainLinks([]);
         setAssessmentTargets([]);
@@ -194,10 +164,45 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
         return;
       }
 
-      await Promise.all([refreshSessions(), refreshEvents(), refreshArtifacts(), refreshAssessment(), refreshCodeAnalysis()]);
+      // Always refresh events + assessment summary (lightweight, needed for tab counts)
+      const promises: Promise<unknown>[] = [
+        refreshEvents(),
+        getAssessmentSummary(engagementKey).then(setAssessmentSummary),
+      ];
+
+      // Only fetch data needed by the active tab
+      const tab = activeTab;
+      switch (tab) {
+        case "overview":
+        case "findings":
+          promises.push(
+            listAssessmentFindings(engagementKey).then(setAssessmentFindings),
+            listAssessmentAttackChains(engagementKey).then(setAssessmentChains),
+            listAssessmentAttackChainLinks(engagementKey).then(setAssessmentChainLinks),
+          );
+          break;
+        case "coverage":
+          promises.push(
+            listAssessmentTargets(engagementKey).then(setAssessmentTargets),
+            listAssessmentServices(engagementKey).then(setAssessmentServices),
+            listAssessmentCoverageItems(engagementKey).then(setAssessmentCoverageItems),
+          );
+          break;
+        case "code":
+          promises.push(refreshCodeAnalysis());
+          break;
+        case "activity":
+          promises.push(refreshSessions());
+          break;
+        case "artifacts":
+          promises.push(refreshArtifacts());
+          break;
+      }
+
+      await Promise.all(promises);
 
       const nextSelectedName = selectedNameRef.current;
-      if (activeTab === "artifacts" && nextSelectedName) {
+      if (tab === "artifacts" && nextSelectedName) {
         await refreshSelectedArtifact(nextSelectedName);
       }
     } catch (error) {
@@ -223,9 +228,36 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
     refreshInFlightRef.current = task;
   });
 
+  // Throttled refresh for WebSocket messages — at most once per 2 seconds to
+  // avoid constant re-renders during rapid-fire backend events.
+  const WS_THROTTLE_MS = 2000;
+  const throttledRefresh = useEffectEvent(() => {
+    const now = Date.now();
+    const elapsed = now - lastWsRefreshRef.current;
+    if (wsThrottleTimerRef.current !== null) {
+      return; // already scheduled
+    }
+    if (elapsed >= WS_THROTTLE_MS) {
+      lastWsRefreshRef.current = now;
+      requestRefresh();
+    } else {
+      wsThrottleTimerRef.current = window.setTimeout(() => {
+        wsThrottleTimerRef.current = null;
+        lastWsRefreshRef.current = Date.now();
+        requestRefresh();
+      }, WS_THROTTLE_MS - elapsed);
+    }
+  });
+
   useEffect(() => {
     requestRefresh();
   }, [engagementKey]);
+
+  // Refresh tab-specific data when switching tabs
+  useEffect(() => {
+    if (!activeEngagement) return;
+    requestRefresh();
+  }, [activeTab]);
 
   useEffect(() => {
     if (!activeEngagement || !selectedName || activeTab !== "artifacts") {
@@ -276,7 +308,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
             return current.at(-1)?.id === nextEvent.id ? current : [...current, nextEvent];
           });
         }
-        requestRefresh();
+        throttledRefresh();
       };
     };
 
@@ -288,6 +320,10 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
       hasConnectedOnceRef.current = false;
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
+      }
+      if (wsThrottleTimerRef.current !== null) {
+        window.clearTimeout(wsThrottleTimerRef.current);
+        wsThrottleTimerRef.current = null;
       }
       socket?.close();
     };
@@ -353,7 +389,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
               </span>
             </div>
             <div className="status-summary-row">
-              <span className="status-summary-label">Workflow</span>
+              <span className="status-summary-label">Phase</span>
               <span className="meta-text">{formatStatusLabel(activeEngagement?.current_phase)}</span>
             </div>
           </div>

@@ -107,6 +107,7 @@ export function CodeAnalysisTab({
 }: CodeAnalysisTabProps) {
   const currentPhase = resolvePhase(repos, queueStats, coverage, results);
   const [expandedModules, setExpandedModules] = useState<Set<number>>(new Set());
+  const [expandedResults, setExpandedResults] = useState<Set<number>>(new Set());
   const [resultFilter, setResultFilter] = useState<string>("all");
   const [resultPage, setResultPage] = useState(0);
 
@@ -294,7 +295,7 @@ export function CodeAnalysisTab({
                   </div>
                 );
               })}
-              {coverage.by_status.unclassified > 0 && (
+              {(coverage.by_status.unclassified ?? 0) > 0 && (
                 <div className="code-classification-row">
                   <span className="badge">unclassified</span>
                   <span className="code-classification-count">{coverage.by_status.unclassified}</span>
@@ -441,47 +442,68 @@ export function CodeAnalysisTab({
 
           {/* Results list */}
           <div className="code-results-list">
-            {pageResults.map((r) => (
-              <article
-                key={r.id}
-                className={`code-result-row ${r.finding_workflow_status === "false_positive" ? "code-result-row-suppressed" : ""}`}
-              >
-                <div className="code-result-header">
-                  <span className={`badge code-disposition-${r.disposition}`}>{r.disposition}</span>
-                  <strong className="mono-text">{r.function_name || `file #${r.file_id}`}</strong>
-                  {r.cwe_id && <span className="badge">{r.cwe_id}</span>}
-                  <span className={`badge code-confidence-${r.confidence}`}>{r.confidence}</span>
-                  <span className="meta-text">{r.agent_name}</span>
-                </div>
-                {r.hypothesis && (
-                  <div className="code-result-detail">
-                    <span className="code-result-label">Hypothesis:</span>
-                    <span>{r.hypothesis.length > 200 ? `${r.hypothesis.slice(0, 200)}...` : r.hypothesis}</span>
+            {pageResults.map((r) => {
+              const isExpanded = expandedResults.has(r.id);
+              const truncateAt = 200;
+              const needsTruncation = (r.evidence?.length ?? 0) > truncateAt || (r.hypothesis?.length ?? 0) > truncateAt;
+              return (
+                <article
+                  key={r.id}
+                  className={`code-result-row ${r.finding_workflow_status === "false_positive" ? "code-result-row-suppressed" : ""}`}
+                  style={needsTruncation ? { cursor: "pointer" } : undefined}
+                  onClick={needsTruncation ? () => {
+                    setExpandedResults((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(r.id)) next.delete(r.id);
+                      else next.add(r.id);
+                      return next;
+                    });
+                  } : undefined}
+                >
+                  <div className="code-result-header">
+                    <span className={`badge code-disposition-${r.disposition}`}>{r.disposition}</span>
+                    <strong className="mono-text">{r.function_name || (r.file_path ? r.file_path.split("/").pop() : `file #${r.file_id}`)}</strong>
+                    {r.cwe_id && <span className="badge">{r.cwe_id}</span>}
+                    {r.slot_type && <span className="badge">{r.slot_type}</span>}
+                    <span className={`badge code-confidence-${r.confidence}`}>{r.confidence} conf.</span>
+                    <span className="meta-text">{r.agent_name}</span>
                   </div>
-                )}
-                {r.evidence && (
-                  <div className="code-result-detail">
-                    <span className="code-result-label">Evidence:</span>
-                    <span>{r.evidence.length > 200 ? `${r.evidence.slice(0, 200)}...` : r.evidence}</span>
-                  </div>
-                )}
-                {r.finding_slug && (
-                  <div className="code-result-detail">
-                    <span className="code-result-label">Finding:</span>
-                    <span className="mono-text">{r.finding_slug}</span>
-                    {r.finding_workflow_status && (
-                      <span className={`badge status-${r.finding_workflow_status}`}>{r.finding_workflow_status}</span>
-                    )}
-                    {r.finding_verification_disposition && r.finding_verification_disposition !== "none" && (
-                      <span className={`badge status-${r.finding_verification_disposition}`}>{r.finding_verification_disposition}</span>
-                    )}
-                    {r.finding_verification_state === "disputed" && (
-                      <span className="badge status-disputed">disputed</span>
-                    )}
-                  </div>
-                )}
-              </article>
-            ))}
+                  {r.file_path && (
+                    <div className="code-result-detail">
+                      <span className="code-result-label">File:</span>
+                      <span className="mono-text">{r.file_path}</span>
+                    </div>
+                  )}
+                  {r.hypothesis && (
+                    <div className="code-result-detail" style={isExpanded ? { whiteSpace: "pre-wrap" } : undefined}>
+                      <span className="code-result-label">Hypothesis:</span>
+                      <span>{!isExpanded && r.hypothesis.length > truncateAt ? `${r.hypothesis.slice(0, truncateAt)}...` : r.hypothesis}</span>
+                    </div>
+                  )}
+                  {r.evidence && (
+                    <div className="code-result-detail" style={isExpanded ? { whiteSpace: "pre-wrap" } : undefined}>
+                      <span className="code-result-label">Evidence:</span>
+                      <span>{!isExpanded && r.evidence.length > truncateAt ? `${r.evidence.slice(0, truncateAt)}...` : r.evidence}</span>
+                    </div>
+                  )}
+                  {r.finding_slug && (
+                    <div className="code-result-detail">
+                      <span className="code-result-label">Finding:</span>
+                      <span className="mono-text">{r.finding_slug}</span>
+                      {r.finding_workflow_status && (
+                        <span className={`badge status-${r.finding_workflow_status}`}>{r.finding_workflow_status}</span>
+                      )}
+                      {r.finding_verification_disposition && r.finding_verification_disposition !== "none" && (
+                        <span className={`badge status-${r.finding_verification_disposition}`}>{r.finding_verification_disposition}</span>
+                      )}
+                      {r.finding_verification_state === "disputed" && (
+                        <span className="badge status-disputed">disputed</span>
+                      )}
+                    </div>
+                  )}
+                </article>
+              );
+            })}
           </div>
 
           {/* Pagination */}
