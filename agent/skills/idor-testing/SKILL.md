@@ -64,19 +64,17 @@ origin: AI Threat Hunting
 - [ ] Version switch: `/v1/users/123` if `/v2/` is protected
 - [ ] JSON body vs query param: move ID between locations
 
-### 6. Cross-Tenant / Multi-Tenant Testing (SaaS)
+### 6. Account Isolation Testing (Shared Platforms)
 
-When the target is a SaaS platform (Zendesk, Salesforce, Jira, etc.), tenant isolation is the highest-value IDOR target:
+On shared/SaaS platforms, test whether object IDs are scoped to the current account:
 
-- [ ] Obtain object IDs from a second tenant (create a second free trial instance if possible)
-- [ ] Test REST API with cross-tenant user/ticket/org IDs — does the API return 404 (good: tenant-scoped query) or data (bad: global ID lookup)?
-- [ ] Test GraphQL `node(id)` with cross-tenant global IDs (base64 GID format like `gid://platform/Type/ID`)
-- [ ] Test incremental/bulk export endpoints — do they scope to current tenant or leak cross-tenant data?
-- [ ] Test header injection: `X-Tenant-Id`, `X-Account-Id`, `Host` header manipulation to switch tenant context
-- [ ] Test query parameter tenant overrides: `?account_id=`, `?org_id=`, `?subdomain=`
-- [ ] Test webhook/integration callbacks — does event-triggered execution access the correct tenant's data?
-- [ ] Test embeddable/widget configs with cross-tenant app IDs — can you access another tenant's config?
-- [ ] Verify that 404 (not 403) is returned for cross-tenant IDs — 403 confirms the object exists (ID oracle)
+- [ ] Obtain object IDs from a second account instance if available
+- [ ] Test REST API with out-of-account IDs — 404 (scoped) vs data returned (leak)
+- [ ] Test GraphQL `node(id)` with global IDs (base64 GID format like `gid://platform/Type/ID`) — federated GraphQL often uses globally-routable node IDs
+- [ ] Test incremental/bulk export endpoints — do they scope to the current account or return cross-account data?
+- [ ] Test header and parameter overrides: `X-Account-Id`, `?account_id=`, `Host` header
+- [ ] Test webhook/integration callbacks — does event-triggered execution stay within the correct account's data?
+- [ ] Check 404 vs 403 — a 403 on an out-of-account ID confirms the object exists (ID oracle)
 
 ### 7. Bulk / Mass Assignment
 
