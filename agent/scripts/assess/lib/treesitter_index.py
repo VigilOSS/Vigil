@@ -44,6 +44,36 @@ _try_import_grammar("tree_sitter_typescript", "typescript")
 
 
 # ---------------------------------------------------------------------------
+# tree-sitter API compat: 0.23 had Language.query() + Query.captures(node)
+# returning {name: [nodes]}.  0.25 removed both — use Query() constructor +
+# QueryCursor.matches() instead.  This helper provides a single call site.
+# ---------------------------------------------------------------------------
+
+def _ts_query_captures(lang_obj: Any, query_str: str, root_node: Any) -> dict[str, list[Any]]:
+    """Run a tree-sitter query and return ``{capture_name: [nodes]}``."""
+    if tree_sitter is None:
+        return {}
+    # 0.25+: Query() constructor + QueryCursor
+    if hasattr(tree_sitter, "QueryCursor"):
+        try:
+            query = tree_sitter.Query(lang_obj, query_str)
+        except Exception:
+            return {}
+        cursor = tree_sitter.QueryCursor(query)
+        result: dict[str, list[Any]] = {}
+        for _pattern_idx, match_dict in cursor.matches(root_node):
+            for name, nodes in match_dict.items():
+                result.setdefault(name, []).extend(nodes)
+        return result
+    # 0.23.x: Language.query() + Query.captures()
+    try:
+        query = lang_obj.query(query_str)
+    except Exception:
+        return {}
+    return query.captures(root_node)  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
 # Extension → language mapping (for tree-sitter supported families only)
 # ---------------------------------------------------------------------------
 
@@ -428,16 +458,11 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
         return []
 
     lang_obj = parser.language
-    try:
-        query = lang_obj.query(query_str)
-    except Exception:
-        return []
 
-    captures = query.captures(tree.root_node)
+    captures = _ts_query_captures(lang_obj, query_str, tree.root_node)
     functions: list[dict[str, Any]] = []
     seen_ranges: set[tuple[int, int]] = set()
 
-    # captures is a dict: {capture_name: [nodes]}
     nodes = captures.get("func", [])
 
     for node in nodes:
@@ -547,12 +572,8 @@ def _extract_classes_ts(tree: Any, language: str, source: bytes) -> list[dict[st
         return []
 
     lang_obj = parser.language
-    try:
-        query = lang_obj.query(query_str)
-    except Exception:
-        return []
 
-    captures = query.captures(tree.root_node)
+    captures = _ts_query_captures(lang_obj, query_str, tree.root_node)
     classes: list[dict[str, Any]] = []
 
     nodes = captures.get("cls", [])
@@ -644,12 +665,8 @@ def _extract_imports_ts(tree: Any, language: str, source: bytes) -> list[str]:
         return []
 
     lang_obj = parser.language
-    try:
-        query = lang_obj.query(query_str)
-    except Exception:
-        return []
 
-    captures = query.captures(tree.root_node)
+    captures = _ts_query_captures(lang_obj, query_str, tree.root_node)
     imports: list[str] = []
 
     nodes = captures.get("imp", [])

@@ -85,8 +85,17 @@ class CaseCollector:
         self.db: sqlite3.Connection | None = None
         self.scope: list[str] = []
         self.engagement_dir: str = ""
+        self.engagement_key: str = ""
         self.orchestrator_base_url = os.getenv("ORCHESTRATOR_BASE_URL", "").rstrip("/")
         self.backend_warning_emitted = False
+
+    @staticmethod
+    def _safe_content(msg) -> bytes:
+        """Get message content without crashing on missing/streamed bodies."""
+        try:
+            return msg.get_content() or b""
+        except Exception:
+            return b""
 
     # -- mitmproxy lifecycle ------------------------------------------------
 
@@ -94,11 +103,18 @@ class CaseCollector:
         loader.add_option(
             "engagement_dir", str, "", "Path to engagement directory"
         )
+        loader.add_option(
+            "engagement_key", str, "", "Engagement key for backend API (defaults to basename of engagement_dir)"
+        )
 
     def configure(self, updates):
+        if "engagement_key" in updates:
+            self.engagement_key = ctx.options.engagement_key
         if "engagement_dir" in updates:
             self.engagement_dir = ctx.options.engagement_dir
             if self.engagement_dir:
+                if not self.engagement_key:
+                    self.engagement_key = os.environ.get("ENGAGEMENT_KEY", "") or os.path.basename(self.engagement_dir)
                 self._init_db()
                 self._load_scope()
 
@@ -278,7 +294,7 @@ class CaseCollector:
         # body params
         body_params = {}
         ct = (req.headers.get("content-type", "") or "").lower()
-        raw_body = req.get_content(raise_if_missing=False) or b""
+        raw_body = self._safe_content(req)
         if raw_body:
             if "application/x-www-form-urlencoded" in ct:
                 try:
@@ -302,15 +318,11 @@ class CaseCollector:
             if _DYNAMIC_RE.match(seg)
         }
 
-        # cookie params
+        # cookie params — use mitmproxy's parsed cookies to avoid
+        # comma-vs-semicolon ambiguity in raw Cookie header serialization
         cookie_params = {}
-        cookie_header = req.headers.get("cookie", "")
-        if cookie_header:
-            for pair in cookie_header.split(";"):
-                pair = pair.strip()
-                if "=" in pair:
-                    k, v = pair.split("=", 1)
-                    cookie_params[k.strip()] = v.strip()
+        for k, v in req.cookies.items():
+            cookie_params[k] = v
 
         return {
             "query_params": json.dumps(query_params) if query_params else None,
@@ -417,7 +429,7 @@ class CaseCollector:
             "auto_generate_coverage": True,
         }
         request = Request(
-            f"{self.orchestrator_base_url}/engagements/{os.path.basename(self.engagement_dir)}/assessment/request-observations",
+            f"{self.orchestrator_base_url}/engagements/{self.engagement_key}/assessment/request-observations",
             data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
@@ -466,25 +478,37 @@ class CaseCollector:
             return "authenticated"
         return "anonymous"
 
-    # -- login detection ----------------------------------------------------
+    # -- auth capture ---------------------------------------------------------
 
-    def _detect_login(self, flow: http.HTTPFlow):
+    def _capture_auth(self, flow: http.HTTPFlow):
+        """Capture auth material from every in-scope response.
+
+        Collects:
+        - Set-Cookie response headers (per host)
+        - Request Cookie header (per host, via mitmproxy's parsed cookies)
+        - Bearer/token values from login-like JSON responses
+
+        Stores per-host cookies in ``host_cookies`` (list of dicts) and keeps
+        the flat ``cookies`` dict populated with the primary scope target's
+        cookies for backward compatibility with downstream consumers.
+        """
         req = flow.request
         resp = flow.response
-        if req.method != "POST" or not resp:
-            return
-        if not LOGIN_URL_RE.search(req.pretty_url):
-            return
-        if resp.status_code and resp.status_code >= 400:
+        if not resp or (resp.status_code and resp.status_code >= 400):
             return
 
-        auth_data: dict = {}
+        parsed = urlparse(req.pretty_url)
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            return
+
         auth_path = os.path.join(self.engagement_dir, "auth.json")
 
-        # Load existing auth.json if present
+        # Load existing auth.json
+        auth_data: dict = {}
         if os.path.exists(auth_path):
             try:
-                with open(auth_path, "r") as fh:
+                with open(auth_path, "r", encoding="utf-8") as fh:
                     auth_data = json.load(fh)
             except (json.JSONDecodeError, OSError):
                 auth_data = {}
@@ -494,56 +518,103 @@ class CaseCollector:
         auth_data.setdefault("auth_context", "authenticated")
         auth_data.setdefault("headers", {})
         auth_data.setdefault("cookies", {})
+        host_cookies_list: list[dict] = auth_data.get("host_cookies", [])
+        if not isinstance(host_cookies_list, list):
+            host_cookies_list = []
+
+        # Build lookup: hostname -> index in host_cookies_list
+        host_index: dict[str, int] = {}
+        for idx, entry in enumerate(host_cookies_list):
+            if isinstance(entry, dict) and isinstance(entry.get("host"), str):
+                host_index[entry["host"].lower()] = idx
 
         updated = False
 
-        # Check Set-Cookie headers
+        # -- 1. Collect request cookies (mitmproxy parses them correctly) ------
+        req_cookies: dict[str, str] = {}
+        for k, v in req.cookies.items():
+            req_cookies[k] = v
+
+        # -- 2. Collect Set-Cookie response headers ----------------------------
+        resp_cookies: dict[str, str] = {}
         set_cookies = resp.headers.get_all("set-cookie")
         if set_cookies:
-            cookies = {}
             for sc in set_cookies:
-                parts = sc.split(";")[0]
-                if "=" in parts:
-                    k, v = parts.split("=", 1)
-                    cookies[k.strip()] = v.strip()
-            if cookies:
-                auth_data["cookies"] = cookies
-                updated = True
+                name_val = sc.split(";")[0]
+                if "=" in name_val:
+                    k, v = name_val.split("=", 1)
+                    resp_cookies[k.strip()] = v.strip()
 
-        # Check response body for tokens
-        resp_body = resp.get_content(raise_if_missing=False) or b""
-        if resp_body:
-            try:
-                body_json = json.loads(resp_body)
-                if isinstance(body_json, dict):
-                    for key in list(body_json.keys()):
-                        if TOKEN_KEYS_RE.search(key):
-                            token_value = body_json[key]
-                            auth_data.setdefault("tokens", {})[key] = token_value
-                            if (
-                                isinstance(token_value, str)
-                                and token_value
-                                and BEARER_TOKEN_KEYS_RE.search(key)
-                            ):
-                                auth_data.setdefault("headers", {})
-                                if "Authorization" not in auth_data["headers"]:
-                                    bearer_value = (
-                                        token_value
-                                        if token_value.lower().startswith("bearer ")
-                                        else f"Bearer {token_value}"
-                                    )
-                                    auth_data["headers"]["Authorization"] = bearer_value
-                            updated = True
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                pass
+        # Merge: response Set-Cookie wins over request Cookie
+        merged: dict[str, str] = {}
+        merged.update(req_cookies)
+        merged.update(resp_cookies)
 
+        if merged:
+            if hostname in host_index:
+                existing = host_cookies_list[host_index[hostname]].get("cookies", {})
+                if not isinstance(existing, dict):
+                    existing = {}
+                existing.update(merged)
+                host_cookies_list[host_index[hostname]]["cookies"] = existing
+            else:
+                host_cookies_list.append({"host": hostname, "cookies": merged})
+                host_index[hostname] = len(host_cookies_list) - 1
+            updated = True
+
+        # -- 3. Token extraction from login-like JSON responses ----------------
+        if req.method == "POST" and LOGIN_URL_RE.search(req.pretty_url):
+            resp_body = self._safe_content(resp)
+            if resp_body:
+                try:
+                    body_json = json.loads(resp_body)
+                    if isinstance(body_json, dict):
+                        for key in list(body_json.keys()):
+                            if TOKEN_KEYS_RE.search(key):
+                                token_value = body_json[key]
+                                auth_data.setdefault("tokens", {})[key] = token_value
+                                if (
+                                    isinstance(token_value, str)
+                                    and token_value
+                                    and BEARER_TOKEN_KEYS_RE.search(key)
+                                ):
+                                    auth_data.setdefault("headers", {})
+                                    if "Authorization" not in auth_data["headers"]:
+                                        bearer_value = (
+                                            token_value
+                                            if token_value.lower().startswith("bearer ")
+                                            else f"Bearer {token_value}"
+                                        )
+                                        auth_data["headers"]["Authorization"] = bearer_value
+                                updated = True
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+
+        # -- 4. Write auth.json ------------------------------------------------
         if updated:
+            # Flat cookies = primary scope target's cookies (first scope host)
+            primary_host = (self.scope[0].lstrip("*.") if self.scope else "").lower()
+            flat_cookies: dict[str, str] = {}
+            for entry in host_cookies_list:
+                h = (entry.get("host") or "").lower()
+                entry_cookies = entry.get("cookies", {})
+                if not isinstance(entry_cookies, dict):
+                    continue
+                if h == primary_host or (primary_host and h.endswith("." + primary_host)):
+                    flat_cookies.update(entry_cookies)
+
+            auth_data["cookies"] = flat_cookies
+            auth_data["host_cookies"] = host_cookies_list
+            auth_data["state"] = "available" if flat_cookies else auth_data.get("state", "missing")
+            auth_data["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             try:
-                auth_data["state"] = "available"
-                auth_data["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                with open(auth_path, "w") as fh:
+                with open(auth_path, "w", encoding="utf-8") as fh:
                     json.dump(auth_data, fh, indent=2)
-                ctx.log.info("proxy_addon: updated auth.json")
+                ctx.log.info(
+                    f"proxy_addon: updated auth.json — "
+                    f"{len(flat_cookies)} flat cookies, "
+                    f"{len(host_cookies_list)} hosts"
+                )
             except OSError as exc:
                 ctx.log.warn(f"proxy_addon: cannot write auth.json — {exc}")
 
@@ -643,8 +714,8 @@ class CaseCollector:
         if self._is_noise(hostname, req.pretty_url):
             return
 
-        # Login detection (side-effect: may write auth.json)
-        self._detect_login(flow)
+        # Auth capture (side-effect: writes auth.json with per-host cookies)
+        self._capture_auth(flow)
 
         # Extract parameters
         params = self._extract_params(flow)
@@ -657,7 +728,7 @@ class CaseCollector:
         # Prefer response content type for classification/storage. Request content
         # type is often empty for GETs and would misclassify normal pages as unknown.
         content_type = resp.headers.get("content-type", "") or req.headers.get("content-type", "") or ""
-        raw_req_body = req.get_content(raise_if_missing=False) or b""
+        raw_req_body = self._safe_content(req)
         content_length = len(raw_req_body)
 
         # Classification
@@ -669,7 +740,7 @@ class CaseCollector:
         # Response info
         response_status = resp.status_code
         resp_headers_json = json.dumps(dict(resp.headers))
-        resp_body = resp.get_content(raise_if_missing=False) or b""
+        resp_body = self._safe_content(resp)
         response_size = len(resp_body)
 
         # Response snippet: first 512 bytes of text responses

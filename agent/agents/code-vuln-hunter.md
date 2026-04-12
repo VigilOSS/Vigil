@@ -275,10 +275,12 @@ to another file via the call graph, emit a trigger so the operator re-queues tha
 ]
 ```
 
-Cross-file triggers capture cases where analysis in one file reveals that a different file
-needs re-examination -- a sink traced to a callee in another module, a shared utility
-discovered to propagate taint, or a finding whose full chain requires verifying behavior in
-a dependency.
+Cross-file triggers use `file_path` (not `file_id`) because the target file may not be ingested
+yet. The operator's requeue step resolves paths to backend `file_id`s automatically.
+
+Triggers capture cases where analysis in one file reveals that a different file needs
+re-examination -- a sink traced to a callee in another module, a shared utility discovered to
+propagate taint, or a finding whose full chain requires verifying behavior in a dependency.
 
 ### CWE-Directed Re-Analysis Mode
 
