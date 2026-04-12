@@ -64,13 +64,27 @@ origin: AI Threat Hunting
 - [ ] Version switch: `/v1/users/123` if `/v2/` is protected
 - [ ] JSON body vs query param: move ID between locations
 
-### 6. Bulk / Mass Assignment
+### 6. Cross-Tenant / Multi-Tenant Testing (SaaS)
+
+When the target is a SaaS platform (Zendesk, Salesforce, Jira, etc.), tenant isolation is the highest-value IDOR target:
+
+- [ ] Obtain object IDs from a second tenant (create a second free trial instance if possible)
+- [ ] Test REST API with cross-tenant user/ticket/org IDs — does the API return 404 (good: tenant-scoped query) or data (bad: global ID lookup)?
+- [ ] Test GraphQL `node(id)` with cross-tenant global IDs (base64 GID format like `gid://platform/Type/ID`)
+- [ ] Test incremental/bulk export endpoints — do they scope to current tenant or leak cross-tenant data?
+- [ ] Test header injection: `X-Tenant-Id`, `X-Account-Id`, `Host` header manipulation to switch tenant context
+- [ ] Test query parameter tenant overrides: `?account_id=`, `?org_id=`, `?subdomain=`
+- [ ] Test webhook/integration callbacks — does event-triggered execution access the correct tenant's data?
+- [ ] Test embeddable/widget configs with cross-tenant app IDs — can you access another tenant's config?
+- [ ] Verify that 404 (not 403) is returned for cross-tenant IDs — 403 confirms the object exists (ID oracle)
+
+### 7. Bulk / Mass Assignment
 
 - [ ] Test listing endpoints without filter: `/api/orders` returns all
 - [ ] Remove or blank the user filter parameter
 - [ ] GraphQL: query relationships to access other users' nested data
 
-### 7. Validate Impact
+### 8. Validate Impact
 
 - [ ] Confirm data belongs to another user (check names, emails)
 - [ ] Demonstrate modification: change another user's data
