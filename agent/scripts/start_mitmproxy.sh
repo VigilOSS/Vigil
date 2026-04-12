@@ -50,13 +50,16 @@ if [[ -f "$ENG_DIR/.orchestrator.env" ]]; then
 fi
 
 # ── Launch ────────────────────────────────────────────────────────────────
-echo "[mitmproxy] Starting on port $PORT (engagement: $ENG_DIR)"
+ENG_KEY="$(basename "$ENG_DIR")"
+
+echo "[mitmproxy] Starting on port $PORT (engagement: $ENG_DIR, key: $ENG_KEY)"
 docker run -d \
     --name "$CONTAINER_NAME" \
     -p "127.0.0.1:${PORT}:8080" \
     -v "$ENG_DIR:/engagement" \
     -v "${VOLUME_NAME}:/root/.mitmproxy" \
     ${ORCH_URL:+-e "ORCHESTRATOR_BASE_URL=$ORCH_URL"} \
+    -e "ENGAGEMENT_KEY=$ENG_KEY" \
     "$IMAGE_NAME" \
     --set engagement_dir=/engagement \
     --set block_global=false
