@@ -79,13 +79,31 @@ curl -s https://TARGET/.git/HEAD
 curl -s https://TARGET/.svn/entries | head -5
 ```
 
-### 8. Virtual Host / Subdomain
+### 8. SaaS API Namespace Fuzzing
+
+SaaS platforms nest APIs under versioned/namespaced prefixes. Fuzz each known prefix separately:
+```bash
+# Discover API versions and namespaces
+for prefix in /api/v1 /api/v2 /api/v3 /api/internal /api/admin /api/lotus /api/private \
+  /sc/v1 /sc/v2 /admin/api /admin/api/v2 /rosetta/api /theming/api /wfm/api /qa/api \
+  /sell/api /explore/api /embeddable/api /collaboration; do
+  code=$(curl -sk -o /dev/null -w "%{http_code}" "https://TARGET$prefix" -u "$AUTH")
+  [ "$code" != "404" ] && echo "$code $prefix"
+done
+
+# For each live prefix, fuzz endpoints
+ffuf -u "https://TARGET/api/v2/FUZZ.json" -w /usr/share/seclists/Discovery/Web-Content/api/api-endpoints.txt -ac
+```
+
+**Header anomaly check:** On every non-404 response, inspect `Location`, `X-Served-By`, `Via`, `Server`, and any vendor-specific headers (e.g., `zendesk-service`, `x-envoy-decorator-operation`) for internal service names, K8s hostnames, or tenant-identifying data.
+
+### 9. Virtual Host / Subdomain
 ```bash
 ffuf -u https://TARGET -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
   -H "Host: FUZZ.TARGET" -ac
 ```
 
-### 9. Output
+### 10. Output
 ```bash
 ffuf -u https://TARGET/FUZZ -w wordlist.txt -ac -o /engagement/scans/dir_fuzz_results.json -of json
 curl -sI https://TARGET/discovered_path  # Verify

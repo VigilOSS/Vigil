@@ -35,8 +35,21 @@ If any of these are missing, STOP and load them now. Fuzzing without the right s
 
 - Do not fuzz aimlessly; require a specific objective, target class, and stop condition
 - Prefer representative payload families over brute-force noise
-- Distinguish between anomalous responses and confirmed vulnerabilities
 - Keep target-facing execution in Kali MCP only
+
+## Anomaly Classification
+
+Not every non-404 is a finding. Classify anomalies before escalating:
+
+| Signal | Likely anomaly | Likely noise |
+|--------|---------------|-------------|
+| 301/302 with internal URL in `Location` header | K8s/service name leak (chain-only unless SSRF exists) | External redirect to login page |
+| 200 with different response size | Hidden parameter accepted, debug mode, data leak | Cacheable page variant, CSRF token rotation |
+| 403 vs 401 on different paths | Auth boundary exists (useful for vertical testing) | WAF or default deny rule |
+| 500 with stack trace or internal hostname | Error disclosure (record as info, chain candidate) | Generic error page |
+| Response header leaking service name (`X-Served-By`, `Via`, `Server`) | Infrastructure info (chain-only) | Standard CDN/proxy headers (Cloudflare, Akamai) |
+
+On shared platforms, also watch for account identifiers (account IDs, subdomain names, shard IDs) appearing in unexpected responses.
 
 ## Output Contract
 
