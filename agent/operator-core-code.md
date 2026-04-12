@@ -77,7 +77,10 @@ The `code-ingest` command:
 - Extracts first ~50 lines as header snippet
 - Runs git churn analysis if .git exists
 - Marks generated/vendored/test/doc files as `skip` candidates
-- POSTs all files to backend code-files endpoint
+- POSTs all files to backend code-files endpoint — the backend assigns each file an integer
+  `file_id` (primary key). Retrieve the mapping via
+  `./scripts/assess.py fetch "code/files?repo_id=<repo-id>&limit=5000"`;
+  queue fetch responses also include the full file object with `file_id`.
 - Creates code_repos record with repo metadata
 - Generates ctags symbol index (if ctags is available)
 
@@ -216,11 +219,13 @@ Adaptive batching is part of the method, not a convenience:
 ./scripts/assess.py code-dispatch stats
 ```
 
-Broad-hunt queue items are file-level only. Do not add `context_id` to the queue artifact. The
-queue carries `file_id` plus metadata such as `batch_theme`, `slot_types`, and
-`guidance_hypotheses`, while tree-sitter-derived structure lives under
-`tools/analysis-state/structural-index/`. `repo_id` is only a queue-normalization helper for
-resolving `file_path`; it is not part of the backend queue schema.
+Broad-hunt queue items are file-level only. Do not add `context_id` to the queue artifact. Each
+item carries `file_id` and `file_path` plus metadata (`batch_theme`, `slot_types`,
+`guidance_hypotheses`). `code-dispatch queue` normalizes the artifact before posting: it strips
+`file_path` (resolving to `file_id` if only a path was provided) and sends only backend-accepted
+fields. Include both identifiers in the artifact so the queue is human-readable and the
+normalizer can resolve either one. `repo_id` is only a disambiguation helper during
+normalization; it is not part of the backend queue schema.
 
 **Fetch loop:**
 ```bash
