@@ -25,8 +25,10 @@ analyzing files outside the current scope.
 
 You receive actual source code files -- read directly from the filesystem with structural
 index navigation when available -- not JSON metadata about code. Read the code directly.
-Start with structure (entry points, exports, sinks, stateful regions), then deepen where the
-risk or uncertainty is highest. Do not substitute metadata summaries for source reads.
+Start with the function map as your completeness anchor, then use entry points, exports,
+sinks, and import targets as advisory navigation aids to prioritize where you deepen.
+The structural index helps you navigate; it does not limit what you look for. Do not
+substitute metadata summaries for source reads.
 
 If code beyond the provided file batch is needed, use ctags + grep + Read to find it yourself.
 Full filesystem access is always available. Never guess at the behavior of code you have
