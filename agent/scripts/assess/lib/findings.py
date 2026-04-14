@@ -155,7 +155,8 @@ def sync_finding_markdown(findings_file: str, finding: dict) -> None:
         rf"(?ms)^## \[{re.escape(slug)}\].*?(?=^## \[FINDING-[A-Z]{{2}}-[0-9]{{3}}\]|\Z)"
     )
     if pattern.search(text):
-        text = pattern.sub(block + "\n", text, count=1)
+        replacement = block + "\n"
+        text = pattern.sub(lambda _: replacement, text, count=1)
     else:
         text = text.rstrip() + "\n\n" + block + "\n"
 
