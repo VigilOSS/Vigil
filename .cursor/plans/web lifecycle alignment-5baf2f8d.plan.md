@@ -25,7 +25,9 @@ The backend has already moved to the real lifecycle model:
 - `assessment_findings.status` is now workflow status.
 - `verification_state` and `verification_disposition` are first-class fields.
 - verification and merge already have dedicated mutation paths and transition history.
-- web engagements now run `Recon -> Collect -> Test -> Verify -> Exploit -> Athena -> Report`.
+- web engagements now run `Recon -> Collect -> Test -> Verify -> Exploit -> 
+
+-> Report`.
 - `findings.md` and `surfaces.jsonl` are generated on demand via `export-findings` / `export-surfaces`; they are no longer synchronized runtime state.
 
 Recent `jj` history changed the picture: part of the prompt/CLI migration already landed on `main`

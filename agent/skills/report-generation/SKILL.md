@@ -269,6 +269,42 @@ After writing the report, run this checklist against every finding before delive
 11. **Severity count match:** Do the counts in the executive summary match the actual finding list?
 12. **Cross-reference completeness:** Does every finding in the body appear in the slug cross-reference table?
 
+## Email Disclosure Reports
+
+When the operator requests a disclosure email instead of an internal report, switch to the
+email disclosure format — a separate output mode, not a variation of report.md.
+
+Load the format reference and both examples before writing:
+- `agent/references/disclosure-email-format.md` — section structure, rules, anti-patterns
+- `agent/references/examples/disclosure-email-ssrf.txt` — multi-sub-issue example
+- `agent/references/examples/disclosure-email-fast-import.txt` — security gate bypass with control test
+
+Output path: `$ENGAGEMENT_DIR/tools/exploit-state/pocs/report-<slug>.txt`
+
+The format reference is the authoritative spec. The examples are anonymized accepted
+disclosures — use them as structural templates. Key points:
+- Plaintext, not markdown. 2-space indent for code, no fences.
+- Sections in order: Subject, greeting, summary, AFFECTED CODE, ROOT CAUSE, IMPACT, REPRODUCTION, SUGGESTED FIX, CVSS (with per-factor justification), AFFECTED VERSIONS, PoC reference, Credit.
+- Under 120 lines for single findings, 150 for multi-issue.
+- Related bugs sharing a root cause go in one email with numbered sub-issues.
+
+## Bug Bounty Submissions
+
+When the operator requests bug bounty submissions (Bugcrowd, HackerOne, or similar),
+each finding becomes a standalone submission — never bundle findings.
+
+Load before writing:
+- `agent/references/bugbounty-submission-format.md` — structure, rules
+- `agent/references/examples/bugbounty-submission-ldap-injection.md` — working example with real POC
+
+POCs must exercise the vendor's code end-to-end and show execution output — reimplemented
+logic proves nothing to a triager. If end-to-end testing requires infrastructure the script
+cannot provide, mark those steps with `# HUMAN:` comments. Credentials go in environment
+variables, never in submission text or scripts.
+
 ## Extended Resources
 
 - `agent/references/runtime-guides/engagement-methodology.md` — methodology narrative source
+- `agent/references/disclosure-email-format.md` — email disclosure format and rules
+- `agent/references/bugbounty-submission-format.md` — bug bounty submission format
+- `agent/references/examples/` — working examples for both output modes
