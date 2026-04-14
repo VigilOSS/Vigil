@@ -63,7 +63,7 @@ git clone <repo-url> $DIR/source/<repo-name>
 # 2. Ingest into backend
 ./scripts/assess.py code-ingest "$DIR/source/<repo-name>" --name <repo-name> --language <primary-lang>
 
-# 3. Generate structural index (optional -- graceful fallback if tree-sitter not installed)
+# 3. Generate structural index
 ./scripts/assess.py code-index "$DIR/source/<repo-name>"
 
 # 4. Verify ingestion and index
@@ -85,19 +85,22 @@ The `code-ingest` command:
 - Generates ctags symbol index (if ctags is available)
 
 The `code-index` command:
+- Runs through the `agent/scripts/assess.py` `uv` script entrypoint, which provides the
+  bundled `tree-sitter` parser packages.
 - Uses tree-sitter to parse each source file
 - Produces per-file JSON in `tools/analysis-state/structural-index/` (filenames are `sha256(rel_path)[:16].json`) containing: function map (names, signatures, line ranges), entry points (main functions, request handlers, exported APIs), security sinks (memory operations, file I/O, command execution, crypto calls), and call sites
 - Writes a manifest at `tools/analysis-state/structural-index-manifest.json` with aggregate statistics and a `path_to_index` mapping (file relative path -> index filename) so consumers can look up index files by path
-- If tree-sitter is not installed, exits cleanly with a warning -- downstream phases operate without it using manual triage as a fallback
+- If tree-sitter is still unavailable, fix the local `uv` environment and rerun. Do not skip
+  structural indexing for a fresh engagement.
 - The structural index accelerates Phase 2 hunting by giving the hunter a pre-built function map and sink catalog instead of requiring manual code triage
 
-Output: `tools/analysis-state/structural-index/` directory with per-file JSON + manifest (when tree-sitter is available).
+Output: `tools/analysis-state/structural-index/` directory with per-file JSON + manifest.
 
 ```bash
 jq '.current_phase = "classify-map"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
 ```
 
-Exit: All files inventoried. ctags symbol index generated if ctags is available. Structural index generated if tree-sitter is available. Transition to Phase 1.
+Exit: All files inventoried. ctags symbol index generated if ctags is available. Structural index generated. Transition to Phase 1.
 
 ### Phase 1: CLASSIFY + MAP
 
@@ -107,7 +110,7 @@ Provide:
 - Repo root path plus a file-list artifact or fetched JSON from `./scripts/assess.py fetch "code/files?repo_id=<repo-id>&limit=5000"` -- do not paste thousands of rows inline
 - Project documentation paths (README, SECURITY.md, build files) so the architect can read the source material directly
 - Git churn data as a short summary or artifact path from `code_repos.git_churn_json`
-- Structural index manifest path (from `tools/analysis-state/structural-index-manifest.json`, if available) -- gives the architect pre-computed function counts, entry points, and sink statistics per file
+- Structural index manifest path (from `tools/analysis-state/structural-index-manifest.json`) -- if it is missing, run `./scripts/assess.py code-index` before dispatching. The manifest gives the architect pre-computed function counts, entry points, and sink statistics per file
 
 Phase 1 produces six deliverables. The call graph and attack hypotheses provide navigational guidance for hunters. The file analysis queue ensures every critical/high file is analyzed regardless of hypothesis coverage.
 
@@ -282,10 +285,11 @@ using the available subagent budget.
   performs unconstrained broad analysis first, then checks these hypotheses second. This
   ordering prevents hypothesis anchoring where the analysis scope narrows to the architect's
   predictions.
-- **Structural index** (if available) -- prefer passing the manifest path plus the relevant
-  per-file index paths from `tools/analysis-state/structural-index/`. Inline only the minimal
-  function/sink excerpt needed for prioritization. The hunter uses the index as a navigation map
-  and completeness checklist: every catalogued sink still needs to be accounted for.
+- **Structural index** -- pass the manifest path plus the relevant per-file index paths from
+  `tools/analysis-state/structural-index/`. If the manifest is missing, stop and run
+  `./scripts/assess.py code-index` before dispatching. Inline only the minimal function/sink
+  excerpt needed for prioritization. The hunter uses the index as a navigation map and
+  completeness checklist: every catalogued sink still needs to be accounted for.
 - **Call graph excerpt** -- give a short summary of the relevant entry chain plus the artifact path
   to `tools/analysis-state/call-graph.json`. Inline only the edges that materially change the
   hunter's reasoning for this dispatch.
@@ -653,11 +657,11 @@ Every code analysis dispatch must include:
 - **Agent identity** and **repository name**
 - **Current phase** and **specific task objective**
 - **Which skill to load** (from `agent/SKILL.md`)
-- **For Phase 1**: full file listing, project docs, git churn data, structural index manifest (if available)
+- **For Phase 1**: full file listing, project docs, git churn data, structural index manifest
 - **For Phase 2 (Hunt)**: file paths from queue items, batch theme, slot types,
   applicable vulnerability classes (ALL classes from SLOT_VULN_CLASSES for these slot types),
   guidance hypotheses (labeled "check AFTER broad analysis"), structural index excerpt or
-  per-file JSON (if available), relevant call graph subgraph, concise threat model summary,
+  per-file JSON, relevant call graph subgraph, concise threat model summary,
   CWE pattern references matching applicable classes, effort score guidelines (thresholds for
   this tier), adversarial framing preamble
 - **For Phase 2B (CWE Re-Analysis)**: cwe_directives (specific classes below threshold),
@@ -679,7 +683,7 @@ Before every dispatch, verify:
 - [ ] For Phase 2: applicable vulnerability classes copied from backend `applicable_vuln_classes` when present; otherwise derived from slot types + role/language fallback rules
 - [ ] For Phase 2: CWE pattern references selected via slot-type mapping table
 - [ ] For Phase 2: guidance hypotheses included and labeled "check AFTER broad analysis"
-- [ ] For Phase 2: structural index excerpt or per-file JSON included (if available)
+- [ ] For Phase 2: structural index excerpt or per-file JSON included, or `code-index` rerun before dispatch
 - [ ] For Phase 2: adversarial framing preamble included (with actual entry points and chains)
 - [ ] For Phase 2: effort score thresholds included for the file's classification tier
 - [ ] For Phase 2: unrelated fetched groups split into separate hunter dispatches so independent modules run in parallel
@@ -737,7 +741,7 @@ Code Analysis: [x] Ingest  [x] Classify+Map  [>] Hunt  [ ] Verify+Variant
 When source code is obtained mid-engagement (exposed .git, source maps, backup download):
 1. Download/reconstruct source to `$DIR/source/<name>/`
 2. Run `./scripts/assess.py code-ingest "$DIR/source/<name>"`
-3. Run `./scripts/assess.py code-index "$DIR/source/<name>"` for structural index
+3. Run `./scripts/assess.py code-index "$DIR/source/<name>"` to materialize the required structural index (the script bootstraps bundled tree-sitter packages through `uv` on first run)
 4. Code analysis phases run in parallel with ongoing web testing
 5. Findings land in the same `assessment_findings` table
 
