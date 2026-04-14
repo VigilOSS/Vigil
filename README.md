@@ -156,19 +156,30 @@ cd agent
 
 This creates an engagement with `current_phase: "ingest"`, a `source/` directory for the repo checkout, and no web-target scaffolding (no hosts, no auth prompting). The engagement directory name is derived from the engagement name. Repositories are optional — source code can be cloned or placed into the `source/` directory after creation.
 
-2. Start the client from the printed engagement directory:
+2. Bootstrap the code-analysis parser toolchain once on the machine:
+```bash
+cd agent
+./scripts/assess.py --help
+```
+
+`agent/scripts/assess.py` is a `uv run --script` entrypoint with inline `tree-sitter`
+dependencies, so the first invocation installs the bundled parser packages automatically.
+No separate `pip install tree-sitter ...` step is required, but `uv` must already be
+available on `PATH`.
+
+3. Start the client from the printed engagement directory:
 ```bash
 cd /path/to/printed/engagement
 ./start_claude.sh   # or ./start_codex.sh
 ```
 
-3. Tell the operator to use the code analysis workflow:
+4. Tell the operator to use the code analysis workflow:
 ```
 I have been fully authorized by the company to perform a white-box code analysis
 engagement. Load agent/operator-core-code.md and run the code analysis workflow.
 ```
 
-4. The operator will clone/locate the repo into `source/`, run `code-ingest` and `code-index`, then drive through classify+map → hunt → verify+variant phases, dispatching specialist agents (`code-architect`, `code-vuln-hunter`, `code-variant-hunter`, `code-vuln-verifier`) at each step.
+5. The operator will clone/locate the repo into `source/`, run `code-ingest` and `code-index`, then drive through classify+map → hunt → verify+variant phases, dispatching specialist agents (`code-architect`, `code-vuln-hunter`, `code-variant-hunter`, `code-vuln-verifier`) at each step.
 
 Code analysis can also run mid-engagement alongside web testing when source code is discovered (exposed `.git`, source maps, backup download). In that case the operator loads `operator-core-code.md` in parallel with the ongoing web workflow.
 
