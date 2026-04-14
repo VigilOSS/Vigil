@@ -67,11 +67,15 @@ Agents CANNOT start, stop, or restart listener, tunnel, or OOB processes.
 
 ## 3. Use Skills and References — They Are the Methodology
 
-**Step 1 — Check `agent/SKILL.md`** when you begin specialist work. It lists every available
-skill with "Use when:" criteria. Load the most relevant skill before improvising.
+**Step 1 — Read `agent/SKILL.md`** before starting any specialist work. It lists every available
+skill with "Use when:" criteria. Select and load the matching skill before doing anything else.
 
-**Step 2 — Check `agent/references/INDEX.md`** when the skill alone does not cover the target
-well enough or when you need payloads, OWASP checklists, or tool guidance.
+**Step 2 — Read `agent/references/INDEX.md`** after loading the skill. Identify the paired
+payload files, tool cheatsheets, and OWASP checklists that apply to your task and load them.
+
+**Do not begin target-facing work until both reads are complete.** Improvising a technique that
+already exists in the skill/reference set wastes tokens, produces inconsistent results, and
+misses methodology that the skill encodes (e.g., mitmproxy setup, payload libraries, tool flags).
 
 **References are not a fallback.** The `references/` library contains:
 - `payloads/` — 20 copy-pasteable attack payload files per bug class
@@ -82,7 +86,7 @@ well enough or when you need payloads, OWASP checklists, or tool guidance.
 When a skill's "Extended Resources" section lists reference files, those are required reading
 for that test class — not optional supplemental material.
 
-Only improvise after confirming the e erence set is genuinely insufficient.
+Only improvise after confirming the reference set is genuinely insufficient.
 
 ---
 

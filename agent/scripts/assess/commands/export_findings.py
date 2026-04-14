@@ -85,6 +85,9 @@ def _render_finding(f: dict) -> str:
         lines.append(f"- **Sink**: {sink}")
     if references:
         lines.append(f"- **References**: {', '.join(references)}")
+    poc_request = f.get("poc_request")
+    poc_response = f.get("poc_response")
+
     if steps:
         lines.append("")
         lines.append("**Steps to Reproduce:**")
@@ -94,6 +97,31 @@ def _render_finding(f: dict) -> str:
         lines.append("")
         lines.append("**PoC Code:**")
         lines.append(f"```\n{poc_code}\n```")
+    if isinstance(poc_request, dict):
+        method = poc_request.get("method", "")
+        url = poc_request.get("url", "")
+        req_headers = poc_request.get("headers") or {}
+        req_body = poc_request.get("body", "")
+        lines.append("")
+        lines.append("**PoC Request:**")
+        lines.append(f"```\n{method} {url}")
+        for k, v in req_headers.items():
+            lines.append(f"{k}: {v}")
+        if req_body:
+            lines.append(f"\n{req_body}")
+        lines.append("```")
+    if isinstance(poc_response, dict):
+        status = poc_response.get("status", "")
+        resp_headers = poc_response.get("headers") or {}
+        body_excerpt = poc_response.get("body_excerpt", "")
+        lines.append("")
+        lines.append("**PoC Response:**")
+        lines.append(f"```\nHTTP {status}")
+        for k, v in resp_headers.items():
+            lines.append(f"{k}: {v}")
+        if body_excerpt:
+            lines.append(f"\n{body_excerpt}")
+        lines.append("```")
 
     block = "\n".join(lines).rstrip()
     if notes:

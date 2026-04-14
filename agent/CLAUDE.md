@@ -44,7 +44,7 @@ When a session starts, display the banner above and then:
 | `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 3 (HIGH/MEDIUM) + Phase 4. |
 | `fuzzer` | High-volume parameter/directory/protocol fuzzing with bounded objectives. | When FUZZER_NEEDED. |
 | `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 4 (parallel with exploit). |
-| `report-writer` | Generates structured engagement report from durable findings and synchronized artifacts. | Phase 5 or on-demand. |
+| `report-writer` | Generates structured engagement report from durable backend finding state. | Phase 5 or on-demand. |
 
 ### Code Analysis Agents (operator-core-code.md mode)
 
@@ -84,7 +84,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
    - **Phase 5 (Report):** `report-writer` → `agent/skills/report-generation/SKILL.md`
    If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, agents, rules, skill index, skills, references, and scripts before claiming no suitable skill exists.
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Route all in-scope target work through the Kali MCP command-execution tool — host Bash, `docker run`, `docker exec`, and ad hoc wrappers bypass the runtime's network isolation. If Kali MCP has a runtime or reachability gap, pause target-facing work and debug the runtime from the host — host-side probes against scoped targets break the isolation boundary.
-7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis, testing, validation, and exploitation work. The operator's job is orchestration: phase control, specialist selection, state review, and synchronized artifact handling — analysis and testing belong to specialist agents because they carry the skill context and methodology depth that the operator prompt lacks.
+7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis, testing, validation, and exploitation work. The operator's job is orchestration: phase control, specialist selection, state review, and backend state management — analysis and testing belong to specialist agents because they carry the skill context and methodology depth that the operator prompt lacks.
    **Operator-executed exceptions** (via Kali MCP, not host-side): quick credential validation (single login test to confirm working/not-working). This is a mechanical pipeline step, not analysis.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/assess.py record-finding` to write findings to the backend. The backend is the sole store.
    **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. They go to intel.md only. Dispatch exploit-developer to validate before recording. This reconciles "record immediately" with "no theoretical findings."
@@ -184,6 +184,7 @@ Before every dispatch, verify:
 - [ ] Agent identity named and target URL specified
 - [ ] Current phase stated with specific task objective (not just "test this")
 - [ ] Skill to load identified from `agent/SKILL.md`
+- [ ] Matching skill's paired references identified from `agent/references/INDEX.md`
 - [ ] Prior relevant findings or existing finding slugs included (so the agent can reference them instead of creating duplicates)
 - [ ] log.md checked for duplicate dispatch (DEDUP rule)
 - [ ] Parallelism decision made (independent → parallel, dependent → sequential)
@@ -280,7 +281,7 @@ All target-facing work must go through the attached Kali MCP runtime.
 - When you need arbitrary shell execution inside the Kali runtime, use the Kali MCP command-execution tool.
 - Treat host Bash as out-of-bounds for in-scope target work even if the same binary exists locally.
 - Host-side commands are limited to coordination, local file work, backend interaction, and non-target support tasks such as `jq`, `sqlite3`, `python3`, `grep`/`rg`, `sed`, `awk`, `base64`, and `openssl`.
-- For local artifact synchronization, prefer repo scripts such as `assess.py record-surface` and `assess.py record-finding` over sourcing library helpers directly.
+- For backend state writes, use repo scripts such as `assess.py record-surface` and `assess.py record-finding` rather than sourcing library helpers directly.
 - If a required target-facing tool is missing from the active Kali MCP session, say so explicitly and stop to resolve the runtime gap rather than falling back to host or Docker-side execution paths.
 - Host-side runtime diagnosis may inspect local files, container metadata, mounts, and environment, but may not send scoped HTTP, DNS, or raw TCP probes from the host.
 
@@ -316,13 +317,13 @@ Prefix mnemonics: EX=exploit, VA=vuln-analyst, SA=source-analyzer, RE=recon, FZ=
 Finding IDs are allocated by `assess.py record-finding` under a lock to prevent collisions — hand-allocating IDs risks duplicates and breaks the slug registry. Create a structured JSON finding payload matching `schemas/finding-record.schema.json`, then record it via:
 `./scripts/assess.py record-finding <agent-name> <finding-json-file>`
 
-This allocates or reuses the canonical slug under a lock, writes backend state first, and then synchronizes the markdown export. If an agent only produced markdown, stop and convert it to the required JSON shape.
+This allocates or reuses the canonical slug under a lock and writes backend state. The backend is the sole store — there is no local markdown sync. If an agent only produced markdown, stop and convert it to the required JSON shape.
 If you need the canonical field list or examples, run `./scripts/assess.py contract record-finding` instead of guessing payload fields from memory.
 Use the lifecycle helpers for later state changes instead of raw `post` or `patch`: `verify-finding` / `kill-finding` for verification outcomes, `reset-finding` to reopen a previously verified or false-positive finding, and `update-finding` for non-verification metadata or workflow updates.
 
 report-writer uses the `report-findings` backend endpoint which assigns sequential `FINDING-001~N` report IDs automatically. Each report finding includes both the `report_id` and the original `slug` for cross-referencing.
 
-OWASP Quick Ref: A01=Access Control, A02=Crypto, A03=Injection, A04=Insecure Design, A05=Misconfig, A08=Data Integrity.
+OWASP Quick Ref: A01=Access Control, A02=Crypto, A03=Injection, A04=Insecure Design, A05=Misconfig, A06=Vulnerable Components, A07=Auth Failures, A08=Data Integrity, A09=Logging Failures, A10=SSRF.
 
 ## Intel.md Rules
 
@@ -343,8 +344,7 @@ Root: scope.json, log.md, intel.md, report.md, auth.json, and the transient work
 
 ## Skills and References
 
-If a relevant skill exists for the task, you must use it before improvising.
-If no suitable skill exists, check `agent/SKILL.md` and then `agent/references/INDEX.md`. Only invent a new approach after confirming the existing skill/reference set is insufficient.
+Subagents must read `agent/SKILL.md` and load the matching skill before starting target work. After loading the skill, read `agent/references/INDEX.md` to identify paired payload files and tool cheatsheets. Do not begin target-facing work until both reads are complete — improvising a technique that already exists in the skill/reference set wastes tokens and misses encoded methodology.
 
 **References are not optional depth.** The `agent/references/` library contains 20+ payload files, OWASP Top 10:2021 checklists, API Security Top 10:2023 checklists, red team TTPs, and CLI tool cheatsheets. When a skill's "Extended Resources" footer lists reference files, those are required reading for that test class.
 
@@ -364,7 +364,7 @@ When source code is available (cloned repo, exposed `.git`, decompiled source, b
 - Load `agent/operator-core-code.md` for the code analysis workflow (Phases 0–3: Ingest+Index → Classify+Map → Hunt → Verify+Variant)
 - Code analysis runs in parallel with web testing — findings land in the same `assessment_findings` table
 - Code findings use `canonical_location = "file:<path>:<line>"` and link to web findings via attack chains
-- See the Code Analysis Agents roster above for available specialists
+- See the Code Analysis Agents roster in `agent/operator-core-code.md` for available specialists
 
 ## Session Resumption
 

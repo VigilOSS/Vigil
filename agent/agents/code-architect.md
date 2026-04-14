@@ -89,21 +89,29 @@ If a structural index exists at `tools/analysis-state/structural-index/`, use it
    - Use grep to find all callers across the codebase
    - Record reverse edges: which external functions call into this critical code
 
-3. Build adjacency list:
+3. Build adjacency list using flat edge fields matching the operator spec:
    ```json
    {
      "edges": [
        {
-         "caller": {"function": "handle", "file": "daemon.c", "line": 887},
-         "callee": {"function": "run_service", "file": "daemon.c", "line": 740},
-         "untrusted_args": ["client_addr", "req_buf"],
-         "crosses_module": false
+         "caller_func": "handle",
+         "caller_file": "daemon.c",
+         "caller_line": 887,
+         "callee_func": "run_service",
+         "callee_file": "daemon.c",
+         "callee_line": 740,
+         "crosses_trust_boundary": false,
+         "untrusted_data_label": "client_addr, req_buf"
        },
        {
-         "caller": {"function": "run_service", "file": "daemon.c", "line": 770},
-         "callee": {"function": "upload_pack", "file": "upload-pack.c", "line": 1438},
-         "untrusted_args": ["pack_request"],
-         "crosses_module": true
+         "caller_func": "run_service",
+         "caller_file": "daemon.c",
+         "caller_line": 770,
+         "callee_func": "upload_pack",
+         "callee_file": "upload-pack.c",
+         "callee_line": 1438,
+         "crosses_trust_boundary": true,
+         "untrusted_data_label": "pack_request"
        }
      ],
      "entry_points": [

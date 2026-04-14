@@ -45,7 +45,7 @@ _KNOWN_DISPOSITIONS = frozenset({"confirmed", "downgraded", "false_positive", "d
 
 def run(args) -> None:
     inline_payload = getattr(args, "inline_payload", None)
-    raw_payload = inline_payload if inline_payload is not None else getattr(args, "payload", getattr(args, "json_file", None))
+    raw_payload = inline_payload if inline_payload is not None else getattr(args, "payload", None)
     if raw_payload is not None and raw_payload in _KNOWN_DISPOSITIONS:
         print(
             f"'{raw_payload}' looks like a disposition, not a payload file.\n"

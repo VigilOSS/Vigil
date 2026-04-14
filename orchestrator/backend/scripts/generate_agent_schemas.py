@@ -59,16 +59,16 @@ def _finding_record_examples() -> list[dict[str, Any]]:
         normalized.setdefault("summary", normalized.get("title", ""))
         normalized.setdefault("evidence_ref", "")
         normalized.setdefault("notes", "")
-        normalized.setdefault("source_name", "code-vuln-hunter")
+        normalized.setdefault("source_name", "vulnerability-analyst")
         details = normalized.get("details") or {}
         if not isinstance(details, dict):
             details = {}
-        details.setdefault("discovered_by", "code-vuln-hunter")
+        details.setdefault("discovered_by", "vulnerability-analyst")
         normalized["details"] = details
         normalized.setdefault(
             "provenance",
             {
-                "agent_name": "code-vuln-hunter",
+                "agent_name": "vulnerability-analyst",
             },
         )
         normalized.setdefault("links", [])

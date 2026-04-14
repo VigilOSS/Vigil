@@ -595,7 +595,8 @@ def test_verify_finding_posts_verification_payload(monkeypatch, tmp_path, capsys
         SimpleNamespace(
             engagement_dir=tmp_path,
             finding_slug="FINDING-VA-001",
-            json_file=str(payload_path),
+            payload=str(payload_path),
+            inline_payload=None,
         )
     )
 

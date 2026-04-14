@@ -55,7 +55,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("links", "[]"),
         ),
         notes=(
-            "Do not guess top-level lifecycle fields from memory. Omit them unless you are intentionally overriding the helper defaults.",
+            "Do not guess top-level lifecycle fields from memory. Omit them unless you are intentionally overriding the helper defaults. The CLI fills workflow_status, verification_state, verification_disposition, and provenance automatically — supply only the fields shown in the examples.",
             "Code-specific evidence fields such as details.entry_point, details.sink, details.taint_path, details.guards_evaluated, details.slot_type, details.variant_of, and details.original_pattern are valid finding details.",
             "Use details.poc_code for exploit scripts, or details.poc_request / details.poc_response for structured HTTP request/response pairs that demonstrate the vulnerability.",
             "Use details.references for CVE links, advisory URLs, or related documentation (array of strings).",
@@ -64,7 +64,6 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("status", "use workflow_status for lifecycle overrides, or omit it and keep the helper default"),
             ("confidence", "confidence belongs in code-record-analysis output, not finding records"),
             ("cwe", "use details.cwe_id"),
-            ("cwe_id", "use details.cwe_id when storing CWE metadata"),
             ("description", "use summary for the short finding statement or notes for replayable proof"),
             ("evidence", "use details.evidence"),
             ("impact", "use details.impact"),

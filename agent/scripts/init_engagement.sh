@@ -219,8 +219,11 @@ This engagement directory is only the run-artifact root. When you start Codex he
 - Always-active rules: ${ROOT_DIR}/rules
 - Skill index: ${ROOT_DIR}/SKILL.md
 - Skills: ${ROOT_DIR}/skills
+- References index: ${ROOT_DIR}/references/INDEX.md
 - References: ${ROOT_DIR}/references
 - Scripts: ${ROOT_DIR}/scripts
+
+Read SKILL.md and references/INDEX.md before starting specialist work — they define the methodology and tooling that must be used before improvising.
 
 Artifact sync:
 - Use ${ROOT_DIR}/scripts/assess.py for all assessment operations (record-finding, record-surface, fetch, post, etc.)
@@ -246,8 +249,11 @@ This engagement directory is only the run-artifact root. When you start Claude h
 - Always-active rules: ${ROOT_DIR}/rules
 - Skill index: ${ROOT_DIR}/SKILL.md
 - Skills: ${ROOT_DIR}/skills
+- References index: ${ROOT_DIR}/references/INDEX.md
 - References: ${ROOT_DIR}/references
 - Scripts: ${ROOT_DIR}/scripts
+
+Read SKILL.md and references/INDEX.md before starting specialist work — they define the methodology and tooling that must be used before improvising.
 
 Artifact sync:
 - Use ${ROOT_DIR}/scripts/assess.py for all assessment operations (record-finding, record-surface, fetch, post, etc.)

@@ -118,8 +118,8 @@ Phase 1 produces six deliverables. The call graph and attack hypotheses provide 
 
 1. **File classifications** -- every file tagged with priority (critical/high/medium/low/skip) and
    slot types (NETWORK-INPUT, PROTOCOL-FIELD, CMD-ARGUMENT, URL-COMPONENT, FILE-CONTENT,
-   CALLBACK-DATA, ENV-VARIABLE). Each record must include backend `file_id`; `file_path` is
-   helper context, not the primary key.
+   CALLBACK-DATA, ENV-VARIABLE, SERIALIZED-DATA). Each record must include backend `file_id`;
+   `file_path` is helper context, not the primary key.
 
 2. **Module map** -- logical groupings of related files. Same as before.
 
