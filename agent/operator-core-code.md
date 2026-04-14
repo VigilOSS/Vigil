@@ -36,7 +36,7 @@ analyzed or user signals stop:
 2. **DECIDE NEXT ACTION** -- Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified, call graph complete, structural index generated). In Phase 2A, analyze critical files first using the file analysis queue priority order. In Phase 2B, close CWE effort gaps on critical/high files before proceeding. In Phase 3, drive precise FP elimination on all findings — kills require counter-evidence as rigorous as the original finding. Coverage gaps drive decisions.
 3. **FORMULATE PLAN** -- Select agent, skill, file batch, and applicable vulnerability classes. Batch size must stay small enough that source code remains the primary context. Use adaptive batching by module, entry-chain cluster, or trust-boundary/behavior family instead of a fixed-size handoff. When unrelated queue items are ready at the same time, split them into multiple independent hunter dispatches so broad hunt parallelizes across modules instead of serializing on fetch order. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
 4. **PRESENT OR PROCEED** -- Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.
-5. **USE SKILLS FIRST** -- Check `agent/SKILL.md` for the right skill.
+5. **USE SKILLS FIRST** -- Read `agent/SKILL.md` and load the matching skill before starting target work. After loading the skill, read `agent/references/INDEX.md` to identify paired CWE pattern references and tool cheatsheets. Do not begin analysis work until both reads are complete.
    - **Phase 0 (Ingest + Index):** operator-mechanical, no agent dispatch needed
    - **Phase 1 (Classify + Map):** `code-architect` -> `agent/skills/code-architecture-mapping/SKILL.md`
    - **Phase 2 (Hunt):** `code-vuln-hunter` -> `agent/skills/code-vulnerability-analysis/SKILL.md` + CWE-specific refs
@@ -66,7 +66,10 @@ git clone <repo-url> $DIR/source/<repo-name>
 # 3. Generate structural index
 ./scripts/assess.py code-index "$DIR/source/<repo-name>"
 
-# 4. Verify ingestion and index
+# 4. Sync structural metadata to backend
+./scripts/assess.py code-index-sync
+
+# 5. Verify ingestion and index
 ./scripts/assess.py code-coverage
 ```
 
@@ -92,7 +95,7 @@ The `code-index` command:
 - Writes a manifest at `tools/analysis-state/structural-index-manifest.json` with aggregate statistics and a `path_to_index` mapping (file relative path -> index filename) so consumers can look up index files by path
 - If tree-sitter is still unavailable, fix the local `uv` environment and rerun. Do not skip
   structural indexing for a fresh engagement.
-- The structural index accelerates Phase 2 hunting by giving the hunter a pre-built function map and sink catalog instead of requiring manual code triage
+- The structural index accelerates Phase 2 hunting by giving the hunter a pre-built function map, export list, import dependency graph, and advisory sink annotations instead of requiring manual code triage. The function map is the primary completeness anchor -- every function must be accounted for. Sinks, exports, and import targets are advisory metadata that aids navigation but does not constrain the hunter's analysis scope
 
 Output: `tools/analysis-state/structural-index/` directory with per-file JSON + manifest.
 
@@ -118,8 +121,8 @@ Phase 1 produces six deliverables. The call graph and attack hypotheses provide 
 
 1. **File classifications** -- every file tagged with priority (critical/high/medium/low/skip) and
    slot types (NETWORK-INPUT, PROTOCOL-FIELD, CMD-ARGUMENT, URL-COMPONENT, FILE-CONTENT,
-   CALLBACK-DATA, ENV-VARIABLE). Each record must include backend `file_id`; `file_path` is
-   helper context, not the primary key.
+   CALLBACK-DATA, ENV-VARIABLE, SERIALIZED-DATA). Each record must include backend `file_id`;
+   `file_path` is helper context, not the primary key.
 
 2. **Module map** -- logical groupings of related files. Same as before.
 
@@ -287,9 +290,11 @@ using the available subagent budget.
   predictions.
 - **Structural index** -- pass the manifest path plus the relevant per-file index paths from
   `tools/analysis-state/structural-index/`. If the manifest is missing, stop and run
-  `./scripts/assess.py code-index` before dispatching. Inline only the minimal function/sink
-  excerpt needed for prioritization. The hunter uses the index as a navigation map and
-  completeness checklist: every catalogued sink still needs to be accounted for.
+  `./scripts/assess.py code-index` before dispatching. Inline only the minimal function
+  excerpt needed for prioritization. The function map is the primary completeness anchor:
+  every listed function must receive a disposition. Sinks, exports, and import targets are
+  advisory metadata that helps the hunter navigate -- they do not limit what the hunter looks
+  for. The hunter's unconstrained analysis may find issues tree-sitter cannot detect.
 - **Call graph excerpt** -- give a short summary of the relevant entry chain plus the artifact path
   to `tools/analysis-state/call-graph.json`. Inline only the edges that materially change the
   hunter's reasoning for this dispatch.
@@ -405,8 +410,8 @@ This displays:
 - For each critical/high file: expected vulnerability classes from `SLOT_VULN_CLASSES`, current
   effort scores per class, and threshold flags (! marks below-threshold scores)
 - Structural index cross-check: if the structural index is available, compare self-reported
-  `functions_analyzed` against structural index sink counts -- discrepancies indicate the hunter
-  may have skipped sinks
+  `functions_analyzed` against the structural index function count -- discrepancies indicate the
+  hunter may have skipped functions that need a disposition
 - Effort thresholds: critical >= 70, high >= 50, medium >= 30 (medium is best-effort, not blocking)
 
 If all critical/high files meet their effort thresholds AND no cross-file triggers are pending,
@@ -640,7 +645,7 @@ jq '.current_phase = "complete"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv
 | `code-vuln-hunter` | Deep file-level vulnerability analysis with TOB-style methodology | Phase 2 (batched, parallel) |
 | `code-variant-hunter` | Systematic variant scanning for confirmed bug patterns | Phase 3 (parallel with verifier) |
 | `code-vuln-verifier` | FP elimination with devil's advocate verification + clean-file spot-check | Phase 3 (parallel with variant) |
-| `report-writer` | Final report generation (reused from web engagement) | Phase 3 (after verify) |
+| `report-writer` | Final report generation (reused from web engagement) | After Phase 3 completes |
 
 ## Finding Prefixes -- Code Analysis
 

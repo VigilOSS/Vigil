@@ -111,6 +111,18 @@ def _resolve_matching_file_ids(item: dict, code_files: list[dict]) -> list[int]:
     return [int(row['id']) for row in matches]
 
 
+_LOCAL_ONLY_FIELDS = frozenset({"file_path", "repo_id"})
+
+
+def _strip_local_fields(payload: list[dict]) -> list[dict]:
+    """Remove client-side lookup fields before sending to the backend."""
+    result: list[dict] = []
+    for item in payload:
+        cleaned = {k: v for k, v in item.items() if k not in _LOCAL_ONLY_FIELDS}
+        result.append(cleaned)
+    return result
+
+
 def _normalize_classifications(payload: list[dict], code_files: list[dict]) -> list[dict]:
     normalized: list[dict] = []
     for item in payload:
@@ -200,9 +212,10 @@ def run(args) -> None:
         sys.exit(1)
 
     cfg = load_config(args.engagement_dir)
-    normalized_payload = payload
     if any(item.get('file_id') in (None, "") for item in payload):
         normalized_payload = _normalize_classifications(payload, _fetch_code_files(cfg))
+    else:
+        normalized_payload = _strip_local_fields(payload)
 
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:

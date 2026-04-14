@@ -103,10 +103,11 @@ Active Directory attack techniques. Used by: exploit-developer, operator.
 
 | File | Techniques |
 |------|-----------|
-| `active-directory/kerberos-attacks.md` | Kerberoasting, AS-REP roasting, Golden/Silver Tickets, delegation abuse, RBCD |
+| `active-directory/kerberos-attacks.md` | Kerberoasting, AS-REP roasting, Golden/Silver Tickets, delegation abuse, RBCD, detection via Event ID 4769, hashcat modes |
 | `active-directory/ad-enumeration.md` | BloodHound, PowerView, AD module, ACL/ACE abuse |
-| `active-directory/ad-persistence.md` | DCSync, DCShadow, AdminSDHolder, shadow credentials, trust abuse |
+| `active-directory/ad-persistence.md` | DCSync, DCShadow, AdminSDHolder, shadow credentials, trust abuse, DCSync detection via replication GUIDs |
 | `active-directory/adcs-attacks.md` | Certificate template abuse (ESC1), PetitPotam + NTLM relay, Certify/Certipy |
+| `active-directory/ad-detection.md` | AD attack detection: Pass-the-Ticket, Pass-the-Hash, Golden Ticket, Kerberoasting, DCSync — Event IDs, Splunk queries, Sigma rules |
 
 ## payloads/ — Attack Payload Library (from PayloadsAllTheThings)
 
@@ -134,6 +135,8 @@ Copy-pasteable payloads organized by attack type. Used by: exploit-developer, vu
 | `payloads/open-redirect-payloads.md` | URL parsing confusion, protocol-relative, unicode normalization |
 | `payloads/business-logic-payloads.md` | Negative quantity, coupon abuse, payment bypass, mass assignment |
 | `payloads/info-disclosure-probes.md` | Standard endpoints checklist (/metrics, /.env, /actuator, cloud metadata) |
+| `payloads/rate-limit-bypass-payloads.md` | IP spoofing headers by CDN, path variation, account rotation, parameter pollution |
+| `payloads/yara-cobalt-strike.md` | YARA rules for Cobalt Strike beacon config, default cert, shellcode stager, XOR keys |
 
 ## code-vuln-patterns/ — SAST-Surviving Vulnerability Patterns
 

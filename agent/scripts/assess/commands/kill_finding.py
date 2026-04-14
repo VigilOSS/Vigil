@@ -4,12 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.contracts import render_contract_epilog
-from assess.lib.findings import sync_finding_markdown, update_finding_count
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 
 
@@ -106,11 +104,5 @@ def run(args) -> None:
         result = client.post(f"findings/{args.finding_slug}/verify", payload)
     finally:
         client.close()
-
-    findings_file = Path(cfg.engagement_dir) / "findings.md"
-    finding = result.get("finding")
-    if isinstance(finding, dict) and findings_file.is_file():
-        sync_finding_markdown(str(findings_file), finding)
-        update_finding_count(str(findings_file))
 
     print(json.dumps(result, indent=2, ensure_ascii=False))

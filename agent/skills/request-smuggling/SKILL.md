@@ -122,6 +122,12 @@ origin: AI Threat Hunting
 - Severity: Critical (credential theft, cache poisoning) or High (access bypass)
 - Remediation: normalize CL/TE handling, use HTTP/2 end-to-end, reject ambiguous requests
 
+## Kill Signals — Stop Testing When
+- Target uses HTTP/2 end-to-end with no downgrade → classic smuggling not applicable, test H2-specific only
+- No proxy/load balancer detected (single server) → smuggling requires parsing disagreement between 2+ servers, move on
+- CL.TE or TE.CL detection confirmed → record finding, proceed to exploitation, do NOT test remaining variants
+- All detection techniques (CL.TE, TE.CL, TE.TE, H2) fail → infrastructure is aligned, move on
+
 ## Extended Resources
 
 - `agent/references/payloads/request-smuggling-payloads.md` — CL.TE, TE.CL, TE.TE obfuscation, HTTP/2 downgrade

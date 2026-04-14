@@ -41,6 +41,8 @@ origin: AI Threat Hunting
 - [ ] Mutation types: `{ __schema { mutationType { fields { name } } } }`
 - [ ] If introspection disabled, test partial: `{ __type(name: "User") { fields { name } } }`
 - [ ] Field suggestion: send typo, observe "Did you mean..." errors
+- [ ] If introspection fully disabled, use clairvoyance for field/type brute-forcing:
+      `clairvoyance -o schema.json -w /path/to/wordlist.txt -d https://target/graphql`
 
 ### 3. Information Gathering
 
@@ -79,9 +81,17 @@ origin: AI Threat Hunting
       { a: user(id:1){name} b: user(id:2){name} ... z: user(id:26){name} }
       ```
 - [ ] Test depth limit, complexity limit, rate limit
+- [ ] Fragment circular reference: `fragment A on User { friends { ...B } }` + `fragment B on User { friends { ...A } }` — causes infinite recursion
+- [ ] Unbounded pagination: `{ users(first: 1000000) { id name } }` — server may attempt to load all records
 
 ### 7. Batched Query Attacks
 
+- [ ] Array-body batching: `[{"query":"{ me { id } }"},{"query":"{ me { id } }"},...]` — many operations in single HTTP request
+- [ ] Alias-based batching for rate limit bypass:
+      ```graphql
+      { a1: login(user:"admin",pass:"pass1"){token} a2: login(user:"admin",pass:"pass2"){token} }
+      ```
+      Single request, N login attempts — bypasses per-request rate limits
 - [ ] Brute-force via batching: send 1000 login mutations in one request
 - [ ] OTP bypass: batch OTP verification attempts
 - [ ] Rate limit bypass: single HTTP request with multiple operations
@@ -102,6 +112,11 @@ origin: AI Threat Hunting
 - DoS threshold (depth/complexity before failure)
 - Severity based on impact (data leak, RCE, DoS)
 - Remediation: disable introspection in prod, enforce depth/complexity limits, field-level authz
+
+## Kill Signals — Stop Testing When
+- Introspection disabled AND clairvoyance/field suggestion finds zero types → limited attack surface, test only known query names from source analysis
+- All mutations require valid authorization AND no IDOR found in query resolvers → authorization is effective, move on
+- Depth/complexity limits enforced AND rate limiting active → DoS not feasible, skip DoS testing
 
 ## Extended Resources
 

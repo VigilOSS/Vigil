@@ -74,7 +74,7 @@ Work through the target in this order unless the operator provides a narrower ta
 - Prefer concrete, reproducible observations over broad speculative scan output
 - Use automation to expand recon efficiently, but do not mistake automation output for confirmed attack surface
 - Keep target-facing execution in Kali MCP only
-- Do not hand-edit synchronized artifacts when helper scripts or backend sync paths exist
+- Do not hand-edit backend state when helper scripts exist — use `assess.py` commands
 - Do not claim a surface candidate unless it is evidenced by a real response, artifact, or protocol signal
 
 ## Recon Kill Check

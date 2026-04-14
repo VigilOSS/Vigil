@@ -99,6 +99,11 @@ origin: AI Threat Hunting
 - Severity: Critical (RCE) or High (info leak)
 - Remediation: use logic-less templates, sandbox, never pass raw user input to template render
 
+## Kill Signals — Stop Testing When
+- {{7*7}} and all probe variants return literal text (no evaluation) across all parameters → no template injection, move on
+- Template engine identified AND RCE payload succeeds → CRITICAL, record and stop
+- Template engine identified but sandbox blocks all RCE attempts after 5+ chains → record as MEDIUM (sandbox escape may require further research), move on
+
 ## Extended Resources
 
 - `agent/references/payloads/ssti-payloads.md` — per-engine detection and RCE (Jinja2, Twig, Pug, Freemarker, ERB, etc.)

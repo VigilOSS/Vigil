@@ -2,11 +2,19 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+
+
+def _derive_module_key(name: str) -> str:
+    """Slugify a module name into a valid module_key."""
+    key = name.strip().lower()
+    key = re.sub(r"[^a-z0-9]+", "_", key)
+    return key.strip("_") or "unknown"
 
 
 def register(subparsers) -> None:
@@ -31,14 +39,18 @@ def run(args) -> None:
         print("No modules to submit.", file=sys.stderr)
         sys.exit(0)
 
-    # Validate required fields
+    # Validate and normalize required fields
     for i, mod in enumerate(modules):
         if not isinstance(mod, dict):
             print(f"Item {i} is not a JSON object", file=sys.stderr)
             sys.exit(1)
         if 'module_key' not in mod:
-            print(f"Item {i} missing required field 'module_key'", file=sys.stderr)
-            sys.exit(1)
+            name = mod.get('name', '')
+            if not name:
+                print(f"Item {i} missing both 'module_key' and 'name'", file=sys.stderr)
+                sys.exit(1)
+            mod['module_key'] = _derive_module_key(name)
+            print(f"Auto-derived module_key '{mod['module_key']}' from name '{name}'", file=sys.stderr)
 
     payload = {
         'repo_id': int(args.repo_id),

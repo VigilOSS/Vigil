@@ -9,12 +9,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
-from assess.lib.findings import (
-    finding_lock_path,
-    next_finding_id,
-    sync_finding_markdown,
-    update_finding_count,
-)
+from assess.lib.findings import finding_lock_path, next_finding_id
 from assess.lib.locking import file_lock
 from assess.lib.sessions import session_dir_path, session_index_path
 
@@ -41,7 +36,6 @@ def run(args) -> None:
         print(f"proposal file not found: {proposals_file}", file=sys.stderr)
         sys.exit(1)
 
-    # Parse proposals
     proposals = []
     counter: Counter = Counter()
     for line in proposals_file.read_text(encoding="utf-8").splitlines():
@@ -56,7 +50,6 @@ def run(args) -> None:
         print("No proposals to merge.", file=sys.stderr)
         sys.exit(1)
 
-    # Show summary
     print(f"Merge summary for session {session_id}")
     for key in sorted(counter):
         print(f"  {key}:{counter[key]}")
@@ -71,7 +64,6 @@ def run(args) -> None:
             sys.exit(1)
 
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    findings_file = str(Path(eng_dir) / "findings.md")
 
     try:
         for proposal in proposals:
@@ -79,12 +71,11 @@ def run(args) -> None:
             payload = proposal["payload"]
 
             if ptype == "finding_record":
-                # Record finding through backend — full record-finding flow
                 lock_path = finding_lock_path(eng_dir)
                 with file_lock(lock_path):
                     candidate_slug = payload.get("slug", "")
                     if not candidate_slug:
-                        candidate_slug = next_finding_id(eng_dir, "exploit-developer")
+                        candidate_slug = next_finding_id(cfg.base_url, cfg.engagement_key, "exploit-developer")
                     payload["slug"] = candidate_slug
                     payload.setdefault("source_name", "exploit-developer")
                     payload.setdefault("severity", "medium")
@@ -108,15 +99,14 @@ def run(args) -> None:
                     if not isinstance(provenance, dict):
                         provenance = {}
                     provenance.setdefault("agent_name", "exploit-developer")
-                    provenance.setdefault("artifact", "findings.md")
                     payload["provenance"] = provenance
                     payload.setdefault("links", [])
 
                     response = client.post("findings", payload)
                     finding = response.get("finding", {})
-                    if finding.get("slug") and finding.get("title"):
-                        sync_finding_markdown(findings_file, finding)
-                        update_finding_count(findings_file)
+                    if not finding.get("slug") or not finding.get("title"):
+                        print("merge-session: backend did not accept finding proposal", file=sys.stderr)
+                        sys.exit(1)
 
             elif ptype == "probe_run":
                 response = client.post("probe-runs", payload)
@@ -142,7 +132,6 @@ def run(args) -> None:
     finally:
         client.close()
 
-    # Update session index
     index_path = Path(session_index_path(eng_dir))
     if index_path.is_file():
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
