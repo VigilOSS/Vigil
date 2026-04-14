@@ -41,6 +41,9 @@ _try_import_grammar("tree_sitter_cpp", "cpp")
 _try_import_grammar("tree_sitter_python", "python")
 _try_import_grammar("tree_sitter_javascript", "javascript")
 _try_import_grammar("tree_sitter_typescript", "typescript")
+_try_import_grammar("tree_sitter_go", "go")
+_try_import_grammar("tree_sitter_ruby", "ruby")
+_try_import_grammar("tree_sitter_php", "php")
 
 
 # ---------------------------------------------------------------------------
@@ -93,9 +96,15 @@ EXTENSION_LANG_MAP: dict[str, str] = {
     ".cjs": "javascript",
     ".ts": "typescript",
     ".tsx": "typescript",
+    ".go": "go",
+    ".rb": "ruby",
+    ".php": "php",
 }
 
-SUPPORTED_LANGUAGES = frozenset({"java", "c", "cpp", "python", "javascript", "typescript"})
+SUPPORTED_LANGUAGES = frozenset({
+    "java", "c", "cpp", "python", "javascript", "typescript",
+    "go", "ruby", "php",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +139,14 @@ def _get_parser(language: str) -> Any | None:
         if gram is None:
             return None
         lang_fn = getattr(gram, "language_tsx", None)
+        if lang_fn is None:
+            return None
+        lang_obj = tree_sitter.Language(lang_fn())
+    elif language == "php":
+        gram = _GRAMMAR_MODULES.get("php")
+        if gram is None:
+            return None
+        lang_fn = getattr(gram, "language_php", None) or getattr(gram, "language", None)
         if lang_fn is None:
             return None
         lang_obj = tree_sitter.Language(lang_fn())
@@ -173,6 +190,18 @@ _FUNCTION_QUERIES: dict[str, str] = {
         (function_declaration) @func
         (method_definition) @func
     """,
+    "go": """
+        (function_declaration) @func
+        (method_declaration) @func
+    """,
+    "ruby": """
+        (method) @func
+        (singleton_method) @func
+    """,
+    "php": """
+        (function_definition) @func
+        (method_declaration) @func
+    """,
 }
 
 _CLASS_QUERIES: dict[str, str] = {
@@ -184,6 +213,16 @@ _CLASS_QUERIES: dict[str, str] = {
     "python": """(class_definition) @cls""",
     "javascript": """(class_declaration) @cls""",
     "typescript": """(class_declaration) @cls""",
+    "go": """(type_spec) @cls""",
+    "ruby": """
+        (class) @cls
+        (module) @cls
+    """,
+    "php": """
+        (class_declaration) @cls
+        (interface_declaration) @cls
+        (trait_declaration) @cls
+    """,
 }
 
 _IMPORT_QUERIES: dict[str, str] = {
@@ -196,6 +235,8 @@ _IMPORT_QUERIES: dict[str, str] = {
     """,
     "javascript": """(import_statement) @imp""",
     "typescript": """(import_statement) @imp""",
+    "go": """(import_spec) @imp""",
+    "php": """(namespace_use_declaration) @imp""",
 }
 
 
@@ -217,6 +258,12 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "python": [r"\bopen\s*\(", r"\bos\.path\.join\s*\(", r"\bPath\s*\("],
             "javascript": [r"\bfs\.readFile\w*\s*\(", r"\bfs\.writeFile\w*\s*\(", r"\bpath\.join\s*\("],
             "typescript": [r"\bfs\.readFile\w*\s*\(", r"\bfs\.writeFile\w*\s*\(", r"\bpath\.join\s*\("],
+            "go": [r"\bos\.Open\w*\s*\(", r"\bos\.Create\s*\(", r"\bfilepath\.Join\s*\(",
+                   r"\bioutil\.ReadFile\s*\(", r"\bos\.ReadFile\s*\("],
+            "ruby": [r"\bFile\.open\s*\(", r"\bFile\.read\s*\(", r"\bIO\.read\s*\(",
+                     r"\bFileUtils\.\w+\s*\("],
+            "php": [r"\bfopen\s*\(", r"\bfile_get_contents\s*\(", r"\bfile_put_contents\s*\(",
+                    r"\binclude\b", r"\brequire\b", r"\binclude_once\b", r"\brequire_once\b"],
         },
     },
     {
@@ -230,6 +277,11 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "python": [r"\bcursor\.execute\s*\(", r"\.execute\s*\("],
             "javascript": [r"\.query\s*\(", r"\.execute\s*\("],
             "typescript": [r"\.query\s*\(", r"\.execute\s*\("],
+            "go": [r"\b\w+\.Query\s*\(", r"\b\w+\.QueryRow\s*\(", r"\b\w+\.Exec\s*\("],
+            "ruby": [r"\b\w+\.execute\s*\(", r"\bActiveRecord.*\.find_by_sql\s*\(",
+                     r"\b\w+\.where\s*\(.*\braw\b"],
+            "php": [r"\bmysqli_query\s*\(", r"\$\w+->query\s*\(", r"\bPDO::query\s*\(",
+                    r"\$\w+->prepare\s*\("],
         },
     },
     {
@@ -243,6 +295,11 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                        r"\bsubprocess\.call\s*\("],
             "javascript": [r"\bchild_process\.exec\s*\(", r"\bchild_process\.spawn\s*\("],
             "typescript": [r"\bchild_process\.exec\s*\(", r"\bchild_process\.spawn\s*\("],
+            "go": [r"\bexec\.Command\s*\(", r"\bos\.StartProcess\s*\("],
+            "ruby": [r"\bsystem\s*\(", r"\bexec\s*\(", r"\b`[^`]*`",
+                     r"\bOpen3\.\w+\s*\(", r"\bIO\.popen\s*\("],
+            "php": [r"\bexec\s*\(", r"\bsystem\s*\(", r"\bshell_exec\s*\(",
+                    r"\bpassthru\s*\(", r"\bproc_open\s*\(", r"\bpopen\s*\("],
         },
     },
     {
@@ -253,6 +310,12 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "python": [r"\brequests\.get\s*\(", r"\burllib\.request\.urlopen\s*\("],
             "javascript": [r"\bfetch\s*\(", r"\bhttp\.request\s*\(", r"\baxios\."],
             "typescript": [r"\bfetch\s*\(", r"\bhttp\.request\s*\(", r"\baxios\."],
+            "go": [r"\bhttp\.Get\s*\(", r"\bhttp\.Post\s*\(", r"\bhttp\.NewRequest\s*\(",
+                   r"\bhttp\.DefaultClient\.Do\s*\("],
+            "ruby": [r"\bNet::HTTP\.\w+\s*\(", r"\bHTTParty\.\w+\s*\(",
+                     r"\bopen-uri\b", r"\bURI\.open\s*\("],
+            "php": [r"\bcurl_exec\s*\(", r"\bfile_get_contents\s*\(.*http",
+                    r"\bfopen\s*\(.*http"],
         },
     },
     {
@@ -261,6 +324,11 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
         "patterns": {
             "java": [r"\bObjectInputStream\b", r"\breadObject\s*\(", r"\bXMLDecoder\b"],
             "python": [r"\bpickle\.loads?\s*\(", r"\byaml\.load\s*\(", r"\bmarshal\.loads?\s*\("],
+            "go": [r"\bjson\.Unmarshal\s*\(", r"\bgob\.NewDecoder\s*\(",
+                   r"\bxml\.Unmarshal\s*\("],
+            "ruby": [r"\bMarshal\.load\s*\(", r"\bYAML\.load\s*\(",
+                     r"\bJSON\.parse\s*\("],
+            "php": [r"\bunserialize\s*\(", r"\bjson_decode\s*\("],
         },
     },
     {
@@ -271,6 +339,10 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "python": [r"\beval\s*\(", r"\bexec\s*\(", r"\bcompile\s*\("],
             "javascript": [r"\beval\s*\(", r"\bFunction\s*\(", r"\bsetTimeout\s*\("],
             "typescript": [r"\beval\s*\(", r"\bFunction\s*\(", r"\bsetTimeout\s*\("],
+            "ruby": [r"\beval\s*\(", r"\bclass_eval\s*\(", r"\binstance_eval\s*\(",
+                     r"\bsend\s*\(", r"\bpublic_send\s*\("],
+            "php": [r"\beval\s*\(", r"\bassert\s*\(", r"\bpreg_replace\s*\(.*/e",
+                    r"\bcreate_function\s*\("],
         },
     },
     {
@@ -283,6 +355,11 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "python": [r"\bhashlib\.", r"\bCrypto\.Cipher\."],
             "javascript": [r"\bcrypto\.createCipher\w*\s*\(", r"\bcrypto\.createHash\s*\("],
             "typescript": [r"\bcrypto\.createCipher\w*\s*\(", r"\bcrypto\.createHash\s*\("],
+            "go": [r"\bcrypto/\w+\b", r"\baes\.NewCipher\s*\(", r"\bsha256\.New\s*\(",
+                   r"\bhmac\.New\s*\("],
+            "ruby": [r"\bOpenSSL::Cipher\b", r"\bDigest::\w+\b", r"\bOpenSSL::HMAC\b"],
+            "php": [r"\bopenssl_encrypt\s*\(", r"\bmd5\s*\(", r"\bsha1\s*\(",
+                    r"\bhash\s*\(", r"\bmcrypt_encrypt\s*\("],
         },
     },
     {
@@ -294,6 +371,11 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "python": [r"\blogin\s*\(", r"\bsession\s*\[", r"@login_required\b"],
             "javascript": [r"\breq\.session\b", r"\bpassport\.authenticate\s*\("],
             "typescript": [r"\breq\.session\b", r"\bpassport\.authenticate\s*\("],
+            "go": [r"\bjwt\.\w+\s*\(", r"\bsession\.Get\s*\(", r"\bbcrypt\.\w+\s*\("],
+            "ruby": [r"\bauthenticate_user\b", r"\bdevise\b", r"\bcurrent_user\b",
+                     r"\bsession\s*\["],
+            "php": [r"\b\$_SESSION\b", r"\bAuth::\w+\s*\(", r"\bpassword_verify\s*\(",
+                    r"\bsession_start\s*\("],
         },
     },
     {
@@ -303,6 +385,9 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "java": [r"\bgetWriter\s*\(\s*\)\.write\s*\("],
             "javascript": [r"\.innerHTML\b", r"\.outerHTML\b", r"\bdocument\.write\s*\("],
             "typescript": [r"\.innerHTML\b", r"\.outerHTML\b", r"\bdocument\.write\s*\("],
+            "go": [r"\btemplate\.HTML\s*\(", r"\bfmt\.Fprintf\s*\(\s*w\b"],
+            "ruby": [r"\braw\s*\(", r"\.html_safe\b"],
+            "php": [r"\becho\b", r"\bprint\b", r"\bprintf\s*\("],
         },
     },
     {
@@ -313,6 +398,9 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "python": [r"\bredirect\s*\(", r"\bHttpResponseRedirect\s*\("],
             "javascript": [r"\bres\.redirect\s*\("],
             "typescript": [r"\bres\.redirect\s*\("],
+            "go": [r"\bhttp\.Redirect\s*\("],
+            "ruby": [r"\bredirect_to\s*\("],
+            "php": [r"\bheader\s*\(\s*['\"]Location", r"\bredirect\s*\("],
         },
     },
     {
@@ -323,6 +411,10 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "c": [r"\bxmlParseFile\s*\("],
             "cpp": [r"\bxmlParseFile\s*\("],
             "python": [r"\bxml\.etree\.ElementTree\.parse\s*\(", r"\blxml\.etree\.parse\s*\("],
+            "go": [r"\bxml\.NewDecoder\s*\(", r"\bxml\.Unmarshal\s*\("],
+            "ruby": [r"\bNokogiri::XML\s*\(", r"\bREXML::Document\.new\s*\("],
+            "php": [r"\bsimplexml_load_string\s*\(", r"\bDOMDocument\b",
+                    r"\bxml_parse\s*\("],
         },
     },
     {
@@ -372,6 +464,9 @@ _ENTRY_ANNOTATIONS: dict[str, list[dict[str, str]]] = {
         {"pattern": r"@router\.\w+\b", "kind": "fastapi_router"},
         {"pattern": r"@celery\.task\b", "kind": "celery_task"},
     ],
+    "php": [
+        {"pattern": r"#\[Route\b", "kind": "symfony_route"},
+    ],
 }
 
 # Method names that indicate entry points when in the right class context.
@@ -383,6 +478,18 @@ _ENTRY_METHOD_NAMES: dict[str, list[dict[str, str]]] = {
         {"name": "doPut", "kind": "servlet_override"},
         {"name": "doDelete", "kind": "servlet_override"},
         {"name": "main", "kind": "main_method"},
+    ],
+    "go": [
+        {"name": "main", "kind": "main_function"},
+        {"name": "init", "kind": "init_function"},
+    ],
+    "ruby": [
+        {"name": "call", "kind": "rack_call"},
+    ],
+    "php": [
+        {"name": "__construct", "kind": "constructor"},
+        {"name": "__destruct", "kind": "destructor"},
+        {"name": "__wakeup", "kind": "deserialization_hook"},
     ],
 }
 
@@ -422,6 +529,26 @@ _ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
     "cpp": [
         {"pattern": r"\b\w+_handler\s*\(", "kind": "handler_callback"},
         {"pattern": r"\b\w+_callback\s*\(", "kind": "handler_callback"},
+    ],
+    "go": [
+        {"pattern": r"\bhttp\.HandleFunc\s*\(", "kind": "http_handler"},
+        {"pattern": r"\bhttp\.Handle\s*\(", "kind": "http_handler"},
+        {"pattern": r"\bmux\.HandleFunc\s*\(", "kind": "mux_handler"},
+        {"pattern": r"\br\.HandleFunc\s*\(", "kind": "gorilla_router"},
+        {"pattern": r"\b(?:e|g|app)\.\w+\s*\(", "kind": "framework_route"},
+    ],
+    "ruby": [
+        {"pattern": r"\bget\s+['\"/]", "kind": "sinatra_route"},
+        {"pattern": r"\bpost\s+['\"/]", "kind": "sinatra_route"},
+        {"pattern": r"\bput\s+['\"/]", "kind": "sinatra_route"},
+        {"pattern": r"\bdelete\s+['\"/]", "kind": "sinatra_route"},
+        {"pattern": r"if\s+__FILE__\s*==\s*\$0", "kind": "main_guard"},
+        {"pattern": r"if\s+\$PROGRAM_NAME\s*==\s*__FILE__", "kind": "main_guard"},
+    ],
+    "php": [
+        {"pattern": r"\bRoute::\w+\s*\(", "kind": "laravel_route"},
+        {"pattern": r"\$app->\w+\s*\(", "kind": "slim_route"},
+        {"pattern": r"\$router->\w+\s*\(", "kind": "framework_route"},
     ],
 }
 
@@ -533,19 +660,49 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
         params_node = node.child_by_field_name("parameters")
         if params_node:
             params = _extract_params(params_node, source)
+    elif language == "go":
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        params_node = node.child_by_field_name("parameters")
+        if params_node:
+            params = _extract_params(params_node, source)
+        receiver = node.child_by_field_name("receiver")
+        if receiver:
+            recv_text = _node_text(receiver, source).strip("() ")
+            if recv_text:
+                annotations.append(f"receiver:{recv_text}")
+    elif language == "ruby":
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        params_node = node.child_by_field_name("parameters")
+        if params_node:
+            params = _extract_params(params_node, source)
+    elif language == "php":
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        params_node = node.child_by_field_name("parameters")
+        if params_node:
+            params = _extract_params(params_node, source)
+        for child in node.children:
+            txt = _node_text(child, source)
+            if child.type in ("visibility_modifier", "static_modifier", "abstract_modifier"):
+                modifiers.append(txt)
 
     if not name:
         return None
 
     return {
         "name": name,
-        "qualified_name": name,  # enriched later with class context
+        "qualified_name": name,
         "line_start": start_line,
         "line_end": end_line,
         "params": params,
         "modifiers": modifiers,
         "annotations": annotations,
-        "is_entry_point": False,  # set during entry-point detection pass
+        "is_entry_point": False,
     }
 
 
@@ -556,7 +713,11 @@ def _extract_params(params_node: Any, source: bytes) -> list[str]:
         if child.type in ("formal_parameter", "parameter", "spread_element",
                           "required_parameter", "optional_parameter",
                           "typed_parameter", "default_parameter",
-                          "identifier", "typed_default_parameter"):
+                          "identifier", "typed_default_parameter",
+                          "parameter_declaration", "simple_parameter",
+                          "variadic_parameter", "optional_parameter",
+                          "keyword_parameter", "block_parameter",
+                          "splat_parameter", "hash_splat_parameter"):
             params.append(_node_text(child, source).strip())
     return params
 
@@ -635,12 +796,39 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
         name_node = node.child_by_field_name("name")
         if name_node:
             name = _node_text(name_node, source)
-        # heritage / extends
         for child in node.children:
             if child.type == "class_heritage":
                 for hc in child.children:
                     if hc.type == "identifier" or hc.type == "member_expression":
                         extends = _node_text(hc, source)
+    elif language == "go":
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+    elif language == "ruby":
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        superclass_node = node.child_by_field_name("superclass")
+        if superclass_node:
+            for child in superclass_node.children:
+                if child.type in ("constant", "scope_resolution"):
+                    extends = _node_text(child, source)
+                    break
+    elif language == "php":
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            name = _node_text(name_node, source)
+        for child in node.children:
+            if child.type == "base_clause":
+                for gc in child.children:
+                    if gc.type in ("name", "qualified_name"):
+                        extends = _node_text(gc, source)
+                        break
+            elif child.type == "class_interface_clause":
+                for gc in child.children:
+                    if gc.type in ("name", "qualified_name"):
+                        implements.append(_node_text(gc, source))
 
     if not name:
         return None
@@ -654,8 +842,16 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
     }
 
 
+_RUBY_REQUIRE_RE = re.compile(
+    r"""(?:require|require_relative|load)\s*[\(]?\s*['"](.+?)['"]\s*[\)]?"""
+)
+
+
 def _extract_imports_ts(tree: Any, language: str, source: bytes) -> list[str]:
     """Extract import/include strings using tree-sitter queries."""
+    if language == "ruby":
+        return _extract_ruby_imports(source)
+
     query_str = _IMPORT_QUERIES.get(language)
     if not query_str:
         return []
@@ -673,24 +869,37 @@ def _extract_imports_ts(tree: Any, language: str, source: bytes) -> list[str]:
 
     for node in nodes:
         text = _node_text(node, source).strip().rstrip(";")
-        # Collapse to the essential import path
         if language == "java":
-            # "import java.io.File" -> "java.io.File"
             text = text.removeprefix("import").strip()
             text = text.removeprefix("static").strip()
         elif language in ("c", "cpp"):
-            # #include <stdio.h> or #include "header.h"
             m = re.search(r'[<"](.+?)[>"]', text)
             if m:
                 text = m.group(1)
+        elif language == "go":
+            text = text.strip().strip('"')
+            if text.startswith("."):
+                continue
+        elif language == "php":
+            text = text.removeprefix("use").strip().rstrip(";")
         elif language == "python":
-            # Keep as-is: "from os.path import join" or "import sys"
             pass
         elif language in ("javascript", "typescript"):
-            # Keep as-is for now
             pass
         imports.append(text)
 
+    return imports
+
+
+def _extract_ruby_imports(source: bytes) -> list[str]:
+    """Extract require/require_relative/load from Ruby source via regex."""
+    imports: list[str] = []
+    for line in source.decode("utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        for m in _RUBY_REQUIRE_RE.finditer(line):
+            imports.append(m.group(1))
     return imports
 
 
@@ -750,8 +959,7 @@ def _detect_entry_points(
                         })
                         func["is_entry_point"] = True
                         matched = True
-                elif mdef["name"] == "main":
-                    # Verify "public static void main" signature
+                elif mdef["name"] == "main" and language == "java":
                     if "public" in func.get("modifiers", []) and "static" in func.get("modifiers", []):
                         entry_points.append({
                             "name": func["name"],
@@ -796,8 +1004,7 @@ def _detect_entry_points(
             if matched:
                 break
 
-    # Also detect C/C++ main()
-    if language in ("c", "cpp"):
+    if language in ("c", "cpp", "go"):
         for func in functions:
             if func["name"] == "main" and not func["is_entry_point"]:
                 entry_points.append({
@@ -855,8 +1062,12 @@ def _detect_call_sites(
     functions: list[dict[str, Any]],
     source_lines: list[str],
 ) -> list[dict[str, Any]]:
-    """Detect function calls within each function body using regex."""
-    # Build set of known function names for filtering
+    """Detect function calls within each function body using regex.
+
+    Each call site includes a ``passes_caller_params`` boolean indicating
+    whether the call forwards any of the caller's parameter names as
+    arguments -- a lightweight signal for data-flow propagation.
+    """
     known_names = {f["name"] for f in functions}
 
     # Common language keywords to exclude from call-site detection
@@ -868,6 +1079,14 @@ def _detect_call_sites(
         "double", "long", "short", "char", "boolean", "String",
         "True", "False", "None", "null", "undefined", "this", "self",
         "typeof", "instanceof", "sizeof", "assert", "print", "println",
+        "func", "go", "defer", "select", "chan", "range", "type", "struct",
+        "interface", "map", "make", "append", "len", "cap", "copy", "close",
+        "string", "bool", "byte", "error", "nil", "fmt", "log",
+        "puts", "raise", "rescue", "ensure", "yield", "begin", "end",
+        "do", "then", "elsif", "unless", "until", "when", "module",
+        "require", "include", "extend", "attr_accessor", "attr_reader",
+        "echo", "isset", "empty", "unset", "array", "list",
+        "foreach", "elseif", "endforeach", "endif", "endwhile",
     })
 
     calls: list[dict[str, Any]] = []
@@ -876,6 +1095,14 @@ def _detect_call_sites(
         end_idx = min(len(source_lines), func["line_end"])
         seen_callees: set[str] = set()
 
+        param_names: set[str] = set()
+        for p in func.get("params", []):
+            tokens = re.split(r"[\s:=,*&]+", p.strip())
+            for tok in tokens:
+                tok = tok.strip().lstrip("$")
+                if tok and tok not in noise and len(tok) > 1:
+                    param_names.add(tok)
+
         for line_idx in range(start_idx, end_idx):
             line_text = source_lines[line_idx]
             stripped = line_text.strip()
@@ -883,22 +1110,143 @@ def _detect_call_sites(
                 continue
             for m in _CALL_RE.finditer(line_text):
                 callee = m.group(1)
-                # Use the last component for qualified calls (obj.method)
                 simple_name = callee.rsplit(".", 1)[-1]
                 if simple_name in noise:
                     continue
                 if simple_name == func["name"]:
-                    continue  # skip self-recursion noise
+                    continue
                 if simple_name in seen_callees:
                     continue
                 seen_callees.add(simple_name)
+
+                passes_params = False
+                if param_names:
+                    call_end = m.end()
+                    rest_of_line = line_text[call_end:]
+                    for pn in param_names:
+                        if re.search(r'\b' + re.escape(pn) + r'\b', rest_of_line):
+                            passes_params = True
+                            break
+
                 calls.append({
                     "caller": func["name"],
                     "callee": callee,
                     "line": line_idx + 1,
+                    "passes_caller_params": passes_params,
                 })
 
     return calls
+
+
+def _detect_exports(
+    functions: list[dict[str, Any]],
+    classes: list[dict[str, Any]],
+    language: str,
+    source_lines: list[str],
+) -> list[dict[str, Any]]:
+    """Detect exported symbols based on language conventions."""
+    exports: list[dict[str, Any]] = []
+
+    if language == "go":
+        for func in functions:
+            if func["name"] and func["name"][0].isupper():
+                exports.append({"name": func["name"], "kind": "function", "line": func["line_start"]})
+        for cls in classes:
+            if cls["name"] and cls["name"][0].isupper():
+                exports.append({"name": cls["name"], "kind": "type", "line": cls["line_start"]})
+    elif language in ("javascript", "typescript"):
+        export_re = re.compile(r"\bexport\s+(?:default\s+)?(?:function|class|const|let|var|type|interface)\s+(\w+)")
+        named_export_re = re.compile(r"\bexport\s*\{([^}]+)\}")
+        module_exports_re = re.compile(r"\bmodule\.exports\s*=")
+        for idx, line in enumerate(source_lines):
+            m = export_re.search(line)
+            if m:
+                exports.append({"name": m.group(1), "kind": "named_export", "line": idx + 1})
+                continue
+            m = named_export_re.search(line)
+            if m:
+                for name in m.group(1).split(","):
+                    name = name.strip().split(" as ")[-1].strip()
+                    if name:
+                        exports.append({"name": name, "kind": "named_export", "line": idx + 1})
+                continue
+            if module_exports_re.search(line):
+                exports.append({"name": "module.exports", "kind": "cjs_export", "line": idx + 1})
+    elif language == "python":
+        all_re = re.compile(r"__all__\s*=\s*\[([^\]]*)\]")
+        has_all = False
+        for idx, line in enumerate(source_lines):
+            m = all_re.search(line)
+            if m:
+                has_all = True
+                for name in re.findall(r"['\"](\w+)['\"]", m.group(1)):
+                    exports.append({"name": name, "kind": "all_export", "line": idx + 1})
+        if not has_all:
+            for func in functions:
+                if not func["name"].startswith("_"):
+                    exports.append({"name": func["name"], "kind": "public_function", "line": func["line_start"]})
+            for cls in classes:
+                if not cls["name"].startswith("_"):
+                    exports.append({"name": cls["name"], "kind": "public_class", "line": cls["line_start"]})
+    elif language == "java":
+        for func in functions:
+            if "public" in func.get("modifiers", []):
+                exports.append({"name": func["name"], "kind": "public_method", "line": func["line_start"]})
+        for cls in classes:
+            exports.append({"name": cls["name"], "kind": "public_class", "line": cls["line_start"]})
+    elif language == "ruby":
+        for func in functions:
+            exports.append({"name": func["name"], "kind": "method", "line": func["line_start"]})
+    elif language == "php":
+        for func in functions:
+            if "public" in func.get("modifiers", []) or not func.get("modifiers"):
+                exports.append({"name": func["name"], "kind": "public_method", "line": func["line_start"]})
+
+    return exports
+
+
+def _resolve_import_targets(
+    imports: list[str],
+    language: str,
+) -> list[dict[str, str]]:
+    """Resolve import strings to likely file targets within the repo."""
+    targets: list[dict[str, str]] = []
+
+    for imp in imports:
+        target: dict[str, str] = {"raw": imp, "resolved": ""}
+
+        if language == "python":
+            m = re.match(r"from\s+([\w.]+)\s+import", imp)
+            if m:
+                target["resolved"] = m.group(1).replace(".", "/") + ".py"
+            elif imp.startswith("import "):
+                mod = imp.removeprefix("import ").strip().split(",")[0].strip()
+                target["resolved"] = mod.replace(".", "/") + ".py"
+        elif language in ("javascript", "typescript"):
+            m = re.search(r"""from\s+['"]([^'"]+)['"]""", imp)
+            if m:
+                path = m.group(1)
+                if path.startswith("."):
+                    target["resolved"] = path
+        elif language == "go":
+            target["resolved"] = imp
+        elif language == "ruby":
+            if "/" in imp or imp.startswith("."):
+                target["resolved"] = imp + ".rb" if not imp.endswith(".rb") else imp
+            else:
+                target["resolved"] = imp
+        elif language == "php":
+            parts = imp.strip().rstrip(";")
+            target["resolved"] = parts.replace("\\", "/")
+        elif language in ("c", "cpp"):
+            if not imp.startswith("<"):
+                target["resolved"] = imp
+        elif language == "java":
+            target["resolved"] = imp.replace(".", "/") + ".java"
+
+        targets.append(target)
+
+    return targets
 
 
 def _enrich_qualified_names(
@@ -1026,6 +1374,12 @@ def index_file(
     # Detect call sites
     call_sites = _detect_call_sites(functions, source_lines)
 
+    # Detect exports
+    exports = _detect_exports(functions, classes, effective_lang, source_lines)
+
+    # Resolve import targets
+    import_targets = _resolve_import_targets(imports, effective_lang)
+
     return {
         "file_path": file_path,
         "language": language,
@@ -1036,6 +1390,8 @@ def index_file(
         "security_sinks": sinks,
         "call_sites": call_sites,
         "imports": imports,
+        "import_targets": import_targets,
+        "exports": exports,
         "classes": classes,
     }
 
@@ -1056,6 +1412,8 @@ def _empty_index(
         "security_sinks": [],
         "call_sites": [],
         "imports": [],
+        "import_targets": [],
+        "exports": [],
         "classes": [],
     }
 
@@ -1074,6 +1432,7 @@ def index_repo(
     total_functions = 0
     total_entry_points = 0
     total_sinks = 0
+    total_exports = 0
     sinks_by_cat: dict[str, int] = {}
     skipped = 0
 
@@ -1086,13 +1445,14 @@ def index_repo(
             continue
 
         idx = index_file(abs_path, lang)
-        idx["file_path"] = rel_path  # keep relative
+        idx["file_path"] = rel_path
         indices.append(idx)
 
         lang_counts[lang] = lang_counts.get(lang, 0) + 1
         total_functions += idx["total_functions"]
         total_entry_points += len(idx["entry_points"])
         total_sinks += len(idx["security_sinks"])
+        total_exports += len(idx.get("exports", []))
         for sink in idx["security_sinks"]:
             kind = sink["kind"]
             sinks_by_cat[kind] = sinks_by_cat.get(kind, 0) + 1
@@ -1106,6 +1466,7 @@ def index_repo(
         "total_functions": total_functions,
         "total_entry_points": total_entry_points,
         "total_security_sinks": total_sinks,
+        "total_exports": total_exports,
         "sinks_by_category": sinks_by_cat,
     }
 

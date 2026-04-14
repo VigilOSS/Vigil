@@ -718,6 +718,7 @@ _CODE_FILE_ALLOWED_FIELDS = frozenset({
     "classification", "role", "analysis_priority", "analysis_status",
     "analysis_depth", "skip_reason", "variant_check_status", "module_id",
     "notes", "slot_types_json", "language",
+    "total_functions", "total_entry_points", "total_sinks", "total_exports",
 })
 
 
@@ -833,6 +834,54 @@ def update_code_file(
         for module_id in module_ids_to_sync:
             _sync_module_rollup(connection, engagement.id, module_id)
     return _hydrate_code_file(row)
+
+
+def bulk_update_structural_metadata(
+    engagement_id: int,
+    updates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Batch-update structural metadata (from tree-sitter index) on code_files rows."""
+    engagement = _engagement_or_404(engagement_id)
+    updated = 0
+    skipped = 0
+    structural_fields = {"total_functions", "total_entry_points", "total_sinks", "total_exports"}
+
+    with get_connection() as connection:
+        for item in updates:
+            file_id = item.get("file_id")
+            if file_id is None:
+                skipped += 1
+                continue
+
+            set_clauses = []
+            params: list[Any] = []
+            for field in structural_fields:
+                if field in item:
+                    val = item[field]
+                    try:
+                        val = int(val)
+                    except (TypeError, ValueError):
+                        continue
+                    set_clauses.append(f"{field} = ?")
+                    params.append(val)
+
+            if not set_clauses:
+                skipped += 1
+                continue
+
+            set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+            params.extend([engagement.id, int(file_id)])
+            cursor = connection.execute(
+                f"UPDATE code_files SET {', '.join(set_clauses)} "
+                f"WHERE engagement_id = ? AND id = ?",
+                tuple(params),
+            )
+            if cursor.rowcount > 0:
+                updated += 1
+            else:
+                skipped += 1
+
+    return {"updated": updated, "skipped": skipped}
 
 
 # =========================================================================
@@ -2313,7 +2362,8 @@ def code_coverage_cwe_detail(
         file_rows = connection.execute(
             f"""
             SELECT f.id AS file_id, f.file_path, f.classification, f.slot_types_json,
-                   f.analysis_status, f.loc, f.language, f.role
+                   f.analysis_status, f.loc, f.language, f.role,
+                   f.total_functions, f.total_entry_points, f.total_sinks, f.total_exports
             FROM code_files f
             WHERE f.engagement_id = ? AND f.classification IN ('critical', 'high'){repo_clause}
             ORDER BY f.analysis_priority DESC, f.id ASC
@@ -2381,6 +2431,10 @@ def code_coverage_cwe_detail(
                 "classification": fr["classification"],
                 "analysis_status": fr["analysis_status"],
                 "loc": int(fr["loc"]),
+                "total_functions": int(fr["total_functions"] or 0),
+                "total_entry_points": int(fr["total_entry_points"] or 0),
+                "total_sinks": int(fr["total_sinks"] or 0),
+                "total_exports": int(fr["total_exports"] or 0),
                 "slot_types": slot_types,
                 "applicable_families": applicable,
                 "cwe_coverage": merged_entries,
