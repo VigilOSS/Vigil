@@ -72,7 +72,7 @@ Path convention:
 
 After engagement initialization completes, repeat until all attack paths exhausted or user signals stop:
 
-1. **ASSESS STATE** — Read scope.json and log.md. When orchestrator backend state is available, treat it as canonical for findings, coverage, services, and chains. Use findings.md as a synchronized readable export, not source-of-truth state. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
+1. **ASSESS STATE** — Read scope.json and log.md. Query backend state via `assess.py list-findings` or `assess.py fetch findings`. Local `findings.md` is not maintained during the engagement — use `assess.py export-findings` to generate it on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
 2. **DECIDE NEXT ACTION** — Prioritize by current phase first. In Phase 1-2, prioritize breadth of surface coverage. In Phase 3, prioritize risk class: object references, auth boundaries, and privileged writes before low-risk surfaces. Once confirmed findings exist, drive HIGH findings to exploitation before investing in medium/low. Skip ahead only when an obviously actionable path is already in hand.
 3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.4` with `high` reasoning, and Claude operator and substantial Claude workers should use `Opus 4.6`. Only drop to `gpt-5.4` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
@@ -86,9 +86,9 @@ After engagement initialization completes, repeat until all attack paths exhaust
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Route all in-scope target work through the Kali MCP command-execution tool — host Bash, `docker run`, `docker exec`, and ad hoc wrappers bypass the runtime's network isolation. If Kali MCP has a runtime or reachability gap, pause target-facing work and debug the runtime from the host — host-side probes against scoped targets break the isolation boundary.
 7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis, testing, validation, and exploitation work. The operator's job is orchestration: phase control, specialist selection, state review, and synchronized artifact handling — analysis and testing belong to specialist agents because they carry the skill context and methodology depth that the operator prompt lacks.
    **Operator-executed exceptions** (via Kali MCP, not host-side): quick credential validation (single login test to confirm working/not-working). This is a mechanical pipeline step, not analysis.
-8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/assess.py record-finding` or the assessment API so findings.md remains a synchronized export, not the authoritative store.
+8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/assess.py record-finding` to write findings to the backend. The backend is the sole store.
    **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. They go to intel.md only. Dispatch exploit-developer to validate before recording. This reconciles "record immediately" with "no theoretical findings."
-9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, append them via `./scripts/assess.py record-surface` so the backend and readable export stay in sync. Use `./scripts/assess.py record-surface` for all surface writes — calling `scripts/lib/surfaces.sh` directly or patching `surfaces.jsonl` by hand bypasses the backend sync that keeps the readable export consistent. After each surface update batch, wait for the command to finish and then verify `surfaces.jsonl` with a fresh read. If the first verification read does not reflect the expected change, re-read once before assuming failure. Only treat it as a real helper/backend problem if the command completed successfully and a second fresh read still disagrees; in that case, stop and report the sync issue instead of editing the artifact manually.
+9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, record them via `./scripts/assess.py record-surface` so the backend stays current. The backend is the sole store — there is no local surfaces file to verify.
    If surface recording fails with a connection error, verify the orchestrator backend is running and that `ORCHESTRATOR_BASE_URL` and the engagement key are set correctly (check `engagement.json` and `.orchestrator.env` in the engagement directory).
 10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
 11. **LOOP** — Back to step 1 to discovery and exploit more findings
@@ -339,7 +339,7 @@ After receiving agent output with `#### Intelligence` section:
 | Custom scripts/exploits | tools/ |
 | Background PIDs | pids/ |
 
-Root: scope.json, log.md, findings.md, intel.md, report.md, auth.json, and the transient worker buffer only.
+Root: scope.json, log.md, intel.md, report.md, auth.json, and the transient worker buffer only.
 
 ## Skills and References
 
@@ -420,7 +420,7 @@ When exploit work should be split across multiple Codex sessions, the coordinato
 ```
 3. In the worker session, use the generated `sessions/<session-id>/prompt.md`.
 4. Workers write proposals under `sessions/<session-id>/proposals/` via `./scripts/assess.py record-proposal` — proposals are staging areas that the coordinator reviews before merging into canonical state.
-5. Workers scope their writes to the session directory — root `findings.md`, `report.md`, and `scope.json` are coordinator-owned and updated only via `assess.py merge-session`.
+5. Workers scope their writes to the session directory — root `report.md` and `scope.json` are coordinator-owned and updated only via `assess.py merge-session`.
 6. The coordinator merges approved proposals into canonical backend state with:
 ```bash
 ./scripts/assess.py merge-session <session-id>

@@ -707,41 +707,6 @@ else
 EOF
 fi
 
-# --- Write findings.md ---
-if [[ "$MODE" == "code" ]]; then
-  cat > "$DIR/findings.md" <<EOF
-# Findings
-
-- **Name**: ${NAME}
-- **Repositories**: ${REPOS_DISPLAY}
-- **Engagement Date**: ${DATE}
-- **Finding Count**: 0
-
----
-EOF
-elif [[ "$MODE" == "web" ]]; then
-  cat > "$DIR/findings.md" <<EOF
-# Findings
-
-- **Target**: ${TARGET_NORMALIZED}
-- **Engagement Date**: ${DATE}
-- **Finding Count**: 0
-
----
-EOF
-else
-  cat > "$DIR/findings.md" <<EOF
-# Findings
-
-- **Name**: ${NAME}
-- **Target**: ${TARGET_NORMALIZED}
-- **Engagement Date**: ${DATE}
-- **Finding Count**: 0
-
----
-EOF
-fi
-
 # --- Write report.md ---
 if [[ "$MODE" == "code" ]]; then
   cat > "$DIR/report.md" <<EOF
@@ -809,7 +774,6 @@ else
 EOF
 fi
 
-: > "$DIR/surfaces.jsonl"
 write_auth_scaffold "$DIR" "$AUTH_MODE" "$START_TIME"
 printf '[]\n' > "$DIR/sessions/index.json"
 printf '[]\n' > "$DIR/agent-registry.json"

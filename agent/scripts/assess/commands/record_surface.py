@@ -1,17 +1,12 @@
-"""assess.py record-surface — POST surface + jsonl sync + emit event."""
+"""assess.py record-surface — POST surface + emit event."""
 from __future__ import annotations
 
-import json
 import os
 import sys
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
-from assess.lib.surfaces import (
-    VALID_STATUSES,
-    VALID_SURFACE_TYPES,
-    upsert_surface_record,
-)
+from assess.lib.surfaces import VALID_STATUSES, VALID_SURFACE_TYPES
 
 
 def register(subparsers) -> None:
@@ -49,21 +44,9 @@ def run(args) -> None:
     finally:
         client.close()
 
-    # Validate response
     if not response.get("surface_type") or not response.get("target_descriptor"):
         print("record-surface: orchestrator backend did not return a canonical surface record", file=sys.stderr)
         sys.exit(1)
-
-    # Sync to surfaces.jsonl
-    upsert_surface_record(
-        cfg.engagement_dir,
-        args.type,
-        args.target,
-        args.source,
-        args.rationale,
-        args.evidence_ref,
-        args.status,
-    )
 
     # Emit event
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)

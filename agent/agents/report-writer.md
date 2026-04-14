@@ -41,8 +41,6 @@ Minimum backend pull set:
 ./scripts/assess.py fetch summary
 ```
 
-Do not re-read `findings.md` when the backend is available — it is a synchronized export, not the source of truth.
-
 ## Responsibilities
 
 - Pull all finding state from the backend, not from filesystem artifacts

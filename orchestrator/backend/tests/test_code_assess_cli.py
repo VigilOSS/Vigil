@@ -532,7 +532,7 @@ def test_code_classify_resolves_file_path_from_later_pages(monkeypatch, tmp_path
     assert posted["file_id"] == 42
 
 
-def test_verify_finding_posts_verification_payload_and_syncs_markdown(monkeypatch, tmp_path, capsys):
+def test_verify_finding_posts_verification_payload(monkeypatch, tmp_path, capsys):
     module = _load_verify_finding_module()
 
     payload_path = tmp_path / "verify.json"
@@ -552,8 +552,6 @@ def test_verify_finding_posts_verification_payload_and_syncs_markdown(monkeypatc
         ),
         encoding="utf-8",
     )
-    findings_file = tmp_path / "findings.md"
-    findings_file.write_text("# Findings\n", encoding="utf-8")
 
     monkeypatch.setattr(
         module,
@@ -592,12 +590,6 @@ def test_verify_finding_posts_verification_payload_and_syncs_markdown(monkeypatc
             return None
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        module,
-        "sync_finding_markdown",
-        lambda path, finding: captured.setdefault("synced", (path, finding["slug"])),
-    )
-    monkeypatch.setattr(module, "update_finding_count", lambda path: captured.setdefault("count_path", path))
 
     module.run(
         SimpleNamespace(
@@ -609,8 +601,6 @@ def test_verify_finding_posts_verification_payload_and_syncs_markdown(monkeypatc
 
     assert captured["endpoint"] == "findings/FINDING-VA-001/verify"
     assert captured["payload"]["disposition"] == "false_positive"
-    assert captured["synced"] == (str(findings_file), "FINDING-VA-001")
-    assert captured["count_path"] == str(findings_file)
     assert "\"verified_false_positive\"" in capsys.readouterr().out
 
 
@@ -1187,8 +1177,8 @@ def test_kill_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_
 def test_record_finding_reports_normalized_contract_errors_before_backend(monkeypatch, tmp_path, capsys):
     module = _load_record_finding_module()
 
-    findings_file = tmp_path / "findings.md"
-    findings_file.write_text("# Findings\n", encoding="utf-8")
+    monkeypatch.setattr(module, "next_finding_id", lambda base_url, engagement_key, agent_name: "FINDING-CH-001")
+
     payload_path = tmp_path / "finding.json"
     payload_path.write_text(
         json.dumps(

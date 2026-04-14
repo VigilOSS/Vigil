@@ -94,39 +94,6 @@ def test_record_proposal_accepts_valid_credential_payload(tmp_path: Path, capsys
     assert recorded["payload"]["credential_key"] == "vpn-admin"
 
 
-def test_sync_finding_markdown_escapes_backslashes_in_evidence(tmp_path: Path) -> None:
-    """Regression: evidence containing \\s, \\d etc. must not crash re.sub."""
-    scripts_root = _scripts_root()
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
-    from assess.lib.findings import sync_finding_markdown
-
-    findings_file = tmp_path / "findings.md"
-    findings_file.write_text(
-        "# Findings\n\n## [FINDING-CH-015] Regex evidence test\n- **Discovered by**: code-vuln-hunter\n",
-        encoding="utf-8",
-    )
-
-    finding = {
-        "slug": "FINDING-CH-015",
-        "title": "Regex evidence test",
-        "severity": "medium",
-        "workflow_status": "reported",
-        "verification_state": "verified",
-        "verification_disposition": "confirmed",
-        "details_json": json.dumps({
-            "evidence": r"Pattern uses \s+ and \d{3} for matching",
-            "impact": "Test impact",
-        }),
-    }
-
-    sync_finding_markdown(str(findings_file), finding)
-    text = findings_file.read_text(encoding="utf-8")
-    assert "FINDING-CH-015" in text
-    assert r"\s+" in text
-    assert r"\d{3}" in text
-
-
 def test_proxy_addon_loads_legacy_scope_keys(tmp_path: Path) -> None:
     module = _load_proxy_addon_module()
     engagement_dir = tmp_path / "engagement"
@@ -253,9 +220,7 @@ def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, 
     monkeypatch.setattr(module, "session_dir_path", lambda eng_dir, session_id: str(session_dir))
     monkeypatch.setattr(module, "session_index_path", lambda eng_dir: str(engagement_dir / "sessions" / "index.json"))
     monkeypatch.setattr(module, "finding_lock_path", lambda eng_dir: str(engagement_dir / ".findings.lock"))
-    monkeypatch.setattr(module, "next_finding_id", lambda eng_dir, source_name: "FINDING-EX-001")
-    monkeypatch.setattr(module, "sync_finding_markdown", lambda path, finding: None)
-    monkeypatch.setattr(module, "update_finding_count", lambda path: None)
+    monkeypatch.setattr(module, "next_finding_id", lambda base_url, engagement_key, source_name: "FINDING-EX-001")
 
     captured: list[tuple[str, dict[str, object]]] = []
 

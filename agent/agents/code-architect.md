@@ -201,7 +201,7 @@ JSON array of per-file classifications:
 ]
 ```
 
-Every classification record must include backend `file_id`. `file_path` may be included as helper context, but path-only classifications are not acceptable.
+Every classification record should include backend `file_id` when available. `file_path` is accepted as a fallback — `code-classify` resolves paths to `file_id` automatically during normalization.
 
 ### `#### Recommended Analysis Order`
 Prioritized list of modules to analyze first, with reasoning.

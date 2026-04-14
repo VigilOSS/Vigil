@@ -390,8 +390,9 @@ conditional branches, not just the one active in the current build configuration
 ## Confidence Scale
 
 See skill file for the full confidence level table. Key mapping:
-- `high` → recorded as `confirmed`. `medium` → recorded as `draft`.
-- `low` → queued for re-analysis with more context, not reported as-is.
+- `high` → record with `workflow_status: "active"` (the default). Verification is the verifier's job in Phase 3.
+- `medium` → record with `workflow_status: "draft"`. Needs more context to promote.
+- `low` → queued for re-analysis with more context, not recorded as a finding.
 
 ## Filesystem Self-Service
 
@@ -428,10 +429,14 @@ defaults when omitted.
     "cwe_id": "CWE-XXX",
     "impact": "Concrete impact statement",
     "evidence": "Code snippet + taint path + guard failure",
+    "entry_point": "function or input source receiving attacker data",
+    "sink": "dangerous operation receiving tainted data",
     "taint_path": "entry -> transform1 -> ... -> sink",
     "guards_evaluated": "What guards exist, why they fail",
     "slot_type": "NETWORK-INPUT|URL-COMPONENT|...",
-    "steps_to_reproduce": ["Step 1", "Step 2", "..."]
+    "steps_to_reproduce": ["Step 1", "Step 2", "..."],
+    "references": ["https://cwe.mitre.org/data/definitions/XXX.html"],
+    "poc_code": "optional PoC exploit script"
   }
 }
 ```
