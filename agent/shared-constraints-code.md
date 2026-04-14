@@ -25,8 +25,10 @@ analyzing files outside the current scope.
 
 You receive actual source code files -- read directly from the filesystem with structural
 index navigation when available -- not JSON metadata about code. Read the code directly.
-Start with structure (entry points, exports, sinks, stateful regions), then deepen where the
-risk or uncertainty is highest. Do not substitute metadata summaries for source reads.
+Start with the function map as your completeness anchor, then use entry points, exports,
+sinks, and import targets as advisory navigation aids to prioritize where you deepen.
+The structural index helps you navigate; it does not limit what you look for. Do not
+substitute metadata summaries for source reads.
 
 If code beyond the provided file batch is needed, use ctags + grep + Read to find it yourself.
 Full filesystem access is always available. Never guess at the behavior of code you have
@@ -80,7 +82,7 @@ Use `./scripts/assess.py record-finding <agent-name> <finding-json-file>` to rec
 | `code-architect` | `CA` | `FINDING-CA-001` |
 | `code-vuln-hunter` | `CH` | `FINDING-CH-001` |
 | `code-variant-hunter` | `CV` | `FINDING-CV-001` |
-| `code-vuln-verifier` | `VF` | `FINDING-VF-001` |
+| `code-vuln-verifier` | `VF` | `FINDING-VF-001` (spot-check only — verifier updates existing findings, not new ones) |
 
 **Title formula:** `[Bug Class] in [file:line or component] allows [attacker role] to [impact]`
 
@@ -104,7 +106,10 @@ finding table.
 - `defect_family` uses CWE-based names: `buffer-overflow`, `integer-overflow`, `use-after-free`, `injection`, `race-condition`, `crypto-misuse`, `auth-bypass`, `format-string`
 - `details.cwe_id` must be a specific CWE ID (e.g., `CWE-122`, not generic `CWE-119`)
 - `source_name` is your agent name (e.g., `code-vuln-hunter`)
-- `evidence` must include: the vulnerable code snippet, the taint path from untrusted input to sink, and why existing guards are insufficient
+- `details.evidence` must include: the vulnerable code snippet, the taint path from untrusted input to sink, and why existing guards are insufficient
+- `details.entry_point` and `details.sink` decompose the taint path into structured fields — populate both alongside the narrative `details.taint_path`
+- `details.references` is an array of CVE links, advisory URLs, or CWE documentation links
+- `details.poc_code` holds a PoC exploit script; for web findings use `details.poc_request` / `details.poc_response` for structured HTTP pairs
 
 **Deduplication:** Before recording, query existing findings via `./scripts/assess.py fetch report-findings`.
 If the same root cause at the same canonical location already exists, update or merge that finding

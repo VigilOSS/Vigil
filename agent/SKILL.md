@@ -33,7 +33,7 @@ Read `agent/shared-constraints.md` first, then select from this index.
 
 - `agent/skills/report-generation/SKILL.md`
   **Use when:** Writing the final or interim engagement report in Phase 5.
-  **Paired references:** _(uses durable finding state and synchronized artifacts)_
+  **Paired references:** _(uses durable backend finding state)_
 
 - `agent/skills/osint-recon/SKILL.md`
   **Use when:** Gathering CVEs, public disclosures, DNS exposure, org intel, or historical breach data.
@@ -97,6 +97,26 @@ Load the relevant skill before starting validation or exploitation of a candidat
   **Use when:** Target exposes a GraphQL API; testing introspection, batching abuse, injection in variables, or authorization on queries/mutations.
   **Paired references:** `references/payloads/graphql-payloads.md`, `references/api-security/API05-broken-function-authz.md`
 
+- `agent/skills/host-header-injection/SKILL.md`
+  **Use when:** Application reflects or routes on the Host header; testing password reset poisoning, cache poisoning via Host, SSRF through Host manipulation, hostname-based access control bypass, or virtual host enumeration.
+  **Paired references:** `agent/skills/cache-poisoning/SKILL.md`, `agent/skills/ssrf-testing/SKILL.md`
+
+- `agent/skills/aws-iam-privesc/SKILL.md`
+  **Use when:** AWS credentials obtained or IAM scope in cloud pentest; enumerating privilege escalation paths via dangerous policy combinations (PassRole+Lambda, CreatePolicyVersion, AssumeRole), wildcard policies, cross-account role chaining, and metadata service exploitation.
+  **Paired references:** _(none — methodology in skill)_
+
+- `agent/skills/cobalt-strike-analysis/SKILL.md`
+  **Use when:** Suspected Cobalt Strike beacon in memory dump, disk artifact, or network capture; extracting beacon configuration (C2 endpoints, watermarks, malleable profiles), assessing operator OPSEC, and generating network detection signatures.
+  **Paired references:** `references/offensive-tactics/red-team-infra/c2-frameworks.md`
+
+- `agent/skills/container-escape-detection/SKILL.md`
+  **Use when:** Testing containerized applications (Docker, Kubernetes pods); enumerating capabilities, detecting privileged container escape vectors (Docker socket, cgroup abuse, sensitive mounts), and validating Falco/seccomp enforcement.
+  **Paired references:** _(none — methodology in skill)_
+
+- `agent/skills/dns-tunneling-detection/SKILL.md`
+  **Use when:** Investigating potential data exfiltration via DNS; analyzing query entropy, subdomain patterns, record type ratios, and query volume in Zeek/Splunk logs to detect tunneling tools (iodine, dnscat2, DNSExfiltrator, Cobalt Strike DNS).
+  **Paired references:** _(none — methodology in skill)_
+
 - `agent/skills/idor-testing/SKILL.md`
   **Use when:** Testing object references in API parameters, IDs, GUIDs, or path segments for unauthorized access.
   **Paired references:** `references/api-security/API01-broken-object-level-authz.md`
@@ -136,6 +156,10 @@ Load the relevant skill before starting validation or exploitation of a candidat
 - `agent/skills/prototype-pollution/SKILL.md`
   **Use when:** JavaScript/Node.js application accepts JSON input that may flow through deep merge or recursive assignment; testing for prototype chain pollution leading to XSS, RCE, or DoS.
   **Paired references:** _(none — methodology in skill)_
+
+- `agent/skills/rate-limit-bypass/SKILL.md`
+  **Use when:** Testing rate limiting on login, registration, OTP, or API endpoints; bypassing limits via IP spoofing headers, path variation, account rotation, parameter pollution, or concurrent request techniques.
+  **Paired references:** `references/api-security/API04-resource-consumption.md`
 
 - `agent/skills/race-condition-testing/SKILL.md`
   **Use when:** Testing time-of-check/time-of-use (TOCTOU) flaws, limit-overrun conditions, or concurrent state mutations.

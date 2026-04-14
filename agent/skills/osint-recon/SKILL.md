@@ -137,7 +137,7 @@ In short: version-only CVE matches are intel, not findings — record in intel.m
 ## Output Integration
 
 Raw OSINT collection goes to `intel.md`. CVE matches stay in intel.md until exploit-developer
-validates them. Do not treat `findings.md` as the canonical destination.
+validates them. Do not treat local files as the canonical destination.
 - CVE matches → intel.md CVE table + `#### Intelligence` (NOT findings — needs validation)
 - Breached credentials → intel.md Breach table + finding only if target-specific proof exists
 - Historical URLs → intel.md DNS table, then ingest confirmed or high-value paths into backend coverage state

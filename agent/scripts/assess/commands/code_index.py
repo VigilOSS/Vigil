@@ -133,6 +133,7 @@ def run(args) -> None:
     total_functions = 0
     total_entry_points = 0
     total_sinks = 0
+    total_exports = 0
     sinks_by_cat: dict[str, int] = {}
     indexed = 0
     skipped_unsupported = 0
@@ -164,6 +165,7 @@ def run(args) -> None:
         total_functions += idx["total_functions"]
         total_entry_points += len(idx["entry_points"])
         total_sinks += len(idx["security_sinks"])
+        total_exports += len(idx.get("exports", []))
         for sink in idx["security_sinks"]:
             kind = sink["kind"]
             sinks_by_cat[kind] = sinks_by_cat.get(kind, 0) + 1
@@ -179,6 +181,7 @@ def run(args) -> None:
         "total_functions": total_functions,
         "total_entry_points": total_entry_points,
         "total_security_sinks": total_sinks,
+        "total_exports": total_exports,
         "sinks_by_category": sinks_by_cat,
         "path_to_index": path_to_index,
     }
@@ -194,8 +197,9 @@ def run(args) -> None:
     print(f"Repository: {repo_path}", file=sys.stderr)
     print(f"Total files: {len(file_list)}  |  Indexed: {indexed}  |  Skipped (unsupported): {skipped_unsupported}", file=sys.stderr)
     print(f"Languages: {json.dumps(lang_counts)}", file=sys.stderr)
-    print(f"Functions: {total_functions}  |  Entry points: {total_entry_points}  |  Security sinks: {total_sinks}", file=sys.stderr)
+    print(f"Functions: {total_functions}  |  Entry points: {total_entry_points}  |  Security sinks: {total_sinks}  |  Exports: {total_exports}", file=sys.stderr)
     if sinks_by_cat:
         print(f"Sinks by category: {json.dumps(sinks_by_cat)}", file=sys.stderr)
     print(f"\nIndex written to: {idx_dir}", file=sys.stderr)
     print(f"Manifest written to: {manifest_path}", file=sys.stderr)
+    print(f"\nRun 'code-index-sync' to push structural metadata to the backend.", file=sys.stderr)
