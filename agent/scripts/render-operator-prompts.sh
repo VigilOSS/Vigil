@@ -90,7 +90,7 @@ render_agent_roster() {
 | `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 3 (HIGH/MEDIUM) + Phase 4. |
 | `fuzzer` | High-volume parameter/directory/protocol fuzzing with bounded objectives. | When FUZZER_NEEDED. |
 | `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 4 (parallel with exploit). |
-| `report-writer` | Generates structured engagement report from durable findings and synchronized artifacts. | Phase 5 or on-demand. |
+| `report-writer` | Generates structured engagement report from durable backend finding state. | Phase 5 or on-demand. |
 
 EOF
 }

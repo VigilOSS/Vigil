@@ -56,7 +56,7 @@ Avoid vague titles like:
 
 ## 9. Use durable finding state as the source
 
-Do not invent details that are not present in recorded findings, synchronized artifacts, or confirmed evidence references.
+Do not invent details that are not present in recorded findings, backend state, or confirmed evidence references.
 
 ## 10. Section length limits
 

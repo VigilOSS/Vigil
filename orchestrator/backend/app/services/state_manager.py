@@ -2087,9 +2087,10 @@ def list_report_findings(engagement_id: int) -> list[dict[str, Any]]:
     """Return findings formatted for report generation.
 
     Excludes merged and false-positive findings, orders by severity (critical
-    first), and extracts CVSS/remediation/steps_to_reproduce from the
-    ``details_json`` blob so the report-writer has structured fields without
-    manual JSON parsing.
+    first), and extracts structured fields from the ``details_json`` blob so
+    the report-writer has them at the top level without manual JSON parsing:
+    CVSS, remediation, steps_to_reproduce, CWE, OWASP, impact, evidence,
+    entry_point, sink, poc_code, poc_request, poc_response, and references.
     """
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
@@ -2139,9 +2140,12 @@ def list_report_findings(engagement_id: int) -> list[dict[str, Any]]:
         record["entry_point"] = details.get("entry_point", "")
         record["sink"] = details.get("sink", "")
         record["poc_code"] = details.get("poc_code", "")
-        record["poc_request"] = details.get("poc_request")
-        record["poc_response"] = details.get("poc_response")
-        record["references"] = details.get("references", [])
+        raw_req = details.get("poc_request")
+        record["poc_request"] = raw_req if isinstance(raw_req, dict) else None
+        raw_resp = details.get("poc_response")
+        record["poc_response"] = raw_resp if isinstance(raw_resp, dict) else None
+        raw_refs = details.get("references", [])
+        record["references"] = raw_refs if isinstance(raw_refs, list) else []
         results.append(record)
 
     return results

@@ -42,7 +42,6 @@ def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-exampl
         encoding="utf-8",
     )
     (engagement_dir / "log.md").write_text("# Engagement Log\n", encoding="utf-8")
-    (engagement_dir / "findings.md").write_text("# Findings\n", encoding="utf-8")
     (engagement_dir / "sessions" / "index.json").write_text(
         json.dumps(
             [
@@ -129,7 +128,7 @@ def test_engagement_artifacts_and_sessions_are_scoped_by_engagement_key(client, 
     artifacts = client.get("/engagements/2026-03-30-120000-example/artifacts")
     assert artifacts.status_code == 200
     artifact_names = {artifact["name"] for artifact in artifacts.json() if artifact["exists"]}
-    assert {"scope.json", "log.md", "findings.md", "engagement.json"} <= artifact_names
+    assert {"scope.json", "log.md", "engagement.json"} <= artifact_names
 
     sessions = client.get("/engagements/2026-03-30-120000-example/sessions")
     assert sessions.status_code == 200

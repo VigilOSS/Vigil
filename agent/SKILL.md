@@ -33,7 +33,7 @@ Read `agent/shared-constraints.md` first, then select from this index.
 
 - `agent/skills/report-generation/SKILL.md`
   **Use when:** Writing the final or interim engagement report in Phase 5.
-  **Paired references:** _(uses durable finding state and synchronized artifacts)_
+  **Paired references:** _(uses durable backend finding state)_
 
 - `agent/skills/osint-recon/SKILL.md`
   **Use when:** Gathering CVEs, public disclosures, DNS exposure, org intel, or historical breach data.

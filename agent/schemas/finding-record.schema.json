@@ -418,16 +418,16 @@
         "references": [
           "https://cwe.mitre.org/data/definitions/89.html"
         ],
-        "discovered_by": "code-vuln-hunter"
+        "discovered_by": "vulnerability-analyst"
       },
       "workflow_status": "active",
       "verification_state": "unreviewed",
       "verification_disposition": "none",
       "root_cause_key": "",
       "auth_context": "anonymous",
-      "source_name": "code-vuln-hunter",
+      "source_name": "vulnerability-analyst",
       "provenance": {
-        "agent_name": "code-vuln-hunter"
+        "agent_name": "vulnerability-analyst"
       },
       "links": []
     },
@@ -449,7 +449,7 @@
         "references": [
           "https://cwe.mitre.org/data/definitions/122.html"
         ],
-        "discovered_by": "code-vuln-hunter"
+        "discovered_by": "vulnerability-analyst"
       },
       "workflow_status": "active",
       "verification_state": "unreviewed",
@@ -458,9 +458,9 @@
       "auth_context": "anonymous",
       "evidence_ref": "",
       "notes": "",
-      "source_name": "code-vuln-hunter",
+      "source_name": "vulnerability-analyst",
       "provenance": {
-        "agent_name": "code-vuln-hunter"
+        "agent_name": "vulnerability-analyst"
       },
       "links": []
     }
