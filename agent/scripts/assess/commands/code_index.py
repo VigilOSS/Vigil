@@ -84,13 +84,12 @@ def run(args) -> None:
         import tree_sitter  # noqa: F401
     except ImportError:
         print(
-            "Warning: tree-sitter is not installed. Structural indexing is "
-            "unavailable. Install the tree-sitter packages for full support:\n"
-            "  pip install tree-sitter tree-sitter-java tree-sitter-c "
-            "tree-sitter-python tree-sitter-javascript tree-sitter-typescript",
+            "Error: tree-sitter is unavailable in the current assess.py runtime. "
+            "Run code-index through ./scripts/assess.py or repair the local uv "
+            "environment instead of skipping structural indexing.",
             file=sys.stderr,
         )
-        sys.exit(0)
+        sys.exit(1)
 
     repo_path = os.path.abspath(args.repo_path)
     if not os.path.isdir(repo_path):
