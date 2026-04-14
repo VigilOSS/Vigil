@@ -169,9 +169,17 @@
           "maximum": 5,
           "description": "Verification check number responsible for the false-positive verdict"
         },
+        "entry_point": {
+          "type": "string",
+          "description": "Source of attacker-controlled data (for example, function name, HTTP parameter, file read site)"
+        },
+        "sink": {
+          "type": "string",
+          "description": "Dangerous operation receiving tainted data (for example, memcpy call, SQL query, exec invocation)"
+        },
         "taint_path": {
           "type": "string",
-          "description": "Ordered attacker-controlled data flow from entry point to sink"
+          "description": "Ordered attacker-controlled data flow from entry point to sink (narrative form)"
         },
         "guards_evaluated": {
           "type": "string",
@@ -203,6 +211,56 @@
           },
           "description": "Ordered reproduction steps, one string per step"
         },
+        "poc_code": {
+          "type": "string",
+          "description": "Proof-of-concept exploit code or script that demonstrates the vulnerability"
+        },
+        "poc_request": {
+          "type": "object",
+          "description": "Structured HTTP request that triggers the vulnerability",
+          "properties": {
+            "method": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "body": {
+              "type": "string"
+            }
+          }
+        },
+        "poc_response": {
+          "type": "object",
+          "description": "Observed HTTP response confirming the vulnerability",
+          "properties": {
+            "status": {
+              "type": "integer"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "body_excerpt": {
+              "type": "string"
+            }
+          }
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "External references such as CVE IDs, advisory URLs, or related documentation links"
+        },
         "variant_of": {
           "type": "string",
           "description": "Finding slug of the original finding when this record is a verified variant"
@@ -224,7 +282,7 @@
         },
         "artifact": {
           "type": "string",
-          "description": "Artifact path where this finding is synchronized (for example, findings.md)"
+          "description": "Optional artifact reference associated with the finding provenance"
         }
       }
     },
@@ -342,6 +400,24 @@
           "Send GET /search?q=test'+AND+1=1--+-",
           "Observe normal search results returned"
         ],
+        "poc_request": {
+          "method": "GET",
+          "url": "https://target.example/search?q=test'+AND+1=1--+-",
+          "headers": {
+            "Accept": "text/html"
+          },
+          "body": ""
+        },
+        "poc_response": {
+          "status": 200,
+          "headers": {
+            "Content-Type": "text/html"
+          },
+          "body_excerpt": "<div class='results'>3 items found</div>"
+        },
+        "references": [
+          "https://cwe.mitre.org/data/definitions/89.html"
+        ],
         "discovered_by": "code-vuln-hunter"
       },
       "workflow_status": "active",
@@ -351,8 +427,7 @@
       "auth_context": "anonymous",
       "source_name": "code-vuln-hunter",
       "provenance": {
-        "agent_name": "code-vuln-hunter",
-        "artifact": "findings.md"
+        "agent_name": "code-vuln-hunter"
       },
       "links": []
     },
@@ -366,9 +441,14 @@
         "cwe_id": "CWE-122",
         "impact": "Remote code execution via heap corruption",
         "evidence": "memcpy(buf, scheme, schemelen) copies attacker-controlled bytes without a bounds check",
+        "entry_point": "curl_url_set(CURLURLPART_URL, attacker_url)",
+        "sink": "memcpy(buf, scheme, schemelen) at lib/urlapi.c:342",
         "taint_path": "curl_url_set(CURLURLPART_URL, attacker_url) -> parseurl() -> memcpy(buf, scheme, schemelen)",
         "guards_evaluated": "No bounds check on schemelen before memcpy",
         "slot_type": "URL-COMPONENT",
+        "references": [
+          "https://cwe.mitre.org/data/definitions/122.html"
+        ],
         "discovered_by": "code-vuln-hunter"
       },
       "workflow_status": "active",
@@ -380,8 +460,7 @@
       "notes": "",
       "source_name": "code-vuln-hunter",
       "provenance": {
-        "agent_name": "code-vuln-hunter",
-        "artifact": "findings.md"
+        "agent_name": "code-vuln-hunter"
       },
       "links": []
     }

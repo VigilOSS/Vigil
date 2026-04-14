@@ -2136,6 +2136,12 @@ def list_report_findings(engagement_id: int) -> list[dict[str, Any]]:
         record["owasp_category"] = details.get("owasp_category", "")
         record["impact"] = details.get("impact", record.get("summary", ""))
         record["evidence_detail"] = details.get("evidence", "")
+        record["entry_point"] = details.get("entry_point", "")
+        record["sink"] = details.get("sink", "")
+        record["poc_code"] = details.get("poc_code", "")
+        record["poc_request"] = details.get("poc_request")
+        record["poc_response"] = details.get("poc_response")
+        record["references"] = details.get("references", [])
         results.append(record)
 
     return results

@@ -50,7 +50,7 @@ Keep it light:
 - `agent/scripts/init_engagement.sh` - engagement bootstrap. Why: creates run directories, seeds local wrappers, and initializes scope/auth/runtime scaffolding.
 - `agent/scripts/assess.py` - CLI entrypoint. Why: stable shell surface into the assessment and code-analysis workflows.
 - `agent/scripts/assess/cli.py` - subcommand registry. Why: authoritative map of supported operator/backend actions.
-- `agent/scripts/assess/commands/` - command families. Why: fetch/post/patch, filtered finding listing plus finding lifecycle helpers (`verify-finding`, `kill-finding`, `update-finding`, `reset-finding`), helper contract introspection (`contract`), record-*, dispatch/ingest, exploit/session, and `code-*` flows are split here.
+- `agent/scripts/assess/commands/` - command families. Why: fetch/post/patch, filtered finding listing plus finding lifecycle helpers (`verify-finding`, `kill-finding`, `update-finding`, `reset-finding`), on-demand export (`export-findings`, `export-surfaces`), helper contract introspection (`contract`), record-*, dispatch/ingest, exploit/session, and `code-*` flows are split here.
 - `agent/scripts/assess/lib/` - shared plumbing. Why: API client, helper contract metadata, locking, auth, scope, DB helpers, schema validation, sessions, and tree-sitter indexing live here.
 - `agent/schemas/` - JSON payload contracts. Why: durable record formats for findings, chains, credentials, access records, probe runs, proposals, and code-analysis outputs live here; backend-backed schemas are generated from backend request models plus explicit agent-side overlays, while `session-proposal.schema.json` remains local because it has no backend model.
 - `agent/scripts/schema.sql` - transient local queue schema. Why: local case/work-item buffering, not orchestrator backend state.
@@ -66,7 +66,7 @@ Keep it light:
 
 - `agent/operator-core.md` -> `agent/AGENTS.md`, `agent/CLAUDE.md`, `agent/.codex/agents/*`, `agent/.claude/agents/*` via `agent/scripts/render-operator-prompts.sh`.
 - `orchestrator/backend/app/api/assessment.py` and `orchestrator/backend/app/api/code_analysis.py` -> backend-backed `agent/schemas/*.json` via `orchestrator/backend/scripts/generate_agent_schemas.py`.
-- Backend state is canonical for findings, coverage, services, and chains; readable artifacts are synchronized exports.
+- Backend state is canonical for findings, coverage, services, and chains; readable artifacts are produced on demand via `export-findings` and `export-surfaces`.
 - `agent/scripts/schema.sql` is not the orchestrator schema. It only defines the transient local queue DB.
 
 ## orchestrator/backend

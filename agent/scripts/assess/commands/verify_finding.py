@@ -4,12 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.contracts import render_contract_epilog
-from assess.lib.findings import sync_finding_markdown, update_finding_count
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 
 
@@ -42,9 +40,19 @@ def register(subparsers) -> None:
     p.set_defaults(func=run)
 
 
+_KNOWN_DISPOSITIONS = frozenset({"confirmed", "downgraded", "false_positive", "disputed"})
+
+
 def run(args) -> None:
     inline_payload = getattr(args, "inline_payload", None)
     raw_payload = inline_payload if inline_payload is not None else getattr(args, "payload", getattr(args, "json_file", None))
+    if raw_payload is not None and raw_payload in _KNOWN_DISPOSITIONS:
+        print(
+            f"'{raw_payload}' looks like a disposition, not a payload file.\n"
+            f"Use: assess.py verify-finding {args.finding_slug} --disposition {raw_payload} --reason \"...\"",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if raw_payload is not None:
         try:
             payload, _ = parse_json_argument(
@@ -123,11 +131,5 @@ def run(args) -> None:
         result = client.post(f"findings/{args.finding_slug}/verify", payload)
     finally:
         client.close()
-
-    findings_file = Path(cfg.engagement_dir) / "findings.md"
-    finding = result.get("finding")
-    if isinstance(finding, dict) and findings_file.is_file():
-        sync_finding_markdown(str(findings_file), finding)
-        update_finding_count(str(findings_file))
 
     print(json.dumps(result, indent=2, ensure_ascii=False))

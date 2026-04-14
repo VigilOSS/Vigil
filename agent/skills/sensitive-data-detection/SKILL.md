@@ -322,7 +322,7 @@ Detected PII feeds into intel.md:
 - People names + roles → intel.md People & Organizations table
 - Internal IPs / domains → intel.md Domains & Infrastructure table
 - Credentials → intel.md Credentials & Secrets table
-- Bulk PII exposure → durable finding via `assess.py record-finding` or assessment API, then keep `findings.md` synchronized
+- Bulk PII exposure → durable finding via `assess.py record-finding` or assessment API
 
 ## Cryptographic Weakness Checks
 
