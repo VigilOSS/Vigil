@@ -1155,7 +1155,7 @@ def _detect_exports(
             if cls["name"] and cls["name"][0].isupper():
                 exports.append({"name": cls["name"], "kind": "type", "line": cls["line_start"]})
     elif language in ("javascript", "typescript"):
-        export_re = re.compile(r"\bexport\s+(?:default\s+)?(?:function|class|const|let|var|type|interface)\s+(\w+)")
+        export_re = re.compile(r"\bexport\s+(?:default\s+)?(?:abstract\s+)?(?:function|class|const|let|var|type|interface|enum)\s+(\w+)")
         named_export_re = re.compile(r"\bexport\s*\{([^}]+)\}")
         module_exports_re = re.compile(r"\bmodule\.exports\s*=")
         for idx, line in enumerate(source_lines):
