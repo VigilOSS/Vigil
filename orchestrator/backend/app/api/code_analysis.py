@@ -149,6 +149,18 @@ class RequeueRequest(BaseModel):
     items: list[dict[str, Any]]
 
 
+class StructuralMetadataItem(BaseModel):
+    file_id: int
+    total_functions: int = Field(default=0, ge=0)
+    total_entry_points: int = Field(default=0, ge=0)
+    total_sinks: int = Field(default=0, ge=0)
+    total_exports: int = Field(default=0, ge=0)
+
+
+class BulkStructuralMetadataRequest(BaseModel):
+    updates: list[StructuralMetadataItem]
+
+
 class ThreatModelRecordRequest(BaseModel):
     repo_id: int
     threat_model: dict[str, Any]
@@ -264,6 +276,20 @@ async def update_file(engagement_key: str, file_id: int, request: dict[str, Any]
     engagement = get_engagement_or_404(engagement_key)
     record = code_analysis.update_code_file(engagement.id, file_id, **request)
     await _broadcast(engagement.key, "file", record)
+    return record
+
+
+@router.post("/files/bulk-structural-metadata")
+async def bulk_structural_metadata(
+    engagement_key: str,
+    request: BulkStructuralMetadataRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = code_analysis.bulk_update_structural_metadata(
+        engagement.id,
+        updates=[u.model_dump() for u in request.updates],
+    )
+    await _broadcast(engagement.key, "structural_metadata", record)
     return record
 
 

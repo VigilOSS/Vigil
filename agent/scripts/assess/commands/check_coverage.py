@@ -1,12 +1,10 @@
-"""assess.py check-coverage — read surfaces.jsonl, report unresolved surfaces."""
+"""assess.py check-coverage — query backend surfaces, report unresolved."""
 from __future__ import annotations
 
-import json
 import sys
-from pathlib import Path
 
+from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
-from assess.lib.surfaces import surface_file_path
 
 
 _STRICT_DEFERRED_TYPES = frozenset({
@@ -24,22 +22,23 @@ def register(subparsers) -> None:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
-    sf = Path(surface_file_path(cfg.engagement_dir))
 
-    if not sf.is_file():
-        print(f"surfaces.jsonl not found in {cfg.engagement_dir}", file=sys.stderr)
+    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    try:
+        surfaces = client.get("surfaces")
+    finally:
+        client.close()
+
+    if not isinstance(surfaces, list):
+        print("check-coverage: unexpected response from backend", file=sys.stderr)
         sys.exit(1)
 
     unresolved = []
     blocked_deferred = []
 
-    for line in sf.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        row = json.loads(line)
+    for row in surfaces:
         surface_type = row.get("surface_type")
-        target = row.get("target")
+        target = row.get("target_descriptor")
         status = row.get("status")
 
         if status == "discovered":

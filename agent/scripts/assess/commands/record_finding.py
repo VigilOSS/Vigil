@@ -1,6 +1,6 @@
 """assess.py record-finding — most complex command.
 
-Schema validate → slug allocate → POST → markdown sync → update count → emit event.
+Schema validate → slug allocate → POST → emit event.
 """
 from __future__ import annotations
 
@@ -12,12 +12,7 @@ from pathlib import Path
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.contracts import common_mistake_hints, render_contract
-from assess.lib.findings import (
-    finding_lock_path,
-    next_finding_id,
-    sync_finding_markdown,
-    update_finding_count,
-)
+from assess.lib.findings import finding_lock_path, next_finding_id
 from assess.lib.locking import file_lock
 from assess.lib.schema_validation import collect_validation_errors, load_schema
 
@@ -62,7 +57,6 @@ def _normalize_payload(payload: dict, *, agent_name: str, candidate_slug: str) -
     if not isinstance(provenance, dict):
         provenance = {}
     provenance.setdefault("agent_name", agent_name)
-    provenance.setdefault("artifact", "findings.md")
     normalized["provenance"] = provenance
 
     normalized.setdefault("links", [])
@@ -90,11 +84,6 @@ def _report_validation_errors(payload: dict, errors: list[str]) -> None:
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
     eng_dir = cfg.engagement_dir
-    findings_file = Path(eng_dir) / "findings.md"
-
-    if not findings_file.is_file():
-        print(f"findings.md not found in {eng_dir}", file=sys.stderr)
-        sys.exit(1)
 
     json_path = Path(args.json_file)
     if not json_path.is_file():
@@ -108,37 +97,29 @@ def run(args) -> None:
 
     agent_name = args.agent_name
 
-    # Acquire finding lock
     lock_path = finding_lock_path(eng_dir)
     with file_lock(lock_path):
-        # Resolve slug
         candidate_slug = payload.get("slug", "")
         if not candidate_slug:
-            candidate_slug = next_finding_id(eng_dir, agent_name)
+            candidate_slug = next_finding_id(cfg.base_url, cfg.engagement_key, agent_name)
 
         payload = _normalize_payload(payload, agent_name=agent_name, candidate_slug=candidate_slug)
         validation_errors = collect_validation_errors(payload, _FINDING_SCHEMA)
         if validation_errors:
             _report_validation_errors(payload, validation_errors)
 
-        # POST to backend (backend does Pydantic validation)
         client = AssessmentClient(cfg.base_url, cfg.engagement_key)
         try:
             response = client.post("findings", payload)
         finally:
             client.close()
 
-        # Validate response
         finding = response.get("finding", {})
         if not finding.get("slug") or not finding.get("title"):
             print("record-finding: orchestrator backend did not return a canonical finding record", file=sys.stderr)
             sys.exit(1)
 
         finding_slug = finding["slug"]
-
-        # Sync to findings.md
-        sync_finding_markdown(str(findings_file), finding)
-        update_finding_count(str(findings_file))
 
     # Emit event (outside lock)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)

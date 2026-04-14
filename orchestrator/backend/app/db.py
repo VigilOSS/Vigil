@@ -816,6 +816,18 @@ def init_db() -> None:
         if result_columns and "cross_file_triggers_json" not in result_columns:
             connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cross_file_triggers_json TEXT NOT NULL DEFAULT '[]'")
 
+        # Migrate code_files: add structural metadata columns from tree-sitter index
+        file_columns = _table_columns(connection, "code_files")
+        structural_columns = {
+            "total_functions": "INTEGER NOT NULL DEFAULT 0",
+            "total_entry_points": "INTEGER NOT NULL DEFAULT 0",
+            "total_sinks": "INTEGER NOT NULL DEFAULT 0",
+            "total_exports": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for col_name, col_def in structural_columns.items():
+            if file_columns and col_name not in file_columns:
+                connection.execute(f"ALTER TABLE code_files ADD COLUMN {col_name} {col_def}")
+
         connection.commit()
 
     _startup_database_fingerprint = _database_fingerprint(db_path)

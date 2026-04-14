@@ -9,6 +9,9 @@
 #     "tree-sitter-python>=0.23,<1",
 #     "tree-sitter-javascript>=0.23,<1",
 #     "tree-sitter-typescript>=0.23,<1",
+#     "tree-sitter-go>=0.23,<1",
+#     "tree-sitter-ruby>=0.23,<1",
+#     "tree-sitter-php>=0.23,<1",
 # ]
 # ///
 """AI Threat Hunting — assessment CLI entry point."""
