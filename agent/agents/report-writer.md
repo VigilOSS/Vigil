@@ -144,6 +144,8 @@ When defending a non-trivial severity, concise phrases like these help:
 
 Each finding class has a minimum evidence bar. If the evidence does not meet this bar, the finding is not ready for the report — send it back to the operator.
 
+**No-theory rule:** `rules/hunting.md` rule 2 applies to report inclusion. A finding without execution proof from the vendor's code is theory — send it back to the operator rather than including it. Source code analysis supports the description but does not replace a POC that calls the vulnerable function and shows the output.
+
 | Finding Class | Minimum Proof |
 |---|---|
 | IDOR / Broken Access Control | Request as attacker → response containing victim's data or state change on victim's resource. Both contexts (attacker auth, victim data) must be visible. |
@@ -198,6 +200,13 @@ Write the full report to `$ENGAGEMENT_DIR/report.md` with these sections:
 
 Follow the post-report procedure in `agent/skills/report-generation/SKILL.md`:
 emit the runtime event, then update each included finding with `./scripts/assess.py update-finding <slug> --status reported ...` so its `workflow_status` is `reported`. Use the finding-specific helper because report publication changes workflow state, not arbitrary endpoint data.
+
+## Alternate Output Modes
+
+The default output is `report.md` (internal engagement report). Two alternate modes exist for external-facing deliverables. Each mode has a dedicated format reference and examples — load them from the skill's Extended Resources section before writing.
+
+- **Bug bounty submissions** — per-finding standalone submissions for Bugcrowd/HackerOne. POCs must exercise the vendor's code end-to-end — reimplemented logic proves nothing to a triager. See the Bug Bounty section in `agent/skills/report-generation/SKILL.md`.
+- **Email disclosures** — plaintext emails for vendor security teams and mailing lists. Factual, compressed, no markdown. See the Email Disclosure section in `agent/skills/report-generation/SKILL.md`.
 
 ## Handoffs
 

@@ -237,3 +237,13 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 | `runtime-guides/subagent-registry.md` | Registry schema, resume-vs-dispatch decision tree, and examples for `agent-registry.json` |
 | `handoff-protocols.md` | Agent-to-agent handoff rules and expected downstream actions |
 | `subdomain-enumeration.md` | Subdomain enumeration (when `*.domain` in hosts), prioritization, and sliding-window execution rules |
+
+## reporting/ — Disclosure & Reporting Formats
+
+| File | Purpose |
+|------|---------|
+| `disclosure-email-format.md` | Email disclosure format for vendor security teams: structure, rules, anti-patterns |
+| `bugbounty-submission-format.md` | Bug bounty submission format for Bugcrowd/HackerOne: per-finding submissions with POC, VRT, evidence |
+| `examples/disclosure-email-ssrf.txt` | Example: multi-sub-issue SSRF disclosure email |
+| `examples/disclosure-email-fast-import.txt` | Example: security gate bypass with control test and CI/CD framing |
+| `examples/bugbounty-submission-ldap-injection.md` | Example: LDAP injection bug bounty submission with working POC |

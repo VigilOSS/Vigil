@@ -1,0 +1,116 @@
+Subject: Missing check_unsafe_feature for rewrite-submodules-from/to and export-pack-edges in fast-import
+
+Hi <security-team>,
+
+Three fast-import features bypass the --allow-unsafe-features gate and
+access the filesystem from an untrusted input stream. import-marks,
+import-marks-if-exists, and export-marks are correctly guarded by
+check_unsafe_feature(), but rewrite-submodules-from,
+rewrite-submodules-to, and export-pack-edges are not. A crafted
+fast-import stream reads arbitrary files and creates files on the host
+without --allow-unsafe-features.
+
+
+TWO SUB-ISSUES
+==============
+
+1. File read via rewrite-submodules-from/to (fast-import.c:3805-3808)
+
+   parse_one_feature() calls option_rewrite_submodules() directly
+   without a preceding check_unsafe_feature() call.
+
+   option_rewrite_submodules() calls read_marks(), which opens the
+   target path and reads it line by line. Lines that do not match marks
+   format trigger die("corrupt mark line: %s", line), printing the file
+   content to stderr.
+
+   For comparison, the guarded features on lines 3795-3801:
+
+     } else if (skip_prefix(feature, "import-marks=", &arg)) {
+         check_unsafe_feature("import-marks", from_stream);  // GUARDED
+     ...
+     } else if (skip_prefix(feature, "rewrite-submodules-to=", &arg)) {
+         option_rewrite_submodules(arg, &sub_marks_to);       // NOT GUARDED
+
+2. File creation via export-pack-edges (fast-import.c:3759)
+
+   parse_one_option() calls option_export_pack_edges() without
+   check_unsafe_feature(). Opens the target path with fopen(path, "a"),
+   creating the file if it does not exist. Content is pack edge
+   metadata (hex OIDs), not attacker-controlled bytes.
+
+
+IMPACT
+======
+
+File read: the first line of any file readable by the process is leaked
+through stderr.
+
+File creation: creates or appends to a file at an arbitrary path.
+Content is hex OIDs only — no direct code execution through file
+content.
+
+Primary exposure is environments where fast-import processes untrusted
+input and stderr is visible to the attacker:
+
+- CI/CD pipelines: build logs include stderr and are visible to PR
+  authors. A crafted stream reads cloud credentials, deployment keys,
+  or service tokens from the build runner.
+
+- Hosted platforms using fast-import for repository imports. If the
+  import endpoint surfaces error messages, server-side files leak
+  cross-tenant.
+
+- Migration tooling processing input from untrusted source repositories.
+
+
+REPRODUCTION
+============
+
+The PoC runs five tests against a temporary bare repo:
+
+1. Control: "feature import-marks=/etc/hosts" -- blocked with
+   "forbidden in input without --allow-unsafe-features".
+
+2. "feature rewrite-submodules-from=x:/etc/hosts" -- NOT blocked.
+   die() output: "corrupt mark line: ##"
+
+3. "feature rewrite-submodules-to=x:/etc/hosts" -- same result.
+
+4. "option git export-pack-edges=/tmp/proof" -- NOT blocked.
+   File created on disk without --allow-unsafe-features.
+
+5. Secrets file with API key -- first line leaked via die().
+
+
+SUGGESTED FIX
+=============
+
+Add check_unsafe_feature() calls for the three unguarded features:
+
+  } else if (skip_prefix(feature, "rewrite-submodules-to=", &arg)) {
+      check_unsafe_feature("rewrite-submodules-to", from_stream);
+      option_rewrite_submodules(arg, &sub_marks_to);
+
+And in parse_one_option():
+
+  } else if (skip_prefix(option, "export-pack-edges=", &option)) {
+      check_unsafe_feature("export-pack-edges", /* from_stream */ 1);
+      option_export_pack_edges(option);
+
+
+CVSS
+====
+
+CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N -- 7.1 (HIGH)
+
+- AV:N  -- attacker submits crafted stream via CI/CD or import endpoint
+- AC:L  -- no special conditions beyond a pipeline running fast-import
+- PR:L  -- attacker needs ability to submit a PR or trigger an import
+- UI:N  -- CI/CD processes the stream automatically
+- C:H   -- reads first line of arbitrary files
+- I:L   -- creates files at chosen paths (non-arbitrary content)
+
+PoC attached.
+
+Credit: <researcher-name> - <researcher-email>

