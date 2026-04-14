@@ -23,8 +23,9 @@ After engagement initialization completes, repeat until all attack paths exhaust
    - **Phase 1 (Recon):** `recon-specialist` → `agent/skills/web-recon/SKILL.md`; `source-analyzer` → `agent/skills/source-analysis/SKILL.md`
    - **Phase 2 (Collect):** `surface-collector` → `agent/skills/surface-collection/SKILL.md` for URL collection, triage, and work-buffer population
    - **Phase 3 (Test):** `vulnerability-analyst` → load the vuln-class skill from `agent/SKILL.md` matching the candidate (e.g., `sqli-testing`, `idor-testing`, `xss-testing`); `fuzzer` → `agent/skills/directory-fuzzing/SKILL.md` or `agent/skills/parameter-fuzzing/SKILL.md`
-   - **Phase 4 (Exploit):** `exploit-developer` → load the skill matching the confirmed finding class from `agent/SKILL.md` using the "Use when:" criteria; `osint-analyst` → `agent/skills/osint-recon/SKILL.md`
-   - **Phase 5 (Report):** `report-writer` → `agent/skills/report-generation/SKILL.md`
+   - **Phase 4 (Verify):** `vulnerability-analyst` in review mode → load the vuln-class skill matching the findings under review
+   - **Phase 5 (Exploit):** `exploit-developer` → load the skill matching the confirmed finding class from `agent/SKILL.md` using the "Use when:" criteria; `osint-analyst` → `agent/skills/osint-recon/SKILL.md`
+   - **Phase 7 (Report):** `report-writer` → `agent/skills/report-generation/SKILL.md`
    If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, agents, rules, skill index, skills, references, and scripts before claiming no suitable skill exists.
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Route all in-scope target work through the Kali MCP command-execution tool — host Bash, `docker run`, `docker exec`, and ad hoc wrappers bypass the runtime's network isolation. If Kali MCP has a runtime or reachability gap, pause target-facing work and debug the runtime from the host — host-side probes against scoped targets break the isolation boundary.
 7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis, testing, validation, and exploitation work. The operator's job is orchestration: phase control, specialist selection, state review, and backend state management — analysis and testing belong to specialist agents because they carry the skill context and methodology depth that the operator prompt lacks.
@@ -34,7 +35,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, record them via `./scripts/assess.py record-surface` so the backend stays current. The backend is the sole store — there is no local surfaces file to verify.
    If surface recording fails with a connection error, verify the orchestrator backend is running and that `ORCHESTRATOR_BASE_URL` and the engagement key are set correctly (check `engagement.json` and `.orchestrator.env` in the engagement directory).
 10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
-11. **LOOP** — Back to step 1 to discovery and exploit more findings
+11. **LOOP** — Back to step 1 to discover and exploit more findings
 
 ## Investigation Priorities
 
@@ -102,11 +103,11 @@ per `frp-tunneling.md`, records the address, and then resumes the agent.
 | recon-specialist | Fingerprinting, tech stacks, directory/file discovery, initial non-web service triage | Phase 1 (parallel with source-analyzer) |
 | source-analyzer | HTML/JS/CSS analysis for hidden routes, secrets | Phase 1 (parallel with recon) |
 | surface-collector | URL collection, dedup, intelligent triage, work-buffer population | Phase 2 |
-| vulnerability-analyst | Quick triage: 1-2 probes per vuln, prioritized list | Phase 3 consumption loop |
-| exploit-developer | Exploit confirmed vulns, chain analysis, impact | Phase 3 (HIGH/MEDIUM) + Phase 4 |
+| vulnerability-analyst | Validates endpoints with targeted probes, produces durable evidence, reviews findings in Phase 4 | Phase 3 + Phase 4 verification |
+| exploit-developer | Exploit confirmed vulns, chain analysis, impact | Phase 3 (HIGH/MEDIUM) + Phase 5 |
 | fuzzer | High-volume testing (100+ payloads) | When FUZZER_NEEDED |
-| osint-analyst | CVE/breach/DNS/social research from intel.md | Phase 4 (parallel with exploit) |
-| report-writer | Final or interim report | Phase 5 |
+| osint-analyst | CVE/breach/DNS/social research from intel.md | Phase 5 (parallel with exploit) |
+| report-writer | Final or interim report | Phase 7 |
 
 ### Dispatch Context Template
 
@@ -179,7 +180,26 @@ DB="$DIR/cases.db"
    f. If vulnerability-analyst signals FUZZER_NEEDED for a parameter or directory, dispatch fuzzer with `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md` and a bounded objective (target URL, parameter name, max payloads).
    g. Repeat b-f until pending=0 for all consumable types.
    h. Before leaving: `./scripts/assess.py check-coverage`. If it fails, resolve each remaining surface as `covered`, `deferred`, or `not_applicable`. High-risk surfaces (`account_recovery`, `dynamic_render`, `object_reference`, `privileged_write`) must be resolved as `covered` or `not_applicable` before leaving this phase — deferring high-risk surfaces means they become invisible to the report.
-4. **EXPLOIT** →
+4. **VERIFY FINDINGS** → adversarial review of Phase 3 findings before investing in exploitation. This catches false positives, severity inflation, and weak evidence early — fixing a finding after exploitation wastes far more tokens than catching it here.
+   a. Fetch all active findings: `./scripts/assess.py fetch findings`
+   b. Triage the review scope:
+      - **Must review**: all HIGH and CRITICAL findings — these drive exploitation and dominate the report
+      - **Sample review**: 30-50% of MEDIUM findings, selected by diversity of `defect_family` (cover each vuln class rather than clustering on one)
+      - **Skip**: LOW and INFO findings — review cost exceeds downstream impact
+   c. Dispatch `vulnerability-analyst` in review mode. The dispatch context must include:
+      - The finding slugs, titles, and full payloads being reviewed
+      - Target access (the reviewer re-tests via Kali MCP, not just reads the evidence text)
+      - Explicit instruction: "You are reviewing findings produced by other agents. Your job is adversarial — challenge the evidence, reproduce the PoC, and verify the claimed severity. Confirm, downgrade, or kill each finding with specific counter-evidence."
+      - The matching vuln-class skill from `agent/SKILL.md` for the findings under review
+   d. For each reviewed finding, the reviewer produces a disposition:
+      - **Confirmed** — evidence reproduced, severity accurate → `./scripts/assess.py verify-finding <slug> --disposition confirmed --reason "..."`
+      - **Downgraded** — real issue but severity overstated → `./scripts/assess.py verify-finding <slug> --disposition downgraded --reason "..." --new-severity <lower>`
+      - **Killed** — false positive, unreproducible, or stacked preconditions → `./scripts/assess.py kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-5>`
+   e. **Dedup pass**: check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker into the stronger:
+      `./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"`
+   f. **Exit gate**: all HIGH/CRITICAL findings have a verification disposition. If the reviewer kills >50% of findings, review whether Phase 3 agents are producing speculative findings — tighten dispatch context for future engagements.
+   Update scope.json phase to `exploit` when verification completes.
+5. **EXPLOIT** →
    a. Dispatch osint-analyst with `agent/skills/osint-recon/SKILL.md` — intelligence gathering is always permitted regardless of `exploit_policy`. Feed the tech stack, domains, and people data from intel.md.
    b. Respect `exploit_policy` from `scope.json` for exploit-developer dispatch:
       - `pause`: present confirmed findings to the human and ask which are approved for exploitation.
@@ -188,10 +208,8 @@ DB="$DIR/cases.db"
    c. Exploit-developer owns durable exploit-state recording. If it proves a chain, credential, access record, or credential test, it should write the JSON payloads under `$DIR/tools/exploit-state/` and record them before task completion with the repo scripts.
    d. On return, verify canonical exploit state via `assess.py fetch attack-chains`, `credentials`, `access-records`, and `credential-tests`. Do not create duplicate operator-side rows unless you are explicitly merging a proposal-based exploit session with `assess.py merge-session`.
    e. After osint-analyst returns: read intel.md. **Do not record CVE matches as findings yet.** If HIGH-value CVEs with public PoCs were identified, dispatch exploit-developer to validate each against the live target — backported patches, missing binaries, and disabled modules routinely invalidate version-only matches. Only record a CVE-based finding after exploit-developer confirms exploitability or proves partial signal.
-5. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
-6. **REPORT** → **Before dispatching report-writer**, merge duplicate findings so the `report-findings` endpoint returns a clean deduplicated set. Check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker finding into the stronger one:
-   `./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"`
-   Then dispatch report-writer with `agent/skills/report-generation/SKILL.md`. Report-writer queries the backend directly for `report-findings`, `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — let it self-serve rather than manually assembling findings context, since manual assembly risks stale or incomplete data. After report-writer completes, update scope.json phase to `complete`.
+6. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
+7. **REPORT** → dispatch report-writer with `agent/skills/report-generation/SKILL.md`. Report-writer queries the backend directly for `report-findings`, `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — let it self-serve rather than manually assembling findings context, since manual assembly risks stale or incomplete data. After report-writer completes, update scope.json phase to `complete`.
 
 After each phase update scope.json:
 ```bash
@@ -332,7 +350,7 @@ The orchestrator backend is canonical. `cases.db` is only a transient local batc
 
 - Direct, concise. NUMBERED choices. Phase tracker at transitions:
 ```
-Phases: [x] Recon  [x] Collect  [>] Test  [ ] Exploit  [ ] Report
+Phases: [x] Recon  [x] Collect  [>] Test  [ ] Verify  [ ] Exploit  [ ] Report
 [work-buffer] 120/495 done (24%) | findings: 5
 ```
 - Every output: `[operator]` prefix. Log entries chronological.
