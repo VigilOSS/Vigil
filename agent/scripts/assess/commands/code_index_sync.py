@@ -65,25 +65,33 @@ def run(args) -> None:
     index_dir_path = Path(index_dir)
 
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
-        query = "code/files?limit=10000"
-        if args.repo_id:
-            query += f"&repo_id={args.repo_id}"
-        backend_files = client.get(query)
-    except Exception as exc:
-        print(f"Failed to fetch files from backend: {exc}", file=sys.stderr)
-        sys.exit(1)
-
-    if not isinstance(backend_files, list):
-        print(f"Unexpected backend response type: {type(backend_files)}", file=sys.stderr)
-        sys.exit(1)
 
     path_to_file_id: dict[str, int] = {}
-    for bf in backend_files:
-        fp = bf.get("file_path", "")
-        fid = bf.get("id")
-        if fp and fid is not None:
-            path_to_file_id[fp] = int(fid)
+    page_size = 5000
+    offset = 0
+    while True:
+        try:
+            query = f"code/files?limit={page_size}&offset={offset}"
+            if args.repo_id:
+                query += f"&repo_id={args.repo_id}"
+            page = client.get(query)
+        except Exception as exc:
+            print(f"Failed to fetch files from backend: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        if not isinstance(page, list):
+            print(f"Unexpected backend response type: {type(page)}", file=sys.stderr)
+            sys.exit(1)
+
+        for bf in page:
+            fp = bf.get("file_path", "")
+            fid = bf.get("id")
+            if fp and fid is not None:
+                path_to_file_id[fp] = int(fid)
+
+        if len(page) < page_size:
+            break
+        offset += page_size
 
     updates: list[dict] = []
     for rel_path, index_filename in path_to_index.items():
