@@ -220,9 +220,7 @@ def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, 
     monkeypatch.setattr(module, "session_dir_path", lambda eng_dir, session_id: str(session_dir))
     monkeypatch.setattr(module, "session_index_path", lambda eng_dir: str(engagement_dir / "sessions" / "index.json"))
     monkeypatch.setattr(module, "finding_lock_path", lambda eng_dir: str(engagement_dir / ".findings.lock"))
-    monkeypatch.setattr(module, "next_finding_id", lambda eng_dir, source_name: "FINDING-EX-001")
-    monkeypatch.setattr(module, "sync_finding_markdown", lambda path, finding: None)
-    monkeypatch.setattr(module, "update_finding_count", lambda path: None)
+    monkeypatch.setattr(module, "next_finding_id", lambda base_url, engagement_key, source_name: "FINDING-EX-001")
 
     captured: list[tuple[str, dict[str, object]]] = []
 

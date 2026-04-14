@@ -114,6 +114,6 @@ Before dispatching report-writer, merge duplicates so `report-findings` returns 
 
 ## Wildcard Mode Specifics
 
-- BACKEND-FIRST FINDING WRITE: every finding lands in canonical backend state, then synchronize child's findings.md and parent's findings.md exports
+- BACKEND-ONLY FINDING WRITE: every finding lands in the backend via `assess.py record-finding`. No local file sync required.
 - Parent prefix: `## [sub.domain.com / FINDING-XX-NNN] Title`
 - Set ENGAGEMENT_DIR to specific child directory before each operation

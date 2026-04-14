@@ -98,6 +98,11 @@ origin: AI Threat Hunting
 - Severity: High (credentials + reflection) to Medium (wildcard, no credentials)
 - Remediation: strict Origin allowlist, avoid reflecting Origin, avoid credentials with wildcard
 
+## Kill Signals — Stop Testing When
+- Origin reflection + Access-Control-Allow-Credentials: true → CRITICAL, record immediately, stop CORS testing
+- ACAO is wildcard (*) but credentials NOT allowed → information disclosure only (MEDIUM at best), record and move on
+- All origin variants rejected (null, subdomain, encoding) → CORS policy is restrictive, move on
+
 ## Extended Resources
 
 - `agent/references/payloads/cors-payloads.md` — null origin, subdomain wildcard, pre-flight bypass

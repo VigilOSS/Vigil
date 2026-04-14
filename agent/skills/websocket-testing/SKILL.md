@@ -131,3 +131,5 @@ origin: AI Threat Hunting
 
 ## Extended Resources
 
+- `agent/skills/source-analysis/SKILL.md` — for discovering WebSocket endpoints in JavaScript source
+- WebSocket testing methodology is otherwise self-contained

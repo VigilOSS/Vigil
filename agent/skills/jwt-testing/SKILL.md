@@ -8,6 +8,7 @@ origin: AI Threat Hunting
 
 ## When to Activate
 
+- **Scope note:** Use this skill when JWT is the primary auth mechanism. If testing general login bypass where JWT is one component, load `auth-bypass` skill instead — it covers JWT briefly alongside other auth mechanisms. Do not load both skills for the same endpoint.
 - Application uses JWT for authentication or authorization
 - Tokens visible in cookies, Authorization header, or URL params
 - Token structure: `xxxxx.yyyyy.zzzzz` (three base64url segments)
@@ -51,6 +52,9 @@ origin: AI Threat Hunting
 - [ ] Change `alg` from `RS256` to `HS256`
 - [ ] Sign token with public key as HMAC secret
 - [ ] Server may verify HMAC using the public key it already has
+- [ ] Try multiple public key formats — server may expect different encoding:
+      Raw PEM | PEM with stripped headers | No newlines | Base64-only (no PEM wrapper)
+- [ ] Obtain key from: `/.well-known/jwks.json`, `/.well-known/openid-configuration` → jwks_uri, TLS certificate public key
 
 ### 5. Claim Tampering
 
@@ -68,6 +72,10 @@ origin: AI Threat Hunting
 - [ ] `jku` spoofing: point to attacker-controlled JWKS
 - [ ] `jwk` embedding: include attacker's key in header
 - [ ] `x5u` / `x5c`: point to attacker certificate
+- [ ] `kid` path traversal to `/dev/null`: empty key → sign with empty string → valid HMAC
+- [ ] `jku` with attacker JWKS: host `{"keys":[{"kty":"RSA","n":"...","e":"AQAB"}]}` at attacker URL
+      Change token `jku` header to point to attacker URL → server fetches attacker's key to verify
+- [ ] `kid` with SSRF: `"kid": "http://internal-server/key"` — may trigger server-side request
 
 ### 7. Token Lifecycle
 
@@ -91,6 +99,13 @@ origin: AI Threat Hunting
 - Secret recovered (if HMAC brute-force)
 - Severity: Critical (forge any user/admin token) or High (privilege escalation)
 - Remediation: strong secrets, enforce algorithm allowlist, validate all claims
+
+## Kill Signals — Stop Testing When
+- alg:none accepted → CRITICAL, record immediately, stop testing other JWT vectors
+- HMAC secret cracked → CRITICAL, record and stop
+- Key confusion (RS256→HS256) succeeds → CRITICAL, record and stop
+- All three above fail AND kid/jku injection returns errors → JWT implementation is robust, test only claim tampering and lifecycle
+- Server validates all claims strictly (exp enforced, iss checked, aud validated) → move on
 
 ## Extended Resources
 

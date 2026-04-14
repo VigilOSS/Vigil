@@ -217,7 +217,7 @@ Only proceed to report generation after validation passes or the operator resolv
 ## Generation Procedure
 
 1. **Pull backend state** using the queries in "Query Backend First" above
-2. **Use `report-findings`** as the authoritative finding list — do not re-read `findings.md`
+2. **Use `report-findings`** as the authoritative finding list
 3. **Use pre-computed CVSS** from finding details. Recalculate only if proved impact at report time materially differs from what was validated
 4. **Use pre-computed remediation** from finding details. Augment only if the exploit chain revealed additional fix requirements
 5. Populate all template fields (flag missing evidence with `[EVIDENCE MISSING]`, never fabricate)
