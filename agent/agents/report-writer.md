@@ -162,10 +162,10 @@ emit the runtime event, then update each included finding with `./scripts/assess
 
 ## Alternate Output Modes
 
-The default output is `report.md` (internal engagement report). Two alternate modes exist for external-facing deliverables. Each mode has a dedicated format reference and examples — load them from the skill's Extended Resources section before writing.
+The default output is `report.md` (internal engagement report). Two alternate modes exist for external-facing deliverables. Load the format reference and example before writing.
 
-- **Bug bounty submissions** — per-finding standalone submissions for Bugcrowd/HackerOne. POCs must exercise the vendor's code end-to-end — reimplemented logic proves nothing to a triager. See the Bug Bounty section in `agent/skills/report-generation/SKILL.md`.
-- **Email disclosures** — plaintext emails for vendor security teams and mailing lists. Factual, compressed, no markdown. See the Email Disclosure section in `agent/skills/report-generation/SKILL.md`.
+- **Bug bounty submissions** — load `agent/references/bugbounty-submission-format.md` and the LDAP injection example.
+- **Email disclosures** — load `agent/references/disclosure-email-format.md` and the fast-import example.
 
 ## Handoffs
 
