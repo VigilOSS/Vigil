@@ -574,9 +574,17 @@ def _node_lines(node: Any) -> tuple[int, int]:
     return (node.start_point[0] + 1, node.end_point[0] + 1)
 
 
+def _query_language_family(language: str) -> str:
+    """Map parser-specific keys to the query family used in *_QUERIES."""
+    if language == "tsx":
+        return "typescript"
+    return language
+
+
 def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[str, Any]]:
     """Extract function/method definitions using tree-sitter queries."""
-    query_str = _FUNCTION_QUERIES.get(language)
+    query_language = _query_language_family(language)
+    query_str = _FUNCTION_QUERIES.get(query_language)
     if not query_str:
         return []
 
@@ -608,6 +616,7 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
 def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, Any] | None:
     """Parse a single function/method tree-sitter node into a structured dict."""
     start_line, end_line = _node_lines(node)
+    language = _query_language_family(language)
     name = ""
     params: list[str] = []
     modifiers: list[str] = []
@@ -724,7 +733,8 @@ def _extract_params(params_node: Any, source: bytes) -> list[str]:
 
 def _extract_classes_ts(tree: Any, language: str, source: bytes) -> list[dict[str, Any]]:
     """Extract class/struct definitions using tree-sitter queries."""
-    query_str = _CLASS_QUERIES.get(language)
+    query_language = _query_language_family(language)
+    query_str = _CLASS_QUERIES.get(query_language)
     if not query_str:
         return []
 
@@ -751,6 +761,7 @@ def _extract_classes_ts(tree: Any, language: str, source: bytes) -> list[dict[st
 def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any] | None:
     """Parse a class/struct tree-sitter node."""
     start_line, end_line = _node_lines(node)
+    language = _query_language_family(language)
     name = ""
     extends: str = ""
     implements: list[str] = []
@@ -849,10 +860,11 @@ _RUBY_REQUIRE_RE = re.compile(
 
 def _extract_imports_ts(tree: Any, language: str, source: bytes) -> list[str]:
     """Extract import/include strings using tree-sitter queries."""
-    if language == "ruby":
+    query_language = _query_language_family(language)
+    if query_language == "ruby":
         return _extract_ruby_imports(source)
 
-    query_str = _IMPORT_QUERIES.get(language)
+    query_str = _IMPORT_QUERIES.get(query_language)
     if not query_str:
         return []
 
@@ -869,22 +881,22 @@ def _extract_imports_ts(tree: Any, language: str, source: bytes) -> list[str]:
 
     for node in nodes:
         text = _node_text(node, source).strip().rstrip(";")
-        if language == "java":
+        if query_language == "java":
             text = text.removeprefix("import").strip()
             text = text.removeprefix("static").strip()
-        elif language in ("c", "cpp"):
+        elif query_language in ("c", "cpp"):
             m = re.search(r'[<"](.+?)[>"]', text)
             if m:
                 text = m.group(1)
-        elif language == "go":
+        elif query_language == "go":
             text = text.strip().strip('"')
             if text.startswith("."):
                 continue
-        elif language == "php":
+        elif query_language == "php":
             text = text.removeprefix("use").strip().rstrip(";")
-        elif language == "python":
+        elif query_language == "python":
             pass
-        elif language in ("javascript", "typescript"):
+        elif query_language in ("javascript", "typescript"):
             pass
         imports.append(text)
 
@@ -1348,9 +1360,9 @@ def index_file(
     tree = parser.parse(source)
 
     # Extract structural elements
-    functions = _extract_functions_ts(tree, parse_lang if parse_lang != "tsx" else "typescript", source)
-    classes = _extract_classes_ts(tree, parse_lang if parse_lang != "tsx" else "typescript", source)
-    imports = _extract_imports_ts(tree, parse_lang if parse_lang != "tsx" else "typescript", source)
+    functions = _extract_functions_ts(tree, parse_lang, source)
+    classes = _extract_classes_ts(tree, parse_lang, source)
+    imports = _extract_imports_ts(tree, parse_lang, source)
 
     # For JS/TS, also find arrow functions assigned to variables
     effective_lang = "typescript" if parse_lang == "tsx" else language

@@ -290,6 +290,31 @@ def test_js_exports():
     assert "mainHandler" in export_names
 
 
+TSX_COMPONENT_SOURCE = b"""\
+import { useEffect, useState } from "react";
+
+export function DemoCard() {
+    const [open, setOpen] = useState(false);
+
+    useEffect(() => {
+        const handleVisibilityChange = () => setOpen(false);
+        document.addEventListener("visibilitychange", handleVisibilityChange);
+        return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+    }, []);
+
+    return <button onClick={() => setOpen((current) => !current)}>{open ? "open" : "closed"}</button>;
+}
+"""
+
+
+@needs_treesitter
+def test_tsx_component_functions_are_indexed():
+    idx = index_file("component.tsx", "typescript", source=TSX_COMPONENT_SOURCE)
+    function_names = {f["name"] for f in idx["functions"]}
+    assert "DemoCard" in function_names
+    assert "handleVisibilityChange" in function_names
+
+
 PYTHON_EXPORT_SOURCE = b"""\
 __all__ = ['public_func', 'MyClass']
 

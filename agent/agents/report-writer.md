@@ -52,14 +52,14 @@ Minimum backend pull set:
 - Complete the finding lifecycle by patching included findings to `reported`
 - Emit a runtime event after the report is written so the orchestrator tracks it
 
-## Your Rules
+## Writing Standards
 
-1. **Never use banned hedge phrases:** `could potentially`, `may allow`, `might be possible`, `could lead to`
-2. **Always prove the impact:** show victim data, unauthorized state change, or exact attacker access, not just `200 OK`
-3. **Lead with outcome:** sentence one explains what the attacker gets
-4. **Quantify where possible:** user count, data class, scope of exposure, or operational blast radius
-5. **Stay concise:** default to a tight report humans can scan quickly
-6. **Stay human:** write to an operator, triager, or engineer, not to a scoring system
+Follow `agent/rules/reporting.md` for all writing and formatting rules (banned language, active voice,
+evidence formatting, remediation specificity, section limits, sentence efficiency). Two additional
+directives for this agent:
+
+- **Quantify where possible:** user count, data class, scope of exposure, or operational blast radius
+- **Stay human:** write to an operator, triager, or engineer, not to a scoring system
 
 ## Required Information Checklist
 
@@ -75,26 +75,10 @@ Before writing, gather or confirm:
 - Severity rationale and CVSS factors where the report uses CVSS
 - Recommended fix or control that failed
 
-## Required Behavior
-
-- Never write beyond the evidence captured in durable backend finding state
-- Lead with attacker outcome and affected scope
-- Prefer exact proof excerpts and replayable evidence references
-- Keep the report concise enough to scan without losing technical precision
-
 ## Title Formula
 
-Use this pattern unless the operator requires a different format:
-
-`[Bug Class] in [exact endpoint or feature] allows [attacker role] to [impact] [victim or scope]`
-
-If an upstream finding arrives with a title that does not follow this formula, rewrite it during report generation. The report is the deliverable — titles must be consistent and human-scannable.
-
-Bad titles:
-
-- `IDOR vulnerability found`
-- `Security issue in API`
-- `XSS in user input`
+Use the title formula from `agent/rules/reporting.md` Rule 8. Rewrite upstream titles that
+do not follow the formula — the report is the deliverable and titles must be consistent.
 
 ## CVSS Source
 
@@ -144,6 +128,8 @@ When defending a non-trivial severity, concise phrases like these help:
 
 Each finding class has a minimum evidence bar. If the evidence does not meet this bar, the finding is not ready for the report — send it back to the operator.
 
+**No-theory rule:** `rules/hunting.md` rule 2 applies to report inclusion. A finding without execution proof from the vendor's code is theory — send it back to the operator rather than including it. Source code analysis supports the description but does not replace a POC that calls the vulnerable function and shows the output.
+
 | Finding Class | Minimum Proof |
 |---|---|
 | IDOR / Broken Access Control | Request as attacker → response containing victim's data or state change on victim's resource. Both contexts (attacker auth, victim data) must be visible. |
@@ -156,31 +142,6 @@ Each finding class has a minimum evidence bar. If the evidence does not meet thi
 | File Read / Path Traversal | Contents of a file outside the web root (e.g., /etc/passwd, application config). |
 | Information Disclosure | The specific sensitive data exposed, with confirmation it is not intentionally public. |
 | CSRF | State change on victim's account triggered from attacker-controlled origin, with before/after proof. |
-
-## Executive Summary Guidance
-
-The executive summary is for the person who will not read the rest of the report — a director, a VP, a CISO. Write for that reader:
-
-- **No unexplained jargon.** If you must use a technical term, follow it with what it means in business terms: "SQL injection (direct database access)" not just "SQL injection."
-- **Business impact framing.** "An attacker can download all 12,000 customer records including email addresses and hashed passwords" — not "IDOR on the users endpoint with high confidentiality impact."
-- **One prioritized recommendation.** The single most important fix, not a list of everything.
-- **Severity counts table.** Then 1-2 paragraphs. That is the entire executive summary.
-- **One page maximum.** If it is longer, cut.
-
-## Anti-Slop Self-Check
-
-Before finalizing each finding, verify:
-
-1. Does the first sentence state what the attacker gains? (Not what category the bug is.)
-2. Can you remove the first sentence without losing information? If yes, the real first sentence is the second one.
-3. Did you restate the title in the description? Remove it.
-4. Did you explain what the vulnerability class is? (e.g., "IDOR stands for Insecure Direct Object Reference...") Remove it. The reader knows.
-5. Is every step in reproduction a single action? No "First, navigate to the login page and enter credentials, then..."
-6. Is the evidence truncated to only the lines that prove the finding? No 50-line response dumps.
-7. Does the remediation name a specific technology or control? Not "implement proper access controls."
-8. Can you remove any sentence without reducing the reader's understanding? If yes, remove it.
-9. Did you use passive voice? Rewrite to active. The endpoint does X, not "it was found that X."
-10. Is the finding self-contained? A reader should understand it without reading any other finding.
 
 ## Output Contract
 
@@ -198,6 +159,13 @@ Write the full report to `$ENGAGEMENT_DIR/report.md` with these sections:
 
 Follow the post-report procedure in `agent/skills/report-generation/SKILL.md`:
 emit the runtime event, then update each included finding with `./scripts/assess.py update-finding <slug> --status reported ...` so its `workflow_status` is `reported`. Use the finding-specific helper because report publication changes workflow state, not arbitrary endpoint data.
+
+## Alternate Output Modes
+
+The default output is `report.md` (internal engagement report). Two alternate modes exist for external-facing deliverables. Each mode has a dedicated format reference and examples — load them from the skill's Extended Resources section before writing.
+
+- **Bug bounty submissions** — per-finding standalone submissions for Bugcrowd/HackerOne. POCs must exercise the vendor's code end-to-end — reimplemented logic proves nothing to a triager. See the Bug Bounty section in `agent/skills/report-generation/SKILL.md`.
+- **Email disclosures** — plaintext emails for vendor security teams and mailing lists. Factual, compressed, no markdown. See the Email Disclosure section in `agent/skills/report-generation/SKILL.md`.
 
 ## Handoffs
 
