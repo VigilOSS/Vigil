@@ -257,19 +257,11 @@ After writing the report, verify every finding against `agent/rules/reporting.md
 When the operator requests a disclosure email instead of an internal report, switch to the
 email disclosure format — a separate output mode, not a variation of report.md.
 
-Load the format reference and both examples before writing:
-- `agent/references/disclosure-email-format.md` — section structure, rules, anti-patterns
-- `agent/references/examples/disclosure-email-ssrf.txt` — multi-sub-issue example
-- `agent/references/examples/disclosure-email-fast-import.txt` — security gate bypass with control test
+Load before writing:
+- `agent/references/disclosure-email-format.md` — authoritative spec (structure, rules, anti-patterns)
+- `agent/references/examples/disclosure-email-fast-import.txt` — working example with control test
 
 Output path: `$ENGAGEMENT_DIR/tools/exploit-state/pocs/report-<slug>.txt`
-
-The format reference is the authoritative spec. The examples are anonymized accepted
-disclosures — use them as structural templates. Key points:
-- Plaintext, not markdown. 2-space indent for code, no fences.
-- Sections in order: Subject, greeting, summary, AFFECTED CODE, ROOT CAUSE, IMPACT, REPRODUCTION, SUGGESTED FIX, CVSS (with per-factor justification), AFFECTED VERSIONS, PoC reference, Credit.
-- Under 120 lines for single findings, 150 for multi-issue.
-- Related bugs sharing a root cause go in one email with numbered sub-issues.
 
 ## Bug Bounty Submissions
 
@@ -277,13 +269,8 @@ When the operator requests bug bounty submissions (Bugcrowd, HackerOne, or simil
 each finding becomes a standalone submission — never bundle findings.
 
 Load before writing:
-- `agent/references/bugbounty-submission-format.md` — structure, rules
-- `agent/references/examples/bugbounty-submission-ldap-injection.md` — working example with real POC
-
-POCs must exercise the vendor's code end-to-end and show execution output — reimplemented
-logic proves nothing to a triager. If end-to-end testing requires infrastructure the script
-cannot provide, mark those steps with `# SETUP:` comments. Credentials go in environment
-variables, never in submission text or scripts.
+- `agent/references/bugbounty-submission-format.md` — authoritative spec (structure, rules)
+- `agent/references/examples/bugbounty-submission-ldap-injection.md` — working example with POC
 
 ## Extended Resources
 

@@ -97,57 +97,51 @@ Credit: <name> - <email>
 
 ## Rules
 
+All writing rules from `agent/rules/reporting.md` apply (banned language, active voice,
+no class definitions, evidence truncation, sentence efficiency).
+
+Format-specific:
+
 1. **Subject line:** Technical summary only. No severity rating, no CVE number
    (you don't have one yet), no "URGENT" or "CRITICAL". Under 80 characters.
 
-2. **No AI slop:** Banned phrases: `could potentially`, `may allow`, `might be
-   possible`, `could lead to`, `it was discovered`, `during our assessment`.
-
-3. **Honest scoping:** If the attack requires non-default config, a local
+2. **Honest scoping:** If the attack requires non-default config, a local
    filesystem, or 32-bit only, say so upfront. Overstating the vector damages
    credibility and delays triage.
 
-4. **Control test when applicable:** If the finding bypasses a security gate,
+3. **Control test when applicable:** If the finding bypasses a security gate,
    show the gate working first (control test), then the bypass. This makes the
    omission self-evident.
 
-5. **One finding per email** unless findings share a root cause. Related
+4. **One finding per email** unless findings share a root cause. Related
    findings (e.g., same bug in two files, or a delivery chain + the corruption
    it enables) can share an email with numbered sub-issues.
 
-6. **Sub-issues format:** When an email covers multiple related bugs, use a
+5. **Sub-issues format:** When an email covers multiple related bugs, use a
    numbered "TWO SUB-ISSUES" / "THREE SUB-ISSUES" section after the summary
    paragraph. Each sub-issue gets its own heading with file:line reference.
    IMPACT, REPRODUCTION, and SUGGESTED FIX then cover all sub-issues together.
 
-7. **CVSS justification:** Include per-factor justification. This prevents the
+6. **CVSS justification:** Include per-factor justification. This prevents the
    triage team from silently rescoring without engaging with your reasoning.
 
-8. **Code indentation:** 2-space indent for code in the email body. No markdown
+7. **Code indentation:** 2-space indent for code in the email body. No markdown
    fences — these are plaintext emails.
 
-9. **Length:** Under 120 lines for a single finding. Under 150 for multi-issue.
+8. **Length:** Under 120 lines for a single finding. Under 150 for multi-issue.
    Shorter is better. If the triage team needs to scroll more than twice,
    the email is too long.
 
-10. **Credit line:** Always include. Format: `Credit: Full Name - email@domain`
+9. **Credit line:** Always include. Format: `Credit: Full Name - email@domain`
 
-## Examples
+## Example
 
-Two reference emails that follow this format:
-
-- `references/examples/disclosure-email-ssrf.txt` — multi-sub-issue
-  format covering a network-reachable SSRF with three contributing bugs
-- `references/examples/disclosure-email-fast-import.txt` — security
-  gate bypass with control test, CI/CD attack vector framing
+- `references/examples/disclosure-email-fast-import.txt` — multi-sub-issue
+  security gate bypass with control test and CI/CD attack vector framing
 
 ## Anti-Patterns
 
 - Starting with "I am a security researcher..." — skip, go straight to the bug
-- Describing what the vulnerability class is ("SSRF stands for...") — the
-  reader knows
-- Including 50 lines of HTTP response — truncate to the 3-5 lines that prove it
 - Attaching a 500-line PoC without a summary — the email body should be
   self-contained; the PoC is supplementary
 - Using markdown formatting — these are plaintext emails to mailing lists
-- Inflating CVSS by assuming worst-case instead of proved impact
