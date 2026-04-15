@@ -397,7 +397,7 @@ def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, 
     )
     (engagement_dir / "sessions" / "index.json").write_text(
         json.dumps(
-            [{"session_id": "session-a", "status": "open", "assigned_findings": ["FINDING-EX-001"]}]
+            [{"session_id": "session-a", "status": "open", "assigned_targets": ["FINDING-EX-001"]}]
         ),
         encoding="utf-8",
     )
@@ -440,6 +440,40 @@ def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, 
     session_index = json.loads((engagement_dir / "sessions" / "index.json").read_text(encoding="utf-8"))
     assert session_index[0]["assigned_targets"] == ["FINDING-EX-001"]
     assert "assigned_findings" not in session_index[0]
+
+
+def test_session_index_rejects_legacy_assigned_findings_key(tmp_path: Path) -> None:
+    module = _load_script_module(
+        "test_sessions_module",
+        "agent/scripts/assess/lib/sessions.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    sessions_dir = engagement_dir / "sessions"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "index.json").write_text(
+        json.dumps(
+            [{"session_id": "session-a", "status": "open", "assigned_findings": ["FINDING-EX-001"]}]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="assigned_findings is no longer supported"):
+        module.load_session_index(str(engagement_dir))
+
+
+def test_save_session_index_rejects_legacy_assigned_findings_key(tmp_path: Path) -> None:
+    module = _load_script_module(
+        "test_sessions_save_module",
+        "agent/scripts/assess/lib/sessions.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    (engagement_dir / "sessions").mkdir(parents=True)
+
+    with pytest.raises(SystemExit, match="assigned_findings is no longer supported"):
+        module.save_session_index(
+            str(engagement_dir),
+            [{"session_id": "session-a", "status": "open", "assigned_findings": ["FINDING-EX-001"]}],
+        )
 
 
 def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, capsys) -> None:

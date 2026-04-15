@@ -45,6 +45,10 @@ def _write_json_atomically(path: Path, payload: Any) -> None:
 
 def normalize_assignment_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     changed = False
+    if "assigned_findings" in payload:
+        raise SystemExit(
+            "legacy assigned_findings is no longer supported; rewrite session assignments to assigned_targets"
+        )
     raw_targets = payload.get("assigned_targets")
     if not isinstance(raw_targets, list):
         raw_targets = []
@@ -78,7 +82,6 @@ def save_session_index(engagement_dir: str, rows: list[dict[str, Any]]) -> None:
     normalized_rows = []
     for row in rows:
         normalized_row = dict(row)
-        normalized_row.pop("assigned_findings", None)
         normalized_rows.append(normalize_assignment_payload(normalized_row)[0])
     _write_json_atomically(Path(session_index_path(engagement_dir)), normalized_rows)
 
@@ -86,6 +89,5 @@ def save_session_index(engagement_dir: str, rows: list[dict[str, Any]]) -> None:
 def write_assignment_file(session_dir: str | Path, payload: dict[str, Any]) -> None:
     assignment_path = Path(session_dir) / "assignment.json"
     normalized_payload = dict(payload)
-    normalized_payload.pop("assigned_findings", None)
     normalized_payload, _ = normalize_assignment_payload(normalized_payload)
     _write_json_atomically(assignment_path, normalized_payload)

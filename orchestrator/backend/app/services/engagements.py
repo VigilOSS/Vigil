@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -32,6 +33,7 @@ class EngagementView:
 
 _sync_lock = Lock()
 _last_sync_signature: tuple[tuple[str, int, int | None, int | None], ...] | None = None
+_logger = logging.getLogger(__name__)
 
 
 def engagements_root() -> Path:
@@ -195,32 +197,50 @@ def sync_engagements() -> None:
     for engagement_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         if not (engagement_dir / "scope.json").exists():
             continue
-        manifest = _manifest_for(engagement_dir)
-        discovered_keys.add(manifest["key"])
-        engagement = db.get_engagement_by_key(manifest["key"])
-        if engagement is None:
-            engagement = db.create_engagement(manifest["key"], manifest["target"], manifest["status"], str(engagement_dir))
-        else:
-            db.update_engagement_identity(engagement.id, manifest["target"], manifest["status"], str(engagement_dir))
-            engagement = db.get_engagement_by_id(engagement.id)
-            assert engagement is not None
+        try:
+            manifest = _manifest_for(engagement_dir)
+            discovered_keys.add(manifest["key"])
+            engagement = db.get_engagement_by_key(manifest["key"])
+            if engagement is None:
+                engagement = db.create_engagement(
+                    manifest["key"],
+                    manifest["target"],
+                    manifest["status"],
+                    str(engagement_dir),
+                )
+            else:
+                db.update_engagement_identity(
+                    engagement.id,
+                    manifest["target"],
+                    manifest["status"],
+                    str(engagement_dir),
+                )
+                engagement = db.get_engagement_by_id(engagement.id)
+                assert engagement is not None
 
-        seen_session_ids: set[str] = set()
-        index_rows = _migrate_session_artifacts(engagement_dir)
-        if isinstance(index_rows, list):
-            for index_row in index_rows:
-                if not isinstance(index_row, dict):
-                    continue
-                session_id = str(index_row.get("session_id") or "").strip()
-                if not session_id:
-                    continue
-                seen_session_ids.add(session_id)
-                session_dir = engagement_dir / "sessions" / session_id
-                db.upsert_engagement_session(engagement.id, session_id, **_session_payload(index_row, session_dir))
+            seen_session_ids: set[str] = set()
+            index_rows = _migrate_session_artifacts(engagement_dir)
+            if isinstance(index_rows, list):
+                for index_row in index_rows:
+                    if not isinstance(index_row, dict):
+                        continue
+                    session_id = str(index_row.get("session_id") or "").strip()
+                    if not session_id:
+                        continue
+                    seen_session_ids.add(session_id)
+                    session_dir = engagement_dir / "sessions" / session_id
+                    db.upsert_engagement_session(
+                        engagement.id,
+                        session_id,
+                        **_session_payload(index_row, session_dir),
+                    )
 
-        for session in db.list_engagement_sessions_for_engagement(engagement.id):
-            if session.session_id not in seen_session_ids:
-                db.delete_engagement_session(engagement.id, session.session_id)
+            for session in db.list_engagement_sessions_for_engagement(engagement.id):
+                if session.session_id not in seen_session_ids:
+                    db.delete_engagement_session(engagement.id, session.session_id)
+        except RuntimeError as exc:
+            _logger.warning("Skipping invalid engagement artifacts for %s: %s", engagement_dir, exc)
+            continue
 
     for engagement in db.list_engagements():
         if engagement.key not in discovered_keys:
