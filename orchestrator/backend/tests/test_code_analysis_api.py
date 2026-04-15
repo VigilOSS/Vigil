@@ -1515,6 +1515,56 @@ def test_file_patch_rejects_module_ids_from_other_repos(client, isolate_settings
     assert "same repo" in patched.json()["detail"]
 
 
+def test_file_patch_rejects_non_integer_structural_metadata(client, isolate_settings):
+    engagement_key = "2026-04-15-code-file-patch-structural-invalid"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="patch-structural-invalid")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    response = client.patch(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}",
+        json={"total_functions": "not-a-number"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "total_functions must be an integer"
+
+
+def test_file_patch_rejects_negative_structural_metadata(client, isolate_settings):
+    engagement_key = "2026-04-15-code-file-patch-structural-negative"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="patch-structural-negative")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    response = client.patch(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}",
+        json={"total_sinks": -1},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "total_sinks must be >= 0"
+
+
+def test_bulk_structural_metadata_requires_all_totals(client, isolate_settings):
+    engagement_key = "2026-04-15-code-bulk-structural-required"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="bulk-structural-required")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/files/bulk-structural-metadata",
+        json={"updates": [{"file_id": parser_file["id"], "total_functions": 3}]},
+    )
+
+    assert response.status_code == 422
+    assert "total_entry_points" in response.text
+    assert "total_sinks" in response.text
+    assert "total_exports" in response.text
+
+
 def test_code_analysis_endpoints_reject_foreign_engagement_ids(client, isolate_settings):
     first_key = "2026-04-04-code-owner-a"
     second_key = "2026-04-04-code-owner-b"

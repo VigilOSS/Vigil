@@ -181,6 +181,198 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
     assert "sha256" not in files_call["files"][0]
 
 
+def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_script_module(
+        "test_export_findings_module",
+        "agent/scripts/assess/commands/export_findings.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+    monkeypatch.setattr(module, "load_scope", lambda engagement_dir: {"engagement_name": "Demo Engagement"})
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            assert endpoint == "findings"
+            return [
+                {
+                    "slug": "finding-002",
+                    "title": "False positive finding",
+                    "severity": "low",
+                    "workflow_status": "false_positive",
+                    "verification_state": "verified",
+                    "verification_disposition": "false_positive",
+                    "summary": "Should still be exported",
+                    "details_json": json.dumps({}),
+                },
+                {
+                    "slug": "finding-001",
+                    "title": "Parser issue",
+                    "severity": "high",
+                    "workflow_status": "merged",
+                    "verification_state": "disputed",
+                    "verification_disposition": "downgraded",
+                    "summary": "Summary text",
+                    "merged_into_slug": "finding-010",
+                    "details_json": json.dumps(
+                        {
+                            "request_method": "POST",
+                            "cwe_id": "CWE-79",
+                            "references": ["https://example.test/advisory", {"id": 7}, 42],
+                            "entry_point": "parse_input",
+                            "sink": "render_output",
+                            "steps_to_reproduce": ["send payload", 2],
+                        }
+                    ),
+                },
+            ]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(SimpleNamespace(engagement_dir=engagement_dir))
+
+    output = capsys.readouterr().out
+    findings_md = (engagement_dir / "findings.md").read_text(encoding="utf-8")
+
+    assert "Exported 2 findings" in output
+    assert "False positive finding" in findings_md
+    assert "- **Workflow**: false_positive" in findings_md
+    assert "Parser issue" in findings_md
+    assert "- **Merged Into**: finding-010" in findings_md
+    assert "- **Location**: POST" not in findings_md
+    assert "- **CWE**: CWE-79" in findings_md
+    assert "- **Entry Point**: parse_input" in findings_md
+    assert "- **Sink**: render_output" in findings_md
+    assert "- **References**: https://example.test/advisory, {'id': 7}, 42" in findings_md
+    assert "1. send payload" in findings_md
+    assert "2. 2" in findings_md
+
+
+def test_code_index_sync_requires_repo_id_for_multi_repo_engagement(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_script_module(
+        "test_code_index_sync_multi_repo_module",
+        "agent/scripts/assess/commands/code_index_sync.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    manifest_dir = engagement_dir / "tools" / "analysis-state"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "structural-index-manifest.json").write_text(
+        json.dumps({"path_to_index": {"src/main.go": "a.json"}}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            assert endpoint == "code/repos"
+            return [{"id": 1}, {"id": 2}]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=engagement_dir,
+                manifest=None,
+                index_dir=None,
+                repo_id=None,
+            )
+        )
+
+    assert excinfo.value.code == 1
+    assert "--repo-id" in capsys.readouterr().err
+
+
+def test_code_record_modules_rejects_auto_derived_key_collisions(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_script_module(
+        "test_code_record_modules_collision_module",
+        "agent/scripts/assess/commands/code_record_modules.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    modules_path = tmp_path / "modules.json"
+    modules_path.write_text(
+        json.dumps(
+            [
+                {"name": "Auth/API"},
+                {"name": "Auth API"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            assert endpoint == "code/modules?repo_id=5"
+            return []
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            raise AssertionError("should not post when derived keys collide")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=engagement_dir,
+                repo_id="5",
+                modules_json=str(modules_path),
+            )
+        )
+
+    assert excinfo.value.code == 1
+    assert "Provide explicit module_key values" in capsys.readouterr().err
+
+
 def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, tmp_path: Path) -> None:
     module = _load_script_module(
         "test_merge_session_module",

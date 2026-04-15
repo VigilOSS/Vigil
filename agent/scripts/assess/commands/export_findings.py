@@ -17,6 +17,35 @@ def register(subparsers) -> None:
     p.set_defaults(func=run)
 
 
+def _details_object(finding: dict) -> dict:
+    details_json = finding.get("details_json")
+    if isinstance(details_json, str):
+        try:
+            parsed = json.loads(details_json)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return details_json if isinstance(details_json, dict) else {}
+
+
+def _detail_value(finding: dict, field: str, default=""):
+    value = finding.get(field)
+    if value not in (None, "", []):
+        return value
+    return _details_object(finding).get(field, default)
+
+
+def _string_list(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    normalized: list[str] = []
+    for value in values:
+        if value in (None, ""):
+            continue
+        normalized.append(str(value))
+    return normalized
+
+
 def _render_finding(f: dict) -> str:
     slug = f["slug"]
     title = f["title"]
@@ -35,17 +64,27 @@ def _render_finding(f: dict) -> str:
     cvss_vector = f.get("cvss_vector") or ""
     cvss_score = f.get("cvss_score")
     remediation = f.get("remediation") or ""
-    steps = f.get("steps_to_reproduce") or []
+    steps = _string_list(_detail_value(f, "steps_to_reproduce", []))
     notes = (f.get("notes") or "").strip()
 
     request_method = ""
-    details_json = f.get("details_json")
-    if isinstance(details_json, str):
-        try:
-            details = json.loads(details_json)
-            request_method = details.get("request_method") or ""
-        except (json.JSONDecodeError, TypeError):
-            pass
+    details = _details_object(f)
+    request_method = details.get("request_method") or ""
+
+    if not owasp_category:
+        owasp_category = str(_detail_value(f, "owasp_category", "") or "")
+    if not cwe_id:
+        cwe_id = str(_detail_value(f, "cwe_id", "") or "")
+    if not cvss_vector:
+        cvss_vector = str(_detail_value(f, "cvss_vector", "") or "")
+    if cvss_score is None:
+        cvss_score = _detail_value(f, "cvss_score", None)
+    if not remediation:
+        remediation = str(_detail_value(f, "remediation", "") or "")
+    if not impact:
+        impact = str(_detail_value(f, "impact", "") or "")
+    if not evidence:
+        evidence = str(_detail_value(f, "evidence", "") or "")
 
     lines = [
         f"## [{slug}] {title}",
@@ -74,10 +113,12 @@ def _render_finding(f: dict) -> str:
         lines.append(f"- **Impact**: {impact}")
     if remediation:
         lines.append(f"- **Remediation**: {remediation}")
-    entry_point = f.get("entry_point") or ""
-    sink = f.get("sink") or ""
-    references = f.get("references") or []
-    poc_code = f.get("poc_code") or ""
+    if f.get("merged_into_slug"):
+        lines.append(f"- **Merged Into**: {f['merged_into_slug']}")
+    entry_point = str(_detail_value(f, "entry_point", "") or "")
+    sink = str(_detail_value(f, "sink", "") or "")
+    references = _string_list(_detail_value(f, "references", []))
+    poc_code = str(_detail_value(f, "poc_code", "") or "")
 
     if entry_point:
         lines.append(f"- **Entry Point**: {entry_point}")
@@ -85,8 +126,8 @@ def _render_finding(f: dict) -> str:
         lines.append(f"- **Sink**: {sink}")
     if references:
         lines.append(f"- **References**: {', '.join(references)}")
-    poc_request = f.get("poc_request")
-    poc_response = f.get("poc_response")
+    poc_request = _detail_value(f, "poc_request")
+    poc_response = _detail_value(f, "poc_response")
 
     if steps:
         lines.append("")
@@ -136,7 +177,7 @@ def run(args) -> None:
 
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
-        findings = client.get("report-findings")
+        findings = client.get("findings")
     finally:
         client.close()
 
@@ -144,8 +185,7 @@ def run(args) -> None:
         print("export-findings: unexpected response from backend", file=sys.stderr)
         sys.exit(1)
 
-    active = [f for f in findings if not f.get("merged_into_slug")]
-    active.sort(key=lambda f: (
+    findings.sort(key=lambda f: (
         _SEVERITY_ORDER.get((f.get("severity") or "medium").lower(), 99),
         f.get("slug", ""),
     ))
@@ -153,13 +193,13 @@ def run(args) -> None:
     header_lines = [
         f"# Findings — {engagement_name}",
         "",
-        f"- **Finding Count**: {len(active)}",
+        f"- **Finding Count**: {len(findings)}",
         "",
     ]
 
-    body_blocks = [_render_finding(f) for f in active]
+    body_blocks = [_render_finding(f) for f in findings]
     content = "\n".join(header_lines) + "\n".join(body_blocks) + "\n"
 
     out_path = Path(cfg.engagement_dir) / "findings.md"
     out_path.write_text(content, encoding="utf-8")
-    print(f"Exported {len(active)} findings to {out_path}")
+    print(f"Exported {len(findings)} findings to {out_path}")
