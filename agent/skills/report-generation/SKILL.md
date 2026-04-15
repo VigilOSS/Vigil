@@ -58,30 +58,13 @@ proved impact at report time materially differs from what was recorded at valida
 
 ## Writing Style
 
-Factual, evidence-based, active voice. No speculation — state conditions if impact is theoretical.
-Quantify where possible. No hyperbole or marketing language.
+Follow `agent/rules/reporting.md` for all writing rules — banned language, active voice,
+evidence formatting, remediation specificity, filler/padding, and section length limits.
 
-**Voice:** Active by default. The endpoint does X. The attacker sends Y. The response contains Z.
-Not "it was discovered that" or "testing revealed that."
+**Audience:** Technical reader who knows vulnerability classes. Do not define standard terms.
 
-**Audience:** Technical reader who knows vulnerability classes. Do not define XSS, SQLi, IDOR, or other
-standard terms. Do not explain how HTTP works. State what is broken and prove it.
-
-**Executive summary audience exception:** The executive summary is for non-technical stakeholders.
+**Executive summary exception:** The executive summary is for non-technical stakeholders.
 Use business language there. "An attacker can download all customer records" not "IDOR on /api/users."
-
-Banned phrases: `could potentially`, `may allow`, `might be possible`, `could lead to`.
-Use instead: `An attacker can [exact action] by [exact method].`
-
-Banned filler: `Furthermore` · `Additionally` · `Moreover` · `It is worth noting` · `It should be noted` ·
-`As demonstrated above` · `During the course of our assessment` · `Upon further investigation` ·
-`This finding describes` · `This vulnerability allows` (as an opener) · `In conclusion` · `To summarize`.
-
-Banned remediation: `Implement proper input validation` · `Use appropriate access controls` ·
-`Follow security best practices` · `Sanitize user input`. Name the technology and the specific fix.
-
-**Padding test:** After writing each finding, re-read it. If you can remove a sentence without reducing
-the reader's understanding, remove it. Every sentence must contribute new information.
 
 ## Report Structure
 
@@ -254,20 +237,20 @@ Only proceed to report generation after validation passes or the operator resolv
 
 ## Post-Generation Self-Review
 
-After writing the report, run this checklist against every finding before delivering. If any check fails, fix it.
+After writing the report, verify every finding against `agent/rules/reporting.md`. If any check fails, fix it.
 
-1. **First sentence test:** Does sentence one of each description state what the attacker gains? Not the bug class, not the endpoint, not "This finding describes..." — the attacker outcome.
-2. **Title echo test:** Did the description restate the title? Remove the duplication.
-3. **Class definition test:** Did you explain what any standard vulnerability class is? (IDOR, XSS, SQLi, SSRF, etc.) Remove it. The audience is security practitioners.
-4. **Filler scan:** Search for `Furthermore`, `Additionally`, `It should be noted`, `It is worth noting`, `During the course of`, `As demonstrated above`, `In conclusion`. Remove all instances.
-5. **Passive voice scan:** Search for `It was discovered`, `was found to be`, `was observed`, `testing revealed`. Rewrite to active voice.
-6. **Evidence length test:** Is any response block longer than 15 lines? Truncate to the relevant excerpt and annotate the proof.
-7. **Remediation specificity test:** Does every remediation name a technology or specific control? Flag any that say "implement proper X" or "follow best practices."
-8. **Sentence removal test:** Re-read each finding. For every sentence, ask: does removing it reduce the reader's understanding? If no, remove it.
-9. **Reproduction test:** Can someone with no context copy the steps-to-reproduce and replay the finding? Each step must be a single action.
-10. **Executive summary length:** Is it one page or less? If not, cut.
-11. **Severity count match:** Do the counts in the executive summary match the actual finding list?
-12. **Cross-reference completeness:** Does every finding in the body appear in the slug cross-reference table?
+1. First sentence states attacker outcome (Rule 6)
+2. No title echo in description (Rule 11)
+3. No vulnerability class definitions (Rule 11)
+4. No banned filler phrases (Rule 11)
+5. Active voice throughout (Rule 12)
+6. Evidence blocks ≤ 15 lines with annotated proof (Rule 13)
+7. Remediation names specific technology (Rule 14)
+8. Every sentence is load-bearing (Rule 15)
+9. Steps to reproduce: one action per step, copy-pasteable (Rule 10)
+10. Executive summary ≤ one page (Rule 10)
+11. Severity counts in executive summary match actual finding list
+12. Every finding appears in the slug cross-reference table
 
 ## Email Disclosure Reports
 
@@ -299,7 +282,7 @@ Load before writing:
 
 POCs must exercise the vendor's code end-to-end and show execution output — reimplemented
 logic proves nothing to a triager. If end-to-end testing requires infrastructure the script
-cannot provide, mark those steps with `# HUMAN:` comments. Credentials go in environment
+cannot provide, mark those steps with `# SETUP:` comments. Credentials go in environment
 variables, never in submission text or scripts.
 
 ## Extended Resources

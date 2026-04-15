@@ -39,15 +39,14 @@ Truncated to only the lines that matter. No full tool dumps.]
 
 ## Rules
 
+All writing rules from `agent/rules/reporting.md` apply (banned language, active voice, no class definitions, every sentence load-bearing).
+
+Format-specific:
 - Each finding is one submission. Do not bundle.
 - The POC must exercise the vendor's code, not reimplemented logic. Import and call their functions. Run their binary. Show their output.
-- If end-to-end testing requires infrastructure (LDAP server, SSH host, proxy), document what the human sets up and what the script does. Use `# HUMAN:` comments in scripts for manual steps.
+- If end-to-end testing requires infrastructure (LDAP server, SSH host, proxy), document what must be set up manually and what the script does. Use `# SETUP:` comments in scripts for manual prerequisite steps.
 - Evidence must come from running the POC, not from reading the source. Code analysis supports the description but does not replace proof.
 - Credentials and secrets go in environment variables, never in submission text or script source.
-- No theory. No "could potentially." No "may allow." State what happens, not what might.
-- No class definitions. The triager knows what LDAP injection is.
-- Active voice. Subject-verb-object.
-- Every sentence must be load-bearing. If removing it does not reduce understanding, remove it.
 
 ## Example
 
