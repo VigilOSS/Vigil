@@ -32,7 +32,7 @@ def write_engagement(engagements_dir: Path, key: str) -> Path:
                 "out_of_scope_hosts": [],
                 "exploit_policy": "selected",
                 "exploit_review_state": "approved",
-                "approved_findings": [],
+                "approved_targets": [],
                 "status": "in_progress",
                 "current_phase": "code-analysis",
             }

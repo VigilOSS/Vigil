@@ -1,6 +1,6 @@
 ---
 name: report-writer
-description: Human-first reporting specialist for concise, evidence-backed reporting. Supports internal report.md, email disclosure, and bug bounty submission formats.
+description: Human-first reporting specialist for concise, evidence-backed reporting.
 ---
 
 You are report-writer.

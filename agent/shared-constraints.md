@@ -123,7 +123,7 @@ Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous
 
 If your CVSS score does not fall within the matching severity range, adjust one or the other before recording.
 
-**Deduplication:** Before recording, query existing findings via `assess.py fetch report-findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
+**Deduplication:** Before recording, query existing findings via `assess.py fetch findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
 
 Record every finding with:
 ```
@@ -150,6 +150,17 @@ Do not invent lifecycle fields from memory — `record-finding` fills the initia
 ```
 
 This keeps CVSS queryable from the API and gives report-writer structured data to format.
+
+When a finding is only reportable as part of a chain, keep it in the same finding lifecycle and
+set chain metadata in `details` during `record-finding` or `update-finding`:
+```json
+"details": {
+  "chain_required": true,
+  "chain_rationale": "This primitive becomes meaningful only after pivoting into the admin export flow.",
+  "required_followup": ["Test sibling privileged write routes", "Attempt authenticated export with stolen token"]
+}
+```
+Use this instead of inventing a special workflow status for chain-only findings.
 
 **The `notes` field must contain replayable commands** — not prose descriptions. Instead of
 "Login to phpMyAdmin with blank password," write the actual command: curl with headers, cookies,

@@ -8,7 +8,7 @@ origin: AI Threat Hunting
 
 ## When to Activate
 
-- Phase 5 (Report) — operator dispatches report-writer after exploit phase completes
+- Phase 7 (Report) — operator dispatches report-writer after Verify and exploit work complete
 - On-demand interim report requested by the operator mid-engagement
 
 ## Query Backend First
@@ -17,8 +17,12 @@ Before writing anything, pull the canonical state from the orchestrator API.
 Use the helper script or `curl` — never query the SQLite database file directly.
 
 ```bash
-# Report-ready findings: sorted by severity, CVSS/remediation extracted, sequential report IDs assigned
-./scripts/assess.py fetch report-findings
+# Final report gate and final-mode findings
+./scripts/assess.py check-report-readiness
+./scripts/assess.py fetch "report-findings?mode=final"
+
+# Interim report findings when the operator explicitly wants a draft before final readiness passes
+./scripts/assess.py fetch "report-findings?mode=draft"
 
 # Attack chains with narrative and severity
 ./scripts/assess.py fetch attack-chains
@@ -95,7 +99,7 @@ No unexplained jargon. "SQL injection (direct database access)" not just "SQL in
 ```markdown
 ## Methodology
 **Approach:** [Black/Grey/White-box, Manual/Automated/Hybrid]
-**Phases:** 1. Recon 2. Collection 3. Testing 4. Exploitation 5. Reporting
+**Phases:** 1. Recon 2. Collection 3. Testing 4. Verify 5. Exploitation 6. Optional log investigation 7. Reporting
 
 | Tool | Purpose |
 |------|---------|
@@ -191,16 +195,17 @@ Tool output in `<details>` blocks, generated scripts, scope verification table, 
 
 Before generating the report body, run these checks against the backend data. If any check fails, **stop and flag the issue to the operator** — do not silently fix or ignore it.
 
-1. **Duplicate check:** scan findings for pairs sharing the same root cause + endpoint. Flag: "FINDING-VA-003 and FINDING-EX-001 appear to describe the same root cause on /api/users — resolve before report."
-2. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
-3. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
+1. **Readiness gate:** for final reports, run `./scripts/assess.py check-report-readiness`. If it fails, stop and flag the blockers to the operator.
+2. **Duplicate check:** scan findings for pairs sharing the same root cause + endpoint. Flag: "FINDING-VA-003 and FINDING-EX-001 appear to describe the same root cause on /api/users — resolve before report."
+3. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
+4. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
 
 Only proceed to report generation after validation passes or the operator resolves flagged issues.
 
 ## Generation Procedure
 
 1. **Pull backend state** using the queries in "Query Backend First" above
-2. **Use `report-findings`** as the authoritative finding list
+2. **Use `report-findings?mode=final`** as the authoritative finding list for final reports, or `report-findings?mode=draft` for interim drafts
 3. **Use pre-computed CVSS** from finding details. Recalculate only if proved impact at report time materially differs from what was validated
 4. **Use pre-computed remediation** from finding details. Augment only if the exploit chain revealed additional fix requirements
 5. Populate all template fields (flag missing evidence with `[EVIDENCE MISSING]`, never fabricate)

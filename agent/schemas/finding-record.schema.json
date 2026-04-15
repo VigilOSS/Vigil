@@ -261,6 +261,21 @@
           },
           "description": "External references such as CVE IDs, advisory URLs, or related documentation links"
         },
+        "chain_required": {
+          "type": "boolean",
+          "description": "Whether this finding remains actionable only as part of a larger exploit chain"
+        },
+        "chain_rationale": {
+          "type": "string",
+          "description": "Why the finding matters primarily as a chain step instead of a standalone report item"
+        },
+        "required_followup": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Concrete follow-up steps needed to validate or complete the chain"
+        },
         "variant_of": {
           "type": "string",
           "description": "Finding slug of the original finding when this record is a verified variant"
@@ -415,6 +430,7 @@
           },
           "body_excerpt": "<div class='results'>3 items found</div>"
         },
+        "chain_required": false,
         "references": [
           "https://cwe.mitre.org/data/definitions/89.html"
         ],
@@ -446,6 +462,12 @@
         "taint_path": "curl_url_set(CURLURLPART_URL, attacker_url) -> parseurl() -> memcpy(buf, scheme, schemelen)",
         "guards_evaluated": "No bounds check on schemelen before memcpy",
         "slot_type": "URL-COMPONENT",
+        "chain_required": true,
+        "chain_rationale": "The primitive is meaningful for exploitation, but final report impact depends on chaining it to a reachable crash or controlled allocation path.",
+        "required_followup": [
+          "Exercise the URL parser through a network-reachable caller",
+          "Confirm whether the overflow produces controlled corruption under sanitizer instrumentation"
+        ],
         "references": [
           "https://cwe.mitre.org/data/definitions/122.html"
         ],

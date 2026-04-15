@@ -630,8 +630,10 @@ similar `defect_family` across hunter and variant-hunter prefixes):
 ```
 
 **Report dispatch:**
-Dispatch `report-writer` with `agent/skills/report-generation/SKILL.md`. Report-writer queries
-the `report-findings` endpoint which includes both code and web findings.
+For a final report, run `./scripts/assess.py check-report-readiness` before dispatching
+`report-writer`. Report-writer queries `report-findings?mode=final` for final output and
+`report-findings?mode=draft` for interim output; both include code and web findings from the
+shared backend.
 
 ```bash
 jq '.current_phase = "complete"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"

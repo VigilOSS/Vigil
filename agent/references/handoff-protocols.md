@@ -3,7 +3,7 @@
 Quick-reference for processing each agent's return output. These rules are subordinate
 to the Phase Flow in `operator-core.md` — agent output is processed within the current
 phase, then queued for later phases where appropriate. Exploit-developer dispatch is
-governed by `exploit_policy` in scope.json and belongs to Phase 4, not earlier phases.
+governed by `exploit_policy` in scope.json and belongs after Verify in Phase 5, not earlier phases.
 
 ## Skill Passing Protocol
 
@@ -21,7 +21,7 @@ Output: endpoint lists, technologies, JS file URLs, parameters, surface candidat
 1. **Read `#### Coverage Gaps` first** — this drives the Recon Coverage Gate. If material gaps exist, re-dispatch recon-specialist with a targeted objective and specific skill before proceeding. See Phase 1 gate checklist in operator-core.
 2. Pass JS file URLs → dispatch source-analyzer (if not already running in parallel) — **bring `agent/skills/source-analysis/SKILL.md`**
 3. Record technology stack → durable state update + intel.md
-4. Turn auth boundaries, framework clues, and proxy hints into hypotheses for Phase 3/4
+4. Turn auth boundaries, framework clues, and proxy hints into hypotheses for Phase 3-5
 
 ### SOURCE-ANALYZER
 
@@ -56,8 +56,8 @@ Output: priority manifest, work-buffer stats, intelligence, coverage gaps, recor
 Output: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED signals
 
 1. Record all findings durably via `assess.py record-finding` — this is the immediate obligation
-2. HIGH/MEDIUM findings → queued for Phase 4 exploit dispatch (governed by `exploit_policy` in scope.json)
-3. LOW findings → record as draft, do not queue for exploit yet
+2. Queue live findings for Phase 4 Verify, not exploitation. Verification decides which findings become confirmed, downgraded, killed, or chain-required before exploit work is spent.
+3. When a finding is real only as part of a chain, keep it in the normal finding table and set `details.chain_required`, `details.chain_rationale`, and `details.required_followup` via `record-finding` or `update-finding`
 4. FUZZER_NEEDED → dispatch fuzzer within Phase 3 — **bring `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md`**, feed results back through vuln-analyst
 5. Mark work-buffer batch done: `./scripts/assess.py dispatch "$DB" done "id1,id2,..."`
 6. Continue the Phase 3 consumption loop (steps b–f in Phase Flow)
@@ -70,12 +70,23 @@ Output: discovered paths, valid parameters, anomalous responses, confirmed findi
 2. Anomalous responses → dispatch vuln-analyst for analysis within Phase 3
 3. Confirmed findings (e.g., valid credentials) → durable findings directly via `assess.py record-finding`
 
-## Phase 4 Returns (EXPLOIT)
+## Phase 4 Returns (VERIFY)
+
+### VULNERABILITY-ANALYST IN REVIEW MODE
+
+Output: confirmed, downgraded, disputed, or killed findings with updated evidence
+
+1. Confirmed or downgraded findings remain eligible for later exploit review
+2. Killed findings are suppressed from exploit and final report output
+3. Chain-only findings stay in the normal finding table and carry `details.chain_required` metadata instead of a special workflow status
+4. Duplicate findings are merged before moving into exploit or report readiness
+
+## Phase 5 Returns (EXPLOIT)
 
 Exploit-developer dispatch is gated by `exploit_policy` in scope.json:
-- `pause` → present confirmed findings to the human, ask which are approved
-- `selected` → exploit only the approved finding slugs
-- `full_send` → dispatch exploit-developer immediately
+- `pause` → present backend exploit candidates to the human, ask which are approved
+- `selected` → exploit only the approved target slugs that are still current backend exploit candidates
+- `full_send` → dispatch exploit-developer immediately on the current backend exploit candidates
 
 ### EXPLOIT-DEVELOPER
 
@@ -87,8 +98,8 @@ Output: CONFIRMED/PARTIAL/FAILED status, extracted data, PoC, chains, credential
 4. CONFIRMED + new attack surface → ingest auth-aware variants and retest obligations
 5. PARTIAL → record as MEDIUM, validate partial signals in stages before giving up
 6. FAILED → log.md, move to next finding
-7. Needs OSINT context → dispatch osint-analyst within Phase 4 — **bring `agent/skills/osint-recon/SKILL.md`**
-8. Exploit failed, lead needs targeted re-evaluation → dispatch vulnerability-analyst for a single-finding retest (this is a Phase 4 feedback loop, not a return to the Phase 3 work-buffer consumption loop) — **bring the same vuln-class skill**
+7. Needs OSINT context → dispatch osint-analyst within Phase 5 — **bring `agent/skills/osint-recon/SKILL.md`**
+8. Exploit failed, lead needs targeted re-evaluation → dispatch vulnerability-analyst for a single-finding retest (this is a Phase 5 feedback loop, not a return to the Phase 3 work-buffer consumption loop) — **bring the same vuln-class skill**
 
 ### OSINT-ANALYST
 
@@ -100,17 +111,19 @@ Output: intel.md updates (technology, CVE, breach, credential intel)
 4. Historical endpoints → ingest into backend coverage state
 5. MEDIUM/LOW intel without target proof → keep in intel.md only
 
-## Phase 6 (REPORT)
+## Phase 7 (REPORT)
 
 ### REPORT-WRITER ← backend API (self-service)
 
-Report-writer queries the backend directly via `assess.py fetch report-findings`, `attack-chains`,
+For final reports, run `assess.py check-report-readiness` first. Report-writer queries the backend
+directly via `assess.py fetch "report-findings?mode=final"` for final output or
+`assess.py fetch "report-findings?mode=draft"` for interim output, plus `attack-chains`,
 `surfaces`, and `summary`. The operator does not pre-assemble findings context.
 
-Before dispatching report-writer, merge duplicates so `report-findings` returns a clean set:
+Before dispatching a final report, resolve readiness blockers so `report-findings?mode=final` succeeds:
 - Check for overlapping `root_cause_key` or `canonical_location` + `defect_family` across agent findings
 - `./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"`
-- The source finding's status becomes `merged` and is excluded from `report-findings`
+- The source finding's status becomes `merged` and is excluded from final report output
 
 ## Wildcard Mode Specifics
 

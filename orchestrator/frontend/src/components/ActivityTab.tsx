@@ -35,8 +35,8 @@ export function ActivityTab({ events, sessions }: ActivityTabProps) {
                     <strong>{session.session_id}</strong>
                     <span className="meta-text">{session.status}</span>
                   </div>
-                  {session.assigned_findings.length > 0 && (
-                    <p className="meta-text">{session.assigned_findings.join(", ")}</p>
+                  {session.assigned_targets.length > 0 && (
+                    <p className="meta-text">{session.assigned_targets.join(", ")}</p>
                   )}
                 </div>
               </article>

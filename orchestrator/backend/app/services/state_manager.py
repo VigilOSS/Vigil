@@ -2083,15 +2083,75 @@ def list_findings(engagement_id: int) -> list[dict[str, Any]]:
     return [_serialize_finding_record(row) for row in rows]
 
 
-def list_report_findings(engagement_id: int) -> list[dict[str, Any]]:
-    """Return findings formatted for report generation.
+def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM assessment_findings
+            WHERE engagement_id = ?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (engagement.id,),
+        ).fetchall()
 
-    Excludes merged and false-positive findings, orders by severity (critical
-    first), and extracts structured fields from the ``details_json`` blob so
-    the report-writer has them at the top level without manual JSON parsing:
-    CVSS, remediation, steps_to_reproduce, CWE, OWASP, impact, evidence,
-    entry_point, sink, poc_code, poc_request, poc_response, and references.
-    """
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        record = _serialize_finding_record(row)
+        workflow_status = record.get("workflow_status", "draft")
+        if workflow_status in {"merged", "false_positive", "reported", "exploited"}:
+            continue
+        if record.get("verification_state") != "verified":
+            continue
+        if record.get("verification_disposition") not in {"confirmed", "downgraded"}:
+            continue
+        details = _json_object(record.get("details_json", "{}"))
+        severity = _normalize_severity(str(record.get("severity", "info")))
+        chain_required = details.get("chain_required") is True
+        if SEVERITY_RANK[severity] < SEVERITY_RANK["medium"] and not chain_required:
+            continue
+        if chain_required and SEVERITY_RANK[severity] < SEVERITY_RANK["medium"]:
+            candidate_reason = "verified_chain_required"
+        else:
+            candidate_reason = f"verified_{severity}"
+        record["candidate_reason"] = candidate_reason
+        record["chain_required"] = chain_required
+        candidates.append(record)
+
+    return sorted(
+        candidates,
+        key=lambda row: (
+            {
+                "verified_critical": 0,
+                "verified_high": 1,
+                "verified_medium": 2,
+                "verified_chain_required": 3,
+            }.get(str(row.get("candidate_reason", "")), 99),
+            str(row.get("slug", "")),
+        ),
+    )
+
+
+def coverage_readiness(engagement_id: int) -> dict[str, Any]:
+    surfaces = list_surfaces(engagement_id)
+    unresolved = [row for row in surfaces if row.get("status") == "discovered"]
+    high_risk_deferred = [
+        row
+        for row in surfaces
+        if row.get("status") == "deferred"
+        and row.get("surface_type") in {"account_recovery", "dynamic_render", "object_reference", "privileged_write"}
+    ]
+    blocker_count = len(unresolved) + len(high_risk_deferred)
+    return {
+        "ready": blocker_count == 0,
+        "blocker_count": blocker_count,
+        "unresolved_surfaces": unresolved,
+        "high_risk_deferred_surfaces": high_risk_deferred,
+    }
+
+
+def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         rows = connection.execute(
@@ -2100,33 +2160,138 @@ def list_report_findings(engagement_id: int) -> list[dict[str, Any]]:
             FROM assessment_findings
             WHERE engagement_id = ?
               AND status NOT IN ('merged', 'false_positive')
-              AND verification_state != 'disputed'
-            ORDER BY
-                CASE severity
-                    WHEN 'critical' THEN 0
-                    WHEN 'high' THEN 1
-                    WHEN 'medium' THEN 2
-                    WHEN 'low' THEN 3
-                    WHEN 'info' THEN 4
-                    ELSE 5
-                END,
-                CASE status
-                    WHEN 'exploited' THEN 0
-                    WHEN 'active' THEN 1
-                    WHEN 'reported' THEN 2
-                    WHEN 'blocked' THEN 3
-                    WHEN 'draft' THEN 4
-                    ELSE 5
-                END,
-                updated_at DESC,
-                id DESC
+            ORDER BY updated_at DESC, id DESC
             """,
             (engagement.id,),
         ).fetchall()
+    return [_serialize_finding_record(row) for row in rows]
+
+
+def report_readiness(engagement_id: int) -> dict[str, Any]:
+    coverage = coverage_readiness(engagement_id)
+    blockers: list[dict[str, Any]] = []
+    if not coverage["ready"]:
+        blockers.append(
+            {
+                "kind": "coverage",
+                "detail": "Coverage blockers remain",
+                "blocker_count": coverage["blocker_count"],
+            }
+        )
+
+    reportable_statuses = {"active", "blocked", "exploited", "reported"}
+    candidates = [
+        row
+        for row in _report_candidate_records(engagement_id)
+        if row.get("workflow_status") in reportable_statuses
+    ]
+
+    for row in candidates:
+        if row.get("verification_state") != "verified":
+            blockers.append(
+                {
+                    "kind": "finding_verification_state",
+                    "slug": row.get("slug", ""),
+                    "title": row.get("title", ""),
+                    "detail": f"verification_state={row.get('verification_state', 'unknown')}",
+                }
+            )
+            continue
+        if row.get("verification_disposition") not in {"confirmed", "downgraded"}:
+            blockers.append(
+                {
+                    "kind": "finding_verification_disposition",
+                    "slug": row.get("slug", ""),
+                    "title": row.get("title", ""),
+                    "detail": f"verification_disposition={row.get('verification_disposition', 'unknown')}",
+                }
+            )
+
+    duplicate_groups: dict[tuple[str, str], list[str]] = {}
+    root_cause_groups: dict[str, list[str]] = {}
+    for row in candidates:
+        slug = str(row.get("slug", ""))
+        root_cause_key = str(row.get("root_cause_key", "") or "").strip()
+        if root_cause_key:
+            root_cause_groups.setdefault(root_cause_key, []).append(slug)
+        location = str(row.get("canonical_location", "") or "").strip()
+        defect_family = str(row.get("defect_family", "") or "").strip()
+        if location and defect_family:
+            duplicate_groups.setdefault((location, defect_family), []).append(slug)
+
+    for root_cause_key, slugs in root_cause_groups.items():
+        if len(slugs) > 1:
+            blockers.append(
+                {
+                    "kind": "duplicate_root_cause",
+                    "slugs": sorted(slugs),
+                    "detail": f"root_cause_key={root_cause_key}",
+                }
+            )
+    for (location, defect_family), slugs in duplicate_groups.items():
+        if len(slugs) > 1:
+            blockers.append(
+                {
+                    "kind": "duplicate_location_family",
+                    "slugs": sorted(slugs),
+                    "detail": f"{defect_family} @ {location}",
+                }
+            )
+
+    return {
+        "ready": len(blockers) == 0,
+        "blocker_count": len(blockers),
+        "blockers": blockers,
+        "coverage": coverage,
+    }
+
+
+def list_report_findings(engagement_id: int, *, mode: str = "draft") -> list[dict[str, Any]]:
+    """Return findings formatted for report generation.
+
+    Excludes merged and false-positive findings, orders by severity (critical
+    first), and extracts structured fields from the ``details_json`` blob so
+    the report-writer has them at the top level without manual JSON parsing:
+    CVSS, remediation, steps_to_reproduce, CWE, OWASP, impact, evidence,
+    entry_point, sink, poc_code, poc_request, poc_response, and references.
+    """
+    rows = _report_candidate_records(engagement_id)
+    if mode == "draft":
+        rows = [row for row in rows if row.get("verification_state") != "disputed"]
+    elif mode == "final":
+        rows = [
+            row
+            for row in rows
+            if row.get("workflow_status") in {"active", "blocked", "exploited", "reported"}
+            and row.get("verification_state") == "verified"
+            and row.get("verification_disposition") in {"confirmed", "downgraded"}
+        ]
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"unsupported report mode: {mode}")
+
+    rows.sort(
+        key=lambda row: (
+            {
+                "critical": 0,
+                "high": 1,
+                "medium": 2,
+                "low": 3,
+                "info": 4,
+            }.get(str(row.get("severity", "")), 5),
+            {
+                "exploited": 0,
+                "active": 1,
+                "reported": 2,
+                "blocked": 3,
+                "draft": 4,
+            }.get(str(row.get("workflow_status", "")), 5),
+            -int(row.get("id", 0)),
+        )
+    )
 
     results: list[dict[str, Any]] = []
     for idx, row in enumerate(rows, start=1):
-        record = _serialize_finding_record(row)
+        record = dict(row)
         details = _json_object(record.get("details_json", "{}"))
         record["report_id"] = f"FINDING-{idx:03d}"
         record["cvss_vector"] = details.get("cvss_vector", "")
@@ -2671,6 +2836,9 @@ def update_coverage_item_status(
 
 def assessment_summary(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    exploit_candidate_count = len(list_exploit_candidates(engagement.id))
+    coverage_gate = coverage_readiness(engagement.id)
+    report_gate = report_readiness(engagement.id)
     with get_connection() as connection:
         target_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_targets WHERE engagement_id = ?", (engagement.id,))
         service_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_services WHERE engagement_id = ?", (engagement.id,))
@@ -2824,6 +2992,9 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
         "tunnel_count": tunnel_count,
         "blocked_technique_count": blocked_technique_count,
         "attack_chain_count": chain_count,
+        "exploit_candidate_count": exploit_candidate_count,
+        "coverage_blocker_count": int(coverage_gate["blocker_count"]),
+        "report_blocker_count": int(report_gate["blocker_count"]),
         "coverage_statuses": {row["status"]: int(row["total"]) for row in coverage_rows},
         "finding_workflow_statuses": {row["status"]: int(row["total"]) for row in finding_rows},
         "finding_verification_states": {row["verification_state"]: int(row["total"]) for row in verification_state_rows},

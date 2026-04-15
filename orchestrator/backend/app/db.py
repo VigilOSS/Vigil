@@ -130,7 +130,7 @@ def init_db() -> None:
                 session_path TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
                 merge_state TEXT NOT NULL DEFAULT 'pending',
-                assigned_findings_json TEXT NOT NULL DEFAULT '[]',
+                assigned_targets_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 merged_at TEXT,
@@ -729,6 +729,10 @@ def init_db() -> None:
         if "secret_locator" in cred_columns and "secret" not in cred_columns:
             connection.execute("ALTER TABLE assessment_credentials RENAME COLUMN secret_locator TO secret")
 
+        session_columns = _table_columns(connection, "engagement_sessions")
+        if "assigned_findings_json" in session_columns and "assigned_targets_json" not in session_columns:
+            connection.execute("ALTER TABLE engagement_sessions RENAME COLUMN assigned_findings_json TO assigned_targets_json")
+
         finding_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_findings)").fetchall()}
         finding_column_defaults = {
             "verification_state": "TEXT NOT NULL DEFAULT 'unreviewed'",
@@ -1059,25 +1063,25 @@ def upsert_engagement_session(
     session_path: str,
     status: str,
     merge_state: str,
-    assigned_findings_json: str,
+    assigned_targets_json: str,
     merged_at: str | None,
 ) -> None:
     with get_connection() as connection:
         connection.execute(
             """
             INSERT INTO engagement_sessions (
-                engagement_id, session_id, session_path, status, merge_state, assigned_findings_json, merged_at
+                engagement_id, session_id, session_path, status, merge_state, assigned_targets_json, merged_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(engagement_id, session_id) DO UPDATE SET
                 session_path = excluded.session_path,
                 status = excluded.status,
                 merge_state = excluded.merge_state,
-                assigned_findings_json = excluded.assigned_findings_json,
+                assigned_targets_json = excluded.assigned_targets_json,
                 merged_at = excluded.merged_at,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (engagement_id, session_id, session_path, status, merge_state, assigned_findings_json, merged_at),
+            (engagement_id, session_id, session_path, status, merge_state, assigned_targets_json, merged_at),
         )
 
 
@@ -1085,7 +1089,7 @@ def list_engagement_sessions_for_engagement(engagement_id: int) -> list[Engageme
     with get_connection() as connection:
         rows = connection.execute(
             """
-            SELECT id, engagement_id, session_id, session_path, status, merge_state, assigned_findings_json, created_at, updated_at, merged_at
+            SELECT id, engagement_id, session_id, session_path, status, merge_state, assigned_targets_json, created_at, updated_at, merged_at
             FROM engagement_sessions
             WHERE engagement_id = ?
             ORDER BY id ASC

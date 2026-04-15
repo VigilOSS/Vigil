@@ -7,7 +7,7 @@ export type Engagement = {
   current_phase: string;
   exploit_policy: string;
   exploit_review_state: string;
-  approved_findings: string[];
+  approved_targets: string[];
   created_at: string;
   updated_at: string;
   session_count: number;
@@ -19,7 +19,7 @@ export type EngagementSession = {
   session_path: string;
   status: string;
   merge_state: string;
-  assigned_findings: string[];
+  assigned_targets: string[];
   created_at: string;
   updated_at: string;
   merged_at: string | null;
@@ -83,6 +83,9 @@ export type FindingDetails = {
   cvss_score?: number;
   remediation?: string;
   steps_to_reproduce?: string[];
+  chain_required?: boolean;
+  chain_rationale?: string;
+  required_followup?: string[];
 };
 
 export type AssessmentFindingDetail = AssessmentFinding & {
@@ -202,6 +205,9 @@ export type AssessmentSummary = {
   tunnel_count: number;
   blocked_technique_count: number;
   attack_chain_count: number;
+  exploit_candidate_count: number;
+  coverage_blocker_count: number;
+  report_blocker_count: number;
   coverage_statuses: Record<string, number>;
   finding_workflow_statuses: Record<string, number>;
   finding_verification_states: Record<string, number>;

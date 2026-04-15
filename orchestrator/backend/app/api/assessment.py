@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..services import state_manager
@@ -240,6 +240,24 @@ def get_assessment_summary(engagement_key: str) -> dict[str, Any]:
     return state_manager.assessment_summary(engagement.id)
 
 
+@router.get("/exploit-candidates")
+def get_exploit_candidates(engagement_key: str) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_exploit_candidates(engagement.id)
+
+
+@router.get("/coverage-readiness")
+def get_coverage_readiness(engagement_key: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.coverage_readiness(engagement.id)
+
+
+@router.get("/report-readiness")
+def get_report_readiness(engagement_key: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.report_readiness(engagement.id)
+
+
 @router.get("/targets")
 def get_targets(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
@@ -295,7 +313,7 @@ def get_finding_transitions(engagement_key: str, finding_slug: str) -> list[dict
 
 
 @router.get("/report-findings")
-def get_report_findings(engagement_key: str) -> list[dict[str, Any]]:
+def get_report_findings(engagement_key: str, mode: Literal["draft", "final"] = "draft") -> list[dict[str, Any]]:
     """Findings formatted for report generation.
 
     Sorted by severity (critical first), excludes merged and false-positive
@@ -306,7 +324,11 @@ def get_report_findings(engagement_key: str) -> list[dict[str, Any]]:
     available for cross-referencing.
     """
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_report_findings(engagement.id)
+    if mode == "final":
+        readiness = state_manager.report_readiness(engagement.id)
+        if not readiness["ready"]:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=readiness)
+    return state_manager.list_report_findings(engagement.id, mode=mode)
 
 
 @router.get("/finding-links")
