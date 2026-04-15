@@ -337,8 +337,16 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
         "patterns": {
             "java": [r"\bScriptEngine\.eval\s*\("],
             "python": [r"\beval\s*\(", r"\bexec\s*\(", r"\bcompile\s*\("],
-            "javascript": [r"\beval\s*\(", r"\bFunction\s*\(", r"\bsetTimeout\s*\("],
-            "typescript": [r"\beval\s*\(", r"\bFunction\s*\(", r"\bsetTimeout\s*\("],
+            "javascript": [
+                r"\beval\s*\(",
+                r"\bFunction\s*\(",
+                r"""\bset(?:Timeout|Interval)\s*\(\s*["'`]""",
+            ],
+            "typescript": [
+                r"\beval\s*\(",
+                r"\bFunction\s*\(",
+                r"""\bset(?:Timeout|Interval)\s*\(\s*["'`]""",
+            ],
             "ruby": [r"\beval\s*\(", r"\bclass_eval\s*\(", r"\binstance_eval\s*\(",
                      r"\bsend\s*\(", r"\bpublic_send\s*\("],
             "php": [r"\beval\s*\(", r"\bassert\s*\(", r"\bpreg_replace\s*\(.*/e",
@@ -1087,6 +1095,7 @@ def _detect_call_sites(
         "if", "else", "for", "while", "switch", "case", "return", "throw",
         "new", "delete", "try", "catch", "finally", "import", "from",
         "class", "def", "function", "var", "let", "const", "static",
+        "async",
         "public", "private", "protected", "void", "int", "float",
         "double", "long", "short", "char", "boolean", "String",
         "True", "False", "None", "null", "undefined", "this", "self",

@@ -315,6 +315,35 @@ def test_tsx_component_functions_are_indexed():
     assert "handleVisibilityChange" in function_names
 
 
+TS_ASYNC_AND_TIMER_SOURCE = b"""\
+export function scheduleRefresh(runTask: () => void) {
+    const refreshPage = useEffectEvent(async () => {
+        await Promise.resolve(runTask());
+    });
+    window.setTimeout(() => refreshPage(), 250);
+    window.setTimeout("refreshPage()", 250);
+}
+"""
+
+
+@needs_treesitter
+def test_typescript_call_sites_ignore_async_keyword():
+    idx = index_file("timers.ts", "typescript", source=TS_ASYNC_AND_TIMER_SOURCE)
+    callees = {call["callee"] for call in idx["call_sites"]}
+    assert "async" not in callees
+    assert "useEffectEvent" in callees
+    assert "Promise.resolve" in callees
+
+
+@needs_treesitter
+def test_typescript_eval_sink_requires_string_timer_callback():
+    idx = index_file("timers.ts", "typescript", source=TS_ASYNC_AND_TIMER_SOURCE)
+    eval_sinks = [sink for sink in idx["security_sinks"] if sink["kind"] == "eval_exec"]
+    assert len(eval_sinks) == 1
+    assert eval_sinks[0]["line"] == 5
+    assert "setTimeout(\"refreshPage()\"" in eval_sinks[0]["snippet"]
+
+
 PYTHON_EXPORT_SOURCE = b"""\
 __all__ = ['public_func', 'MyClass']
 
