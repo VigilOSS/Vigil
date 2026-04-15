@@ -2,6 +2,8 @@
 
 This repository contains the operator prompts, Kali MCP runtime, engagement scaffolding, and orchestrator services used to run those engagements.
 
+**[Operator Guide](OPERATOR-GUIDE.md)** — phases, expected outputs, per-file metadata, and questions to ask during an engagement.
+
 ## Repository Layout
 
 - `agent/docker/runtime-full/Dockerfile`

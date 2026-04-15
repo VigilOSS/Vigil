@@ -199,6 +199,8 @@ def sync_engagements() -> None:
             continue
         try:
             manifest = _manifest_for(engagement_dir)
+            index_rows = _migrate_session_artifacts(engagement_dir)
+
             discovered_keys.add(manifest["key"])
             engagement = db.get_engagement_by_key(manifest["key"])
             if engagement is None:
@@ -219,7 +221,6 @@ def sync_engagements() -> None:
                 assert engagement is not None
 
             seen_session_ids: set[str] = set()
-            index_rows = _migrate_session_artifacts(engagement_dir)
             if isinstance(index_rows, list):
                 for index_row in index_rows:
                     if not isinstance(index_row, dict):
