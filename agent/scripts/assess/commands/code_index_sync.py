@@ -65,66 +65,79 @@ def run(args) -> None:
     index_dir_path = Path(index_dir)
 
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-
-    path_to_file_id: dict[str, int] = {}
-    page_size = 5000
-    offset = 0
-    while True:
-        try:
-            query = f"code/files?limit={page_size}&offset={offset}"
-            if args.repo_id:
-                query += f"&repo_id={args.repo_id}"
-            page = client.get(query)
-        except Exception as exc:
-            print(f"Failed to fetch files from backend: {exc}", file=sys.stderr)
-            sys.exit(1)
-
-        if not isinstance(page, list):
-            print(f"Unexpected backend response type: {type(page)}", file=sys.stderr)
-            sys.exit(1)
-
-        for bf in page:
-            fp = bf.get("file_path", "")
-            fid = bf.get("id")
-            if fp and fid is not None:
-                path_to_file_id[fp] = int(fid)
-
-        if len(page) < page_size:
-            break
-        offset += page_size
-
-    updates: list[dict] = []
-    for rel_path, index_filename in path_to_index.items():
-        file_id = path_to_file_id.get(rel_path)
-        if file_id is None:
-            continue
-
-        index_file = index_dir_path / index_filename
-        if not index_file.is_file():
-            continue
-
-        try:
-            idx = json.loads(index_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-
-        updates.append({
-            "file_id": file_id,
-            "total_functions": idx.get("total_functions", 0),
-            "total_entry_points": len(idx.get("entry_points", [])),
-            "total_sinks": len(idx.get("security_sinks", [])),
-            "total_exports": len(idx.get("exports", [])),
-        })
-
-    if not updates:
-        print("No files matched between structural index and backend.", file=sys.stderr)
-        sys.exit(0)
-
     try:
-        result = client.post("code/files/bulk-structural-metadata", {"updates": updates})
-    except Exception as exc:
-        print(f"Failed to sync structural metadata: {exc}", file=sys.stderr)
-        sys.exit(1)
+        if not args.repo_id:
+            repos = client.get("code/repos")
+            if not isinstance(repos, list):
+                print(f"Unexpected backend response type for repos: {type(repos)}", file=sys.stderr)
+                sys.exit(1)
+            if len(repos) > 1:
+                print(
+                    "Multiple repos found for this engagement. Re-run code-index-sync with --repo-id "
+                    "to avoid syncing structural metadata to duplicate relative paths across repos.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+        path_to_file_id: dict[str, int] = {}
+        page_size = 5000
+        offset = 0
+        while True:
+            try:
+                query = f"code/files?limit={page_size}&offset={offset}"
+                if args.repo_id:
+                    query += f"&repo_id={args.repo_id}"
+                page = client.get(query)
+            except Exception as exc:
+                print(f"Failed to fetch files from backend: {exc}", file=sys.stderr)
+                sys.exit(1)
+
+            if not isinstance(page, list):
+                print(f"Unexpected backend response type: {type(page)}", file=sys.stderr)
+                sys.exit(1)
+
+            for bf in page:
+                fp = bf.get("file_path", "")
+                fid = bf.get("id")
+                if fp and fid is not None:
+                    path_to_file_id[fp] = int(fid)
+
+            if len(page) < page_size:
+                break
+            offset += page_size
+
+        updates: list[dict] = []
+        for rel_path, index_filename in path_to_index.items():
+            file_id = path_to_file_id.get(rel_path)
+            if file_id is None:
+                continue
+
+            index_file = index_dir_path / index_filename
+            if not index_file.is_file():
+                continue
+
+            try:
+                idx = json.loads(index_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+
+            updates.append({
+                "file_id": file_id,
+                "total_functions": idx.get("total_functions", 0),
+                "total_entry_points": len(idx.get("entry_points", [])),
+                "total_sinks": len(idx.get("security_sinks", [])),
+                "total_exports": len(idx.get("exports", [])),
+            })
+
+        if not updates:
+            print("No files matched between structural index and backend.", file=sys.stderr)
+            sys.exit(0)
+
+        try:
+            result = client.post("code/files/bulk-structural-metadata", {"updates": updates})
+        except Exception as exc:
+            print(f"Failed to sync structural metadata: {exc}", file=sys.stderr)
+            sys.exit(1)
     finally:
         client.close()
 

@@ -151,10 +151,10 @@ class RequeueRequest(BaseModel):
 
 class StructuralMetadataItem(BaseModel):
     file_id: int
-    total_functions: int = Field(default=0, ge=0)
-    total_entry_points: int = Field(default=0, ge=0)
-    total_sinks: int = Field(default=0, ge=0)
-    total_exports: int = Field(default=0, ge=0)
+    total_functions: int = Field(ge=0)
+    total_entry_points: int = Field(ge=0)
+    total_sinks: int = Field(ge=0)
+    total_exports: int = Field(ge=0)
 
 
 class BulkStructuralMetadataRequest(BaseModel):
