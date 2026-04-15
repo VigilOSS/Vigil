@@ -45,6 +45,16 @@ def _json_decode(value: Any, default: Any) -> Any:
 
 
 def _coerce_int(value: Any, *, field_name: str) -> int:
+    if isinstance(value, bool):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must be an integer",
+        )
+    if isinstance(value, float):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must be an integer",
+        )
     try:
         return int(value)
     except (TypeError, ValueError) as exc:

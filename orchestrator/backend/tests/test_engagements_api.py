@@ -227,6 +227,20 @@ def test_engagement_sync_migrates_legacy_target_keys_on_disk(client, isolate_set
     assert "assigned_findings" not in assignment_payload
 
 
+def test_engagement_sync_skips_invalid_engagement_json_without_aborting(client, isolate_settings, caplog):
+    write_engagement(isolate_settings["engagements_dir"], key="2026-03-30-120000-valid")
+    broken_dir = write_engagement(isolate_settings["engagements_dir"], key="2026-03-30-120500-broken")
+    (broken_dir / "scope.json").write_text("{not valid json", encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        response = client.get("/engagements")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["key"] for item in payload] == ["2026-03-30-120000-valid"]
+    assert any("Skipping invalid engagement artifacts" in message for message in caplog.messages)
+
+
 def test_engagement_event_and_assessment_routes_use_engagement_key(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 

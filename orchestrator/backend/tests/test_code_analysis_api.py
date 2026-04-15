@@ -1547,6 +1547,22 @@ def test_file_patch_rejects_negative_structural_metadata(client, isolate_setting
     assert response.json()["detail"] == "total_sinks must be >= 0"
 
 
+def test_file_patch_rejects_fractional_structural_metadata(client, isolate_settings):
+    engagement_key = "2026-04-15-code-file-patch-structural-fractional"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="patch-structural-fractional")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    response = client.patch(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}",
+        json={"total_functions": 3.9},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "total_functions must be an integer"
+
+
 def test_bulk_structural_metadata_requires_all_totals(client, isolate_settings):
     engagement_key = "2026-04-15-code-bulk-structural-required"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
