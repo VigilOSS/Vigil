@@ -1555,6 +1555,21 @@ def test_cli_main_prints_assesserror_without_traceback(monkeypatch, capsys):
     assert "Traceback" not in err
 
 
+def test_cli_registers_check_report_readiness(monkeypatch):
+    cli_module = _load_cli_module()
+    from assess.commands import check_report_readiness as command
+
+    called: dict[str, object] = {}
+
+    def fake_run(args):
+        called["engagement_dir"] = args.engagement_dir
+
+    monkeypatch.setattr(command, "run", fake_run)
+
+    cli_module.main(["--engagement-dir", "/tmp/eng", "check-report-readiness"])
+    assert called["engagement_dir"] == "/tmp/eng"
+
+
 def _load_code_audit_module():
     repo_root = Path(__file__).resolve().parents[3]
     scripts_root = repo_root / "agent" / "scripts"

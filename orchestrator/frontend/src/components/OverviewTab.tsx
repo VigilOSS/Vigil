@@ -74,6 +74,18 @@ export function OverviewTab({ events, assessmentSummary, findings, chains, chain
             <span className="stat-value">{s?.open_surface_count ?? 0}</span>
             <span className="meta-text">Open surfaces</span>
           </article>
+          <article className="stat-card">
+            <span className="stat-value">{s?.exploit_candidate_count ?? 0}</span>
+            <span className="meta-text">Exploit candidates</span>
+          </article>
+          <article className="stat-card">
+            <span className="stat-value">{s?.coverage_blocker_count ?? 0}</span>
+            <span className="meta-text">Coverage blockers</span>
+          </article>
+          <article className="stat-card">
+            <span className="stat-value">{s?.report_blocker_count ?? 0}</span>
+            <span className="meta-text">Report blockers</span>
+          </article>
         </div>
       </section>
 

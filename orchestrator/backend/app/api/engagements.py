@@ -25,7 +25,7 @@ class EngagementResponse(BaseModel):
     current_phase: str
     exploit_policy: str
     exploit_review_state: str
-    approved_findings: list[str]
+    approved_targets: list[str]
     created_at: str
     updated_at: str
     session_count: int
@@ -37,7 +37,7 @@ class SessionResponse(BaseModel):
     session_path: str
     status: str
     merge_state: str
-    assigned_findings: list[str]
+    assigned_targets: list[str]
     created_at: str
     updated_at: str
     merged_at: str | None
@@ -53,7 +53,7 @@ def _engagement_response(engagement: EngagementView) -> EngagementResponse:
         current_phase=engagement.current_phase,
         exploit_policy=engagement.exploit_policy,
         exploit_review_state=engagement.exploit_review_state,
-        approved_findings=engagement.approved_findings,
+        approved_targets=engagement.approved_targets,
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
         session_count=engagement.session_count,
@@ -81,7 +81,7 @@ def get_sessions(engagement_key: str) -> list[SessionResponse]:
             session_path=session.session_path,
             status=session.status,
             merge_state=session.merge_state,
-            assigned_findings=json.loads(session.assigned_findings_json or "[]"),
+            assigned_targets=json.loads(session.assigned_targets_json or "[]"),
             created_at=session.created_at,
             updated_at=session.updated_at,
             merged_at=session.merged_at,

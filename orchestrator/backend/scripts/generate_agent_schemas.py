@@ -184,6 +184,19 @@ _FINDING_DETAIL_PROPERTIES = {
         "items": {"type": "string"},
         "description": "External references such as CVE IDs, advisory URLs, or related documentation links",
     },
+    "chain_required": {
+        "type": "boolean",
+        "description": "Whether this finding remains actionable only as part of a larger exploit chain",
+    },
+    "chain_rationale": {
+        "type": "string",
+        "description": "Why the finding matters primarily as a chain step instead of a standalone report item",
+    },
+    "required_followup": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Concrete follow-up steps needed to validate or complete the chain",
+    },
     "variant_of": {
         "type": "string",
         "description": "Finding slug of the original finding when this record is a verified variant",

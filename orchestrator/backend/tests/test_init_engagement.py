@@ -64,7 +64,7 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
     assert scope["hosts"] == ["app.example.com", "admin.example.com"]
     assert scope["exploit_policy"] == "selected"
     assert scope["exploit_review_state"] == "pending"
-    assert scope["approved_findings"] == []
+    assert scope["approved_targets"] == []
     assert "parallelism" not in scope
     assert "confirm_mode" not in scope
     assert "scan_intensity" not in scope

@@ -111,7 +111,7 @@ finding table.
 - `details.references` is an array of CVE links, advisory URLs, or CWE documentation links
 - `details.poc_code` holds a PoC exploit script; for web findings use `details.poc_request` / `details.poc_response` for structured HTTP pairs
 
-**Deduplication:** Before recording, query existing findings via `./scripts/assess.py fetch report-findings`.
+**Deduplication:** Before recording, query existing findings via `./scripts/assess.py fetch findings`.
 If the same root cause at the same canonical location already exists, update or merge that finding
 instead of creating a duplicate. Variant instances in different files or materially different sink
 sites are new findings; repeated commentary on the same `file:path:line` is not.

@@ -59,6 +59,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Code-specific evidence fields such as details.entry_point, details.sink, details.taint_path, details.guards_evaluated, details.slot_type, details.variant_of, and details.original_pattern are valid finding details.",
             "Use details.poc_code for exploit scripts, or details.poc_request / details.poc_response for structured HTTP request/response pairs that demonstrate the vulnerability.",
             "Use details.references for CVE links, advisory URLs, or related documentation (array of strings).",
+            "Use details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete and worth tracking, but only becomes exploitation-worthy as part of a larger chain. Specialists set or refine these fields through record-finding or update-finding; verification reviews them but does not own them.",
         ),
         common_mistakes=(
             ("status", "use workflow_status for lifecycle overrides, or omit it and keep the helper default"),
@@ -102,6 +103,7 @@ _CONTRACTS: dict[str, CommandContract] = {
                         "headers": {"Content-Type": "text/html"},
                         "body_excerpt": "<div class='results'>3 items found</div>",
                     },
+                    "chain_required": False,
                     "references": ["https://cwe.mitre.org/data/definitions/89.html"],
                 },
             },
@@ -120,6 +122,12 @@ _CONTRACTS: dict[str, CommandContract] = {
                     "taint_path": "curl_url_set(CURLURLPART_URL, attacker_url) -> parseurl() -> memcpy(buf, scheme, schemelen)",
                     "guards_evaluated": "No bounds check on schemelen before memcpy",
                     "slot_type": "URL-COMPONENT",
+                    "chain_required": True,
+                    "chain_rationale": "The primitive is meaningful for exploitation, but final report impact depends on chaining it to a reachable crash or controlled allocation path.",
+                    "required_followup": [
+                        "Exercise the URL parser through a network-reachable caller",
+                        "Confirm whether the overflow produces controlled corruption under sanitizer instrumentation",
+                    ],
                     "references": ["https://cwe.mitre.org/data/definitions/122.html"],
                 },
             },
