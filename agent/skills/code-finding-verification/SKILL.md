@@ -122,6 +122,7 @@ Apply the constrained attacker persona with maximum rigor. You must reach one of
 **Process:**
 
 1. **Construct the exploit** (attempt this first):
+   - When the finding claims a library/stdlib function is the sink (e.g., `extractall()`, `exec()`, `deserialize()`), call that function with adversarial input and observe the result before reasoning about feasibility. If the function handles the attack correctly, KILL.
    - What specific bytes must the attacker send?
    - Through which entry point (protocol field, parameter, file format field)?
    - What is the exact code path from entry to vulnerability trigger?
