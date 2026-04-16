@@ -212,13 +212,15 @@ def test_code_analysis_codex_wrappers_exist():
     assert expected <= {path.name for path in codex_dir.glob("*.toml")}
 
 
-def test_exploit_developer_prompt_uses_workflow_status_for_findings_examples():
+def test_exploit_developer_prompt_uses_backend_exploit_candidates_for_context():
     repo_root = Path(__file__).resolve().parents[3]
     exploit_prompt = (repo_root / "agent" / "agents" / "exploit-developer.md").read_text(encoding="utf-8")
 
     assert '.status | IN("confirmed","exploited","draft")' not in exploit_prompt
-    assert '.workflow_status | IN("active","exploited","draft")' in exploit_prompt
-    assert "{slug, title, severity, workflow_status, defect_family, canonical_location, auth_context}" in exploit_prompt
+    assert '.workflow_status | IN("active","exploited","draft")' not in exploit_prompt
+    assert "./scripts/assess.py fetch exploit-candidates" in exploit_prompt
+    assert "candidate_reason" in exploit_prompt
+    assert "verified findings at nearby endpoints" in exploit_prompt
 
 
 def test_code_agent_prompts_use_current_finding_lifecycle_contracts():
@@ -252,3 +254,45 @@ def test_operator_prompt_outputs_reference_helper_contracts_for_findings():
     for text in (operator_core, agents_prompt, claude_prompt):
         assert "assess.py contract record-finding" in text
         assert "reset-finding" in text
+
+
+def test_prompt_stack_uses_current_report_and_dedup_contracts():
+    repo_root = Path(__file__).resolve().parents[3]
+    shared_constraints = (repo_root / "agent" / "shared-constraints.md").read_text(encoding="utf-8")
+    shared_constraints_code = (repo_root / "agent" / "shared-constraints-code.md").read_text(
+        encoding="utf-8"
+    )
+    vuln_analyst = (repo_root / "agent" / "agents" / "vulnerability-analyst.md").read_text(
+        encoding="utf-8"
+    )
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+    operator_core_code = (repo_root / "agent" / "operator-core-code.md").read_text(
+        encoding="utf-8"
+    )
+    handoff = (repo_root / "agent" / "references" / "handoff-protocols.md").read_text(
+        encoding="utf-8"
+    )
+    report_skill = (repo_root / "agent" / "skills" / "report-generation" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    report_writer = (repo_root / "agent" / "agents" / "report-writer.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "fetch report-findings" not in shared_constraints
+    assert "fetch findings" in shared_constraints
+    assert "fetch report-findings" not in shared_constraints_code
+    assert "fetch findings" in shared_constraints_code
+    assert "fetch report-findings" not in vuln_analyst
+    assert "fetch findings" in vuln_analyst
+    assert "drive HIGH findings to exploitation before investing in medium/low" not in operator_core
+    assert "check-report-readiness" in operator_core
+    assert "report-findings?mode=final" in operator_core
+    assert "report-findings?mode=draft" in operator_core
+    assert "check-report-readiness" in operator_core_code
+    assert "report-findings?mode=final" in operator_core_code
+    assert "belongs after Verify in Phase 5" in handoff
+    assert "check-report-readiness" in report_skill
+    assert 'fetch "report-findings?mode=final"' in report_skill
+    assert 'fetch "report-findings?mode=draft"' in report_skill
+    assert 'fetch "report-findings?mode=final"' in report_writer

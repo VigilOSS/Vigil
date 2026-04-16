@@ -32,7 +32,7 @@ Read `agent/shared-constraints.md` first, then select from this index.
   **Paired references:** _(none — coordination logic only)_
 
 - `agent/skills/report-generation/SKILL.md`
-  **Use when:** Writing the final or interim engagement report in Phase 5.
+  **Use when:** Writing the final or interim engagement report in Phase 7 or on demand.
   **Paired references:** _(uses durable backend finding state)_
 
 - `agent/skills/osint-recon/SKILL.md`

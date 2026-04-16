@@ -629,7 +629,7 @@ if [[ "$MODE" == "code" ]]; then
   "hosts": [],
   "exploit_policy": "${EXPLOIT_POLICY}",
   "exploit_review_state": "pending",
-  "approved_findings": [],
+  "approved_targets": [],
   "source_repos": [],
   "status": "in_progress",
   "current_phase": "ingest"
@@ -643,7 +643,7 @@ elif [[ "$MODE" == "web" ]]; then
   "hosts": ${HOSTS_JSON},
   "exploit_policy": "${EXPLOIT_POLICY}",
   "exploit_review_state": "pending",
-  "approved_findings": [],
+  "approved_targets": [],
   "status": "in_progress",
   "current_phase": "recon"
 }
@@ -659,7 +659,7 @@ else
   "repos": ${REPOS_JSON},
   "exploit_policy": "${EXPLOIT_POLICY}",
   "exploit_review_state": "pending",
-  "approved_findings": [],
+  "approved_targets": [],
   "source_repos": [],
   "status": "in_progress",
   "current_phase": "recon"

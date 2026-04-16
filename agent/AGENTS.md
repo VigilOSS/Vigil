@@ -40,7 +40,7 @@ When a session starts, display the banner above and then:
 | `source-analyzer` | Deep static analysis of HTML/JS/CSS for hidden routes, API endpoints, secrets. | Phase 1 (parallel with recon). |
 | `surface-collector` | URL collection, dedup, intelligent triage, work-buffer population. | Phase 2. |
 | `vulnerability-analyst` | Validates endpoints with targeted probes, produces durable evidence, reviews findings in Phase 4. | Phase 3 + Phase 4 verification. |
-| `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 3 (HIGH/MEDIUM) + Phase 5. |
+| `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 5. |
 | `fuzzer` | High-volume parameter/directory/protocol fuzzing with bounded objectives. | When FUZZER_NEEDED. |
 | `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 5 (parallel with exploit). |
 | `report-writer` | Generates structured engagement report from durable backend finding state. | Phase 7 or on-demand. |
@@ -72,7 +72,7 @@ Path convention:
 After engagement initialization completes, repeat until all attack paths exhausted or user signals stop:
 
 1. **ASSESS STATE** — Read scope.json and log.md. Query backend state via `assess.py list-findings` or `assess.py fetch findings`. Local `findings.md` is not maintained during the engagement — use `assess.py export-findings` to generate it on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
-2. **DECIDE NEXT ACTION** — Prioritize by current phase first. In Phase 1-2, prioritize breadth of surface coverage. In Phase 3, prioritize risk class: object references, auth boundaries, and privileged writes before low-risk surfaces. Once confirmed findings exist, drive HIGH findings to exploitation before investing in medium/low. Skip ahead only when an obviously actionable path is already in hand.
+2. **DECIDE NEXT ACTION** — Prioritize by current phase first. In Phase 1-2, prioritize breadth of surface coverage. In Phase 3, prioritize risk class: object references, auth boundaries, and privileged writes before low-risk surfaces. Keep exploitation behind Verify: only findings that survived review as `confirmed` or `downgraded`, or findings explicitly marked `details.chain_required=true`, enter exploit review. Skip ahead only when an obviously actionable path is already in hand.
 3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.4` with `high` reasoning, and Claude operator and substantial Claude workers should use `Opus 4.6`. Only drop to `gpt-5.4` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
 5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide the payload libraries and checklists that make skills actionable. Always check `agent/SKILL.md` for the right skill, then check `agent/references/INDEX.md` for payload and checklist depth — references are not a fallback, they are the methodology library.
@@ -160,7 +160,7 @@ per `frp-tunneling.md`, records the address, and then resumes the agent.
 | source-analyzer | HTML/JS/CSS analysis for hidden routes, secrets | Phase 1 (parallel with recon) |
 | surface-collector | URL collection, dedup, intelligent triage, work-buffer population | Phase 2 |
 | vulnerability-analyst | Validates endpoints with targeted probes, produces durable evidence, reviews findings in Phase 4 | Phase 3 + Phase 4 verification |
-| exploit-developer | Exploit confirmed vulns, chain analysis, impact | Phase 3 (HIGH/MEDIUM) + Phase 5 |
+| exploit-developer | Exploit verified findings, chain analysis, impact | Phase 5 |
 | fuzzer | High-volume testing (100+ payloads) | When FUZZER_NEEDED |
 | osint-analyst | CVE/breach/DNS/social research from intel.md | Phase 5 (parallel with exploit) |
 | report-writer | Final or interim report | Phase 7 |
@@ -174,7 +174,7 @@ Every dispatch must include:
 - **Prior findings relevant to this dispatch:**
   - For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, and the specific hypothesis to test
   - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `assess.py fetch` — pass all B candidates (chain-target endpoints) through, since pre-filtering hides chain opportunities
-  - For `report-writer`: no finding context needed — the agent queries the `report-findings` endpoint directly
+  - For `report-writer`: no finding context needed — the agent queries `report-findings?mode=final` for final reports or `report-findings?mode=draft` for interim reports
 
 ### Pre-Dispatch Checklist
 
@@ -253,19 +253,20 @@ DB="$DIR/cases.db"
       - **Killed** — false positive, unreproducible, or stacked preconditions → `./scripts/assess.py kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-5>`
    e. **Dedup pass**: check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker into the stronger:
       `./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"`
-   f. **Exit gate**: all HIGH/CRITICAL findings have a verification disposition. If the reviewer kills >50% of findings, review whether Phase 3 agents are producing speculative findings — tighten dispatch context for future engagements.
+   f. **Chain-only primitives stay in the normal finding table**: when a finding is real only as part of a proved or expected escalation path, update it with `./scripts/assess.py update-finding <slug> ...` so `details.chain_required`, `details.chain_rationale`, and `details.required_followup` are populated. Do not invent a chain-specific workflow status.
+   g. **Exit gate**: all HIGH/CRITICAL findings have a verification disposition. If the reviewer kills >50% of findings, review whether Phase 3 agents are producing speculative findings — tighten dispatch context for future engagements.
    Update scope.json phase to `exploit` when verification completes.
 5. **EXPLOIT** →
    a. Dispatch osint-analyst with `agent/skills/osint-recon/SKILL.md` — intelligence gathering is always permitted regardless of `exploit_policy`. Feed the tech stack, domains, and people data from intel.md.
-   b. Respect `exploit_policy` from `scope.json` for exploit-developer dispatch:
-      - `pause`: present confirmed findings to the human and ask which are approved for exploitation.
-      - `selected`: exploit only the approved finding slugs recorded in scope metadata.
-      - `full_send`: dispatch exploit-developer immediately.
+   b. Respect `exploit_policy` from `scope.json` for exploit-developer dispatch. Use `./scripts/assess.py review-exploits` to inspect the current backend candidate set and `./scripts/assess.py check-exploit-gate` before launching work:
+      - `pause`: present backend exploit candidates to the human and ask which are approved for exploitation.
+      - `selected`: exploit only the approved target slugs recorded in scope metadata and still allowed by the backend exploit-candidate gate.
+      - `full_send`: dispatch all current backend exploit candidates immediately. Human approval is skipped, backend readiness is not.
    c. Exploit-developer owns durable exploit-state recording. If it proves a chain, credential, access record, or credential test, it should write the JSON payloads under `$DIR/tools/exploit-state/` and record them before task completion with the repo scripts.
    d. On return, verify canonical exploit state via `assess.py fetch attack-chains`, `credentials`, `access-records`, and `credential-tests`. Do not create duplicate operator-side rows unless you are explicitly merging a proposal-based exploit session with `assess.py merge-session`.
    e. After osint-analyst returns: read intel.md. **Do not record CVE matches as findings yet.** If HIGH-value CVEs with public PoCs were identified, dispatch exploit-developer to validate each against the live target — backported patches, missing binaries, and disabled modules routinely invalidate version-only matches. Only record a CVE-based finding after exploit-developer confirms exploitability or proves partial signal.
 6. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
-7. **REPORT** → dispatch report-writer with `agent/skills/report-generation/SKILL.md`. Report-writer queries the backend directly for `report-findings`, `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — let it self-serve rather than manually assembling findings context, since manual assembly risks stale or incomplete data. After report-writer completes, update scope.json phase to `complete`.
+7. **REPORT** → for a final report, run `./scripts/assess.py check-report-readiness` first and resolve blockers before dispatch. Report-writer queries the backend directly for `report-findings?mode=final` on final reports or `report-findings?mode=draft` on interim reports, plus `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — let it self-serve rather than manually assembling findings context, since manual assembly risks stale or incomplete data. After a final report completes, update scope.json phase to `complete`.
 
 After each phase update scope.json:
 ```bash
@@ -338,7 +339,7 @@ This allocates or reuses the canonical slug under a lock and writes backend stat
 If you need the canonical field list or examples, run `./scripts/assess.py contract record-finding` instead of guessing payload fields from memory.
 Use the lifecycle helpers for later state changes instead of raw `post` or `patch`: `verify-finding` / `kill-finding` for verification outcomes, `reset-finding` to reopen a previously verified or false-positive finding, and `update-finding` for non-verification metadata or workflow updates.
 
-report-writer uses the `report-findings` backend endpoint which assigns sequential `FINDING-001~N` report IDs automatically. Each report finding includes both the `report_id` and the original `slug` for cross-referencing.
+report-writer uses the `report-findings` backend endpoint in explicit draft/final mode, which assigns sequential `FINDING-001~N` report IDs automatically. Each report finding includes both the `report_id` and the original `slug` for cross-referencing.
 
 OWASP Quick Ref: A01=Access Control, A02=Crypto, A03=Injection, A04=Insecure Design, A05=Misconfig, A06=Vulnerable Components, A07=Auth Failures, A08=Data Integrity, A09=Logging Failures, A10=SSRF.
 

@@ -45,6 +45,16 @@ def _json_decode(value: Any, default: Any) -> Any:
 
 
 def _coerce_int(value: Any, *, field_name: str) -> int:
+    if isinstance(value, bool):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must be an integer",
+        )
+    if isinstance(value, float):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must be an integer",
+        )
     try:
         return int(value)
     except (TypeError, ValueError) as exc:
@@ -52,6 +62,16 @@ def _coerce_int(value: Any, *, field_name: str) -> int:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"{field_name} must be an integer",
         ) from exc
+
+
+def _coerce_non_negative_int(value: Any, *, field_name: str) -> int:
+    coerced = _coerce_int(value, field_name=field_name)
+    if coerced < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must be >= 0",
+        )
+    return coerced
 
 
 def _coerce_float(value: Any, default: float = 0.0) -> float:
@@ -783,6 +803,13 @@ def update_code_file(
                 normalized_kwargs["slot_types_json"],
                 field_name="slot_types_json",
             )
+
+        for field_name in ("total_functions", "total_entry_points", "total_sinks", "total_exports"):
+            if field_name in normalized_kwargs:
+                normalized_kwargs[field_name] = _coerce_non_negative_int(
+                    normalized_kwargs[field_name],
+                    field_name=field_name,
+                )
 
         effective_classification = str(
             normalized_kwargs.get("classification", file_row["classification"] or "")

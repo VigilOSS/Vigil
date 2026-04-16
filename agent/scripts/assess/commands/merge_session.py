@@ -11,7 +11,7 @@ from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.findings import finding_lock_path, next_finding_id
 from assess.lib.locking import file_lock
-from assess.lib.sessions import session_dir_path, session_index_path
+from assess.lib.sessions import load_session_index, save_session_index, session_dir_path
 
 
 def register(subparsers) -> None:
@@ -132,15 +132,20 @@ def run(args) -> None:
     finally:
         client.close()
 
-    index_path = Path(session_index_path(eng_dir))
-    if index_path.is_file():
+    session_index = load_session_index(eng_dir)
+    if session_index:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        index = json.loads(index_path.read_text(encoding="utf-8"))
-        for row in index:
+        for row in session_index:
+            legacy_targets = row.get("assigned_findings")
+            current_targets = row.get("assigned_targets")
+            if (not isinstance(current_targets, list) or not current_targets) and isinstance(legacy_targets, list):
+                row["assigned_targets"] = [str(item) for item in legacy_targets]
+            if "assigned_findings" in row:
+                del row["assigned_findings"]
             if row.get("session_id") == session_id:
                 row["status"] = "merged"
                 row["merge_state"] = "merged"
                 row["merged_at"] = timestamp
-        index_path.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        save_session_index(eng_dir, session_index)
 
     print(f"Merged session {session_id} into canonical backend state.")

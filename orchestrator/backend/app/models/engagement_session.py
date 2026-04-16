@@ -12,7 +12,7 @@ class EngagementSession:
     session_path: str
     status: str
     merge_state: str
-    assigned_findings_json: str
+    assigned_targets_json: str
     created_at: str
     updated_at: str
     merged_at: str | None
@@ -26,7 +26,7 @@ class EngagementSession:
             session_path=row["session_path"],
             status=row["status"],
             merge_state=row["merge_state"],
-            assigned_findings_json=row["assigned_findings_json"],
+            assigned_targets_json=row["assigned_targets_json"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             merged_at=row["merged_at"],

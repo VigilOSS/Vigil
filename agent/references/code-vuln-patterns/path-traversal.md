@@ -39,6 +39,11 @@ The code validates the destination directory once but not each archive entry.
 - Absolute paths
 - Symlink entries that pivot later writes outside the extraction root
 
+**Check the extraction library first.** Some already strip traversal paths internally:
+- Python `zipfile.extractall()` — strips `../` since 3.6. Not vulnerable on any supported Python 3.x.
+- Python `tarfile.extractall()` — no filtering before 3.12. Genuinely vulnerable pre-3.12.
+- Go `archive/zip`, Java `ZipInputStream` — no built-in filtering. Caller must validate.
+
 ### 4. Indirect Traversal
 
 The attacker does not control the final path directly; they control a lookup key, alias, or identifier
