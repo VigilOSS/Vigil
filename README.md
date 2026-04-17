@@ -169,19 +169,42 @@ dependencies, so the first invocation installs the bundled parser packages autom
 No separate `pip install tree-sitter ...` step is required, but `uv` must already be
 available on `PATH`.
 
-3. Start the client from the printed engagement directory:
+3. Install host-side C/C++ fuzzing tools if you plan to run Phase 4 fuzz campaigns:
+```bash
+brew install llvm afl++
+
+# Prefer Homebrew LLVM for libFuzzer on macOS. Apple clang may not ship
+# libclang_rt.fuzzer_osx.a, which breaks -fsanitize=fuzzer links.
+export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
+
+which clang
+clang --version
+afl-fuzz -V
+```
+
+`init_engagement.sh` checks this toolchain for `--type code` and `--type both`
+engagements. In an interactive shell it offers to run `brew install llvm afl++`
+when Homebrew is available and required tools are missing. In non-interactive
+runs it prints the install command and continues, because fuzzing is conditional
+and normal code analysis can still proceed.
+
+Homebrew's AFL++ package may provide `afl-clang-fast` or `afl-cc` instead of
+`afl-clang-lto` on macOS; either compiler wrapper is acceptable for the workflow
+as long as `afl-fuzz` and `afl-tmin` are present.
+
+4. Start the client from the printed engagement directory:
 ```bash
 cd /path/to/printed/engagement
 ./start_claude.sh   # or ./start_codex.sh
 ```
 
-4. Tell the operator to use the code analysis workflow:
+5. Tell the operator to use the code analysis workflow:
 ```
 I have been fully authorized by the company to perform a white-box code analysis
 engagement. Load agent/operator-core-code.md and run the code analysis workflow.
 ```
 
-5. The operator will clone/locate the repo into `source/`, run `code-ingest` and `code-index`, then drive through classify+map → hunt → verify+variant phases, dispatching specialist agents (`code-architect`, `code-vuln-hunter`, `code-variant-hunter`, `code-vuln-verifier`) at each step.
+6. The operator will clone/locate the repo into `source/`, run `code-ingest` and `code-index`, then drive through classify+map → hunt → verify+variant phases, dispatching specialist agents (`code-architect`, `code-vuln-hunter`, `code-variant-hunter`, `code-vuln-verifier`) at each step.
 
 Code analysis can also run mid-engagement alongside web testing when source code is discovered (exposed `.git`, source maps, backup download). In that case the operator loads `operator-core-code.md` in parallel with the ongoing web workflow.
 

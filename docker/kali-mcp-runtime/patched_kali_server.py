@@ -19,18 +19,29 @@ from typing import Any, Dict
 
 UPSTREAM_SERVER_PATH = Path("/usr/share/mcp-kali-server/server.py")
 
-# Target-facing routes require audit headers. /health and metadata routes
-# stay open so container health checks and MCP tool discovery keep working.
+# Target-facing routes require audit headers. /health, /metrics, discovery
+# and MCP capability routes stay open so container health checks and tool
+# discovery keep working without audit context.
 AUDIT_OPEN_PATHS = {
     "/health",
     "/metrics",
     "/favicon.ico",
     "/",
+    "/mcp/capabilities",
 }
 
 AUDIT_REQUIRED = os.environ.get("KALI_MCP_AUDIT_REQUIRED", "1") != "0"
 ORCHESTRATOR_BASE_URL = os.environ.get("ORCHESTRATOR_BASE_URL", "http://127.0.0.1:18000").rstrip("/")
 RECORDING_TIMEOUT_SECONDS = float(os.environ.get("KALI_MCP_AUDIT_TIMEOUT", "3"))
+
+# Per-field env-fallback policy. engagement_key and artifact_dir are
+# session- or install-static and can honestly be defaulted from env.
+# agent_name and phase change per-dispatch — falling back to env would
+# silently mis-attribute every call to whatever role was set at container
+# start, which breaks `list-command-runs --agent-name <self>` queries and
+# the entire dedup story. Attribution fields MUST come from headers.
+_ENV_FALLBACK_ALLOWED = {"engagement_key", "artifact_dir"}
+_ENV_FALLBACK_WARNED: set[str] = set()
 
 # Tool-name detection from the Flask request path. The upstream server exposes
 # routes like /api/tools/nmap/scan and /api/generic/execute, so we derive the
@@ -190,8 +201,9 @@ upstream.execute_command = execute_command
 
 def _is_audit_eligible_path(path: str) -> bool:
     """True when the request path represents target-facing tool work that
-    should be audited. /health, /static, and other infra endpoints are
-    excluded so they neither require audit headers nor pollute the log."""
+    should be audited. /health, /static, /mcp/capabilities, and other
+    infra endpoints are excluded so they neither require audit headers
+    nor pollute the log."""
     if path in AUDIT_OPEN_PATHS:
         return False
     if path.startswith("/static"):
@@ -205,31 +217,65 @@ def _should_require_audit(path: str) -> bool:
     return _is_audit_eligible_path(path)
 
 
+def _rollup_audit_source(sources: dict[str, str]) -> str:
+    """Roll up per-field source labels into a single row provenance value.
+    attribution fields (agent_name, phase) carry more weight than infra
+    fields (engagement_key, artifact_dir) because filtering queries key
+    off attribution. A call with headers for agent_name+phase but env
+    fallback for engagement_key still reads as 'header' — the part that
+    matters for query-by-agent is trustworthy."""
+    attribution = [sources.get("agent_name"), sources.get("phase")]
+    if all(s == "header" for s in attribution):
+        return "header"
+    if all(s in ("header", "env_fallback") for s in attribution):
+        return "mixed"
+    return "env_fallback"
+
+
 def _install_audit_hooks(flask_app) -> None:
     from flask import g, jsonify, request  # type: ignore
 
     @flask_app.before_request
     def _capture_audit_context():  # pragma: no cover — wired at import
-        # Headers win over env fallbacks so per-call audit context from the
-        # MCP client (once client.py exposes the fields) supersedes session
-        # defaults. Env fallbacks make v1 usable before the client schema
-        # patch lands.
-        g.audit_engagement_key = (
-            request.headers.get("X-Engagement-Key", "").strip()
-            or os.environ.get("KALI_MCP_DEFAULT_ENGAGEMENT_KEY", "").strip()
-        )
-        g.audit_agent_name = (
-            request.headers.get("X-Agent-Name", "").strip()
-            or os.environ.get("KALI_MCP_DEFAULT_AGENT_NAME", "").strip()
-        )
-        g.audit_phase = (
-            request.headers.get("X-Phase", "").strip()
-            or os.environ.get("KALI_MCP_DEFAULT_PHASE", "").strip()
-        )
-        g.audit_artifact_dir = (
-            request.headers.get("X-Engagement-Artifact-Dir", "").strip()
-            or os.environ.get("KALI_MCP_DEFAULT_ARTIFACT_DIR", "").strip()
-        )
+        # Per-field resolution. Each field gets either header
+        # (authoritative) or env fallback (only when policy allows).
+        # Track the source so the audit row records attribution
+        # provenance.
+        fields = {
+            "engagement_key": ("X-Engagement-Key", "KALI_MCP_DEFAULT_ENGAGEMENT_KEY"),
+            "agent_name": ("X-Agent-Name", "KALI_MCP_DEFAULT_AGENT_NAME"),
+            "phase": ("X-Phase", "KALI_MCP_DEFAULT_PHASE"),
+            "artifact_dir": ("X-Engagement-Artifact-Dir", "KALI_MCP_DEFAULT_ARTIFACT_DIR"),
+        }
+        sources: dict[str, str] = {}
+        values: dict[str, str] = {}
+        for key, (header, env_var) in fields.items():
+            header_value = request.headers.get(header, "").strip()
+            if header_value:
+                values[key] = header_value
+                sources[key] = "header"
+                continue
+            if key in _ENV_FALLBACK_ALLOWED:
+                env_value = os.environ.get(env_var, "").strip()
+                if env_value:
+                    values[key] = env_value
+                    sources[key] = "env_fallback"
+                    if key not in _ENV_FALLBACK_WARNED:
+                        _ENV_FALLBACK_WARNED.add(key)
+                        logger.warning(
+                            "audit field '%s' fell back to env var %s — per-call headers preferred for per-dispatch attribution",
+                            key,
+                            env_var,
+                        )
+                    continue
+            values[key] = ""
+            sources[key] = "missing"
+
+        g.audit_engagement_key = values["engagement_key"]
+        g.audit_agent_name = values["agent_name"]
+        g.audit_phase = values["phase"]
+        g.audit_artifact_dir = values["artifact_dir"]
+        g.audit_sources = sources
         g.command_runs = []
 
         if not _should_require_audit(request.path):
@@ -275,7 +321,18 @@ def _install_audit_hooks(flask_app) -> None:
             return response
         agent_name = getattr(g, "audit_agent_name", "") or "unknown"
         phase = getattr(g, "audit_phase", "") or "unknown"
-        artifact_dir = getattr(g, "audit_artifact_dir", "") or None
+        raw_artifact_dir = getattr(g, "audit_artifact_dir", "") or ""
+        # The backend writer drops files directly into the supplied dir;
+        # by convention we organize command-run logs under
+        # <root>/scans/command-runs/ so they don't mingle with unrelated
+        # scan outputs. Append the subdir when the runtime only supplied
+        # the scans root.
+        if raw_artifact_dir and not raw_artifact_dir.rstrip("/").endswith("command-runs"):
+            artifact_dir = str(Path(raw_artifact_dir) / "command-runs")
+        else:
+            artifact_dir = raw_artifact_dir or None
+        sources = getattr(g, "audit_sources", {}) or {}
+        audit_source = _rollup_audit_source(sources)
         tool_name = _tool_name_from_path(request.path)
         route = request.path
 
@@ -295,6 +352,7 @@ def _install_audit_hooks(flask_app) -> None:
                 "duration_ms": run["duration_ms"],
                 "stdout": run["stdout"],
                 "stderr": run["stderr"],
+                "audit_source": audit_source,
                 "command_hash": hashlib.sha256(
                     run["command"].encode("utf-8", errors="replace")
                 ).hexdigest(),

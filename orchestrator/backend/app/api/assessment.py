@@ -78,6 +78,7 @@ class CommandRunRecordRequest(BaseModel):
     notes: str = Field(default="", max_length=4096)
     engagement_artifact_dir: str | None = Field(default=None, max_length=1024)
     run_uuid: str | None = Field(default=None, max_length=64)
+    audit_source: Literal["header", "env_fallback", "mixed"] = "header"
 
 
 class SurfaceRecordRequest(BaseModel):
@@ -325,6 +326,8 @@ def get_command_runs(
     agent_name: str = "",
     phase: str = "",
     tool_name: str = "",
+    tool_bin: str = "",
+    audit_source: str = "",
     success: bool | None = Query(default=None),
     timed_out: bool | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=1000),
@@ -338,6 +341,8 @@ def get_command_runs(
         agent_name=agent_name,
         phase=phase,
         tool_name=tool_name,
+        tool_bin=tool_bin,
+        audit_source=audit_source,
         success=success,
         timed_out=timed_out,
         limit=limit,
