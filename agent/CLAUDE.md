@@ -116,42 +116,11 @@ This runtime is shared infrastructure, not per-engagement state. Multiple engage
 
 ## Listener & Callback Management
 
-Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are operator-controlled infrastructure — only the operator provisions and tears down these services because they bind ports and create external-facing attack surface that requires human oversight.
+Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are operator-controlled — only the operator binds ports and exposes external surface. Agents emit `# MANUAL:` playbook steps; the operator executes them and records the result.
 
-Setup references:
-- **Shell listeners (pwncat-vl, tmux, reverse shell payloads):** `agent/references/offensive-tactics/shell-handling.md`
-- **Tunnel exposure & OOB callbacks (frp, interactsh):** `agent/references/offensive-tactics/frp-tunneling.md`
-
-### When agents need external connectivity
-
-If an agent needs a reverse shell listener, OOB callbacks for blind testing, or any tunnel to reach
-a remote target, the **operator must set up the frp tunnel first**. The operator provisions the tunnel
-per `frp-tunneling.md`, records the address, and then resumes the agent.
-
-**When an agent needs a reverse shell listener:**
-1. Agent outputs `# MANUAL:` playbook steps referencing `shell-handling.md` and `frp-tunneling.md`
-2. Operator checks if a listener is already running: `docker exec security-research tmux list-sessions`
-3. If not running → operator starts pwncat listener per `shell-handling.md`, then starts frp tunnel per `frp-tunneling.md`, records address in `$DIR/.listener_url`
-4. Operator resumes the agent. Agent reads `LISTENER_HOST`/`LISTENER_PORT` from `$DIR/.listener_url`.
-5. If the operator cannot provision the listener now, record a blocked technique:
-   `./scripts/assess.py post blocked-techniques <blocked-technique-json-file>`
-
-**When an agent needs OOB (blind vuln detection):**
-1. Agent checks whether `$DIR/.oob_url` exists in its dispatch context
-2. If available → use the callback URL in blind payloads (SSRF, XXE, XSS, SQLi)
-3. If not available → fall back to time-based detection (sleep payloads) and note in output that OOB was unavailable
-4. If time-based also fails and OOB would have been decisive → stop and ask the operator to provision interactsh + frp tunnels per `frp-tunneling.md`
-5. After sending blind payloads, agents check OOB logs via Kali MCP: `tail -50 /data/oob-client.log` (preferred, correlated hits only) or `tail -50 /data/oob-server.log` (raw, noisy)
-
-**Files agents read (never write):**
-- `$DIR/.listener_url` — tunnel address (`host:port`) for reverse shell payloads
-- `$DIR/.oob_url` — callback URL for blind vulnerability detection
-
-**Log files agents check for hits (via Kali MCP):**
-- `/data/oob-client.log` — correlated interactsh callback hits (preferred — filters AWS noise)
-- `/data/oob-server.log` — raw interactsh log (noisy, includes health check traffic)
-- `/data/shell-*.log` — shell session I/O
-- `/data/frpc.log` — tunnel connection status
+- **Operator** provisions per `agent/references/offensive-tactics/shell-handling.md` (reverse shells) and `agent/references/offensive-tactics/frp-tunneling.md` (tunnels, interactsh OOB), then writes `$DIR/.listener_url` and/or `$DIR/.oob_url`.
+- **Agents** read `$DIR/.listener_url` and `$DIR/.oob_url` from dispatch context (never write). If OOB is unavailable, fall back to time-based detection and note it in output. If a listener cannot be provisioned, record a blocked technique via `./scripts/assess.py post blocked-techniques <json-file>`.
+- **Hit-checking and log paths** (`/data/oob-client.log`, `/data/oob-server.log`, `/data/shell-*.log`, `/data/frpc.log`) are documented in `frp-tunneling.md` and `shell-handling.md`.
 
 ## Subagent Dispatch
 
@@ -334,16 +303,7 @@ shared engagement state: the operator and every specialist can search it via
 
 ### Kali MCP Troubleshooting
 
-If Kali MCP tools are not available or MCP tool discovery returns no tools:
-
-1. Verify the runtime container is running: `docker ps --filter name=security-research`
-2. Verify the MCP server process inside the container: `docker exec security-research pgrep -f mcp-server`
-3. Check MCP client registration: `claude mcp list` (Claude) or `codex mcp list` (Codex)
-4. If the MCP server is not registered, register it: `claude mcp add kali -s user -- docker exec -i security-research mcp-server`
-5. **MCP tools load at session startup.** If you registered the MCP server during this session, restart the session for tools to become available.
-6. Restart the runtime if unhealthy: `./scripts/start_kali_mcp_runtime.sh`
-
-Host-side `docker` commands are for diagnostic inspection only (container status, logs, process lists) — target-facing work through `docker exec` bypasses the Kali MCP runtime's tool inventory and audit trail.
+If Kali MCP tools are missing or MCP tool discovery returns no tools, see `agent/references/runtime-guides/kali-mcp-troubleshooting.md`.
 
 ### Kali MCP Audit and Reuse
 
@@ -441,25 +401,6 @@ When source code is available (cloned repo, exposed `.git`, decompiled source, b
 - Code findings use `canonical_location = "file:<path>:<line>"` and link to web findings via attack chains
 - See the Code Analysis Agents roster in `agent/operator-core-code.md` for available specialists
 
-## Session Resumption
-
-On start or when resuming inside an engagement:
-```bash
-if [[ -f "./scope.json" ]]; then
-  ENGAGEMENT_DIR="$(pwd)"
-  AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
-else
-  echo "Set ENGAGEMENT_DIR explicitly or start from inside an engagement directory." >&2
-  exit 1
-fi
-export ENGAGEMENT_DIR
-cat "$ENGAGEMENT_DIR/scope.json"
-"$AGENT_ROOT/scripts/assess.py" dispatch "$ENGAGEMENT_DIR/cases.db" stats 2>/dev/null
-```
-
-If status=in_progress: read scope/log state, inspect orchestrator coverage and findings state when available, recover stale work-buffer items, and resume from the correct phase.
-The orchestrator backend is canonical. `cases.db` is only a transient local batching buffer: pending=not done, done=completed, processing=interrupted.
-
 ## Communication
 
 - Direct, concise. NUMBERED choices. Phase tracker at transitions:
@@ -484,22 +425,6 @@ Summary: recon→source-analyzer (bring source-analysis skill) + vuln-analyst (b
 
 If logs are available, run the optional Athena/log-investigation phase before closing the engagement — it determines whether the most important attack paths show signs of prior exploitation in the available telemetry window.
 
-## Manual Worker Sessions
-
-When exploit work should be split across multiple Codex sessions, the coordinator stays manual.
-
-1. Get human approval for exploit scope inside the conversation before launching worker sessions.
-2. Create a worker session with the local helper script when needed:
-```bash
-./scripts/assess.py launch-session <session-id> <finding-slug> [finding-slug...]
-```
-3. In the worker session, use the generated `sessions/<session-id>/prompt.md`.
-4. Workers write proposals under `sessions/<session-id>/proposals/` via `./scripts/assess.py record-proposal` — proposals are staging areas that the coordinator reviews before merging into canonical state.
-5. Workers scope their writes to the session directory — root `report.md` and `scope.json` are coordinator-owned and updated only via `assess.py merge-session`.
-6. The coordinator merges approved proposals into canonical backend state with:
-```bash
-./scripts/assess.py merge-session <session-id>
-```
 
 ## Claude Dispatch Syntax
 
