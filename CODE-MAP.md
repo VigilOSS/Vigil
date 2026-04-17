@@ -70,6 +70,19 @@ Keep it light:
 - `agent/scripts/assess/commands/code_index.py` writes per-file JSON under `tools/analysis-state/structural-index/` and writes `structural-index-manifest.json` beside that directory. `code_index_sync.py` pushes structural metadata (total_functions, total_entry_points, total_sinks, total_exports) from those index files to `code_files` rows in the backend via `POST code/files/bulk-structural-metadata`.
 - `agent/scripts/schema.sql` is not the orchestrator schema. It only defines the transient local queue DB.
 
+### Easy-to-miss registration points
+
+When adding a new agent that records findings:
+- `agent/scripts/assess/lib/findings.py` `_AGENT_PREFIX_MAP` — add the agent name and 2-letter prefix. Without this, `record-finding` exits with "unknown finding prefix for agent."
+- `agent/shared-constraints-code.md` prefix table (code agents) or `agent/operator-core.md` prefix table (web agents) — add the prefix so prompts reference it.
+- `agent/operator-core-code.md` or `agent/operator-core.md` agent roster and finding prefix tables — add the agent row.
+
+When adding a new agent or changing the agent roster:
+- Edit `agent/operator-core.md` (web) or `agent/operator-core-code.md` (code), NOT `agent/AGENTS.md` or `agent/CLAUDE.md`. The latter two are generated outputs — direct edits are overwritten by `render-operator-prompts.sh`.
+
+When adding a new code analysis phase or agent:
+- Dispatch context in `operator-core-code.md` must separate backend data (fetched via `assess.py`) from filesystem artifacts (under `tools/analysis-state/`). Agents read filesystem artifacts directly; the operator fetches and summarizes backend state.
+
 ## orchestrator/backend
 
 - `orchestrator/backend/app/main.py` - FastAPI bootstrap. Why: process startup, DB init, engagement sync, router registration, websocket endpoint, health check, and SPA fallback meet here.
