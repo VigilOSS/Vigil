@@ -141,7 +141,7 @@ Copy-pasteable payloads organized by attack type. Used by: exploit-developer, vu
 ## code-vuln-patterns/ — SAST-Surviving Vulnerability Patterns
 
 Source code vulnerability patterns that require multi-function reasoning and semantic understanding.
-Used by: code-vuln-hunter, code-variant-hunter, code-vuln-verifier.
+Used by: code-vuln-hunter, code-variant-hunter, code-vuln-verifier, code-fuzz-engineer.
 
 These are NOT traditional SAST patterns. They focus on bugs that survive CodeQL, Semgrep, and OSS-Fuzz —
 multi-function chains, combinatorial arithmetic, state machine bugs, and incomplete patches.
@@ -171,6 +171,7 @@ multi-function chains, combinatorial arithmetic, state machine bugs, and incompl
 | `code-vuln-patterns/web-app-injection.md` | ORM bypass, second-order injection, template injection, deserialization in web contexts, NoSQL injection | Python, JS, Java, Ruby |
 | `code-vuln-patterns/web-app-data-exposure.md` | IDOR in ORM queries, mass assignment, serializer over-exposure, GraphQL field auth, bulk endpoints | Python, JS, Java, Ruby, Go |
 | `code-vuln-patterns/ai-ml-security.md` | Prompt injection, MCP tool poisoning, RAG poisoning, unsafe tool execution, cross-user context leakage | Python, JS, Java |
+| `code-vuln-patterns/fuzz-harness-patterns.md` | libFuzzer/AFL++ harness templates, sanitizer flag reference, seed corpus construction, harness antipatterns, crash triage checklist | C/C++ |
 
 ## tools/ — CLI Tool Cheatsheets
 

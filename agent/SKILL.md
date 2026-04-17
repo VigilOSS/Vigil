@@ -218,7 +218,7 @@ Load the relevant skill before starting validation or exploitation of a candidat
 ## Code Analysis Skills
 
 Load these skills when performing white-box source code analysis (operator-core-code.md mode).
-Pipeline: Ingest → Classify+Map → Hunt → Verify+Variant
+Pipeline: Ingest → Classify+Map → Hunt → Verify+Variant → Fuzz (conditional)
 
 - `agent/skills/code-architecture-mapping/SKILL.md`
   **Use when:** Phase 1 (Classify+Map) — classifying files, mapping modules, building threat model, producing cross-module call graph, generating attack hypotheses.
@@ -235,3 +235,7 @@ Pipeline: Ingest → Classify+Map → Hunt → Verify+Variant
 - `agent/skills/code-finding-verification/SKILL.md`
   **Use when:** Phase 3 (Verify+Variant, parallel) — eliminating false positives via five-check protocol with devil's advocate methodology and multi-perspective voting.
   **Paired references:** _(uses build system configuration, CWE pattern references for pattern verification)_
+
+- `agent/skills/code-fuzz-campaign/SKILL.md`
+  **Use when:** Phase 4 (Fuzz, conditional) — AI-driven fuzz campaigns for C/C++ codebases. Selects targets from structural index and Phase 2 findings, writes libFuzzer/AFL++ harnesses, compiles under ASAN/UBSAN, configures campaigns, and triages crashes with rigorous false-positive gates. Skip when codebase is memory-safe or has no memory-safety findings.
+  **Paired references:** `references/code-vuln-patterns/fuzz-harness-patterns.md`, `references/code-vuln-patterns/buffer-overflow.md`, `references/code-vuln-patterns/integer-overflow.md`, `references/code-vuln-patterns/use-after-free.md`, `references/code-vuln-patterns/uninitialized-memory.md`
