@@ -284,6 +284,14 @@ export function getEngagement(engagementKey: string) {
   return request<Engagement>(`/engagements/${engagementKey}`);
 }
 
+export function deleteEngagement(engagementKey: string) {
+  const qs = new URLSearchParams({ confirm: engagementKey }).toString();
+  return request<{ deleted: boolean; key: string; id: number }>(
+    `/engagements/${encodeURIComponent(engagementKey)}?${qs}`,
+    { method: "DELETE" },
+  );
+}
+
 export function listEngagementSessions(engagementKey: string) {
   return request<EngagementSession[]>(`/engagements/${engagementKey}/sessions`);
 }

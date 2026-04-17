@@ -243,9 +243,23 @@ def sync_engagements() -> None:
             _logger.warning("Skipping invalid engagement artifacts for %s: %s", engagement_dir, exc)
             continue
 
+    # Sync is ADDITIVE only. A filesystem directory that vanished (renamed,
+    # archived, accidentally rm'd, or temporarily moved for backup) used to
+    # cascade-delete every engagement row — findings, probe runs, command
+    # runs, code analysis, credentials — via the FK ON DELETE CASCADE chain.
+    # Silent destruction of engagement history is never an acceptable
+    # filesystem-drift response. Explicit deletion MUST go through the
+    # `DELETE /api/engagements/{key}` endpoint with a confirm token.
     for engagement in db.list_engagements():
         if engagement.key not in discovered_keys:
-            db.delete_engagement(engagement.id)
+            _logger.info(
+                "Engagement %s (id=%s) has no filesystem directory under %s; "
+                "retaining DB row. Use DELETE /api/engagements/%s to remove explicitly.",
+                engagement.key,
+                engagement.id,
+                engagements_root(),
+                engagement.key,
+            )
 
 
 def maybe_sync_engagements(force: bool = False) -> None:

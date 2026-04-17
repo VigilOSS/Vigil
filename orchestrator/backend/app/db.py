@@ -27,44 +27,92 @@ def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
     return {row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
-def _database_requires_reset(db_path: Path) -> bool:
+class IncompatibleDatabaseError(RuntimeError):
+    """Raised when the on-disk orchestrator DB does not match the current schema.
+
+    Auto-reset was removed intentionally: the engagement database holds
+    canonical findings, probe runs, command-run audit, and code analysis
+    state. Silently unlinking it on a schema mismatch is unrecoverable
+    data loss. Operators must triage an incompatibility explicitly.
+    """
+
+
+def _incompatible_message(db_path: Path, reason: str) -> str:
+    return (
+        f"Orchestrator database at {db_path} is incompatible with the current schema: {reason}.\n"
+        "Refusing to start — auto-reset would delete engagement history (findings, probes, "
+        "command runs, code analysis) with no backup.\n"
+        "Resolve manually, in order of preference:\n"
+        "  1. Investigate the schema drift and migrate the data in place.\n"
+        f"  2. If the data is not needed, move the file aside yourself, e.g.:\n"
+        f"       ts=$(date +%Y%m%dT%H%M%S)\n"
+        f"       for s in '' '-shm' '-wal'; do\n"
+        f"         [[ -f {db_path}$s ]] && mv {db_path}$s {db_path}.incompatible.$ts$s\n"
+        f"       done\n"
+        "     Then restart the orchestrator; it will initialise a fresh database.\n"
+        "No files have been modified."
+    )
+
+
+def _check_database_compatibility(db_path: Path) -> None:
+    """Raise :class:`IncompatibleDatabaseError` if the DB cannot safely serve
+    the current schema. Never modifies the filesystem.
+
+    Only flags the real pre-engagement migration signals: legacy
+    ``projects``/``runs``/``users`` tables, or a ``run_id`` column lingering on
+    an engagement-scoped table. A missing ``engagement_id`` column is
+    intentionally NOT flagged — a future shared (non-engagement-scoped) table
+    using the ``assessment_``/``code_`` prefix would false-positive trip the
+    check and block startup for schema evolution we explicitly allow.
+    """
     if not db_path.exists():
-        return False
+        return
 
     try:
         with sqlite3.connect(str(db_path)) as connection:
             tables = {
                 row[0]
-                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
             }
 
-            if {"projects", "runs", "users"} & tables:
-                return True
+            legacy = {"projects", "runs", "users"} & tables
+            if legacy:
+                raise IncompatibleDatabaseError(
+                    _incompatible_message(
+                        db_path, f"legacy pre-engagement tables present: {sorted(legacy)}"
+                    )
+                )
 
-            engagement_scoped_tables = {"engagement_sessions", "events"}
-            engagement_scoped_tables.update(
-                table_name for table_name in tables if table_name.startswith("assessment_") or table_name.startswith("code_")
+            scoped_tables = {"engagement_sessions", "events"}
+            scoped_tables.update(
+                table_name
+                for table_name in tables
+                if table_name.startswith("assessment_") or table_name.startswith("code_")
             )
-            for table_name in engagement_scoped_tables:
+            for table_name in scoped_tables:
                 if table_name not in tables:
                     continue
                 columns = _table_columns(connection, table_name)
-                if "run_id" in columns or "engagement_id" not in columns:
-                    return True
-    except sqlite3.DatabaseError:
-        return True
-
-    return False
-
-
-def _reset_incompatible_database(db_path: Path) -> None:
-    if not _database_requires_reset(db_path):
-        return
-
-    for suffix in ("", "-shm", "-wal"):
-        candidate = Path(f"{db_path}{suffix}")
-        if candidate.exists():
-            candidate.unlink()
+                if "run_id" in columns:
+                    raise IncompatibleDatabaseError(
+                        _incompatible_message(
+                            db_path,
+                            f"{table_name} still has pre-engagement `run_id` column",
+                        )
+                    )
+    except sqlite3.OperationalError:
+        # `database is locked` and friends are transient — let the caller see
+        # the raw OperationalError so uvicorn's retry/startup logic can
+        # distinguish contention from real incompatibility. Converting this to
+        # IncompatibleDatabaseError would tell the operator to move the DB
+        # aside for what is actually a concurrent-access race.
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise IncompatibleDatabaseError(
+            _incompatible_message(db_path, f"SQLite refused to open the file: {exc}")
+        ) from exc
 
 
 def database_path() -> Path:
@@ -114,9 +162,14 @@ def init_db() -> None:
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     db_path = database_path()
-    _reset_incompatible_database(db_path)
+    _check_database_compatibility(db_path)
     with sqlite3.connect(str(db_path)) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
+        # WAL mode lets readers (including `sqlite3 .backup` snapshots and the
+        # 15-minute backend backup task) run concurrently with writers without
+        # taking an exclusive lock. Without this, the rollback-journal default
+        # causes backups to collide with active writes and return SQLITE_BUSY.
+        connection.execute("PRAGMA journal_mode = WAL")
         _require_fts5(connection)
         connection.execute(
             """
