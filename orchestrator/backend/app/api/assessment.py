@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..services import state_manager
@@ -54,6 +55,29 @@ class ProbeRunRecordRequest(BaseModel):
     signal_type: str = Field(default="", max_length=128)
     evidence_ref: str = Field(default="", max_length=1024)
     notes: str = Field(default="", max_length=4096)
+
+
+class CommandRunRecordRequest(BaseModel):
+    command: str = Field(min_length=1, max_length=65536)
+    argv: list[str] | None = None
+    tool_name: str = Field(min_length=1, max_length=128)
+    route: str = Field(default="", max_length=256)
+    agent_name: str = Field(min_length=1, max_length=128)
+    phase: str = Field(min_length=1, max_length=64)
+    return_code: int | None = None
+    timed_out: bool = False
+    success: bool | None = None
+    started_at: str = Field(min_length=1, max_length=64)
+    completed_at: str = Field(min_length=1, max_length=64)
+    duration_ms: int = 0
+    stdout: str = ""
+    stderr: str = ""
+    command_hash: str = Field(default="", max_length=128)
+    stdout_sha256: str = Field(default="", max_length=128)
+    stderr_sha256: str = Field(default="", max_length=128)
+    notes: str = Field(default="", max_length=4096)
+    engagement_artifact_dir: str | None = Field(default=None, max_length=1024)
+    run_uuid: str | None = Field(default=None, max_length=64)
 
 
 class SurfaceRecordRequest(BaseModel):
@@ -439,15 +463,10 @@ async def create_probe_run(engagement_key: str, request: ProbeRunRecordRequest) 
 async def create_command_run(engagement_key: str, request: CommandRunRecordRequest) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     payload = request.model_dump()
-    payload["command_hash"] = payload["command_hash"] or hashlib.sha256(
-        payload["command"].encode("utf-8", errors="replace")
-    ).hexdigest()
-    payload["stdout_sha256"] = payload["stdout_sha256"] or hashlib.sha256(
-        payload["stdout"].encode("utf-8", errors="replace")
-    ).hexdigest()
-    payload["stderr_sha256"] = payload["stderr_sha256"] or hashlib.sha256(
-        payload["stderr"].encode("utf-8", errors="replace")
-    ).hexdigest()
+    if not payload.get("command_hash"):
+        payload["command_hash"] = hashlib.sha256(
+            payload["command"].encode("utf-8", errors="replace")
+        ).hexdigest()
     record = state_manager.record_command_run(engagement.id, **payload)
     await _broadcast(engagement.key, "command_run", record)
     return record

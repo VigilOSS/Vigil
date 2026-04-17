@@ -25,6 +25,7 @@ Before starting any target-facing work, verify:
 3. You read the skill's `## Extended Resources` section and loaded the listed references
 4. You have the dispatch context: targets from scope.json, Phase 1 endpoint artifacts, auth.json state
 5. You have `$DIR/cases.db` path and the engagement directory set
+6. You checked command history for prior runs that already cover this objective: `./scripts/assess.py list-command-runs --agent-name surface-collector --phase <current> --q <keyword>`. Reuse prior Katana/gau results when the target and auth context have not changed; re-run only when the target state shifted, the prior run was partial/timed out, or a materially different crawl scope is required (and say which reason applies in your output). Full decision table: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If any of these are missing, STOP and load them now. Working without the skill means running
 tools without a triage methodology — you will produce a flat URL dump instead of prioritized

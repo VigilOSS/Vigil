@@ -1,0 +1,20 @@
+{
+  "preview_bytes": 65536,
+  "suppress_patterns": [
+    {
+      "reason": "static-asset-filter",
+      "tool_name": "*",
+      "command_regex": "grep -[viE]{1,3}\\s+'\\\\\\.\\(jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot\\)"
+    },
+    {
+      "reason": "mass-url-filter",
+      "tool_name": "*",
+      "command_regex": "\\b(gau|katana|waybackurls)\\b[^|]*\\|\\s*(sort|uniq|wc\\b)"
+    },
+    {
+      "reason": "binary-dump",
+      "tool_name": "*",
+      "command_regex": "\\b(xxd|hexdump|od)\\b"
+    }
+  ]
+}

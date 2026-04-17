@@ -100,6 +100,15 @@ def _verify_database_fingerprint() -> Path:
     return db_path
 
 
+def _require_fts5(connection: sqlite3.Connection) -> None:
+    row = connection.execute("SELECT sqlite_compileoption_used('ENABLE_FTS5')").fetchone()
+    if not row or not row[0]:
+        raise RuntimeError(
+            "Orchestrator SQLite build lacks FTS5 support, which assessment_command_runs search requires. "
+            "Rebuild the interpreter's SQLite with ENABLE_FTS5 or use a Python/SQLite distribution that ships it."
+        )
+
+
 def init_db() -> None:
     global _startup_database_fingerprint
 
@@ -108,6 +117,7 @@ def init_db() -> None:
     _reset_incompatible_database(db_path)
     with sqlite3.connect(str(db_path)) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
+        _require_fts5(connection)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS engagements (
@@ -564,6 +574,149 @@ def init_db() -> None:
                 UNIQUE(engagement_id, technique_key),
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
             )
+            """
+        )
+        # assessment_command_runs is the source of truth for every Kali MCP
+        # command executed during an engagement. A shadow FTS5 virtual table
+        # plus three sync triggers provide keyword search. A later change can
+        # add assessment_command_run_chunks (cols: command_run_id, seq,
+        # chunk_text, embedding_blob, indexed_at) for embedding search without
+        # touching the source rows.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_command_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                run_uuid TEXT NOT NULL UNIQUE,
+                command TEXT NOT NULL,
+                argv_json TEXT NOT NULL DEFAULT '[]',
+                tool_name TEXT NOT NULL,
+                route TEXT NOT NULL DEFAULT '',
+                agent_name TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                return_code INTEGER,
+                timed_out INTEGER NOT NULL DEFAULT 0,
+                success INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                command_hash TEXT NOT NULL,
+                stdout_sha256 TEXT NOT NULL DEFAULT '',
+                stderr_sha256 TEXT NOT NULL DEFAULT '',
+                stdout_preview TEXT NOT NULL DEFAULT '',
+                stderr_preview TEXT NOT NULL DEFAULT '',
+                output_retention_status TEXT NOT NULL DEFAULT 'retained',
+                stdout_suppression_reason TEXT NOT NULL DEFAULT '',
+                stderr_suppression_reason TEXT NOT NULL DEFAULT '',
+                stdout_artifact_ref TEXT NOT NULL DEFAULT '',
+                stderr_artifact_ref TEXT NOT NULL DEFAULT '',
+                stdout_bytes INTEGER NOT NULL DEFAULT 0,
+                stderr_bytes INTEGER NOT NULL DEFAULT 0,
+                indexed_for_embeddings_at TEXT,
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_created "
+            "ON assessment_command_runs(engagement_id, created_at DESC, id DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_agent "
+            "ON assessment_command_runs(engagement_id, agent_name)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_phase "
+            "ON assessment_command_runs(engagement_id, phase)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_tool "
+            "ON assessment_command_runs(engagement_id, tool_name)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_hash "
+            "ON assessment_command_runs(engagement_id, command_hash)"
+        )
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS assessment_command_runs_fts
+            USING fts5(
+                command,
+                tool_name,
+                agent_name,
+                phase,
+                stdout_preview,
+                stderr_preview,
+                stdout_suppression_reason,
+                stderr_suppression_reason,
+                notes,
+                content='assessment_command_runs',
+                content_rowid='id',
+                tokenize='unicode61'
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS assessment_command_runs_ai
+            AFTER INSERT ON assessment_command_runs BEGIN
+                INSERT INTO assessment_command_runs_fts(
+                    rowid, command, tool_name, agent_name, phase,
+                    stdout_preview, stderr_preview,
+                    stdout_suppression_reason, stderr_suppression_reason, notes
+                )
+                VALUES (
+                    new.id, new.command, new.tool_name, new.agent_name, new.phase,
+                    new.stdout_preview, new.stderr_preview,
+                    new.stdout_suppression_reason, new.stderr_suppression_reason, new.notes
+                );
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS assessment_command_runs_ad
+            AFTER DELETE ON assessment_command_runs BEGIN
+                INSERT INTO assessment_command_runs_fts(
+                    assessment_command_runs_fts, rowid, command, tool_name, agent_name, phase,
+                    stdout_preview, stderr_preview,
+                    stdout_suppression_reason, stderr_suppression_reason, notes
+                )
+                VALUES (
+                    'delete', old.id, old.command, old.tool_name, old.agent_name, old.phase,
+                    old.stdout_preview, old.stderr_preview,
+                    old.stdout_suppression_reason, old.stderr_suppression_reason, old.notes
+                );
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS assessment_command_runs_au
+            AFTER UPDATE ON assessment_command_runs BEGIN
+                INSERT INTO assessment_command_runs_fts(
+                    assessment_command_runs_fts, rowid, command, tool_name, agent_name, phase,
+                    stdout_preview, stderr_preview,
+                    stdout_suppression_reason, stderr_suppression_reason, notes
+                )
+                VALUES (
+                    'delete', old.id, old.command, old.tool_name, old.agent_name, old.phase,
+                    old.stdout_preview, old.stderr_preview,
+                    old.stdout_suppression_reason, old.stderr_suppression_reason, old.notes
+                );
+                INSERT INTO assessment_command_runs_fts(
+                    rowid, command, tool_name, agent_name, phase,
+                    stdout_preview, stderr_preview,
+                    stdout_suppression_reason, stderr_suppression_reason, notes
+                )
+                VALUES (
+                    new.id, new.command, new.tool_name, new.agent_name, new.phase,
+                    new.stdout_preview, new.stderr_preview,
+                    new.stdout_suppression_reason, new.stderr_suppression_reason, new.notes
+                );
+            END
             """
         )
         # ── Code Analysis Tables ──────────────────────────────────

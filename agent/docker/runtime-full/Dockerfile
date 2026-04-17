@@ -133,12 +133,13 @@ RUN chmod +x /usr/bin/mcp-server
 RUN mkdir -p /opt/mcp-tools
 RUN mkdir -p /data
 COPY docker/kali-mcp-runtime/patched_kali_server.py /opt/mcp-tools/patched_kali_server.py
+COPY docker/kali-mcp-runtime/patched_kali_client.py /opt/mcp-tools/patched_kali_client.py
 COPY docker/callback_listener.py /opt/mcp-tools/callback_listener.py
 COPY docker/start-callback.sh /usr/local/bin/start-callback
 RUN chmod +x /usr/local/bin/start-callback
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD command -v mcp-server >/dev/null && command -v katana >/dev/null && test -f /opt/mcp-tools/patched_kali_server.py || exit 1
+  CMD command -v mcp-server >/dev/null && command -v katana >/dev/null && test -f /opt/mcp-tools/patched_kali_server.py && test -f /opt/mcp-tools/patched_kali_client.py || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bash", "-lc", "mkdir -p /data && exec sleep infinity"]

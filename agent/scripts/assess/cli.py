@@ -42,10 +42,12 @@ def main(argv: list[str] | None = None) -> None:
         export_findings,
         export_surfaces,
         fetch,
+        get_command_run,
         ingest_endpoints,
         ingest_spec,
         kill_finding,
         launch_session,
+        list_command_runs,
         list_findings,
         log_entry,
         merge_finding,
@@ -64,6 +66,8 @@ def main(argv: list[str] | None = None) -> None:
 
     for mod in (
         fetch,
+        list_command_runs,
+        get_command_run,
         list_findings,
         post,
         patch,

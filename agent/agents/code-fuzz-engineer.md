@@ -29,6 +29,7 @@ Before producing any output, confirm:
 - [ ] File classifications fetched via `./scripts/assess.py fetch "code/files?repo_id=<id>&limit=5000"` (or summary provided)
 - [ ] Existing fuzzer inventory checked via `rg 'LLVMFuzzerTestOneInput' --type c` and `ls oss-fuzz/` in source repo
 - [ ] Build system identified (Makefile, CMake, etc.) and compiler toolchain confirmed (`which clang`)
+- [ ] Prior fuzz campaigns checked via `./scripts/assess.py list-command-runs --agent-name code-fuzz-engineer --phase <current> --q <harness-or-target>`. Reuse prior libFuzzer/AFL++ runs when the harness binary, corpus, and dictionary are unchanged; re-run only when the harness changed, the prior campaign ran under its time budget, or a materially different sanitizer/corpus is needed (and say which reason applies in your output). Full decision table: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If structural index, threat model, or call graph are missing on the filesystem, stop and
 request the operator re-run Phase 0-1 steps before proceeding. If findings are missing from
