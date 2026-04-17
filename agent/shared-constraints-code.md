@@ -41,6 +41,15 @@ not read. Never request operator-mediated expansion when you can resolve it with
 Source code is read directly from the local filesystem via host Bash or Claude Code tools.
 This is NOT target-facing network work -- Kali MCP is not needed for reading source files.
 
+**When code analysis does reach for Kali MCP** (for example, a fuzz campaign or
+binary-triage pass that runs a tool through the runtime), the same audit-and-reuse
+rule as the web mode applies: every call carries `engagement_key`/`agent_name`/`phase`,
+runs land in `assessment_command_runs`, and you must check
+`./scripts/assess.py list-command-runs --agent-name <role> --phase <phase> --q <keyword>`
+before re-running an equivalent command so you do not duplicate work already captured
+in the engagement audit log. Full reuse decision table:
+`agent/references/runtime-guides/command-history-auditing.md`.
+
 **Available tools:**
 
 | Tool | Use |
@@ -83,6 +92,7 @@ Use `./scripts/assess.py record-finding <agent-name> <finding-json-file>` to rec
 | `code-vuln-hunter` | `CH` | `FINDING-CH-001` |
 | `code-variant-hunter` | `CV` | `FINDING-CV-001` |
 | `code-vuln-verifier` | `VF` | `FINDING-VF-001` (spot-check only — verifier updates existing findings, not new ones) |
+| `code-fuzz-engineer` | `CF` | `FINDING-CF-001` |
 
 **Title formula:** `[Bug Class] in [file:line or component] allows [attacker role] to [impact]`
 

@@ -65,6 +65,38 @@ Agents CANNOT start, stop, or restart listener, tunnel, or OOB processes.
 
 ---
 
+## 2b. Consult Command History Before Re-Running
+
+Every Kali MCP call records its command, argv, tool, agent, phase, exit code,
+timeout state, timings, and an output preview (or artifact ref) to the
+orchestrator backend. Treat that history as shared engagement state.
+
+Before issuing a probing, scanning, fuzzing, or credential-testing command,
+search for prior runs that already cover the same objective:
+
+```bash
+./scripts/assess.py list-command-runs \
+    --agent-name <your-role> \
+    --phase <current-phase> \
+    --q <keyword>
+```
+
+Duplicate probing wastes context, hides whether a real signal already exists,
+and risks rate-limiting a target that is already well-characterized — so reuse
+the prior result when it matches. Re-run only when:
+
+1. The target's state has changed since the prior run (new port, deployed change, auth now available).
+2. The prior run was partial or timed out and left coverage open.
+3. The new hypothesis requires a materially different payload set or tool, not a retry.
+
+When re-running is justified, name the reason in your output alongside the new
+command so a reviewer can audit the decision against the prior record.
+
+Full reuse decision table and output-field interpretation:
+`agent/references/runtime-guides/command-history-auditing.md`.
+
+---
+
 ## 3. Use Skills and References — They Are the Methodology
 
 **Step 1 — Read `agent/SKILL.md`** before starting any specialist work. It lists every available

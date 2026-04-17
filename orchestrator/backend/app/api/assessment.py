@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..services import state_manager
@@ -54,6 +55,29 @@ class ProbeRunRecordRequest(BaseModel):
     signal_type: str = Field(default="", max_length=128)
     evidence_ref: str = Field(default="", max_length=1024)
     notes: str = Field(default="", max_length=4096)
+
+
+class CommandRunRecordRequest(BaseModel):
+    command: str = Field(min_length=1, max_length=65536)
+    argv: list[str] | None = None
+    tool_name: str = Field(min_length=1, max_length=128)
+    route: str = Field(default="", max_length=256)
+    agent_name: str = Field(min_length=1, max_length=128)
+    phase: str = Field(min_length=1, max_length=64)
+    return_code: int | None = None
+    timed_out: bool = False
+    success: bool | None = None
+    started_at: str = Field(min_length=1, max_length=64)
+    completed_at: str = Field(min_length=1, max_length=64)
+    duration_ms: int = 0
+    stdout: str = ""
+    stderr: str = ""
+    command_hash: str = Field(default="", max_length=128)
+    stdout_sha256: str = Field(default="", max_length=128)
+    stderr_sha256: str = Field(default="", max_length=128)
+    notes: str = Field(default="", max_length=4096)
+    engagement_artifact_dir: str | None = Field(default=None, max_length=1024)
+    run_uuid: str | None = Field(default=None, max_length=64)
 
 
 class SurfaceRecordRequest(BaseModel):
@@ -294,6 +318,40 @@ def get_probe_runs(engagement_key: str) -> list[dict[str, Any]]:
     return state_manager.list_probe_runs(engagement.id)
 
 
+@router.get("/command-runs")
+def get_command_runs(
+    engagement_key: str,
+    q: str = "",
+    agent_name: str = "",
+    phase: str = "",
+    tool_name: str = "",
+    success: bool | None = Query(default=None),
+    timed_out: bool | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    include_output: bool = False,
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_command_runs(
+        engagement.id,
+        q=q,
+        agent_name=agent_name,
+        phase=phase,
+        tool_name=tool_name,
+        success=success,
+        timed_out=timed_out,
+        limit=limit,
+        offset=offset,
+        include_output=include_output,
+    )
+
+
+@router.get("/command-runs/{command_run_id}")
+def get_command_run(engagement_key: str, command_run_id: int) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_command_run(engagement.id, command_run_id)
+
+
 @router.get("/surfaces")
 def get_surfaces(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
@@ -398,6 +456,19 @@ async def create_probe_run(engagement_key: str, request: ProbeRunRecordRequest) 
     engagement = get_engagement_or_404(engagement_key)
     record = state_manager.record_probe_run(engagement.id, **request.model_dump())
     await _broadcast(engagement.key, "probe_run", record)
+    return record
+
+
+@router.post("/command-runs", status_code=status.HTTP_201_CREATED)
+async def create_command_run(engagement_key: str, request: CommandRunRecordRequest) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    payload = request.model_dump()
+    if not payload.get("command_hash"):
+        payload["command_hash"] = hashlib.sha256(
+            payload["command"].encode("utf-8", errors="replace")
+        ).hexdigest()
+    record = state_manager.record_command_run(engagement.id, **payload)
+    await _broadcast(engagement.key, "command_run", record)
     return record
 
 

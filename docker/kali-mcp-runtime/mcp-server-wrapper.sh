@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -e
 
-UPSTREAM_CLIENT_PATH="${KALI_MCP_CLIENT_PATH:-/usr/share/mcp-kali-server/client.py}"
+PATCHED_CLIENT_PATH="${KALI_MCP_PATCHED_CLIENT_PATH:-/opt/mcp-tools/patched_kali_client.py}"
 
 cd /usr/share/mcp-kali-server/
 if ! curl -s http://localhost:5000/health >/dev/null 2>&1; then
@@ -17,4 +17,9 @@ if [ "${1:-}" != "" ] && [ "${1#-}" = "$1" ]; then
   shift
 fi
 
-exec python3 "$UPSTREAM_CLIENT_PATH" "$@"
+# The patched client re-exports the upstream MCP stdio bridge after
+# monkey-patching `requests.Session.request` so every call to the local Kali
+# API server carries audit headers sourced from per-call context or the
+# KALI_MCP_DEFAULT_* environment variables. Audit recording lands in the
+# orchestrator backend via the patched Kali server regardless.
+exec python3 "$PATCHED_CLIENT_PATH" "$@"

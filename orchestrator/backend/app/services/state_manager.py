@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import uuid
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -3008,3 +3012,346 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
         "attack_chains": [dict(row) for row in attack_chains],
         "service_coverage_gaps": [dict(row) for row in service_coverage_gaps],
     }
+
+
+# ── Command-run audit ───────────────────────────────────────────────
+
+_DEFAULT_PREVIEW_BYTES = 65_536
+_DEFAULT_RETENTION_CONFIG = Path(__file__).resolve().parents[1] / "config" / "command_run_retention.json"
+_FTS_SPECIAL_RE = re.compile(r'[\"\'\\]')
+
+
+@lru_cache(maxsize=1)
+def _retention_config() -> dict[str, Any]:
+    override = os.environ.get("COMMAND_RUN_RETENTION_CONFIG")
+    path = Path(override) if override else _DEFAULT_RETENTION_CONFIG
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"preview_bytes": _DEFAULT_PREVIEW_BYTES, "suppress_patterns": []}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"preview_bytes": _DEFAULT_PREVIEW_BYTES, "suppress_patterns": []}
+    preview = int(data.get("preview_bytes") or _DEFAULT_PREVIEW_BYTES)
+    patterns: list[dict[str, Any]] = []
+    for entry in data.get("suppress_patterns") or []:
+        if not isinstance(entry, dict):
+            continue
+        regex_src = entry.get("command_regex", "")
+        if not regex_src:
+            continue
+        try:
+            compiled = re.compile(regex_src)
+        except re.error:
+            continue
+        patterns.append(
+            {
+                "tool_name": entry.get("tool_name", "*"),
+                "reason": entry.get("reason", "suppressed"),
+                "regex": compiled,
+            }
+        )
+    return {"preview_bytes": preview, "suppress_patterns": patterns}
+
+
+def _match_suppress_rule(command: str, tool_name: str) -> dict[str, Any] | None:
+    config = _retention_config()
+    for rule in config["suppress_patterns"]:
+        if rule["tool_name"] not in ("*", tool_name):
+            continue
+        if rule["regex"].search(command):
+            return rule
+    return None
+
+
+def _apply_output_retention(
+    stream_bytes: bytes,
+    *,
+    suppression_reason: str,
+    preview_bytes: int,
+    artifact_writer,
+    artifact_label: str,
+) -> dict[str, Any]:
+    size = len(stream_bytes)
+    sha = hashlib.sha256(stream_bytes).hexdigest() if size else ""
+    result: dict[str, Any] = {
+        "sha256": sha,
+        "bytes": size,
+        "preview": "",
+        "suppression_reason": "",
+        "artifact_ref": "",
+        "status": "empty",
+    }
+    if size == 0:
+        return result
+    if suppression_reason:
+        result["suppression_reason"] = suppression_reason
+        result["status"] = "suppressed"
+        return result
+    if size <= preview_bytes:
+        result["preview"] = stream_bytes.decode("utf-8", errors="replace")
+        result["status"] = "retained"
+        return result
+    # large — store preview + full artifact
+    result["preview"] = stream_bytes[:preview_bytes].decode("utf-8", errors="replace")
+    artifact_ref = artifact_writer(artifact_label, stream_bytes)
+    result["artifact_ref"] = artifact_ref
+    result["status"] = "artifact"
+    return result
+
+
+def _write_command_run_artifact(
+    engagement_artifact_dir: str | None,
+    run_uuid: str,
+) -> Any:
+    """Return a closure(label, bytes) → artifact_ref. Empty string when disabled."""
+
+    if not engagement_artifact_dir:
+
+        def _noop(_label: str, _data: bytes) -> str:
+            return ""
+
+        return _noop
+
+    base = Path(engagement_artifact_dir) / "command-runs"
+
+    def _write(label: str, data: bytes) -> str:
+        base.mkdir(parents=True, exist_ok=True)
+        target = base / f"{run_uuid}.{label}.log"
+        target.write_bytes(data)
+        return str(target)
+
+    return _write
+
+
+def record_command_run(
+    engagement_id: int,
+    *,
+    command: str,
+    argv: list[str] | None = None,
+    tool_name: str,
+    route: str = "",
+    agent_name: str,
+    phase: str,
+    return_code: int | None = None,
+    timed_out: bool = False,
+    success: bool | None = None,
+    started_at: str,
+    completed_at: str,
+    duration_ms: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+    command_hash: str = "",
+    stdout_sha256: str = "",
+    stderr_sha256: str = "",
+    notes: str = "",
+    engagement_artifact_dir: str | None = None,
+    run_uuid: str | None = None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+
+    run_uuid = run_uuid or uuid.uuid4().hex
+    command_hash = command_hash or hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()
+
+    effective_success = bool(success) if success is not None else (return_code == 0 and not timed_out)
+
+    config = _retention_config()
+    preview_bytes = int(config["preview_bytes"])
+
+    suppress_rule = _match_suppress_rule(command, tool_name)
+    suppress_reason = suppress_rule["reason"] if suppress_rule else ""
+
+    artifact_writer = _write_command_run_artifact(engagement_artifact_dir, run_uuid)
+
+    stdout_raw = stdout.encode("utf-8", errors="replace") if isinstance(stdout, str) else bytes(stdout or b"")
+    stderr_raw = stderr.encode("utf-8", errors="replace") if isinstance(stderr, str) else bytes(stderr or b"")
+
+    stdout_retention = _apply_output_retention(
+        stdout_raw,
+        suppression_reason=suppress_reason,
+        preview_bytes=preview_bytes,
+        artifact_writer=artifact_writer,
+        artifact_label="stdout",
+    )
+    stderr_retention = _apply_output_retention(
+        stderr_raw,
+        suppression_reason=suppress_reason,
+        preview_bytes=preview_bytes,
+        artifact_writer=artifact_writer,
+        artifact_label="stderr",
+    )
+
+    stdout_sha256 = stdout_sha256 or stdout_retention["sha256"]
+    stderr_sha256 = stderr_sha256 or stderr_retention["sha256"]
+
+    # Row-level retention status rolls up stream statuses.
+    statuses = {stdout_retention["status"], stderr_retention["status"]}
+    if "artifact" in statuses:
+        row_status = "artifact"
+    elif "suppressed" in statuses and "retained" not in statuses:
+        row_status = "suppressed"
+    elif "retained" in statuses:
+        row_status = "retained"
+    else:
+        row_status = "empty"
+
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO assessment_command_runs (
+                engagement_id, run_uuid, command, argv_json, tool_name, route,
+                agent_name, phase, return_code, timed_out, success,
+                started_at, completed_at, duration_ms,
+                command_hash, stdout_sha256, stderr_sha256,
+                stdout_preview, stderr_preview, output_retention_status,
+                stdout_suppression_reason, stderr_suppression_reason,
+                stdout_artifact_ref, stderr_artifact_ref,
+                stdout_bytes, stderr_bytes, notes
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?,
+                ?, ?,
+                ?, ?,
+                ?, ?, ?
+            )
+            """,
+            (
+                engagement.id,
+                run_uuid,
+                command,
+                json.dumps(list(argv) if argv else [], ensure_ascii=False),
+                tool_name,
+                route,
+                agent_name,
+                phase,
+                return_code,
+                1 if timed_out else 0,
+                1 if effective_success else 0,
+                started_at,
+                completed_at,
+                int(duration_ms or 0),
+                command_hash,
+                stdout_sha256,
+                stderr_sha256,
+                stdout_retention["preview"],
+                stderr_retention["preview"],
+                row_status,
+                stdout_retention["suppression_reason"],
+                stderr_retention["suppression_reason"],
+                stdout_retention["artifact_ref"],
+                stderr_retention["artifact_ref"],
+                stdout_retention["bytes"],
+                stderr_retention["bytes"],
+                notes,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM assessment_command_runs WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        assert row is not None
+        return _serialize_command_run(row, include_output=True)
+
+
+def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["argv"] = json.loads(data.get("argv_json") or "[]")
+    except json.JSONDecodeError:
+        data["argv"] = []
+    data["timed_out"] = bool(data.get("timed_out"))
+    data["success"] = bool(data.get("success"))
+    if not include_output:
+        # Listings default to lightweight rows so a sub-agent fetching 50
+        # records does not load 50 × 64 KiB of preview text into context.
+        # Hashes, suppression reasons, artifact refs, and byte counts stay
+        # so the caller can decide whether a follow-up get-command-run is
+        # warranted. The full preview is always available via that detail
+        # endpoint or by passing include_output=true on the list call.
+        stdout_len = len(data.get("stdout_preview") or "")
+        stderr_len = len(data.get("stderr_preview") or "")
+        data["stdout_preview"] = ""
+        data["stderr_preview"] = ""
+        data["stdout_preview_chars"] = stdout_len
+        data["stderr_preview_chars"] = stderr_len
+    return data
+
+
+def _fts_escape(term: str) -> str:
+    # FTS5 MATCH query — wrap each token in double quotes to treat as phrase
+    # and drop special chars that would confuse the parser.
+    cleaned = _FTS_SPECIAL_RE.sub(" ", term).strip()
+    if not cleaned:
+        return ""
+    tokens = [t for t in cleaned.split() if t]
+    if not tokens:
+        return ""
+    return " ".join(f'"{t}"' for t in tokens)
+
+
+def list_command_runs(
+    engagement_id: int,
+    *,
+    q: str = "",
+    agent_name: str = "",
+    phase: str = "",
+    tool_name: str = "",
+    success: bool | None = None,
+    timed_out: bool | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    include_output: bool = False,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    params: list[Any] = [engagement.id]
+    where = ["r.engagement_id = ?"]
+
+    join_sql = ""
+    fts_term = _fts_escape(q) if q else ""
+    if fts_term:
+        join_sql = "JOIN assessment_command_runs_fts f ON f.rowid = r.id"
+        where.append("f.assessment_command_runs_fts MATCH ?")
+        params.append(fts_term)
+
+    if agent_name:
+        where.append("r.agent_name = ?")
+        params.append(agent_name)
+    if phase:
+        where.append("r.phase = ?")
+        params.append(phase)
+    if tool_name:
+        where.append("r.tool_name = ?")
+        params.append(tool_name)
+    if success is not None:
+        where.append("r.success = ?")
+        params.append(1 if success else 0)
+    if timed_out is not None:
+        where.append("r.timed_out = ?")
+        params.append(1 if timed_out else 0)
+
+    params.extend([int(limit), int(offset)])
+    query = (
+        f"SELECT r.* FROM assessment_command_runs r {join_sql} "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY r.created_at DESC, r.id DESC LIMIT ? OFFSET ?"
+    )
+
+    with get_connection() as connection:
+        rows = connection.execute(query, tuple(params)).fetchall()
+    return [_serialize_command_run(row, include_output=include_output) for row in rows]
+
+
+def get_command_run(engagement_id: int, command_run_id: int) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
+            (engagement.id, int(command_run_id)),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="command run not found")
+    return _serialize_command_run(row, include_output=True)
