@@ -141,6 +141,7 @@ def test_list_command_runs_fts_search_finds_keyword(client, isolate_settings):
         client,
         _base_payload(
             command="httpx -l /tmp/targets.txt",
+            argv=["httpx", "-l", "/tmp/targets.txt"],
             tool_name="execute_command",
             stdout="example.com 200 OK",
         ),
@@ -227,6 +228,80 @@ def test_list_command_runs_strips_previews_unless_include_output(client, isolate
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?include_output=true"
     ).json()
     assert len(rows_full[0]["stdout_preview"]) == 4_000
+
+
+def test_tool_bin_is_derived_and_filterable(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert _post(
+        client,
+        _base_payload(
+            command="curl -s https://example.com/health",
+            argv=["curl", "-s", "https://example.com/health"],
+            tool_name="execute_command",
+        ),
+    ).status_code == 201
+    assert _post(
+        client,
+        _base_payload(
+            command="FOO=bar sqlmap --batch -u https://example.com",
+            argv=None,
+            tool_name="execute_command",
+        ),
+    ).status_code == 201
+
+    rows = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs").json()
+    bins = {r["tool_bin"] for r in rows}
+    assert "curl" in bins
+    assert "sqlmap" in bins  # env-assignment prefix stripped
+    curl_only = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?tool_bin=curl"
+    ).json()
+    assert len(curl_only) == 1
+    assert curl_only[0]["command"].startswith("curl")
+
+
+def test_audit_source_stored_and_filterable(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert _post(client, _base_payload()).status_code == 201  # default header
+    assert _post(
+        client, _base_payload(command="a", audit_source="env_fallback", argv=["a"])
+    ).status_code == 201
+
+    env_fallback = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?audit_source=env_fallback"
+    ).json()
+    assert len(env_fallback) == 1
+    assert env_fallback[0]["audit_source"] == "env_fallback"
+
+
+def test_artifact_dir_defaults_to_engagement_root_when_omitted(client, isolate_settings):
+    engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
+    big = ("X" * 1024) * 200  # 200 KiB — over the 64 KiB cap
+    response = _post(
+        client,
+        _base_payload(
+            command="huge-dump",
+            argv=["huge-dump"],
+            tool_name="execute_command",
+            stdout=big,
+            engagement_artifact_dir=None,  # caller did NOT supply one
+        ),
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["output_retention_status"] == "artifact"
+    ref = Path(created["stdout_artifact_ref"])
+    # Should land under <engagement_root>/scans/command-runs/
+    assert ref.exists(), f"artifact not written to {ref}"
+    assert ref.parent == engagement_dir / "scans" / "command-runs"
+    assert ref.read_text(encoding="utf-8") == big
+
+
+def test_argv_json_not_leaked_into_response(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(client, _base_payload()).json()
+    assert "argv_json" not in created  # deserialized into argv, raw text dropped
+    assert created["argv"] == ["nmap", "-sV", "10.0.0.1"]
 
 
 def test_get_command_run_returns_full_record(client, isolate_settings):

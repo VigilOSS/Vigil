@@ -176,6 +176,80 @@ default_orchestrator_base_url() {
   printf '%s\n' "http://127.0.0.1:18000"
 }
 
+tool_exists() {
+  local tool="${1:?tool required}"
+  if [[ "$tool" == */* ]]; then
+    [[ -x "$tool" ]]
+  else
+    command -v "$tool" >/dev/null 2>&1
+  fi
+}
+
+homebrew_llvm_clang() {
+  for candidate in \
+    /opt/homebrew/opt/llvm/bin/clang \
+    /usr/local/opt/llvm/bin/clang
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+afl_compiler_available() {
+  tool_exists afl-clang-lto || tool_exists afl-clang-fast || tool_exists afl-cc
+}
+
+check_code_fuzz_toolchain() {
+  local needs_llvm=0
+  local needs_afl=0
+  local packages=()
+
+  if ! homebrew_llvm_clang >/dev/null 2>&1; then
+    needs_llvm=1
+    packages+=("llvm")
+  fi
+
+  if ! tool_exists afl-fuzz || ! afl_compiler_available || ! tool_exists afl-tmin; then
+    needs_afl=1
+    packages+=("afl++")
+  fi
+
+  if [[ "$needs_llvm" -eq 0 && "$needs_afl" -eq 0 ]]; then
+    return 0
+  fi
+
+  printf 'Code fuzzing toolchain check: missing ' >&2
+  local sep=""
+  if [[ "$needs_llvm" -eq 1 ]]; then
+    printf '%sHomebrew LLVM clang/libFuzzer' "$sep" >&2
+    sep=", "
+  fi
+  if [[ "$needs_afl" -eq 1 ]]; then
+    printf '%sAFL++ (afl-fuzz, afl-tmin, afl-clang-fast/afl-cc)' "$sep" >&2
+  fi
+  printf '.\n' >&2
+
+  if ! command -v brew >/dev/null 2>&1; then
+    printf 'Homebrew is not installed. Install the missing tools manually before Phase 4 fuzzing.\n' >&2
+    return 0
+  fi
+
+  if [[ -t 0 ]]; then
+    printf 'Install missing code fuzzing tools now with `brew install %s`? [y/N]: ' "${packages[*]}" >&2
+    local install_tools
+    read -r install_tools
+    if [[ "$install_tools" =~ ^[Yy] ]]; then
+      brew install "${packages[@]}"
+      return 0
+    fi
+  fi
+
+  printf 'Skipping code fuzzing tool installation. Before Phase 4, run: brew install %s\n' "${packages[*]}" >&2
+}
+
 install_client_kind() {
   local has_codex=0
   local has_claude=0
@@ -598,6 +672,7 @@ if [[ "$MODE" == "code" || "$MODE" == "both" ]]; then
     REPOS_JSON="[]"
     REPOS_DISPLAY="(none — add source to ./source/)"
   fi
+  check_code_fuzz_toolchain
 fi
 
 # --- Create engagement directory ---

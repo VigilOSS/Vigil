@@ -21,7 +21,9 @@ def register(subparsers) -> None:
     p.add_argument("--q", default="", help="Keyword search (FTS5) over command, tool, previews, suppression reasons")
     p.add_argument("--agent-name", dest="agent_name", default="", help="Filter to a single dispatching agent")
     p.add_argument("--phase", default="", help="Filter to a specific engagement phase")
-    p.add_argument("--tool-name", dest="tool_name", default="", help="Filter to a single MCP tool (e.g. nmap_scan, execute_command)")
+    p.add_argument("--tool-name", dest="tool_name", default="", help="Filter to the route-derived tool label (e.g. nmap, command)")
+    p.add_argument("--tool-bin", dest="tool_bin", default="", help="Filter to the argv[0] binary (e.g. curl, sqlmap) — useful for execute_command runs")
+    p.add_argument("--audit-source", dest="audit_source", default="", choices=["", "header", "env_fallback", "mixed"], help="Filter by attribution provenance")
     status_group = p.add_mutually_exclusive_group()
     status_group.add_argument("--success", dest="success", action="store_true", help="Only successful runs")
     status_group.add_argument("--failed", dest="failed", action="store_true", help="Only failed runs (rc != 0 and not timed out)")
@@ -43,6 +45,10 @@ def _build_query(args) -> str:
         params.append(("phase", args.phase))
     if args.tool_name:
         params.append(("tool_name", args.tool_name))
+    if args.tool_bin:
+        params.append(("tool_bin", args.tool_bin))
+    if args.audit_source:
+        params.append(("audit_source", args.audit_source))
     if args.success:
         params.append(("success", "true"))
     if args.failed:

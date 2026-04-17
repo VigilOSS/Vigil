@@ -3105,7 +3105,10 @@ def _write_command_run_artifact(
     engagement_artifact_dir: str | None,
     run_uuid: str,
 ) -> Any:
-    """Return a closure(label, bytes) → artifact_ref. Empty string when disabled."""
+    """Return a closure(label, bytes) → artifact_ref. Empty string when
+    disabled. ``engagement_artifact_dir`` is the exact directory files
+    land in — callers and the resolver are responsible for any subdir
+    conventions (e.g. ``<root>/scans/command-runs/``)."""
 
     if not engagement_artifact_dir:
 
@@ -3114,7 +3117,7 @@ def _write_command_run_artifact(
 
         return _noop
 
-    base = Path(engagement_artifact_dir) / "command-runs"
+    base = Path(engagement_artifact_dir)
 
     def _write(label: str, data: bytes) -> str:
         base.mkdir(parents=True, exist_ok=True)
@@ -3123,6 +3126,44 @@ def _write_command_run_artifact(
         return str(target)
 
     return _write
+
+
+def _derive_tool_bin(command: str, argv: list[str] | None) -> str:
+    """Return the first executable token of the command. The route-derived
+    ``tool_name`` collapses every /api/command call to ``command``; tool_bin
+    is the discriminator (cat vs curl vs sqlmap) that operator filtering
+    actually needs."""
+    if argv:
+        first = (argv[0] or "").strip()
+        if first:
+            return Path(first).name
+    text = (command or "").strip()
+    if not text:
+        return ""
+    # Strip leading env assignments (``FOO=bar BAR=baz cmd ...``) and pick
+    # the first bare token. Not a full shell parse, but correct for the
+    # 95% case in practice.
+    for token in text.split():
+        if "=" in token and token.split("=", 1)[0].replace("_", "").isalnum():
+            continue
+        bare = Path(token).name.split(";")[0].split("|")[0].strip()
+        return bare or token
+    return text.split()[0]
+
+
+def _resolve_artifact_dir(engagement, override: str | None) -> str | None:
+    """Prefer caller-supplied dir; fall back to
+    ``<engagement_root>/scans/command-runs/``. Ensures big outputs always
+    have somewhere to spill rather than silently losing raw bytes when the
+    runtime forgot to set KALI_MCP_DEFAULT_ARTIFACT_DIR. The returned path
+    is the final directory where artifact files are written — no further
+    subdir is appended by ``_write_command_run_artifact``."""
+    if override:
+        return override
+    root = getattr(engagement, "engagement_root", "") or ""
+    if not root:
+        return None
+    return str(Path(root) / "scans" / "command-runs")
 
 
 def record_command_run(
@@ -3148,11 +3189,13 @@ def record_command_run(
     notes: str = "",
     engagement_artifact_dir: str | None = None,
     run_uuid: str | None = None,
+    audit_source: str = "header",
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
 
     run_uuid = run_uuid or uuid.uuid4().hex
     command_hash = command_hash or hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()
+    tool_bin = _derive_tool_bin(command, argv)
 
     effective_success = bool(success) if success is not None else (return_code == 0 and not timed_out)
 
@@ -3162,7 +3205,8 @@ def record_command_run(
     suppress_rule = _match_suppress_rule(command, tool_name)
     suppress_reason = suppress_rule["reason"] if suppress_rule else ""
 
-    artifact_writer = _write_command_run_artifact(engagement_artifact_dir, run_uuid)
+    effective_artifact_dir = _resolve_artifact_dir(engagement, engagement_artifact_dir)
+    artifact_writer = _write_command_run_artifact(effective_artifact_dir, run_uuid)
 
     stdout_raw = stdout.encode("utf-8", errors="replace") if isinstance(stdout, str) else bytes(stdout or b"")
     stderr_raw = stderr.encode("utf-8", errors="replace") if isinstance(stderr, str) else bytes(stderr or b"")
@@ -3200,8 +3244,9 @@ def record_command_run(
         cursor = connection.execute(
             """
             INSERT INTO assessment_command_runs (
-                engagement_id, run_uuid, command, argv_json, tool_name, route,
-                agent_name, phase, return_code, timed_out, success,
+                engagement_id, run_uuid, command, argv_json, tool_name, tool_bin, route,
+                agent_name, phase, audit_source,
+                return_code, timed_out, success,
                 started_at, completed_at, duration_ms,
                 command_hash, stdout_sha256, stderr_sha256,
                 stdout_preview, stderr_preview, output_retention_status,
@@ -3209,8 +3254,9 @@ def record_command_run(
                 stdout_artifact_ref, stderr_artifact_ref,
                 stdout_bytes, stderr_bytes, notes
             ) VALUES (
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?,
                 ?, ?, ?,
                 ?, ?, ?,
                 ?, ?, ?,
@@ -3225,9 +3271,11 @@ def record_command_run(
                 command,
                 json.dumps(list(argv) if argv else [], ensure_ascii=False),
                 tool_name,
+                tool_bin,
                 route,
                 agent_name,
                 phase,
+                audit_source or "header",
                 return_code,
                 1 if timed_out else 0,
                 1 if effective_success else 0,
@@ -3260,7 +3308,7 @@ def record_command_run(
 def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
     data = dict(row)
     try:
-        data["argv"] = json.loads(data.get("argv_json") or "[]")
+        data["argv"] = json.loads(data.pop("argv_json", None) or "[]")
     except json.JSONDecodeError:
         data["argv"] = []
     data["timed_out"] = bool(data.get("timed_out"))
@@ -3300,6 +3348,8 @@ def list_command_runs(
     agent_name: str = "",
     phase: str = "",
     tool_name: str = "",
+    tool_bin: str = "",
+    audit_source: str = "",
     success: bool | None = None,
     timed_out: bool | None = None,
     limit: int = 100,
@@ -3326,6 +3376,12 @@ def list_command_runs(
     if tool_name:
         where.append("r.tool_name = ?")
         params.append(tool_name)
+    if tool_bin:
+        where.append("r.tool_bin = ?")
+        params.append(tool_bin)
+    if audit_source:
+        where.append("r.audit_source = ?")
+        params.append(audit_source)
     if success is not None:
         where.append("r.success = ?")
         params.append(1 if success else 0)

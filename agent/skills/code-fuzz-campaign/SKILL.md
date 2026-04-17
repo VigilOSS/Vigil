@@ -23,7 +23,7 @@ Host-side (source code work, not target-facing):
 - `clang` / `gcc` — compilation with sanitizer flags
 - `make` / `cmake` / project build system — harness integration
 - `libFuzzer` (via `-fsanitize=fuzzer`) — quick local campaigns
-- `AFL++` (`afl-fuzz`, `afl-clang-lto`) — deep campaigns with CmpLog/laf-intel
+- `AFL++` (`afl-fuzz`, plus `afl-clang-lto`, `afl-clang-fast`, or `afl-cc`) — deep campaigns with CmpLog/laf-intel
 - `afl-tmin` / libFuzzer `-minimize_crash=1` — crash minimization
 - `grep` / `rg` / `Read` / `Glob` — source code navigation
 - `nm` / `objdump` — symbol verification for harness linking
