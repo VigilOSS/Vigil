@@ -349,3 +349,5 @@ Detected PII feeds into intel.md:
 ## Extended Resources
 
 - `agent/references/payloads/info-disclosure-probes.md` — standard probe endpoints and metadata paths
+- `agent/skills/gau-triage/SKILL.md` — pipeline-driven bulk scanning across large historical URL corpora (use this skill when scanning a single response or bundle; use gau-triage when you have hundreds of stored response bodies to scan with `trufflehog`)
+- `agent/references/tools/recon/trufflehog.md` — TruffleHog v3 CLI for structured secret detection with 800+ detectors

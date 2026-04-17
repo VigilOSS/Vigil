@@ -17,7 +17,7 @@ IMAGE="${REDTEAM_IMAGE:-security-research:latest}"
 CONTAINER_NAME="${KALI_MCP_CONTAINER_NAME:-security-research}"
 DATA_DIR="${KALI_MCP_DATA_DIR:-$ROOT_DIR/.runtime-data}"
 RECREATE=0
-REQUIRED_TOOLS=(mcp-server katana gau nuclei)
+REQUIRED_TOOLS=(mcp-server katana gau nuclei httpx trufflehog gf uro)
 
 usage() {
   cat <<'EOF'
