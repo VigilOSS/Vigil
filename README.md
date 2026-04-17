@@ -90,6 +90,23 @@ Start it from the install root in a second terminal:
 
 That builds the frontend, then serves the local UI from the backend at `http://127.0.0.1:18000`.
 
+The backend stores canonical engagement state in a single SQLite file and keeps rotated snapshots next to it:
+
+- **Live DB**: `<install-root>/orchestrator/backend/data/orchestrator.sqlite3`
+- **Scheduled backups**: `<install-root>/orchestrator/backend/data/backups/orchestrator.<UTC-timestamp>.sqlite3` — a WAL-coherent snapshot every 15 minutes, last 60 copies retained (~15 hours of continuous coverage). Written by the backend process itself; independent of the per-engagement snapshot that `init_engagement.sh` takes before creating an engagement.
+
+Override the data location with env vars (first match wins):
+
+- `AI_THREAT_HUNTING_DATA_DIR` — absolute path to the directory that holds `orchestrator.sqlite3` and `backups/`
+- `REDTEAM_ORCHESTRATOR_DATA_DIR` — legacy alias of the same setting
+- `AI_THREAT_HUNTING_INSTALL_DIR` — install root; the DB is then read from `$AI_THREAT_HUNTING_INSTALL_DIR/orchestrator/backend/data/`
+
+Both the backend and `agent/scripts/init_engagement.sh` honor the same precedence so snapshots and the live DB always target the same file. Engagement deletion is explicit: `DELETE /engagements/<key>?confirm=<key>` or the frontend delete button with a typed-key confirmation. Renaming or removing an engagement directory under `agent/engagements/` leaves the DB row intact — no cascade delete.
+
+Backup cadence tuning (optional):
+
+- `AI_THREAT_HUNTING_BACKUP_DISABLED=1` — turn off the scheduled backup entirely (used by the test suite)
+
 Then create an engagement inside the chosen install:
 
 ```bash

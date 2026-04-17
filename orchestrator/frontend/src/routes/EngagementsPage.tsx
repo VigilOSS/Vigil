@@ -4,7 +4,7 @@ import { deleteEngagement, type Engagement } from "../lib/api";
 type EngagementsPageProps = {
   engagements: Engagement[];
   onOpenEngagement: (engagementKey: string) => void;
-  onEngagementDeleted?: () => void;
+  onEngagementDeleted?: (engagementKey: string) => void;
 };
 
 export function EngagementsPage({ engagements, onOpenEngagement, onEngagementDeleted }: EngagementsPageProps) {
@@ -30,8 +30,9 @@ export function EngagementsPage({ engagements, onOpenEngagement, onEngagementDel
     setDeleteError(null);
     try {
       await deleteEngagement(pendingDelete.key);
+      const deletedKey = pendingDelete.key;
       closeDialog();
-      onEngagementDeleted?.();
+      onEngagementDeleted?.(deletedKey);
     } catch (err) {
       setDeleteError(err instanceof Error ? err.message : String(err));
       setIsSubmitting(false);

@@ -78,6 +78,23 @@ def test_check_raises_on_engagement_scoped_table_missing_engagement_id(isolate_s
     assert db_path.exists()
 
 
+def test_check_raises_on_known_scoped_table_missing_engagement_id(isolate_settings):
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    _write_db_with_tables(
+        db_path,
+        """
+        CREATE TABLE assessment_findings (
+            id INTEGER PRIMARY KEY,
+            slug TEXT NOT NULL
+        );
+        """,
+    )
+    with pytest.raises(db_module.IncompatibleDatabaseError) as exc:
+        db_module._check_database_compatibility(db_path)
+    assert "missing required `engagement_id`" in str(exc.value)
+    assert db_path.exists()
+
+
 def test_check_raises_on_unopenable_file(isolate_settings):
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -130,8 +147,8 @@ def test_operational_error_passthrough_not_incompatibility(monkeypatch, isolate_
 
 def test_check_accepts_future_shared_table_without_engagement_id(isolate_settings):
     """A future non-engagement-scoped table with an ``assessment_`` or ``code_``
-    prefix must NOT trigger a false-positive refuse-to-start. Only the real
-    migration signal — a legacy ``run_id`` column — matters."""
+    prefix must NOT trigger a false-positive refuse-to-start unless it is added
+    to the known engagement-scoped table allowlist."""
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     _write_db_with_tables(
         db_path,
