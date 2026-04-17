@@ -241,7 +241,7 @@ def test_engagement_sync_skips_invalid_engagement_json_without_aborting(client, 
     assert any("Skipping invalid engagement artifacts" in message for message in caplog.messages)
 
 
-def test_invalid_session_artifacts_remove_stale_engagement_from_sync_results(client, isolate_settings, caplog):
+def test_invalid_session_artifacts_preserve_existing_engagement_state(client, isolate_settings, caplog):
     engagement_dir = write_engagement(isolate_settings["engagements_dir"])
 
     first = client.get("/engagements/2026-03-30-120000-example/sessions")
@@ -254,10 +254,32 @@ def test_invalid_session_artifacts_remove_stale_engagement_from_sync_results(cli
         sessions_response = client.get("/engagements/2026-03-30-120000-example/sessions")
         engagements_response = client.get("/engagements")
 
-    assert sessions_response.status_code == 404
+    assert sessions_response.status_code == 200
+    assert len(sessions_response.json()) == 1
     assert engagements_response.status_code == 200
-    assert engagements_response.json() == []
+    assert [item["key"] for item in engagements_response.json()] == ["2026-03-30-120000-example"]
     assert any("Skipping invalid engagement artifacts" in message for message in caplog.messages)
+
+
+def test_invalid_scope_preserves_existing_engagement_state(client, isolate_settings, caplog):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+
+    first = client.get("/engagements")
+    assert first.status_code == 200
+    assert len(first.json()) == 1
+
+    (engagement_dir / "scope.json").write_text("{not valid json", encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        response = client.get("/engagements")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["key"] for item in payload] == ["2026-03-30-120000-example"]
+    assert payload[0]["current_phase"] == "unknown"
+    assert payload[0]["approved_targets"] == []
+    assert any("Skipping invalid engagement artifacts" in message for message in caplog.messages)
+    assert any("Using persisted engagement identity" in message for message in caplog.messages)
 
 
 def test_engagement_event_and_assessment_routes_use_engagement_key(client, isolate_settings):

@@ -163,10 +163,10 @@ def test_list_command_runs_fts_search_finds_keyword(client, isolate_settings):
     assert httpx_hits[0]["tool_name"] == "execute_command"
 
 
-def test_large_stdout_spills_to_artifact_file(client, isolate_settings, tmp_path):
-    _write_engagement(isolate_settings["engagements_dir"])
+def test_large_stdout_spills_to_artifact_file(client, isolate_settings):
+    engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     big = ("A" * 1024 + "\n") * 200  # ~200 KiB — well above 64 KiB cap
-    artifact_dir = tmp_path / "engagement-artifacts"
+    artifact_dir = engagement_dir / "custom-artifacts"
     response = _post(
         client,
         _base_payload(
@@ -174,6 +174,7 @@ def test_large_stdout_spills_to_artifact_file(client, isolate_settings, tmp_path
             tool_name="execute_command",
             stdout=big,
             engagement_artifact_dir=str(artifact_dir),
+            run_uuid="abc_123-XYZ",
         ),
     )
     assert response.status_code == 201, response.text
@@ -182,9 +183,43 @@ def test_large_stdout_spills_to_artifact_file(client, isolate_settings, tmp_path
     assert created["stdout_artifact_ref"]
     artifact_file = Path(created["stdout_artifact_ref"])
     assert artifact_file.exists()
+    assert artifact_file.name == "abc_123-XYZ.stdout.log"
     assert artifact_file.read_text(encoding="utf-8") == big
     # Preview is capped; full bytes live only in the artifact file.
     assert len(created["stdout_preview"].encode("utf-8")) <= 65_536 + 8
+
+
+def test_command_run_rejects_artifact_dir_outside_engagement_root(client, isolate_settings, tmp_path):
+    _write_engagement(isolate_settings["engagements_dir"])
+    outside_dir = tmp_path / "outside-artifacts"
+
+    response = _post(
+        client,
+        _base_payload(
+            engagement_artifact_dir=str(outside_dir),
+            stdout=("A" * 1024) * 200,
+        ),
+    )
+
+    assert response.status_code == 400
+    assert "engagement_artifact_dir" in response.text
+    assert not outside_dir.exists()
+
+
+def test_command_run_rejects_path_like_run_uuid(client, isolate_settings):
+    engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
+
+    response = _post(
+        client,
+        _base_payload(
+            run_uuid="../escape",
+            stdout=("A" * 1024) * 200,
+        ),
+    )
+
+    assert response.status_code == 400
+    assert "run_uuid" in response.text
+    assert not (engagement_dir.parent / "escape.stdout.log").exists()
 
 
 def test_retention_suppresses_noisy_static_asset_filter(client, isolate_settings):
@@ -293,7 +328,7 @@ def test_artifact_dir_defaults_to_engagement_root_when_omitted(client, isolate_s
     ref = Path(created["stdout_artifact_ref"])
     # Should land under <engagement_root>/scans/command-runs/
     assert ref.exists(), f"artifact not written to {ref}"
-    assert ref.parent == engagement_dir / "scans" / "command-runs"
+    assert ref.parent == (engagement_dir / "scans" / "command-runs").resolve()
     assert ref.read_text(encoding="utf-8") == big
 
 

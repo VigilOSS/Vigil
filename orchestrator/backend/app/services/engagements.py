@@ -197,11 +197,11 @@ def sync_engagements() -> None:
     for engagement_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         if not (engagement_dir / "scope.json").exists():
             continue
+        discovered_keys.add(engagement_dir.name)
         try:
             manifest = _manifest_for(engagement_dir)
             index_rows = _migrate_session_artifacts(engagement_dir)
 
-            discovered_keys.add(manifest["key"])
             engagement = db.get_engagement_by_key(manifest["key"])
             if engagement is None:
                 engagement = db.create_engagement(
@@ -264,7 +264,11 @@ def maybe_sync_engagements(force: bool = False) -> None:
 
 
 def _scope_details(engagement_root: Path) -> tuple[str, str, str, list[str]]:
-    scope = _migrate_scope_file(engagement_root / "scope.json")
+    try:
+        scope = _migrate_scope_file(engagement_root / "scope.json")
+    except RuntimeError as exc:
+        _logger.warning("Using persisted engagement identity for invalid scope at %s: %s", engagement_root, exc)
+        return "unknown", "pause", "pending", []
     current_phase = str(scope.get("current_phase") or "unknown")
     exploit_policy = str(scope.get("exploit_policy") or "pause")
     exploit_review_state = str(scope.get("exploit_review_state") or "pending")
