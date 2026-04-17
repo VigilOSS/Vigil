@@ -264,6 +264,41 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
     assert "2. 2" in findings_md
 
 
+def test_export_findings_preserves_legacy_non_mapping_poc_headers() -> None:
+    module = _load_script_module(
+        "test_export_findings_headers_module",
+        "agent/scripts/assess/commands/export_findings.py",
+    )
+
+    rendered = module._render_finding(
+        {
+            "slug": "finding-001",
+            "title": "Legacy headers",
+            "details_json": json.dumps(
+                {
+                    "poc_request": {
+                        "method": "GET",
+                        "url": "https://example.test",
+                        "headers": "Accept: text/html",
+                    },
+                    "poc_response": {
+                        "status": 200,
+                        "headers": ["Content-Type: text/plain"],
+                        "body_excerpt": "ok",
+                    },
+                }
+            ),
+        }
+    )
+
+    assert "**PoC Request:**" in rendered
+    assert "GET https://example.test" in rendered
+    assert "Accept: text/html" in rendered
+    assert "**PoC Response:**" in rendered
+    assert "HTTP 200" in rendered
+    assert "Content-Type: text/plain" in rendered
+
+
 def test_code_index_sync_requires_repo_id_for_multi_repo_engagement(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_script_module(
         "test_code_index_sync_multi_repo_module",
