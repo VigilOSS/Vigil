@@ -3035,7 +3035,12 @@ def _retention_config() -> dict[str, Any]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return {"preview_bytes": _DEFAULT_PREVIEW_BYTES, "suppress_patterns": []}
-    preview = int(data.get("preview_bytes") or _DEFAULT_PREVIEW_BYTES)
+    try:
+        preview = int(data.get("preview_bytes") or _DEFAULT_PREVIEW_BYTES)
+    except (TypeError, ValueError):
+        preview = _DEFAULT_PREVIEW_BYTES
+    if preview <= 0:
+        preview = _DEFAULT_PREVIEW_BYTES
     patterns: list[dict[str, Any]] = []
     for entry in data.get("suppress_patterns") or []:
         if not isinstance(entry, dict):
