@@ -18,6 +18,11 @@ CONTAINER_NAME="${KALI_MCP_CONTAINER_NAME:-security-research}"
 DATA_DIR="${KALI_MCP_DATA_DIR:-$ROOT_DIR/.runtime-data}"
 RECREATE=0
 REQUIRED_TOOLS=(mcp-server katana gau nuclei httpx trufflehog gf uro)
+REQUIRED_FILES=(
+  /opt/mcp-tools/patched_kali_server.py
+  /opt/mcp-tools/patched_kali_client.py
+  /opt/mcp-tools/kali_mcp_audit.py
+)
 
 usage() {
   cat <<'EOF'
@@ -39,15 +44,21 @@ EOF
 validate_runtime_tools() {
   local missing=()
   local tool
+  local file
   for tool in "${REQUIRED_TOOLS[@]}"; do
     if ! docker exec "$CONTAINER_NAME" sh -lc "command -v '$tool' >/dev/null" >/dev/null 2>&1; then
       missing+=("$tool")
     fi
   done
+  for file in "${REQUIRED_FILES[@]}"; do
+    if ! docker exec "$CONTAINER_NAME" test -f "$file" >/dev/null 2>&1; then
+      missing+=("$file")
+    fi
+  done
 
   if [[ "${#missing[@]}" -gt 0 ]]; then
     echo "[runtime] Runtime tool validation failed for container: $CONTAINER_NAME" >&2
-    echo "[runtime] Missing required tools: ${missing[*]}" >&2
+    echo "[runtime] Missing required tools/files: ${missing[*]}" >&2
     echo "[runtime] The local image is likely stale relative to the checked-in Dockerfile." >&2
     echo "[runtime] Rebuild and recreate the runtime, for example:" >&2
     echo "  docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile ." >&2
@@ -105,11 +116,24 @@ docker_args=(
   --cap-add=NET_RAW
   --cap-add=NET_ADMIN
   -v "$DATA_DIR:/data"
+  # Docker Desktop on macOS/Windows resolves host.docker.internal
+  # automatically; on Linux the alias must be set explicitly. Adding
+  # the flag unconditionally is safe on all three platforms.
+  --add-host=host.docker.internal:host-gateway
 )
 
 if [[ -f "$ROOT_DIR/.env" ]]; then
   docker_args+=(--env-file "$ROOT_DIR/.env")
 fi
+
+# Audit POSTs from inside the container MUST reach the orchestrator running
+# on the host, not the container's own loopback. Rewrite loopback literals
+# to host.docker.internal so a stale .env with 127.0.0.1:18000 still
+# works. Default value matches the orchestrator's default bind port.
+ORCHESTRATOR_URL_FOR_CONTAINER="${ORCHESTRATOR_BASE_URL:-http://host.docker.internal:18000}"
+ORCHESTRATOR_URL_FOR_CONTAINER="${ORCHESTRATOR_URL_FOR_CONTAINER//127.0.0.1/host.docker.internal}"
+ORCHESTRATOR_URL_FOR_CONTAINER="${ORCHESTRATOR_URL_FOR_CONTAINER//localhost/host.docker.internal}"
+docker_args+=(-e "ORCHESTRATOR_BASE_URL=${ORCHESTRATOR_URL_FOR_CONTAINER}")
 
 docker_args+=("$IMAGE")
 

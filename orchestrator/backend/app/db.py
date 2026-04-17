@@ -54,16 +54,45 @@ def _incompatible_message(db_path: Path, reason: str) -> str:
     )
 
 
+_ENGAGEMENT_SCOPED_TABLES = {
+    "engagement_sessions",
+    "events",
+    "assessment_targets",
+    "assessment_services",
+    "assessment_request_variants",
+    "assessment_request_observations",
+    "assessment_coverage_items",
+    "assessment_probe_runs",
+    "assessment_surfaces",
+    "assessment_findings",
+    "assessment_finding_transitions",
+    "assessment_finding_links",
+    "assessment_attack_chains",
+    "assessment_attack_chain_links",
+    "assessment_credentials",
+    "assessment_credential_tests",
+    "assessment_access_records",
+    "assessment_pivots",
+    "assessment_tunnels",
+    "assessment_blocked_techniques",
+    "assessment_command_runs",
+    "code_repos",
+    "code_modules",
+    "code_files",
+    "code_analysis_queue",
+    "code_analysis_results",
+    "code_analysis_triggers",
+}
+
+
 def _check_database_compatibility(db_path: Path) -> None:
     """Raise :class:`IncompatibleDatabaseError` if the DB cannot safely serve
     the current schema. Never modifies the filesystem.
 
-    Only flags the real pre-engagement migration signals: legacy
-    ``projects``/``runs``/``users`` tables, or a ``run_id`` column lingering on
-    an engagement-scoped table. A missing ``engagement_id`` column is
-    intentionally NOT flagged — a future shared (non-engagement-scoped) table
-    using the ``assessment_``/``code_`` prefix would false-positive trip the
-    check and block startup for schema evolution we explicitly allow.
+    Only known engagement-scoped tables must carry ``engagement_id``. A future
+    shared, non-engagement-scoped table may still use an ``assessment_`` or
+    ``code_`` prefix without tripping this check, but current scoped tables
+    missing ``engagement_id`` would fail later CRUD and must refuse startup.
     """
     if not db_path.exists():
         return
@@ -85,21 +114,21 @@ def _check_database_compatibility(db_path: Path) -> None:
                     )
                 )
 
-            scoped_tables = {"engagement_sessions", "events"}
-            scoped_tables.update(
-                table_name
-                for table_name in tables
-                if table_name.startswith("assessment_") or table_name.startswith("code_")
-            )
+            scoped_tables = _ENGAGEMENT_SCOPED_TABLES & tables
             for table_name in scoped_tables:
-                if table_name not in tables:
-                    continue
                 columns = _table_columns(connection, table_name)
                 if "run_id" in columns:
                     raise IncompatibleDatabaseError(
                         _incompatible_message(
                             db_path,
                             f"{table_name} still has pre-engagement `run_id` column",
+                        )
+                    )
+                if "engagement_id" not in columns:
+                    raise IncompatibleDatabaseError(
+                        _incompatible_message(
+                            db_path,
+                            f"{table_name} is missing required `engagement_id` column",
                         )
                     )
     except sqlite3.OperationalError:
