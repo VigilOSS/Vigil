@@ -1467,7 +1467,13 @@ def test_coverage_patch_rejects_unknown_status_values(client, isolate_settings):
     assert "invalid coverage status" in patch.json()["detail"]
 
 
-def test_incompatible_local_database_is_reset(isolate_settings):
+def test_incompatible_local_database_refuses_to_start_and_preserves_file(isolate_settings):
+    """Auto-reset was removed: an incompatible DB must raise, never be unlinked.
+
+    Silently deleting the orchestrator DB on a schema mismatch is unrecoverable
+    data loss (findings, probe runs, command runs, code analysis). The
+    orchestrator now refuses to start and tells the operator how to resolve.
+    """
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     with sqlite3.connect(str(db_path)) as connection:
         connection.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT)")
@@ -1491,26 +1497,35 @@ def test_incompatible_local_database_is_reset(isolate_settings):
         )
         connection.commit()
 
-    db_module.init_db()
-    write_engagement(isolate_settings["engagements_dir"])
-    engagement_service.maybe_sync_engagements(force=True)
-    assert engagement_service.list_engagements()[0].key == "2026-03-30-120000-example"
+    with pytest.raises(db_module.IncompatibleDatabaseError) as exc:
+        db_module.init_db()
+    message = str(exc.value)
+    assert "Refusing to start" in message
+    assert "delete engagement history" in message
 
+    assert db_path.exists(), "incompatible DB must NOT be unlinked"
     with sqlite3.connect(str(db_path)) as connection:
         table_names = {
             row[0]
-            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
         }
-        assert "runs" not in table_names
-        event_columns = {row[1] for row in connection.execute("PRAGMA table_info(events)").fetchall()}
-        chain_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_attack_chains)").fetchall()}
-        assert "engagement_id" in event_columns
-        assert "engagement_id" in chain_columns
-        assert "run_id" not in event_columns
-        assert "run_id" not in chain_columns
+        assert "runs" in table_names, "legacy table must still be present after refuse"
+        event_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(events)").fetchall()
+        }
+        assert "run_id" in event_columns, "legacy column must still be present after refuse"
 
 
-def test_deleted_filesystem_engagement_is_pruned_from_database(client, isolate_settings):
+def test_filesystem_engagement_removal_retains_db_row(client, isolate_settings):
+    """Sync must NOT cascade-delete findings when an engagement directory
+    vanishes. The old behavior silently wiped every finding/probe/command-run
+    when the operator renamed, archived, or cleaned up an engagement dir.
+    Deletion is now explicit — via ``DELETE /engagements/{key}`` — and this
+    test exists to lock the additive-only sync contract in place.
+    """
     engagement_dir = write_engagement(isolate_settings["engagements_dir"])
 
     response = client.get("/engagements")
@@ -1526,7 +1541,9 @@ def test_deleted_filesystem_engagement_is_pruned_from_database(client, isolate_s
 
     response = client.get("/engagements")
     assert response.status_code == 200
-    assert response.json() == []
+    rows = response.json()
+    assert len(rows) == 1, "DB row must survive filesystem removal"
+    assert rows[0]["key"] == "2026-03-30-120000-example"
 
 
 def test_deleted_session_is_pruned_from_database(client, isolate_settings):

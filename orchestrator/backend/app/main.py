@@ -10,6 +10,7 @@ from .api.engagements import router as engagements_router
 from .api.events import router as events_router
 from .config import settings
 from .db import init_db
+from .services.backup import start_scheduler as start_backup_scheduler, stop_scheduler as stop_backup_scheduler
 from .services.engagements import get_engagement_or_404, maybe_sync_engagements
 from .ws import broadcaster
 
@@ -18,7 +19,11 @@ from .ws import broadcaster
 async def lifespan(app: FastAPI):
     init_db()
     maybe_sync_engagements(force=True)
-    yield
+    start_backup_scheduler()
+    try:
+        yield
+    finally:
+        stop_backup_scheduler()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)

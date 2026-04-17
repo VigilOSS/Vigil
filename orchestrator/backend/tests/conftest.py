@@ -1,3 +1,4 @@
+import os
 import shutil
 import sys
 import tempfile
@@ -9,6 +10,12 @@ from fastapi.testclient import TestClient
 repo_root = Path(__file__).resolve().parents[3]
 backend_root = repo_root / "orchestrator" / "backend"
 sys.path.insert(0, str(backend_root))
+
+# Disable the scheduled backup timer for the entire test run — the timer
+# is a daemon thread that would otherwise fire against test-temp data dirs
+# that get torn down between tests, producing log noise and interleaved
+# sqlite3 handles across fixtures.
+os.environ.setdefault("AI_THREAT_HUNTING_BACKUP_DISABLED", "1")
 
 from app.config import settings
 from app import db as db_module

@@ -176,6 +176,64 @@ default_orchestrator_base_url() {
   printf '%s\n' "http://127.0.0.1:18000"
 }
 
+resolve_orchestrator_db_path() {
+  # Mirrors orchestrator/backend/app/config.py:settings.data_dir resolution.
+  # Explicit env vars win. Otherwise we prefer AI_THREAT_HUNTING_INSTALL_DIR
+  # (the canonical install-root pointer used by the backend itself) so a
+  # script invoked from a worktree or a symlinked path still targets the
+  # same file the running backend is reading. Only fall back to a ROOT_DIR
+  # heuristic when no install pointer is set.
+  local data_dir=""
+  if [[ -n "${AI_THREAT_HUNTING_DATA_DIR:-}" ]]; then
+    data_dir="$AI_THREAT_HUNTING_DATA_DIR"
+  elif [[ -n "${REDTEAM_ORCHESTRATOR_DATA_DIR:-}" ]]; then
+    data_dir="$REDTEAM_ORCHESTRATOR_DATA_DIR"
+  elif [[ -n "${AI_THREAT_HUNTING_INSTALL_DIR:-}" ]]; then
+    data_dir="$AI_THREAT_HUNTING_INSTALL_DIR/orchestrator/backend/data"
+  else
+    local install_root
+    install_root="$(cd "$ROOT_DIR/.." && pwd)"
+    data_dir="$install_root/orchestrator/backend/data"
+  fi
+  printf '%s/orchestrator.sqlite3\n' "$data_dir"
+}
+
+snapshot_orchestrator_database() {
+  # Always take a WAL-coherent snapshot of the orchestrator DB before a new
+  # engagement begins. The backend sets journal_mode=WAL at init_db(), so
+  # `sqlite3 .backup` runs concurrent with live writes without lock
+  # contention. Non-fatal: if the DB is not present (first engagement,
+  # fresh install) we silently skip. Failure modes (disk full, EPERM,
+  # cross-device) surface sqlite3's own stderr so the operator sees the
+  # actual error rather than a generic "continuing without backup".
+  local db_path
+  db_path="$(resolve_orchestrator_db_path)"
+  if [[ ! -f "$db_path" ]]; then
+    return 0
+  fi
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    printf '[init_engagement] sqlite3 missing; skipping orchestrator DB snapshot for %s\n' "$db_path" >&2
+    return 0
+  fi
+  # Collision-safe suffix: timestamp + PID + random. Two init_engagement.sh
+  # invocations in the same second cannot overwrite each other's backup.
+  local ts bak err_file
+  ts="$(date +%Y%m%dT%H%M%SZ).$$.${RANDOM}"
+  bak="${db_path}.bak.${ts}"
+  err_file="$(mktemp -t init_engagement_backup_err.XXXXXX)"
+  if sqlite3 "$db_path" ".backup '$bak'" >/dev/null 2>"$err_file"; then
+    printf '[init_engagement] orchestrator DB snapshot: %s\n' "$bak" >&2
+    rm -f "$err_file"
+  else
+    printf '[init_engagement] WARNING: orchestrator DB snapshot failed for %s\n' "$db_path" >&2
+    if [[ -s "$err_file" ]]; then
+      printf '[init_engagement]   sqlite3 said: %s\n' "$(tr '\n' ' ' < "$err_file")" >&2
+    fi
+    printf '[init_engagement]   engagement creation will continue WITHOUT a fresh backup.\n' >&2
+    rm -f "$err_file"
+  fi
+}
+
 tool_exists() {
   local tool="${1:?tool required}"
   if [[ "$tool" == */* ]]; then
@@ -635,6 +693,8 @@ esac
 
 cd "$ROOT_DIR"
 mkdir -p engagements
+
+snapshot_orchestrator_database
 
 DATE=$(date +%Y-%m-%d)
 TIME=$(date +%H%M%S)

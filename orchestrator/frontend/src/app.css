@@ -1433,3 +1433,41 @@ input {
     transform: translateY(0) scale(1);
   }
 }
+
+.engagement-delete-button {
+  background: transparent;
+  color: #f08a8a;
+  border: 1px solid rgba(240, 138, 138, 0.6);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease-out, color 0.12s ease-out;
+}
+
+.engagement-delete-button:hover:not(:disabled) {
+  background: rgba(240, 138, 138, 0.14);
+  color: #ffb4b4;
+}
+
+.engagement-delete-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.delete-confirm-label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.delete-confirm-label input {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(9, 11, 18, 0.6);
+  color: inherit;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
