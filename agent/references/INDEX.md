@@ -190,6 +190,8 @@ Quick-reference per tool, organized by usage phase.
 | `tools/recon/puredns.md` | Active DNS brute-force with wildcard filtering |
 | `tools/recon/dnsx.md` | Bulk DNS resolution and record enumeration |
 | `tools/recon/gau.md` | Historical URL discovery (Wayback, OTX, Common Crawl, URLScan) |
+| `tools/recon/gf.md` | URL parameter-pattern classifier (xss, ssrf, redirect, idor, sqli, lfi, debug) with 1ndianl33t patterns |
+| `tools/recon/trufflehog.md` | Secret scanner (filesystem mode, 800+ detectors, v3 positional-path syntax, `--no-verification` default) |
 
 ### tools/fuzzing/ — Used by: fuzzer, recon-specialist
 
