@@ -744,10 +744,13 @@ def init_db() -> None:
             row[1]
             for row in connection.execute("PRAGMA table_info(assessment_command_runs_fts)").fetchall()
         }
+        existing_cmdrun_count = connection.execute("SELECT COUNT(*) FROM assessment_command_runs").fetchone()[0]
+        rebuild_command_runs_fts = not fts_columns and existing_cmdrun_count > 0
         if fts_columns and "tool_bin" not in fts_columns:
             connection.execute("DROP TABLE IF EXISTS assessment_command_runs_fts")
             for trigger in ("assessment_command_runs_ai", "assessment_command_runs_ad", "assessment_command_runs_au"):
                 connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            rebuild_command_runs_fts = existing_cmdrun_count > 0
         connection.execute(
             """
             CREATE VIRTUAL TABLE IF NOT EXISTS assessment_command_runs_fts
@@ -829,6 +832,10 @@ def init_db() -> None:
             END
             """
         )
+        if rebuild_command_runs_fts:
+            connection.execute(
+                "INSERT INTO assessment_command_runs_fts(assessment_command_runs_fts) VALUES ('rebuild')"
+            )
         # ── Code Analysis Tables ──────────────────────────────────
         connection.execute(
             """

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
@@ -35,6 +36,64 @@ def _load_proxy_addon_module():
     )
     sys.modules["mitmproxy"] = mitmproxy_module
     return _load_script_module("test_proxy_addon_module", "agent/scripts/proxy_addon.py")
+
+
+def test_patched_kali_client_preserves_audit_context_for_async_tools(monkeypatch) -> None:
+    module = _load_script_module(
+        "test_patched_kali_client_module",
+        "docker/kali-mcp-runtime/patched_kali_client.py",
+    )
+
+    class FakeFastMCP:
+        def tool(self, *args, **kwargs):
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+    mcp_module = ModuleType("mcp")
+    server_module = ModuleType("mcp.server")
+    fastmcp_module = ModuleType("mcp.server.fastmcp")
+    fastmcp_module.FastMCP = FakeFastMCP
+    monkeypatch.setitem(sys.modules, "mcp", mcp_module)
+    monkeypatch.setitem(sys.modules, "mcp.server", server_module)
+    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp_module)
+
+    module._wrap_fastmcp_tool_decorator()
+    observed_headers: list[dict[str, str]] = []
+
+    async def upstream_tool() -> str:
+        observed_headers.append(module._current_audit_headers())
+        await asyncio.sleep(0)
+        observed_headers.append(module._current_audit_headers())
+        return "ok"
+
+    wrapped = FakeFastMCP().tool(name="async-tool")(upstream_tool)
+    signature = module.inspect.signature(wrapped)
+
+    assert module.inspect.iscoroutinefunction(wrapped)
+    assert signature.parameters["engagement_key"].kind == module.inspect.Parameter.KEYWORD_ONLY
+    assert signature.parameters["agent_name"].kind == module.inspect.Parameter.KEYWORD_ONLY
+    assert signature.parameters["phase"].kind == module.inspect.Parameter.KEYWORD_ONLY
+
+    result = asyncio.run(
+        wrapped(engagement_key="eng-1", agent_name="recon-agent", phase="recon")
+    )
+
+    assert result == "ok"
+    assert observed_headers == [
+        {
+            "X-Engagement-Key": "eng-1",
+            "X-Agent-Name": "recon-agent",
+            "X-Phase": "recon",
+        },
+        {
+            "X-Engagement-Key": "eng-1",
+            "X-Agent-Name": "recon-agent",
+            "X-Phase": "recon",
+        },
+    ]
+    assert getattr(module._AUDIT_CONTEXT, "headers", {}) == {}
 
 
 def test_record_proposal_rejects_invalid_finding_payload(tmp_path: Path, capsys) -> None:

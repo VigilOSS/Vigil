@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
+
+from app import db as db_module
+from app.services import state_manager
 
 
 ENGAGEMENT_KEY = "2026-04-17-120000-example"
@@ -243,6 +247,27 @@ def test_retention_suppresses_noisy_static_asset_filter(client, isolate_settings
     assert created["stdout_sha256"]
 
 
+def test_invalid_retention_preview_bytes_falls_back_to_default(client, isolate_settings, tmp_path, monkeypatch):
+    _write_engagement(isolate_settings["engagements_dir"])
+    retention_config = tmp_path / "command_run_retention.json"
+    retention_config.write_text(
+        json.dumps({"preview_bytes": "64k", "suppress_patterns": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("COMMAND_RUN_RETENTION_CONFIG", str(retention_config))
+    state_manager._retention_config.cache_clear()
+
+    try:
+        response = _post(client, _base_payload(stdout="small output"))
+    finally:
+        state_manager._retention_config.cache_clear()
+
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["output_retention_status"] == "retained"
+    assert created["stdout_preview"] == "small output"
+
+
 def test_list_command_runs_strips_previews_unless_include_output(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
     big = "B" * 4_000  # well under the 64 KiB cap so it's a normal preview
@@ -337,6 +362,108 @@ def test_argv_json_not_leaked_into_response(client, isolate_settings):
     created = _post(client, _base_payload()).json()
     assert "argv_json" not in created  # deserialized into argv, raw text dropped
     assert created["argv"] == ["nmap", "-sV", "10.0.0.1"]
+
+
+def test_init_db_rebuilds_command_run_fts_after_legacy_shape(isolate_settings):
+    db_path = db_module.database_path()
+    with sqlite3.connect(str(db_path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE engagements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL UNIQUE,
+                target TEXT NOT NULL,
+                status TEXT NOT NULL,
+                engagement_root TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO engagements (id, key, target, status, engagement_root)
+            VALUES (1, ?, 'https://example.com', 'in_progress', ?)
+            """,
+            (ENGAGEMENT_KEY, str(isolate_settings["engagements_dir"] / ENGAGEMENT_KEY)),
+        )
+        connection.execute(
+            """
+            CREATE TABLE assessment_command_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                run_uuid TEXT NOT NULL UNIQUE,
+                command TEXT NOT NULL,
+                argv_json TEXT NOT NULL DEFAULT '[]',
+                tool_name TEXT NOT NULL,
+                route TEXT NOT NULL DEFAULT '',
+                agent_name TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                return_code INTEGER,
+                timed_out INTEGER NOT NULL DEFAULT 0,
+                success INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                command_hash TEXT NOT NULL,
+                stdout_sha256 TEXT NOT NULL DEFAULT '',
+                stderr_sha256 TEXT NOT NULL DEFAULT '',
+                stdout_preview TEXT NOT NULL DEFAULT '',
+                stderr_preview TEXT NOT NULL DEFAULT '',
+                output_retention_status TEXT NOT NULL DEFAULT 'retained',
+                stdout_suppression_reason TEXT NOT NULL DEFAULT '',
+                stderr_suppression_reason TEXT NOT NULL DEFAULT '',
+                stdout_artifact_ref TEXT NOT NULL DEFAULT '',
+                stderr_artifact_ref TEXT NOT NULL DEFAULT '',
+                stdout_bytes INTEGER NOT NULL DEFAULT 0,
+                stderr_bytes INTEGER NOT NULL DEFAULT 0,
+                indexed_for_embeddings_at TEXT,
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO assessment_command_runs (
+                id, engagement_id, run_uuid, command, argv_json, tool_name, route,
+                agent_name, phase, return_code, timed_out, success, started_at,
+                completed_at, duration_ms, command_hash, stdout_preview, notes
+            ) VALUES (
+                1, 1, 'legacy-run', 'legacy nmap scan', '[]', 'nmap_scan', '',
+                'legacy-agent', 'recon', 0, 0, 1, '2026-04-17T12:00:00Z',
+                '2026-04-17T12:00:01Z', 1000, 'hash', 'legacy output', ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE assessment_command_runs_fts
+            USING fts5(
+                command,
+                tool_name,
+                agent_name,
+                phase,
+                stdout_preview,
+                stderr_preview,
+                stdout_suppression_reason,
+                stderr_suppression_reason,
+                notes,
+                content='assessment_command_runs',
+                content_rowid='id',
+                tokenize='unicode61'
+            )
+            """
+        )
+        connection.commit()
+
+    db_module.init_db()
+
+    rows = state_manager.list_command_runs(1, q="legacy")
+    assert len(rows) == 1
+    assert rows[0]["command"] == "legacy nmap scan"
+    assert rows[0]["tool_bin"] == ""
 
 
 def test_get_command_run_returns_full_record(client, isolate_settings):
