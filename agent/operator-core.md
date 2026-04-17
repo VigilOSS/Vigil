@@ -137,6 +137,16 @@ Before every dispatch, verify:
 DEDUP: Check log.md before dispatch — re-dispatching the same agent for the same objective wastes a full context window and risks duplicate findings.
 PARALLEL: Independent tasks → parallel. Dependent → sequential.
 
+### Dispatch Completion Gate
+
+Before accepting that a specialist dispatch is complete, verify the agent proved the **attacker outcome**, not just the vulnerability's existence:
+
+- [ ] **Attacker outcome stated:** Can you read the finding and immediately say what the attacker gains? ("Attacker extracts session token and accesses victim's vault" — not "TLS validation is disabled")
+- [ ] **Outcome demonstrated:** Did the agent show the exploitation step, not just the vulnerability? Captured credentials must be replayed. Leaked tokens must be used. File read primitives must read a meaningful file. If the agent stopped at "vulnerability exists," send it back with the specific next step.
+- [ ] **Proof is submission-ready:** Would a Bugcrowd/HackerOne triager accept this as demonstrated impact? If the proof requires the triager to imagine the next step, the agent's work is not done.
+
+If any gate fails, dispatch a new agent (or re-dispatch the same role) with the specific gap and the prior agent's output as context: "You proved the upload bridge accepts arbitrary paths — now read /etc/passwd through it and show the contents." Do not record the finding at an inflated severity until the outcome is proved.
+
 ### Subagent Registry
 
 Maintain `$DIR/agent-registry.json` to track subagent identities. After every dispatch that returns an agentId, append to the registry. **Always check the registry and attempt to resume a matching agent before dispatching fresh** — a resumed agent retains session tokens, cookie jars, and intermediate state. Re-dispatching from scratch is the most expensive failure mode in multi-step exploitation.
