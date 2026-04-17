@@ -71,7 +71,9 @@ LDFLAGS="-fsanitize=fuzzer,address,undefined" \
 # -fsanitize=fuzzer,address,undefined in CFLAGS+LDFLAGS works for the whole build.
 
 # AFL++ build: ASAN + UBSAN (no -fsanitize=fuzzer, AFL++ provides its own runtime)
-CC=afl-clang-lto \
+# Use afl-clang-lto when available; Homebrew AFL++ on macOS may provide
+# afl-clang-fast or afl-cc instead.
+CC=afl-clang-fast \
 AFL_USE_ASAN=1 AFL_USE_UBSAN=1 \
 CFLAGS="-g -O1 -fno-omit-frame-pointer" \
 make fuzz_target_afl

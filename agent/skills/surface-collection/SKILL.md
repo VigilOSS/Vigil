@@ -120,6 +120,13 @@ is working correctly.
 This is the core value-add over the previous operator-orchestrated pipeline. After
 mechanical ingestion is complete, analyze the full URL corpus for attack signals.
 
+**Deep triage (large corpora):** when the gau output exceeds ~500 URLs, or response-body
+secret scanning is in scope, stop here and ask the operator to dispatch a follow-up
+surface-collector invocation loaded with `agent/skills/gau-triage/SKILL.md`. That skill
+layers `gf` parameter classification, `httpx` body capture, and `trufflehog` secret
+scanning on top of the URL corpus this step produces — it is a deeper pass, not a
+replacement.
+
 **Retrieve work items for analysis:**
 ```bash
 ./scripts/assess.py dispatch "$DB" fetch api 50 surface-collector
@@ -200,3 +207,4 @@ The surface-collector agent prompt defines the full output format. Key sections:
 
 - `references/tools/recon/gau.md` — gau CLI reference and pipeline patterns
 - `references/tools/recon/httpx.md` — HTTP probing reference for URL validation
+- `agent/skills/gau-triage/SKILL.md` — deeper follow-up pass (gf classification + httpx body capture + trufflehog secret scan) for large historical URL corpora

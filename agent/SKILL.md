@@ -27,6 +27,10 @@ Read `agent/shared-constraints.md` first, then select from this index.
   **Use when:** Phase 2 (Collect); running Katana + gau + historical URL enrichment, intelligent URL triage, and work-buffer population.
   **Paired references:** `references/tools/recon/gau.md`, `references/tools/recon/httpx.md`
 
+- `agent/skills/gau-triage/SKILL.md`
+  **Use when:** After Phase 2 ingestion, a large (~500+) historical URL corpus remains to triage; deep pass of gf classification → httpx body fetch → trufflehog secret scan (no external HTTP by default). Operator-dispatched; owned by surface-collector.
+  **Paired references:** `references/tools/recon/gf.md`, `references/tools/recon/trufflehog.md`, `references/tools/recon/httpx.md`, `references/tools/recon/gau.md`
+
 - `agent/skills/case-dispatching/SKILL.md`
   **Use when:** Operator needs to coordinate the Phase 3 work-buffer consumption loop (reset-stale → stats → fetch → dispatch → done → requeue).
   **Paired references:** _(none — coordination logic only)_

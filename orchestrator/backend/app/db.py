@@ -591,9 +591,11 @@ def init_db() -> None:
                 command TEXT NOT NULL,
                 argv_json TEXT NOT NULL DEFAULT '[]',
                 tool_name TEXT NOT NULL,
+                tool_bin TEXT NOT NULL DEFAULT '',
                 route TEXT NOT NULL DEFAULT '',
                 agent_name TEXT NOT NULL,
                 phase TEXT NOT NULL,
+                audit_source TEXT NOT NULL DEFAULT 'header',
                 return_code INTEGER,
                 timed_out INTEGER NOT NULL DEFAULT 0,
                 success INTEGER NOT NULL DEFAULT 0,
@@ -619,6 +621,19 @@ def init_db() -> None:
             )
             """
         )
+        # Additive migration for existing deployments of the pre-tool_bin,
+        # pre-audit_source schema. Safe to run on fresh DBs (CREATE TABLE
+        # above already includes the columns, so _table_columns returns them
+        # and the ALTER is skipped).
+        cmdrun_columns = _table_columns(connection, "assessment_command_runs")
+        if cmdrun_columns and "tool_bin" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN tool_bin TEXT NOT NULL DEFAULT ''"
+            )
+        if cmdrun_columns and "audit_source" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN audit_source TEXT NOT NULL DEFAULT 'header'"
+            )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_created "
             "ON assessment_command_runs(engagement_id, created_at DESC, id DESC)"
@@ -639,12 +654,25 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_hash "
             "ON assessment_command_runs(engagement_id, command_hash)"
         )
+        # If the FTS schema predates tool_bin, drop it so CREATE VIRTUAL
+        # TABLE below rebuilds with the new column set. Old triggers are
+        # re-created as CREATE TRIGGER IF NOT EXISTS — but they reference
+        # the old fts table, so force a clean slate on any shape mismatch.
+        fts_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(assessment_command_runs_fts)").fetchall()
+        }
+        if fts_columns and "tool_bin" not in fts_columns:
+            connection.execute("DROP TABLE IF EXISTS assessment_command_runs_fts")
+            for trigger in ("assessment_command_runs_ai", "assessment_command_runs_ad", "assessment_command_runs_au"):
+                connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
         connection.execute(
             """
             CREATE VIRTUAL TABLE IF NOT EXISTS assessment_command_runs_fts
             USING fts5(
                 command,
                 tool_name,
+                tool_bin,
                 agent_name,
                 phase,
                 stdout_preview,
@@ -663,12 +691,12 @@ def init_db() -> None:
             CREATE TRIGGER IF NOT EXISTS assessment_command_runs_ai
             AFTER INSERT ON assessment_command_runs BEGIN
                 INSERT INTO assessment_command_runs_fts(
-                    rowid, command, tool_name, agent_name, phase,
+                    rowid, command, tool_name, tool_bin, agent_name, phase,
                     stdout_preview, stderr_preview,
                     stdout_suppression_reason, stderr_suppression_reason, notes
                 )
                 VALUES (
-                    new.id, new.command, new.tool_name, new.agent_name, new.phase,
+                    new.id, new.command, new.tool_name, new.tool_bin, new.agent_name, new.phase,
                     new.stdout_preview, new.stderr_preview,
                     new.stdout_suppression_reason, new.stderr_suppression_reason, new.notes
                 );
@@ -680,12 +708,12 @@ def init_db() -> None:
             CREATE TRIGGER IF NOT EXISTS assessment_command_runs_ad
             AFTER DELETE ON assessment_command_runs BEGIN
                 INSERT INTO assessment_command_runs_fts(
-                    assessment_command_runs_fts, rowid, command, tool_name, agent_name, phase,
+                    assessment_command_runs_fts, rowid, command, tool_name, tool_bin, agent_name, phase,
                     stdout_preview, stderr_preview,
                     stdout_suppression_reason, stderr_suppression_reason, notes
                 )
                 VALUES (
-                    'delete', old.id, old.command, old.tool_name, old.agent_name, old.phase,
+                    'delete', old.id, old.command, old.tool_name, old.tool_bin, old.agent_name, old.phase,
                     old.stdout_preview, old.stderr_preview,
                     old.stdout_suppression_reason, old.stderr_suppression_reason, old.notes
                 );
@@ -697,22 +725,22 @@ def init_db() -> None:
             CREATE TRIGGER IF NOT EXISTS assessment_command_runs_au
             AFTER UPDATE ON assessment_command_runs BEGIN
                 INSERT INTO assessment_command_runs_fts(
-                    assessment_command_runs_fts, rowid, command, tool_name, agent_name, phase,
+                    assessment_command_runs_fts, rowid, command, tool_name, tool_bin, agent_name, phase,
                     stdout_preview, stderr_preview,
                     stdout_suppression_reason, stderr_suppression_reason, notes
                 )
                 VALUES (
-                    'delete', old.id, old.command, old.tool_name, old.agent_name, old.phase,
+                    'delete', old.id, old.command, old.tool_name, old.tool_bin, old.agent_name, old.phase,
                     old.stdout_preview, old.stderr_preview,
                     old.stdout_suppression_reason, old.stderr_suppression_reason, old.notes
                 );
                 INSERT INTO assessment_command_runs_fts(
-                    rowid, command, tool_name, agent_name, phase,
+                    rowid, command, tool_name, tool_bin, agent_name, phase,
                     stdout_preview, stderr_preview,
                     stdout_suppression_reason, stderr_suppression_reason, notes
                 )
                 VALUES (
-                    new.id, new.command, new.tool_name, new.agent_name, new.phase,
+                    new.id, new.command, new.tool_name, new.tool_bin, new.agent_name, new.phase,
                     new.stdout_preview, new.stderr_preview,
                     new.stdout_suppression_reason, new.stderr_suppression_reason, new.notes
                 );

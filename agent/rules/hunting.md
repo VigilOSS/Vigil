@@ -7,9 +7,27 @@ strict: breaking them wastes time and lowers finding quality.
 
 Confirm the exact in-scope hosts, scope mode, exploit policy, and auth state before making target-facing decisions.
 
-## 2. No theoretical findings
+## 2. No theoretical findings — prove the attacker outcome, not just the vulnerability
 
 If the answer to "can an attacker do this right now with real harm?" is no, it is not a finding yet.
+
+Proving a vulnerability exists is not enough. You must demonstrate what the attacker **gains** from it. The gap between "vulnerability confirmed" and "attacker outcome proved" is where most severity underrating happens.
+
+**Existence proof (insufficient alone) — examples, not exhaustive:**
+- "TLS validation is disabled" — so what?
+- "IDOR returns a different user's ID" — what data?
+- "SSRF reaches internal host" — what's on it?
+- "Session token is in the response" — can you use it?
+
+**Exploitation proof (required) — same examples, completed:**
+- "TLS bypass lets attacker extract session token X from intercepted traffic → replaying X against /api/vault returns the victim's vault records"
+- "IDOR on /api/users/{id} returns full name, email, phone, and billing address for any user ID"
+- "SSRF to 169.254.169.254 returns IAM credentials → credentials grant s3:ListBucket on production bucket"
+- "Session token replayed from a different IP returns 200 with authenticated user data — no IP binding"
+
+The pattern applies to every vulnerability class: confirm the primitive exists, then demonstrate the attacker outcome it enables.
+
+When you capture credentials, tokens, or keys — **use them**. Extract the token, replay it, show what it unlocks. If replay fails, say why (expiry, IP binding, CSRF token required) and mark the finding CHAIN REQUIRED with the specific gap.
 
 ## 3. Precondition equivalence check
 

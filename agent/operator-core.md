@@ -124,7 +124,7 @@ Every dispatch must include:
 
 Before every dispatch, verify:
 
-- [ ] Agent registry checked — resume an existing agent if the criteria match (see Subagent Registry below)
+- [ ] Agent registry checked for a prior dispatch against this task — if one exists, the new prompt carries forward its condensed output and durable-state pointers (finding slugs, `$DIR/` paths) rather than re-running the same objective (see Cross-Dispatch Continuity below)
 - [ ] Agent identity named and target URL specified
 - [ ] Current phase stated with specific task objective (not just "test this")
 - [ ] Skill to load identified from `agent/SKILL.md`
@@ -137,11 +137,31 @@ Before every dispatch, verify:
 DEDUP: Check log.md before dispatch — re-dispatching the same agent for the same objective wastes a full context window and risks duplicate findings.
 PARALLEL: Independent tasks → parallel. Dependent → sequential.
 
-### Subagent Registry
+### Dispatch Completion Gate
 
-Maintain `$DIR/agent-registry.json` to track subagent identities. After every dispatch that returns an agentId, append to the registry. **Always check the registry and attempt to resume a matching agent before dispatching fresh** — a resumed agent retains session tokens, cookie jars, and intermediate state. Re-dispatching from scratch is the most expensive failure mode in multi-step exploitation.
+Before accepting that a specialist dispatch is complete, verify the agent proved the **attacker outcome**, not just the vulnerability's existence:
 
-Full registry schema, resume-vs-dispatch decision tree, and examples: `agent/references/runtime-guides/subagent-registry.md`
+- [ ] **Attacker outcome stated:** Can you read the finding and immediately say what the attacker gains? ("Attacker extracts session token and accesses victim's vault" — not "TLS validation is disabled")
+- [ ] **Outcome demonstrated:** Did the agent show the exploitation step, not just the vulnerability? Captured credentials must be replayed. Leaked tokens must be used. File read primitives must read a meaningful file. If the agent stopped at "vulnerability exists," send it back with the specific next step.
+- [ ] **Proof is submission-ready:** Would a Bugcrowd/HackerOne triager accept this as demonstrated impact? If the proof requires the triager to imagine the next step, the agent's work is not done.
+
+If any gate fails, dispatch a new agent (or re-dispatch the same role) with the specific gap and the prior agent's output as context: "You proved the upload bridge accepts arbitrary paths — now read /etc/passwd through it and show the contents." Do not record the finding at an inflated severity until the outcome is proved.
+
+### Cross-Dispatch Continuity
+
+Every dispatch launches a fresh agent — treat each dispatch as a clean-room environment that inherits only what the operator explicitly hands it. Session tokens, cookie jars, discovered endpoints, partial PoC steps, and next-step plans travel to the next dispatch through the dispatch prompt and durable state (backend records, engagement files), because the harness rebuilds subagent context from those sources on each launch.
+
+Append to `$DIR/agent-registry.json` after every dispatch that returns an agentId — this is the engagement audit trail and the DEDUP input, so skipping a write costs both the pre-dispatch duplicate check and the report-writer's ability to trace which agent produced which finding. Record role, task, finding slugs, skill loaded, scope host, timestamp, and status; the registry is read to build the next handoff prompt and to audit prior work.
+
+When continuing multi-step work (exploit chains, credential reuse, follow-up probes), the new dispatch prompt carries forward the prior agent's relevant output:
+- Captured session tokens, cookies, and CSRF values from the prior agent's transcript
+- Discovered endpoints and intermediate PoC steps
+- Durable-state pointers: finding slugs, `$DIR/tools/` paths, credential ids the new agent can `fetch` from the backend
+- The specific next step the new agent should take (the exact action, not a rehash of the original objective)
+
+Keep handoff prompts bounded — durable content lives in the backend, `log.md`, and engagement files, and the dispatch prompt carries pointers plus the specific next step. A full transcript paste into the next prompt crowds out the objective and inflates context linearly across long chains; two or three excerpted lines (the captured token, the working payload, the next action) paired with finding slugs and file paths are enough for the new agent to `fetch` canonical state and continue.
+
+Registry schema and handoff-prompt examples: `agent/references/runtime-guides/subagent-registry.md`
 
 ## Phase Flow
 
