@@ -18,6 +18,7 @@ _AGENT_PREFIX_MAP = {
     "code-variant-hunter": "CV",
     "code-vuln-verifier": "VF",
     "surface-collector": "SC",
+    "code-fuzz-engineer": "CF",
 }
 
 _FINDING_ID_RE = re.compile(r"FINDING-([A-Z]{2})-(\d{3})")
