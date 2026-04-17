@@ -22,6 +22,7 @@ Before starting any target-facing work, verify:
 2. You loaded the RIGHT fuzzing skill — `directory-fuzzing/SKILL.md` for path/directory work or `parameter-fuzzing/SKILL.md` for parameter work — choosing wrong means using the wrong tool and payload family entirely
 3. You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
 4. You have the dispatch context (target URL, phase, task objective, bounded stop condition)
+5. You checked command history for prior fuzz campaigns on this target: `./scripts/assess.py list-command-runs --agent-name fuzzer --phase <current> --q <keyword>`. Reuse prior ffuf/wfuzz results when the target, wordlist, and filters are unchanged; re-run only when the target state shifted, the prior run was partial/timed out, or a materially different wordlist or payload family is required (and say which reason applies in your output). Full decision table: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If any of these are missing, STOP and load them now. Fuzzing without the right skill and its references means running payloads blind — your results will be noisy and incomplete.
 

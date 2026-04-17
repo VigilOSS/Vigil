@@ -198,6 +198,61 @@ def test_code_variant_hunter_example_matches_record_finding_contract():
     assert '"impact": "Remote attackers can trigger heap corruption in the FTP path parser with an overlong path"' in hunter_prompt
 
 
+def test_kali_mcp_audit_and_reuse_wording_is_present():
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+    operator_agents = (repo_root / "agent" / "AGENTS.md").read_text(encoding="utf-8")
+    operator_claude = (repo_root / "agent" / "CLAUDE.md").read_text(encoding="utf-8")
+    shared_web = (repo_root / "agent" / "shared-constraints.md").read_text(encoding="utf-8")
+    shared_code = (repo_root / "agent" / "shared-constraints-code.md").read_text(encoding="utf-8")
+
+    # Operator source + rendered wrappers describe the audit channel and the
+    # reuse-search CLI so an operator reading any of the three sees both.
+    for text in (operator_core, operator_agents, operator_claude):
+        assert "engagement_key" in text
+        assert "agent_name" in text
+        assert "phase" in text
+        assert "list-command-runs" in text
+        assert "Kali MCP Audit and Reuse" in text
+        assert "command history checked" in text.lower()
+
+    # Shared-constraints: both modes mention the reuse rule so specialists see
+    # it on first load.
+    for text in (shared_web, shared_code):
+        assert "list-command-runs" in text
+        assert "command-history-auditing.md" in text
+
+
+def test_kali_specialist_prompts_document_history_check():
+    repo_root = Path(__file__).resolve().parents[3]
+    expectations = {
+        "recon-specialist.md": "recon-specialist",
+        "surface-collector.md": "surface-collector",
+        "vulnerability-analyst.md": "vulnerability-analyst",
+        "exploit-developer.md": "exploit-developer",
+        "fuzzer.md": "fuzzer",
+        "osint-analyst.md": "osint-analyst",
+        "code-fuzz-engineer.md": "code-fuzz-engineer",
+    }
+    for filename, role in expectations.items():
+        path = repo_root / "agent" / "agents" / filename
+        text = path.read_text(encoding="utf-8")
+        assert "list-command-runs" in text, f"{filename} missing list-command-runs reference"
+        assert f"--agent-name {role}" in text, f"{filename} missing --agent-name {role}"
+        assert "command-history-auditing.md" in text, f"{filename} missing reuse reference"
+
+
+def test_command_history_reference_guide_exists():
+    repo_root = Path(__file__).resolve().parents[3]
+    path = repo_root / "agent" / "references" / "runtime-guides" / "command-history-auditing.md"
+    text = path.read_text(encoding="utf-8")
+    assert "Reuse Decision Table" in text
+    assert "output_retention_status" in text
+    assert "list-command-runs" in text
+    index = (repo_root / "agent" / "references" / "INDEX.md").read_text(encoding="utf-8")
+    assert "runtime-guides/command-history-auditing.md" in index
+
+
 def test_code_analysis_codex_wrappers_exist():
     repo_root = Path(__file__).resolve().parents[3]
     codex_dir = repo_root / "agent" / ".codex" / "agents"

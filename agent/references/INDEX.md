@@ -236,6 +236,7 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 |------|---------|
 | `runtime-guides/engagement-methodology.md` | Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase |
 | `runtime-guides/subagent-registry.md` | Registry schema, resume-vs-dispatch decision tree, and examples for `agent-registry.json` |
+| `runtime-guides/command-history-auditing.md` | How to query `assess.py list-command-runs`, the reuse decision table, and how to interpret retention/suppression fields before re-running a Kali MCP command |
 | `handoff-protocols.md` | Agent-to-agent handoff rules and expected downstream actions |
 | `subdomain-enumeration.md` | Subdomain enumeration (when `*.domain` in hosts), prioritization, and sliding-window execution rules |
 

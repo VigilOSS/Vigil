@@ -25,6 +25,7 @@ Before starting any target-facing work, verify:
 3. You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
 4. You read `scope.json` and confirmed the in-scope hosts plus the active `exploit_policy` before making any target-facing decisions
 5. You have the dispatch context (target URL, phase, task objective, prior findings)
+6. You checked command history for prior runs that already cover this objective: `./scripts/assess.py list-command-runs --agent-name recon-specialist --phase <current> --q <keyword>`. Reuse prior results when the target and hypothesis have not changed; re-run only when the target state shifted, the prior run was partial/timed out, or a materially different payload set is required (and say which reason applies in your output). Full decision table: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your recon quality will be significantly lower.
 

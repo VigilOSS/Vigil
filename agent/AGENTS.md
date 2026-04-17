@@ -187,6 +187,7 @@ Before every dispatch, verify:
 - [ ] Matching skill's paired references identified from `agent/references/INDEX.md`
 - [ ] Prior relevant findings or existing finding slugs included (so the agent can reference them instead of creating duplicates)
 - [ ] log.md checked for duplicate dispatch (DEDUP rule)
+- [ ] Command history checked — `./scripts/assess.py list-command-runs --agent-name <role> --phase <current>` reviewed for prior runs that already cover the objective
 - [ ] Parallelism decision made (independent → parallel, dependent → sequential)
 
 DEDUP: Check log.md before dispatch — re-dispatching the same agent for the same objective wastes a full context window and risks duplicate findings.
@@ -293,7 +294,14 @@ Auth handling rules:
 
 ## Kali MCP Execution
 
-All target-facing work must go through the attached Kali MCP runtime.
+All target-facing work must go through the attached Kali MCP runtime. Every
+call carries three audit fields — `engagement_key` (from the engagement dir
+basename or `engagement.json`), `agent_name` (the dispatching role, e.g.
+`recon-specialist`), and `phase` (from `scope.json.current_phase`) — so the
+runtime can record the command, argv, stdout/stderr, exit code, timeout state,
+and timings to the orchestrator backend automatically. Treat that recording as
+shared engagement state: the operator and every specialist can search it via
+`./scripts/assess.py list-command-runs` before repeating work.
 
 - Use MCP tool discovery to inspect the currently available Kali tools instead of assuming a fixed tool inventory in the prompt.
 - When you need arbitrary shell execution inside the Kali runtime, use the Kali MCP command-execution tool.
@@ -315,6 +323,34 @@ If Kali MCP tools are not available or MCP tool discovery returns no tools:
 6. Restart the runtime if unhealthy: `./scripts/start_kali_mcp_runtime.sh`
 
 Host-side `docker` commands are for diagnostic inspection only (container status, logs, process lists) — target-facing work through `docker exec` bypasses the Kali MCP runtime's tool inventory and audit trail.
+
+### Kali MCP Audit and Reuse
+
+Every Kali MCP tool call is recorded to the orchestrator backend as an
+`assessment_command_runs` row with FTS5 keyword search. Command output is
+retained with a configurable retention policy (noisy filter outputs are
+suppressed but still hashed; large outputs spill to engagement artifacts).
+Use that history to avoid duplicating work.
+
+Before dispatching a specialist for a probing, scanning, fuzzing, or test
+objective, check whether equivalent commands already ran this engagement:
+
+```bash
+./scripts/assess.py list-command-runs \
+    --agent-name <role> \
+    --phase <current-phase> \
+    --q <keyword>
+```
+
+Common reasons to re-run anyway — call them out in the dispatch context so
+the specialist does not repeat work that has already resolved:
+
+1. The target's state changed since the prior run (new port, new auth context, deployed change).
+2. The prior run was partial or timed out and left coverage open.
+3. The new hypothesis needs a materially different payload set or tooling, not just a retry.
+
+See `agent/references/runtime-guides/command-history-auditing.md` for the
+full reuse decision table and output-field interpretation.
 
 ## Finding Format
 

@@ -23,6 +23,7 @@ Before starting any work, verify:
 2. You loaded the osint-recon skill (`agent/skills/osint-recon/SKILL.md`)
 3. You read the skill's `## Extended Resources` section and loaded the listed reference files
 4. You have the dispatch context (target domain, tech stack, phase, task objective, prior intel)
+5. You checked command history for prior OSINT queries on this domain/stack: `./scripts/assess.py list-command-runs --agent-name osint-analyst --phase <current> --q <keyword>`. Reuse prior whois/dns/cert/CVE lookups when the inputs have not changed; re-run only when the target list grew, the prior run was partial/timed out, or a new CVE feed has since landed (and say which reason applies in your output). Full decision table: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your intelligence quality will be significantly lower.
 
