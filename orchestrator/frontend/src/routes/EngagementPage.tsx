@@ -6,6 +6,7 @@ import {
   AssessmentCoverageItem,
   AssessmentFindingDetail,
   AssessmentService,
+  AssessmentSurface,
   AssessmentSummary,
   AssessmentTarget,
   Artifact,
@@ -18,11 +19,14 @@ import {
   Engagement,
   EngagementSession,
   EventRecord,
+  IntelSummary,
   engagementWebSocketUrl,
   getAssessmentSummary,
   getCodeCoverage,
   getCodeQueueStats,
   getEngagement,
+  getIntelSummary,
+  listActivityEntries,
   listArtifacts,
   listAssessmentAttackChainLinks,
   listAssessmentAttackChains,
@@ -35,6 +39,7 @@ import {
   listCodeRepos,
   listEngagementSessions,
   listEvents,
+  listSurfaces,
   readArtifact,
 } from "../lib/api";
 import { ActivityTab } from "../components/ActivityTab";
@@ -42,7 +47,10 @@ import { ArtifactViewer } from "../components/ArtifactViewer";
 import { CodeAnalysisTab } from "../components/CodeAnalysisTab";
 import { CoverageTab } from "../components/CoverageTab";
 import { FindingsTab } from "../components/FindingsTab";
+import { IntelTab } from "../components/IntelTab";
+import { LogTab } from "../components/LogTab";
 import { OverviewTab } from "../components/OverviewTab";
+import { SurfacesTab } from "../components/SurfacesTab";
 import { TabBar } from "../components/TabBar";
 import type { TabKey } from "../components/TabBar";
 
@@ -74,6 +82,9 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const [codeQueueStats, setCodeQueueStats] = useState<CodeQueueStats | null>(null);
   const [codeCoverage, setCodeCoverage] = useState<CodeCoverage | null>(null);
   const [codeResults, setCodeResults] = useState<CodeAnalysisResult[]>([]);
+  const [intelSummary, setIntelSummary] = useState<IntelSummary | null>(null);
+  const [assessmentSurfaces, setAssessmentSurfaces] = useState<AssessmentSurface[]>([]);
+  const [activityTotal, setActivityTotal] = useState<number>(0);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactContent | null>(null);
   const activeEngagement = engagement?.key === engagementKey ? engagement : null;
@@ -159,6 +170,9 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
         setCodeQueueStats(null);
         setCodeCoverage(null);
         setCodeResults([]);
+        setIntelSummary(null);
+        setAssessmentSurfaces([]);
+        setActivityTotal(0);
         setSelectedName(null);
         setSelectedArtifact(null);
         return;
@@ -168,6 +182,14 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
       const promises: Promise<unknown>[] = [
         refreshEvents(),
         getAssessmentSummary(engagementKey).then(setAssessmentSummary),
+        // Intel summary is cheap and drives the Intel tab count + left-rail
+        // per-type counts. 501s while B1 is in flight collapse to null.
+        getIntelSummary(engagementKey).then(setIntelSummary).catch(() => setIntelSummary(null)),
+        // Activity entry count for the Log tab badge. Fetch the first page
+        // only — we just need `total`.
+        listActivityEntries(engagementKey, { limit: 1 })
+          .then((resp) => setActivityTotal(resp.total))
+          .catch(() => setActivityTotal(0)),
       ];
 
       // Only fetch data needed by the active tab
@@ -193,6 +215,19 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
           break;
         case "activity":
           promises.push(refreshSessions());
+          break;
+        case "surfaces":
+          promises.push(
+            listSurfaces(engagementKey).then(setAssessmentSurfaces).catch(() => setAssessmentSurfaces([])),
+          );
+          break;
+        case "intel":
+          // IntelTab owns its own per-entity fetches; only the summary is
+          // needed at the page level (already fetched above for tab counts).
+          break;
+        case "log":
+          // LogTab owns its own search+fetch; page-level only needs the
+          // total (already fetched above for the tab count).
           break;
         case "artifacts":
           promises.push(refreshArtifacts());
@@ -365,10 +400,19 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
     [activeEngagement, displayEvents],
   );
 
+  const intelTotal = intelSummary
+    ? Object.values(intelSummary.counts).reduce((a, b) => a + b, 0)
+    : undefined;
+
   const tabCounts: Partial<Record<TabKey, number>> = {
     findings: displaySummary?.finding_count ?? displayFindings.length,
     coverage: displaySummary?.coverage_count ?? 0,
     code: codeRepos.length > 0 ? codeResults.length : undefined,
+    intel: intelTotal,
+    // `open_surface_count` is the closest cheap figure in the existing
+    // assessment summary; fall back to the loaded list if present.
+    surfaces: displaySummary?.open_surface_count ?? assessmentSurfaces.length,
+    log: activityTotal || undefined,
   };
 
   return (
@@ -444,6 +488,18 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
 
           {activeTab === "activity" && (
             <ActivityTab events={displayEvents} sessions={sessions} />
+          )}
+
+          {activeTab === "intel" && (
+            <IntelTab engagementKey={engagementKey} summary={intelSummary} />
+          )}
+
+          {activeTab === "surfaces" && (
+            <SurfacesTab engagementKey={engagementKey} surfaces={assessmentSurfaces} />
+          )}
+
+          {activeTab === "log" && (
+            <LogTab engagementKey={engagementKey} />
           )}
 
           {activeTab === "artifacts" && (

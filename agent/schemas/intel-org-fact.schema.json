@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/intel-org-fact.schema.json",
+  "$comment": "Mirrors app.api.intel_schemas.OrgFactRecordRequest. Free-form key/value for org metadata that doesn't deserve its own table (Founded, EIN, Revenue, Parent company, etc.).",
+  "title": "Intel Org Fact Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fact_key"],
+  "properties": {
+    "fact_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Fact label (e.g., 'founded', 'revenue_usd', 'parent_company')."
+    },
+    "fact_value": {
+      "type": "string",
+      "maxLength": 4096,
+      "default": ""
+    },
+    "source_name": {
+      "type": "string",
+      "maxLength": 128,
+      "default": ""
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 4096,
+      "default": ""
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "agent_name": { "type": "string" },
+        "artifact_ref": { "type": "string" },
+        "captured_at": { "type": "string" },
+        "evidence_quote": { "type": "string" }
+      }
+    }
+  }
+}

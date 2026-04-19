@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/intel-domain.schema.json",
+  "$comment": "Mirrors app.api.intel_schemas.DomainRecordRequest.",
+  "title": "Intel Domain Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["identity"],
+  "properties": {
+    "identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "The domain, subdomain, IP address, or ASN identifier."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["subdomain", "ip", "asn", "nameserver", "mx", "ptr", "domain"],
+      "default": "subdomain"
+    },
+    "value": {
+      "type": "string",
+      "maxLength": 1024,
+      "default": "",
+      "description": "Resolved value or supporting datum (e.g., A record IP, MX target)."
+    },
+    "source_name": {
+      "type": "string",
+      "maxLength": 128,
+      "default": ""
+    },
+    "live_status": {
+      "type": "string",
+      "maxLength": 64,
+      "default": "",
+      "description": "Observed liveness (e.g., 'up', 'down', '200', 'nx')."
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 4096,
+      "default": ""
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "agent_name": { "type": "string" },
+        "artifact_ref": { "type": "string" },
+        "captured_at": { "type": "string" },
+        "evidence_quote": { "type": "string" }
+      }
+    }
+  }
+}

@@ -158,7 +158,7 @@ def test_engagement_artifacts_and_sessions_are_scoped_by_engagement_key(client, 
     artifacts = client.get("/engagements/2026-03-30-120000-example/artifacts")
     assert artifacts.status_code == 200
     artifact_names = {artifact["name"] for artifact in artifacts.json() if artifact["exists"]}
-    assert {"scope.json", "log.md", "engagement.json"} <= artifact_names
+    assert {"scope.json", "engagement.json"} <= artifact_names
 
     sessions = client.get("/engagements/2026-03-30-120000-example/sessions")
     assert sessions.status_code == 200
@@ -304,7 +304,7 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
             "target_descriptor": "https://example.com/orders/7",
             "source_name": "source-analyzer",
             "rationale": "Observed direct object path",
-            "evidence_ref": "log.md",
+            "evidence_ref": "activity_entries",
             "status": "covered",
         },
     )

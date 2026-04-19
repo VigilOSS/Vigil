@@ -25,10 +25,8 @@ class ArtifactContent:
 
 ARTIFACT_SPECS = {
     "scope.json": ("scope.json", "application/json", False),
-    "log.md": ("log.md", "text/markdown", False),
     "findings.md": ("findings.md", "text/markdown", False),
     "report.md": ("report.md", "text/markdown", False),
-    "intel.md": ("intel.md", "text/markdown", False),
     "auth.json": ("auth.json", "application/json", True),
     "surfaces.jsonl": ("surfaces.jsonl", "text/plain", False),
     "engagement.json": ("engagement.json", "application/json", False),

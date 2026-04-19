@@ -87,7 +87,7 @@ Useful for CVE matching and targeted exploitation. Worth noting but not worth a 
 
 ### Low: Verbose Errors Without Sensitive Data
 
-Generic stack traces, verbose 404 pages, "null pointer at line 42" without file paths or secrets. Not worth reporting on their own. Note them in intel.md for context but do not create findings.
+Generic stack traces, verbose 404 pages, "null pointer at line 42" without file paths or secrets. Not worth reporting on their own. Capture them via `./scripts/assess.py record-intel note <json-file>` for context but do not create findings.
 
 ---
 

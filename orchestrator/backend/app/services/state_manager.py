@@ -14,6 +14,7 @@ from fastapi import HTTPException, status
 
 from ..db import get_connection
 from .events import _engagement_or_404
+from .search import fts_escape as _fts_escape_shared
 
 SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 WORKFLOW_STATUSES = {"draft", "active", "blocked", "exploited", "false_positive", "merged", "reported"}
@@ -3018,7 +3019,6 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
 
 _DEFAULT_PREVIEW_BYTES = 65_536
 _DEFAULT_RETENTION_CONFIG = Path(__file__).resolve().parents[1] / "config" / "command_run_retention.json"
-_FTS_SPECIAL_RE = re.compile(r'[\"\'\\]')
 _RUN_UUID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _ARTIFACT_LABEL_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
@@ -3362,15 +3362,8 @@ def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
 
 
 def _fts_escape(term: str) -> str:
-    # FTS5 MATCH query — wrap each token in double quotes to treat as phrase
-    # and drop special chars that would confuse the parser.
-    cleaned = _FTS_SPECIAL_RE.sub(" ", term).strip()
-    if not cleaned:
-        return ""
-    tokens = [t for t in cleaned.split() if t]
-    if not tokens:
-        return ""
-    return " ".join(f'"{t}"' for t in tokens)
+    """Back-compat shim; real implementation lives in ``services.search``."""
+    return _fts_escape_shared(term)
 
 
 def list_command_runs(

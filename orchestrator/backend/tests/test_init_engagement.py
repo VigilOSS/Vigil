@@ -31,10 +31,6 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
     sandbox_root = tmp_path / "agent"
     _copy_init_fixture_tree(agent_root, sandbox_root, client="codex")
 
-    templates_target = sandbox_root / "scripts" / "templates"
-    templates_target.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(agent_root / "scripts" / "templates" / "intel.md", templates_target / "intel.md")
-
     result = subprocess.run(
         [
             "bash",
@@ -352,7 +348,6 @@ def test_init_engagement_code_mode_with_local_repo(tmp_path: Path) -> None:
     scope = json.loads((engagement_dir / "scope.json").read_text(encoding="utf-8"))
     auth = json.loads((engagement_dir / "auth.json").read_text(encoding="utf-8"))
     manifest = json.loads((engagement_dir / "engagement.json").read_text(encoding="utf-8"))
-    log_text = (engagement_dir / "log.md").read_text(encoding="utf-8")
 
     # Code-mode scope assertions
     assert scope["engagement_type"] == "code"
@@ -378,10 +373,6 @@ def test_init_engagement_code_mode_with_local_repo(tmp_path: Path) -> None:
     assert "repo_name" not in manifest
     assert "target" not in manifest
     assert "hostname" not in manifest
-
-    # Log reflects code analysis
-    assert "Code Analysis" in log_text
-    assert "Repositories" in log_text
 
     # source/ directory created for repo checkout
     assert (engagement_dir / "source").is_dir()

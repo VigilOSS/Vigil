@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/intel-cve.schema.json",
+  "$comment": "Mirrors app.api.intel_schemas.CveRecordRequest. CVE intel is not a confirmed finding — record-finding stays gated on exploit-developer validation.",
+  "title": "Intel CVE Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cve_id"],
+  "properties": {
+    "cve_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "description": "Canonical CVE identifier (e.g., CVE-2023-12345)."
+    },
+    "affected_component": {
+      "type": "string",
+      "maxLength": 256,
+      "default": "",
+      "description": "Product/library name the CVE applies to, ideally matching an intel_tech_components.component."
+    },
+    "affected_version_range": {
+      "type": "string",
+      "maxLength": 256,
+      "default": "",
+      "description": "Affected version range string (e.g., '<= 2.4.7')."
+    },
+    "cvss_score": {
+      "type": ["number", "null"],
+      "default": null,
+      "minimum": 0,
+      "maximum": 10
+    },
+    "cvss_vector": {
+      "type": "string",
+      "maxLength": 256,
+      "default": ""
+    },
+    "cwe_id": {
+      "type": "string",
+      "maxLength": 64,
+      "default": ""
+    },
+    "poc_available": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether a public proof-of-concept exploit exists."
+    },
+    "source_name": {
+      "type": "string",
+      "maxLength": 128,
+      "default": ""
+    },
+    "validation_status": {
+      "type": "string",
+      "enum": ["unverified", "version_match", "ruled_out", "exploited"],
+      "default": "unverified"
+    },
+    "linked_finding_slug": {
+      "type": "string",
+      "maxLength": 256,
+      "default": "",
+      "description": "assessment_findings.slug once exploitation confirms this CVE."
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 4096,
+      "default": ""
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "agent_name": { "type": "string" },
+        "artifact_ref": { "type": "string" },
+        "captured_at": { "type": "string" },
+        "evidence_quote": { "type": "string" }
+      }
+    }
+  }
+}
