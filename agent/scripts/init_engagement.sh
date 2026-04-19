@@ -802,51 +802,9 @@ else
 EOF
 fi
 
-# --- Write log.md ---
-if [[ "$MODE" == "code" ]]; then
-  cat > "$DIR/log.md" <<EOF
-# Engagement Log
-
-- **Type**: Code Analysis
-- **Name**: ${NAME}
-- **Repositories**: ${REPOS_DISPLAY}
-- **Date**: ${DATE}
-- **Status**: In Progress
-- **Exploit Policy**: ${EXPLOIT_POLICY}
-
----
-EOF
-elif [[ "$MODE" == "web" ]]; then
-  cat > "$DIR/log.md" <<EOF
-# Engagement Log
-
-- **Type**: Web
-- **Target**: ${TARGET_NORMALIZED}
-- **Date**: ${DATE}
-- **Status**: In Progress
-- **Hosts**: $(printf '%s' "$HOSTS_RAW" | tr ',' ', ')
-- **Auth Mode**: ${AUTH_MODE}
-- **Exploit Policy**: ${EXPLOIT_POLICY}
-
----
-EOF
-else
-  cat > "$DIR/log.md" <<EOF
-# Engagement Log
-
-- **Type**: Web + Code
-- **Name**: ${NAME}
-- **Target**: ${TARGET_NORMALIZED}
-- **Repositories**: ${REPOS_DISPLAY}
-- **Date**: ${DATE}
-- **Status**: In Progress
-- **Hosts**: $(printf '%s' "$HOSTS_RAW" | tr ',' ', ')
-- **Auth Mode**: ${AUTH_MODE}
-- **Exploit Policy**: ${EXPLOIT_POLICY}
-
----
-EOF
-fi
+# Narrative activity log now lives in the orchestrator backend
+# (activity_entries table). init no longer writes a local log.md — agents
+# and the post-tool hook POST to /engagements/{key}/activity-entries.
 
 # --- Write report.md ---
 if [[ "$MODE" == "code" ]]; then
@@ -923,11 +881,10 @@ printf 'ORCHESTRATOR_BASE_URL=%q\n' "$(default_orchestrator_base_url)" > "$DIR/.
 
 sqlite3 "$DIR/cases.db" < "$SCRIPT_DIR/schema.sql" >/dev/null
 
-if [[ -f "$SCRIPT_DIR/templates/intel.md" ]]; then
-  cp "$SCRIPT_DIR/templates/intel.md" "$DIR/intel.md"
-else
-  printf '# Intelligence Collection\n' > "$DIR/intel.md"
-fi
+# Structured intel now lives in the orchestrator backend
+# (intel_* tables). init no longer writes a local intel.md — agents POST
+# via `./scripts/assess.py record-intel <type> <json-file>` to the
+# /engagements/{key}/intel/{type-plural} endpoints.
 
 CLIENT_KIND="$(install_client_kind)"
 write_engagement_prompt_wrappers "$DIR" "$CLIENT_KIND"

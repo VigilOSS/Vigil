@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/intel-social-profile.schema.json",
+  "$comment": "Mirrors app.api.intel_schemas.SocialProfileRecordRequest.",
+  "title": "Intel Social Profile Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["subject_kind", "platform"],
+  "properties": {
+    "subject_kind": {
+      "type": "string",
+      "enum": ["person", "org"],
+      "description": "Whether the profile belongs to an individual or an organisation."
+    },
+    "subject_ref": {
+      "type": "string",
+      "maxLength": 512,
+      "default": "",
+      "description": "Name or identifier of the subject (e.g., 'Acme Corp', 'Alice Smith')."
+    },
+    "platform": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Platform or network (LinkedIn, X/Twitter, GitHub, Mastodon, etc.)."
+    },
+    "handle": {
+      "type": "string",
+      "maxLength": 256,
+      "default": ""
+    },
+    "url": {
+      "type": "string",
+      "maxLength": 2048,
+      "default": ""
+    },
+    "source_name": {
+      "type": "string",
+      "maxLength": 128,
+      "default": ""
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 4096,
+      "default": ""
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "agent_name": { "type": "string" },
+        "artifact_ref": { "type": "string" },
+        "captured_at": { "type": "string" },
+        "evidence_quote": { "type": "string" }
+      }
+    }
+  }
+}
