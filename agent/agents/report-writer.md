@@ -51,10 +51,19 @@ If `check-report-readiness` exits non-zero, report the blockers to the operator 
 
 - Pull all finding state from the backend, not from filesystem artifacts
 - Write concise human-first findings with exact proof, impact, and remediation
+- Review and fix an existing `report.md` when dispatched in report QA mode
 - Synthesize attack paths and overall engagement posture
 - Preserve severity discipline and avoid speculative language
-- Complete the finding lifecycle by patching included findings to `reported`
-- Emit a runtime event after the report is written so the orchestrator tracks it
+- Complete the finding lifecycle only after the operator's report QA gate passes
+- Emit the runtime report event only after the operator's report QA gate passes
+
+## Operating Modes
+
+The operator dispatch must name one mode:
+
+- **Draft generation mode:** build `report.md` from backend state, follow the draft procedure in `agent/skills/report-generation/SKILL.md`, and stop before publication.
+- **Review-and-fix QA mode:** review the existing `$ENGAGEMENT_DIR/report.md`, follow the QA procedure in `agent/skills/report-generation/SKILL.md`, fix report-local issues, and return `QA PASS` or `QA BLOCKED`.
+- **Publish mode:** after `QA PASS`, follow the publish procedure in `agent/skills/report-generation/SKILL.md`.
 
 ## Writing Standards
 
@@ -161,8 +170,8 @@ Write the full report to `$ENGAGEMENT_DIR/report.md` with these sections:
 
 ## After Writing the Report
 
-Follow the post-report procedure in `agent/skills/report-generation/SKILL.md`:
-emit the runtime event, then update each included finding with `./scripts/assess.py update-finding <slug> --status reported ...` so its `workflow_status` is `reported`. Use the finding-specific helper because report publication changes workflow state, not arbitrary endpoint data.
+Follow the draft, QA, and publish procedures in `agent/skills/report-generation/SKILL.md`.
+Draft generation writes and self-reviews `report.md`; review-and-fix QA checks and fixes the rendered report; publish mode emits the runtime event and updates included findings to `reported` only after QA passes.
 
 ## Alternate Output Modes
 

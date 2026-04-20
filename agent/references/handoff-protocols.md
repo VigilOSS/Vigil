@@ -125,6 +125,11 @@ Before dispatching a final report, resolve readiness blockers so `report-finding
 - `./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"`
 - The source finding's status becomes `merged` and is excluded from final report output
 
+After draft generation, dispatch a fresh `report-writer` in review-and-fix QA mode. The QA writer
+checks the rendered `report.md` against backend report state and the 12-step post-generation
+self-review, fixes report-local issues, and returns `QA PASS` or `QA BLOCKED`. Only publish the
+report, mark findings `reported`, and complete the engagement after `QA PASS`.
+
 ## Wildcard Mode Specifics
 
 - BACKEND-ONLY FINDING WRITE: every finding lands in the backend via `assess.py record-finding`. No local file sync required.

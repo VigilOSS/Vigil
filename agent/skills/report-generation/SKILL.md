@@ -215,30 +215,14 @@ Only proceed to report generation after validation passes or the operator resolv
 9. Write executive summary LAST — it depends on the complete finding set and chain analysis
 10. Verify: severity counts in executive summary match the actual finding list
 
-## After Writing the Report
+## After Writing the Draft
 
 1. **Write report to `$ENGAGEMENT_DIR/report.md`**
-2. **Emit a runtime event** so the orchestrator and UI know the report exists:
-   ```bash
-   ./scripts/assess.py emit-event \
-       "report.generated" \
-       "report" \
-       "report.md" \
-       "report-writer" \
-       "Report generated with N findings"
-   ```
-3. **Update finding workflow status to `reported`** for all findings included in the report:
-   ```bash
-   # For each finding slug included in the report, use the finding-specific helper so the
-   # workflow transition stays explicit at the command line:
-   ./scripts/assess.py update-finding FINDING-VA-003 \
-     --status reported \
-     --notes "Included in report.md" \
-     --reason "Included in the generated report deliverable." \
-     --source-name report-writer \
-     --provenance-inline '{"reported_by":"report-writer"}'
-   ```
-   This advances the workflow lifecycle after verification has already established the durable disposition.
+2. **Run the post-generation self-review below**
+3. **Fix report-local failures before returning to the operator**
+4. **Return the completed checklist and current QA status**
+
+Do not emit `report.generated` or mark findings `reported` during draft generation. Publication belongs after the operator dispatches a fresh report-writer in review-and-fix QA mode and receives `QA PASS`, because lifecycle transitions before QA make an unreviewed report look final.
 
 ## Post-Generation Self-Review
 
@@ -256,6 +240,40 @@ After writing the report, verify every finding against `agent/rules/reporting.md
 10. Executive summary ≤ one page (Rule 10)
 11. Severity counts in executive summary match actual finding list
 12. Every finding appears in the slug cross-reference table
+
+## Review-and-Fix QA Mode
+
+When the operator dispatches report-writer in review-and-fix QA mode, load the existing `$ENGAGEMENT_DIR/report.md`, pull the same backend report state, and run the 12 checks above against the rendered report.
+
+- Fix report-local failures directly in `report.md`: wording, structure, counts, cross-reference rows, missing annotations, overlong evidence, title echoes, passive voice, and non-load-bearing sentences.
+- Return `QA PASS` only when all 12 checks pass after fixes.
+- Return `QA BLOCKED` when the report cannot be corrected without new backend state: missing evidence, missing remediation, unresolved duplicate findings, severity/CVSS mismatch, or a finding that no longer belongs in final output. Include exact finding slugs and the required operator action.
+
+## Publish After QA Pass
+
+Run these publication steps only after the operator confirms the report QA gate passed:
+
+1. **Emit a runtime event** so the orchestrator and UI know the report exists:
+   ```bash
+   ./scripts/assess.py emit-event \
+       "report.generated" \
+       "report" \
+       "report.md" \
+       "report-writer" \
+       "Report generated with N findings"
+   ```
+2. **Update finding workflow status to `reported`** for all findings included in the report:
+   ```bash
+   # For each finding slug included in the report, use the finding-specific helper so the
+   # workflow transition stays explicit at the command line:
+   ./scripts/assess.py update-finding FINDING-VA-003 \
+     --status reported \
+     --notes "Included in report.md" \
+     --reason "Included in the generated report deliverable." \
+     --source-name report-writer \
+     --provenance-inline '{"reported_by":"report-writer"}'
+   ```
+   This advances the workflow lifecycle after verification and report QA have established the durable disposition.
 
 ## Email Disclosure Reports
 

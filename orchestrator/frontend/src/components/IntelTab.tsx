@@ -82,6 +82,42 @@ function sevDotColor(sev: string): string {
   return SEV_COLORS[sev] || "#9a988d";
 }
 
+// Per-entity accent colors used when a row has no CVSS-derived severity
+// (i.e. everything except CVE). Keeps the Intel list visually distinguishable
+// by category instead of painting every row the default gray.
+const ITYPE_COLORS: Record<string, string> = {
+  tech_component: "#17354c",
+  person: "#7c3aed",
+  email: "#2f7f52",
+  domain: "#0d6b6b",
+  credentials: "#c64d15",
+  cve: "#991b1b",
+  dns_record: "#4b5563",
+  social_profile: "#be185d",
+  breach_record: "#6b0d0d",
+  org_fact: "#a16207",
+  note: "#8c7b62",
+};
+
+// Status color buckets. Arbitrary status strings from different intel types
+// (domain live_status, credential state, CVE validation_status, etc.) collapse
+// into a small semantic palette so the Status filter chips read consistently.
+const STATUS_COLORS: Record<string, string> = {
+  active: "#2f7f52",
+  blocked: "#991b1b",
+  exploited: "#6b0d0d",
+  false_positive: "#8c7b62",
+  unreviewed: "#9a988d",
+};
+function statusColorKey(s: string): string {
+  const v = s.toLowerCase();
+  if (v === "active" || v === "live" || v === "up" || v === "valid" || v === "version_match") return "active";
+  if (v === "blocked" || v === "down" || v === "dead" || v === "revoked" || v === "invalid") return "blocked";
+  if (v === "exploited") return "exploited";
+  if (v === "ruled_out" || v === "false_positive") return "false_positive";
+  return "unreviewed";
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 function relTime(iso: string | undefined | null): string {
   if (!iso) return "";
@@ -952,9 +988,10 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
                 <button
                   key={spec.key}
                   type="button"
-                  className={`filter-chip ${entityFilters.has(spec.key) ? "is-active" : ""}`}
+                  className={`filter-chip itype-${spec.key} ${entityFilters.has(spec.key) ? "is-active" : ""}`}
                   onClick={() => toggle(entityFilters, setEntityFilters, spec.key)}
                 >
+                  <span className="sev-dot" style={{ background: ITYPE_COLORS[spec.key] }} />
                   {spec.label}
                   <span className="filter-count">{count}</span>
                 </button>
@@ -971,9 +1008,10 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
                   <button
                     key={s}
                     type="button"
-                    className={`filter-chip ${statusFilters.has(s) ? "is-active" : ""}`}
+                    className={`filter-chip istatus-${statusColorKey(s)} ${statusFilters.has(s) ? "is-active" : ""}`}
                     onClick={() => toggle(statusFilters, setStatusFilters, s)}
                   >
+                    <span className="sev-dot" style={{ background: STATUS_COLORS[statusColorKey(s)] }} />
                     {s.replace(/_/g, " ")}
                     <span className="filter-count">{n}</span>
                   </button>
@@ -990,9 +1028,10 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
                   <button
                     key={s}
                     type="button"
-                    className={`filter-chip ${sourceFilters.has(s) ? "is-active" : ""}`}
+                    className={`filter-chip isource ${sourceFilters.has(s) ? "is-active" : ""}`}
                     onClick={() => toggle(sourceFilters, setSourceFilters, s)}
                   >
+                    <span className="sev-dot" style={{ background: "#0d6b6b" }} />
                     {s}
                     <span className="filter-count">{n}</span>
                   </button>
@@ -1280,7 +1319,9 @@ function IntelRow({
   freeTerms: string[];
   gridTemplate?: string;
 }) {
-  const sevClass = d.sev || "info";
+  const isCveWithSev = d.entity === "cve" && d.sev != null;
+  const barClass = isCveWithSev ? `sevbar-${d.sev}` : `ibar-${d.entity}`;
+  const pillClass = isCveWithSev ? String(d.sev) : `itype-${d.entity}`;
   return (
     <button
       type="button"
@@ -1289,8 +1330,8 @@ function IntelRow({
       data-id={d.id}
       style={gridTemplate ? { gridTemplateColumns: gridTemplate } : undefined}
     >
-      <span className={`frow-sevbar sevbar-${sevClass}`} />
-      <span className={`frow-sev ${sevClass}`}>{d.entityLabel}</span>
+      <span className={`frow-sevbar ${barClass}`} />
+      <span className={`frow-sev ${pillClass}`}>{d.entityLabel}</span>
       <span className="frow-main">
         <span className="frow-title">{highlight(d.title, freeTerms)}</span>
         <span className="frow-meta">
@@ -1372,7 +1413,11 @@ function Drawer({ d, maximized, onToggleMaximize }: DrawerProps) {
     { id: "raw", label: "Raw" },
   ];
   const visibleTabs = tabs.filter((t) => !t.hidden);
+  const isCveWithSev = d.entity === "cve" && d.sev != null;
   const sevClass = d.sev || "info";
+  const heroAccentClass = isCveWithSev ? `sev-${d.sev}` : `itype-${d.entity}`;
+  const heroPillClass = isCveWithSev ? sevClass : `itype-${d.entity}`;
+  const heroDotColor = isCveWithSev ? sevDotColor(sevClass) : ITYPE_COLORS[d.entity];
 
   const copyId = () => {
     try {
@@ -1384,7 +1429,7 @@ function Drawer({ d, maximized, onToggleMaximize }: DrawerProps) {
 
   return (
     <aside className="drawer-panel panel">
-      <div className={`drawer-hero sev-${sevClass}`}>
+      <div className={`drawer-hero ${heroAccentClass}`}>
         <div className="drawer-top">
           <div className="drawer-slug">
             <span>{d.id}</span>
@@ -1412,8 +1457,8 @@ function Drawer({ d, maximized, onToggleMaximize }: DrawerProps) {
         </div>
         <h2 className="drawer-title">{d.title}</h2>
         <div className="hero-meta">
-          <span className={`hero-sev ${sevClass}`}>
-            <span className="sev-dot" style={{ background: sevDotColor(sevClass) }} />
+          <span className={`hero-sev ${heroPillClass}`}>
+            <span className="sev-dot" style={{ background: heroDotColor }} />
             {d.entityLabel}
           </span>
           {d.sevLabel && <span className="tag cve">{d.sevLabel}</span>}
