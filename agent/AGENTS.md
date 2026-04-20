@@ -156,7 +156,7 @@ Before every dispatch, verify:
 - [ ] Matching skill's paired references identified from `agent/references/INDEX.md`
 - [ ] Prior relevant findings or existing finding slugs included (so the agent can reference them instead of creating duplicates)
 - [ ] Activity log checked for duplicate dispatch — `./scripts/assess.py fetch activity-entries` (DEDUP rule)
-- [ ] Command history checked — `./scripts/assess.py list-command-runs --agent-name <role> --phase <current>` reviewed for prior runs that already cover the objective
+- [ ] Command history checked — `./scripts/assess.py list-command-runs --q <keyword>` reviewed for prior runs that already cover the objective. Default to an unscoped search so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, open its preview with `./scripts/assess.py get-command-run <id>` — `success=true` only means return_code=0, not that the output answers the current question
 - [ ] Parallelism decision made (independent → parallel, dependent → sequential)
 
 DEDUP: Check the activity log (`assess.py fetch activity-entries`) before dispatch — re-dispatching the same agent for the same objective wastes a full context window and risks duplicate findings.
@@ -316,21 +316,33 @@ suppressed but still hashed; large outputs spill to engagement artifacts).
 Use that history to avoid duplicating work.
 
 Before dispatching a specialist for a probing, scanning, fuzzing, or test
-objective, check whether equivalent commands already ran this engagement:
+objective, check whether equivalent commands already ran this engagement.
+Default to an unscoped search so you see every agent's and every phase's
+prior work on the target; narrow with `--agent-name` or `--phase` only after
+the broad result is overwhelming. Cross-agent and cross-phase context is
+usually the most valuable reuse signal; scoping it out by default hides
+exactly the information you need:
 
 ```bash
-./scripts/assess.py list-command-runs \
-    --agent-name <role> \
-    --phase <current-phase> \
-    --q <keyword>
+./scripts/assess.py list-command-runs --q <keyword>
 ```
 
 Common reasons to re-run anyway — call them out in the dispatch context so
-the specialist does not repeat work that has already resolved:
+the specialist does not repeat work that has already resolved. This list is
+not exhaustive; dispatch with any reason you can name:
 
 1. The target's state changed since the prior run (new port, new auth context, deployed change).
-2. The prior run was partial or timed out and left coverage open.
-3. The new hypothesis needs a materially different payload set or tooling, not just a retry.
+2. The prior run was partial, timed out, or returned ambiguous output (success=true on a soft-failure page, rate-limited response, WAF interposition).
+3. The new hypothesis needs a materially different payload family, tool, or instrumentation, not just a retry.
+4. An independent baseline is needed — cross-agent or cross-phase runs may have used a context that doesn't map to the new specialist's.
+5. Time has passed and a regression check is warranted (networks drift, targets redeploy mid-engagement).
+6. The new dispatch is probing a boundary or interaction between two prior runs that neither covered.
+
+Before telling a specialist to reuse a prior run, fetch its preview with
+`./scripts/assess.py get-command-run <id>` and confirm the stored evidence
+answers the current question. A row with `success=true` only means
+`return_code=0` — open the preview to rule out soft-failure pages, WAF
+intercepts, and rate-limited stubs that exit cleanly.
 
 See `agent/references/runtime-guides/command-history-auditing.md` for the
 full reuse decision table and output-field interpretation.

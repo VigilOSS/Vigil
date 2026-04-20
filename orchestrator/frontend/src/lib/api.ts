@@ -445,6 +445,97 @@ export function listAssessmentCoverageItems(engagementKey: string) {
   return request<AssessmentCoverageItem[]>(`/engagements/${engagementKey}/assessment/coverage-items`);
 }
 
+// ── Assessment command runs ─────────────────────────────
+// Schema mirrors `assessment_command_runs` + `_serialize_command_run` in the
+// backend: list rows elide the preview text (preview_chars counts + hashes
+// remain so callers can decide whether to request the detail endpoint with
+// full output).
+export type AssessmentCommandRun = {
+  id: number;
+  engagement_id: number;
+  run_uuid: string;
+  command: string;
+  argv: string[];
+  tool_name: string;
+  tool_bin: string;
+  route: string;
+  agent_name: string;
+  phase: string;
+  audit_source: string;
+  return_code: number | null;
+  timed_out: boolean;
+  success: boolean;
+  started_at: string;
+  completed_at: string;
+  duration_ms: number;
+  command_hash: string;
+  stdout_sha256: string;
+  stderr_sha256: string;
+  stdout_preview: string;
+  stderr_preview: string;
+  // Listings: always "" with preview_chars populated. Detail: full text.
+  stdout_preview_chars?: number;
+  stderr_preview_chars?: number;
+  output_retention_status: string; // retained | suppressed | artifact | empty
+  stdout_suppression_reason: string;
+  stderr_suppression_reason: string;
+  stdout_artifact_ref: string;
+  stderr_artifact_ref: string;
+  stdout_bytes: number;
+  stderr_bytes: number;
+  indexed_for_embeddings_at: string | null;
+  notes: string;
+  created_at: string;
+};
+
+// Detail fetch always returns preview text (include_output=true server-side).
+export type AssessmentCommandRunDetail = AssessmentCommandRun;
+
+export type ListAssessmentCommandRunsParams = {
+  q?: string;
+  agent_name?: string;
+  phase?: string;
+  tool_name?: string;
+  tool_bin?: string;
+  audit_source?: string;
+  // Backend currently only exposes success + timed_out (no `failed` param).
+  // Rows where success=false && !timed_out are the "failed" bucket;
+  // consumers derive that client-side.
+  success?: boolean;
+  timed_out?: boolean;
+  include_output?: boolean;
+  limit?: number;
+  offset?: number;
+};
+
+export function listAssessmentCommandRuns(
+  engagementKey: string,
+  params: ListAssessmentCommandRunsParams = {},
+) {
+  const query = new URLSearchParams();
+  if (params.q) query.set("q", params.q);
+  if (params.agent_name) query.set("agent_name", params.agent_name);
+  if (params.phase) query.set("phase", params.phase);
+  if (params.tool_name) query.set("tool_name", params.tool_name);
+  if (params.tool_bin) query.set("tool_bin", params.tool_bin);
+  if (params.audit_source) query.set("audit_source", params.audit_source);
+  if (params.success != null) query.set("success", params.success ? "true" : "false");
+  if (params.timed_out != null) query.set("timed_out", params.timed_out ? "true" : "false");
+  if (params.include_output) query.set("include_output", "true");
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return request<AssessmentCommandRun[]>(
+    `/engagements/${engagementKey}/assessment/command-runs${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export function getAssessmentCommandRun(engagementKey: string, commandRunId: number) {
+  return request<AssessmentCommandRunDetail>(
+    `/engagements/${engagementKey}/assessment/command-runs/${commandRunId}`,
+  );
+}
+
 export function engagementWebSocketUrl(engagementKey: string): string {
   const url = new URL(`ws/engagements/${encodeURIComponent(engagementKey)}`, appBaseUrl());
   url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";

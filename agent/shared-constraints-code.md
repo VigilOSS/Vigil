@@ -43,11 +43,23 @@ This is NOT target-facing network work -- Kali MCP is not needed for reading sou
 
 **When code analysis does reach for Kali MCP** (for example, a fuzz campaign or
 binary-triage pass that runs a tool through the runtime), the same audit-and-reuse
-rule as the web mode applies: every call carries `engagement_key`/`agent_name`/`phase`,
-runs land in `assessment_command_runs`, and you must check
-`./scripts/assess.py list-command-runs --agent-name <role> --phase <phase> --q <keyword>`
-before re-running an equivalent command so you do not duplicate work already captured
-in the engagement audit log. Full reuse decision table:
+rule as the web mode applies: every call carries `engagement_key`/`agent_name`/`phase`
+and runs land in `assessment_command_runs`. Before re-running an equivalent
+command, search history with an unscoped query first so you see every agent's
+and every phase's prior work on the target — `./scripts/assess.py list-command-runs --q <keyword>` —
+and narrow with `--agent-name` or `--phase` only after the broad result is
+overwhelming. Re-run when any of the following apply — this list is not
+exhaustive, and you may re-run for a reason you can name that isn't listed:
+the target's state has changed; the prior run was partial, timed out, or
+returned ambiguous output (success=true on a soft-failure page, rate-limited
+response, WAF interposition); the new hypothesis requires a materially
+different payload family, tool, or instrumentation; you need an independent
+baseline; time has passed and a regression check is warranted; or you are
+probing a boundary between two prior runs that neither covered. Before
+reusing a prior run, fetch its preview with `./scripts/assess.py get-command-run <id>` —
+`success=true` only means `return_code=0`, so open the preview to rule out
+soft-failure pages, WAF intercepts, and rate-limited stubs that exit cleanly.
+Full reuse decision table:
 `agent/references/runtime-guides/command-history-auditing.md`.
 
 **Available tools:**
