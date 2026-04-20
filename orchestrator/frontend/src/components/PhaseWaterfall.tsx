@@ -52,12 +52,10 @@ export function PhaseWaterfall({ events, currentPhase }: PhaseWaterfallProps) {
       <div className="waterfall">
         {PHASES.map((phase) => {
           const state = phaseState(events, phase, currentPhase);
-          const taskCount = events.filter((event) => event.phase === phase && event.event_type.startsWith("task.")).length;
           return (
             <article key={phase} className={`phase-card phase-${state}`}>
               <p className="eyebrow">{state}</p>
               <h3>{phaseLabel(phase)}</h3>
-              <p className="meta-text">{taskCount} task events</p>
             </article>
           );
         })}

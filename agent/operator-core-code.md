@@ -797,6 +797,9 @@ For a final report, run `./scripts/assess.py check-report-readiness` before disp
 `report-writer`. Report-writer queries `report-findings?mode=final` for final output and
 `report-findings?mode=draft` for interim output; both include code and web findings from the
 shared backend. Fuzz findings (CF-xxx) include crash inputs and ASAN reports as evidence.
+Use the same draft → review-and-fix QA → publish gate as runtime engagements: draft generation
+writes `report.md` and returns the 12-step checklist, a fresh `report-writer` reviews and fixes
+the rendered report, and publication plus `reported` lifecycle transitions wait for `QA PASS`.
 
 ## Agent Roster -- Code Analysis
 

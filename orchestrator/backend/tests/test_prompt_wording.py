@@ -344,10 +344,20 @@ def test_prompt_stack_uses_current_report_and_dedup_contracts():
     assert "check-report-readiness" in operator_core
     assert "report-findings?mode=final" in operator_core
     assert "report-findings?mode=draft" in operator_core
+    assert "review-and-fix mode" in operator_core
+    assert "Publication before QA passes creates false workflow state" in operator_core
     assert "check-report-readiness" in operator_core_code
     assert "report-findings?mode=final" in operator_core_code
+    assert "review-and-fix QA" in operator_core_code
+    assert "QA PASS" in operator_core_code
     assert "belongs after Verify in Phase 5" in handoff
+    assert "review-and-fix QA mode" in handoff
     assert "check-report-readiness" in report_skill
     assert 'fetch "report-findings?mode=final"' in report_skill
     assert 'fetch "report-findings?mode=draft"' in report_skill
+    assert "Do not emit `report.generated` or mark findings `reported` during draft generation" in report_skill
+    assert "Review-and-Fix QA Mode" in report_skill
+    assert "Publish After QA Pass" in report_skill
     assert 'fetch "report-findings?mode=final"' in report_writer
+    assert "Review-and-fix QA mode" in report_writer
+    assert "Publish mode" in report_writer

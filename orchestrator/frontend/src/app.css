@@ -2067,14 +2067,23 @@ input {
 }
 
 .findings-redesign .section-title {
-  font-size: 0.72rem;
+  font-size: 0.74rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--muted);
-  margin: 0 0 6px;
+  color: var(--ink);
+  font-weight: 600;
+  margin: 0 0 8px;
   display: flex;
   align-items: center;
   gap: 6px;
+}
+.findings-redesign .section-title::before {
+  content: "";
+  width: 3px;
+  height: 0.9em;
+  background: var(--accent);
+  border-radius: 2px;
+  display: inline-block;
 }
 .findings-redesign .section p,
 .findings-redesign .section li {
@@ -2089,6 +2098,10 @@ input {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px 18px;
+  padding: 12px 14px;
+  background: rgba(23, 53, 76, 0.035);
+  border: 1px solid var(--border);
+  border-radius: 12px;
 }
 .findings-redesign .kv .k {
   font-size: 0.7rem;
@@ -2112,14 +2125,32 @@ input {
 .findings-redesign .callout {
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 10px 12px;
+  padding: 12px 14px;
   background: rgba(255, 255, 255, 0.6);
   display: grid;
-  gap: 4px;
+  gap: 6px;
 }
-.findings-redesign .callout.impact { border-left: 3px solid #991b1b; }
-.findings-redesign .callout.remediation { border-left: 3px solid var(--ok); }
-.findings-redesign .callout.kill { border-left: 3px solid var(--pending); }
+/* Tinted backgrounds + wider left stripe so Impact/Remediation/Kill pop
+ * against neighboring plain sections. The section-title's ::before bar
+ * inside a callout picks up the callout's accent color. */
+.findings-redesign .callout.impact {
+  border-left: 4px solid #991b1b;
+  background: rgba(153, 27, 27, 0.05);
+}
+.findings-redesign .callout.remediation {
+  border-left: 4px solid var(--ok);
+  background: rgba(47, 127, 82, 0.05);
+}
+.findings-redesign .callout.kill {
+  border-left: 4px solid var(--pending);
+  background: rgba(140, 123, 98, 0.06);
+}
+.findings-redesign .callout.impact .section-title::before      { background: #991b1b; }
+.findings-redesign .callout.remediation .section-title::before { background: var(--ok); }
+.findings-redesign .callout.kill .section-title::before        { background: var(--pending); }
+.findings-redesign .callout.impact .section-title      { color: #991b1b; }
+.findings-redesign .callout.remediation .section-title { color: var(--ok); }
+.findings-redesign .callout.kill .section-title        { color: var(--pending); }
 
 .findings-redesign .pre {
   white-space: pre-wrap;
@@ -2510,6 +2541,83 @@ input {
 .findings-redesign .col-resize-handle:active::after {
   background: var(--accent);
 }
+
+/*
+ * Intel tab per-entity accents. Unlike the Findings tab, Intel rows don't
+ * have a uniform "severity" axis — CVEs get CVSS-bucket coloring, everything
+ * else uses a type-based accent so the tab isn't a sea of gray. Keep colors
+ * in sync with ITYPE_COLORS in IntelTab.tsx.
+ */
+.findings-redesign .ibar-tech_component  { background: #17354c; }
+.findings-redesign .ibar-person          { background: #7c3aed; }
+.findings-redesign .ibar-email           { background: #2f7f52; }
+.findings-redesign .ibar-domain          { background: #0d6b6b; }
+.findings-redesign .ibar-credentials     { background: #c64d15; }
+.findings-redesign .ibar-cve             { background: #991b1b; }
+.findings-redesign .ibar-dns_record      { background: #4b5563; }
+.findings-redesign .ibar-social_profile  { background: #be185d; }
+.findings-redesign .ibar-breach_record   { background: #6b0d0d; }
+.findings-redesign .ibar-org_fact        { background: #a16207; }
+.findings-redesign .ibar-note            { background: #8c7b62; }
+
+.findings-redesign .frow-sev.itype-tech_component  { color: #17354c; }
+.findings-redesign .frow-sev.itype-person          { color: #7c3aed; }
+.findings-redesign .frow-sev.itype-email           { color: #2f7f52; }
+.findings-redesign .frow-sev.itype-domain          { color: #0d6b6b; }
+.findings-redesign .frow-sev.itype-credentials     { color: #c64d15; }
+.findings-redesign .frow-sev.itype-cve             { color: #991b1b; }
+.findings-redesign .frow-sev.itype-dns_record      { color: #4b5563; }
+.findings-redesign .frow-sev.itype-social_profile  { color: #be185d; }
+.findings-redesign .frow-sev.itype-breach_record   { color: #6b0d0d; }
+.findings-redesign .frow-sev.itype-org_fact        { color: #a16207; }
+.findings-redesign .frow-sev.itype-note            { color: #8c7b62; }
+
+.findings-redesign .drawer-hero.itype-tech_component::before  { background: #17354c; }
+.findings-redesign .drawer-hero.itype-person::before          { background: #7c3aed; }
+.findings-redesign .drawer-hero.itype-email::before           { background: #2f7f52; }
+.findings-redesign .drawer-hero.itype-domain::before          { background: #0d6b6b; }
+.findings-redesign .drawer-hero.itype-credentials::before     { background: #c64d15; }
+.findings-redesign .drawer-hero.itype-cve::before             { background: #991b1b; }
+.findings-redesign .drawer-hero.itype-dns_record::before      { background: #4b5563; }
+.findings-redesign .drawer-hero.itype-social_profile::before  { background: #be185d; }
+.findings-redesign .drawer-hero.itype-breach_record::before   { background: #6b0d0d; }
+.findings-redesign .drawer-hero.itype-org_fact::before        { background: #a16207; }
+.findings-redesign .drawer-hero.itype-note::before            { background: #8c7b62; }
+
+.findings-redesign .hero-sev.itype-tech_component  { background: rgba(23,53,76,0.10);  color: #17354c; }
+.findings-redesign .hero-sev.itype-person          { background: rgba(124,58,237,0.12); color: #7c3aed; }
+.findings-redesign .hero-sev.itype-email           { background: rgba(47,127,82,0.14);  color: #2f7f52; }
+.findings-redesign .hero-sev.itype-domain          { background: rgba(13,107,107,0.12); color: #0d6b6b; }
+.findings-redesign .hero-sev.itype-credentials     { background: rgba(198,77,21,0.14);  color: #c64d15; }
+.findings-redesign .hero-sev.itype-cve             { background: rgba(153,27,27,0.14);  color: #991b1b; }
+.findings-redesign .hero-sev.itype-dns_record      { background: rgba(75,85,99,0.12);   color: #4b5563; }
+.findings-redesign .hero-sev.itype-social_profile  { background: rgba(190,24,93,0.12);  color: #be185d; }
+.findings-redesign .hero-sev.itype-breach_record   { background: rgba(107,13,13,0.14);  color: #6b0d0d; }
+.findings-redesign .hero-sev.itype-org_fact        { background: rgba(161,98,7,0.14);   color: #a16207; }
+.findings-redesign .hero-sev.itype-note            { background: rgba(140,123,98,0.12); color: #6b685d; }
+
+/* Intel filter chips: active-state tints. Inactive chips keep their sev-dot
+ * visible so you can scan the whole filter bar by color, not just by label.
+ * Active state swaps border + bg + text to the dot's hue. */
+.findings-redesign .filter-chip.is-active.itype-tech_component  { border-color: #17354c; background: rgba(23,53,76,0.10);  color: #17354c; }
+.findings-redesign .filter-chip.is-active.itype-person          { border-color: #7c3aed; background: rgba(124,58,237,0.12); color: #7c3aed; }
+.findings-redesign .filter-chip.is-active.itype-email           { border-color: #2f7f52; background: rgba(47,127,82,0.14);  color: #2f7f52; }
+.findings-redesign .filter-chip.is-active.itype-domain          { border-color: #0d6b6b; background: rgba(13,107,107,0.12); color: #0d6b6b; }
+.findings-redesign .filter-chip.is-active.itype-credentials     { border-color: #c64d15; background: rgba(198,77,21,0.14);  color: #c64d15; }
+.findings-redesign .filter-chip.is-active.itype-cve             { border-color: #991b1b; background: rgba(153,27,27,0.12);  color: #991b1b; }
+.findings-redesign .filter-chip.is-active.itype-dns_record      { border-color: #4b5563; background: rgba(75,85,99,0.12);   color: #4b5563; }
+.findings-redesign .filter-chip.is-active.itype-social_profile  { border-color: #be185d; background: rgba(190,24,93,0.12);  color: #be185d; }
+.findings-redesign .filter-chip.is-active.itype-breach_record   { border-color: #6b0d0d; background: rgba(107,13,13,0.14);  color: #6b0d0d; }
+.findings-redesign .filter-chip.is-active.itype-org_fact        { border-color: #a16207; background: rgba(161,98,7,0.14);   color: #a16207; }
+.findings-redesign .filter-chip.is-active.itype-note            { border-color: #8c7b62; background: rgba(140,123,98,0.12); color: #6b685d; }
+
+.findings-redesign .filter-chip.is-active.istatus-active         { border-color: #2f7f52; background: rgba(47,127,82,0.14);  color: #2f7f52; }
+.findings-redesign .filter-chip.is-active.istatus-blocked        { border-color: #991b1b; background: rgba(153,27,27,0.12);  color: #991b1b; }
+.findings-redesign .filter-chip.is-active.istatus-exploited      { border-color: #6b0d0d; background: rgba(107,13,13,0.14);  color: #6b0d0d; }
+.findings-redesign .filter-chip.is-active.istatus-false_positive { border-color: #8c7b62; background: rgba(140,123,98,0.12); color: #6b685d; }
+.findings-redesign .filter-chip.is-active.istatus-unreviewed     { border-color: #9a988d; background: rgba(154,152,141,0.16); color: #5a584f; }
+
+.findings-redesign .filter-chip.is-active.isource { border-color: #0d6b6b; background: rgba(13,107,107,0.12); color: #0d6b6b; }
 
 /* Small screens */
 @media (max-width: 1100px) {
