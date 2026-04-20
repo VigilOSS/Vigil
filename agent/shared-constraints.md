@@ -72,25 +72,41 @@ timeout state, timings, and an output preview (or artifact ref) to the
 orchestrator backend. Treat that history as shared engagement state.
 
 Before issuing a probing, scanning, fuzzing, or credential-testing command,
-search for prior runs that already cover the same objective:
+search for prior runs that already cover the same objective. Default to an
+unscoped search so you see every agent's and every phase's prior work on the
+target; narrow with `--agent-name` or `--phase` only after the broad result is
+overwhelming:
 
 ```bash
-./scripts/assess.py list-command-runs \
-    --agent-name <your-role> \
-    --phase <current-phase> \
-    --q <keyword>
+./scripts/assess.py list-command-runs --q <keyword>
 ```
 
-Duplicate probing wastes context, hides whether a real signal already exists,
-and risks rate-limiting a target that is already well-characterized — so reuse
-the prior result when it matches. Re-run only when:
+The audit table exists to make prior work visible, not to discourage fresh
+probes. Shallow coverage is more expensive than a second probe: silently
+trusting a prior run that answered a different question misses findings.
+Re-running with a stated reason is cheap; under-probing is not. Reuse when the
+prior run actually answers your current question — not when it merely
+overlaps.
+
+Re-run when any of the following apply — this list is not exhaustive, and you
+may re-run for a reason you can name that isn't listed:
 
 1. The target's state has changed since the prior run (new port, deployed change, auth now available).
-2. The prior run was partial or timed out and left coverage open.
-3. The new hypothesis requires a materially different payload set or tool, not a retry.
+2. The prior run was partial, timed out, or returned ambiguous output (success=true on a soft-failure page, rate-limited response, WAF interposition).
+3. The new hypothesis requires a materially different payload family, tool, or instrumentation (e.g. capturing headers you didn't last time).
+4. You need an independent baseline for your own reasoning — cross-agent or cross-phase runs may have used a context that doesn't map to yours.
+5. Time has passed and a regression check is warranted (networks drift, targets redeploy mid-engagement).
+6. You are probing a boundary or interaction between two prior runs that neither covered.
 
-When re-running is justified, name the reason in your output alongside the new
-command so a reviewer can audit the decision against the prior record.
+When re-running, name the reason so the audit trail is legible. The reviewer
+is not the gatekeeper of re-running; they are the reader of your output.
+
+Before reusing a prior run, fetch its preview with `./scripts/assess.py get-command-run <id>`
+and confirm the stored evidence answers your current question. A row with
+`success=true` only means `return_code=0`. Open the preview to rule out
+soft-failure pages, WAF intercepts, and rate-limited stubs that exit cleanly.
+Reuse is only cheap when the prior output actually speaks to your hypothesis;
+citing an id you never looked at is worse than running a fresh probe.
 
 Full reuse decision table and output-field interpretation:
 `agent/references/runtime-guides/command-history-auditing.md`.

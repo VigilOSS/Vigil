@@ -30,10 +30,10 @@ to interpret the audit fields.
 | Prior run state | Current need | Decision |
 | --- | --- | --- |
 | Same tool, same target, success, retained output covers the question | Same objective | **Reuse.** Quote the prior run id in your output. |
-| Same tool, same target, success, output suppressed by retention policy | Same objective, need raw bytes | **Fetch artifact** via `get-command-run` before re-running — artifact is the canonical copy. |
+| Same tool, same target, success, output suppressed by retention policy | Same objective, need raw bytes | **Check `output_retention_status` on the row.** If `artifact`, fetch the spillover file via `stdout_artifact_ref` / `stderr_artifact_ref`. If `suppressed`, only the SHA256 hash is stored — there is no recoverable output. Re-run with a non-suppressing configuration (narrower scope, smaller output) or accept the hash as dedup-only evidence. |
 | Same tool, same target, `timed_out=true` | Same objective, full coverage needed | **Re-run with tuned timeout or narrower input.** Cite the timeout in your justification. |
 | Same tool, same target, `return_code != 0` | Same objective | **Investigate stderr first.** Re-run only if the failure reason is known and addressable. |
-| Same tool, different target, success | Similar objective on a new target | **New run justified.** The audit table indexes by target via command text, not by auto-correlation, so the reviewer expects a fresh row. |
+| Same tool, different target, success | Similar objective on a new target | **A fresh run is appropriate.** The audit layer does not auto-correlate by target — there is no `target_host` column — so retrieval by target requires keyword search against the command text. Do not assume prior runs against other targets tell you anything about this one. |
 | Same tool and target, success, but stored before an auth change | Same objective with new credentials | **Re-run.** Note `auth context changed` in the dispatch reason. |
 | Same tool and target, success, new hypothesis (different payload family) | Different objective | **New run justified.** Different payloads mean different coverage. |
 
@@ -73,12 +73,29 @@ for sub-agent introspection.
 ## When to Record the Reuse Decision
 
 If you reuse a prior run instead of re-running, cite the prior `id` in your
-output so a reviewer can audit the decision:
+output so the audit trail is legible:
 
 > Reused command-run #142 (nmap TCP top-1000 on 10.0.0.5 from recon-specialist, success, stdout retained). No re-scan required — target state unchanged since 2026-04-17T09:12Z.
 
-If you re-run anyway, state which of the three re-run conditions applied
-(state changed, prior partial/timed-out, different hypothesis) and why.
+Re-run when any of the following apply — this list is not exhaustive, and you
+may re-run for a reason you can name that isn't listed:
+
+1. The target's state has changed since the prior run (new port, deployed change, auth now available).
+2. The prior run was partial, timed out, or returned ambiguous output (success=true on a soft-failure page, rate-limited response, WAF interposition).
+3. The new hypothesis requires a materially different payload family, tool, or instrumentation (e.g. capturing headers you didn't last time).
+4. You need an independent baseline for your own reasoning — cross-agent or cross-phase runs may have used a context that doesn't map to yours.
+5. Time has passed and a regression check is warranted (networks drift, targets redeploy mid-engagement).
+6. You are probing a boundary or interaction between two prior runs that neither covered.
+
+When re-running, record your reasoning so the audit trail is legible. The
+reviewer is the reader of your output, not the gatekeeper of re-running.
+
+Before reusing a prior run, fetch its preview with `./scripts/assess.py get-command-run <id>`
+and confirm the stored evidence answers your current question. A row with
+`success=true` only means `return_code=0`. Open the preview to rule out
+soft-failure pages, WAF intercepts, and rate-limited stubs that exit cleanly.
+Reuse is only cheap when the prior output actually speaks to your hypothesis;
+citing an id you never looked at is worse than running a fresh probe.
 
 ## Scope
 

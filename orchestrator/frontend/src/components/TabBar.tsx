@@ -7,6 +7,9 @@
 //   Surfaces   — what we can attack (bridges intel → findings)
 //   Coverage   — where we've tested (quantitative companion to Surfaces)
 //   Code       — code-analysis results, own domain
+//   Commands   — Kali MCP command-run audit; a deeper cut of Activity that
+//                exposes per-tool exit codes, output retention, and argv
+//                so operators can audit what actually ran
 //   Activity   — structured state-change timeline
 //   Log        — narrative prose activity (sits next to Activity so the
 //                two log-style tabs are adjacent)
@@ -18,6 +21,7 @@ export const TABS = [
   { key: "surfaces", label: "Surfaces" },
   { key: "coverage", label: "Coverage" },
   { key: "code", label: "Code" },
+  { key: "commands", label: "Commands" },
   { key: "activity", label: "Activity" },
   { key: "log", label: "Log" },
   { key: "artifacts", label: "Artifacts" },
