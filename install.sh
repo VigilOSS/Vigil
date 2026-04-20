@@ -2,9 +2,8 @@
 # install.sh — AI Threat Hunting installation script
 #
 # Usage:
-#   ./install.sh claude [target_dir]
-#   ./install.sh codex [target_dir]
-#   ./install.sh --dry-run claude
+#   ./install.sh [target_dir]
+#   ./install.sh --dry-run
 #
 # This installer provisions workflows for authorized realistic lab environments only.
 # Supported platforms: macOS and Linux only.
@@ -12,10 +11,7 @@ set -euo pipefail
 
 show_help() {
   cat <<'EOF'
-Usage: ./install.sh [--dry-run] [--force] <claude|codex> [target_dir]
-
-  claude  Install the Claude Code workflow files
-  codex   Install the Codex workflow files
+Usage: ./install.sh [--dry-run] [--force] [target_dir]
 
 Options:
   --dry-run  Validate the install without writing files
@@ -26,7 +22,6 @@ EOF
 
 DRY_RUN=false
 FORCE_REBUILD=false
-PRODUCT=""
 TARGET_DIR=""
 SKIP_PREREQ_CHECKS="${AI_THREAT_HUNTING_SKIP_PREREQ_CHECKS:-${REDTEAM_SKIP_PREREQ_CHECKS:-0}}"
 SKIP_DOCKER_IMAGE_CHECKS="${AI_THREAT_HUNTING_SKIP_DOCKER_IMAGE_CHECKS:-${REDTEAM_SKIP_DOCKER_IMAGE_CHECKS:-0}}"
@@ -36,15 +31,22 @@ for arg in "$@"; do
     --dry-run) DRY_RUN=true ;;
     --force) FORCE_REBUILD=true ;;
     -h|--help) show_help; exit 0 ;;
-    claude|codex) PRODUCT="$arg" ;;
-    *) [ -z "$TARGET_DIR" ] && TARGET_DIR="$arg" ;;
+    claude|codex)
+      echo "Client arguments were removed; install.sh now installs both Codex and Claude workflow files." >&2
+      show_help >&2
+      exit 1
+      ;;
+    *)
+      if [ -z "$TARGET_DIR" ]; then
+        TARGET_DIR="$arg"
+      else
+        echo "Unexpected extra argument: $arg" >&2
+        show_help >&2
+        exit 1
+      fi
+      ;;
   esac
 done
-
-if [ -z "$PRODUCT" ]; then
-  show_help
-  exit 1
-fi
 
 INSTALL_DIR="${TARGET_DIR:-${AI_THREAT_HUNTING_DIR:-${REDTEAM_DIR:-$HOME/security-research}}}"
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -169,11 +171,11 @@ remove_children_except() {
 echo ""
 if $DRY_RUN; then
   echo "╔══════════════════════════════════════════════════════════════╗"
-  echo "║   AI Threat Hunting — DRY RUN ($PRODUCT)                    ║"
+  echo "║   AI Threat Hunting — DRY RUN                               ║"
   echo "╚══════════════════════════════════════════════════════════════╝"
 else
   echo "╔══════════════════════════════════════════════════════════════╗"
-  echo "║   AI Threat Hunting — Install for $PRODUCT                  ║"
+  echo "║   AI Threat Hunting — Install                               ║"
   echo "╚══════════════════════════════════════════════════════════════╝"
 fi
 echo ""
@@ -193,11 +195,11 @@ else
     fi
   done
 
-  if [ "$PRODUCT" = "claude" ] && ! command -v claude >/dev/null 2>&1; then
+  if ! command -v claude >/dev/null 2>&1; then
     fail "Claude Code not installed"
     ERRORS=$((ERRORS + 1))
   fi
-  if [ "$PRODUCT" = "codex" ] && ! command -v codex >/dev/null 2>&1; then
+  if ! command -v codex >/dev/null 2>&1; then
     fail "Codex not installed"
     ERRORS=$((ERRORS + 1))
   fi
@@ -268,17 +270,10 @@ else
     # orchestrator/backend/: remove everything except data/
     remove_children_except "$INSTALL_DIR/orchestrator/backend" data
   fi
-    # Product-specific config
-    case "$PRODUCT" in
-      claude)
-        copy_if_exists "$AGENT_ROOT/.claude" "$INSTALL_DIR/.claude"
-        copy_if_exists "$AGENT_ROOT/CLAUDE.md" "$INSTALL_DIR/CLAUDE.md"
-        ;;
-      codex)
-        copy_if_exists "$AGENT_ROOT/.codex" "$INSTALL_DIR/.codex"
-        copy_if_exists "$AGENT_ROOT/AGENTS.md" "$INSTALL_DIR/AGENTS.md"
-        ;;
-    esac
+    copy_if_exists "$AGENT_ROOT/.claude" "$INSTALL_DIR/.claude"
+    copy_if_exists "$AGENT_ROOT/.codex" "$INSTALL_DIR/.codex"
+    copy_if_exists "$AGENT_ROOT/CLAUDE.md" "$INSTALL_DIR/CLAUDE.md"
+    copy_if_exists "$AGENT_ROOT/AGENTS.md" "$INSTALL_DIR/AGENTS.md"
 
     if $IS_UPGRADE; then
       # Copy managed paths, skipping user-data directories in place
@@ -300,18 +295,6 @@ else
       done
     fi
   fi
-
-  # Remove opposite product's config from agent/
-  case "$PRODUCT" in
-    claude)
-      rm -rf "$INSTALL_DIR/agent/.codex"
-      rm -f "$INSTALL_DIR/agent/AGENTS.md"
-      ;;
-    codex)
-      rm -rf "$INSTALL_DIR/agent/.claude"
-      rm -f "$INSTALL_DIR/agent/CLAUDE.md"
-      ;;
-  esac
 
   UPGRADE_IN_PROGRESS=false
 
@@ -363,7 +346,7 @@ fi
 
 echo ""
 echo "════════════════════════════════════════════════════════════════"
-echo -e "${GREEN}Installation complete! (${PRODUCT})${NC}"
+echo -e "${GREEN}Installation complete!${NC}"
 echo ""
 echo "  Installed to: $INSTALL_DIR"
 echo ""
@@ -371,14 +354,8 @@ echo "  Next steps:"
 echo "    Configure shared runtime env in $INSTALL_DIR/.env as needed"
 echo "    cd $INSTALL_DIR"
 echo "    ./agent/scripts/start_kali_mcp_runtime.sh"
-case "$PRODUCT" in
-  claude)
-    echo "    claude mcp add kali -s user -- docker exec -i security-research mcp-server"
-    ;;
-  codex)
-    echo "    codex mcp add kali -- docker exec -i security-research mcp-server"
-    ;;
-esac
+echo "    claude mcp add kali -s user -- docker exec -i security-research mcp-server"
+echo "    codex mcp add kali -- docker exec -i security-research mcp-server"
 echo ""
 echo "    # in another terminal"
 echo "    cd $INSTALL_DIR"
@@ -389,12 +366,7 @@ echo "    cd $INSTALL_DIR/agent"
 echo "    ./scripts/init_engagement.sh https://target.example --scope-mode host_only --auth-mode none --exploit-policy pause"
 echo ""
 echo "    # then enter the printed engagement directory"
-case "$PRODUCT" in
-  claude)
-    echo "    cd /path/to/engagement && ./start_claude.sh"
-    ;;
-  codex)
-    echo "    cd /path/to/engagement && ./start_codex.sh"
-    ;;
-esac
+echo "    cd /path/to/engagement && ./start_codex.sh"
+echo "    # or"
+echo "    cd /path/to/engagement && ./start_claude.sh"
 echo ""

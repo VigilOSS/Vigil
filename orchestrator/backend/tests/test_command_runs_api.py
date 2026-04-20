@@ -193,6 +193,42 @@ def test_large_stdout_spills_to_artifact_file(client, isolate_settings):
     assert len(created["stdout_preview"].encode("utf-8")) <= 65_536 + 8
 
 
+def test_duplicate_run_uuid_does_not_overwrite_existing_artifact(client, isolate_settings):
+    engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
+    artifact_dir = engagement_dir / "custom-artifacts"
+    first_output = ("A" * 1024 + "\n") * 200
+    second_output = ("B" * 1024 + "\n") * 200
+
+    first = _post(
+        client,
+        _base_payload(
+            command="big-dump --all",
+            tool_name="execute_command",
+            stdout=first_output,
+            engagement_artifact_dir=str(artifact_dir),
+            run_uuid="dup-run",
+        ),
+    )
+    assert first.status_code == 201, first.text
+    artifact_file = Path(first.json()["stdout_artifact_ref"])
+    assert artifact_file.read_text(encoding="utf-8") == first_output
+
+    duplicate = _post(
+        client,
+        _base_payload(
+            command="big-dump --different",
+            tool_name="execute_command",
+            stdout=second_output,
+            engagement_artifact_dir=str(artifact_dir),
+            run_uuid="dup-run",
+        ),
+    )
+
+    assert duplicate.status_code == 409
+    assert "run_uuid" in duplicate.text
+    assert artifact_file.read_text(encoding="utf-8") == first_output
+
+
 def test_command_run_rejects_artifact_dir_outside_engagement_root(client, isolate_settings, tmp_path):
     _write_engagement(isolate_settings["engagements_dir"])
     outside_dir = tmp_path / "outside-artifacts"

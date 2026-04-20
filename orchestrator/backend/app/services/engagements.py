@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -32,12 +33,31 @@ class EngagementView:
 
 
 _sync_lock = Lock()
-_last_sync_signature: tuple[tuple[str, int, int | None, int | None], ...] | None = None
+_last_sync_signature: tuple[tuple[str, int | None, int | None, int | None, int | None], ...] | None = None
 _logger = logging.getLogger(__name__)
+_DELETED_ENGAGEMENTS_DIR = ".deleted-engagements"
 
 
 def engagements_root() -> Path:
     return settings.install_dir / "agent" / "engagements"
+
+
+def _deleted_engagement_marker_path(engagement_key: str) -> Path:
+    return engagements_root() / _DELETED_ENGAGEMENTS_DIR / f"{engagement_key}.json"
+
+
+def mark_engagement_deleted(engagement: Engagement) -> None:
+    marker_path = _deleted_engagement_marker_path(engagement.key)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json_atomically(
+        marker_path,
+        {
+            "key": engagement.key,
+            "id": engagement.id,
+            "engagement_root": engagement.engagement_root,
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
 
 
 def _json_file(path: Path) -> dict[str, Any]:
@@ -168,15 +188,18 @@ def _safe_mtime_ns(path: Path) -> int | None:
         return None
 
 
-def _engagements_signature() -> tuple[tuple[str, int, int | None, int | None], ...]:
+def _engagements_signature() -> tuple[tuple[str, int | None, int | None, int | None, int | None], ...]:
     root = engagements_root()
     root.mkdir(parents=True, exist_ok=True)
 
-    signature: list[tuple[str, int, int | None, int | None]] = []
+    signature: list[tuple[str, int | None, int | None, int | None, int | None]] = []
     for engagement_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        if engagement_dir.name == _DELETED_ENGAGEMENTS_DIR:
+            continue
         scope_path = engagement_dir / "scope.json"
         scope_mtime_ns = _safe_mtime_ns(scope_path)
-        if scope_mtime_ns is None:
+        marker_mtime_ns = _safe_mtime_ns(_deleted_engagement_marker_path(engagement_dir.name))
+        if scope_mtime_ns is None and marker_mtime_ns is None:
             continue
         signature.append(
             (
@@ -184,6 +207,7 @@ def _engagements_signature() -> tuple[tuple[str, int, int | None, int | None], .
                 scope_mtime_ns,
                 _safe_mtime_ns(engagement_dir / "engagement.json"),
                 _safe_mtime_ns(engagement_dir / "sessions" / "index.json"),
+                marker_mtime_ns,
             )
         )
     return tuple(signature)
@@ -195,6 +219,10 @@ def sync_engagements() -> None:
 
     discovered_keys: set[str] = set()
     for engagement_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        if engagement_dir.name == _DELETED_ENGAGEMENTS_DIR:
+            continue
+        if _deleted_engagement_marker_path(engagement_dir.name).exists():
+            continue
         if not (engagement_dir / "scope.json").exists():
             continue
         discovered_keys.add(engagement_dir.name)

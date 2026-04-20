@@ -13,6 +13,7 @@ import type {
   FindingReference,
 } from "../lib/api";
 import { listAssessmentFindingLinks, listAssessmentFindingTransitions } from "../lib/api";
+import { useResizableColumns } from "../lib/useResizableColumns";
 import { JsonTree } from "./ArtifactViewer";
 
 // ── Types & helpers ───────────────────────────────────────────────────
@@ -40,6 +41,13 @@ const SEV_COLORS: Record<string, string> = {
   low: "#17354c",
   info: "#9a988d",
 };
+
+// Default column widths (in px) for the Findings list. Order matches
+// the columns rendered in the list-header / frow below. These get saved
+// to localStorage via useResizableColumns and can be reset per-column
+// by double-clicking a handle.
+const FINDINGS_LIST_DEFAULTS = [10, 74, 520, 240, 260, 140];
+const FINDINGS_LIST_MINS = [8, 52, 220, 120, 140, 100];
 
 const KNOWN_DETAIL_KEYS = new Set<string>([
   "discovered_by",
@@ -106,29 +114,33 @@ function verificationKey(finding: FindingLike): string {
   return finding.verification_state;
 }
 
+// Human-readable labels shared across pill text, filter chip text, and
+// command-palette subtitles. Keep these maps together so a rename (e.g.
+// the old "Suppressed" → "False positive") lands everywhere at once.
+const WORKFLOW_LABELS: Record<string, string> = {
+  reported: "Reported",
+  merged: "Merged",
+  active: "Active",
+  exploited: "Exploited",
+  blocked: "Blocked",
+  false_positive: "False positive",
+};
+
+const VERIFICATION_LABELS: Record<string, string> = {
+  confirmed: "Verified",
+  downgraded: "Downgraded",
+  false_positive: "False positive",
+  disputed: "Disputed",
+  unreviewed: "Unreviewed",
+};
+
 function verificationLabel(finding: FindingLike): string {
   const k = verificationKey(finding);
-  return (
-    {
-      confirmed: "Verified",
-      downgraded: "Downgraded",
-      false_positive: "False positive",
-      disputed: "Disputed",
-      unreviewed: "Unreviewed",
-    }[k] || k
-  );
+  return VERIFICATION_LABELS[k] || k;
 }
 
 function workflowLabel(finding: FindingLike): string {
-  const map: Record<string, string> = {
-    reported: "Reported",
-    merged: "Merged",
-    active: "Active",
-    exploited: "Exploited",
-    blocked: "Blocked",
-    false_positive: "Suppressed",
-  };
-  return map[finding.workflow_status] || finding.workflow_status;
+  return WORKFLOW_LABELS[finding.workflow_status] || finding.workflow_status;
 }
 
 function relTime(iso: string | undefined | null): string {
@@ -406,30 +418,6 @@ const IconClose = () => (
     <path d="M6 6l12 12M18 6L6 18" />
   </svg>
 );
-const IconUp = () => (
-  <svg
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={2}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M18 15l-6-6-6 6" />
-  </svg>
-);
-const IconDown = () => (
-  <svg
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={2}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M6 9l6 6 6-6" />
-  </svg>
-);
 const IconCopy = () => (
   <svg
     viewBox="0 0 24 24"
@@ -457,6 +445,21 @@ const IconExternal = () => (
     <path d="M14 4h6v6" />
     <path d="M10 14L21 3" />
     <path d="M19 14v6H4V4h6" />
+  </svg>
+);
+const IconMaximize = () => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M4 9V4h5" />
+    <path d="M20 9V4h-5" />
+    <path d="M4 15v5h5" />
+    <path d="M20 15v5h-5" />
   </svg>
 );
 
@@ -520,6 +523,29 @@ export function FindingsTab({
       return null;
     }
   });
+
+  // Drawer maximize is a layout state only — does NOT persist across
+  // reloads (intentional: a maximized drawer with stale selection is a
+  // confusing first impression) and resets whenever the selection
+  // changes. Esc still un-selects via the existing keyboard handler; the
+  // top-right close-maximize icon only leaves maximized mode.
+  const [maximized, setMaximized] = useState(false);
+  useEffect(() => {
+    setMaximized(false);
+  }, [selected]);
+
+  // Column widths for the Findings list. 6 cols: [sev-bar, sev, title,
+  // location, tags, status]. Persisted per-key so the Findings and
+  // Intel tabs don't trample each other.
+  const {
+    gridTemplate: listGridTemplate,
+    startResize: startListResize,
+    resetColumn: resetListColumn,
+  } = useResizableColumns(
+    "findings.col-widths",
+    FINDINGS_LIST_DEFAULTS,
+    FINDINGS_LIST_MINS,
+  );
 
   const searchRef = useRef<HTMLInputElement | null>(null);
 
@@ -936,8 +962,6 @@ export function FindingsTab({
   const activeFilterCount =
     sevFilters.size + workflowFilters.size + verifFilters.size + (query ? 1 : 0);
 
-  const selIdx = filtered.findIndex((d) => d.slug === selected);
-
   return (
     <div className="findings-redesign">
       <div className="page-head">
@@ -1016,7 +1040,13 @@ export function FindingsTab({
                 className={`filter-chip ${workflowFilters.has(s) ? "is-active" : ""}`}
                 onClick={() => toggle(workflowFilters, setWorkflowFilters, s)}
               >
-                {s.replace(/_/g, " ")}
+                {/*
+                  Use the same human-readable map as the row pills
+                  (e.g. "false_positive" -> "False positive" rather
+                  than the old "Suppressed"). Falls back to a
+                  _-stripped value for statuses we don't label.
+                */}
+                {WORKFLOW_LABELS[s] || s.replace(/_/g, " ")}
                 <span className="filter-count">{workflowCounts[s]}</span>
               </button>
             ))}
@@ -1030,7 +1060,7 @@ export function FindingsTab({
                 className={`filter-chip ${verifFilters.has(s) ? "is-active" : ""}`}
                 onClick={() => toggle(verifFilters, setVerifFilters, s)}
               >
-                {s.replace(/_/g, " ")}
+                {VERIFICATION_LABELS[s] || s.replace(/_/g, " ")}
                 <span className="filter-count">{verifCounts[s]}</span>
               </button>
             ))}
@@ -1044,14 +1074,47 @@ export function FindingsTab({
       </div>
 
       {/* List + drawer */}
-      <div className="findings-shell">
+      <div
+        className={`findings-shell ${maximized && selectedDerived ? "is-maximized" : ""}`}
+      >
         <section className="list-panel panel">
-          <div className="list-header">
+          <div
+            className="list-header"
+            style={{ gridTemplateColumns: listGridTemplate }}
+          >
             <span />
-            <span>Sev</span>
-            <span>Title / slug</span>
-            <span>Location</span>
-            <span>Tags</span>
+            <span>
+              Sev
+              <span
+                className="col-resize-handle"
+                onPointerDown={(e) => startListResize(1, e)}
+                onDoubleClick={() => resetListColumn(1)}
+              />
+            </span>
+            <span>
+              Title / slug
+              <span
+                className="col-resize-handle"
+                onPointerDown={(e) => startListResize(2, e)}
+                onDoubleClick={() => resetListColumn(2)}
+              />
+            </span>
+            <span>
+              Location
+              <span
+                className="col-resize-handle"
+                onPointerDown={(e) => startListResize(3, e)}
+                onDoubleClick={() => resetListColumn(3)}
+              />
+            </span>
+            <span>
+              Tags
+              <span
+                className="col-resize-handle"
+                onPointerDown={(e) => startListResize(4, e)}
+                onDoubleClick={() => resetListColumn(4)}
+              />
+            </span>
             <span style={{ textAlign: "right" }}>Status</span>
           </div>
           <div className="list-scroll">
@@ -1072,6 +1135,7 @@ export function FindingsTab({
                   selected={selected === d.slug}
                   onClick={() => setSelected(d.slug)}
                   freeTerms={parsedQuery.freeTerms}
+                  gridTemplate={listGridTemplate}
                 />
               ))
             )}
@@ -1110,16 +1174,8 @@ export function FindingsTab({
           transitionsLoading={transitionsLoading}
           transitionsError={transitionsError}
           onSelect={setSelected}
-          onClose={() => setSelected(null)}
-          onPrev={() => {
-            if (selIdx > 0) setSelected(filtered[selIdx - 1].slug);
-          }}
-          onNext={() => {
-            if (selIdx >= 0 && selIdx < filtered.length - 1)
-              setSelected(filtered[selIdx + 1].slug);
-          }}
-          hasPrev={selIdx > 0}
-          hasNext={selIdx >= 0 && selIdx < filtered.length - 1}
+          maximized={maximized}
+          onToggleMaximize={() => setMaximized((m) => !m)}
         />
       </div>
 
@@ -1193,11 +1249,13 @@ function FindingRow({
   selected,
   onClick,
   freeTerms,
+  gridTemplate,
 }: {
   d: Derived;
   selected: boolean;
   onClick: () => void;
   freeTerms: string[];
+  gridTemplate?: string;
 }) {
   const chainRefs = d.links.filter((l) => l.target_kind === "chain");
   const cveRefs = d.links.filter((l) => l.target_kind === "cve");
@@ -1209,6 +1267,7 @@ function FindingRow({
       className={`frow ${selected ? "is-selected" : ""} ${suppressed ? "is-suppressed" : ""}`}
       onClick={onClick}
       data-slug={d.slug}
+      style={gridTemplate ? { gridTemplateColumns: gridTemplate } : undefined}
     >
       <span className={`frow-sevbar sevbar-${d.severity}`} />
       <span className={`frow-sev ${d.severity}`}>{d.severity}</span>
@@ -1265,11 +1324,8 @@ type DrawerProps = {
   transitionsLoading: boolean;
   transitionsError: string | null;
   onSelect: (slug: string | null) => void;
-  onClose: () => void;
-  onPrev: () => void;
-  onNext: () => void;
-  hasPrev: boolean;
-  hasNext: boolean;
+  maximized: boolean;
+  onToggleMaximize: () => void;
 };
 
 type TabId = "overview" | "poc" | "code" | "links" | "history" | "intel";
@@ -1283,11 +1339,8 @@ function Drawer({
   transitionsLoading,
   transitionsError,
   onSelect,
-  onClose,
-  onPrev,
-  onNext,
-  hasPrev,
-  hasNext,
+  maximized,
+  onToggleMaximize,
 }: DrawerProps) {
   const [tab, setTab] = useState<TabId>("overview");
   useEffect(() => {
@@ -1321,7 +1374,19 @@ function Drawer({
   const codeCount = d.slot_type ? 1 : 0;
   const linksCount = linkedFindings.length + linkedChains.length;
   const historyCount = transitions.length;
-  const intelCount = (d.references?.length ?? 0) + (d.provenance ? 1 : 0);
+  // Intel count must match exactly what IntelPane will render:
+  // references + (provenance ? 1 : 0). The pane also drops empty
+  // provenance objects, so mirror that here (fixes FINDING-VA-004,
+  // which showed "Intel 1" for a finding with an empty provenance
+  // object and no refs).
+  const hasProvenance = !!(
+    d.provenance &&
+    (d.provenance.agent_name ||
+      d.provenance.captured_at ||
+      d.provenance.artifact_ref ||
+      d.provenance.evidence_quote)
+  );
+  const intelCount = (d.references?.length ?? 0) + (hasProvenance ? 1 : 0);
 
   const tabs: { id: TabId; label: string; count?: number; hidden?: boolean }[] = [
     { id: "overview", label: "Overview" },
@@ -1341,10 +1406,6 @@ function Drawer({
     }
   };
 
-  const noop = () => {
-    // no-op for now
-  };
-
   return (
     <aside className="drawer-panel panel">
       <div className={`drawer-hero sev-${d.severity}`}>
@@ -1361,31 +1422,22 @@ function Drawer({
             </button>
           </div>
           <div className="drawer-nav">
+            {/*
+              Prev / next / close were removed: keyboard shortcuts
+              ( `[`, `]`, `Esc` ) already cover that and the three
+              buttons cluttered the hero. The maximize toggle expands
+              the drawer over the list panel; its close-maximize icon
+              only un-maximizes (it does NOT deselect the finding —
+              Esc still does that via the existing global handler).
+            */}
             <button
               type="button"
               className="icon-btn"
-              onClick={onPrev}
-              disabled={!hasPrev}
-              title="Previous finding ([)"
+              onClick={onToggleMaximize}
+              title={maximized ? "Restore drawer" : "Maximize drawer"}
+              aria-pressed={maximized}
             >
-              <IconUp />
-            </button>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={onNext}
-              disabled={!hasNext}
-              title="Next finding (])"
-            >
-              <IconDown />
-            </button>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={onClose}
-              title="Close (Esc)"
-            >
-              <IconClose />
+              {maximized ? <IconClose /> : <IconMaximize />}
             </button>
           </div>
         </div>
@@ -1407,24 +1459,6 @@ function Drawer({
             </span>
           )}
           {d.cwe_id && <span className="tag cwe">{d.cwe_id}</span>}
-        </div>
-        {/* TODO: wire these quick-action buttons to real workflow mutations */}
-        <div className="quick-actions">
-          <button type="button" className="qa-btn primary" onClick={noop}>
-            Mark reported
-          </button>
-          <button type="button" className="qa-btn" onClick={noop}>
-            Verify
-          </button>
-          <button type="button" className="qa-btn" onClick={noop}>
-            Dispute
-          </button>
-          <button type="button" className="qa-btn" onClick={noop}>
-            Suppress
-          </button>
-          <button type="button" className="qa-btn" onClick={noop}>
-            Export ↗
-          </button>
         </div>
       </div>
       <div className="drawer-tabs">
@@ -1928,6 +1962,17 @@ function HistoryPane({
 
 function IntelPane({ d }: { d: Derived }) {
   const refs = d.references;
+  // Match the Drawer's tab-count logic exactly: a provenance object
+  // only counts when at least one of the surfaced fields is present.
+  // If the pane has nothing to show, the Intel tab is hidden upstream.
+  const prov = d.provenance;
+  const hasProvenance = !!(
+    prov &&
+    (prov.agent_name ||
+      prov.captured_at ||
+      prov.artifact_ref ||
+      prov.evidence_quote)
+  );
   return (
     <>
       {refs.length > 0 && (
@@ -1955,20 +2000,20 @@ function IntelPane({ d }: { d: Derived }) {
           </ul>
         </div>
       )}
-      {d.provenance && (
+      {hasProvenance && prov && (
         <div className="section">
           <p className="section-title">Provenance</p>
           <div className="kv-grid">
-            <KV k="Agent" v={d.provenance.agent_name} mono />
-            <KV k="Captured" v={d.provenance.captured_at} mono />
-            <KV k="Artifact" v={d.provenance.artifact_ref} mono />
+            <KV k="Agent" v={prov.agent_name} mono />
+            <KV k="Captured" v={prov.captured_at} mono />
+            <KV k="Artifact" v={prov.artifact_ref} mono />
           </div>
-          {d.provenance.evidence_quote && (
-            <pre className="pre">&ldquo;{d.provenance.evidence_quote}&rdquo;</pre>
+          {prov.evidence_quote && (
+            <pre className="pre">&ldquo;{prov.evidence_quote}&rdquo;</pre>
           )}
         </div>
       )}
-      {refs.length === 0 && !d.provenance && (
+      {refs.length === 0 && !hasProvenance && (
         <p className="empty">No intel captured for this finding.</p>
       )}
     </>

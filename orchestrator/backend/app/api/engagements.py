@@ -12,6 +12,7 @@ from ..services.engagements import (
     get_engagement_view_or_404,
     list_engagements,
     list_sessions_for_engagement,
+    mark_engagement_deleted,
 )
 
 router = APIRouter(prefix="/engagements", tags=["engagements"])
@@ -95,6 +96,7 @@ def delete_engagement(engagement_key: str, confirm: str = "") -> DeleteEngagemen
                 "command-run history"
             ),
         )
+    mark_engagement_deleted(engagement)
     db.delete_engagement(engagement.id)
     return DeleteEngagementResponse(deleted=True, key=engagement.key, id=engagement.id)
 

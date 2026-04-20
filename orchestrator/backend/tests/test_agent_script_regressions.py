@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import sys
+from urllib.parse import parse_qs
 
 import pytest
 
@@ -93,7 +94,133 @@ def test_patched_kali_client_preserves_audit_context_for_async_tools(monkeypatch
             "X-Phase": "recon",
         },
     ]
-    assert getattr(module._AUDIT_CONTEXT, "headers", {}) == {}
+    assert module._AUDIT_CONTEXT.get() == {}
+
+
+def test_patched_kali_client_isolates_concurrent_async_audit_contexts(monkeypatch) -> None:
+    module = _load_script_module(
+        "test_patched_kali_client_concurrent_module",
+        "docker/kali-mcp-runtime/patched_kali_client.py",
+    )
+
+    class FakeFastMCP:
+        def tool(self, *args, **kwargs):
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+    mcp_module = ModuleType("mcp")
+    server_module = ModuleType("mcp.server")
+    fastmcp_module = ModuleType("mcp.server.fastmcp")
+    fastmcp_module.FastMCP = FakeFastMCP
+    monkeypatch.setitem(sys.modules, "mcp", mcp_module)
+    monkeypatch.setitem(sys.modules, "mcp.server", server_module)
+    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp_module)
+
+    module._wrap_fastmcp_tool_decorator()
+    proceed = asyncio.Event()
+    started = 0
+    observed: dict[str, list[dict[str, str]]] = {"agent-a": [], "agent-b": []}
+
+    async def upstream_tool() -> str:
+        nonlocal started
+        agent_name = module._current_audit_headers()["X-Agent-Name"]
+        observed[agent_name].append(module._current_audit_headers())
+        started += 1
+        if started == 2:
+            proceed.set()
+        await proceed.wait()
+        observed[agent_name].append(module._current_audit_headers())
+        return agent_name
+
+    wrapped = FakeFastMCP().tool(name="async-tool")(upstream_tool)
+
+    async def run_pair() -> list[str]:
+        return await asyncio.gather(
+            wrapped(engagement_key="eng-1", agent_name="agent-a", phase="recon"),
+            wrapped(engagement_key="eng-1", agent_name="agent-b", phase="exploit"),
+        )
+
+    result = asyncio.run(run_pair())
+
+    assert sorted(result) == ["agent-a", "agent-b"]
+    assert observed == {
+        "agent-a": [
+            {
+                "X-Engagement-Key": "eng-1",
+                "X-Agent-Name": "agent-a",
+                "X-Phase": "recon",
+            },
+            {
+                "X-Engagement-Key": "eng-1",
+                "X-Agent-Name": "agent-a",
+                "X-Phase": "recon",
+            },
+        ],
+        "agent-b": [
+            {
+                "X-Engagement-Key": "eng-1",
+                "X-Agent-Name": "agent-b",
+                "X-Phase": "exploit",
+            },
+            {
+                "X-Engagement-Key": "eng-1",
+                "X-Agent-Name": "agent-b",
+                "X-Phase": "exploit",
+            },
+        ],
+    }
+    assert module._AUDIT_CONTEXT.get() == {}
+
+
+def test_list_intel_search_uses_canonical_entity_type(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_script_module(
+        "test_list_intel_search_module",
+        "agent/scripts/assess/commands/list_intel.py",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    captured: list[tuple[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get_engagement(self, endpoint: str, query: str = ""):
+            captured.append((endpoint, query))
+            return []
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    for intel_type in ("cve", "tech-component"):
+        module.run(
+            SimpleNamespace(
+                engagement_dir=tmp_path,
+                q="2024",
+                intel_type=intel_type,
+                limit=50,
+                as_json=True,
+            )
+        )
+
+    assert [endpoint for endpoint, _ in captured] == ["intel/search", "intel/search"]
+    assert parse_qs(captured[0][1])["entity_type"] == ["cve"]
+    assert parse_qs(captured[1][1])["entity_type"] == ["tech_component"]
+    assert "[]" in capsys.readouterr().out
 
 
 def test_record_proposal_rejects_invalid_finding_payload(tmp_path: Path, capsys) -> None:

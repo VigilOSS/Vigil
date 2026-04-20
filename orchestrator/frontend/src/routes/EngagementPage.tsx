@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import {
   AssessmentAttackChainDetail,
@@ -395,11 +395,6 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const chains = assessmentChains.length > 0 ? assessmentChains : (assessmentSummary?.attack_chains ?? []);
   const displaySummary = assessmentSummary;
 
-  const latestSummary = useMemo(
-    () => (activeEngagement ? displayEvents.at(-1)?.summary ?? "Waiting for recorded activity" : "Waiting for recorded activity"),
-    [activeEngagement, displayEvents],
-  );
-
   const intelTotal = intelSummary
     ? Object.values(intelSummary.counts).reduce((a, b) => a + b, 0)
     : undefined;
@@ -422,7 +417,6 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
         <div>
           <p className="eyebrow">Engagement detail</p>
           <h1>{activeEngagement?.target ?? engagementKey}</h1>
-          <p className="lead">{latestSummary}</p>
         </div>
         <div className="page-actions">
           <div className="status-summary">

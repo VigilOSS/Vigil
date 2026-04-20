@@ -16,6 +16,19 @@ from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.commands.record_intel import INTEL_TYPES
 
+INTEL_ENTITY_TYPES = {
+    "tech-component": "tech_component",
+    "person": "person",
+    "email": "email",
+    "domain": "domain",
+    "cve": "cve",
+    "dns-record": "dns_record",
+    "social-profile": "social_profile",
+    "breach-record": "breach_record",
+    "org-fact": "org_fact",
+    "note": "note",
+}
+
 
 def register(subparsers) -> None:
     types_list = ", ".join(sorted(INTEL_TYPES.keys()))
@@ -77,8 +90,7 @@ def run(args) -> None:
                         f"{', '.join(sorted(INTEL_TYPES))}"
                     )
                     return
-                # entity_type is the plural endpoint segment (matches backend convention).
-                params["entity_type"] = INTEL_TYPES[args.intel_type][1]
+                params["entity_type"] = INTEL_ENTITY_TYPES[args.intel_type]
             result = client.get_engagement("intel/search", query=urlencode(params))
         elif args.intel_type:
             if args.intel_type not in INTEL_TYPES:
