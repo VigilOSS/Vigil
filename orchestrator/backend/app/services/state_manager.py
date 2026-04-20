@@ -14,6 +14,7 @@ from fastapi import HTTPException, status
 
 from ..db import get_connection
 from .events import _engagement_or_404
+from .search import fts_escape as _fts_escape_shared
 
 SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 WORKFLOW_STATUSES = {"draft", "active", "blocked", "exploited", "false_positive", "merged", "reported"}
@@ -3018,7 +3019,8 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
 
 _DEFAULT_PREVIEW_BYTES = 65_536
 _DEFAULT_RETENTION_CONFIG = Path(__file__).resolve().parents[1] / "config" / "command_run_retention.json"
-_FTS_SPECIAL_RE = re.compile(r'[\"\'\\]')
+_RUN_UUID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_ARTIFACT_LABEL_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 
 @lru_cache(maxsize=1)
@@ -3033,7 +3035,12 @@ def _retention_config() -> dict[str, Any]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return {"preview_bytes": _DEFAULT_PREVIEW_BYTES, "suppress_patterns": []}
-    preview = int(data.get("preview_bytes") or _DEFAULT_PREVIEW_BYTES)
+    try:
+        preview = int(data.get("preview_bytes") or _DEFAULT_PREVIEW_BYTES)
+    except (TypeError, ValueError):
+        preview = _DEFAULT_PREVIEW_BYTES
+    if preview <= 0:
+        preview = _DEFAULT_PREVIEW_BYTES
     patterns: list[dict[str, Any]] = []
     for entry in data.get("suppress_patterns") or []:
         if not isinstance(entry, dict):
@@ -3117,15 +3124,32 @@ def _write_command_run_artifact(
 
         return _noop
 
-    base = Path(engagement_artifact_dir)
+    base = Path(engagement_artifact_dir).expanduser().resolve()
 
     def _write(label: str, data: bytes) -> str:
+        if not _ARTIFACT_LABEL_RE.fullmatch(label):
+            raise RuntimeError(f"invalid command-run artifact label: {label}")
         base.mkdir(parents=True, exist_ok=True)
-        target = base / f"{run_uuid}.{label}.log"
+        target = (base / f"{run_uuid}.{label}.log").resolve()
+        if target.parent != base:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="command-run artifact path escaped its base directory",
+            )
         target.write_bytes(data)
         return str(target)
 
     return _write
+
+
+def _normalize_run_uuid(value: str) -> str:
+    run_uuid = str(value or "").strip()
+    if not _RUN_UUID_RE.fullmatch(run_uuid):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="run_uuid must contain only letters, numbers, underscores, or hyphens",
+        )
+    return run_uuid
 
 
 def _derive_tool_bin(command: str, argv: list[str] | None) -> str:
@@ -3152,18 +3176,26 @@ def _derive_tool_bin(command: str, argv: list[str] | None) -> str:
 
 
 def _resolve_artifact_dir(engagement, override: str | None) -> str | None:
-    """Prefer caller-supplied dir; fall back to
-    ``<engagement_root>/scans/command-runs/``. Ensures big outputs always
-    have somewhere to spill rather than silently losing raw bytes when the
-    runtime forgot to set KALI_MCP_DEFAULT_ARTIFACT_DIR. The returned path
-    is the final directory where artifact files are written — no further
-    subdir is appended by ``_write_command_run_artifact``."""
-    if override:
-        return override
     root = getattr(engagement, "engagement_root", "") or ""
     if not root:
         return None
-    return str(Path(root) / "scans" / "command-runs")
+    engagement_root = Path(root).expanduser().resolve()
+    if override:
+        candidate = Path(override).expanduser().resolve()
+        try:
+            candidate.relative_to(engagement_root)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="engagement_artifact_dir must be inside the engagement root",
+            ) from exc
+        if candidate == engagement_root:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="engagement_artifact_dir must be an engagement-root subdirectory",
+            )
+        return str(candidate)
+    return str(engagement_root / "scans" / "command-runs")
 
 
 def record_command_run(
@@ -3193,7 +3225,7 @@ def record_command_run(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
 
-    run_uuid = run_uuid or uuid.uuid4().hex
+    run_uuid = _normalize_run_uuid(run_uuid or uuid.uuid4().hex)
     command_hash = command_hash or hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()
     tool_bin = _derive_tool_bin(command, argv)
 
@@ -3330,15 +3362,8 @@ def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
 
 
 def _fts_escape(term: str) -> str:
-    # FTS5 MATCH query — wrap each token in double quotes to treat as phrase
-    # and drop special chars that would confuse the parser.
-    cleaned = _FTS_SPECIAL_RE.sub(" ", term).strip()
-    if not cleaned:
-        return ""
-    tokens = [t for t in cleaned.split() if t]
-    if not tokens:
-        return ""
-    return " ".join(f'"{t}"' for t in tokens)
+    """Back-compat shim; real implementation lives in ``services.search``."""
+    return _fts_escape_shared(term)
 
 
 def list_command_runs(

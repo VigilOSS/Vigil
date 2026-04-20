@@ -132,16 +132,33 @@ def _wrap_fastmcp_tool_decorator() -> None:
             ]
             new_sig = original_sig.replace(parameters=original_params + audit_params)
 
-            @functools.wraps(fn)
-            def shim(*args, **kwargs):
+            def _pop_audit_kwargs(kwargs):
                 engagement_key = kwargs.pop("engagement_key", "") or ""
                 agent_name = kwargs.pop("agent_name", "") or ""
                 phase = kwargs.pop("phase", "") or ""
-                _set_audit_context(engagement_key, agent_name, phase)
-                try:
-                    return fn(*args, **kwargs)
-                finally:
-                    _clear_audit_context()
+                return engagement_key, agent_name, phase
+
+            if inspect.iscoroutinefunction(fn):
+
+                @functools.wraps(fn)
+                async def shim(*args, **kwargs):
+                    engagement_key, agent_name, phase = _pop_audit_kwargs(kwargs)
+                    _set_audit_context(engagement_key, agent_name, phase)
+                    try:
+                        return await fn(*args, **kwargs)
+                    finally:
+                        _clear_audit_context()
+
+            else:
+
+                @functools.wraps(fn)
+                def shim(*args, **kwargs):
+                    engagement_key, agent_name, phase = _pop_audit_kwargs(kwargs)
+                    _set_audit_context(engagement_key, agent_name, phase)
+                    try:
+                        return fn(*args, **kwargs)
+                    finally:
+                        _clear_audit_context()
 
             shim.__signature__ = new_sig  # type: ignore[attr-defined]
             shim.__doc__ = (fn.__doc__ or "") + (

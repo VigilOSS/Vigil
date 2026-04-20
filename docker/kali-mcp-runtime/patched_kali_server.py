@@ -3,14 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
-import json
 import logging
 import os
 import subprocess
+import sys
 import time
 import traceback
-import urllib.error
-import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,20 +17,51 @@ from typing import Any, Dict
 
 UPSTREAM_SERVER_PATH = Path("/usr/share/mcp-kali-server/server.py")
 
-# Target-facing routes require audit headers. /health, /metrics, discovery
+# Target-facing routes require audit headers. Health, metrics, discovery,
 # and MCP capability routes stay open so container health checks and tool
-# discovery keep working without audit context.
+# discovery keep working without audit context. The upstream Kali API
+# exposes both ``/health`` and ``/api/health`` depending on the probe —
+# both must be open or container health probes return 400 and the
+# operator sees a confusing "GET /api/health 400" in the log.
 AUDIT_OPEN_PATHS = {
     "/health",
+    "/api/health",
+    "/api/status",
+    "/api/version",
     "/metrics",
+    "/api/metrics",
     "/favicon.ico",
     "/",
     "/mcp/capabilities",
 }
 
 AUDIT_REQUIRED = os.environ.get("KALI_MCP_AUDIT_REQUIRED", "1") != "0"
-ORCHESTRATOR_BASE_URL = os.environ.get("ORCHESTRATOR_BASE_URL", "http://127.0.0.1:18000").rstrip("/")
-RECORDING_TIMEOUT_SECONDS = float(os.environ.get("KALI_MCP_AUDIT_TIMEOUT", "3"))
+# This module ONLY runs inside the Kali MCP Docker container. ``127.0.0.1``
+# inside the container is the container's own loopback, not the Mac host
+# where the orchestrator runs — using it here silently routes every audit
+# POST to nothing and returns ECONNREFUSED. Docker Desktop exposes the
+# host via ``host.docker.internal`` (automatically resolved on macOS and
+# Windows; Linux needs ``--add-host=host.docker.internal:host-gateway``,
+# which ``start_kali_mcp_runtime.sh`` sets on recreate). Also normalize
+# any loopback values the operator passed through env to the same host
+# alias so a stale ``.env`` with ``127.0.0.1:18000`` still works.
+# Empty string and missing are both "no value" — without the strip/``or``
+# fallback, passing ``-e ORCHESTRATOR_BASE_URL=`` (empty) silently disables
+# audit because the URL becomes the empty string instead of the default.
+_raw_orchestrator_url = (
+    os.environ.get("ORCHESTRATOR_BASE_URL", "").strip()
+    or "http://host.docker.internal:18000"
+).rstrip("/")
+ORCHESTRATOR_BASE_URL = (
+    _raw_orchestrator_url
+    .replace("://127.0.0.1", "://host.docker.internal")
+    .replace("://localhost", "://host.docker.internal")
+)
+
+# Load the audit poster module that lives beside this file in the
+# container. Pure stdlib, zero upstream-server dependencies.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import kali_mcp_audit  # noqa: E402
 
 # Per-field env-fallback policy. engagement_key and artifact_dir are
 # session- or install-static and can honestly be defaulted from env.
@@ -359,29 +388,8 @@ def _install_audit_hooks(flask_app) -> None:
                 "engagement_artifact_dir": artifact_dir,
                 "run_uuid": uuid.uuid4().hex,
             }
-            _post_command_run(engagement_key, payload)
+            kali_mcp_audit.default_poster().enqueue(engagement_key, payload)
         return response
-
-
-def _post_command_run(engagement_key: str, payload: dict[str, Any]) -> None:
-    url = f"{ORCHESTRATOR_BASE_URL}/engagements/{engagement_key}/assessment/command-runs"
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=RECORDING_TIMEOUT_SECONDS):
-            pass
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        logger.warning(
-            "command-run audit POST failed (%s %s): %s — tool output returned unchanged",
-            engagement_key,
-            payload.get("tool_name"),
-            exc,
-        )
 
 
 def main() -> None:
@@ -396,6 +404,9 @@ def main() -> None:
         upstream.API_PORT = args.port
 
     _install_audit_hooks(upstream.app)
+    # Eagerly boot the background audit worker so the first tool call
+    # doesn't pay the cost of lazy initialization.
+    kali_mcp_audit.default_poster()
 
     upstream.logger.info(
         "Starting Kali Linux Tools API Server on %s:%s (audit_required=%s, orchestrator=%s)",

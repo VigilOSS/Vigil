@@ -32,7 +32,7 @@ If any of these are missing, STOP and load them now. Working without the skill a
 - Gather relevant CVEs, vendor advisories, public disclosures, org exposure clues, and supporting context
 - Use `gau` for historical URL discovery, `waymore` when available, and `bbot` for recursive recon intelligence
 - Map public intelligence to the current engagement state and target stack
-- Feed useful intel into `intel.md` and help the operator decide what to test next
+- Feed useful intel into the backend via `./scripts/assess.py record-intel <type> <json-file>` — one call per row (cve, person, domain, breach-record, social-profile, dns-record, org-fact, note) — and help the operator decide what to test next
 
 ## Required Behavior
 
@@ -51,10 +51,12 @@ Return concise structured output with these sections when relevant:
 ## Finding Recording
 
 **CVE matches are intel, not findings.** When you discover CVEs that match the target's version
-strings, record them in `#### Intelligence` output and `intel.md` — NOT as durable findings.
-A CVE with a public PoC does not become a finding until exploit-developer validates it against
-the actual target (backported patches, missing CGI binaries, disabled modules, and firewall rules
-all invalidate version-only matches).
+strings, record them in `#### Intelligence` output AND via
+`./scripts/assess.py record-intel cve <cve-json-file>` (matches
+`schemas/intel-cve.schema.json` — see `assess.py contract` if unsure of the field list)
+— NOT as durable findings via `record-finding`. A CVE with a public PoC does not become
+a finding until exploit-developer validates it against the actual target (backported patches,
+missing CGI binaries, disabled modules, and firewall rules all invalidate version-only matches).
 
 Only record a finding via `./scripts/assess.py record-finding osint-analyst <finding-json-file>`
 when you have target-specific proof that does not require exploit-developer validation — for example,

@@ -82,5 +82,13 @@ export default function App() {
     return <EngagementPage engagementKey={engagementRoute} onBack={() => navigate("/engagements")} />;
   }
 
-  return <EngagementsPage engagements={engagements} onOpenEngagement={(engagementKey) => navigate(`/engagements/${encodeURIComponent(engagementKey)}`)} />;
+  return (
+    <EngagementsPage
+      engagements={engagements}
+      onOpenEngagement={(engagementKey) => navigate(`/engagements/${encodeURIComponent(engagementKey)}`)}
+      onEngagementDeleted={(engagementKey) => {
+        setEngagements((current) => current.filter((engagement) => engagement.key !== engagementKey));
+      }}
+    />
+  );
 }

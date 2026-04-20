@@ -158,7 +158,7 @@ def test_engagement_artifacts_and_sessions_are_scoped_by_engagement_key(client, 
     artifacts = client.get("/engagements/2026-03-30-120000-example/artifacts")
     assert artifacts.status_code == 200
     artifact_names = {artifact["name"] for artifact in artifacts.json() if artifact["exists"]}
-    assert {"scope.json", "log.md", "engagement.json"} <= artifact_names
+    assert {"scope.json", "engagement.json"} <= artifact_names
 
     sessions = client.get("/engagements/2026-03-30-120000-example/sessions")
     assert sessions.status_code == 200
@@ -241,7 +241,7 @@ def test_engagement_sync_skips_invalid_engagement_json_without_aborting(client, 
     assert any("Skipping invalid engagement artifacts" in message for message in caplog.messages)
 
 
-def test_invalid_session_artifacts_remove_stale_engagement_from_sync_results(client, isolate_settings, caplog):
+def test_invalid_session_artifacts_preserve_existing_engagement_state(client, isolate_settings, caplog):
     engagement_dir = write_engagement(isolate_settings["engagements_dir"])
 
     first = client.get("/engagements/2026-03-30-120000-example/sessions")
@@ -254,10 +254,32 @@ def test_invalid_session_artifacts_remove_stale_engagement_from_sync_results(cli
         sessions_response = client.get("/engagements/2026-03-30-120000-example/sessions")
         engagements_response = client.get("/engagements")
 
-    assert sessions_response.status_code == 404
+    assert sessions_response.status_code == 200
+    assert len(sessions_response.json()) == 1
     assert engagements_response.status_code == 200
-    assert engagements_response.json() == []
+    assert [item["key"] for item in engagements_response.json()] == ["2026-03-30-120000-example"]
     assert any("Skipping invalid engagement artifacts" in message for message in caplog.messages)
+
+
+def test_invalid_scope_preserves_existing_engagement_state(client, isolate_settings, caplog):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+
+    first = client.get("/engagements")
+    assert first.status_code == 200
+    assert len(first.json()) == 1
+
+    (engagement_dir / "scope.json").write_text("{not valid json", encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        response = client.get("/engagements")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["key"] for item in payload] == ["2026-03-30-120000-example"]
+    assert payload[0]["current_phase"] == "unknown"
+    assert payload[0]["approved_targets"] == []
+    assert any("Skipping invalid engagement artifacts" in message for message in caplog.messages)
+    assert any("Using persisted engagement identity" in message for message in caplog.messages)
 
 
 def test_engagement_event_and_assessment_routes_use_engagement_key(client, isolate_settings):
@@ -282,7 +304,7 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
             "target_descriptor": "https://example.com/orders/7",
             "source_name": "source-analyzer",
             "rationale": "Observed direct object path",
-            "evidence_ref": "log.md",
+            "evidence_ref": "activity_entries",
             "status": "covered",
         },
     )
@@ -1445,7 +1467,13 @@ def test_coverage_patch_rejects_unknown_status_values(client, isolate_settings):
     assert "invalid coverage status" in patch.json()["detail"]
 
 
-def test_incompatible_local_database_is_reset(isolate_settings):
+def test_incompatible_local_database_refuses_to_start_and_preserves_file(isolate_settings):
+    """Auto-reset was removed: an incompatible DB must raise, never be unlinked.
+
+    Silently deleting the orchestrator DB on a schema mismatch is unrecoverable
+    data loss (findings, probe runs, command runs, code analysis). The
+    orchestrator now refuses to start and tells the operator how to resolve.
+    """
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     with sqlite3.connect(str(db_path)) as connection:
         connection.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT)")
@@ -1469,26 +1497,35 @@ def test_incompatible_local_database_is_reset(isolate_settings):
         )
         connection.commit()
 
-    db_module.init_db()
-    write_engagement(isolate_settings["engagements_dir"])
-    engagement_service.maybe_sync_engagements(force=True)
-    assert engagement_service.list_engagements()[0].key == "2026-03-30-120000-example"
+    with pytest.raises(db_module.IncompatibleDatabaseError) as exc:
+        db_module.init_db()
+    message = str(exc.value)
+    assert "Refusing to start" in message
+    assert "delete engagement history" in message
 
+    assert db_path.exists(), "incompatible DB must NOT be unlinked"
     with sqlite3.connect(str(db_path)) as connection:
         table_names = {
             row[0]
-            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
         }
-        assert "runs" not in table_names
-        event_columns = {row[1] for row in connection.execute("PRAGMA table_info(events)").fetchall()}
-        chain_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_attack_chains)").fetchall()}
-        assert "engagement_id" in event_columns
-        assert "engagement_id" in chain_columns
-        assert "run_id" not in event_columns
-        assert "run_id" not in chain_columns
+        assert "runs" in table_names, "legacy table must still be present after refuse"
+        event_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(events)").fetchall()
+        }
+        assert "run_id" in event_columns, "legacy column must still be present after refuse"
 
 
-def test_deleted_filesystem_engagement_is_pruned_from_database(client, isolate_settings):
+def test_filesystem_engagement_removal_retains_db_row(client, isolate_settings):
+    """Sync must NOT cascade-delete findings when an engagement directory
+    vanishes. The old behavior silently wiped every finding/probe/command-run
+    when the operator renamed, archived, or cleaned up an engagement dir.
+    Deletion is now explicit — via ``DELETE /engagements/{key}`` — and this
+    test exists to lock the additive-only sync contract in place.
+    """
     engagement_dir = write_engagement(isolate_settings["engagements_dir"])
 
     response = client.get("/engagements")
@@ -1504,7 +1541,9 @@ def test_deleted_filesystem_engagement_is_pruned_from_database(client, isolate_s
 
     response = client.get("/engagements")
     assert response.status_code == 200
-    assert response.json() == []
+    rows = response.json()
+    assert len(rows) == 1, "DB row must survive filesystem removal"
+    assert rows[0]["key"] == "2026-03-30-120000-example"
 
 
 def test_deleted_session_is_pruned_from_database(client, isolate_settings):

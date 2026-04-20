@@ -15,7 +15,7 @@ Path convention:
 
 After engagement initialization completes, repeat until all attack paths exhausted or user signals stop:
 
-1. **ASSESS STATE** — Read scope.json and log.md. Query backend state via `assess.py list-findings` or `assess.py fetch findings`. Local `findings.md` is not maintained during the engagement — use `assess.py export-findings` to generate it on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
+1. **ASSESS STATE** — Read scope.json. Query backend state via `assess.py list-findings` (findings), `assess.py list-intel` (intel summary), and `assess.py fetch activity-entries` (narrative activity log — formerly `log.md`). Local `findings.md` is not maintained during the engagement — use `assess.py export-findings` to generate it on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
 2. **DECIDE NEXT ACTION** — Prioritize by current phase first. In Phase 1-2, prioritize breadth of surface coverage. In Phase 3, prioritize risk class: object references, auth boundaries, and privileged writes before low-risk surfaces. Keep exploitation behind Verify: only findings that survived review as `confirmed` or `downgraded`, or findings explicitly marked `details.chain_required=true`, enter exploit review. Skip ahead only when an obviously actionable path is already in hand.
 3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.4` with `high` reasoning, and Claude operator and substantial Claude workers should use `Opus 4.6`. Only drop to `gpt-5.4` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
@@ -31,7 +31,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis, testing, validation, and exploitation work. The operator's job is orchestration: phase control, specialist selection, state review, and backend state management — analysis and testing belong to specialist agents because they carry the skill context and methodology depth that the operator prompt lacks.
    **Operator-executed exceptions** (via Kali MCP, not host-side): quick credential validation (single login test to confirm working/not-working). This is a mechanical pipeline step, not analysis.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/assess.py record-finding` to write findings to the backend. The backend is the sole store.
-   **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. They go to intel.md only. Dispatch exploit-developer to validate before recording. This reconciles "record immediately" with "no theoretical findings."
+   **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. Record them via `./scripts/assess.py record-intel cve <cve-json-file>` (intel_cves table), NOT `record-finding`. Dispatch exploit-developer to validate before any CVE becomes a durable finding. This reconciles "record immediately" with "no theoretical findings."
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, record them via `./scripts/assess.py record-surface` so the backend stays current. The backend is the sole store — there is no local surfaces file to verify.
    If surface recording fails with a connection error, verify the orchestrator backend is running and that `ORCHESTRATOR_BASE_URL` and the engagement key are set correctly (check `engagement.json` and `.orchestrator.env` in the engagement directory).
 10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
@@ -59,42 +59,11 @@ This runtime is shared infrastructure, not per-engagement state. Multiple engage
 
 ## Listener & Callback Management
 
-Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are operator-controlled infrastructure — only the operator provisions and tears down these services because they bind ports and create external-facing attack surface that requires human oversight.
+Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are operator-controlled — only the operator binds ports and exposes external surface. Agents emit `# MANUAL:` playbook steps; the operator executes them and records the result.
 
-Setup references:
-- **Shell listeners (pwncat-vl, tmux, reverse shell payloads):** `agent/references/offensive-tactics/shell-handling.md`
-- **Tunnel exposure & OOB callbacks (frp, interactsh):** `agent/references/offensive-tactics/frp-tunneling.md`
-
-### When agents need external connectivity
-
-If an agent needs a reverse shell listener, OOB callbacks for blind testing, or any tunnel to reach
-a remote target, the **operator must set up the frp tunnel first**. The operator provisions the tunnel
-per `frp-tunneling.md`, records the address, and then resumes the agent.
-
-**When an agent needs a reverse shell listener:**
-1. Agent outputs `# MANUAL:` playbook steps referencing `shell-handling.md` and `frp-tunneling.md`
-2. Operator checks if a listener is already running: `docker exec security-research tmux list-sessions`
-3. If not running → operator starts pwncat listener per `shell-handling.md`, then starts frp tunnel per `frp-tunneling.md`, records address in `$DIR/.listener_url`
-4. Operator resumes the agent. Agent reads `LISTENER_HOST`/`LISTENER_PORT` from `$DIR/.listener_url`.
-5. If the operator cannot provision the listener now, record a blocked technique:
-   `./scripts/assess.py post blocked-techniques <blocked-technique-json-file>`
-
-**When an agent needs OOB (blind vuln detection):**
-1. Agent checks whether `$DIR/.oob_url` exists in its dispatch context
-2. If available → use the callback URL in blind payloads (SSRF, XXE, XSS, SQLi)
-3. If not available → fall back to time-based detection (sleep payloads) and note in output that OOB was unavailable
-4. If time-based also fails and OOB would have been decisive → stop and ask the operator to provision interactsh + frp tunnels per `frp-tunneling.md`
-5. After sending blind payloads, agents check OOB logs via Kali MCP: `tail -50 /data/oob-client.log` (preferred, correlated hits only) or `tail -50 /data/oob-server.log` (raw, noisy)
-
-**Files agents read (never write):**
-- `$DIR/.listener_url` — tunnel address (`host:port`) for reverse shell payloads
-- `$DIR/.oob_url` — callback URL for blind vulnerability detection
-
-**Log files agents check for hits (via Kali MCP):**
-- `/data/oob-client.log` — correlated interactsh callback hits (preferred — filters AWS noise)
-- `/data/oob-server.log` — raw interactsh log (noisy, includes health check traffic)
-- `/data/shell-*.log` — shell session I/O
-- `/data/frpc.log` — tunnel connection status
+- **Operator** provisions per `agent/references/offensive-tactics/shell-handling.md` (reverse shells) and `agent/references/offensive-tactics/frp-tunneling.md` (tunnels, interactsh OOB), then writes `$DIR/.listener_url` and/or `$DIR/.oob_url`.
+- **Agents** read `$DIR/.listener_url` and `$DIR/.oob_url` from dispatch context (never write). If OOB is unavailable, fall back to time-based detection and note it in output. If a listener cannot be provisioned, record a blocked technique via `./scripts/assess.py post blocked-techniques <json-file>`.
+- **Hit-checking and log paths** (`/data/oob-client.log`, `/data/oob-server.log`, `/data/shell-*.log`, `/data/frpc.log`) are documented in `frp-tunneling.md` and `shell-handling.md`.
 
 ## Subagent Dispatch
 
@@ -106,7 +75,7 @@ per `frp-tunneling.md`, records the address, and then resumes the agent.
 | vulnerability-analyst | Validates endpoints with targeted probes, produces durable evidence, reviews findings in Phase 4 | Phase 3 + Phase 4 verification |
 | exploit-developer | Exploit verified findings, chain analysis, impact | Phase 5 |
 | fuzzer | High-volume testing (100+ payloads) | When FUZZER_NEEDED |
-| osint-analyst | CVE/breach/DNS/social research from intel.md | Phase 5 (parallel with exploit) |
+| osint-analyst | CVE/breach/DNS/social research backed by backend intel tables | Phase 5 (parallel with exploit) |
 | report-writer | Final or interim report | Phase 7 |
 
 ### Dispatch Context Template
@@ -130,11 +99,11 @@ Before every dispatch, verify:
 - [ ] Skill to load identified from `agent/SKILL.md`
 - [ ] Matching skill's paired references identified from `agent/references/INDEX.md`
 - [ ] Prior relevant findings or existing finding slugs included (so the agent can reference them instead of creating duplicates)
-- [ ] log.md checked for duplicate dispatch (DEDUP rule)
+- [ ] Activity log checked for duplicate dispatch — `./scripts/assess.py fetch activity-entries` (DEDUP rule)
 - [ ] Command history checked — `./scripts/assess.py list-command-runs --agent-name <role> --phase <current>` reviewed for prior runs that already cover the objective
 - [ ] Parallelism decision made (independent → parallel, dependent → sequential)
 
-DEDUP: Check log.md before dispatch — re-dispatching the same agent for the same objective wastes a full context window and risks duplicate findings.
+DEDUP: Check the activity log (`assess.py fetch activity-entries`) before dispatch — re-dispatching the same agent for the same objective wastes a full context window and risks duplicate findings.
 PARALLEL: Independent tasks → parallel. Dependent → sequential.
 
 ### Dispatch Completion Gate
@@ -159,7 +128,7 @@ When continuing multi-step work (exploit chains, credential reuse, follow-up pro
 - Durable-state pointers: finding slugs, `$DIR/tools/` paths, credential ids the new agent can `fetch` from the backend
 - The specific next step the new agent should take (the exact action, not a rehash of the original objective)
 
-Keep handoff prompts bounded — durable content lives in the backend, `log.md`, and engagement files, and the dispatch prompt carries pointers plus the specific next step. A full transcript paste into the next prompt crowds out the objective and inflates context linearly across long chains; two or three excerpted lines (the captured token, the working payload, the next action) paired with finding slugs and file paths are enough for the new agent to `fetch` canonical state and continue.
+Keep handoff prompts bounded — durable content lives in the backend (findings, intel, activity entries) and engagement files, and the dispatch prompt carries pointers plus the specific next step. A full transcript paste into the next prompt crowds out the objective and inflates context linearly across long chains; two or three excerpted lines (the captured token, the working payload, the next action) paired with finding slugs and file paths are enough for the new agent to `fetch` canonical state and continue.
 
 Registry schema and handoff-prompt examples: `agent/references/runtime-guides/subagent-registry.md`
 
@@ -176,7 +145,7 @@ DB="$DIR/cases.db"
 2. **COLLECT** → dispatch surface-collector with `agent/skills/surface-collection/SKILL.md`.
    Provide: targets from scope.json, Phase 1 endpoint artifacts (paths to `endpoints.txt` and any source-analyzer output in `scans/`), auth.json state, and `$DIR/cases.db` path.
    On return:
-   - Append `#### Intelligence` to intel.md
+   - Intelligence from `#### Intelligence` sections must be recorded via `./scripts/assess.py record-intel <type> <json-file>` — one call per structured row (tech-component, person, email, domain, dns-record, org-fact, note, etc.). Verify the counts with `./scripts/assess.py list-intel` (summary view).
    - Review `#### Priority Attack Surfaces` for Phase 3 dispatch ordering — surface-collector's triage signals override the default type-based dispatch order when risk-informed prioritization is available
    - Inspect work-buffer stats: `./scripts/assess.py dispatch "$DIR/cases.db" stats`
    - Inspect coverage gaps: `./scripts/assess.py fetch summary`
@@ -222,14 +191,14 @@ DB="$DIR/cases.db"
    g. **Exit gate**: all HIGH/CRITICAL findings have a verification disposition. If the reviewer kills >50% of findings, review whether Phase 3 agents are producing speculative findings — tighten dispatch context for future engagements.
    Update scope.json phase to `exploit` when verification completes.
 5. **EXPLOIT** →
-   a. Dispatch osint-analyst with `agent/skills/osint-recon/SKILL.md` — intelligence gathering is always permitted regardless of `exploit_policy`. Feed the tech stack, domains, and people data from intel.md.
+   a. Dispatch osint-analyst with `agent/skills/osint-recon/SKILL.md` — intelligence gathering is always permitted regardless of `exploit_policy`. Feed the tech stack, domains, and people data via `assess.py list-intel tech-component`, `assess.py list-intel domain`, and `assess.py list-intel person` (or `assess.py fetch intel` for the summary).
    b. Respect `exploit_policy` from `scope.json` for exploit-developer dispatch. Use `./scripts/assess.py review-exploits` to inspect the current backend candidate set and `./scripts/assess.py check-exploit-gate` before launching work:
       - `pause`: present backend exploit candidates to the human and ask which are approved for exploitation.
       - `selected`: exploit only the approved target slugs recorded in scope metadata and still allowed by the backend exploit-candidate gate.
       - `full_send`: dispatch all current backend exploit candidates immediately. Human approval is skipped, backend readiness is not.
    c. Exploit-developer owns durable exploit-state recording. If it proves a chain, credential, access record, or credential test, it should write the JSON payloads under `$DIR/tools/exploit-state/` and record them before task completion with the repo scripts.
    d. On return, verify canonical exploit state via `assess.py fetch attack-chains`, `credentials`, `access-records`, and `credential-tests`. Do not create duplicate operator-side rows unless you are explicitly merging a proposal-based exploit session with `assess.py merge-session`.
-   e. After osint-analyst returns: read intel.md. **Do not record CVE matches as findings yet.** If HIGH-value CVEs with public PoCs were identified, dispatch exploit-developer to validate each against the live target — backported patches, missing binaries, and disabled modules routinely invalidate version-only matches. Only record a CVE-based finding after exploit-developer confirms exploitability or proves partial signal.
+   e. After osint-analyst returns: read the recorded CVE intel via `./scripts/assess.py list-intel cve`. **Do not promote CVE matches to findings yet.** If HIGH-value CVEs with public PoCs were identified, dispatch exploit-developer to validate each against the live target — backported patches, missing binaries, and disabled modules routinely invalidate version-only matches. Only record a CVE-based finding via `record-finding` after exploit-developer confirms exploitability or proves partial signal.
 6. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
 7. **REPORT** → for a final report, run `./scripts/assess.py check-report-readiness` first and resolve blockers before dispatch. Report-writer queries the backend directly for `report-findings?mode=final` on final reports or `report-findings?mode=draft` on interim reports, plus `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — let it self-serve rather than manually assembling findings context, since manual assembly risks stale or incomplete data. After a final report completes, update scope.json phase to `complete`.
 
@@ -244,7 +213,7 @@ jq '.current_phase = "<next>"' \
 When ANY agent discovers credentials, the operator coordinates these steps:
 
 1. **Operator tests credentials via Kali MCP** — a quick login check is mechanical pipeline work, not analysis. Run a single login request (curl POST, HTTP basic auth, etc.) via the Kali MCP command-execution tool to confirm working or not-working.
-   - If login **fails** → record result in log.md, continue anonymously. Do not dispatch a specialist for a failed login.
+   - If login **fails** → record the result via `./scripts/assess.py log operator "Login test failed" "<command>" "<response>"` (writes an activity entry to the backend), continue anonymously. Do not dispatch a specialist for a failed login.
    - If login **succeeds** → continue to step 2.
 2. **Operator writes to auth.json** — populate cookies, headers, or token fields from the successful login response. Set `state` to `available` and `use_for_requests` to `true`. This is local file work.
 3. **Operator re-dispatches surface-collector** — dispatch surface-collector with updated auth.json to re-run the collection pipeline (Katana + gau + ingestion) with authenticated context. Surface-collector handles auth-aware crawling and ingests authenticated-only endpoints into the work buffer. This is the POST-AUTH RE-COLLECTION step.
@@ -277,16 +246,7 @@ shared engagement state: the operator and every specialist can search it via
 
 ### Kali MCP Troubleshooting
 
-If Kali MCP tools are not available or MCP tool discovery returns no tools:
-
-1. Verify the runtime container is running: `docker ps --filter name=security-research`
-2. Verify the MCP server process inside the container: `docker exec security-research pgrep -f mcp-server`
-3. Check MCP client registration: `claude mcp list` (Claude) or `codex mcp list` (Codex)
-4. If the MCP server is not registered, register it: `claude mcp add kali -s user -- docker exec -i security-research mcp-server`
-5. **MCP tools load at session startup.** If you registered the MCP server during this session, restart the session for tools to become available.
-6. Restart the runtime if unhealthy: `./scripts/start_kali_mcp_runtime.sh`
-
-Host-side `docker` commands are for diagnostic inspection only (container status, logs, process lists) — target-facing work through `docker exec` bypasses the Kali MCP runtime's tool inventory and audit trail.
+If Kali MCP tools are missing or MCP tool discovery returns no tools, see `agent/references/runtime-guides/kali-mcp-troubleshooting.md`.
 
 ### Kali MCP Audit and Reuse
 
@@ -343,11 +303,25 @@ report-writer uses the `report-findings` backend endpoint in explicit draft/fina
 
 OWASP Quick Ref: A01=Access Control, A02=Crypto, A03=Injection, A04=Insecure Design, A05=Misconfig, A06=Vulnerable Components, A07=Auth Failures, A08=Data Integrity, A09=Logging Failures, A10=SSRF.
 
-## Intel.md Rules
+## Intel Recording Rules
 
-After receiving agent output with `#### Intelligence` section:
-- Append to corresponding intel.md table
-- Dedup by: Technology table on Component, People on Name, Emails on Email, Domains on Item+Type, Credentials on Type+Source
+After receiving agent output with `#### Intelligence` section, translate each row into a structured JSON payload matching the relevant `schemas/intel-*.schema.json` and record it:
+
+```
+./scripts/assess.py record-intel <type> <json-file>
+```
+
+Valid `<type>` values: `tech-component`, `person`, `email`, `domain`, `cve`, `dns-record`, `social-profile`, `breach-record`, `org-fact`, `note`.
+
+The backend deduplicates engagement-scoped (per the `UNIQUE(engagement_id, <natural key>)` constraint on each `intel_*` table):
+- Tech stack on Component (+ Version)
+- People on Name
+- Emails on Address
+- Domains on Identity + Kind
+- CVEs on `cve_id`
+- Credentials on `assessment_credentials` (use `./scripts/assess.py post credentials`, not `record-intel` — credentials live in the assessment domain)
+
+Prose intel that doesn't fit a structured row goes to `record-intel note` — it's FTS-indexed and still engagement-scoped.
 
 ## File Organization
 
@@ -358,7 +332,7 @@ After receiving agent output with `#### Intelligence` section:
 | Custom scripts/exploits | tools/ |
 | Background PIDs | pids/ |
 
-Root: scope.json, log.md, intel.md, report.md, auth.json, and the transient worker buffer only.
+Root: scope.json, report.md, auth.json, and the transient worker buffer only. Activity log and intel now live in the orchestrator backend — query via `assess.py fetch activity-entries` and `assess.py list-intel`.
 
 ## Skills and References
 
@@ -384,25 +358,6 @@ When source code is available (cloned repo, exposed `.git`, decompiled source, b
 - Code findings use `canonical_location = "file:<path>:<line>"` and link to web findings via attack chains
 - See the Code Analysis Agents roster in `agent/operator-core-code.md` for available specialists
 
-## Session Resumption
-
-On start or when resuming inside an engagement:
-```bash
-if [[ -f "./scope.json" ]]; then
-  ENGAGEMENT_DIR="$(pwd)"
-  AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
-else
-  echo "Set ENGAGEMENT_DIR explicitly or start from inside an engagement directory." >&2
-  exit 1
-fi
-export ENGAGEMENT_DIR
-cat "$ENGAGEMENT_DIR/scope.json"
-"$AGENT_ROOT/scripts/assess.py" dispatch "$ENGAGEMENT_DIR/cases.db" stats 2>/dev/null
-```
-
-If status=in_progress: read scope/log state, inspect orchestrator coverage and findings state when available, recover stale work-buffer items, and resume from the correct phase.
-The orchestrator backend is canonical. `cases.db` is only a transient local batching buffer: pending=not done, done=completed, processing=interrupted.
-
 ## Communication
 
 - Direct, concise. NUMBERED choices. Phase tracker at transitions:
@@ -427,19 +382,3 @@ Summary: recon→source-analyzer (bring source-analysis skill) + vuln-analyst (b
 
 If logs are available, run the optional Athena/log-investigation phase before closing the engagement — it determines whether the most important attack paths show signs of prior exploitation in the available telemetry window.
 
-## Manual Worker Sessions
-
-When exploit work should be split across multiple Codex sessions, the coordinator stays manual.
-
-1. Get human approval for exploit scope inside the conversation before launching worker sessions.
-2. Create a worker session with the local helper script when needed:
-```bash
-./scripts/assess.py launch-session <session-id> <finding-slug> [finding-slug...]
-```
-3. In the worker session, use the generated `sessions/<session-id>/prompt.md`.
-4. Workers write proposals under `sessions/<session-id>/proposals/` via `./scripts/assess.py record-proposal` — proposals are staging areas that the coordinator reviews before merging into canonical state.
-5. Workers scope their writes to the session directory — root `report.md` and `scope.json` are coordinator-owned and updated only via `assess.py merge-session`.
-6. The coordinator merges approved proposals into canonical backend state with:
-```bash
-./scripts/assess.py merge-session <session-id>
-```

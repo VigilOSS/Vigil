@@ -197,11 +197,11 @@ def sync_engagements() -> None:
     for engagement_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         if not (engagement_dir / "scope.json").exists():
             continue
+        discovered_keys.add(engagement_dir.name)
         try:
             manifest = _manifest_for(engagement_dir)
             index_rows = _migrate_session_artifacts(engagement_dir)
 
-            discovered_keys.add(manifest["key"])
             engagement = db.get_engagement_by_key(manifest["key"])
             if engagement is None:
                 engagement = db.create_engagement(
@@ -243,9 +243,23 @@ def sync_engagements() -> None:
             _logger.warning("Skipping invalid engagement artifacts for %s: %s", engagement_dir, exc)
             continue
 
+    # Sync is ADDITIVE only. A filesystem directory that vanished (renamed,
+    # archived, accidentally rm'd, or temporarily moved for backup) used to
+    # cascade-delete every engagement row — findings, probe runs, command
+    # runs, code analysis, credentials — via the FK ON DELETE CASCADE chain.
+    # Silent destruction of engagement history is never an acceptable
+    # filesystem-drift response. Explicit deletion MUST go through the
+    # `DELETE /api/engagements/{key}` endpoint with a confirm token.
     for engagement in db.list_engagements():
         if engagement.key not in discovered_keys:
-            db.delete_engagement(engagement.id)
+            _logger.info(
+                "Engagement %s (id=%s) has no filesystem directory under %s; "
+                "retaining DB row. Use DELETE /api/engagements/%s to remove explicitly.",
+                engagement.key,
+                engagement.id,
+                engagements_root(),
+                engagement.key,
+            )
 
 
 def maybe_sync_engagements(force: bool = False) -> None:
@@ -264,7 +278,11 @@ def maybe_sync_engagements(force: bool = False) -> None:
 
 
 def _scope_details(engagement_root: Path) -> tuple[str, str, str, list[str]]:
-    scope = _migrate_scope_file(engagement_root / "scope.json")
+    try:
+        scope = _migrate_scope_file(engagement_root / "scope.json")
+    except RuntimeError as exc:
+        _logger.warning("Using persisted engagement identity for invalid scope at %s: %s", engagement_root, exc)
+        return "unknown", "pause", "pending", []
     current_phase = str(scope.get("current_phase") or "unknown")
     exploit_policy = str(scope.get("exploit_policy") or "pause")
     exploit_review_state = str(scope.get("exploit_review_state") or "pending")

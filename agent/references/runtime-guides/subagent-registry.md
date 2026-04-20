@@ -36,8 +36,9 @@ After every dispatch that returns an agentId, append to the registry:
 
 - **Audit trail** — records what was tried, by whom, against which target and
   finding cluster. Read back during report-writing and log-investigation phases.
-- **DEDUP input** — the pre-dispatch checklist checks the registry and `log.md`
-  to avoid re-dispatching the same role for the same objective.
+- **DEDUP input** — the pre-dispatch checklist checks the registry and the
+  backend activity log (`assess.py fetch activity-entries`) to avoid
+  re-dispatching the same role for the same objective.
 - **Handoff source** — when continuing a multi-step task, the registry entry for
   the prior dispatch identifies which output transcript the new dispatch prompt
   pulls context from.
@@ -78,6 +79,8 @@ Capture transient state during the prior dispatch so it survives the handoff:
   tokens, upload paths, and working PoC scripts go under `$DIR/tools/`,
   `$DIR/scans/`, or `$DIR/downloads/` so the next dispatch can reference them
   by path.
-- **`log.md` for the narrative.** A condensed per-dispatch summary (what was
-  tried, what worked, what the next step is) keeps the engagement thread
-  readable and feeds the next handoff prompt.
+- **Backend activity log for the narrative.** A condensed per-dispatch summary
+  (what was tried, what worked, what the next step is) goes to the
+  `activity_entries` table via `./scripts/assess.py log <agent> <title>
+  <action> <result>`. Query with `./scripts/assess.py fetch activity-entries`
+  — the log is engagement-scoped and FTS-searchable.

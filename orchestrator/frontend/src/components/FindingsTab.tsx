@@ -1,97 +1,496 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AssessmentAttackChainDetail,
   AssessmentAttackChainLink,
   AssessmentFinding,
   AssessmentFindingDetail,
+  AssessmentFindingLink,
   AssessmentFindingTransition,
   FindingDetails,
+  FindingPocRequest,
+  FindingPocResponse,
+  FindingProvenance,
+  FindingReference,
 } from "../lib/api";
-import { listAssessmentFindingTransitions } from "../lib/api";
+import { listAssessmentFindingLinks, listAssessmentFindingTransitions } from "../lib/api";
+import { JsonTree } from "./ArtifactViewer";
+
+// ── Types & helpers ───────────────────────────────────────────────────
+
+type FindingLike = AssessmentFinding | AssessmentFindingDetail;
 
 type FindingsTabProps = {
   engagementKey: string;
-  findings: (AssessmentFindingDetail | AssessmentFinding)[];
+  findings: FindingLike[];
   fallbackFindings: AssessmentFinding[];
   chains: AssessmentAttackChainDetail[];
   chainLinks: AssessmentAttackChainLink[];
 };
 
-const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
+const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const;
+type Severity = (typeof SEVERITY_ORDER)[number];
+const SEV_RANK: Record<string, number> = Object.fromEntries(
+  SEVERITY_ORDER.map((s, i) => [s, i]),
+);
+const PAGE_SIZE = 40;
+const SEV_COLORS: Record<string, string> = {
+  critical: "#991b1b",
+  high: "#c64d15",
+  medium: "#a16207",
+  low: "#17354c",
+  info: "#9a988d",
+};
 
-function isDetail(finding: AssessmentFinding | AssessmentFindingDetail): finding is AssessmentFindingDetail {
+const KNOWN_DETAIL_KEYS = new Set<string>([
+  "discovered_by",
+  "owasp_category",
+  "cwe_id",
+  "parameter",
+  "request_method",
+  "evidence",
+  "kill_reason",
+  "kill_check",
+  "impact",
+  "cvss_vector",
+  "cvss_score",
+  "remediation",
+  "steps_to_reproduce",
+  "chain_required",
+  "chain_rationale",
+  "required_followup",
+  "poc_code",
+  "poc_language",
+  "poc_request",
+  "poc_response",
+  "references",
+  "slot_type",
+  "entry_point",
+  "sink",
+  "taint_path",
+  "guards_evaluated",
+  "variant_of",
+  "original_pattern",
+]);
+
+function isDetail(finding: FindingLike): finding is AssessmentFindingDetail {
   return "id" in finding;
 }
 
-function parseDetails(finding: AssessmentFinding | AssessmentFindingDetail): FindingDetails {
+function parseDetails(finding: FindingLike): FindingDetails {
   if (!isDetail(finding)) return {};
   try {
-    return JSON.parse(finding.details_json || "{}");
+    return JSON.parse(finding.details_json || "{}") as FindingDetails;
   } catch {
     return {};
   }
 }
 
-function sortFindings(findings: (AssessmentFindingDetail | AssessmentFinding)[]) {
-  return [...findings].sort((left, right) => {
-    const severityDelta = SEVERITY_ORDER.indexOf(left.severity) - SEVERITY_ORDER.indexOf(right.severity);
-    if (severityDelta !== 0) return severityDelta;
-    return left.title.localeCompare(right.title);
-  });
-}
-
-function workflowLabel(finding: AssessmentFinding | AssessmentFindingDetail) {
-  switch (finding.workflow_status) {
-    case "reported":
-      return "Included in report";
-    case "merged":
-      return isDetail(finding) && finding.merged_into_slug ? `Merged into ${finding.merged_into_slug}` : "Merged duplicate";
-    case "active":
-      return "Active";
-    case "exploited":
-      return "Exploited";
-    case "blocked":
-      return "Blocked";
-    case "false_positive":
-      return "Suppressed";
-    default:
-      return finding.workflow_status;
+function parseProvenance(raw: string | undefined | null): FindingProvenance | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as FindingProvenance;
+    }
+  } catch {
+    // ignore
   }
+  return null;
 }
 
-function verificationKey(finding: AssessmentFinding | AssessmentFindingDetail) {
+function verificationKey(finding: FindingLike): string {
   if (finding.verification_state === "disputed") return "disputed";
-  if (finding.verification_disposition !== "none") return finding.verification_disposition;
+  if (finding.verification_disposition && finding.verification_disposition !== "none") {
+    return finding.verification_disposition;
+  }
   return finding.verification_state;
 }
 
-function verificationLabel(finding: AssessmentFinding | AssessmentFindingDetail) {
-  switch (verificationKey(finding)) {
-    case "confirmed":
-      return "Verified";
-    case "downgraded":
-      return "Downgraded";
-    case "false_positive":
-      return "False positive";
-    case "disputed":
-      return "Disputed";
-    default:
-      return "Unreviewed";
+function verificationLabel(finding: FindingLike): string {
+  const k = verificationKey(finding);
+  return (
+    {
+      confirmed: "Verified",
+      downgraded: "Downgraded",
+      false_positive: "False positive",
+      disputed: "Disputed",
+      unreviewed: "Unreviewed",
+    }[k] || k
+  );
+}
+
+function workflowLabel(finding: FindingLike): string {
+  const map: Record<string, string> = {
+    reported: "Reported",
+    merged: "Merged",
+    active: "Active",
+    exploited: "Exploited",
+    blocked: "Blocked",
+    false_positive: "Suppressed",
+  };
+  return map[finding.workflow_status] || finding.workflow_status;
+}
+
+function relTime(iso: string | undefined | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const now = new Date();
+  const diffMin = Math.round((now.getTime() - d.getTime()) / 60000);
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const h = Math.round(diffMin / 60);
+  if (h < 24) return `${h}h ago`;
+  const day = Math.round(h / 24);
+  if (day < 7) return `${day}d ago`;
+  return d.toISOString().slice(0, 10);
+}
+
+function sevDotColor(sev: string): string {
+  return SEV_COLORS[sev] || "#9a988d";
+}
+
+function extractHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
   }
 }
 
-function rowMeta(finding: AssessmentFinding | AssessmentFindingDetail) {
-  const parts = [];
-  if (finding.source_name) {
-    parts.push(finding.source_name);
+function formatHttp(
+  obj: FindingPocRequest | FindingPocResponse | string | undefined,
+  kind: "req" | "resp",
+): string {
+  if (!obj) return "";
+  if (typeof obj === "string") return obj;
+  const lines: string[] = [];
+  if (kind === "req") {
+    const req = obj as FindingPocRequest;
+    lines.push(`${(req.method || "GET").toUpperCase()} ${req.url || ""}`.trim());
+  } else if (kind === "resp") {
+    const resp = obj as FindingPocResponse;
+    if (resp.status != null) lines.push(`HTTP ${resp.status}`);
   }
-  if (finding.workflow_status !== "active") {
-    parts.push(workflowLabel(finding));
+  const headers = (obj as FindingPocRequest | FindingPocResponse).headers;
+  if (headers && typeof headers === "object") {
+    for (const [k, v] of Object.entries(headers)) lines.push(`${k}: ${v}`);
+  } else if (typeof headers === "string" && headers.trim()) {
+    lines.push(headers.trim());
   }
-  return parts.join(" · ");
+  const body = (obj as FindingPocRequest | FindingPocResponse).body;
+  if (body) {
+    lines.push("");
+    lines.push(body);
+  }
+  return lines.join("\n");
 }
 
-const FINDINGS_PAGE_SIZE = 50;
+function normalizeReference(
+  ref: FindingReference,
+): { label: string; href?: string } {
+  if (typeof ref === "string") {
+    const trimmed = ref.trim();
+    if (/^https?:\/\//i.test(trimmed)) return { label: trimmed, href: trimmed };
+    return { label: trimmed };
+  }
+  if (ref && typeof ref === "object") {
+    const href = ref.url && /^https?:\/\//i.test(ref.url) ? ref.url : undefined;
+    const label = ref.title || ref.url || ref.id || "";
+    return { label, href };
+  }
+  return { label: String(ref) };
+}
+
+// ── Search tokenizer ──────────────────────────────────────────────────
+
+const SCOPES = [
+  "severity",
+  "status",
+  "workflow",
+  "verification",
+  "cwe",
+  "owasp",
+  "cve",
+  "source",
+  "agent",
+  "auth",
+  "method",
+  "slug",
+  "family",
+  "chain",
+] as const;
+type Scope = (typeof SCOPES)[number];
+
+type ParsedQuery = {
+  tokens: { scope: Scope; value: string }[];
+  freeTerms: string[];
+};
+
+function parseQuery(q: string): ParsedQuery {
+  const tokens: ParsedQuery["tokens"] = [];
+  const freeTerms: string[] = [];
+  const re = /(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(q || "")) !== null) {
+    const tok = m[1];
+    const idx = tok.indexOf(":");
+    if (idx > 0) {
+      const scope = tok.slice(0, idx).toLowerCase();
+      if ((SCOPES as readonly string[]).includes(scope)) {
+        tokens.push({ scope: scope as Scope, value: tok.slice(idx + 1).toLowerCase() });
+        continue;
+      }
+    }
+    freeTerms.push(tok.toLowerCase());
+  }
+  return { tokens, freeTerms };
+}
+
+// ── Derived-finding shape (one-pass normalisation) ────────────────────
+
+type DerivedLink = {
+  link_kind: string;
+  target_kind: "finding" | "chain" | "cve" | string;
+  target_ref: string;
+  id?: number;
+};
+
+type Derived = {
+  finding: FindingLike;
+  slug: string;
+  title: string;
+  severity: string;
+  workflow_status: string;
+  verification_state: string;
+  verification_disposition: string;
+  verificationKey: string;
+  verificationLabel: string;
+  workflowLabel: string;
+  canonical_location: string;
+  summary: string;
+  source_name: string;
+  updated_at: string;
+  // details_json-derived
+  cwe_id?: string;
+  owasp_category?: string;
+  cvss_vector?: string;
+  cvss_score?: number;
+  impact?: string;
+  remediation?: string;
+  evidence?: string;
+  kill_reason?: string;
+  kill_check?: number;
+  steps_to_reproduce?: string[];
+  parameter?: string;
+  request_method?: string;
+  discovered_by?: string;
+  poc_code?: string;
+  poc_language?: string;
+  poc_request?: FindingPocRequest | string;
+  poc_response?: FindingPocResponse | string;
+  references: FindingReference[];
+  chain_required?: boolean;
+  chain_rationale?: string;
+  required_followup?: string[];
+  slot_type?: string;
+  entry_point?: string;
+  sink?: string;
+  taint_path?: string[];
+  guards_evaluated?: string | string[] | Record<string, unknown>;
+  variant_of?: string;
+  original_pattern?: string;
+  // detail-only
+  defect_family?: string;
+  auth_context?: string;
+  root_cause_key?: string;
+  merged_into_slug?: string | null;
+  notes?: string;
+  evidence_ref?: string;
+  // derived
+  details: FindingDetails;
+  provenance: FindingProvenance | null;
+  links: DerivedLink[];
+  searchCorpus: string;
+};
+
+function toStringArray(v: unknown): string[] | undefined {
+  if (v == null) return undefined;
+  if (Array.isArray(v)) return v.map((x) => (typeof x === "string" ? x : JSON.stringify(x)));
+  if (typeof v === "string") return [v];
+  return undefined;
+}
+
+function buildSearchCorpus(d: Omit<Derived, "searchCorpus">): string {
+  const parts: (string | undefined | null)[] = [
+    d.slug,
+    d.title,
+    d.summary,
+    d.canonical_location,
+    d.source_name,
+    d.severity,
+    d.workflow_status,
+    d.verificationKey,
+    d.verificationLabel,
+    d.cwe_id,
+    d.owasp_category,
+    d.defect_family,
+    d.auth_context,
+    d.parameter,
+    d.request_method,
+    d.discovered_by,
+    d.impact,
+    d.remediation,
+    d.evidence,
+    d.kill_reason,
+    d.root_cause_key,
+    d.poc_code,
+    d.entry_point,
+    d.sink,
+    (d.steps_to_reproduce || []).join(" "),
+    (d.taint_path || []).join(" "),
+    JSON.stringify(d.poc_request || ""),
+    JSON.stringify(d.poc_response || ""),
+    d.links.map((l) => `${l.link_kind} ${l.target_kind}:${l.target_ref}`).join(" "),
+    d.references
+      .map((r) => (typeof r === "string" ? r : `${r.title || ""} ${r.url || ""}`))
+      .join(" "),
+    d.provenance?.agent_name,
+  ];
+  return parts.filter(Boolean).join(" \n ").toLowerCase();
+}
+
+// ── Highlight helper ──────────────────────────────────────────────────
+
+function highlight(text: string | undefined, freeTerms: string[]): React.ReactNode {
+  if (!text) return text ?? "";
+  if (!freeTerms || !freeTerms.length) return text;
+  const lower = text.toLowerCase();
+  let bestIdx = -1;
+  let bestLen = 0;
+  for (const t of freeTerms) {
+    const i = lower.indexOf(t);
+    if (i >= 0 && (bestIdx < 0 || i < bestIdx)) {
+      bestIdx = i;
+      bestLen = t.length;
+    }
+  }
+  if (bestIdx < 0) return text;
+  return (
+    <>
+      {text.slice(0, bestIdx)}
+      <mark className="hl">{text.slice(bestIdx, bestIdx + bestLen)}</mark>
+      {text.slice(bestIdx + bestLen)}
+    </>
+  );
+}
+
+// ── Icons (inline SVG) ────────────────────────────────────────────────
+
+const IconSearch = () => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className="search-icon"
+  >
+    <circle cx={11} cy={11} r={7} />
+    <path d="M21 21l-4.3-4.3" />
+  </svg>
+);
+const IconClose = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+    <path d="M6 6l12 12M18 6L6 18" />
+  </svg>
+);
+const IconUp = () => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M18 15l-6-6-6 6" />
+  </svg>
+);
+const IconDown = () => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M6 9l6 6 6-6" />
+  </svg>
+);
+const IconCopy = () => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <rect x={9} y={9} width={13} height={13} rx={2} />
+    <path d="M5 15V5a2 2 0 012-2h10" />
+  </svg>
+);
+const IconExternal = () => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    width={11}
+    height={11}
+  >
+    <path d="M14 4h6v6" />
+    <path d="M10 14L21 3" />
+    <path d="M19 14v6H4V4h6" />
+  </svg>
+);
+
+// ── JsonTree value safety ─────────────────────────────────────────────
+
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+function toJsonValue(value: unknown): JsonValue {
+  if (value === null || value === undefined) return null;
+  const t = typeof value;
+  if (t === "string" || t === "number" || t === "boolean") return value as JsonValue;
+  if (Array.isArray(value)) return value.map(toJsonValue);
+  if (t === "object") {
+    const out: { [key: string]: JsonValue } = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = toJsonValue(v);
+    }
+    return out;
+  }
+  return String(value);
+}
+
+// ── Chain link ↔ finding matcher ──────────────────────────────────────
+
+function chainLinkFindingSlug(
+  link: AssessmentAttackChainLink,
+  detailIdToSlug: Map<number, string>,
+): string | null {
+  if (link.entity_kind !== "finding") return null;
+  if (link.entity_ref) return link.entity_ref;
+  if (link.entity_id != null) return detailIdToSlug.get(link.entity_id) ?? null;
+  return null;
+}
+
+// ── Component ─────────────────────────────────────────────────────────
 
 export function FindingsTab({
   engagementKey,
@@ -100,30 +499,315 @@ export function FindingsTab({
   chains,
   chainLinks,
 }: FindingsTabProps) {
-  const [severityFilter, setSeverityFilter] = useState<string | null>(null);
-  const [workflowFilter, setWorkflowFilter] = useState<string | null>(null);
-  const [verificationFilter, setVerificationFilter] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [page, setPage] = useState(0);
+  const allFindingsRaw = findings.length > 0 ? findings : fallbackFindings;
+
+  const [allFindingLinks, setAllFindingLinks] = useState<AssessmentFindingLink[]>([]);
   const [transitions, setTransitions] = useState<AssessmentFindingTransition[]>([]);
   const [transitionsLoading, setTransitionsLoading] = useState(false);
   const [transitionsError, setTransitionsError] = useState<string | null>(null);
 
-  const allFindings = findings.length > 0 ? findings : fallbackFindings;
+  const [query, setQuery] = useState("");
+  const [sevFilters, setSevFilters] = useState<Set<string>>(new Set());
+  const [workflowFilters, setWorkflowFilters] = useState<Set<string>>(new Set());
+  const [verifFilters, setVerifFilters] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(0);
+  const [cmdOpen, setCmdOpen] = useState(false);
 
+  const [selected, setSelected] = useState<string | null>(() => {
+    try {
+      return window.localStorage.getItem("findings.selected");
+    } catch {
+      return null;
+    }
+  });
+
+  const searchRef = useRef<HTMLInputElement | null>(null);
+
+  // Persist selection
   useEffect(() => {
-    if (!selected) return;
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setSelected(null);
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    try {
+      if (selected) window.localStorage.setItem("findings.selected", selected);
+      else window.localStorage.removeItem("findings.selected");
+    } catch {
+      // ignore
+    }
   }, [selected]);
 
+  // Fetch finding links
+  useEffect(() => {
+    let cancelled = false;
+    listAssessmentFindingLinks(engagementKey)
+      .then((rows) => {
+        if (!cancelled) setAllFindingLinks(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setAllFindingLinks([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engagementKey]);
+
+  // ── Derived findings (one pass) ──
+  const detailIdToSlug = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const f of allFindingsRaw) {
+      if (isDetail(f)) map.set(f.id, f.slug);
+    }
+    return map;
+  }, [allFindingsRaw]);
+
+  const chainLinksByFindingSlug = useMemo(() => {
+    const map = new Map<string, AssessmentAttackChainLink[]>();
+    for (const link of chainLinks) {
+      const slug = chainLinkFindingSlug(link, detailIdToSlug);
+      if (!slug) continue;
+      if (!map.has(slug)) map.set(slug, []);
+      map.get(slug)!.push(link);
+    }
+    return map;
+  }, [chainLinks, detailIdToSlug]);
+
+  const findingLinksBySlug = useMemo(() => {
+    const map = new Map<string, AssessmentFindingLink[]>();
+    for (const link of allFindingLinks) {
+      if (!map.has(link.finding_slug)) map.set(link.finding_slug, []);
+      map.get(link.finding_slug)!.push(link);
+    }
+    return map;
+  }, [allFindingLinks]);
+
+  const derivedList = useMemo<Derived[]>(() => {
+    return allFindingsRaw.map((f) => {
+      const details = parseDetails(f);
+      const provenance = isDetail(f) ? parseProvenance(f.provenance_json) : null;
+
+      const findingLinks = findingLinksBySlug.get(f.slug) || [];
+      const chainLinkSet = chainLinksByFindingSlug.get(f.slug) || [];
+
+      // Build derived links: prefer AssessmentFindingLink for finding/chain/cve.
+      const links: DerivedLink[] = [];
+      const seenChains = new Set<string>();
+      for (const link of findingLinks) {
+        links.push({
+          link_kind: link.link_kind,
+          target_kind: link.target_kind,
+          target_ref: link.target_ref,
+          id: link.id,
+        });
+        if (link.target_kind === "chain") seenChains.add(link.target_ref);
+      }
+      // Fallback: add chain links from chainLinks prop if not already present.
+      for (const cl of chainLinkSet) {
+        if (!seenChains.has(cl.chain_key)) {
+          links.push({
+            link_kind: cl.relation || "attack-chain",
+            target_kind: "chain",
+            target_ref: cl.chain_key,
+          });
+        }
+      }
+
+      const taintArr = toStringArray(details.taint_path);
+
+      const base: Omit<Derived, "searchCorpus"> = {
+        finding: f,
+        slug: f.slug,
+        title: f.title,
+        severity: f.severity,
+        workflow_status: f.workflow_status,
+        verification_state: f.verification_state,
+        verification_disposition: f.verification_disposition,
+        verificationKey: verificationKey(f),
+        verificationLabel: verificationLabel(f),
+        workflowLabel: workflowLabel(f),
+        canonical_location: f.canonical_location,
+        summary: f.summary,
+        source_name: f.source_name,
+        updated_at: f.updated_at,
+        cwe_id: details.cwe_id,
+        owasp_category: details.owasp_category,
+        cvss_vector: details.cvss_vector,
+        cvss_score: typeof details.cvss_score === "number" ? details.cvss_score : undefined,
+        impact: details.impact,
+        remediation: details.remediation,
+        evidence: details.evidence,
+        kill_reason: details.kill_reason,
+        kill_check: typeof details.kill_check === "number" ? details.kill_check : undefined,
+        steps_to_reproduce: details.steps_to_reproduce,
+        parameter: details.parameter,
+        request_method: details.request_method,
+        discovered_by: details.discovered_by,
+        poc_code: details.poc_code,
+        poc_language: details.poc_language,
+        poc_request: details.poc_request,
+        poc_response: details.poc_response,
+        references: details.references || [],
+        chain_required: details.chain_required,
+        chain_rationale: details.chain_rationale,
+        required_followup: details.required_followup,
+        slot_type: details.slot_type,
+        entry_point: details.entry_point,
+        sink: details.sink,
+        taint_path: taintArr,
+        guards_evaluated: details.guards_evaluated,
+        variant_of: details.variant_of,
+        original_pattern: details.original_pattern,
+        defect_family: isDetail(f) ? f.defect_family : undefined,
+        auth_context: isDetail(f) ? f.auth_context : undefined,
+        root_cause_key: isDetail(f) ? f.root_cause_key : undefined,
+        merged_into_slug: isDetail(f) ? f.merged_into_slug ?? null : undefined,
+        notes: isDetail(f) ? f.notes : undefined,
+        evidence_ref: isDetail(f) ? f.evidence_ref : undefined,
+        details,
+        provenance,
+        links,
+      };
+      return { ...base, searchCorpus: buildSearchCorpus(base) };
+    });
+  }, [allFindingsRaw, findingLinksBySlug, chainLinksByFindingSlug]);
+
+  const derivedBySlug = useMemo(() => {
+    const m = new Map<string, Derived>();
+    for (const d of derivedList) m.set(d.slug, d);
+    return m;
+  }, [derivedList]);
+
+  const chainsByKey = useMemo(() => {
+    const m = new Map<string, AssessmentAttackChainDetail>();
+    for (const c of chains) m.set(c.chain_key, c);
+    return m;
+  }, [chains]);
+
+  const chainMembersByKey = useMemo(() => {
+    const m = new Map<string, Derived[]>();
+    for (const d of derivedList) {
+      for (const l of d.links) {
+        if (l.target_kind === "chain") {
+          if (!m.has(l.target_ref)) m.set(l.target_ref, []);
+          m.get(l.target_ref)!.push(d);
+        }
+      }
+    }
+    return m;
+  }, [derivedList]);
+
+  // ── Filtering ──
+  const parsedQuery = useMemo(() => parseQuery(query), [query]);
+
+  const matchesQuery = useCallback(
+    (d: Derived, parsed: ParsedQuery): boolean => {
+      for (const tok of parsed.tokens) {
+        const v = tok.value;
+        switch (tok.scope) {
+          case "severity":
+            if ((d.severity || "").toLowerCase() !== v) return false;
+            break;
+          case "status":
+          case "workflow":
+            if ((d.workflow_status || "").toLowerCase() !== v) return false;
+            break;
+          case "verification":
+            if ((d.verificationKey || "").toLowerCase() !== v) return false;
+            break;
+          case "cwe":
+            if (!(d.cwe_id || "").toLowerCase().includes(v)) return false;
+            break;
+          case "owasp":
+            if (!(d.owasp_category || "").toLowerCase().includes(v)) return false;
+            break;
+          case "cve": {
+            const refs = d.references
+              .map((r) => (typeof r === "string" ? r : `${r.title || ""} ${r.url || ""}`))
+              .join(" ");
+            const linkCves = d.links
+              .filter((l) => l.target_kind === "cve")
+              .map((l) => l.target_ref)
+              .join(" ");
+            if (!(refs + " " + linkCves).toLowerCase().includes(v)) return false;
+            break;
+          }
+          case "source":
+            if (!(d.source_name || "").toLowerCase().includes(v)) return false;
+            break;
+          case "agent": {
+            const hay =
+              (d.discovered_by || "") + " " + (d.provenance?.agent_name || "");
+            if (!hay.toLowerCase().includes(v)) return false;
+            break;
+          }
+          case "auth":
+            if (!(d.auth_context || "").toLowerCase().includes(v)) return false;
+            break;
+          case "method":
+            if (!(d.request_method || "").toLowerCase().includes(v)) return false;
+            break;
+          case "slug":
+            if (!(d.slug || "").toLowerCase().includes(v)) return false;
+            break;
+          case "family":
+            if (!(d.defect_family || "").toLowerCase().includes(v)) return false;
+            break;
+          case "chain": {
+            const hay = d.links
+              .filter((l) => l.target_kind === "chain")
+              .map((l) => l.target_ref)
+              .join(" ");
+            if (!hay.toLowerCase().includes(v)) return false;
+            break;
+          }
+        }
+      }
+      if (parsed.freeTerms.length) {
+        for (const t of parsed.freeTerms) if (!d.searchCorpus.includes(t)) return false;
+      }
+      return true;
+    },
+    [],
+  );
+
+  const filtered = useMemo(() => {
+    const list = derivedList.filter((d) => {
+      if (sevFilters.size && !sevFilters.has(d.severity)) return false;
+      if (workflowFilters.size && !workflowFilters.has(d.workflow_status)) return false;
+      if (verifFilters.size && !verifFilters.has(d.verificationKey)) return false;
+      if (!matchesQuery(d, parsedQuery)) return false;
+      return true;
+    });
+    list.sort((a, b) => {
+      const dRank = (SEV_RANK[a.severity] ?? 99) - (SEV_RANK[b.severity] ?? 99);
+      if (dRank !== 0) return dRank;
+      return a.title.localeCompare(b.title);
+    });
+    return list;
+  }, [derivedList, sevFilters, workflowFilters, verifFilters, parsedQuery, matchesQuery]);
+
+  // Reset page when filters/search change
+  useEffect(() => {
+    setPage(0);
+  }, [sevFilters, workflowFilters, verifFilters, query]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  useEffect(() => {
+    setPage((p) => Math.min(p, totalPages - 1));
+  }, [totalPages]);
+  const pageRows = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  // Auto-select first if none selected and we have findings
+  useEffect(() => {
+    if (!selected && derivedList.length > 0) {
+      const persisted = derivedBySlug.get(selected || "");
+      if (!persisted) setSelected(derivedList[0].slug);
+    }
+    // If selected slug no longer exists, clear it
+    if (selected && !derivedBySlug.has(selected)) {
+      setSelected(derivedList[0]?.slug ?? null);
+    }
+  }, [derivedList, derivedBySlug, selected]);
+
+  const selectedDerived = selected ? derivedBySlug.get(selected) ?? null : null;
+
+  // Transitions fetch
   useEffect(() => {
     if (!selected) {
       setTransitions([]);
@@ -131,462 +815,1294 @@ export function FindingsTab({
       setTransitionsError(null);
       return;
     }
-
     let cancelled = false;
     setTransitionsLoading(true);
     setTransitionsError(null);
     listAssessmentFindingTransitions(engagementKey, selected)
       .then((rows) => {
-        if (cancelled) return;
-        setTransitions(rows);
+        if (!cancelled) setTransitions(rows);
       })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        setTransitions([]);
-        setTransitionsError(error instanceof Error ? error.message : "Failed to load transition history");
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setTransitions([]);
+          setTransitionsError(
+            err instanceof Error ? err.message : "Failed to load transition history",
+          );
+        }
       })
       .finally(() => {
         if (!cancelled) setTransitionsLoading(false);
       });
-
     return () => {
       cancelled = true;
     };
   }, [engagementKey, selected]);
 
-  const severities = useMemo(() => {
-    const set = new Set(allFindings.map((finding) => finding.severity));
-    return SEVERITY_ORDER.filter((severity) => set.has(severity));
-  }, [allFindings]);
-
-  const workflowStatuses = useMemo(() => {
-    const set = new Set<string>();
-    allFindings.forEach((finding) => set.add(finding.workflow_status));
-    return Array.from(set);
-  }, [allFindings]);
-
-  const verificationStatuses = useMemo(() => {
-    const set = new Set<string>();
-    allFindings.forEach((finding) => set.add(verificationKey(finding)));
-    return Array.from(set);
-  }, [allFindings]);
-
-  const workflowCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const finding of allFindings) {
-      counts[finding.workflow_status] = (counts[finding.workflow_status] ?? 0) + 1;
-    }
-    return counts;
-  }, [allFindings]);
-
-  const verificationCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const finding of allFindings) {
-      const key = verificationKey(finding);
-      counts[key] = (counts[key] ?? 0) + 1;
-    }
-    return counts;
-  }, [allFindings]);
-
-  const filtered = useMemo(() => {
-    const visible = allFindings.filter((finding) => {
-      if (severityFilter && finding.severity !== severityFilter) return false;
-      if (workflowFilter && finding.workflow_status !== workflowFilter) return false;
-      if (verificationFilter && verificationKey(finding) !== verificationFilter) return false;
-      return true;
-    });
-    return sortFindings(visible);
-  }, [allFindings, severityFilter, workflowFilter, verificationFilter]);
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / FINDINGS_PAGE_SIZE));
-  const pageFindings = filtered.slice(page * FINDINGS_PAGE_SIZE, (page + 1) * FINDINGS_PAGE_SIZE);
+  // ── Keyboard ──
+  const filteredRef = useRef(filtered);
+  filteredRef.current = filtered;
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
 
   useEffect(() => {
-    setPage(0);
-  }, [severityFilter, workflowFilter, verificationFilter]);
-
-  useEffect(() => {
-    setPage((current) => Math.min(current, totalPages - 1));
-  }, [totalPages]);
-
-  const selectedFinding = useMemo(
-    () => allFindings.find((finding) => finding.slug === selected) ?? null,
-    [allFindings, selected],
-  );
-
-  const details = selectedFinding ? parseDetails(selectedFinding) : {};
-
-  const findingLinkMatches = useMemo(() => {
-    const findingIdToSlug = new Map<number, string>();
-    for (const f of allFindings) {
-      if (isDetail(f)) findingIdToSlug.set(f.id, f.slug);
-    }
-    return (link: { entity_kind: string; entity_ref: string; entity_id: number | null }) => {
-      if (link.entity_kind !== "finding") return null;
-      if (link.entity_ref) return link.entity_ref;
-      if (link.entity_id != null) return findingIdToSlug.get(link.entity_id) ?? null;
-      return null;
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = (target?.tagName || "").toLowerCase();
+      const isTyping = tag === "input" || tag === "textarea";
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setCmdOpen(true);
+        return;
+      }
+      if (!isTyping && e.key === "/") {
+        e.preventDefault();
+        searchRef.current?.focus();
+        return;
+      }
+      if (e.key === "Escape") {
+        if (isTyping) {
+          searchRef.current?.blur();
+        } else {
+          setSelected(null);
+        }
+        return;
+      }
+      if (!isTyping && (e.key === "[" || e.key === "]")) {
+        e.preventDefault();
+        const list = filteredRef.current;
+        const cur = selectedRef.current;
+        const idx = list.findIndex((f) => f.slug === cur);
+        if (idx < 0) {
+          if (list[0]) setSelected(list[0].slug);
+          return;
+        }
+        const next =
+          e.key === "[" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
+        setSelected(list[next].slug);
+      }
+      if (!isTyping && (e.key === "j" || e.key === "k")) {
+        e.preventDefault();
+        const list = filteredRef.current;
+        const cur = selectedRef.current;
+        const idx = list.findIndex((f) => f.slug === cur);
+        if (idx < 0 && list[0]) {
+          setSelected(list[0].slug);
+          return;
+        }
+        const next =
+          e.key === "k" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
+        setSelected(list[next].slug);
+      }
     };
-  }, [allFindings]);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
-  const selectedChains = useMemo(() => {
-    if (!selectedFinding) return [];
-    const linkedChainKeys = chainLinks
-      .filter((link) => findingLinkMatches(link) === selectedFinding.slug)
-      .map((link) => link.chain_key);
-    return chains.filter((chain) => linkedChainKeys.includes(chain.chain_key));
-  }, [selectedFinding, chains, chainLinks, findingLinkMatches]);
+  // ── Counters ──
+  const severityCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const d of derivedList) c[d.severity] = (c[d.severity] || 0) + 1;
+    return c;
+  }, [derivedList]);
+  const workflowCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const d of derivedList) c[d.workflow_status] = (c[d.workflow_status] || 0) + 1;
+    return c;
+  }, [derivedList]);
+  const verifCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const d of derivedList) c[d.verificationKey] = (c[d.verificationKey] || 0) + 1;
+    return c;
+  }, [derivedList]);
 
-  const findingChainCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const link of chainLinks) {
-      const slug = findingLinkMatches(link);
-      if (slug) counts[slug] = (counts[slug] ?? 0) + 1;
-    }
-    return counts;
-  }, [chainLinks, findingLinkMatches]);
+  const toggle = (
+    set: Set<string>,
+    setter: (s: Set<string>) => void,
+    val: string,
+  ) => {
+    const next = new Set(set);
+    if (next.has(val)) next.delete(val);
+    else next.add(val);
+    setter(next);
+  };
+
+  const clearAll = () => {
+    setSevFilters(new Set());
+    setWorkflowFilters(new Set());
+    setVerifFilters(new Set());
+    setQuery("");
+  };
+
+  const activeFilterCount =
+    sevFilters.size + workflowFilters.size + verifFilters.size + (query ? 1 : 0);
+
+  const selIdx = filtered.findIndex((d) => d.slug === selected);
 
   return (
-    <>
-      <section className="panel filter-bar-panel">
-        <div className="filter-bar">
+    <div className="findings-redesign">
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">Findings</h1>
+          <div className="page-crumbs">
+            Engagement <code>{engagementKey}</code> ·{" "}
+            <span>
+              {filtered.length} of {derivedList.length} findings
+            </span>
+          </div>
+        </div>
+        <SevSpark counts={severityCounts} />
+      </div>
+
+      {/* Toolbar */}
+      <div className="panel findings-toolbar-panel">
+        <div className="toolbar">
+          <div className="search-wrap">
+            <IconSearch />
+            <input
+              ref={searchRef}
+              className="search-input"
+              placeholder="Search any field — title, CWE, slug, payload, endpoint… (try severity:high cwe:79)"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {query && (
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setQuery("")}
+                title="Clear"
+                style={{ width: 22, height: 22 }}
+              >
+                <IconClose />
+              </button>
+            )}
+            <span className="search-kbd">/</span>
+          </div>
+          <div className="toolbar-right">
+            <button
+              type="button"
+              className="qa-btn"
+              onClick={() => setCmdOpen(true)}
+            >
+              Jump to…{" "}
+              <span className="search-kbd" style={{ marginLeft: 4 }}>
+                ⌘K
+              </span>
+            </button>
+          </div>
+        </div>
+        <div className="filter-row">
           <div className="filter-group">
             <span className="filter-label">Severity</span>
-            {severities.map((severity) => (
+            {SEVERITY_ORDER.filter((s) => severityCounts[s]).map((s) => (
               <button
-                key={severity}
+                key={s}
                 type="button"
-                className={`filter-chip severity-${severity} ${severityFilter === severity ? "filter-active" : ""}`}
-                onClick={() => setSeverityFilter(severityFilter === severity ? null : severity)}
+                className={`filter-chip sev-${s} ${sevFilters.has(s) ? "is-active" : ""}`}
+                onClick={() => toggle(sevFilters, setSevFilters, s)}
               >
-                {severity}
+                <span className="sev-dot" style={{ background: sevDotColor(s) }} />
+                {s}
+                <span className="filter-count">{severityCounts[s]}</span>
               </button>
             ))}
           </div>
           <div className="filter-group">
             <span className="filter-label">Workflow</span>
-            {workflowStatuses.map((status) => (
+            {Object.keys(workflowCounts).map((s) => (
               <button
-                key={status}
+                key={s}
                 type="button"
-                className={`filter-chip ${workflowFilter === status ? "filter-active" : ""}`}
-                onClick={() => setWorkflowFilter(workflowFilter === status ? null : status)}
+                className={`filter-chip ${workflowFilters.has(s) ? "is-active" : ""}`}
+                onClick={() => toggle(workflowFilters, setWorkflowFilters, s)}
               >
-                {status}
-                <span className="filter-count">{workflowCounts[status] ?? 0}</span>
+                {s.replace(/_/g, " ")}
+                <span className="filter-count">{workflowCounts[s]}</span>
               </button>
             ))}
           </div>
           <div className="filter-group">
             <span className="filter-label">Verification</span>
-            {verificationStatuses.map((status) => (
+            {Object.keys(verifCounts).map((s) => (
               <button
-                key={status}
+                key={s}
                 type="button"
-                className={`filter-chip ${verificationFilter === status ? "filter-active" : ""}`}
-                onClick={() => setVerificationFilter(verificationFilter === status ? null : status)}
+                className={`filter-chip ${verifFilters.has(s) ? "is-active" : ""}`}
+                onClick={() => toggle(verifFilters, setVerifFilters, s)}
               >
-                {status}
-                <span className="filter-count">{verificationCounts[status] ?? 0}</span>
+                {s.replace(/_/g, " ")}
+                <span className="filter-count">{verifCounts[s]}</span>
               </button>
             ))}
           </div>
-        </div>
-      </section>
-
-      <section className="findings-layout">
-        <div className="findings-list">
-          {pageFindings.map((finding) => (
-            <button
-              key={finding.slug}
-              type="button"
-              className={`finding-row ${finding.workflow_status === "false_positive" ? "finding-row-suppressed" : ""} ${selected === finding.slug ? "finding-row-active" : ""}`}
-              onClick={() => setSelected(finding.slug)}
-            >
-              <div className="finding-row-main">
-                <strong className="finding-row-title">{finding.title}</strong>
-                <p className="meta-text">{rowMeta(finding) || finding.slug}</p>
-              </div>
-              <div className="finding-row-aside">
-                {(findingChainCounts[finding.slug] ?? 0) > 0 && (
-                  <span className="badge" title="Attack chains">{findingChainCounts[finding.slug]} chain{findingChainCounts[finding.slug] !== 1 ? "s" : ""}</span>
-                )}
-                <span className={`badge severity-${finding.severity}`}>{finding.severity}</span>
-                <span className={`badge status-${finding.workflow_status}`}>{finding.workflow_status}</span>
-                {verificationKey(finding) !== "unreviewed" && (
-                  <span className={`badge status-${verificationKey(finding)}`}>{verificationLabel(finding)}</span>
-                )}
-              </div>
+          {activeFilterCount > 0 && (
+            <button type="button" className="filter-clear" onClick={clearAll}>
+              Clear all ({activeFilterCount})
             </button>
-          ))}
-          {filtered.length === 0 && (
-            <p className="empty-state" style={{ padding: "20px" }}>
-              {allFindings.length === 0 ? "No findings recorded yet." : "No findings match the current filters."}
-            </p>
           )}
         </div>
-        {totalPages > 1 && (
-          <div className="pager">
-            <button type="button" className="pager-button" disabled={page === 0} onClick={() => setPage(page - 1)}>Prev</button>
-            <span className="meta-text">Page {page + 1} of {totalPages} ({filtered.length} findings)</span>
-            <button type="button" className="pager-button" disabled={page >= totalPages - 1} onClick={() => setPage(page + 1)}>Next</button>
+      </div>
+
+      {/* List + drawer */}
+      <div className="findings-shell">
+        <section className="list-panel panel">
+          <div className="list-header">
+            <span />
+            <span>Sev</span>
+            <span>Title / slug</span>
+            <span>Location</span>
+            <span>Tags</span>
+            <span style={{ textAlign: "right" }}>Status</span>
           </div>
+          <div className="list-scroll">
+            {pageRows.length === 0 ? (
+              <div className="empty">
+                No findings match.
+                <div style={{ marginTop: 10 }}>
+                  <button type="button" className="qa-btn" onClick={clearAll}>
+                    Clear filters
+                  </button>
+                </div>
+              </div>
+            ) : (
+              pageRows.map((d) => (
+                <FindingRow
+                  key={d.slug}
+                  d={d}
+                  selected={selected === d.slug}
+                  onClick={() => setSelected(d.slug)}
+                  freeTerms={parsedQuery.freeTerms}
+                />
+              ))
+            )}
+          </div>
+          <div className="list-footer">
+            <span>
+              {filtered.length} findings · page {page + 1} / {totalPages}
+            </span>
+            <div className="pager-group">
+              <button
+                type="button"
+                className="pager-btn"
+                disabled={page === 0}
+                onClick={() => setPage((p) => p - 1)}
+              >
+                Prev
+              </button>
+              <button
+                type="button"
+                className="pager-btn"
+                disabled={page >= totalPages - 1}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <Drawer
+          d={selectedDerived}
+          derivedBySlug={derivedBySlug}
+          chainsByKey={chainsByKey}
+          chainMembersByKey={chainMembersByKey}
+          transitions={transitions}
+          transitionsLoading={transitionsLoading}
+          transitionsError={transitionsError}
+          onSelect={setSelected}
+          onClose={() => setSelected(null)}
+          onPrev={() => {
+            if (selIdx > 0) setSelected(filtered[selIdx - 1].slug);
+          }}
+          onNext={() => {
+            if (selIdx >= 0 && selIdx < filtered.length - 1)
+              setSelected(filtered[selIdx + 1].slug);
+          }}
+          hasPrev={selIdx > 0}
+          hasNext={selIdx >= 0 && selIdx < filtered.length - 1}
+        />
+      </div>
+
+      <div className="findings-shortcuts">
+        <span>
+          <code>/</code> focus search
+        </span>
+        <span>
+          <code>⌘K</code> jump to finding
+        </span>
+        <span>
+          <code>j / k</code> move
+        </span>
+        <span>
+          <code>[ / ]</code> prev / next
+        </span>
+        <span>
+          <code>Esc</code> close drawer
+        </span>
+      </div>
+
+      {cmdOpen && (
+        <CommandPalette
+          derivedList={derivedList}
+          onSelect={(slug) => {
+            setSelected(slug);
+            setCmdOpen(false);
+          }}
+          onClose={() => setCmdOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── SevSpark ──────────────────────────────────────────────────────────
+
+function SevSpark({ counts }: { counts: Record<string, number> }) {
+  const max = Math.max(1, ...Object.values(counts));
+  return (
+    <div className="sev-sparkline-wrap">
+      <span className="sev-label">Severity</span>
+      <div className="sev-sparkline">
+        {SEVERITY_ORDER.map((s) => {
+          const c = counts[s] || 0;
+          const h = Math.max(4, (c / max) * 26);
+          return (
+            <div
+              key={s}
+              className="sev-bar"
+              style={{
+                height: `${h}px`,
+                background: SEV_COLORS[s],
+                opacity: c ? 1 : 0.2,
+              }}
+              title={`${s}: ${c}`}
+            >
+              <span>{c}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── FindingRow ────────────────────────────────────────────────────────
+
+function FindingRow({
+  d,
+  selected,
+  onClick,
+  freeTerms,
+}: {
+  d: Derived;
+  selected: boolean;
+  onClick: () => void;
+  freeTerms: string[];
+}) {
+  const chainRefs = d.links.filter((l) => l.target_kind === "chain");
+  const cveRefs = d.links.filter((l) => l.target_kind === "cve");
+  const suppressed =
+    d.workflow_status === "false_positive" || d.workflow_status === "merged";
+  return (
+    <button
+      type="button"
+      className={`frow ${selected ? "is-selected" : ""} ${suppressed ? "is-suppressed" : ""}`}
+      onClick={onClick}
+      data-slug={d.slug}
+    >
+      <span className={`frow-sevbar sevbar-${d.severity}`} />
+      <span className={`frow-sev ${d.severity}`}>{d.severity}</span>
+      <span className="frow-main">
+        <span className="frow-title">{highlight(d.title, freeTerms)}</span>
+        <span className="frow-meta">
+          <span className="mono">{d.slug}</span>
+          <span className="dot" />
+          {d.cwe_id && <span>{d.cwe_id}</span>}
+          {d.cwe_id && <span className="dot" />}
+          <span>{d.source_name || "—"}</span>
+          {d.updated_at && (
+            <>
+              <span className="dot" />
+              <span>{relTime(d.updated_at)}</span>
+            </>
+          )}
+        </span>
+      </span>
+      <span className="frow-loc">{d.canonical_location || ""}</span>
+      <span className="frow-tags">
+        {d.cwe_id && <span className="tag cwe">{d.cwe_id}</span>}
+        {cveRefs.map((r, i) => (
+          <span key={`cve-${i}-${r.target_ref}`} className="tag cve">
+            {r.target_ref}
+          </span>
+        ))}
+        {chainRefs.map((r, i) => (
+          <span key={`chain-${i}-${r.target_ref}`} className="tag chain">
+            {r.target_ref}
+          </span>
+        ))}
+      </span>
+      <span className="frow-status">
+        <span className={`pill pill-${d.workflow_status}`}>{d.workflowLabel}</span>
+        {d.verificationKey !== "unreviewed" && (
+          <span className={`pill pill-${d.verificationKey}`}>
+            {d.verificationLabel}
+          </span>
         )}
-      </section>
+      </span>
+    </button>
+  );
+}
 
-      {selectedFinding && (
-        <div className="finding-overlay" role="presentation" onClick={() => setSelected(null)}>
-          <article className="finding-modal panel" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
-            <div className="finding-modal-header">
-              <div className="finding-modal-heading">
-                <h2>{selectedFinding.title}</h2>
-                <p className="meta-text">{selectedFinding.slug}</p>
-              </div>
-              <div className="finding-modal-actions">
-                <span className={`badge severity-${selectedFinding.severity}`}>{selectedFinding.severity}</span>
-                <button type="button" className="ghost-button" onClick={() => setSelected(null)}>Close</button>
-              </div>
-            </div>
+// ── Drawer ────────────────────────────────────────────────────────────
 
-            <div className="finding-modal-content">
-              {selectedFinding.summary && (
-                <div>
-                  <p className="eyebrow">Summary</p>
-                  <p>{selectedFinding.summary}</p>
-                </div>
-              )}
+type DrawerProps = {
+  d: Derived | null;
+  derivedBySlug: Map<string, Derived>;
+  chainsByKey: Map<string, AssessmentAttackChainDetail>;
+  chainMembersByKey: Map<string, Derived[]>;
+  transitions: AssessmentFindingTransition[];
+  transitionsLoading: boolean;
+  transitionsError: string | null;
+  onSelect: (slug: string | null) => void;
+  onClose: () => void;
+  onPrev: () => void;
+  onNext: () => void;
+  hasPrev: boolean;
+  hasNext: boolean;
+};
 
-              {selectedFinding.canonical_location && (
-                <div>
-                  <p className="eyebrow">Location</p>
-                  <p className="meta-text finding-mono">{selectedFinding.canonical_location}</p>
-                </div>
-              )}
+type TabId = "overview" | "poc" | "code" | "links" | "history" | "intel";
 
-              <div className="finding-meta-grid">
-                <div>
-                  <p className="eyebrow">Workflow</p>
-                  <p>{workflowLabel(selectedFinding)}</p>
-                </div>
-                <div>
-                  <p className="eyebrow">Verification</p>
-                  <p>{verificationLabel(selectedFinding)}</p>
-                </div>
-                {selectedFinding.source_name && (
-                  <div>
-                    <p className="eyebrow">Source</p>
-                    <p>{selectedFinding.source_name}</p>
-                  </div>
-                )}
-                {details.discovered_by && (
-                  <div>
-                    <p className="eyebrow">Discovered by</p>
-                    <p>{details.discovered_by}</p>
-                  </div>
-                )}
-                {isDetail(selectedFinding) && selectedFinding.defect_family && (
-                  <div>
-                    <p className="eyebrow">Defect family</p>
-                    <p>{selectedFinding.defect_family}</p>
-                  </div>
-                )}
-                {isDetail(selectedFinding) && selectedFinding.auth_context && (
-                  <div>
-                    <p className="eyebrow">Auth context</p>
-                    <p>{selectedFinding.auth_context}</p>
-                  </div>
-                )}
-                {isDetail(selectedFinding) && selectedFinding.root_cause_key && (
-                  <div>
-                    <p className="eyebrow">Root cause</p>
-                    <p className="finding-mono">{selectedFinding.root_cause_key}</p>
-                  </div>
-                )}
-                {details.parameter && (
-                  <div>
-                    <p className="eyebrow">Parameter</p>
-                    <p>{details.parameter}</p>
-                  </div>
-                )}
-                {details.owasp_category && (
-                  <div>
-                    <p className="eyebrow">OWASP</p>
-                    <p>{details.owasp_category}</p>
-                  </div>
-                )}
-                {details.cwe_id && (
-                  <div>
-                    <p className="eyebrow">CWE</p>
-                    <p>{details.cwe_id}</p>
-                  </div>
-                )}
-                {details.request_method && (
-                  <div>
-                    <p className="eyebrow">Method</p>
-                    <p>{details.request_method}</p>
-                  </div>
-                )}
-                {details.cvss_vector && (
-                  <div>
-                    <p className="eyebrow">CVSS</p>
-                    <p className="finding-mono">
-                      {details.cvss_vector}
-                      {details.cvss_score != null ? ` (${details.cvss_score})` : ""}
-                    </p>
-                  </div>
-                )}
-                {isDetail(selectedFinding) && selectedFinding.merged_into_slug && (
-                  <div>
-                    <p className="eyebrow">Merged into</p>
-                    <p className="finding-mono">{selectedFinding.merged_into_slug}</p>
-                  </div>
-                )}
-              </div>
+function Drawer({
+  d,
+  derivedBySlug,
+  chainsByKey,
+  chainMembersByKey,
+  transitions,
+  transitionsLoading,
+  transitionsError,
+  onSelect,
+  onClose,
+  onPrev,
+  onNext,
+  hasPrev,
+  hasNext,
+}: DrawerProps) {
+  const [tab, setTab] = useState<TabId>("overview");
+  useEffect(() => {
+    setTab("overview");
+  }, [d?.slug]);
 
-              {details.impact && (
-                <div>
-                  <p className="eyebrow">Impact</p>
-                  <p>{details.impact}</p>
-                </div>
-              )}
+  if (!d) {
+    return (
+      <aside className="drawer-panel panel">
+        <div className="empty" style={{ padding: "60px 20px" }}>
+          <p style={{ fontSize: "0.9rem", margin: 0 }}>
+            Select a finding to see details.
+          </p>
+          <p style={{ fontSize: "0.78rem", color: "var(--muted)", marginTop: "10px" }}>
+            Tip: press <code>⌘K</code> or <code>/</code> to search.
+          </p>
+        </div>
+      </aside>
+    );
+  }
 
-              {details.kill_reason && (
-                <div>
-                  <p className="eyebrow">Kill reason</p>
-                  <p>
-                    {details.kill_check != null ? `Check ${details.kill_check}: ` : ""}
-                    {details.kill_reason}
-                  </p>
-                </div>
-              )}
+  const linkedFindings = d.links.filter((l) => l.target_kind === "finding");
+  const linkedChains = d.links
+    .filter((l) => l.target_kind === "chain")
+    .map((l) => chainsByKey.get(l.target_ref))
+    .filter((c): c is AssessmentAttackChainDetail => Boolean(c));
 
-              {details.remediation && (
-                <div>
-                  <p className="eyebrow">Remediation</p>
-                  <p>{details.remediation}</p>
-                </div>
-              )}
+  const pocCount = [d.poc_code, d.poc_request, d.poc_response, d.evidence].filter(
+    Boolean,
+  ).length;
+  const codeCount = d.slot_type ? 1 : 0;
+  const linksCount = linkedFindings.length + linkedChains.length;
+  const historyCount = transitions.length;
+  const intelCount = (d.references?.length ?? 0) + (d.provenance ? 1 : 0);
 
-              {details.evidence && (
-                <div>
-                  <p className="eyebrow">Evidence detail</p>
-                  <p>{details.evidence}</p>
-                </div>
-              )}
+  const tabs: { id: TabId; label: string; count?: number; hidden?: boolean }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "poc", label: "Proof of Concept", count: pocCount },
+    { id: "code", label: "Code", count: codeCount, hidden: !d.slot_type },
+    { id: "links", label: "Links", count: linksCount, hidden: linksCount === 0 },
+    { id: "history", label: "History", count: historyCount },
+    { id: "intel", label: "Intel", count: intelCount, hidden: intelCount === 0 },
+  ];
+  const visibleTabs = tabs.filter((t) => !t.hidden);
 
-              {details.steps_to_reproduce && details.steps_to_reproduce.length > 0 && (
-                <div>
-                  <p className="eyebrow">Steps to reproduce</p>
-                  <ol className="finding-steps">
-                    {details.steps_to_reproduce.map((step, index) => (
-                      <li key={index}>{step}</li>
-                    ))}
-                  </ol>
-                </div>
-              )}
+  const copySlug = () => {
+    try {
+      void navigator.clipboard?.writeText(d.slug);
+    } catch {
+      // ignore
+    }
+  };
 
-              <div>
-                <p className="eyebrow">Transition history</p>
-                {transitionsLoading && <p className="meta-text">Loading transition history…</p>}
-                {transitionsError && <p className="meta-text">{transitionsError}</p>}
-                {!transitionsLoading && !transitionsError && transitions.length === 0 && (
-                  <p className="meta-text">No transition history recorded yet.</p>
-                )}
-                {!transitionsLoading && !transitionsError && transitions.length > 0 && (
-                  <div className="finding-transitions">
-                    {transitions.map((transition) => {
-                      const isCreation = transition.action === "created" || !transition.from_workflow_status;
-                      const verificationChanged =
-                        transition.from_verification_state !== transition.to_verification_state ||
-                        transition.from_verification_disposition !== transition.to_verification_disposition;
+  const noop = () => {
+    // no-op for now
+  };
 
-                      function formatVerification(state: string, disposition: string) {
-                        if (state === "disputed") return "disputed";
-                        if (disposition && disposition !== "none") return `${state} (${disposition.replace(/_/g, " ")})`;
-                        return state;
-                      }
+  return (
+    <aside className="drawer-panel panel">
+      <div className={`drawer-hero sev-${d.severity}`}>
+        <div className="drawer-top">
+          <div className="drawer-slug">
+            <span>{d.slug}</span>
+            <button
+              type="button"
+              className="copy-btn"
+              onClick={copySlug}
+              title="Copy slug"
+            >
+              <IconCopy />
+            </button>
+          </div>
+          <div className="drawer-nav">
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={onPrev}
+              disabled={!hasPrev}
+              title="Previous finding ([)"
+            >
+              <IconUp />
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={onNext}
+              disabled={!hasNext}
+              title="Next finding (])"
+            >
+              <IconDown />
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={onClose}
+              title="Close (Esc)"
+            >
+              <IconClose />
+            </button>
+          </div>
+        </div>
+        <h2 className="drawer-title">{d.title}</h2>
+        <div className="hero-meta">
+          <span className={`hero-sev ${d.severity}`}>
+            <span className="sev-dot" style={{ background: sevDotColor(d.severity) }} />
+            {d.severity}
+          </span>
+          {d.cvss_score != null && (
+            <span className="cvss-chip">
+              CVSS <span className="cvss-num">{d.cvss_score.toFixed(1)}</span>
+            </span>
+          )}
+          <span className={`pill pill-${d.workflow_status}`}>{d.workflowLabel}</span>
+          {d.verificationKey !== "unreviewed" && (
+            <span className={`pill pill-${d.verificationKey}`}>
+              {d.verificationLabel}
+            </span>
+          )}
+          {d.cwe_id && <span className="tag cwe">{d.cwe_id}</span>}
+        </div>
+        {/* TODO: wire these quick-action buttons to real workflow mutations */}
+        <div className="quick-actions">
+          <button type="button" className="qa-btn primary" onClick={noop}>
+            Mark reported
+          </button>
+          <button type="button" className="qa-btn" onClick={noop}>
+            Verify
+          </button>
+          <button type="button" className="qa-btn" onClick={noop}>
+            Dispute
+          </button>
+          <button type="button" className="qa-btn" onClick={noop}>
+            Suppress
+          </button>
+          <button type="button" className="qa-btn" onClick={noop}>
+            Export ↗
+          </button>
+        </div>
+      </div>
+      <div className="drawer-tabs">
+        {visibleTabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className={`drawer-tab ${tab === t.id ? "is-active" : ""}`}
+            onClick={() => setTab(t.id)}
+          >
+            {t.label}
+            {t.count != null && <span className="count">{t.count}</span>}
+          </button>
+        ))}
+      </div>
+      <div className="drawer-body">
+        {tab === "overview" && <OverviewPane d={d} />}
+        {tab === "poc" && <PocPane d={d} />}
+        {tab === "code" && <CodePane d={d} />}
+        {tab === "links" && (
+          <LinksPane
+            d={d}
+            derivedBySlug={derivedBySlug}
+            linkedFindings={linkedFindings}
+            linkedChains={linkedChains}
+            chainMembersByKey={chainMembersByKey}
+            onSelect={(slug) => onSelect(slug)}
+          />
+        )}
+        {tab === "history" && (
+          <HistoryPane
+            transitions={transitions}
+            loading={transitionsLoading}
+            error={transitionsError}
+          />
+        )}
+        {tab === "intel" && <IntelPane d={d} />}
+      </div>
+    </aside>
+  );
+}
 
-                      return (
-                        <div key={transition.id} className="finding-transition-row">
-                          <div className="finding-transition-header">
-                            <strong>{transition.action}</strong>
-                            <span className="meta-text">{transition.actor || "system"}</span>
-                            <span className="meta-text">{transition.created_at}</span>
-                          </div>
-                          <p className="meta-text">
-                            {isCreation ? (
-                              <>
-                                Workflow: {transition.to_workflow_status}
-                                {" · "}
-                                Verification: {formatVerification(transition.to_verification_state, transition.to_verification_disposition)}
-                              </>
-                            ) : (
-                              <>
-                                Workflow: {transition.from_workflow_status} → {transition.to_workflow_status}
-                                {verificationChanged && (
-                                  <>
-                                    {" · "}
-                                    Verification: {formatVerification(transition.from_verification_state ?? "unreviewed", transition.from_verification_disposition ?? "none")}
-                                    {" → "}
-                                    {formatVerification(transition.to_verification_state, transition.to_verification_disposition)}
-                                  </>
-                                )}
-                              </>
-                            )}
-                          </p>
-                          {(isCreation || transition.from_severity !== transition.to_severity) && (
-                            <p className="meta-text">
-                              {isCreation
-                                ? `Severity: ${transition.to_severity}`
-                                : `Severity: ${transition.from_severity} → ${transition.to_severity}`}
-                            </p>
-                          )}
-                          {transition.reason_text && <p>{transition.reason_text}</p>}
-                          {transition.artifact_ref && (
-                            <p className="meta-text finding-mono">{transition.artifact_ref}</p>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
+// ── Panes ─────────────────────────────────────────────────────────────
 
-              {selectedChains.length > 0 && (
-                <div>
-                  <p className="eyebrow">Attack chains</p>
-                  <div style={{ display: "grid", gap: "8px", marginTop: "4px" }}>
-                    {selectedChains.map((chain) => (
-                      <div key={chain.chain_key} style={{ display: "grid", gap: "2px" }}>
-                        <div style={{ display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" }}>
-                          <span className={`badge severity-${chain.severity}`}>{chain.severity}</span>
-                          <strong>{chain.title}</strong>
-                          <span className="meta-text">{chain.status}</span>
-                        </div>
-                        {chain.narrative && <p className="meta-text">{chain.narrative}</p>}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+function KV({ k, v, mono }: { k: string; v: unknown; mono?: boolean }) {
+  if (v === undefined || v === null || v === "") return null;
+  return (
+    <div className="kv">
+      <p className="k">{k}</p>
+      <p className={`v ${mono ? "mono" : ""}`}>{String(v)}</p>
+    </div>
+  );
+}
 
-              {isDetail(selectedFinding) && selectedFinding.notes && (
-                <div>
-                  <p className="eyebrow">Notes</p>
-                  <pre className="finding-notes">{selectedFinding.notes}</pre>
-                </div>
-              )}
-
-              {isDetail(selectedFinding) && selectedFinding.evidence_ref && (
-                <div>
-                  <p className="eyebrow">Evidence reference</p>
-                  <p className="meta-text finding-mono">{selectedFinding.evidence_ref}</p>
-                </div>
-              )}
-            </div>
-          </article>
+function OverviewPane({ d }: { d: Derived }) {
+  const additionalDetailKeys = Object.keys(d.details).filter(
+    (key) => !KNOWN_DETAIL_KEYS.has(key),
+  );
+  return (
+    <>
+      {d.summary && (
+        <div className="section">
+          <p className="section-title">Summary</p>
+          <p>{d.summary}</p>
+        </div>
+      )}
+      {d.impact && (
+        <div className="callout impact">
+          <p className="section-title">Impact</p>
+          <p>{d.impact}</p>
+        </div>
+      )}
+      {d.remediation && (
+        <div className="callout remediation">
+          <p className="section-title">Remediation</p>
+          <p>{d.remediation}</p>
+        </div>
+      )}
+      {d.kill_reason && (
+        <div className="callout kill">
+          <p className="section-title">
+            Kill reason · check {d.kill_check ?? "?"}
+          </p>
+          <p>{d.kill_reason}</p>
+        </div>
+      )}
+      <div className="section">
+        <p className="section-title">Metadata</p>
+        <div className="kv-grid">
+          <KV k="Location" v={d.canonical_location} mono />
+          <KV k="Method" v={d.request_method} />
+          <KV k="Parameter" v={d.parameter} mono />
+          <KV k="Auth context" v={d.auth_context} />
+          <KV k="Source" v={d.source_name} />
+          <KV k="Discovered by" v={d.discovered_by} mono />
+          <KV k="Defect family" v={d.defect_family} />
+          <KV k="Root cause" v={d.root_cause_key} mono />
+          <KV k="OWASP" v={d.owasp_category} />
+          <KV k="CWE" v={d.cwe_id} />
+          <KV k="CVSS vector" v={d.cvss_vector} mono />
+          <KV k="CVSS score" v={d.cvss_score} />
+          {d.merged_into_slug && (
+            <KV k="Merged into" v={d.merged_into_slug} mono />
+          )}
+          <KV k="Evidence ref" v={d.evidence_ref} mono />
+        </div>
+      </div>
+      {(d.chain_required !== undefined || d.chain_rationale) && (
+        <div className="section">
+          <p className="section-title">Chain context</p>
+          {d.chain_required !== undefined && (
+            <p>
+              <span
+                className={`pill ${d.chain_required ? "pill-active" : "pill-unreviewed"}`}
+              >
+                {d.chain_required ? "Chain required" : "Standalone"}
+              </span>
+            </p>
+          )}
+          {d.chain_rationale && <p>{d.chain_rationale}</p>}
+        </div>
+      )}
+      {d.steps_to_reproduce && d.steps_to_reproduce.length > 0 && (
+        <div className="section">
+          <p className="section-title">Steps to reproduce</p>
+          <ol className="steps">
+            {d.steps_to_reproduce.map((s, i) => (
+              <li key={i}>{s}</li>
+            ))}
+          </ol>
+        </div>
+      )}
+      {d.required_followup && d.required_followup.length > 0 && (
+        <div className="section">
+          <p className="section-title">Required follow-up</p>
+          <ul className="steps">
+            {d.required_followup.map((s, i) => (
+              <li key={i}>{s}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {(d.variant_of || d.original_pattern) && (
+        <div className="section">
+          <p className="section-title">Variant</p>
+          {d.variant_of && (
+            <p>
+              <span style={{ color: "var(--muted)", fontSize: "0.82rem" }}>
+                Variant of:{" "}
+              </span>
+              <span className="mono">{d.variant_of}</span>
+            </p>
+          )}
+          {d.original_pattern && (
+            <pre className="pre">{d.original_pattern}</pre>
+          )}
+        </div>
+      )}
+      {d.notes && (
+        <div className="section">
+          <p className="section-title">Notes</p>
+          <pre className="pre">{d.notes}</pre>
+        </div>
+      )}
+      {additionalDetailKeys.length > 0 && (
+        <div className="section">
+          <p className="section-title">Additional details</p>
+          <div className="json-children">
+            {additionalDetailKeys.map((key) => (
+              <JsonTree
+                key={key}
+                label={key}
+                value={toJsonValue((d.details as Record<string, unknown>)[key])}
+                defaultOpen
+              />
+            ))}
+          </div>
         </div>
       )}
     </>
+  );
+}
+
+function PocPane({ d }: { d: Derived }) {
+  const hasAny = d.evidence || d.poc_code || d.poc_request || d.poc_response;
+  return (
+    <>
+      {d.evidence && (
+        <div className="section">
+          <p className="section-title">Evidence</p>
+          <p>{d.evidence}</p>
+        </div>
+      )}
+      {d.poc_code && (
+        <div className="section">
+          <p className="section-title">
+            Payload
+            {d.poc_language && <span className="count">{d.poc_language}</span>}
+          </p>
+          <pre className="pre">{d.poc_code}</pre>
+        </div>
+      )}
+      {d.poc_request && (
+        <div className="section">
+          <p className="section-title">Request</p>
+          <pre className="pre req">{formatHttp(d.poc_request, "req")}</pre>
+        </div>
+      )}
+      {d.poc_response && (
+        <div className="section">
+          <p className="section-title">Response</p>
+          <pre className="pre resp">{formatHttp(d.poc_response, "resp")}</pre>
+        </div>
+      )}
+      {!hasAny && (
+        <p className="empty">No proof-of-concept captured for this finding.</p>
+      )}
+    </>
+  );
+}
+
+function CodePane({ d }: { d: Derived }) {
+  return (
+    <>
+      <div className="section">
+        <p className="section-title">Slot</p>
+        <div className="kv-grid">
+          <KV k="Slot type" v={d.slot_type} mono />
+          <KV k="Entry point" v={d.entry_point} mono />
+          <KV k="Sink" v={d.sink} mono />
+        </div>
+      </div>
+      {d.taint_path && d.taint_path.length > 0 && (
+        <div className="section">
+          <p className="section-title">Taint path</p>
+          <div className="taint">
+            {d.taint_path.map((step, i, arr) => (
+              <div key={i} style={{ display: "contents" }}>
+                <div className="taint-row">
+                  <span className="taint-bubble">
+                    {i === 0 ? "IN" : i === arr.length - 1 ? "⚠" : i}
+                  </span>
+                  <span className="taint-line">{step}</span>
+                </div>
+                {i < arr.length - 1 && <div className="taint-link" />}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {d.guards_evaluated != null && (
+        <div className="section">
+          <p className="section-title">Guards evaluated</p>
+          {Array.isArray(d.guards_evaluated) ? (
+            <ul className="steps mono">
+              {d.guards_evaluated.map((g, i) => (
+                <li key={i}>
+                  {typeof g === "string" ? g : JSON.stringify(g)}
+                </li>
+              ))}
+            </ul>
+          ) : typeof d.guards_evaluated === "string" ? (
+            <pre className="pre">{d.guards_evaluated}</pre>
+          ) : (
+            <JsonTree value={toJsonValue(d.guards_evaluated)} defaultOpen />
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+function LinksPane({
+  d,
+  derivedBySlug,
+  linkedFindings,
+  linkedChains,
+  chainMembersByKey,
+  onSelect,
+}: {
+  d: Derived;
+  derivedBySlug: Map<string, Derived>;
+  linkedFindings: DerivedLink[];
+  linkedChains: AssessmentAttackChainDetail[];
+  chainMembersByKey: Map<string, Derived[]>;
+  onSelect: (slug: string) => void;
+}) {
+  return (
+    <>
+      {linkedFindings.length > 0 && (
+        <div className="section">
+          <p className="section-title">
+            Linked findings <span className="count">{linkedFindings.length}</span>
+          </p>
+          <div className="link-grid">
+            {linkedFindings.map((l, i) => {
+              const target = derivedBySlug.get(l.target_ref);
+              return (
+                <button
+                  key={`${i}-${l.target_ref}`}
+                  type="button"
+                  className="link-card"
+                  onClick={() => target && onSelect(target.slug)}
+                  disabled={!target}
+                >
+                  <span className="link-kind">
+                    {(l.link_kind || "").replace(/_/g, " ")}
+                  </span>
+                  <span>
+                    <span className="link-title">
+                      {target ? target.title : l.target_ref}
+                    </span>
+                    <br />
+                    <span className="link-sub">
+                      {target ? `${target.slug} · ${target.severity}` : "external"}
+                    </span>
+                  </span>
+                  {target && (
+                    <span
+                      className="sev-dot"
+                      style={{ background: sevDotColor(target.severity) }}
+                    />
+                  )}
+                  <span className="link-go">›</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {linkedChains.length > 0 && (
+        <div className="section">
+          <p className="section-title">
+            Attack chains <span className="count">{linkedChains.length}</span>
+          </p>
+          {linkedChains.map((chain) => {
+            const members = chainMembersByKey.get(chain.chain_key) || [];
+            return (
+              <div key={chain.chain_key} className="chain-card">
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "8px",
+                    alignItems: "baseline",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <span
+                    className={`hero-sev ${chain.severity}`}
+                    style={{ fontSize: "0.7rem", padding: "2px 8px" }}
+                  >
+                    {chain.severity}
+                  </span>
+                  <strong style={{ fontSize: "0.94rem" }}>{chain.title}</strong>
+                  <span className={`pill pill-${chain.status}`}>{chain.status}</span>
+                  <span
+                    className="tag"
+                    style={{ fontFamily: "'IBM Plex Mono', monospace" }}
+                  >
+                    {chain.chain_key}
+                  </span>
+                </div>
+                {chain.narrative && (
+                  <p
+                    style={{
+                      fontSize: "0.86rem",
+                      color: "var(--ink-2)",
+                      margin: 0,
+                    }}
+                  >
+                    {chain.narrative}
+                  </p>
+                )}
+                {members.length > 0 && (
+                  <div className="chain-flow">
+                    {members.map((m, i) => (
+                      <div key={m.slug} style={{ display: "contents" }}>
+                        <button
+                          type="button"
+                          className="chain-node"
+                          onClick={() => onSelect(m.slug)}
+                          style={
+                            m.slug === d.slug
+                              ? {
+                                  borderColor: "var(--accent)",
+                                  background: "rgba(23,53,76,0.06)",
+                                }
+                              : undefined
+                          }
+                        >
+                          <span
+                            className="sev-dot"
+                            style={{ background: sevDotColor(m.severity) }}
+                          />
+                          {m.slug.split("-").slice(0, 2).join("-")}
+                        </button>
+                        {i < members.length - 1 && (
+                          <span className="chain-arrow">→</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
+function HistoryPane({
+  transitions,
+  loading,
+  error,
+}: {
+  transitions: AssessmentFindingTransition[];
+  loading: boolean;
+  error: string | null;
+}) {
+  if (loading) return <p className="empty">Loading transition history…</p>;
+  if (error) return <p className="empty">{error}</p>;
+  if (!transitions.length)
+    return <p className="empty">No transition history recorded.</p>;
+  return (
+    <div className="timeline">
+      {transitions.map((t) => {
+        const isCreation = t.action === "created" || !t.from_workflow_status;
+        const sevChanged =
+          t.from_severity && t.from_severity !== t.to_severity;
+        const workflowChanged =
+          t.from_workflow_status && t.from_workflow_status !== t.to_workflow_status;
+        const verifChanged =
+          t.from_verification_state &&
+          t.from_verification_state !== t.to_verification_state;
+        return (
+          <div key={t.id} className={`tl-row action-${t.action}`}>
+            <div className="tl-head">
+              <span className="tl-action">{t.action}</span>
+              <span className="tl-actor">{t.actor || "system"}</span>
+              <span className="tl-time">{relTime(t.created_at)}</span>
+            </div>
+            <div className="tl-detail">
+              {(isCreation || workflowChanged) && (
+                <span>
+                  workflow:{" "}
+                  {!isCreation && (
+                    <>
+                      <span className={`pill pill-${t.from_workflow_status}`}>
+                        {t.from_workflow_status}
+                      </span>
+                      <span className="transition-arrow"> → </span>
+                    </>
+                  )}
+                  <span className={`pill pill-${t.to_workflow_status}`}>
+                    {t.to_workflow_status}
+                  </span>
+                </span>
+              )}
+              {sevChanged && (
+                <span>
+                  severity:{" "}
+                  <span
+                    className={`hero-sev ${t.from_severity}`}
+                    style={{ fontSize: "0.65rem", padding: "1px 7px" }}
+                  >
+                    {t.from_severity}
+                  </span>
+                  <span className="transition-arrow"> → </span>
+                  <span
+                    className={`hero-sev ${t.to_severity}`}
+                    style={{ fontSize: "0.65rem", padding: "1px 7px" }}
+                  >
+                    {t.to_severity}
+                  </span>
+                </span>
+              )}
+              {verifChanged && (
+                <span>
+                  verif:{" "}
+                  <span className={`pill pill-${t.from_verification_state}`}>
+                    {t.from_verification_state}
+                  </span>
+                  <span className="transition-arrow"> → </span>
+                  <span className={`pill pill-${t.to_verification_state}`}>
+                    {t.to_verification_state}
+                  </span>
+                </span>
+              )}
+            </div>
+            {t.reason_text && (
+              <p className="tl-reason">&ldquo;{t.reason_text}&rdquo;</p>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function IntelPane({ d }: { d: Derived }) {
+  const refs = d.references;
+  return (
+    <>
+      {refs.length > 0 && (
+        <div className="section">
+          <p className="section-title">
+            References <span className="count">{refs.length}</span>
+          </p>
+          <ul className="ref-list">
+            {refs.map((r, i) => {
+              const { label, href } = normalizeReference(r);
+              return (
+                <li key={i}>
+                  {href ? (
+                    <a href={href} target="_blank" rel="noopener noreferrer">
+                      {label || href}
+                      <IconExternal />
+                      <span className="host">{extractHost(href)}</span>
+                    </a>
+                  ) : (
+                    <span>{label}</span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+      {d.provenance && (
+        <div className="section">
+          <p className="section-title">Provenance</p>
+          <div className="kv-grid">
+            <KV k="Agent" v={d.provenance.agent_name} mono />
+            <KV k="Captured" v={d.provenance.captured_at} mono />
+            <KV k="Artifact" v={d.provenance.artifact_ref} mono />
+          </div>
+          {d.provenance.evidence_quote && (
+            <pre className="pre">&ldquo;{d.provenance.evidence_quote}&rdquo;</pre>
+          )}
+        </div>
+      )}
+      {refs.length === 0 && !d.provenance && (
+        <p className="empty">No intel captured for this finding.</p>
+      )}
+    </>
+  );
+}
+
+// ── Command palette ───────────────────────────────────────────────────
+
+function CommandPalette({
+  derivedList,
+  onSelect,
+  onClose,
+}: {
+  derivedList: Derived[];
+  onSelect: (slug: string) => void;
+  onClose: () => void;
+}) {
+  const [q, setQ] = useState("");
+  const [idx, setIdx] = useState(0);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  const results = useMemo(() => {
+    const parsed = parseQuery(q);
+    const list = derivedList.filter((d) => {
+      for (const tok of parsed.tokens) {
+        const v = tok.value;
+        switch (tok.scope) {
+          case "severity":
+            if ((d.severity || "").toLowerCase() !== v) return false;
+            break;
+          case "status":
+          case "workflow":
+            if ((d.workflow_status || "").toLowerCase() !== v) return false;
+            break;
+          case "verification":
+            if ((d.verificationKey || "").toLowerCase() !== v) return false;
+            break;
+          case "cwe":
+            if (!(d.cwe_id || "").toLowerCase().includes(v)) return false;
+            break;
+          case "owasp":
+            if (!(d.owasp_category || "").toLowerCase().includes(v)) return false;
+            break;
+          case "source":
+            if (!(d.source_name || "").toLowerCase().includes(v)) return false;
+            break;
+          case "slug":
+            if (!(d.slug || "").toLowerCase().includes(v)) return false;
+            break;
+          case "family":
+            if (!(d.defect_family || "").toLowerCase().includes(v)) return false;
+            break;
+          default: {
+            if (!d.searchCorpus.includes(v)) return false;
+          }
+        }
+      }
+      for (const t of parsed.freeTerms) {
+        if (!d.searchCorpus.includes(t)) return false;
+      }
+      return true;
+    });
+    list.sort(
+      (a, b) => (SEV_RANK[a.severity] ?? 99) - (SEV_RANK[b.severity] ?? 99),
+    );
+    return list.slice(0, 30);
+  }, [q, derivedList]);
+
+  useEffect(() => {
+    setIdx(0);
+  }, [q]);
+
+  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setIdx((i) => Math.min(results.length - 1, i + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setIdx((i) => Math.max(0, i - 1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (results[idx]) onSelect(results[idx].slug);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      onClose();
+    }
+  };
+
+  return (
+    <div className="cmd-overlay" onClick={onClose}>
+      <div className="cmd-box" onClick={(e) => e.stopPropagation()}>
+        <div className="cmd-input-row">
+          <IconSearch />
+          <input
+            ref={inputRef}
+            className="cmd-input"
+            placeholder="Jump to finding · try 'severity:critical xss' or a slug"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={onKey}
+          />
+          <span className="search-kbd">esc</span>
+        </div>
+        <div className="cmd-list">
+          {results.length === 0 ? (
+            <div className="cmd-empty">No findings match.</div>
+          ) : (
+            results.map((d, i) => (
+              <div
+                key={d.slug}
+                className={`cmd-item ${i === idx ? "is-active" : ""}`}
+                onMouseEnter={() => setIdx(i)}
+                onClick={() => onSelect(d.slug)}
+              >
+                <span
+                  className="sev-dot"
+                  style={{ background: sevDotColor(d.severity) }}
+                />
+                <span>
+                  <div className="cmd-title">{d.title}</div>
+                  <div className="cmd-sub">
+                    {d.slug} · {d.severity} · {d.cwe_id || ""}
+                  </div>
+                </span>
+                <span className="cmd-sub">{d.canonical_location || ""}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
   );
 }

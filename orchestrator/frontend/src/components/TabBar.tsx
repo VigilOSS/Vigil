@@ -1,9 +1,25 @@
+// Rationale for the order:
+//   Overview   — at-a-glance dashboard, always first
+//   Intel      — "what do we know about the target" (pre-attack context),
+//                sits next to Overview because operators triage intel before
+//                they attack surfaces or dig into findings
+//   Findings   — the primary deliverable, high up
+//   Surfaces   — what we can attack (bridges intel → findings)
+//   Coverage   — where we've tested (quantitative companion to Surfaces)
+//   Code       — code-analysis results, own domain
+//   Activity   — structured state-change timeline
+//   Log        — narrative prose activity (sits next to Activity so the
+//                two log-style tabs are adjacent)
+//   Artifacts  — raw files, last (catch-all archive)
 export const TABS = [
   { key: "overview", label: "Overview" },
+  { key: "intel", label: "Intel" },
   { key: "findings", label: "Findings" },
+  { key: "surfaces", label: "Surfaces" },
   { key: "coverage", label: "Coverage" },
   { key: "code", label: "Code" },
   { key: "activity", label: "Activity" },
+  { key: "log", label: "Log" },
   { key: "artifacts", label: "Artifacts" },
 ] as const;
 

@@ -46,6 +46,16 @@ def _string_list(values: object) -> list[str]:
     return normalized
 
 
+def _header_lines(headers: object) -> list[str]:
+    if isinstance(headers, dict):
+        return [f"{key}: {value}" for key, value in headers.items() if key not in (None, "") and value is not None]
+    if isinstance(headers, str):
+        return [headers] if headers else []
+    if isinstance(headers, list):
+        return [str(value) for value in headers if value not in (None, "")]
+    return []
+
+
 def _render_finding(f: dict) -> str:
     slug = f["slug"]
     title = f["title"]
@@ -141,25 +151,23 @@ def _render_finding(f: dict) -> str:
     if isinstance(poc_request, dict):
         method = poc_request.get("method", "")
         url = poc_request.get("url", "")
-        req_headers = poc_request.get("headers") or {}
+        req_headers = _header_lines(poc_request.get("headers"))
         req_body = poc_request.get("body", "")
         lines.append("")
         lines.append("**PoC Request:**")
         lines.append(f"```\n{method} {url}")
-        for k, v in req_headers.items():
-            lines.append(f"{k}: {v}")
+        lines.extend(req_headers)
         if req_body:
             lines.append(f"\n{req_body}")
         lines.append("```")
     if isinstance(poc_response, dict):
         status = poc_response.get("status", "")
-        resp_headers = poc_response.get("headers") or {}
+        resp_headers = _header_lines(poc_response.get("headers"))
         body_excerpt = poc_response.get("body_excerpt", "")
         lines.append("")
         lines.append("**PoC Response:**")
         lines.append(f"```\nHTTP {status}")
-        for k, v in resp_headers.items():
-            lines.append(f"{k}: {v}")
+        lines.extend(resp_headers)
         if body_excerpt:
             lines.append(f"\n{body_excerpt}")
         lines.append("```")

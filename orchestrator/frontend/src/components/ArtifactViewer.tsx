@@ -29,7 +29,7 @@ function summarizeJsonValue(value: JsonValue) {
   return String(value);
 }
 
-function JsonTree({ label, value, defaultOpen = false }: { label?: string; value: JsonValue; defaultOpen?: boolean }) {
+export function JsonTree({ label, value, defaultOpen = false }: { label?: string; value: JsonValue; defaultOpen?: boolean }) {
   if (Array.isArray(value)) {
     return (
       <details className="json-node" open={defaultOpen}>
