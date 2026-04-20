@@ -14,22 +14,23 @@ applying two patches so every Kali MCP tool call carries audit context:
    decorator the upstream applies extends the handler signature with
    three required keyword-only string parameters: ``engagement_key``,
    ``agent_name``, and ``phase``. The LLM sees these in the tool schema
-   and must pass them per call; the wrapper captures them into a thread-
-   local that the HTTP patch reads when it assembles headers, then
-   invokes the original handler with only the fields upstream defined.
+   and must pass them per call; the wrapper captures them into a
+   context-local variable that the HTTP patch reads when it assembles
+   headers, then invokes the original handler with only the fields
+   upstream defined.
 
 If either patch fails, the module falls back to the unpatched upstream
 so the MCP bridge at least keeps working — warnings go to stderr.
 """
 from __future__ import annotations
 
+import contextvars
 import functools
 import importlib.util
 import inspect
 import logging
 import os
 import sys
-import threading
 from pathlib import Path
 
 
@@ -38,7 +39,10 @@ UPSTREAM_CLIENT_PATH = Path(
 )
 
 
-_AUDIT_CONTEXT = threading.local()
+_AUDIT_CONTEXT: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
+    "kali_audit_context",
+    default={},
+)
 logger = logging.getLogger("patched_kali_client")
 
 
@@ -50,7 +54,7 @@ def _current_audit_headers() -> dict[str, str]:
     header simply won't travel (and the server will 400 when
     KALI_MCP_AUDIT_REQUIRED=1)."""
     headers: dict[str, str] = {}
-    ctx: dict[str, str] | None = getattr(_AUDIT_CONTEXT, "headers", None)
+    ctx = _AUDIT_CONTEXT.get()
     if ctx:
         headers.update(ctx)
     for header, env_var in (
@@ -65,21 +69,27 @@ def _current_audit_headers() -> dict[str, str]:
     return headers
 
 
-def _set_audit_context(engagement_key: str, agent_name: str, phase: str) -> None:
-    _AUDIT_CONTEXT.headers = {
-        "X-Engagement-Key": engagement_key,
-        "X-Agent-Name": agent_name,
-        "X-Phase": phase,
-    }
+def _set_audit_context(
+    engagement_key: str,
+    agent_name: str,
+    phase: str,
+) -> contextvars.Token[dict[str, str]]:
+    return _AUDIT_CONTEXT.set(
+        {
+            "X-Engagement-Key": engagement_key,
+            "X-Agent-Name": agent_name,
+            "X-Phase": phase,
+        }
+    )
 
 
-def _clear_audit_context() -> None:
-    _AUDIT_CONTEXT.headers = {}
+def _clear_audit_context(token: contextvars.Token[dict[str, str]]) -> None:
+    _AUDIT_CONTEXT.reset(token)
 
 
 def _patch_requests_functions() -> None:
     """Wrap module-level ``requests.get/post/request`` so every outbound
-    call picks up audit headers from the current thread's context.
+    call picks up audit headers from the current call context.
     Upstream client.py uses these shortcuts (not ``Session``), so
     patching ``Session.request`` alone would be a silent no-op."""
     import requests  # type: ignore
@@ -106,7 +116,7 @@ def _wrap_fastmcp_tool_decorator() -> None:
     (``engagement_key``, ``agent_name``, ``phase``). FastMCP generates
     the tool's JSON schema from the function signature, so extending
     the signature means the LLM sees the audit fields and cannot call a
-    Kali tool without supplying them."""
+   Kali tool without supplying them."""
     try:
         from mcp.server.fastmcp import FastMCP  # type: ignore
     except ImportError:  # pragma: no cover — defensive
@@ -143,22 +153,22 @@ def _wrap_fastmcp_tool_decorator() -> None:
                 @functools.wraps(fn)
                 async def shim(*args, **kwargs):
                     engagement_key, agent_name, phase = _pop_audit_kwargs(kwargs)
-                    _set_audit_context(engagement_key, agent_name, phase)
+                    token = _set_audit_context(engagement_key, agent_name, phase)
                     try:
                         return await fn(*args, **kwargs)
                     finally:
-                        _clear_audit_context()
+                        _clear_audit_context(token)
 
             else:
 
                 @functools.wraps(fn)
                 def shim(*args, **kwargs):
                     engagement_key, agent_name, phase = _pop_audit_kwargs(kwargs)
-                    _set_audit_context(engagement_key, agent_name, phase)
+                    token = _set_audit_context(engagement_key, agent_name, phase)
                     try:
                         return fn(*args, **kwargs)
                     finally:
-                        _clear_audit_context()
+                        _clear_audit_context(token)
 
             shim.__signature__ = new_sig  # type: ignore[attr-defined]
             shim.__doc__ = (fn.__doc__ or "") + (

@@ -112,8 +112,13 @@ def test_delete_endpoint_removes_engagement_and_findings(client, isolate_setting
     payload = response.json()
     assert payload == {"deleted": True, "key": ENGAGEMENT_KEY, "id": engagement.id}
 
+    marker = isolate_settings["engagements_dir"] / ".deleted-engagements" / f"{ENGAGEMENT_KEY}.json"
+    assert marker.exists()
     assert db_module.get_engagement_by_key(ENGAGEMENT_KEY) is None
     assert _finding_count(engagement.id) == 0
+
+    _force_sync()
+    assert db_module.get_engagement_by_key(ENGAGEMENT_KEY) is None
 
 
 def test_delete_endpoint_404_for_unknown_key(client, isolate_settings):

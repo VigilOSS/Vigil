@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import uuid
 from functools import lru_cache
 from pathlib import Path
@@ -3136,10 +3137,44 @@ def _write_command_run_artifact(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="command-run artifact path escaped its base directory",
             )
-        target.write_bytes(data)
+        try:
+            with target.open("xb") as handle:
+                handle.write(data)
+        except FileExistsError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="command-run artifact already exists for run_uuid",
+            ) from exc
         return str(target)
 
     return _write
+
+
+def _ensure_command_run_uuid_available(run_uuid: str) -> None:
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT id FROM assessment_command_runs WHERE run_uuid = ?",
+            (run_uuid,),
+        ).fetchone()
+    if row:
+        _raise_duplicate_command_run_uuid()
+
+
+def _raise_duplicate_command_run_uuid() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="command-run run_uuid already exists",
+    )
+
+
+def _remove_written_command_run_artifacts(*artifact_refs: str) -> None:
+    for artifact_ref in artifact_refs:
+        if not artifact_ref:
+            continue
+        try:
+            Path(artifact_ref).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _normalize_run_uuid(value: str) -> str:
@@ -3226,6 +3261,7 @@ def record_command_run(
     engagement = _engagement_or_404(engagement_id)
 
     run_uuid = _normalize_run_uuid(run_uuid or uuid.uuid4().hex)
+    _ensure_command_run_uuid_available(run_uuid)
     command_hash = command_hash or hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()
     tool_bin = _derive_tool_bin(command, argv)
 
@@ -3273,62 +3309,71 @@ def record_command_run(
         row_status = "empty"
 
     with get_connection() as connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO assessment_command_runs (
-                engagement_id, run_uuid, command, argv_json, tool_name, tool_bin, route,
-                agent_name, phase, audit_source,
-                return_code, timed_out, success,
-                started_at, completed_at, duration_ms,
-                command_hash, stdout_sha256, stderr_sha256,
-                stdout_preview, stderr_preview, output_retention_status,
-                stdout_suppression_reason, stderr_suppression_reason,
-                stdout_artifact_ref, stderr_artifact_ref,
-                stdout_bytes, stderr_bytes, notes
-            ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?,
-                ?, ?, ?,
-                ?, ?, ?,
-                ?, ?, ?,
-                ?, ?, ?,
-                ?, ?,
-                ?, ?,
-                ?, ?, ?
+        try:
+            cursor = connection.execute(
+                """
+                INSERT INTO assessment_command_runs (
+                    engagement_id, run_uuid, command, argv_json, tool_name, tool_bin, route,
+                    agent_name, phase, audit_source,
+                    return_code, timed_out, success,
+                    started_at, completed_at, duration_ms,
+                    command_hash, stdout_sha256, stderr_sha256,
+                    stdout_preview, stderr_preview, output_retention_status,
+                    stdout_suppression_reason, stderr_suppression_reason,
+                    stdout_artifact_ref, stderr_artifact_ref,
+                    stdout_bytes, stderr_bytes, notes
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?,
+                    ?, ?,
+                    ?, ?, ?
+                )
+                """,
+                (
+                    engagement.id,
+                    run_uuid,
+                    command,
+                    json.dumps(list(argv) if argv else [], ensure_ascii=False),
+                    tool_name,
+                    tool_bin,
+                    route,
+                    agent_name,
+                    phase,
+                    audit_source or "header",
+                    return_code,
+                    1 if timed_out else 0,
+                    1 if effective_success else 0,
+                    started_at,
+                    completed_at,
+                    int(duration_ms or 0),
+                    command_hash,
+                    stdout_sha256,
+                    stderr_sha256,
+                    stdout_retention["preview"],
+                    stderr_retention["preview"],
+                    row_status,
+                    stdout_retention["suppression_reason"],
+                    stderr_retention["suppression_reason"],
+                    stdout_retention["artifact_ref"],
+                    stderr_retention["artifact_ref"],
+                    stdout_retention["bytes"],
+                    stderr_retention["bytes"],
+                    notes,
+                ),
             )
-            """,
-            (
-                engagement.id,
-                run_uuid,
-                command,
-                json.dumps(list(argv) if argv else [], ensure_ascii=False),
-                tool_name,
-                tool_bin,
-                route,
-                agent_name,
-                phase,
-                audit_source or "header",
-                return_code,
-                1 if timed_out else 0,
-                1 if effective_success else 0,
-                started_at,
-                completed_at,
-                int(duration_ms or 0),
-                command_hash,
-                stdout_sha256,
-                stderr_sha256,
-                stdout_retention["preview"],
-                stderr_retention["preview"],
-                row_status,
-                stdout_retention["suppression_reason"],
-                stderr_retention["suppression_reason"],
-                stdout_retention["artifact_ref"],
-                stderr_retention["artifact_ref"],
-                stdout_retention["bytes"],
-                stderr_retention["bytes"],
-                notes,
-            ),
-        )
+        except sqlite3.IntegrityError as exc:
+            if "run_uuid" in str(exc):
+                _remove_written_command_run_artifacts(
+                    str(stdout_retention["artifact_ref"] or ""),
+                    str(stderr_retention["artifact_ref"] or ""),
+                )
+                _raise_duplicate_command_run_uuid()
+            raise
         row = connection.execute(
             "SELECT * FROM assessment_command_runs WHERE id = ?",
             (cursor.lastrowid,),
