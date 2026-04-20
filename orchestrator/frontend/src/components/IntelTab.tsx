@@ -13,6 +13,7 @@ import {
   listIntelCredentials,
   searchIntel,
 } from "../lib/api";
+import { useResizableColumns } from "../lib/useResizableColumns";
 import { JsonTree } from "./ArtifactViewer";
 
 // ── Props ────────────────────────────────────────────────────────────
@@ -50,6 +51,13 @@ const ENTITY_LABEL = new Map<string, string>(
 );
 
 const PAGE_SIZE = 40;
+
+// Column widths for the Intel list. Order matches the columns rendered
+// in the list-header / IntelRow below: [sev-bar, type, title, location,
+// tags, status]. Persisted under its own key so the Findings and Intel
+// tabs don't trample each other.
+const INTEL_LIST_DEFAULTS = [10, 120, 480, 260, 260, 140];
+const INTEL_LIST_MINS = [8, 80, 200, 120, 140, 100];
 
 // Severity-ish palette reused for CVE chips (CVSS buckets) and credential
 // status. These are purely visual; we map to the same pill/hero-sev classes
@@ -468,21 +476,19 @@ const IconClose = () => (
     <path d="M6 6l12 12M18 6L6 18" />
   </svg>
 );
-const IconUp = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-    <path d="M18 15l-6-6-6 6" />
-  </svg>
-);
-const IconDown = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-    <path d="M6 9l6 6 6-6" />
-  </svg>
-);
 const IconExternal = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" width={11} height={11}>
     <path d="M14 4h6v6" />
     <path d="M10 14L21 3" />
     <path d="M19 14v6H4V4h6" />
+  </svg>
+);
+const IconMaximize = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 9V4h5" />
+    <path d="M20 9V4h-5" />
+    <path d="M4 15v5h5" />
+    <path d="M20 15v5h-5" />
   </svg>
 );
 
@@ -519,6 +525,27 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
   const [urlLoading, setUrlLoading] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Drawer maximize is a layout state only — resets on selection change
+  // so opening a different record doesn't carry the maximized state.
+  // Esc still clears the selection via the keyboard handler; the
+  // top-right close-maximize icon only leaves maximized mode.
+  const [maximized, setMaximized] = useState(false);
+  useEffect(() => {
+    setMaximized(false);
+  }, [selectedId]);
+
+  // Column widths for the Intel list. Separate storage key from the
+  // Findings list so the two don't collide.
+  const {
+    gridTemplate: listGridTemplate,
+    startResize: startListResize,
+    resetColumn: resetListColumn,
+  } = useResizableColumns(
+    "intel.col-widths",
+    INTEL_LIST_DEFAULTS,
+    INTEL_LIST_MINS,
+  );
 
   const searchRef = useRef<HTMLInputElement | null>(null);
 
@@ -823,7 +850,6 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
   const activeFilterCount =
     entityFilters.size + statusFilters.size + sourceFilters.size + (query ? 1 : 0);
 
-  const selIdx = filtered.findIndex((d) => d.id === selectedId);
   const loadingAny = loading.size > 0;
 
   // FTS search.
@@ -1080,14 +1106,47 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
       )}
 
       {/* List + drawer */}
-      <div className="findings-shell">
+      <div
+        className={`findings-shell ${maximized && selectedDerived ? "is-maximized" : ""}`}
+      >
         <section className="list-panel panel">
-          <div className="list-header">
+          <div
+            className="list-header"
+            style={{ gridTemplateColumns: listGridTemplate }}
+          >
             <span />
-            <span>Type</span>
-            <span>Title / subtitle</span>
-            <span>Location</span>
-            <span>Tags</span>
+            <span>
+              Type
+              <span
+                className="col-resize-handle"
+                onPointerDown={(e) => startListResize(1, e)}
+                onDoubleClick={() => resetListColumn(1)}
+              />
+            </span>
+            <span>
+              Title / subtitle
+              <span
+                className="col-resize-handle"
+                onPointerDown={(e) => startListResize(2, e)}
+                onDoubleClick={() => resetListColumn(2)}
+              />
+            </span>
+            <span>
+              Location
+              <span
+                className="col-resize-handle"
+                onPointerDown={(e) => startListResize(3, e)}
+                onDoubleClick={() => resetListColumn(3)}
+              />
+            </span>
+            <span>
+              Tags
+              <span
+                className="col-resize-handle"
+                onPointerDown={(e) => startListResize(4, e)}
+                onDoubleClick={() => resetListColumn(4)}
+              />
+            </span>
             <span style={{ textAlign: "right" }}>Status</span>
           </div>
           <div className="list-scroll">
@@ -1108,6 +1167,7 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
                   selected={selectedId === d.id}
                   onClick={() => setSelectedId(d.id)}
                   freeTerms={parsedQuery.freeTerms}
+                  gridTemplate={listGridTemplate}
                 />
               ))
             )}
@@ -1151,16 +1211,8 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
 
         <Drawer
           d={selectedDerived}
-          onClose={() => setSelectedId(null)}
-          onPrev={() => {
-            if (selIdx > 0) setSelectedId(filtered[selIdx - 1].id);
-          }}
-          onNext={() => {
-            if (selIdx >= 0 && selIdx < filtered.length - 1)
-              setSelectedId(filtered[selIdx + 1].id);
-          }}
-          hasPrev={selIdx > 0}
-          hasNext={selIdx >= 0 && selIdx < filtered.length - 1}
+          maximized={maximized}
+          onToggleMaximize={() => setMaximized((m) => !m)}
         />
       </div>
 
@@ -1220,11 +1272,13 @@ function IntelRow({
   selected,
   onClick,
   freeTerms,
+  gridTemplate,
 }: {
   d: Derived;
   selected: boolean;
   onClick: () => void;
   freeTerms: string[];
+  gridTemplate?: string;
 }) {
   const sevClass = d.sev || "info";
   return (
@@ -1233,6 +1287,7 @@ function IntelRow({
       className={`frow ${selected ? "is-selected" : ""}`}
       onClick={onClick}
       data-id={d.id}
+      style={gridTemplate ? { gridTemplateColumns: gridTemplate } : undefined}
     >
       <span className={`frow-sevbar sevbar-${sevClass}`} />
       <span className={`frow-sev ${sevClass}`}>{d.entityLabel}</span>
@@ -1275,16 +1330,13 @@ function IntelRow({
 // ── Drawer ───────────────────────────────────────────────────────────
 type DrawerProps = {
   d: Derived | null;
-  onClose: () => void;
-  onPrev: () => void;
-  onNext: () => void;
-  hasPrev: boolean;
-  hasNext: boolean;
+  maximized: boolean;
+  onToggleMaximize: () => void;
 };
 
 type TabId = "overview" | "references" | "provenance" | "raw";
 
-function Drawer({ d, onClose, onPrev, onNext, hasPrev, hasNext }: DrawerProps) {
+function Drawer({ d, maximized, onToggleMaximize }: DrawerProps) {
   const [tab, setTab] = useState<TabId>("overview");
   useEffect(() => {
     setTab("overview");
@@ -1341,14 +1393,20 @@ function Drawer({ d, onClose, onPrev, onNext, hasPrev, hasNext }: DrawerProps) {
             </button>
           </div>
           <div className="drawer-nav">
-            <button type="button" className="icon-btn" onClick={onPrev} disabled={!hasPrev} title="Previous ([)">
-              <IconUp />
-            </button>
-            <button type="button" className="icon-btn" onClick={onNext} disabled={!hasNext} title="Next (])">
-              <IconDown />
-            </button>
-            <button type="button" className="icon-btn" onClick={onClose} title="Close (Esc)">
-              <IconClose />
+            {/*
+              Prev / next / close were removed: keyboard shortcuts
+              ( `[`, `]`, `Esc` ) already cover that. Maximize expands
+              the drawer over the list panel; its close-maximize icon
+              only un-maximizes — Esc still deselects.
+            */}
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={onToggleMaximize}
+              title={maximized ? "Restore drawer" : "Maximize drawer"}
+              aria-pressed={maximized}
+            >
+              {maximized ? <IconClose /> : <IconMaximize />}
             </button>
           </div>
         </div>
