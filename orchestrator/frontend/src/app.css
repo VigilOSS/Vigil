@@ -1586,18 +1586,32 @@ input {
   color: var(--muted);
   letter-spacing: 0.02em;
 }
+/*
+ * Severity sparkline wrap: the label sits to the LEFT of the bar
+ * container. The previous `display: grid` stack collapsed the label on
+ * top of the bars, which visually overlapped the tallest severity
+ * column. Switching to a flex row with explicit gap gives the label
+ * breathing room and keeps the bars in a fixed-height container so the
+ * absolutely-positioned count badges below each bar don't get clipped.
+ */
 .findings-redesign .sev-sparkline-wrap {
-  display: grid;
-  grid-template-rows: auto 14px;
-  align-items: end;
-  padding-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 16px; /* leave room for the count badges under bars */
+}
+.findings-redesign .sev-sparkline-wrap .sev-sparkline {
+  height: 28px;
+  flex: 0 0 auto;
 }
 .findings-redesign .sev-label {
   font-size: 0.7rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
-  margin-right: 2px;
+  margin: 0;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 /* Filter chips row (scoped redefinition) */
@@ -2444,6 +2458,57 @@ input {
 @keyframes drawer-slide {
   from { opacity: 0; transform: translateX(12px); }
   to { opacity: 1; transform: none; }
+}
+
+/*
+ * Maximized drawer: expands the drawer-panel to cover both grid columns
+ * of the .findings-shell, effectively hiding the list panel while the
+ * drawer takes over the full content area. The list-panel is still in
+ * the DOM (scroll position / filters preserved), just visually
+ * eclipsed. Only the drawer's maximize-close icon leaves this state —
+ * Esc still un-selects the finding via the global keyboard handler.
+ */
+.findings-redesign .findings-shell.is-maximized .list-panel {
+  display: none;
+}
+.findings-redesign .findings-shell.is-maximized .drawer-panel {
+  grid-column: 1 / -1;
+  min-height: 0;
+}
+
+/*
+ * Resizable column handle. Sits at the right edge of each header cell
+ * (the parent cell becomes `position: relative`). Width is a skinny
+ * 6px so it doesn't visually crowd the text, but the hit area extends
+ * the full height of the header so dragging is forgiving.
+ */
+.findings-redesign .list-header > span {
+  position: relative;
+}
+.findings-redesign .col-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -5px; /* centre the handle on the grid gap */
+  width: 10px;
+  cursor: col-resize;
+  user-select: none;
+  touch-action: none;
+  z-index: 1;
+}
+.findings-redesign .col-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 50%;
+  width: 1px;
+  background: transparent;
+  transition: background 0.12s;
+}
+.findings-redesign .col-resize-handle:hover::after,
+.findings-redesign .col-resize-handle:active::after {
+  background: var(--accent);
 }
 
 /* Small screens */

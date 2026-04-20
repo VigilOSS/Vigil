@@ -17,7 +17,7 @@ Keep it light:
 
 - `README.md` - operator/install guide. Why: defines the supported runtime model and engagement startup flow.
 - `AGENTS.md` - maintainer workflow. Why: local development rules, verification steps, and prompt regeneration requirements live here.
-- `install.sh` - installer/upgrader for `claude` and `codex` installs. Why: copies the source-owned trees into an install root and preserves durable local state across upgrades.
+- `install.sh` - installer/upgrader for the combined Claude Code and Codex install. Why: copies both client prompt surfaces plus the source-owned trees into an install root and preserves durable local state across upgrades.
 - `orchestrator/start_local.sh` - local UI/backend launcher. Why: builds the frontend and serves the backend on `127.0.0.1:18000`.
 - `docker/kali-mcp-runtime/mcp-server-wrapper.sh` - container entry shim. Why: waits for the Kali API and then starts the MCP client.
 - `docker/kali-mcp-runtime/patched_kali_server.py` - local patch over the upstream Kali API server. Why: normalizes command execution, timeout, partial-result behavior, and audit-record emission. Extracts `X-Engagement-Key`/`X-Agent-Name`/`X-Phase` audit headers (or env-var defaults), rejects tool calls missing them when `KALI_MCP_AUDIT_REQUIRED=1`, and enqueues each run for backend recording.

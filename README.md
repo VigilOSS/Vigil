@@ -19,35 +19,28 @@ This repository contains the operator prompts, Kali MCP runtime, engagement scaf
 
 ## Prompt Locality
 
-- Root operator prompts live at `AGENTS.md` and `CLAUDE.md`.
+- In an installed workspace, root operator prompts live at `AGENTS.md` and `CLAUDE.md`.
+- Source operator prompt outputs live at `agent/AGENTS.md` and `agent/CLAUDE.md`.
 - Specialist prompt sources live under `agent/agents/`.
-- Generated specialist wrappers live under `.codex/agents/` and `.claude/agents/`.
+- Generated specialist wrappers live under `agent/.codex/agents/` and `agent/.claude/agents/`; install copies them to root `.codex/agents/` and `.claude/agents/`.
 - Always-active rules live under `agent/rules/`.
 - Skill discovery starts at `agent/SKILL.md`, then drills into `agent/skills/*/SKILL.md`.
 
 ## Quick Start
 
-### Choose one client per install
+### Install both clients
 
-Keep Claude and Codex in separate installs and separate engagement trees. Do not run both clients against the same install directory.
+Each install contains both Claude Code and Codex workflow files. The install root holds the shared prompt source tree, generated client wrappers, runtime scripts, and orchestrator state while each client keeps its own entrypoint.
 
-The shared Kali MCP runtime is not per-engagement. Start it once and then attach one or more client installs to the same `docker exec -i security-research mcp-server` endpoint. Within a single install, multiple engagements may exist under `agent/engagements/`.
+The shared Kali MCP runtime is not per-engagement. Start it once and then attach Claude Code and Codex to the same `docker exec -i security-research mcp-server` endpoint. Within a single install, multiple engagements may exist under `agent/engagements/`.
 
-- Codex install:
 ```bash
-# Only needed once, and not again for future engagements
-./install.sh codex ~/security-research-codex
-cd ~/security-research-codex
+# Run once per install root
+./install.sh ~/security-research
+cd ~/security-research
 ```
 
-- Claude install:
-```bash
-# Only needed once, and not again for future engagements
-./install.sh claude ~/security-research-claude
-cd ~/security-research-claude
-```
-
-To switch clients, stop using the current engagement, install the other client into a different directory, and start a new engagement there.
+Use one lead operator per engagement at a time unless you are deliberately coordinating a dual-client run through backend state. Both clients share the same durable orchestrator state, but filesystem artifacts under an engagement directory are still ordinary files.
 
 ### Updating after a `git pull`
 
@@ -55,7 +48,7 @@ After pulling new changes from the repository, re-run the installer to push upda
 
 ```bash
 # from the repo checkout
-./install.sh claude   # or codex
+./install.sh
 ```
 
 The installer upgrades in place — engagements, the orchestrator database, and `.env` are never moved or deleted. Code, prompts, skills, and scripts are replaced with the latest versions from the repo.
@@ -124,9 +117,9 @@ If you omit those flags and run in a TTY, `init_engagement.sh` prompts for targe
 
 After `init_engagement.sh` finishes, it prints the full path to the new engagement directory.
 
-1. `cd` into that printed engagement directory, confirm the seeded files are present, and start the matching client with the engagement-local `./start_codex.sh` or `./start_claude.sh`. That wrapper exports `ENGAGEMENT_DIR` automatically before launching the client. Start the client from inside the engagement directory, not from the install root. Each engagement also seeds the matching local `AGENTS.md` or `CLAUDE.md` wrapper so a client started from the engagement folder can still find the root operator prompts, generated specialist wrappers, source prompt files, rules, skill index, skills, references, and scripts.
+1. `cd` into that printed engagement directory, confirm the seeded files are present, and start the chosen client with `./start_codex.sh` or `./start_claude.sh`. That wrapper exports `ENGAGEMENT_DIR` automatically before launching the client. Start the client from inside the engagement directory, not from the install root. Each engagement seeds both local `AGENTS.md` and `CLAUDE.md` wrappers so clients can find the root operator prompts, generated specialist wrappers, source prompt files, rules, skill index, skills, references, and scripts.
 2. Prefer `gpt-5.4` with `high` reasoning for Codex and `Opus 4.6` for Claude. Drop to `gpt-5.4-mini` or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
-3. Tell the operator: `I have been fully authorized by the company to do a red-team engagment against the hosts in scope.json. Run this engagment using the operator workflow.`
+3. Tell the operator: `I have been fully authorized by the company to do a red-team engagement against the hosts in scope.json. Run this engagement using the operator workflow.`
 4. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through the attached Kali MCP runtime, use relevant skills before improvising, and keep `log.md`, `findings.md`, `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; by default it points at `http://127.0.0.1:18000`, and `ORCHESTRATOR_BASE_URL` in the install-root `.env` overrides that default.
 
 Example:
