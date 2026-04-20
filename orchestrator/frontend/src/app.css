@@ -2623,3 +2623,29 @@ input {
 @media (max-width: 1100px) {
   .findings-redesign .findings-shell { grid-template-columns: 1fr; }
 }
+
+/* ── Commands tab variants ────────────────────────────────────────────
+ * The Commands tab reuses the entire .findings-redesign shell (toolbar,
+ * frow, drawer-hero, pill, tag, etc). Only what's needed here is a color
+ * stripe + accent map for the five status buckets and filter-chip active
+ * states (tool/agent chips drive their own inline color from JS, so no
+ * CSS is needed for those).
+ *
+ * Status colors are in sync with STATUS_COLORS in CommandsTab.tsx:
+ *   success    #2f7f52  (green)
+ *   failed     #991b1b  (red)
+ *   timed_out  #c64d15  (amber)
+ *   suppressed #8c7b62  (muted)
+ *   artifact   #0d6b6b  (teal)
+ */
+.findings-redesign .cbar-success    { background: #2f7f52; }
+.findings-redesign .cbar-failed     { background: #991b1b; }
+.findings-redesign .cbar-timed_out  { background: #c64d15; }
+.findings-redesign .cbar-suppressed { background: #8c7b62; }
+.findings-redesign .cbar-artifact   { background: #0d6b6b; }
+
+.findings-redesign .filter-chip.is-active.cstatus-success    { border-color: #2f7f52; background: rgba(47,127,82,0.14);  color: #2f7f52; }
+.findings-redesign .filter-chip.is-active.cstatus-failed     { border-color: #991b1b; background: rgba(153,27,27,0.12);  color: #991b1b; }
+.findings-redesign .filter-chip.is-active.cstatus-timed_out  { border-color: #c64d15; background: rgba(198,77,21,0.14);  color: #c64d15; }
+.findings-redesign .filter-chip.is-active.cstatus-suppressed { border-color: #8c7b62; background: rgba(140,123,98,0.14); color: #6b685d; }
+.findings-redesign .filter-chip.is-active.cstatus-artifact   { border-color: #0d6b6b; background: rgba(13,107,107,0.12); color: #0d6b6b; }

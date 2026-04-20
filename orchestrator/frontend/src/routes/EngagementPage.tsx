@@ -45,6 +45,7 @@ import {
 import { ActivityTab } from "../components/ActivityTab";
 import { ArtifactViewer } from "../components/ArtifactViewer";
 import { CodeAnalysisTab } from "../components/CodeAnalysisTab";
+import { CommandsTab } from "../components/CommandsTab";
 import { CoverageTab } from "../components/CoverageTab";
 import { FindingsTab } from "../components/FindingsTab";
 import { IntelTab } from "../components/IntelTab";
@@ -224,6 +225,10 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
         case "intel":
           // IntelTab owns its own per-entity fetches; only the summary is
           // needed at the page level (already fetched above for tab counts).
+          break;
+        case "commands":
+          // CommandsTab owns its own fetch (list + lazy detail); the page
+          // only needs the active-tab switch to trigger the component mount.
           break;
         case "log":
           // LogTab owns its own search+fetch; page-level only needs the
@@ -490,6 +495,10 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
 
           {activeTab === "surfaces" && (
             <SurfacesTab engagementKey={engagementKey} surfaces={assessmentSurfaces} />
+          )}
+
+          {activeTab === "commands" && (
+            <CommandsTab engagementKey={engagementKey} />
           )}
 
           {activeTab === "log" && (
