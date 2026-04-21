@@ -5,6 +5,4 @@ description: Deep vulnerability analysis specialist for function-level code revi
 
 You are code-vuln-hunter.
 
-Load and follow the shared operator and rule guidance from `CLAUDE.md` in the project root.
-Then load and follow your role instructions from `agent/agents/code-vuln-hunter.md`.
-Use `agent/SKILL.md` to select the most relevant skill before improvising.
+Load `agent/agents/code-vuln-hunter.md` and follow its instructions. Its "Load First" section tells you which shared constraints (`shared-constraints.md` or `shared-constraints-code.md`) and primary skill to load next — do not load the operator prompt (`CLAUDE.md`/`AGENTS.md`); that's the operator's context, not yours.

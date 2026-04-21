@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/intel-breach-record.schema.json",
+  "$comment": "Mirrors app.api.intel_schemas.BreachRecordRequest.",
+  "title": "Intel Breach Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["subject", "breach_name"],
+  "properties": {
+    "subject": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Email, account, domain, or other identifier exposed in the breach."
+    },
+    "breach_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Named breach or leak (e.g., 'Collection1', 'LinkedIn 2021')."
+    },
+    "breach_date": {
+      "type": "string",
+      "maxLength": 64,
+      "default": "",
+      "description": "Date of breach (free-form — vendor dates vary)."
+    },
+    "data_types": {
+      "type": "string",
+      "maxLength": 1024,
+      "default": "",
+      "description": "Comma or newline-delimited list of exposed data classes."
+    },
+    "source_name": {
+      "type": "string",
+      "maxLength": 128,
+      "default": ""
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 4096,
+      "default": ""
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "agent_name": { "type": "string" },
+        "artifact_ref": { "type": "string" },
+        "captured_at": { "type": "string" },
+        "evidence_quote": { "type": "string" }
+      }
+    }
+  }
+}

@@ -46,21 +46,6 @@ agent_description() {
   esac
 }
 
-render_banner() {
-  cat <<'EOF'
-```
-╔══════════════════════════════════════════════════════════════╗
-║                                                              ║
-║   ██████  ███████ ██████  ████████ ███████  █████  ███    ███║
-║   ██   ██ ██      ██   ██    ██    ██      ██   ██ ████  ████║
-║   ██████  █████   ██   ██    ██    █████   ███████ ██ ████ ██║
-║   ██   ██ ██      ██   ██    ██    ██      ██   ██ ██  ██  ██║
-║   ██   ██ ███████ ██████     ██    ███████ ██   ██ ██      ██║
-║                                                              ║
-║   Autonomous Red Team Simulation Agent                       ║
-EOF
-}
-
 render_prompt_locality() {
   cat <<'EOF'
 ## Prompt Locality
@@ -86,11 +71,11 @@ render_agent_roster() {
 | `recon-specialist` | Network recon: fingerprinting, directory fuzzing, tech stack, port scanning. | Phase 1. |
 | `source-analyzer` | Deep static analysis of HTML/JS/CSS for hidden routes, API endpoints, secrets. | Phase 1 (parallel with recon). |
 | `surface-collector` | URL collection, dedup, intelligent triage, work-buffer population. | Phase 2. |
-| `vulnerability-analyst` | Validates endpoints, kills weak findings, and prepares durable evidence. | Phase 3 consumption loop. |
-| `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 3 (HIGH/MEDIUM) + Phase 4. |
+| `vulnerability-analyst` | Validates endpoints with targeted probes, produces durable evidence, reviews findings in Phase 4. | Phase 3 + Phase 4 verification. |
+| `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 5. |
 | `fuzzer` | High-volume parameter/directory/protocol fuzzing with bounded objectives. | When FUZZER_NEEDED. |
-| `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 4 (parallel with exploit). |
-| `report-writer` | Generates structured engagement report from durable findings and synchronized artifacts. | Phase 5 or on-demand. |
+| `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 5 (parallel with exploit). |
+| `report-writer` | Generates structured engagement report from durable backend finding state. | Phase 7 or on-demand. |
 
 EOF
 }
@@ -109,23 +94,14 @@ render_code_agent_roster() {
 EOF
 }
 
-render_claude() {
+render_operator_prompt() {
+  local out="$1"
   {
     cat <<'EOF'
 # AI Threat Hunting — Operator Instructions
 
-EOF
-    render_banner
-    cat <<'EOF'
-║   Powered by Claude Code  ║
-║                                                              ║
-╚══════════════════════════════════════════════════════════════╝
-```
-
-When a session starts, display the banner above and then:
+When a session starts, display:
 "[operator] AI Threat Hunting ready. Ensure `./agent/scripts/start_kali_mcp_runtime.sh` is running, then use `cd agent && ./scripts/init_engagement.sh <target_url>` to start a new engagement."
-
----
 
 <!-- Generated from operator-core.md via scripts/render-operator-prompts.sh -->
 
@@ -135,22 +111,6 @@ EOF
     render_code_agent_roster
     cat "$CORE_FILE"
     cat <<'EOF'
-
-## Claude Dispatch Syntax
-
-Use `@agent-name` when dispatching subagents:
-- `@recon-specialist`
-- `@source-analyzer`
-- `@surface-collector`
-- `@vulnerability-analyst`
-- `@exploit-developer`
-- `@fuzzer`
-- `@osint-analyst`
-- `@report-writer`
-- `@code-architect`
-- `@code-vuln-hunter`
-- `@code-variant-hunter`
-- `@code-vuln-verifier`
 
 ## macOS/zsh Compatibility
 
@@ -158,36 +118,6 @@ Use `@agent-name` when dispatching subagents:
 - Do NOT use `grep -P` (Perl regex). Use `grep -E` (extended) or `rg` instead.
 - HEREDOC: Use unquoted delimiter (`<< EOF`), NOT single-quoted (`<< 'EOF'`).
 - New files: use bash commands (mkdir, cat >, echo >). Existing files: use Edit tool.
-EOF
-  } > "$CLAUDE_OUT"
-  perl -0pi -e 's/\n+\z/\n/' "$CLAUDE_OUT"
-}
-
-render_agents() {
-  {
-    cat <<'EOF'
-# AI Threat Hunting
-
-EOF
-    render_banner
-    cat <<'EOF'
-║                                                              ║
-╚══════════════════════════════════════════════════════════════╝
-```
-
-When a session starts, display the banner above and then:
-"[operator] AI Threat Hunting ready. Ensure `./agent/scripts/start_kali_mcp_runtime.sh` is running, then use `cd agent && ./scripts/init_engagement.sh <target_url>` to start a new engagement."
-
----
-
-<!-- Generated from operator-core.md via scripts/render-operator-prompts.sh -->
-
-EOF
-    render_prompt_locality
-    render_agent_roster
-    render_code_agent_roster
-    cat "$CORE_FILE"
-    cat <<'EOF'
 
 ## Tool Promotion Workflow
 
@@ -195,8 +125,16 @@ After an engagement, review generated tools in `agent/engagements/<...>/tools/`:
 1. Identify reusable tools -> create a skill in `agent/skills/<name>/SKILL.md`
 2. Add the new skill to `agent/references/INDEX.md` and note it in the relevant Claude/Codex instructions
 EOF
-  } > "$AGENTS_OUT"
-  perl -0pi -e 's/\n+\z/\n/' "$AGENTS_OUT"
+  } > "$out"
+  perl -0pi -e 's/\n+\z/\n/' "$out"
+}
+
+render_claude() {
+  render_operator_prompt "$CLAUDE_OUT"
+}
+
+render_agents() {
+  render_operator_prompt "$AGENTS_OUT"
 }
 
 render_claude_wrapper() {
@@ -229,9 +167,7 @@ description: $description
 
 You are $agent_name.
 
-Load and follow the shared operator and rule guidance from \`CLAUDE.md\` in the project root.
-Then load and follow your role instructions from \`agent/agents/$agent_name.md\`.
-Use \`agent/SKILL.md\` to select the most relevant skill before improvising.
+Load \`agent/agents/$agent_name.md\` and follow its instructions. Its "Load First" section tells you which shared constraints (\`shared-constraints.md\` or \`shared-constraints-code.md\`) and primary skill to load next — do not load the operator prompt (\`CLAUDE.md\`/\`AGENTS.md\`); that's the operator's context, not yours.
 EOF
 }
 
@@ -260,9 +196,7 @@ name = "$agent_name"
 description = "$description"
 
 developer_instructions = """
-Load and follow the shared operator and rule guidance from AGENTS.md in the project root.
-Then load and follow your role instructions from agent/agents/$agent_name.md.
-Use agent/SKILL.md to select the most relevant skill before improvising.
+Load agent/agents/$agent_name.md and follow its instructions. Its "Load First" section tells you which shared constraints (shared-constraints.md or shared-constraints-code.md) and primary skill to load next — do not load the operator prompt (CLAUDE.md/AGENTS.md); that's the operator's context, not yours.
 """
 EOF
 }

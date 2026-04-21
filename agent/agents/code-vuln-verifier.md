@@ -52,13 +52,18 @@ If any item is missing, stop and request it from the operator before proceeding.
 
 The five-check protocol is in the skill file. These rules govern HOW you apply it:
 
-**Rigor bar for kills:** A counter-argument must meet the same evidence bar as the original
-finding. The hunter provided CWE, taint path, guard failure analysis, and concrete attacker
-impact. Your counter-argument must provide equally specific evidence: the exact guard code,
-proof it covers ALL paths (not just one branch), and a concrete explanation of why the
-attacker's input cannot reach the sink. Circumstantial evidence — a test case exists, a
-commit message mentions security, the code "looks well-written" — is not sufficient to kill.
-If your counter-evidence is weaker than the hunter's original evidence, the finding survives.
+**Symmetric rigor bar:** Each check produces PASS, KILL, DOWNGRADE, or ESCALATE, and PASS and
+KILL carry the same evidence cost. PASS requires cited supporting evidence in the shape that
+check validates (reachability witness with taint trace, inspected-callers list, build-config
+line, byte-level exploit path, discharged DA disproof attempts). KILL requires cited
+counter-evidence at the same bar — the exact guard code with proof it covers ALL paths, or
+the specific blocking constraint with demonstration that the attacker cannot route around it
+(alt input channels, encoding mismatch, partial-match bypass, pre-guard-state mutation).
+Circumstantial evidence — a test case exists, a commit message mentions security, the code
+"looks well-written" — is not sufficient to kill, and absence of such evidence is not
+sufficient to confirm. When your evidence for either direction is weaker than the hunter's
+original evidence, record the specific ambiguity and escalate to voting rather than defaulting
+to PASS or KILL.
 
 **Partial guards → DOWNGRADE, not KILL:** A guard that covers some paths but not all reduces
 exploitability — it does not eliminate the bug. Document which paths are guarded and which
@@ -83,9 +88,10 @@ voting. Do not resolve uncertainty by defaulting to kill.
 
 ## Dispositions
 
-- `confirmed` — all 5 checks passed, exploitation is feasible, finding stands
+- `confirmed` — supporting evidence cited across the 5 checks is at least as concrete as the hunter's original claim, exploitation is feasible, finding stands
 - `downgraded` — real issue but severity is lower than claimed (provide new severity + reason)
-- `killed` — false positive with specific kill reason (must be verifiable)
+- `killed` — counter-evidence cited across the 5 checks reaches the same bar as the hunter's original claim (must be verifiable)
+- `voting` — evidence fits neither the PASS bar nor the KILL bar at one or more checks; escalated to multi-perspective voting
 
 See skill file for the full disposition table and kill reason format with examples.
 
@@ -125,11 +131,14 @@ chains linking them. Only net-new spot-check findings should create fresh `VF` f
 
 ## Key Principles
 
-- **Kill precisely, not aggressively** — your job is accuracy, not volume. A wrongly killed real finding is as bad as a missed FP
-- **Every kill needs evidence as rigorous as the original finding** — not "probably safe" but "guard at line X prevents Y on all paths"
+- **Symmetric evidence** — confirm when the supporting evidence cited across the 5 checks is at least as concrete as the hunter's original claim; kill when counter-evidence cited across the 5 checks reaches the same bar; escalate to voting when neither bar is met. KILL and CONFIRM carry equal evidence cost; neither is the path of least resistance.
+- **PASS is not "no kill trigger fired"** — each check's PASS requires cited supporting evidence in the shape that check validates (reachability witness, inspected-callers list, build-config line, byte-level exploit trace, discharged DA disproof attempts). Absence of counter-evidence is not PASS evidence.
+- **Kill precisely, not aggressively** — your job is accuracy, not volume. A wrongly killed real finding is as bad as a missed FP, and a wrongly confirmed one wastes the exploit phase.
+- **Every kill needs evidence as rigorous as the original finding** — not "probably safe" but "guard at line X prevents Y on all paths, and routes around it (alt input channels, encoding mismatch, partial-match, pre-guard mutation) are each closed by [specific evidence]"
 - **Read the source code** — do not trust the hunter's annotations, verify independently
 - **Devil's advocate is mandatory** — you must try to disprove every finding before confirming, but DA evidence must clear the same bar as hunter evidence to justify a kill
 - **Construct the exploit, prove why you cannot, or identify probabilistic feasibility** — Check 4 requires one of the three
+- **ESCALATE is a first-class option at every check** — when evidence fits neither PASS nor KILL, record the specific ambiguity and route to multi-perspective voting instead of defaulting to either outcome
 - **Composable chains matter** — two medium findings may compose into a critical exploit
 - **Full filesystem access** — use Read, Grep, Glob to verify call chains and guards independently
 - **Variant awareness** — when variants exist, a killed original may still have valid variants

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/intel-email.schema.json",
+  "$comment": "Mirrors app.api.intel_schemas.EmailRecordRequest.",
+  "title": "Intel Email Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["address"],
+  "properties": {
+    "address": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 320,
+      "description": "Fully qualified email address."
+    },
+    "role_hint": {
+      "type": "string",
+      "maxLength": 128,
+      "default": "",
+      "description": "Observed role, e.g. 'admin', 'support', 'ops'."
+    },
+    "linked_person_id": {
+      "type": ["integer", "null"],
+      "default": null,
+      "minimum": 1,
+      "description": "intel_people.id if the email has been attributed to a known person."
+    },
+    "source_name": {
+      "type": "string",
+      "maxLength": 128,
+      "default": ""
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 4096,
+      "default": ""
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "agent_name": { "type": "string" },
+        "artifact_ref": { "type": "string" },
+        "captured_at": { "type": "string" },
+        "evidence_quote": { "type": "string" }
+      }
+    }
+  }
+}

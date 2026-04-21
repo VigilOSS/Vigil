@@ -198,6 +198,67 @@ def test_code_variant_hunter_example_matches_record_finding_contract():
     assert '"impact": "Remote attackers can trigger heap corruption in the FTP path parser with an overlong path"' in hunter_prompt
 
 
+def test_kali_mcp_audit_and_reuse_wording_is_present():
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+    operator_agents = (repo_root / "agent" / "AGENTS.md").read_text(encoding="utf-8")
+    operator_claude = (repo_root / "agent" / "CLAUDE.md").read_text(encoding="utf-8")
+    shared_web = (repo_root / "agent" / "shared-constraints.md").read_text(encoding="utf-8")
+    shared_code = (repo_root / "agent" / "shared-constraints-code.md").read_text(encoding="utf-8")
+
+    # Operator source + rendered wrappers describe the audit channel and the
+    # coverage-search CLI so an operator reading any of the three sees both,
+    # under the current coverage-map framing (not the old reuse-gate framing).
+    for text in (operator_core, operator_agents, operator_claude):
+        assert "engagement_key" in text
+        assert "agent_name" in text
+        assert "phase" in text
+        assert "list-command-runs" in text
+        assert "Kali MCP Audit — Shape Dispatches From Coverage" in text
+        assert "variant that hasn't been tried" in text
+
+    # Shared-constraints: both modes mention the reuse rule so specialists see
+    # it on first load.
+    for text in (shared_web, shared_code):
+        assert "list-command-runs" in text
+        assert "command-history-auditing.md" in text
+
+
+def test_kali_specialist_prompts_document_history_check():
+    repo_root = Path(__file__).resolve().parents[3]
+    filenames = [
+        "recon-specialist.md",
+        "surface-collector.md",
+        "vulnerability-analyst.md",
+        "exploit-developer.md",
+        "fuzzer.md",
+        "osint-analyst.md",
+        "code-fuzz-engineer.md",
+    ]
+    for filename in filenames:
+        path = repo_root / "agent" / "agents" / filename
+        text = path.read_text(encoding="utf-8")
+        assert "list-command-runs" in text, f"{filename} missing list-command-runs reference"
+        assert "--q <" in text, f"{filename} missing broad command-history search example"
+        assert "unscoped" in text.lower(), f"{filename} missing unscoped search default"
+        assert "narrow with `--agent-name`/`--phase` only if swamped" in text, (
+            f"{filename} missing coverage-map scoping guidance"
+        )
+        assert "coverage map" in text.lower(), f"{filename} missing coverage-map framing"
+        assert "command-history-auditing.md" in text, f"{filename} missing history-guide reference"
+
+
+def test_command_history_reference_guide_exists():
+    repo_root = Path(__file__).resolve().parents[3]
+    path = repo_root / "agent" / "references" / "runtime-guides" / "command-history-auditing.md"
+    text = path.read_text(encoding="utf-8")
+    assert "Coverage-vs-duplicate decision table" in text
+    assert "output_retention_status" in text
+    assert "list-command-runs" in text
+    index = (repo_root / "agent" / "references" / "INDEX.md").read_text(encoding="utf-8")
+    assert "runtime-guides/command-history-auditing.md" in index
+
+
 def test_code_analysis_codex_wrappers_exist():
     repo_root = Path(__file__).resolve().parents[3]
     codex_dir = repo_root / "agent" / ".codex" / "agents"
@@ -212,13 +273,15 @@ def test_code_analysis_codex_wrappers_exist():
     assert expected <= {path.name for path in codex_dir.glob("*.toml")}
 
 
-def test_exploit_developer_prompt_uses_workflow_status_for_findings_examples():
+def test_exploit_developer_prompt_uses_backend_exploit_candidates_for_context():
     repo_root = Path(__file__).resolve().parents[3]
     exploit_prompt = (repo_root / "agent" / "agents" / "exploit-developer.md").read_text(encoding="utf-8")
 
     assert '.status | IN("confirmed","exploited","draft")' not in exploit_prompt
-    assert '.workflow_status | IN("active","exploited","draft")' in exploit_prompt
-    assert "{slug, title, severity, workflow_status, defect_family, canonical_location, auth_context}" in exploit_prompt
+    assert '.workflow_status | IN("active","exploited","draft")' not in exploit_prompt
+    assert "./scripts/assess.py fetch exploit-candidates" in exploit_prompt
+    assert "candidate_reason" in exploit_prompt
+    assert "verified findings at nearby endpoints" in exploit_prompt
 
 
 def test_code_agent_prompts_use_current_finding_lifecycle_contracts():
@@ -252,3 +315,55 @@ def test_operator_prompt_outputs_reference_helper_contracts_for_findings():
     for text in (operator_core, agents_prompt, claude_prompt):
         assert "assess.py contract record-finding" in text
         assert "reset-finding" in text
+
+
+def test_prompt_stack_uses_current_report_and_dedup_contracts():
+    repo_root = Path(__file__).resolve().parents[3]
+    shared_constraints = (repo_root / "agent" / "shared-constraints.md").read_text(encoding="utf-8")
+    shared_constraints_code = (repo_root / "agent" / "shared-constraints-code.md").read_text(
+        encoding="utf-8"
+    )
+    vuln_analyst = (repo_root / "agent" / "agents" / "vulnerability-analyst.md").read_text(
+        encoding="utf-8"
+    )
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+    operator_core_code = (repo_root / "agent" / "operator-core-code.md").read_text(
+        encoding="utf-8"
+    )
+    handoff = (repo_root / "agent" / "references" / "handoff-protocols.md").read_text(
+        encoding="utf-8"
+    )
+    report_skill = (repo_root / "agent" / "skills" / "report-generation" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    report_writer = (repo_root / "agent" / "agents" / "report-writer.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "fetch report-findings" not in shared_constraints
+    assert "fetch findings" in shared_constraints
+    assert "fetch report-findings" not in shared_constraints_code
+    assert "fetch findings" in shared_constraints_code
+    assert "fetch report-findings" not in vuln_analyst
+    assert "fetch findings" in vuln_analyst
+    assert "drive HIGH findings to exploitation before investing in medium/low" not in operator_core
+    assert "check-report-readiness" in operator_core
+    assert "report-findings?mode=final" in operator_core
+    assert "report-findings?mode=draft" in operator_core
+    assert "review-and-fix mode" in operator_core
+    assert "Publication before QA passes creates false workflow state" in operator_core
+    assert "check-report-readiness" in operator_core_code
+    assert "report-findings?mode=final" in operator_core_code
+    assert "review-and-fix QA" in operator_core_code
+    assert "QA PASS" in operator_core_code
+    assert "belongs after Verify in Phase 5" in handoff
+    assert "review-and-fix QA mode" in handoff
+    assert "check-report-readiness" in report_skill
+    assert 'fetch "report-findings?mode=final"' in report_skill
+    assert 'fetch "report-findings?mode=draft"' in report_skill
+    assert "Do not emit `report.generated` or mark findings `reported` during draft generation" in report_skill
+    assert "Review-and-Fix QA Mode" in report_skill
+    assert "Publish After QA Pass" in report_skill
+    assert 'fetch "report-findings?mode=final"' in report_writer
+    assert "Review-and-fix QA mode" in report_writer
+    assert "Publish mode" in report_writer

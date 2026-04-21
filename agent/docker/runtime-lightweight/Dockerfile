@@ -112,6 +112,8 @@ RUN ln -sf /usr/share/wordlists /wordlists && \
 
 COPY docker/kali-mcp-runtime/mcp-server-wrapper.sh /usr/bin/mcp-server
 COPY docker/kali-mcp-runtime/patched_kali_server.py /opt/mcp-tools/patched_kali_server.py
+COPY docker/kali-mcp-runtime/patched_kali_client.py /opt/mcp-tools/patched_kali_client.py
+COPY docker/kali-mcp-runtime/kali_mcp_audit.py /opt/mcp-tools/kali_mcp_audit.py
 RUN chmod +x /usr/bin/mcp-server && mkdir -p /opt/mcp-tools /data
 
 WORKDIR /engagement

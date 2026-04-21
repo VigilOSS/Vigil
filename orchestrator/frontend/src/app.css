@@ -1,18 +1,159 @@
-:root {
+:root,
+:root[data-theme="light"] {
   color-scheme: light;
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
-  background:
-    radial-gradient(circle at top left, rgba(255, 197, 90, 0.28), transparent 34%),
-    radial-gradient(circle at top right, rgba(32, 88, 255, 0.18), transparent 30%),
-    #f6f2e8;
-  color: #1a1a16;
+
+  /* ── Page background + primary ink ──────────────────────── */
+  --page-bg-gradient-1: rgba(255, 197, 90, 0.28);
+  --page-bg-gradient-2: rgba(32, 88, 255, 0.18);
+  --page-bg-color: #f6f2e8;
+  --ink: #1a1a16;
+  --ink-2: #4b4a42;
+  --muted: #6b685d;
+
+  /* ── Surfaces ───────────────────────────────────────────── */
   --panel: rgba(255, 255, 255, 0.82);
+  --panel-strong: rgba(255, 255, 255, 0.96);
+  --panel-soft: rgba(255, 255, 255, 0.6);
+  --panel-hover: rgba(255, 255, 255, 0.9);
+  --elevated: rgba(255, 255, 255, 1);
   --border: rgba(18, 18, 18, 0.1);
+  --border-strong: rgba(18, 18, 18, 0.18);
+  --divider: rgba(18, 18, 18, 0.08);
+  --overlay-bg: rgba(0, 0, 0, 0.45);
+
+  /* ── Accent + semantic ──────────────────────────────────── */
   --accent: #17354c;
+  --accent-muted: rgba(23, 53, 76, 0.35);
   --accent-soft: #f4a259;
   --ok: #2f7f52;
   --warn: #c64d15;
   --pending: #8c7b62;
+  --danger: #991b1b;
+
+  /* ── Severity + chip palette (light) ────────────────────── */
+  --sev-critical: #991b1b;
+  --sev-high: #c64d15;
+  --sev-medium: #a16207;
+  --sev-low: #17354c;
+  --sev-info: #5a584f;
+
+  /* Chip hues — consumed by inline style via var(--chip-*) in
+   * CommandsTab / IntelTab for status/tool/technique/probe-kind
+   * colors, so a dark-mode swap only needs to rewrite these. */
+  --chip-green: #2f7f52;
+  --chip-red: #991b1b;
+  --chip-orange: #c64d15;
+  --chip-muted: #8c7b62;
+  --chip-teal: #0d6b6b;
+  --chip-navy: #17354c;
+  --chip-purple: #7c3aed;
+  --chip-pink: #be185d;
+  --chip-maroon: #6b0d0d;
+  --chip-ochre: #a16207;
+  --chip-slate: #4b5563;
+  --chip-muted-grey: #6b685d;
+  --chip-unreviewed: #9a988d;
+  --chip-unreviewed-ink: #5a584f;
+
+  /* ── JSON syntax highlight (light) ──────────────────────── */
+  --json-key: #17354c;
+  --json-string: #2f7f52;
+  --json-number: #a16207;
+  --json-boolean: #7c3aed;
+  --json-null: #7c3aed;
+  --json-punctuation: #8c7b62;
+  --json-gutter: #9a988d;
+  --json-bg: rgba(16, 18, 26, 0.045);
+  --json-border: rgba(16, 18, 26, 0.08);
+
+  /* ── Drawer tabs + count badges (light) ─────────────────── */
+  --drawer-tab-bar-bg: rgba(255, 255, 255, 0.6);
+  --drawer-tab-active-ink: #17354c;
+  --count-bg: rgba(23, 53, 76, 0.08);
+  --count-ink: #17354c;
+  --count-bg-active: rgba(23, 53, 76, 0.14);
+  --count-ink-active: #17354c;
+
+  background:
+    radial-gradient(circle at top left, var(--page-bg-gradient-1), transparent 34%),
+    radial-gradient(circle at top right, var(--page-bg-gradient-2), transparent 30%),
+    var(--page-bg-color);
+  color: var(--ink);
+}
+
+/* ── Dark theme ─────────────────────────────────────────────
+ * Applied via <html data-theme="dark"> from the ThemeToggle.
+ * Redefines the same variables the light block declares; do
+ * not introduce new variable names here — the point is that
+ * every component which references var(--…) in app.css or
+ * inline styles picks up the dark values for free. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --page-bg-gradient-1: rgba(90, 60, 200, 0.22);
+  --page-bg-gradient-2: rgba(32, 88, 255, 0.18);
+  --page-bg-color: #0f1117;
+  --ink: #e6e8ee;
+  --ink-2: #c4c8d4;
+  --muted: #a0a6b5;
+
+  --panel: rgba(28, 32, 42, 0.82);
+  --panel-strong: #161920;
+  --panel-soft: rgba(28, 32, 42, 0.5);
+  --panel-hover: rgba(40, 44, 56, 0.85);
+  --elevated: #1c202a;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --divider: rgba(255, 255, 255, 0.07);
+  --overlay-bg: rgba(0, 0, 0, 0.65);
+
+  --accent: #79a9d4;
+  --accent-muted: rgba(121, 169, 212, 0.4);
+  --accent-soft: #f7bb7b;
+  --ok: #5fc08a;
+  --warn: #f08a52;
+  --pending: #b8ab92;
+  --danger: #e56c6c;
+
+  --sev-critical: #e56c6c;
+  --sev-high: #f08a52;
+  --sev-medium: #e0b04a;
+  --sev-low: #79a9d4;
+  --sev-info: #9aa0ae;
+
+  --chip-green: #5fc08a;
+  --chip-red: #e56c6c;
+  --chip-orange: #f08a52;
+  --chip-muted: #b8ab92;
+  --chip-teal: #4fb5b5;
+  --chip-navy: #79a9d4;
+  --chip-purple: #b190f5;
+  --chip-pink: #e573a9;
+  --chip-maroon: #d68585;
+  --chip-ochre: #e0b04a;
+  --chip-slate: #8e9ab0;
+  --chip-muted-grey: #9aa0ae;
+  --chip-unreviewed: #8b8e9a;
+  --chip-unreviewed-ink: #c4c8d4;
+
+  --json-key: #79a9d4;
+  --json-string: #9bd2ad;
+  --json-number: #e0b04a;
+  --json-boolean: #b190f5;
+  --json-null: #b190f5;
+  --json-punctuation: #7a8195;
+  --json-gutter: #555b6c;
+  --json-bg: rgba(255, 255, 255, 0.03);
+  --json-border: rgba(255, 255, 255, 0.08);
+
+  /* ── Drawer tabs + count badges (dark) ──────────────────── */
+  --drawer-tab-bar-bg: rgba(22, 25, 32, 0.7);
+  --drawer-tab-active-ink: #e6e8ee;
+  --count-bg: rgba(121, 169, 212, 0.16);
+  --count-ink: #b6d2ea;
+  --count-bg-active: rgba(121, 169, 212, 0.28);
+  --count-ink-active: #e6e8ee;
 }
 
 * {
@@ -107,7 +248,7 @@ input {
   font-size: 0.74rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #6b685d;
+  color: var(--muted);
 }
 
 /* ── Engagement list ────────────────────────────────────── */
@@ -160,7 +301,7 @@ input {
   padding: 10px 16px;
   font-size: 0.9rem;
   font-weight: 500;
-  color: #6b685d;
+  color: var(--muted);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -476,7 +617,7 @@ input {
   font-size: 0.8rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #6b685d;
+  color: var(--muted);
   margin-right: 4px;
 }
 
@@ -486,8 +627,8 @@ input {
   padding: 4px 12px;
   font-size: 0.78rem;
   cursor: pointer;
-  background: rgba(255, 255, 255, 0.7);
-  color: #4b4a42;
+  background: var(--panel-soft);
+  color: var(--ink-2);
   display: flex;
   align-items: center;
   gap: 4px;
@@ -712,7 +853,7 @@ input {
   align-items: center;
   gap: 5px;
   font-size: 0.82rem;
-  color: #6b685d;
+  color: var(--muted);
 }
 
 .coverage-dot {
@@ -799,7 +940,7 @@ input {
   font-size: 0.78rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #6b685d;
+  color: var(--muted);
   border-bottom: 1px solid var(--border);
 }
 
@@ -830,8 +971,8 @@ input {
   border-radius: 999px;
   padding: 4px 10px;
   font-size: 0.78rem;
-  background: rgba(255, 255, 255, 0.7);
-  color: #4b4a42;
+  background: var(--panel-soft);
+  color: var(--ink-2);
   cursor: pointer;
   font: inherit;
   font-size: 0.78rem;
@@ -1207,7 +1348,7 @@ input {
   gap: 12px;
   margin-top: 6px;
   font-size: 0.88rem;
-  color: #4b4a42;
+  color: var(--ink-2);
 }
 
 .code-gate-status {
@@ -1244,7 +1385,7 @@ input {
 
 .code-module-detail {
   font-size: 0.88rem;
-  color: #4b4a42;
+  color: var(--ink-2);
 }
 
 .code-results-list {
@@ -1275,7 +1416,7 @@ input {
 
 .code-result-detail {
   font-size: 0.86rem;
-  color: #4b4a42;
+  color: var(--ink-2);
   display: flex;
   gap: 6px;
   min-width: 0;
@@ -1290,7 +1431,7 @@ input {
 
 .code-result-label {
   font-weight: 600;
-  color: #6b685d;
+  color: var(--muted);
   flex-shrink: 0;
 }
 
@@ -1331,14 +1472,14 @@ input {
 }
 
 .lead {
-  color: #4b4a42;
+  color: var(--ink-2);
   max-width: 72ch;
 }
 
 .meta-text,
 .path-text,
 .empty-state {
-  color: #6b685d;
+  color: var(--muted);
   font-size: 0.9rem;
 }
 
@@ -1432,4 +1573,1923 @@ input {
     opacity: 1;
     transform: translateY(0) scale(1);
   }
+}
+
+.engagement-delete-button {
+  background: transparent;
+  color: #f08a8a;
+  border: 1px solid rgba(240, 138, 138, 0.6);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease-out, color 0.12s ease-out;
+}
+
+.engagement-delete-button:hover:not(:disabled) {
+  background: rgba(240, 138, 138, 0.14);
+  color: #ffb4b4;
+}
+
+.engagement-delete-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.delete-confirm-label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.delete-confirm-label input {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(9, 11, 18, 0.6);
+  color: inherit;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+
+/* ── Findings tab (redesign) ──────────────────────────────────────────
+ * Rules are scoped under `.findings-redesign` so that redefined class
+ * names (filter-chip, filter-group, filter-label, filter-count, empty,
+ * section, timeline, tag, count, pill, hl, dot, mono, count) do not leak
+ * into Coverage/Intel/Activity/Overview tabs, which reuse some of these
+ * class names with different visual contracts.
+ * ---------------------------------------------------------------------- */
+
+.findings-redesign {
+  /* --ink, --ink-2, --muted, --panel-strong, --border-strong all come
+   * from :root (theme layer) so dark mode flips them. Do not
+   * redeclare here. */
+  display: block;
+  min-width: 0;
+}
+
+.findings-redesign .page-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.findings-redesign .page-title { margin: 0; font-size: 1.6rem; letter-spacing: -0.01em; }
+.findings-redesign .page-crumbs {
+  font-size: 0.82rem;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+.findings-redesign .page-crumbs code {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  background: rgba(23, 53, 76, 0.07);
+  border-radius: 6px;
+  padding: 1px 6px;
+  color: var(--accent);
+}
+
+/* Toolbar (search + filters) */
+.findings-redesign .findings-toolbar-panel { padding: 0; }
+.findings-redesign .toolbar {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 14px;
+  align-items: stretch;
+  padding: 12px 14px;
+}
+.findings-redesign .search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: var(--panel-strong);
+  transition: border-color 0.14s, box-shadow 0.14s;
+}
+.findings-redesign .search-wrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(23, 53, 76, 0.10);
+}
+.findings-redesign .search-icon { width: 16px; height: 16px; color: var(--muted); flex: 0 0 auto; }
+.findings-redesign .search-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 0.94rem;
+  color: var(--ink);
+  min-width: 0;
+}
+.findings-redesign .search-kbd {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.72rem;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.6);
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.findings-redesign .toolbar-right {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+/* Severity sparkline */
+.findings-redesign .sev-sparkline {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 28px;
+  padding: 0 4px;
+}
+.findings-redesign .sev-bar {
+  width: 18px;
+  border-radius: 4px 4px 2px 2px;
+  position: relative;
+  display: grid;
+  place-items: end center;
+}
+.findings-redesign .sev-bar > span {
+  position: absolute;
+  bottom: -14px;
+  font-size: 0.66rem;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+/*
+ * Severity sparkline wrap: the label sits to the LEFT of the bar
+ * container. The previous `display: grid` stack collapsed the label on
+ * top of the bars, which visually overlapped the tallest severity
+ * column. Switching to a flex row with explicit gap gives the label
+ * breathing room and keeps the bars in a fixed-height container so the
+ * absolutely-positioned count badges below each bar don't get clipped.
+ */
+.findings-redesign .sev-sparkline-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 16px; /* leave room for the count badges under bars */
+}
+.findings-redesign .sev-sparkline-wrap .sev-sparkline {
+  height: 28px;
+  flex: 0 0 auto;
+}
+.findings-redesign .sev-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* Filter chips row (scoped redefinition) */
+.findings-redesign .filter-row {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-top: 1px dashed var(--border);
+}
+.findings-redesign .filter-group {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.findings-redesign .filter-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-right: 2px;
+}
+.findings-redesign .filter-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 0.76rem;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--ink-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.findings-redesign .filter-chip:hover { background: rgba(255, 255, 255, 0.95); }
+.findings-redesign .filter-chip.is-active {
+  border-color: var(--accent);
+  background: rgba(23, 53, 76, 0.08);
+  color: var(--accent);
+  font-weight: 500;
+}
+.findings-redesign .filter-chip.is-active.sev-critical { border-color: #991b1b; background: rgba(153,27,27,0.1); color: #991b1b; }
+.findings-redesign .filter-chip.is-active.sev-high     { border-color: var(--warn); background: rgba(198,77,21,0.1); color: var(--warn); }
+.findings-redesign .filter-chip.is-active.sev-medium   { border-color: #a16207; background: rgba(161,98,7,0.1); color: #a16207; }
+.findings-redesign .filter-chip.is-active.sev-low      { border-color: var(--accent); background: rgba(23,53,76,0.08); color: var(--accent); }
+.findings-redesign .filter-chip.is-active.sev-info     { border-color: #5a584f; background: rgba(90,88,79,0.1); color: #5a584f; }
+.findings-redesign .filter-count {
+  font-size: 0.68rem;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+.findings-redesign .filter-clear {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.76rem;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.findings-redesign .filter-clear:hover { color: var(--accent); }
+
+/* Master/detail — list panel takes the full content width. The detail
+ * view now renders as a centered modal (.detail-modal-*) instead of a
+ * right-hand column, so the shell is a single-column grid. The old
+ * two-column rule was removed in 2026-04 along with the in-page drawer. */
+.findings-redesign .findings-shell {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 18px;
+  align-items: stretch;
+  margin-top: 16px;
+  min-height: 620px;
+}
+.findings-redesign .list-panel {
+  padding: 0;
+  overflow: hidden;
+  display: grid;
+  /* 1fr takes the scrollable list region, last auto rows are the
+   * footer + any error summary block. list-scroll-x (our new
+   * horizontal-scroll wrapper) holds the header + rows and flexes
+   * vertically inside the 1fr. */
+  grid-template-rows: 1fr auto auto;
+  min-height: 0;
+}
+/*
+ * The list needs a single scroll container covering both the header and
+ * every row so sticky-column alignment stays perfect at any scroll
+ * offset (sticky resolves to the nearest scrolling ancestor on both
+ * axes; nesting two scrollers would break that).
+ *
+ * The Commands tab can produce command strings wider than any sane
+ * viewport; rather than ellipsing aggressively we let the operator
+ * scroll right while keeping the Time column pinned (position: sticky;
+ * left: 0) so context never disappears.
+ */
+.findings-redesign .list-scroll-x {
+  overflow: auto;
+  min-height: 0;
+  max-height: 72vh;
+  /* display: block ensures the inner list-header/list-scroll stack
+   * naturally. The horizontal scroll expands to fit the widest row. */
+}
+.findings-redesign .list-header {
+  display: grid;
+  grid-template-columns: 10px 52px 2.1fr 1fr 1.1fr 110px;
+  gap: 10px;
+  padding: 10px 16px 10px 14px;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+  position: sticky;
+  top: 0;
+  background: var(--panel-strong);
+  z-index: 3;
+}
+.findings-redesign .list-scroll {
+  /* When wrapped in .list-scroll-x this becomes a pass-through row
+   * container — the outer scroll owns the overflow on both axes. */
+  min-height: 0;
+}
+
+/* Row — snyk-dense */
+.findings-redesign .frow {
+  display: grid;
+  grid-template-columns: 10px 52px 2.1fr 1fr 1.1fr 110px;
+  gap: 10px;
+  padding: 10px 16px 10px 0;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  border-bottom: 1px solid rgba(18, 18, 18, 0.05);
+  transition: background 0.12s;
+  font: inherit;
+  color: inherit;
+}
+.findings-redesign .frow:hover { background: rgba(255, 255, 255, 0.7); }
+.findings-redesign .frow.is-selected { background: rgba(23, 53, 76, 0.06); }
+.findings-redesign .frow.is-selected .frow-title { color: var(--accent); }
+.findings-redesign .frow.is-suppressed { opacity: 0.6; }
+.findings-redesign .frow.is-suppressed .frow-title { text-decoration: line-through; }
+.findings-redesign .frow-sevbar {
+  height: 34px;
+  border-radius: 0 3px 3px 0;
+  width: 6px;
+  margin-left: 0;
+}
+.findings-redesign .sevbar-critical { background: #991b1b; }
+.findings-redesign .sevbar-high { background: var(--warn); }
+.findings-redesign .sevbar-medium { background: #a16207; }
+.findings-redesign .sevbar-low { background: var(--accent); }
+.findings-redesign .sevbar-info { background: #9a988d; }
+.findings-redesign .sev-dot {
+  width: 10px; height: 10px; border-radius: 3px;
+  display: inline-block;
+}
+.findings-redesign .frow-sev {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.findings-redesign .frow-sev.critical { color: #991b1b; }
+.findings-redesign .frow-sev.high { color: var(--warn); }
+.findings-redesign .frow-sev.medium { color: #a16207; }
+.findings-redesign .frow-sev.low { color: var(--accent); }
+.findings-redesign .frow-sev.info { color: var(--muted); }
+.findings-redesign .frow-main { min-width: 0; display: grid; gap: 3px; }
+.findings-redesign .frow-title {
+  font-size: 0.94rem;
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.findings-redesign .frow-meta {
+  font-size: 0.76rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.findings-redesign .frow-meta .dot { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.5; }
+.findings-redesign .frow-meta .mono { font-family: "IBM Plex Mono", "SFMono-Regular", monospace; font-size: 0.74rem; color: var(--ink-2); }
+.findings-redesign .hl { background: rgba(244, 162, 89, 0.28); color: var(--ink); padding: 0 2px; border-radius: 3px; }
+.findings-redesign .frow-loc {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.78rem;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.findings-redesign .frow-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  overflow: hidden;
+  max-height: 20px;
+}
+.findings-redesign .frow-status {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.findings-redesign .tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(23, 53, 76, 0.07);
+  color: var(--accent);
+  white-space: nowrap;
+}
+.findings-redesign .tag.cwe { background: rgba(23, 53, 76, 0.08); }
+.findings-redesign .tag.owasp { background: rgba(244, 162, 89, 0.16); color: var(--warn); }
+.findings-redesign .tag.cve { background: rgba(153, 27, 27, 0.1); color: #991b1b; }
+.findings-redesign .tag.chain { background: rgba(244, 162, 89, 0.2); color: #7a3a11; }
+
+.findings-redesign .pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 500;
+}
+.findings-redesign .pill-active     { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
+.findings-redesign .pill-reported   { background: rgba(47, 127, 82, 0.16); color: var(--ok); }
+.findings-redesign .pill-exploited  { background: rgba(153, 27, 27, 0.14); color: #991b1b; }
+.findings-redesign .pill-blocked    { background: rgba(153, 27, 27, 0.14); color: #991b1b; }
+.findings-redesign .pill-merged     { background: rgba(23, 53, 76, 0.1); color: var(--accent); }
+.findings-redesign .pill-false_positive { background: rgba(84, 88, 96, 0.12); color: #4b5563; }
+.findings-redesign .pill-confirmed  { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
+.findings-redesign .pill-unreviewed { background: rgba(140, 123, 98, 0.15); color: var(--pending); }
+.findings-redesign .pill-downgraded { background: rgba(23, 53, 76, 0.12); color: var(--accent); }
+.findings-redesign .pill-disputed   { background: rgba(117, 79, 31, 0.16); color: #8a5a1f; }
+
+/* Pager */
+.findings-redesign .list-footer {
+  border-top: 1px solid var(--border);
+  padding: 10px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.findings-redesign .pager-group { display: flex; gap: 6px; }
+.findings-redesign .pager-btn {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.78rem;
+}
+.findings-redesign .pager-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* Empty state (scoped) */
+.findings-redesign .empty {
+  padding: 48px 20px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.findings-redesign .empty code { font-family: "IBM Plex Mono", "SFMono-Regular", monospace; }
+
+/* Drawer */
+.findings-redesign .drawer-panel {
+  padding: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  min-height: 0;
+  background: var(--panel-strong);
+  position: relative;
+}
+.findings-redesign .drawer-hero {
+  padding: 18px 20px 14px;
+  display: grid;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+.findings-redesign .drawer-hero::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 4px;
+}
+.findings-redesign .drawer-hero.sev-critical::before { background: #991b1b; }
+.findings-redesign .drawer-hero.sev-high::before     { background: var(--warn); }
+.findings-redesign .drawer-hero.sev-medium::before   { background: #a16207; }
+.findings-redesign .drawer-hero.sev-low::before      { background: var(--accent); }
+.findings-redesign .drawer-hero.sev-info::before     { background: #9a988d; }
+.findings-redesign .drawer-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+.findings-redesign .drawer-nav {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.findings-redesign .icon-btn {
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: 28px; height: 28px;
+  display: grid; place-items: center;
+  cursor: pointer;
+  color: var(--accent);
+  transition: background 0.12s, border-color 0.12s;
+}
+.findings-redesign .icon-btn:hover { background: rgba(255, 255, 255, 1); border-color: var(--border-strong); }
+.findings-redesign .icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.findings-redesign .icon-btn svg { width: 14px; height: 14px; }
+
+.findings-redesign .drawer-slug {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.76rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.findings-redesign .copy-btn {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+}
+.findings-redesign .copy-btn:hover { background: rgba(0,0,0,0.05); color: var(--accent); }
+.findings-redesign .copy-btn svg { width: 12px; height: 12px; }
+
+.findings-redesign .drawer-title {
+  font-size: 1.18rem;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0;
+  line-height: 1.28;
+}
+.findings-redesign .hero-meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.findings-redesign .hero-sev {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+.findings-redesign .hero-sev.critical { background: rgba(153,27,27,0.14); color: #991b1b; }
+.findings-redesign .hero-sev.high     { background: rgba(198,77,21,0.14); color: var(--warn); }
+.findings-redesign .hero-sev.medium   { background: rgba(161,98,7,0.14); color: #a16207; }
+.findings-redesign .hero-sev.low      { background: rgba(23,53,76,0.10); color: var(--accent); }
+.findings-redesign .hero-sev.info     { background: rgba(23,53,76,0.06); color: #5a584f; }
+.findings-redesign .cvss-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.76rem;
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  color: var(--ink-2);
+}
+.findings-redesign .cvss-num {
+  font-weight: 700;
+  color: var(--ink);
+}
+.findings-redesign .quick-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+}
+.findings-redesign .qa-btn {
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.findings-redesign .qa-btn:hover { border-color: var(--accent); background: white; }
+.findings-redesign .qa-btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
+.findings-redesign .qa-btn.primary:hover { background: #0f2537; }
+
+/* Drawer tabs
+ *
+ * Theme-aware: --drawer-tab-bar-bg and --count-bg come from the :root
+ * theme layer so dark/light flip for free. In dark mode the active tab
+ * gets a brighter --drawer-tab-active-ink (near-white) with a thicker
+ * underline so it clearly wins against the muted/ink-2 idle color. */
+.findings-redesign .drawer-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  background: var(--drawer-tab-bar-bg);
+}
+.findings-redesign .drawer-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 10px 12px;
+  font-size: 0.84rem;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-weight: 500;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.findings-redesign .drawer-tab:hover { color: var(--drawer-tab-active-ink); }
+.findings-redesign .drawer-tab.is-active {
+  color: var(--drawer-tab-active-ink);
+  border-bottom-color: var(--drawer-tab-active-ink);
+  border-bottom-width: 2px;
+  font-weight: 600;
+}
+.findings-redesign .drawer-tab .count,
+.findings-redesign .section-title .count,
+.findings-redesign .count {
+  font-size: 0.7rem;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--count-bg);
+  color: var(--count-ink);
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  opacity: 1;
+}
+.findings-redesign .drawer-tab.is-active .count {
+  background: var(--count-bg-active);
+  color: var(--count-ink-active);
+}
+
+.findings-redesign .drawer-body {
+  overflow-y: auto;
+  padding: 18px 20px 24px;
+  display: grid;
+  gap: 18px;
+  min-height: 0;
+}
+
+.findings-redesign .section-title {
+  font-size: 0.74rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink);
+  font-weight: 600;
+  /* 8px → 6px: .section's own 4px grid gap already provides
+   * label→body breathing room. Previous 8px stacked with it. */
+  margin: 0 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.findings-redesign .section-title::before {
+  content: "";
+  width: 3px;
+  height: 0.9em;
+  background: var(--accent);
+  border-radius: 2px;
+  display: inline-block;
+}
+.findings-redesign .section p,
+.findings-redesign .section li {
+  margin: 0;
+  line-height: 1.55;
+  font-size: 0.92rem;
+  color: var(--ink);
+}
+.findings-redesign .section { display: grid; gap: 4px; }
+
+.findings-redesign .kv-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 18px;
+  padding: 12px 14px;
+  background: rgba(23, 53, 76, 0.035);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.findings-redesign .kv .k {
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 2px;
+}
+.findings-redesign .kv .v {
+  font-size: 0.88rem;
+  color: var(--ink);
+  margin: 0;
+}
+.findings-redesign .kv .v.mono {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.82rem;
+  color: var(--ink-2);
+  word-break: break-all;
+}
+
+.findings-redesign .callout {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.6);
+  display: grid;
+  gap: 6px;
+}
+/* Tinted backgrounds + wider left stripe so Impact/Remediation/Kill pop
+ * against neighboring plain sections. The section-title's ::before bar
+ * inside a callout picks up the callout's accent color. */
+.findings-redesign .callout.impact {
+  border-left: 4px solid #991b1b;
+  background: rgba(153, 27, 27, 0.05);
+}
+.findings-redesign .callout.remediation {
+  border-left: 4px solid var(--ok);
+  background: rgba(47, 127, 82, 0.05);
+}
+.findings-redesign .callout.kill {
+  border-left: 4px solid var(--pending);
+  background: rgba(140, 123, 98, 0.06);
+}
+.findings-redesign .callout.impact .section-title::before      { background: #991b1b; }
+.findings-redesign .callout.remediation .section-title::before { background: var(--ok); }
+.findings-redesign .callout.kill .section-title::before        { background: var(--pending); }
+.findings-redesign .callout.impact .section-title      { color: #991b1b; }
+.findings-redesign .callout.remediation .section-title { color: var(--ok); }
+.findings-redesign .callout.kill .section-title        { color: var(--pending); }
+
+.findings-redesign .pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  background: rgba(16, 18, 26, 0.045);
+  padding: 10px 12px;
+  border-radius: 10px;
+  margin: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid rgba(16, 18, 26, 0.06);
+}
+.findings-redesign .pre.req { border-left: 3px solid var(--accent); }
+.findings-redesign .pre.resp { border-left: 3px solid var(--ok); }
+
+.findings-redesign .steps {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 6px;
+}
+.findings-redesign .steps li { font-size: 0.9rem; }
+.findings-redesign .steps.mono li {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.82rem;
+}
+
+/* Taint path */
+.findings-redesign .taint {
+  display: grid;
+  gap: 6px;
+}
+.findings-redesign .taint-row {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  align-items: center;
+  gap: 10px;
+}
+.findings-redesign .taint-bubble {
+  width: 20px; height: 20px;
+  border-radius: 6px;
+  display: grid; place-items: center;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.72rem;
+  color: white;
+  background: var(--accent);
+}
+.findings-redesign .taint-row:first-child .taint-bubble { background: var(--accent-soft); color: #2a1a08; }
+.findings-redesign .taint-row:last-child .taint-bubble { background: #991b1b; }
+.findings-redesign .taint-line {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.84rem;
+  color: var(--ink-2);
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px 10px;
+}
+.findings-redesign .taint-link {
+  grid-column: 1 / 2;
+  height: 10px;
+  border-left: 2px dashed rgba(23, 53, 76, 0.3);
+  margin-left: 10px;
+}
+
+/* Linked findings */
+.findings-redesign .link-grid {
+  display: grid;
+  gap: 6px;
+}
+.findings-redesign .link-card {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  transition: background 0.12s, border-color 0.12s;
+}
+.findings-redesign .link-card:hover:not(:disabled) { background: white; border-color: var(--accent); }
+.findings-redesign .link-card:disabled { cursor: default; opacity: 0.8; }
+.findings-redesign .link-card .sev-dot { width: 8px; height: 8px; border-radius: 50%; }
+.findings-redesign .link-card .link-kind {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(244, 162, 89, 0.18);
+  color: var(--warn);
+  white-space: nowrap;
+}
+.findings-redesign .link-card .link-title {
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.findings-redesign .link-card .link-sub {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.74rem;
+  color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.findings-redesign .link-card .link-go {
+  color: var(--muted);
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+/* Chain */
+.findings-redesign .chain-card {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 12px;
+  background: rgba(255, 248, 237, 0.6);
+  display: grid;
+  gap: 6px;
+}
+.findings-redesign .chain-flow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+}
+.findings-redesign .chain-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.76rem;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 7px;
+  cursor: pointer;
+  color: var(--ink-2);
+}
+.findings-redesign .chain-node:hover { border-color: var(--accent); color: var(--accent); }
+.findings-redesign .chain-node .sev-dot { width: 7px; height: 7px; }
+.findings-redesign .chain-arrow { color: var(--muted); font-weight: 700; }
+
+/* Timeline (scoped) */
+.findings-redesign .timeline {
+  display: grid;
+  gap: 0;
+  position: relative;
+  padding-left: 18px;
+}
+.findings-redesign .timeline::before {
+  content: "";
+  position: absolute;
+  left: 4px; top: 4px; bottom: 4px;
+  width: 2px;
+  background: rgba(23, 53, 76, 0.14);
+}
+.findings-redesign .tl-row {
+  position: relative;
+  padding: 8px 0 14px;
+}
+.findings-redesign .tl-row::before {
+  content: "";
+  position: absolute;
+  left: -18px;
+  top: 12px;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: white;
+  border: 2px solid var(--accent);
+}
+.findings-redesign .tl-row.action-created::before { border-color: var(--pending); }
+.findings-redesign .tl-row.action-verified::before,
+.findings-redesign .tl-row.action-confirmed::before { border-color: var(--ok); }
+.findings-redesign .tl-row.action-reported::before { border-color: var(--ok); background: var(--ok); }
+.findings-redesign .tl-row.action-exploited::before,
+.findings-redesign .tl-row.action-blocked::before { border-color: #991b1b; background: #991b1b; }
+.findings-redesign .tl-row.action-suppressed::before { border-color: #8c7b62; background: #8c7b62; }
+.findings-redesign .tl-row.action-merged::before { border-color: var(--accent); background: var(--accent); }
+.findings-redesign .tl-row.action-downgraded::before { border-color: var(--accent); }
+
+.findings-redesign .tl-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.findings-redesign .tl-action {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ink);
+  text-transform: capitalize;
+}
+.findings-redesign .tl-actor {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+.findings-redesign .tl-time {
+  font-size: 0.74rem;
+  color: var(--muted);
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.findings-redesign .tl-detail {
+  font-size: 0.82rem;
+  color: var(--ink-2);
+  margin: 4px 0 0;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.findings-redesign .transition-arrow { color: var(--muted); }
+.findings-redesign .tl-reason {
+  font-size: 0.86rem;
+  margin: 6px 0 0;
+  color: var(--ink);
+  font-style: italic;
+}
+
+/* Refs */
+.findings-redesign .ref-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; }
+.findings-redesign .ref-list a {
+  font-size: 0.86rem;
+  color: var(--accent);
+  text-decoration: none;
+  display: inline-flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.findings-redesign .ref-list a:hover { text-decoration: underline; }
+.findings-redesign .ref-list .host {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+/* Command palette (rendered inside .findings-redesign wrapper) */
+.findings-redesign .cmd-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 19, 27, 0.36);
+  backdrop-filter: blur(6px);
+  display: grid;
+  place-items: start center;
+  padding-top: 12vh;
+  z-index: 50;
+  animation: fade-in 0.14s ease-out;
+}
+.findings-redesign .cmd-box {
+  width: min(640px, calc(100vw - 48px));
+  background: white;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  box-shadow: 0 30px 80px rgba(17, 19, 27, 0.32);
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  max-height: 60vh;
+}
+.findings-redesign .cmd-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.findings-redesign .cmd-input-row .search-icon { width: 16px; height: 16px; color: var(--muted); }
+.findings-redesign .cmd-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 1.02rem;
+  background: transparent;
+}
+.findings-redesign .cmd-list {
+  overflow-y: auto;
+  padding: 6px;
+}
+.findings-redesign .cmd-item {
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  align-items: center;
+}
+.findings-redesign .cmd-item.is-active { background: rgba(23, 53, 76, 0.08); }
+.findings-redesign .cmd-item .sev-dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.findings-redesign .cmd-item .cmd-title { font-size: 0.9rem; color: var(--ink); }
+.findings-redesign .cmd-item .cmd-sub {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+.findings-redesign .cmd-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+/* Keyboard-hints footer */
+.findings-redesign .findings-shortcuts {
+  margin-top: 14px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.findings-redesign .findings-shortcuts code {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  background: rgba(23, 53, 76, 0.07);
+  border-radius: 5px;
+  padding: 1px 5px;
+  color: var(--accent);
+}
+
+/* Drawer animation — kept for the in-modal drawer panel which still
+ * reuses the .drawer-panel class for its hero + tabs + body styling. */
+.findings-redesign .drawer-panel {
+  animation: drawer-slide 0.18s ease-out;
+}
+@keyframes drawer-slide {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/*
+ * Detail modal — centred, dialog-sized. Replaces the old in-page
+ * right-hand drawer across Findings / Intel / Commands tabs. Shared
+ * class so the visual vocabulary stays consistent: backdrop with blur,
+ * light shadow on the panel, rounded corners, internal scroll, close
+ * button in the upper-right, one z-index tier below .cmd-overlay so
+ * Cmd/Ctrl-K can stack on top.
+ */
+.findings-redesign .detail-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  z-index: 40;
+  animation: fade-in 0.16s ease-out;
+}
+.findings-redesign .detail-modal-panel {
+  position: relative;
+  width: min(1400px, 85vw);
+  height: min(900px, 85vh);
+  max-width: 1400px;
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  animation: modal-rise 0.18s ease-out;
+  min-height: 0;
+}
+/* When the Drawer renders inside the modal the hero/tabs/body still use
+ * their original classes. Kill the drawer-panel translate animation so
+ * the entrance animation belongs to the modal panel only. */
+.findings-redesign .detail-modal-panel .drawer-panel {
+  animation: none;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  display: contents;
+}
+.findings-redesign .detail-modal-panel .drawer-body {
+  overflow-y: auto;
+  min-height: 0;
+}
+.findings-redesign .detail-modal-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 1;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.9);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: var(--ink-2);
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.findings-redesign .detail-modal-close:hover {
+  background: rgba(255, 255, 255, 1);
+  border-color: var(--border-strong);
+  color: var(--ink);
+}
+.findings-redesign .detail-modal-close svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Sticky first column for the Commands table so the Time cell stays in
+ * view while the operator scrolls right into the (potentially very
+ * wide) Command cell. The sticky offset is 0; z-index floats above the
+ * other row cells so the background paints over neighbours. */
+.findings-redesign .list-header > span.col-sticky,
+.findings-redesign .frow > span.col-sticky {
+  position: sticky;
+  left: 10px; /* clear the 10px sevbar column */
+  background: var(--panel-strong);
+  z-index: 2;
+}
+.findings-redesign .frow:hover > span.col-sticky {
+  background: rgba(248, 246, 241, 0.98);
+}
+.findings-redesign .frow.is-selected > span.col-sticky {
+  background: rgba(23, 53, 76, 0.06);
+}
+
+/*
+ * Resizable column handle. Sits at the right edge of each header cell
+ * (the parent cell becomes `position: relative`). Width is a skinny
+ * 6px so it doesn't visually crowd the text, but the hit area extends
+ * the full height of the header so dragging is forgiving.
+ */
+.findings-redesign .list-header > span {
+  position: relative;
+}
+.findings-redesign .col-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -5px; /* centre the handle on the grid gap */
+  width: 10px;
+  cursor: col-resize;
+  user-select: none;
+  touch-action: none;
+  z-index: 1;
+}
+.findings-redesign .col-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 50%;
+  width: 1px;
+  background: transparent;
+  transition: background 0.12s;
+}
+.findings-redesign .col-resize-handle:hover::after,
+.findings-redesign .col-resize-handle:active::after {
+  background: var(--accent);
+}
+
+/*
+ * Intel tab per-entity accents. Unlike the Findings tab, Intel rows don't
+ * have a uniform "severity" axis — CVEs get CVSS-bucket coloring, everything
+ * else uses a type-based accent so the tab isn't a sea of gray. Keep colors
+ * in sync with ITYPE_COLORS in IntelTab.tsx.
+ */
+.findings-redesign .ibar-tech_component  { background: #17354c; }
+.findings-redesign .ibar-person          { background: #7c3aed; }
+.findings-redesign .ibar-email           { background: #2f7f52; }
+.findings-redesign .ibar-domain          { background: #0d6b6b; }
+.findings-redesign .ibar-credentials     { background: #c64d15; }
+.findings-redesign .ibar-cve             { background: #991b1b; }
+.findings-redesign .ibar-dns_record      { background: #4b5563; }
+.findings-redesign .ibar-social_profile  { background: #be185d; }
+.findings-redesign .ibar-breach_record   { background: #6b0d0d; }
+.findings-redesign .ibar-org_fact        { background: #a16207; }
+.findings-redesign .ibar-note            { background: #8c7b62; }
+
+.findings-redesign .frow-sev.itype-tech_component  { color: #17354c; }
+.findings-redesign .frow-sev.itype-person          { color: #7c3aed; }
+.findings-redesign .frow-sev.itype-email           { color: #2f7f52; }
+.findings-redesign .frow-sev.itype-domain          { color: #0d6b6b; }
+.findings-redesign .frow-sev.itype-credentials     { color: #c64d15; }
+.findings-redesign .frow-sev.itype-cve             { color: #991b1b; }
+.findings-redesign .frow-sev.itype-dns_record      { color: #4b5563; }
+.findings-redesign .frow-sev.itype-social_profile  { color: #be185d; }
+.findings-redesign .frow-sev.itype-breach_record   { color: #6b0d0d; }
+.findings-redesign .frow-sev.itype-org_fact        { color: #a16207; }
+.findings-redesign .frow-sev.itype-note            { color: #8c7b62; }
+
+.findings-redesign .drawer-hero.itype-tech_component::before  { background: #17354c; }
+.findings-redesign .drawer-hero.itype-person::before          { background: #7c3aed; }
+.findings-redesign .drawer-hero.itype-email::before           { background: #2f7f52; }
+.findings-redesign .drawer-hero.itype-domain::before          { background: #0d6b6b; }
+.findings-redesign .drawer-hero.itype-credentials::before     { background: #c64d15; }
+.findings-redesign .drawer-hero.itype-cve::before             { background: #991b1b; }
+.findings-redesign .drawer-hero.itype-dns_record::before      { background: #4b5563; }
+.findings-redesign .drawer-hero.itype-social_profile::before  { background: #be185d; }
+.findings-redesign .drawer-hero.itype-breach_record::before   { background: #6b0d0d; }
+.findings-redesign .drawer-hero.itype-org_fact::before        { background: #a16207; }
+.findings-redesign .drawer-hero.itype-note::before            { background: #8c7b62; }
+
+.findings-redesign .hero-sev.itype-tech_component  { background: rgba(23,53,76,0.10);  color: #17354c; }
+.findings-redesign .hero-sev.itype-person          { background: rgba(124,58,237,0.12); color: #7c3aed; }
+.findings-redesign .hero-sev.itype-email           { background: rgba(47,127,82,0.14);  color: #2f7f52; }
+.findings-redesign .hero-sev.itype-domain          { background: rgba(13,107,107,0.12); color: #0d6b6b; }
+.findings-redesign .hero-sev.itype-credentials     { background: rgba(198,77,21,0.14);  color: #c64d15; }
+.findings-redesign .hero-sev.itype-cve             { background: rgba(153,27,27,0.14);  color: #991b1b; }
+.findings-redesign .hero-sev.itype-dns_record      { background: rgba(75,85,99,0.12);   color: #4b5563; }
+.findings-redesign .hero-sev.itype-social_profile  { background: rgba(190,24,93,0.12);  color: #be185d; }
+.findings-redesign .hero-sev.itype-breach_record   { background: rgba(107,13,13,0.14);  color: #6b0d0d; }
+.findings-redesign .hero-sev.itype-org_fact        { background: rgba(161,98,7,0.14);   color: #a16207; }
+.findings-redesign .hero-sev.itype-note            { background: rgba(140,123,98,0.12); color: #6b685d; }
+
+/* Intel filter chips: active-state tints. Inactive chips keep their sev-dot
+ * visible so you can scan the whole filter bar by color, not just by label.
+ * Active state swaps border + bg + text to the dot's hue. */
+.findings-redesign .filter-chip.is-active.itype-tech_component  { border-color: #17354c; background: rgba(23,53,76,0.10);  color: #17354c; }
+.findings-redesign .filter-chip.is-active.itype-person          { border-color: #7c3aed; background: rgba(124,58,237,0.12); color: #7c3aed; }
+.findings-redesign .filter-chip.is-active.itype-email           { border-color: #2f7f52; background: rgba(47,127,82,0.14);  color: #2f7f52; }
+.findings-redesign .filter-chip.is-active.itype-domain          { border-color: #0d6b6b; background: rgba(13,107,107,0.12); color: #0d6b6b; }
+.findings-redesign .filter-chip.is-active.itype-credentials     { border-color: #c64d15; background: rgba(198,77,21,0.14);  color: #c64d15; }
+.findings-redesign .filter-chip.is-active.itype-cve             { border-color: #991b1b; background: rgba(153,27,27,0.12);  color: #991b1b; }
+.findings-redesign .filter-chip.is-active.itype-dns_record      { border-color: #4b5563; background: rgba(75,85,99,0.12);   color: #4b5563; }
+.findings-redesign .filter-chip.is-active.itype-social_profile  { border-color: #be185d; background: rgba(190,24,93,0.12);  color: #be185d; }
+.findings-redesign .filter-chip.is-active.itype-breach_record   { border-color: #6b0d0d; background: rgba(107,13,13,0.14);  color: #6b0d0d; }
+.findings-redesign .filter-chip.is-active.itype-org_fact        { border-color: #a16207; background: rgba(161,98,7,0.14);   color: #a16207; }
+.findings-redesign .filter-chip.is-active.itype-note            { border-color: #8c7b62; background: rgba(140,123,98,0.12); color: #6b685d; }
+
+.findings-redesign .filter-chip.is-active.istatus-active         { border-color: #2f7f52; background: rgba(47,127,82,0.14);  color: #2f7f52; }
+.findings-redesign .filter-chip.is-active.istatus-blocked        { border-color: #991b1b; background: rgba(153,27,27,0.12);  color: #991b1b; }
+.findings-redesign .filter-chip.is-active.istatus-exploited      { border-color: #6b0d0d; background: rgba(107,13,13,0.14);  color: #6b0d0d; }
+.findings-redesign .filter-chip.is-active.istatus-false_positive { border-color: #8c7b62; background: rgba(140,123,98,0.12); color: #6b685d; }
+.findings-redesign .filter-chip.is-active.istatus-unreviewed     { border-color: #9a988d; background: rgba(154,152,141,0.16); color: #5a584f; }
+
+.findings-redesign .filter-chip.is-active.isource { border-color: #0d6b6b; background: rgba(13,107,107,0.12); color: #0d6b6b; }
+
+/* Small screens — the detail modal shrinks via its own min() width cap.
+ * The list shell is already single-column, no responsive override needed. */
+
+/* ── Commands tab variants ────────────────────────────────────────────
+ * The Commands tab reuses the entire .findings-redesign shell (toolbar,
+ * frow, drawer-hero, pill, tag, etc). Only what's needed here is a color
+ * stripe + accent map for the five status buckets and filter-chip active
+ * states (tool/agent chips drive their own inline color from JS, so no
+ * CSS is needed for those).
+ *
+ * Status colors are in sync with STATUS_COLORS in CommandsTab.tsx:
+ *   success    #2f7f52  (green)
+ *   failed     #991b1b  (red)
+ *   timed_out  #c64d15  (amber)
+ *   suppressed #8c7b62  (muted)
+ *   artifact   #0d6b6b  (teal)
+ */
+.findings-redesign .cbar-success    { background: #2f7f52; }
+.findings-redesign .cbar-failed     { background: #991b1b; }
+.findings-redesign .cbar-timed_out  { background: #c64d15; }
+.findings-redesign .cbar-suppressed { background: #8c7b62; }
+.findings-redesign .cbar-artifact   { background: #0d6b6b; }
+
+.findings-redesign .filter-chip.is-active.cstatus-success    { border-color: #2f7f52; background: rgba(47,127,82,0.14);  color: #2f7f52; }
+.findings-redesign .filter-chip.is-active.cstatus-failed     { border-color: #991b1b; background: rgba(153,27,27,0.12);  color: #991b1b; }
+.findings-redesign .filter-chip.is-active.cstatus-timed_out  { border-color: #c64d15; background: rgba(198,77,21,0.14);  color: #c64d15; }
+.findings-redesign .filter-chip.is-active.cstatus-suppressed { border-color: #8c7b62; background: rgba(140,123,98,0.14); color: #6b685d; }
+.findings-redesign .filter-chip.is-active.cstatus-artifact   { border-color: #0d6b6b; background: rgba(13,107,107,0.12); color: #0d6b6b; }
+
+/* Technique chip active state is driven by inline style from JS (hash
+ * fallback means we can't enumerate every possible class name), but we
+ * keep a shared `.ctech` hook in case later CSS needs to target all
+ * technique chips (e.g. cursor, spacing tweaks). */
+.findings-redesign .filter-chip.ctech { /* inline-color-driven */ }
+
+/* Probe kind chips — closed 6-value enum, each colored per PROBE_KIND_COLORS
+ * in CommandsTab.tsx:
+ *   fingerprint #0d6b6b (teal) | baseline #4b5563 (slate)
+ *   payload     #c64d15 (orange) | exploit  #991b1b (red)
+ *   replay      #7c3aed (purple) | cleanup  #6b685d (muted)
+ */
+.findings-redesign .filter-chip.is-active.cpk-fingerprint { border-color: #0d6b6b; background: rgba(13,107,107,0.12); color: #0d6b6b; }
+.findings-redesign .filter-chip.is-active.cpk-baseline    { border-color: #4b5563; background: rgba(75,85,99,0.12);   color: #4b5563; }
+.findings-redesign .filter-chip.is-active.cpk-payload     { border-color: #c64d15; background: rgba(198,77,21,0.14);  color: #c64d15; }
+.findings-redesign .filter-chip.is-active.cpk-exploit     { border-color: #991b1b; background: rgba(153,27,27,0.12);  color: #991b1b; }
+.findings-redesign .filter-chip.is-active.cpk-replay      { border-color: #7c3aed; background: rgba(124,58,237,0.12); color: #7c3aed; }
+.findings-redesign .filter-chip.is-active.cpk-cleanup     { border-color: #6b685d; background: rgba(107,104,93,0.14); color: #6b685d; }
+
+/* ──────────────────────────────────────────────────────────
+ * Theme toggle button — lives in the page headers. Keeps the
+ * same pill shape as the existing ghost-button so the header
+ * composition stays visually balanced.
+ * ────────────────────────────────────────────────────────── */
+.theme-toggle {
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+  color: var(--ink-2);
+  padding: 8px 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.86rem;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.theme-toggle:hover {
+  background: var(--panel-hover);
+  border-color: var(--border-strong);
+  color: var(--ink);
+}
+.theme-toggle svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+/* ──────────────────────────────────────────────────────────
+ * Detail-modal scroll lock. Applied to <body> by each
+ * DetailModal via useEffect while the modal is mounted. Uses
+ * a reference-count class (see modalScrollLock.ts) so stacked
+ * or rapidly re-opened modals never leave the lock stuck on.
+ * The preferred approach (vs onWheel.stopPropagation) because
+ * keyboard PageUp/PageDown + trackpad + wheel are all handled
+ * uniformly by overflow:hidden on <body>.
+ * ────────────────────────────────────────────────────────── */
+body.detail-modal-open {
+  overflow: hidden;
+}
+
+/* ──────────────────────────────────────────────────────────
+ * Raw-record JSON viewer. Regex-tokenized in JsonView.tsx and
+ * styled via theme variables so syntax highlight survives the
+ * dark/light flip. Uses mono 13px / 1.55 line-height, wraps
+ * long strings, and exposes a line-number gutter for blocks
+ * over ~5 lines (see JsonView.tsx for the threshold).
+ * ────────────────────────────────────────────────────────── */
+.json-view {
+  background: var(--json-bg);
+  border: 1px solid var(--json-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: 480px;
+  margin: 0;
+  color: var(--ink);
+}
+.json-view pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+}
+.json-view.has-gutter {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0 10px;
+}
+.json-view .json-gutter {
+  user-select: none;
+  text-align: right;
+  color: var(--json-gutter);
+  font-variant-numeric: tabular-nums;
+  border-right: 1px solid var(--json-border);
+  padding-right: 8px;
+  opacity: 0.8;
+}
+.json-view .json-body {
+  min-width: 0;
+}
+.json-tok-key         { color: var(--json-key); }
+.json-tok-string      { color: var(--json-string); }
+.json-tok-number      { color: var(--json-number); }
+.json-tok-boolean     { color: var(--json-boolean); }
+.json-tok-null        { color: var(--json-null); }
+.json-tok-punctuation { color: var(--json-punctuation); }
+
+.json-view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.json-view-header .json-view-meta {
+  font-size: 0.74rem;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+/* ──────────────────────────────────────────────────────────
+ * Notes / Provenance / PoC chrome — consumed by IntelTab
+ * (.intel-notes, .intel-tag-row, .provenance-list,
+ *  .provenance-row, .evidence-quote, .copy-inline) and
+ * FindingsTab (.poc-steps, .poc-curl). All colors come from
+ * the theme layer so dark/light flips for free.
+ * ────────────────────────────────────────────────────────── */
+.findings-redesign .tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  /* Tight gap to the following NotesBody. The old 10px plus
+   * the .section grid's 4px gap plus NotesBody's own rhythm
+   * stacked to ~18px of air; drop to a single 6px breath. */
+  margin: 0 0 6px;
+}
+/* Inline variant used in Intel Notes & tags: "Tags <chips>" on one
+ * flex row, no vertical margin — the parent .section.inline-row
+ * handles spacing via gap. */
+.findings-redesign .section.inline-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.findings-redesign .section-title--inline {
+  margin: 0;
+  min-width: 0;
+}
+.findings-redesign .tag-row--inline {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+.findings-redesign .tag-row .tag {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+  color: var(--ink-2);
+  border-radius: 999px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: inherit;
+  font-size: 0.76rem;
+}
+
+.findings-redesign .notes-body {
+  display: grid;
+  gap: 10px;
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: var(--ink);
+  white-space: normal;
+}
+.findings-redesign .notes-body p { margin: 0; }
+/* Kill any top margin on the first child so the section-title sits
+ * flush against the first paragraph/heading/blockquote. Fixes the
+ * "Evidence" label floating ~20px above its own text in PoC. */
+.findings-redesign .notes-body > :first-child { margin-top: 0; }
+.findings-redesign .notes-body > :last-child { margin-bottom: 0; }
+.findings-redesign .notes-body a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  word-break: break-word;
+}
+.findings-redesign .notes-body a:hover { text-decoration-thickness: 2px; }
+.findings-redesign .notes-body code {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  background: var(--json-bg);
+  border: 1px solid var(--json-border);
+  border-radius: 5px;
+  padding: 0 5px;
+  font-size: 0.88em;
+}
+.findings-redesign .notes-body h3 {
+  margin: 0;
+  font-size: 1.02rem;
+  letter-spacing: -0.005em;
+  color: var(--ink);
+}
+
+.findings-redesign .provenance-list {
+  display: grid;
+  /* Tightened from 12px — provenance rows already self-separate
+   * via a 1px divider; extra outer gap was double-spacing. */
+  gap: 6px;
+}
+.findings-redesign .provenance-row {
+  display: grid;
+  /* Intra-row gap: label→value lines pack tight at 4px. */
+  gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--divider);
+}
+.findings-redesign .provenance-row:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+.findings-redesign .provenance-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  /* Label→value gap: drop from 8px to 6px to feel crisper. */
+  gap: 6px;
+  font-size: 0.88rem;
+}
+.findings-redesign .provenance-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  min-width: 72px;
+}
+.findings-redesign .provenance-value {
+  color: var(--ink);
+}
+.findings-redesign .provenance-value.mono {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.84rem;
+  color: var(--ink-2);
+  word-break: break-all;
+}
+.findings-redesign .agent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.76rem;
+  padding: 1px 8px;
+  border-radius: 6px;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  color: var(--ink-2);
+}
+.findings-redesign .evidence-quote {
+  border-left: 3px solid var(--accent-muted);
+  padding: 4px 0 4px 12px;
+  margin: 2px 0 0;
+  color: var(--ink-2);
+  font-style: italic;
+  line-height: 1.5;
+}
+/* Compact evidence callout for short prose observations in the
+ * Findings PoC pane. Muted panel + accent bar; monospace tip-toed
+ * in via IBM Plex Mono to help the eye tell evidence from flavor
+ * prose. Longer (>200 char, multi-paragraph) evidence falls back to
+ * NotesBody so paragraph structure survives. */
+.findings-redesign .evidence-inline {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  padding: 10px 14px;
+  margin: 0;
+  background: var(--panel-soft);
+  border-left: 3px solid var(--accent-muted);
+  border-radius: 0 8px 8px 0;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.findings-redesign .copy-inline {
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+  border-radius: 6px;
+  padding: 1px 6px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.72rem;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.findings-redesign .copy-inline:hover {
+  background: var(--panel-hover);
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+.findings-redesign .copy-inline.is-copied {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.findings-redesign .rel-time {
+  font-size: 0.82rem;
+  color: var(--ink-2);
+}
+
+.findings-redesign .poc-steps {
+  display: grid;
+  gap: 8px;
+  padding-left: 24px;
+  margin: 0;
+  counter-reset: poc-step;
+}
+.findings-redesign .poc-steps li {
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+.findings-redesign .code-block {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  background: var(--json-bg);
+  border: 1px solid var(--json-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+  color: var(--ink);
+}
+.findings-redesign .code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.findings-redesign .code-block-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+/* ──────────────────────────────────────────────────────────
+ * Dark-theme overrides for elements that still bake in white
+ * `rgba(255, 255, 255, …)` backgrounds. These are localized
+ * fix-ups rather than a wholesale rewrite of every rule —
+ * the surfaces that operators actually see in the UI.
+ * ────────────────────────────────────────────────────────── */
+:root[data-theme="dark"] .panel,
+:root[data-theme="dark"] .stat-card,
+:root[data-theme="dark"] .phase-card,
+:root[data-theme="dark"] .artifact-row,
+:root[data-theme="dark"] .timeline-row,
+:root[data-theme="dark"] .finding-row,
+:root[data-theme="dark"] .finding-transition-row,
+:root[data-theme="dark"] .coverage-tree-header,
+:root[data-theme="dark"] .service-row {
+  background: var(--panel);
+  border-color: var(--border);
+}
+:root[data-theme="dark"] .phase-completed {
+  background: rgba(47, 127, 82, 0.18);
+  border-color: rgba(95, 192, 138, 0.35);
+}
+:root[data-theme="dark"] .phase-active {
+  background: rgba(240, 138, 82, 0.18);
+  border-color: rgba(240, 138, 82, 0.45);
+}
+:root[data-theme="dark"] .phase-pending {
+  background: var(--panel-soft);
+}
+:root[data-theme="dark"] .code-phase-completed {
+  background: rgba(47, 127, 82, 0.18);
+  border-color: rgba(95, 192, 138, 0.35);
+}
+:root[data-theme="dark"] .code-phase-active {
+  background: rgba(240, 138, 82, 0.18);
+  border-color: rgba(240, 138, 82, 0.45);
+}
+:root[data-theme="dark"] .code-phase-pending {
+  background: var(--panel-soft);
+}
+:root[data-theme="dark"] .ghost-button,
+:root[data-theme="dark"] .pager-button,
+:root[data-theme="dark"] .filter-chip {
+  background: var(--panel-soft);
+}
+:root[data-theme="dark"] .ghost-button:hover,
+:root[data-theme="dark"] .pager-button:hover:not(:disabled) {
+  background: var(--panel-hover);
+}
+:root[data-theme="dark"] .filter-chip:hover {
+  background: var(--panel-hover);
+}
+:root[data-theme="dark"] .coverage-items-row:nth-child(even) {
+  background: rgba(255, 255, 255, 0.03);
+}
+:root[data-theme="dark"] .coverage-bar {
+  background: rgba(255, 255, 255, 0.05);
+}
+:root[data-theme="dark"] .engagement-card-clickable:hover {
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+  border-color: var(--border-strong);
+}
+:root[data-theme="dark"] .finding-row:hover,
+:root[data-theme="dark"] .finding-row-active {
+  background: var(--panel-hover);
+}
+:root[data-theme="dark"] .artifact-content {
+  background: var(--elevated);
+  color: var(--ink);
+  border: 1px solid var(--border);
+}
+
+/* findings-redesign drawer/list elements that bake in white */
+:root[data-theme="dark"] .findings-redesign .drawer-panel,
+:root[data-theme="dark"] .findings-redesign .frow.is-selected,
+:root[data-theme="dark"] .findings-redesign .frow:hover,
+:root[data-theme="dark"] .findings-redesign .list-header {
+  background: var(--panel-strong);
+}
+:root[data-theme="dark"] .findings-redesign .frow > span.col-sticky {
+  background: var(--panel-strong);
+}
+:root[data-theme="dark"] .findings-redesign .callout {
+  background: rgba(255, 255, 255, 0.04);
+}
+:root[data-theme="dark"] .findings-redesign .taint-line {
+  background: rgba(255, 255, 255, 0.04);
+}
+:root[data-theme="dark"] .findings-redesign .link-card {
+  background: rgba(255, 255, 255, 0.03);
+}
+:root[data-theme="dark"] .findings-redesign .link-card:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.07);
+}
+:root[data-theme="dark"] .findings-redesign .icon-btn:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+:root[data-theme="dark"] .findings-redesign .cmd-input-row,
+:root[data-theme="dark"] .findings-redesign .cmd-box {
+  background: var(--panel-strong);
+}
+:root[data-theme="dark"] .findings-redesign .qa-btn:hover {
+  background: var(--panel-hover);
+}
+:root[data-theme="dark"] .findings-redesign .detail-modal-close {
+  background: var(--panel-strong);
+}
+:root[data-theme="dark"] .findings-redesign .detail-modal-close:hover {
+  background: var(--panel-hover);
+}
+:root[data-theme="dark"] .findings-redesign .pre,
+:root[data-theme="dark"] .finding-notes {
+  background: var(--json-bg);
+  border-color: var(--json-border);
+}
+:root[data-theme="dark"] .findings-redesign .kv-grid {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: var(--border);
+}
+:root[data-theme="dark"] .findings-redesign .frow.is-selected > span.col-sticky {
+  background: rgba(121, 169, 212, 0.08);
+}
+
+/* Chip maps that bake in hex — give them dark-mode tints. The inline
+ * bars (cbar-/ibar- variants) already render the color in isolation,
+ * so the severity-bar sidebars do not need fixing; the problematic
+ * ones are the filter-chip.is-active tinted backgrounds that use
+ * rgba over white, which look muddy on a dark surface. Swap the base
+ * color for a slightly higher-alpha fill so the chip reads. */
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-tech_component  { background: rgba(121,169,212,0.18); color: #9ec5e8; border-color: #9ec5e8; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-person          { background: rgba(177,144,245,0.22); color: #c8b0ff; border-color: #c8b0ff; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-email           { background: rgba(95,192,138,0.22);  color: #9fdcb8; border-color: #9fdcb8; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-domain          { background: rgba(79,181,181,0.22);  color: #89d4d4; border-color: #89d4d4; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-credentials     { background: rgba(240,138,82,0.22);  color: #f4b092; border-color: #f4b092; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-cve             { background: rgba(229,108,108,0.22); color: #f09494; border-color: #f09494; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-dns_record      { background: rgba(142,154,176,0.22); color: #bcc4d3; border-color: #bcc4d3; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-social_profile  { background: rgba(229,115,169,0.22); color: #f198c1; border-color: #f198c1; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-breach_record   { background: rgba(214,133,133,0.22); color: #e4a5a5; border-color: #e4a5a5; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-org_fact        { background: rgba(224,176,74,0.22);  color: #ebc47e; border-color: #ebc47e; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-note            { background: rgba(184,171,146,0.18); color: #cec3ae; border-color: #cec3ae; }
+
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.istatus-active         { background: rgba(95,192,138,0.22);  color: #9fdcb8; border-color: #9fdcb8; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.istatus-blocked        { background: rgba(229,108,108,0.22); color: #f09494; border-color: #f09494; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.istatus-exploited      { background: rgba(214,133,133,0.22); color: #e4a5a5; border-color: #e4a5a5; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.istatus-false_positive { background: rgba(184,171,146,0.18); color: #cec3ae; border-color: #cec3ae; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.istatus-unreviewed     { background: rgba(139,142,154,0.22); color: #c4c8d4; border-color: #c4c8d4; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.isource                { background: rgba(79,181,181,0.22);  color: #89d4d4; border-color: #89d4d4; }
+
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cstatus-success    { background: rgba(95,192,138,0.22);  color: #9fdcb8; border-color: #9fdcb8; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cstatus-failed     { background: rgba(229,108,108,0.22); color: #f09494; border-color: #f09494; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cstatus-timed_out  { background: rgba(240,138,82,0.22);  color: #f4b092; border-color: #f4b092; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cstatus-suppressed { background: rgba(184,171,146,0.18); color: #cec3ae; border-color: #cec3ae; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cstatus-artifact   { background: rgba(79,181,181,0.22);  color: #89d4d4; border-color: #89d4d4; }
+
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cpk-fingerprint { background: rgba(79,181,181,0.22);  color: #89d4d4; border-color: #89d4d4; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cpk-baseline    { background: rgba(142,154,176,0.22); color: #bcc4d3; border-color: #bcc4d3; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cpk-payload     { background: rgba(240,138,82,0.22);  color: #f4b092; border-color: #f4b092; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cpk-exploit     { background: rgba(229,108,108,0.22); color: #f09494; border-color: #f09494; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cpk-replay      { background: rgba(177,144,245,0.22); color: #c8b0ff; border-color: #c8b0ff; }
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cpk-cleanup     { background: rgba(154,160,174,0.22); color: #c4c8d4; border-color: #c4c8d4; }
+
+/* Severity pills and tags use rgba over white as background. Re-tint in
+ * dark mode so they keep a visible fill without turning muddy. */
+:root[data-theme="dark"] .findings-redesign .hero-sev.high,
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.sev-high {
+  background: rgba(240,138,82,0.22); color: #f4b092; border-color: #f4b092;
+}
+:root[data-theme="dark"] .findings-redesign .hero-sev.low,
+:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.sev-low {
+  background: rgba(121,169,212,0.18); color: #9ec5e8; border-color: #9ec5e8;
+}
+:root[data-theme="dark"] .findings-redesign .tag.owasp { background: rgba(240,138,82,0.22); color: #f4b092; }
+:root[data-theme="dark"] .findings-redesign .tag.cve    { background: rgba(229,108,108,0.2); color: #f09494; }
+:root[data-theme="dark"] .findings-redesign .tag.chain  { background: rgba(247,187,123,0.22); color: #f4b092; }
+
+:root[data-theme="dark"] .findings-redesign .pill-active     { background: rgba(240,138,82,0.22); color: #f4b092; }
+:root[data-theme="dark"] .findings-redesign .pill-reported   { background: rgba(95,192,138,0.22); color: #9fdcb8; }
+:root[data-theme="dark"] .findings-redesign .pill-exploited  { background: rgba(229,108,108,0.22); color: #f09494; }
+:root[data-theme="dark"] .findings-redesign .pill-blocked    { background: rgba(229,108,108,0.22); color: #f09494; }
+:root[data-theme="dark"] .findings-redesign .pill-merged     { background: rgba(121,169,212,0.18); color: #9ec5e8; }
+:root[data-theme="dark"] .findings-redesign .pill-confirmed  { background: rgba(95,192,138,0.22); color: #9fdcb8; }
+:root[data-theme="dark"] .findings-redesign .pill-unreviewed { background: rgba(184,171,146,0.18); color: #cec3ae; }
+:root[data-theme="dark"] .findings-redesign .pill-downgraded { background: rgba(121,169,212,0.2); color: #9ec5e8; }
+:root[data-theme="dark"] .findings-redesign .pill-disputed   { background: rgba(224,176,74,0.22); color: #ebc47e; }
+:root[data-theme="dark"] .findings-redesign .pill-false_positive { background: rgba(184,171,146,0.18); color: #cec3ae; }
+
+:root[data-theme="dark"] .severity-critical { background: rgba(229,108,108,0.22); color: #f09494; }
+:root[data-theme="dark"] .severity-high     { background: rgba(240,138,82,0.22);  color: #f4b092; }
+:root[data-theme="dark"] .severity-medium   { background: rgba(224,176,74,0.22);  color: #ebc47e; }
+:root[data-theme="dark"] .severity-low      { background: rgba(121,169,212,0.18); color: #9ec5e8; }
+:root[data-theme="dark"] .severity-info     { background: rgba(154,160,174,0.22); color: #c4c8d4; }
+
+:root[data-theme="dark"] .status-queued,
+:root[data-theme="dark"] .status-pending,
+:root[data-theme="dark"] .status-draft,
+:root[data-theme="dark"] .status-unreviewed { background: rgba(184,171,146,0.18); color: #cec3ae; }
+:root[data-theme="dark"] .status-running,
+:root[data-theme="dark"] .status-in_progress,
+:root[data-theme="dark"] .status-active     { background: rgba(240,138,82,0.22); color: #f4b092; }
+:root[data-theme="dark"] .status-completed,
+:root[data-theme="dark"] .status-confirmed,
+:root[data-theme="dark"] .status-exploited,
+:root[data-theme="dark"] .status-reported   { background: rgba(95,192,138,0.22); color: #9fdcb8; }
+:root[data-theme="dark"] .status-downgraded { background: rgba(121,169,212,0.2); color: #9ec5e8; }
+:root[data-theme="dark"] .status-blocked,
+:root[data-theme="dark"] .status-failed     { background: rgba(229,108,108,0.22); color: #f09494; }
+:root[data-theme="dark"] .status-false_positive { background: rgba(142,154,176,0.22); color: #bcc4d3; }
+:root[data-theme="dark"] .status-disputed   { background: rgba(224,176,74,0.22); color: #ebc47e; }
+
+:root[data-theme="dark"] .event-type-finding { background: rgba(95,192,138,0.22); color: #9fdcb8; }
+:root[data-theme="dark"] .event-type-chain   { background: rgba(229,108,108,0.22); color: #f09494; }
+:root[data-theme="dark"] .event-type-surface { background: rgba(240,138,82,0.22); color: #f4b092; }
+:root[data-theme="dark"] .event-type-merge   { background: rgba(121,169,212,0.2); color: #9ec5e8; }
+:root[data-theme="dark"] .event-type-phase   { background: rgba(184,171,146,0.18); color: #cec3ae; }
+:root[data-theme="dark"] .event-type-task    { background: rgba(121,169,212,0.18); color: #9ec5e8; }
+
+:root[data-theme="dark"] .tab-count {
+  background: rgba(121,169,212,0.15);
+  color: var(--accent);
+}
+/* .findings-redesign .count is now theme-aware via --count-bg /
+ * --count-ink variables defined on :root — no dark override needed. */
+:root[data-theme="dark"] .findings-redesign .hl {
+  background: rgba(247,187,123,0.3);
+  color: var(--ink);
+}
+:root[data-theme="dark"] .panel code,
+:root[data-theme="dark"] .findings-redesign .page-crumbs code {
+  background: rgba(121,169,212,0.12);
+  color: var(--accent);
 }

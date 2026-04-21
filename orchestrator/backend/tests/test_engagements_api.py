@@ -34,7 +34,7 @@ def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-exampl
                 "out_of_scope_hosts": [],
                 "exploit_policy": "selected",
                 "exploit_review_state": "approved",
-                "approved_findings": ["FINDING-VA-001"],
+                "approved_targets": ["FINDING-VA-001"],
                 "status": "in_progress",
                 "current_phase": "exploit",
             }
@@ -42,7 +42,6 @@ def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-exampl
         encoding="utf-8",
     )
     (engagement_dir / "log.md").write_text("# Engagement Log\n", encoding="utf-8")
-    (engagement_dir / "findings.md").write_text("# Findings\n", encoding="utf-8")
     (engagement_dir / "sessions" / "index.json").write_text(
         json.dumps(
             [
@@ -50,7 +49,7 @@ def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-exampl
                     "session_id": "session-a",
                     "status": "active",
                     "merge_state": "pending",
-                    "assigned_findings": ["FINDING-VA-001"],
+                    "assigned_targets": ["FINDING-VA-001"],
                 }
             ]
         ),
@@ -123,19 +122,164 @@ def test_get_connection_rejects_database_file_replacement(isolate_settings, monk
             pass
 
 
+def test_init_db_renames_legacy_assigned_findings_column(isolate_settings):
+    db_path = db_module.database_path()
+    with sqlite3.connect(str(db_path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE engagement_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                session_id TEXT NOT NULL,
+                session_path TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                merge_state TEXT NOT NULL DEFAULT 'pending',
+                assigned_findings_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                merged_at TEXT
+            )
+            """
+        )
+        connection.commit()
+
+    db_module.init_db()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(engagement_sessions)").fetchall()}
+
+    assert "assigned_targets_json" in columns
+    assert "assigned_findings_json" not in columns
+
+
 def test_engagement_artifacts_and_sessions_are_scoped_by_engagement_key(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
     artifacts = client.get("/engagements/2026-03-30-120000-example/artifacts")
     assert artifacts.status_code == 200
     artifact_names = {artifact["name"] for artifact in artifacts.json() if artifact["exists"]}
-    assert {"scope.json", "log.md", "findings.md", "engagement.json"} <= artifact_names
+    assert {"scope.json", "engagement.json"} <= artifact_names
 
     sessions = client.get("/engagements/2026-03-30-120000-example/sessions")
     assert sessions.status_code == 200
     payload = sessions.json()
     assert payload[0]["session_id"] == "session-a"
-    assert payload[0]["assigned_findings"] == ["FINDING-VA-001"]
+    assert payload[0]["assigned_targets"] == ["FINDING-VA-001"]
+
+
+def test_engagement_sync_migrates_legacy_target_keys_on_disk(client, isolate_settings):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+    (engagement_dir / "scope.json").write_text(
+        json.dumps(
+            {
+                "hostname": "example.com",
+                "scope_mode": "host_only",
+                "scope_hosts": ["example.com"],
+                "scope": ["example.com"],
+                "out_of_scope_hosts": [],
+                "exploit_policy": "selected",
+                "exploit_review_state": "approved",
+                "approved_findings": ["FINDING-VA-001"],
+                "status": "in_progress",
+                "current_phase": "exploit",
+            }
+        ),
+        encoding="utf-8",
+    )
+    session_dir = engagement_dir / "sessions" / "session-a"
+    (engagement_dir / "sessions" / "index.json").write_text(
+        json.dumps(
+            [
+                {
+                    "session_id": "session-a",
+                    "status": "active",
+                    "merge_state": "pending",
+                    "assigned_findings": ["FINDING-VA-001"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "assignment.json").write_text(
+        json.dumps(
+            {
+                "session_id": "session-a",
+                "status": "active",
+                "assigned_findings": ["FINDING-VA-001"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    first = client.get("/engagements")
+    second = client.get("/engagements")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    scope_payload = json.loads((engagement_dir / "scope.json").read_text(encoding="utf-8"))
+    index_payload = json.loads((engagement_dir / "sessions" / "index.json").read_text(encoding="utf-8"))
+    assignment_payload = json.loads((session_dir / "assignment.json").read_text(encoding="utf-8"))
+    assert scope_payload["approved_targets"] == ["FINDING-VA-001"]
+    assert "approved_findings" not in scope_payload
+    assert index_payload[0]["assigned_targets"] == ["FINDING-VA-001"]
+    assert "assigned_findings" not in index_payload[0]
+    assert assignment_payload["assigned_targets"] == ["FINDING-VA-001"]
+    assert "assigned_findings" not in assignment_payload
+
+
+def test_engagement_sync_skips_invalid_engagement_json_without_aborting(client, isolate_settings, caplog):
+    write_engagement(isolate_settings["engagements_dir"], key="2026-03-30-120000-valid")
+    broken_dir = write_engagement(isolate_settings["engagements_dir"], key="2026-03-30-120500-broken")
+    (broken_dir / "scope.json").write_text("{not valid json", encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        response = client.get("/engagements")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["key"] for item in payload] == ["2026-03-30-120000-valid"]
+    assert any("Skipping invalid engagement artifacts" in message for message in caplog.messages)
+
+
+def test_invalid_session_artifacts_preserve_existing_engagement_state(client, isolate_settings, caplog):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+
+    first = client.get("/engagements/2026-03-30-120000-example/sessions")
+    assert first.status_code == 200
+    assert len(first.json()) == 1
+
+    (engagement_dir / "sessions" / "index.json").write_text("{not valid json", encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        sessions_response = client.get("/engagements/2026-03-30-120000-example/sessions")
+        engagements_response = client.get("/engagements")
+
+    assert sessions_response.status_code == 200
+    assert len(sessions_response.json()) == 1
+    assert engagements_response.status_code == 200
+    assert [item["key"] for item in engagements_response.json()] == ["2026-03-30-120000-example"]
+    assert any("Skipping invalid engagement artifacts" in message for message in caplog.messages)
+
+
+def test_invalid_scope_preserves_existing_engagement_state(client, isolate_settings, caplog):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+
+    first = client.get("/engagements")
+    assert first.status_code == 200
+    assert len(first.json()) == 1
+
+    (engagement_dir / "scope.json").write_text("{not valid json", encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        response = client.get("/engagements")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["key"] for item in payload] == ["2026-03-30-120000-example"]
+    assert payload[0]["current_phase"] == "unknown"
+    assert payload[0]["approved_targets"] == []
+    assert any("Skipping invalid engagement artifacts" in message for message in caplog.messages)
+    assert any("Using persisted engagement identity" in message for message in caplog.messages)
 
 
 def test_engagement_event_and_assessment_routes_use_engagement_key(client, isolate_settings):
@@ -160,7 +304,7 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
             "target_descriptor": "https://example.com/orders/7",
             "source_name": "source-analyzer",
             "rationale": "Observed direct object path",
-            "evidence_ref": "log.md",
+            "evidence_ref": "activity_entries",
             "status": "covered",
         },
     )
@@ -223,6 +367,124 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
     assert summary.status_code == 200
     assert summary.json()["finding_count"] == 1
+    assert summary.json()["exploit_candidate_count"] == 1
+    assert summary.json()["coverage_blocker_count"] == 0
+    assert summary.json()["report_blocker_count"] == 0
+
+    exploit_candidates = client.get("/engagements/2026-03-30-120000-example/assessment/exploit-candidates")
+    assert exploit_candidates.status_code == 200
+    assert [row["slug"] for row in exploit_candidates.json()] == ["FINDING-VA-001"]
+
+    coverage_readiness = client.get("/engagements/2026-03-30-120000-example/assessment/coverage-readiness")
+    assert coverage_readiness.status_code == 200
+    assert coverage_readiness.json()["ready"] is True
+    assert coverage_readiness.json()["blocker_count"] == 0
+
+    report_readiness = client.get("/engagements/2026-03-30-120000-example/assessment/report-readiness")
+    assert report_readiness.status_code == 200
+    assert report_readiness.json()["ready"] is True
+    assert report_readiness.json()["blocker_count"] == 0
+
+    final_report = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/report-findings?mode=final"
+    )
+    assert final_report.status_code == 200
+    assert [row["slug"] for row in final_report.json()] == ["FINDING-VA-001"]
+
+
+def test_events_synthesizes_legacy_log_artifact_timeline(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    create_start = client.post(
+        "/engagements/2026-03-30-120000-example/events",
+        json={
+            "event_type": "artifact.updated",
+            "phase": "recon",
+            "task_name": "log.md",
+            "agent_name": "recon-specialist",
+            "summary": "Recon start",
+        },
+    )
+    assert create_start.status_code == 201
+
+    create_complete = client.post(
+        "/engagements/2026-03-30-120000-example/events",
+        json={
+            "event_type": "artifact.updated",
+            "phase": "recon",
+            "task_name": "log.md",
+            "agent_name": "recon-specialist",
+            "summary": "Recon summary",
+        },
+    )
+    assert create_complete.status_code == 201
+
+    response = client.get("/engagements/2026-03-30-120000-example/events")
+
+    assert response.status_code == 200, response.text
+    event_types = [event["event_type"] for event in response.json()]
+    assert "phase.started" in event_types
+    assert "task.started" in event_types
+    assert "task.completed" in event_types
+
+
+def test_final_report_mode_returns_conflict_when_readiness_fails(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    create_surface = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/surfaces",
+        json={
+            "surface_type": "object_reference",
+            "target_descriptor": "https://example.com/orders/7",
+            "source_name": "source-analyzer",
+            "status": "covered",
+        },
+    )
+    assert create_surface.status_code == 201
+
+    create_finding = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "FINDING-VA-009",
+            "title": "Unreviewed IDOR in orders",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "idor",
+            "root_cause_key": "orders-idor-unreviewed",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/orders/9",
+            "summary": "Order data can be accessed cross-tenant.",
+            "evidence_ref": "findings.md",
+            "notes": "Needs verification.",
+            "source_name": "vulnerability-analyst",
+            "details": {
+                "evidence": "GET /orders/9 returns order for user B when authenticated as user A",
+                "impact": "cross-tenant access",
+            },
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [],
+        },
+    )
+    assert create_finding.status_code == 201
+
+    report_readiness = client.get("/engagements/2026-03-30-120000-example/assessment/report-readiness")
+    assert report_readiness.status_code == 200
+    assert report_readiness.json()["ready"] is False
+    assert any(
+        blocker["kind"] == "finding_verification_state" for blocker in report_readiness.json()["blockers"]
+    )
+
+    final_report = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/report-findings?mode=final"
+    )
+    assert final_report.status_code == 409
+    assert final_report.json()["detail"]["ready"] is False
+    assert any(
+        blocker["kind"] == "finding_verification_state"
+        for blocker in final_report.json()["detail"]["blockers"]
+    )
 
 
 def test_coverage_patch_normalizes_tested_to_covered_and_refreshes_service_status(client, isolate_settings):
@@ -1241,7 +1503,13 @@ def test_coverage_patch_rejects_unknown_status_values(client, isolate_settings):
     assert "invalid coverage status" in patch.json()["detail"]
 
 
-def test_incompatible_local_database_is_reset(isolate_settings):
+def test_incompatible_local_database_refuses_to_start_and_preserves_file(isolate_settings):
+    """Auto-reset was removed: an incompatible DB must raise, never be unlinked.
+
+    Silently deleting the orchestrator DB on a schema mismatch is unrecoverable
+    data loss (findings, probe runs, command runs, code analysis). The
+    orchestrator now refuses to start and tells the operator how to resolve.
+    """
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     with sqlite3.connect(str(db_path)) as connection:
         connection.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT)")
@@ -1265,26 +1533,35 @@ def test_incompatible_local_database_is_reset(isolate_settings):
         )
         connection.commit()
 
-    db_module.init_db()
-    write_engagement(isolate_settings["engagements_dir"])
-    engagement_service.maybe_sync_engagements(force=True)
-    assert engagement_service.list_engagements()[0].key == "2026-03-30-120000-example"
+    with pytest.raises(db_module.IncompatibleDatabaseError) as exc:
+        db_module.init_db()
+    message = str(exc.value)
+    assert "Refusing to start" in message
+    assert "delete engagement history" in message
 
+    assert db_path.exists(), "incompatible DB must NOT be unlinked"
     with sqlite3.connect(str(db_path)) as connection:
         table_names = {
             row[0]
-            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
         }
-        assert "runs" not in table_names
-        event_columns = {row[1] for row in connection.execute("PRAGMA table_info(events)").fetchall()}
-        chain_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_attack_chains)").fetchall()}
-        assert "engagement_id" in event_columns
-        assert "engagement_id" in chain_columns
-        assert "run_id" not in event_columns
-        assert "run_id" not in chain_columns
+        assert "runs" in table_names, "legacy table must still be present after refuse"
+        event_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(events)").fetchall()
+        }
+        assert "run_id" in event_columns, "legacy column must still be present after refuse"
 
 
-def test_deleted_filesystem_engagement_is_pruned_from_database(client, isolate_settings):
+def test_filesystem_engagement_removal_retains_db_row(client, isolate_settings):
+    """Sync must NOT cascade-delete findings when an engagement directory
+    vanishes. The old behavior silently wiped every finding/probe/command-run
+    when the operator renamed, archived, or cleaned up an engagement dir.
+    Deletion is now explicit — via ``DELETE /engagements/{key}`` — and this
+    test exists to lock the additive-only sync contract in place.
+    """
     engagement_dir = write_engagement(isolate_settings["engagements_dir"])
 
     response = client.get("/engagements")
@@ -1300,7 +1577,9 @@ def test_deleted_filesystem_engagement_is_pruned_from_database(client, isolate_s
 
     response = client.get("/engagements")
     assert response.status_code == 200
-    assert response.json() == []
+    rows = response.json()
+    assert len(rows) == 1, "DB row must survive filesystem removal"
+    assert rows[0]["key"] == "2026-03-30-120000-example"
 
 
 def test_deleted_session_is_pruned_from_database(client, isolate_settings):

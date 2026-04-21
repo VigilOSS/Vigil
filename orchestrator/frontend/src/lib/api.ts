@@ -7,7 +7,7 @@ export type Engagement = {
   current_phase: string;
   exploit_policy: string;
   exploit_review_state: string;
-  approved_findings: string[];
+  approved_targets: string[];
   created_at: string;
   updated_at: string;
   session_count: number;
@@ -19,7 +19,7 @@ export type EngagementSession = {
   session_path: string;
   status: string;
   merge_state: string;
-  assigned_findings: string[];
+  assigned_targets: string[];
   created_at: string;
   updated_at: string;
   merged_at: string | null;
@@ -69,7 +69,31 @@ export type AssessmentFinding = {
   updated_at: string;
 };
 
+export type FindingPocRequest = {
+  method?: string;
+  url?: string;
+  headers?: Record<string, string> | string;
+  body?: string;
+};
+
+export type FindingPocResponse = {
+  status?: number | string;
+  headers?: Record<string, string> | string;
+  body?: string;
+};
+
+export type FindingReference = string | { url?: string; title?: string; id?: string };
+
+export type FindingProvenance = {
+  agent_name?: string;
+  artifact_ref?: string;
+  captured_at?: string;
+  evidence_quote?: string;
+  [key: string]: unknown;
+};
+
 export type FindingDetails = {
+  // Core metadata already rendered today.
   discovered_by?: string;
   owasp_category?: string;
   cwe_id?: string;
@@ -83,6 +107,27 @@ export type FindingDetails = {
   cvss_score?: number;
   remediation?: string;
   steps_to_reproduce?: string[];
+  // Chain context panel.
+  chain_required?: boolean;
+  chain_rationale?: string;
+  required_followup?: string[];
+  // Proof-of-concept panel.
+  poc_code?: string;
+  poc_language?: string;
+  poc_request?: FindingPocRequest | string;
+  poc_response?: FindingPocResponse | string;
+  references?: FindingReference[];
+  // Code analysis panel.
+  slot_type?: string;
+  entry_point?: string;
+  sink?: string;
+  taint_path?: string | string[];
+  guards_evaluated?: string | string[] | Record<string, unknown>;
+  // Variant panel.
+  variant_of?: string;
+  original_pattern?: string;
+  // Catch-all for any additional custom fields.
+  [key: string]: unknown;
 };
 
 export type AssessmentFindingDetail = AssessmentFinding & {
@@ -93,6 +138,7 @@ export type AssessmentFindingDetail = AssessmentFinding & {
   root_cause_key: string;
   auth_context: string;
   details_json: string;
+  provenance_json?: string;
   merged_into_slug?: string | null;
 };
 
@@ -202,6 +248,9 @@ export type AssessmentSummary = {
   tunnel_count: number;
   blocked_technique_count: number;
   attack_chain_count: number;
+  exploit_candidate_count: number;
+  coverage_blocker_count: number;
+  report_blocker_count: number;
   coverage_statuses: Record<string, number>;
   finding_workflow_statuses: Record<string, number>;
   finding_verification_states: Record<string, number>;
@@ -276,6 +325,14 @@ export function listEngagements() {
 
 export function getEngagement(engagementKey: string) {
   return request<Engagement>(`/engagements/${engagementKey}`);
+}
+
+export function deleteEngagement(engagementKey: string) {
+  const qs = new URLSearchParams({ confirm: engagementKey }).toString();
+  return request<{ deleted: boolean; key: string; id: number }>(
+    `/engagements/${encodeURIComponent(engagementKey)}?${qs}`,
+    { method: "DELETE" },
+  );
 }
 
 export function listEngagementSessions(engagementKey: string) {
@@ -386,6 +443,115 @@ export function listAssessmentServices(engagementKey: string) {
 
 export function listAssessmentCoverageItems(engagementKey: string) {
   return request<AssessmentCoverageItem[]>(`/engagements/${engagementKey}/assessment/coverage-items`);
+}
+
+// ── Assessment command runs ─────────────────────────────
+// Schema mirrors `assessment_command_runs` + `_serialize_command_run` in the
+// backend: list rows elide the preview text (preview_chars counts + hashes
+// remain so callers can decide whether to request the detail endpoint with
+// full output).
+export type AssessmentCommandRun = {
+  id: number;
+  engagement_id: number;
+  run_uuid: string;
+  command: string;
+  argv: string[];
+  tool_name: string;
+  tool_bin: string;
+  route: string;
+  agent_name: string;
+  phase: string;
+  audit_source: string;
+  return_code: number | null;
+  timed_out: boolean;
+  success: boolean;
+  started_at: string;
+  completed_at: string;
+  duration_ms: number;
+  command_hash: string;
+  stdout_sha256: string;
+  stderr_sha256: string;
+  stdout_preview: string;
+  stderr_preview: string;
+  // Listings: always "" with preview_chars populated. Detail: full text.
+  stdout_preview_chars?: number;
+  stderr_preview_chars?: number;
+  output_retention_status: string; // retained | suppressed | artifact | empty
+  stdout_suppression_reason: string;
+  stderr_suppression_reason: string;
+  stdout_artifact_ref: string;
+  stderr_artifact_ref: string;
+  stdout_bytes: number;
+  stderr_bytes: number;
+  indexed_for_embeddings_at: string | null;
+  notes: string;
+  created_at: string;
+  // Command-metadata audit fields. All nullable — pre-migration rows
+  // and calls that don't set the X-* headers land as null.
+  technique?: string | null;
+  intent?: string | null;
+  probe_kind?: string | null;
+  destructive?: boolean | null;
+};
+
+// Detail fetch always returns preview text (include_output=true server-side).
+export type AssessmentCommandRunDetail = AssessmentCommandRun;
+
+export type ListAssessmentCommandRunsParams = {
+  q?: string;
+  agent_name?: string;
+  phase?: string;
+  tool_name?: string;
+  tool_bin?: string;
+  audit_source?: string;
+  // Backend currently only exposes success + timed_out (no `failed` param).
+  // Rows where success=false && !timed_out are the "failed" bucket;
+  // consumers derive that client-side.
+  success?: boolean;
+  timed_out?: boolean;
+  // Command-metadata filter axes. Technique + probe_kind are exact matches.
+  // intent_q runs an FTS5-scoped `intent:` match server-side. destructive
+  // is a tri-state: undefined = don't filter; true/false = exact match.
+  technique?: string;
+  probe_kind?: string;
+  destructive?: boolean;
+  intent_q?: string;
+  include_output?: boolean;
+  limit?: number;
+  offset?: number;
+};
+
+export function listAssessmentCommandRuns(
+  engagementKey: string,
+  params: ListAssessmentCommandRunsParams = {},
+) {
+  const query = new URLSearchParams();
+  if (params.q) query.set("q", params.q);
+  if (params.agent_name) query.set("agent_name", params.agent_name);
+  if (params.phase) query.set("phase", params.phase);
+  if (params.tool_name) query.set("tool_name", params.tool_name);
+  if (params.tool_bin) query.set("tool_bin", params.tool_bin);
+  if (params.audit_source) query.set("audit_source", params.audit_source);
+  if (params.success != null) query.set("success", params.success ? "true" : "false");
+  if (params.timed_out != null) query.set("timed_out", params.timed_out ? "true" : "false");
+  if (params.technique) query.set("technique", params.technique);
+  if (params.probe_kind) query.set("probe_kind", params.probe_kind);
+  if (params.destructive != null)
+    query.set("destructive", params.destructive ? "true" : "false");
+  if (params.intent_q) query.set("intent_q", params.intent_q);
+  if (params.include_output) query.set("include_output", "true");
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return request<AssessmentCommandRun[]>(
+    `/engagements/${engagementKey}/assessment/command-runs${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export function getAssessmentCommandRun(engagementKey: string, commandRunId: number) {
+  return request<AssessmentCommandRunDetail>(
+    `/engagements/${engagementKey}/assessment/command-runs/${commandRunId}`,
+  );
 }
 
 export function engagementWebSocketUrl(engagementKey: string): string {
@@ -545,3 +711,280 @@ export function listCodeAnalysisResults(engagementKey: string, params?: { file_i
   const qs = query.toString();
   return request<CodeAnalysisResult[]>(`/engagements/${engagementKey}/assessment/code/analysis-results${qs ? `?${qs}` : ""}`);
 }
+
+// ── Intel types ─────────────────────────────────────────
+// Every interface below mirrors an orchestrator response model in
+// `orchestrator/backend/app/api/intel_schemas.py`. Keep these in lock-step
+// with the pydantic response classes; the JSON schemas under
+// `agent/schemas/intel-*.schema.json` are the request-side view of the
+// same contract. Fetcher functions land in Phase B1.
+
+export type IntelProvenance = {
+  agent_name?: string;
+  artifact_ref?: string;
+  captured_at?: string;
+  evidence_quote?: string;
+};
+
+type IntelRowBase = {
+  id: number;
+  engagement_id: number;
+  source_name: string;
+  notes: string;
+  provenance: IntelProvenance;
+  created_at: string;
+  updated_at: string;
+};
+
+export type IntelTechComponent = IntelRowBase & {
+  component: string;
+  version: string;
+  confidence: string;
+  evidence_ref: string;
+  first_seen_at: string;
+  last_seen_at: string;
+};
+
+export type IntelPerson = IntelRowBase & {
+  name: string;
+  role: string;
+  organization: string;
+  email: string;
+};
+
+export type IntelEmail = IntelRowBase & {
+  address: string;
+  role_hint: string;
+  linked_person_id: number | null;
+};
+
+export type IntelDomain = IntelRowBase & {
+  identity: string;
+  kind: "subdomain" | "ip" | "asn" | "nameserver" | "mx" | "ptr" | "domain";
+  value: string;
+  live_status: string;
+};
+
+export type IntelCve = IntelRowBase & {
+  cve_id: string;
+  affected_component: string;
+  affected_version_range: string;
+  cvss_score: number | null;
+  cvss_vector: string;
+  cwe_id: string;
+  poc_available: boolean;
+  validation_status: "unverified" | "version_match" | "ruled_out" | "exploited";
+  linked_finding_slug: string;
+};
+
+export type IntelDnsRecord = IntelRowBase & {
+  record_type: string;
+  name: string;
+  value: string;
+  first_seen: string;
+  last_seen: string;
+};
+
+export type IntelSocialProfile = IntelRowBase & {
+  subject_kind: "person" | "org";
+  subject_ref: string;
+  platform: string;
+  handle: string;
+  url: string;
+};
+
+export type IntelBreachRecord = IntelRowBase & {
+  subject: string;
+  breach_name: string;
+  breach_date: string;
+  data_types: string;
+};
+
+export type IntelOrgFact = IntelRowBase & {
+  fact_key: string;
+  fact_value: string;
+};
+
+export type IntelNote = IntelRowBase & {
+  title: string;
+  body_markdown: string;
+  source_agent: string;
+  tags: string[];
+};
+
+export type IntelEntityType =
+  | "tech_component"
+  | "person"
+  | "email"
+  | "domain"
+  | "cve"
+  | "dns_record"
+  | "social_profile"
+  | "breach_record"
+  | "org_fact"
+  | "note";
+
+export type IntelRecord =
+  | IntelTechComponent
+  | IntelPerson
+  | IntelEmail
+  | IntelDomain
+  | IntelCve
+  | IntelDnsRecord
+  | IntelSocialProfile
+  | IntelBreachRecord
+  | IntelOrgFact
+  | IntelNote;
+
+export type ListIntelResponse<T = IntelRecord> = {
+  entity_type: IntelEntityType;
+  total: number;
+  items: T[];
+};
+
+export type IntelSearchHit = {
+  entity_type: IntelEntityType;
+  source_id: number;
+  key: string;
+  body: string;
+  source_name: string;
+  rank: number | null;
+  record: Record<string, unknown>;
+};
+
+export type IntelSummary = {
+  counts: Record<string, number>;
+};
+
+export type IntelByUrlResponse = {
+  domains: IntelDomain[];
+  services: Record<string, unknown>[];
+  surfaces: Record<string, unknown>[];
+  request_variants: Record<string, unknown>[];
+};
+
+// ── Activity log types ──────────────────────────────────
+
+export type ActivityEntry = {
+  id: number;
+  engagement_id: number;
+  occurred_at: string;
+  actor_kind: "operator" | "agent" | "hook" | "system";
+  actor_name: string;
+  title: string;
+  action: string;
+  result: string;
+  artifact_ref: string;
+  body_markdown: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ListActivityEntriesResponse = {
+  total: number;
+  items: ActivityEntry[];
+};
+
+// ── Intel & Activity fetchers ───────────────────────────
+// These hit the route stubs wired by Phase B1. Until the backend bodies
+// land, each endpoint 501s — callers therefore must always handle the
+// error path and fall back to an empty-state render.
+
+export function getIntelSummary(engagementKey: string) {
+  return request<IntelSummary>(`/engagements/${engagementKey}/intel/summary`);
+}
+
+export function listIntel(
+  engagementKey: string,
+  entityType: IntelEntityType,
+): Promise<ListIntelResponse> {
+  const path = intelEntityPath(entityType);
+  // Reader endpoints currently return a bare list (see api/intel.py); the
+  // typed `ListIntelResponse` shape is what A1 froze, so normalise here.
+  return request<IntelRecord[] | ListIntelResponse>(
+    `/engagements/${engagementKey}/intel/${path}`,
+  ).then((payload) => {
+    if (Array.isArray(payload)) {
+      return { entity_type: entityType, total: payload.length, items: payload };
+    }
+    return payload;
+  });
+}
+
+export function listIntelCredentials(engagementKey: string) {
+  // Credentials are a thin alias over assessment_credentials; shape is
+  // "list of dict" at the contract layer — keep it loose.
+  return request<Record<string, unknown>[]>(
+    `/engagements/${engagementKey}/intel/credentials`,
+  );
+}
+
+export function searchIntel(
+  engagementKey: string,
+  params: { q?: string; entity_type?: IntelEntityType | ""; limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.q) query.set("q", params.q);
+  if (params.entity_type) query.set("entity_type", params.entity_type);
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return request<IntelSearchHit[]>(
+    `/engagements/${engagementKey}/intel/search${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export function intelByUrl(engagementKey: string, url: string) {
+  const qs = new URLSearchParams({ url }).toString();
+  return request<IntelByUrlResponse>(
+    `/engagements/${engagementKey}/intel/by-url?${qs}`,
+  );
+}
+
+export function listActivityEntries(
+  engagementKey: string,
+  params: { q?: string; actor_kind?: string; since?: string; until?: string; limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.q) query.set("q", params.q);
+  if (params.actor_kind) query.set("actor_kind", params.actor_kind);
+  if (params.since) query.set("since", params.since);
+  if (params.until) query.set("until", params.until);
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return request<ListActivityEntriesResponse>(
+    `/engagements/${engagementKey}/activity-entries${qs ? `?${qs}` : ""}`,
+  );
+}
+
+// `listSurfaces` is an alias over the existing assessment endpoint; the
+// SurfacesTab imports this name for parity with §3b.
+export const listSurfaces = listAssessmentSurfaces;
+
+function intelEntityPath(entityType: IntelEntityType): string {
+  switch (entityType) {
+    case "tech_component":
+      return "tech-components";
+    case "person":
+      return "people";
+    case "email":
+      return "emails";
+    case "domain":
+      return "domains";
+    case "cve":
+      return "cves";
+    case "dns_record":
+      return "dns-records";
+    case "social_profile":
+      return "social-profiles";
+    case "breach_record":
+      return "breach-records";
+    case "org_fact":
+      return "org-facts";
+    case "note":
+      return "notes";
+  }
+}
+

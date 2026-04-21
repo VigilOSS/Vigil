@@ -34,7 +34,7 @@ Each iteration (set `DB="$DIR/cases.db"`):
 4. On subagent return:
    - Done: ./scripts/assess.py dispatch "$DB" done "id1,id2,..."
    - New endpoints: feed them back through `assess.py ingest-endpoints "$DB" <source>` or `assess.py ingest-spec "$DB" <spec-file>` so backend state is created first
-   - Findings: write structured finding state first with `assess.py record-finding`, then keep findings.md synchronized
+   - Findings: write structured finding state with `assess.py record-finding`
    - Errors: ./scripts/assess.py dispatch "$DB" error "id1,id2,..."
 5. pending=0 and producers stopped → report completion
 6. Otherwise → loop back to step 1
@@ -74,12 +74,14 @@ sqlite3 "$DB" ".timeout 5000" "
 
 - Use `./scripts/assess.py dispatch "$DB" <action>` for all work-buffer operations — reading cases.db directly bypasses the backend sync layer and can produce stale or inconsistent state
 - Treat this skill as host-side coordination only. All real target testing stays in Kali MCP.
-- Record findings in backend state immediately and keep findings.md synchronized
+- Record findings in backend state immediately via `assess.py record-finding`
 - Re-ingest new endpoints through backend-first producers; let the work buffer mirror the resulting canonical ids
 - Use reset-stale at start of each iteration
 - **DO NOT STOP EARLY** — loop until pending=0 for all consumable types
 - On subagent error: mark work items `error`, log, CONTINUE (don't halt loop)
-- Only stop on: pending=0 everywhere, or user /stop
+- Stop on any of:
+  - pending=0 everywhere (normal completion)
+  - the upstream work-buffer producer (surface-collector, ingestion, nuclei sweep) is itself stuck or failing — looping against an empty or broken producer burns dispatch budget on no real work. Escalate the producer issue first, then resume.
 
 ## Dispatcher Quick Reference
 

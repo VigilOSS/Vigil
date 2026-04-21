@@ -1,19 +1,46 @@
 # Hunting Rules
 
 These rules are always active across the engagement. They are intentionally compact, but they are
-strict: breaking them wastes time and lowers finding quality.
+strict: breaking them lowers finding quality.
 
 ## 1. Read scope before target work
 
 Confirm the exact in-scope hosts, scope mode, exploit policy, and auth state before making target-facing decisions.
 
-## 2. No theoretical findings
+## 2. No theoretical findings — prove the attacker outcome, not just the vulnerability
 
 If the answer to "can an attacker do this right now with real harm?" is no, it is not a finding yet.
 
-## 3. Kill weak leads fast
+Proving a vulnerability exists is not enough. You must demonstrate what the attacker **gains** from it. The gap between "vulnerability confirmed" and "attacker outcome proved" is where most severity underrating happens.
 
-Do not spend long stretches polishing low-confidence signals. Either validate quickly, chain them, or drop them.
+**Existence proof (insufficient alone) — examples, not exhaustive:**
+- "TLS validation is disabled" — so what?
+- "IDOR returns a different user's ID" — what data?
+- "SSRF reaches internal host" — what's on it?
+- "Session token is in the response" — can you use it?
+
+**Exploitation proof (required) — same examples, completed:**
+- "TLS bypass lets attacker extract session token X from intercepted traffic → replaying X against /api/vault returns the victim's vault records"
+- "IDOR on /api/users/{id} returns full name, email, phone, and billing address for any user ID"
+- "SSRF to 169.254.169.254 returns IAM credentials → credentials grant s3:ListBucket on production bucket"
+- "Session token replayed from a different IP returns 200 with authenticated user data — no IP binding"
+
+The pattern applies to every vulnerability class: confirm the primitive exists, then demonstrate the attacker outcome it enables.
+
+When you capture credentials, tokens, or keys — **use them**. Extract the token, replay it, show what it unlocks. If replay fails, say why (expiry, IP binding, CSRF token required) and mark the finding CHAIN REQUIRED with the specific gap.
+
+## 3. Precondition equivalence check
+
+Before rating severity, identify the precondition required to trigger the vulnerability. If that precondition already grants the attacker equivalent or greater access than the vulnerability itself provides, the finding is defense-in-depth (Low), not an independent exploit. Score on incremental impact over the precondition, not total impact of the chain.
+
+Examples:
+- **Redundant**: "Unvalidated redirect captures auth verifier" — but triggering the redirect requires breaking the same TLS connection that already exposes the auth verifier. Incremental impact: zero.
+- **Not redundant**: "App disables TLS validation process-wide" — no precondition beyond network proximity. The app removes its own protection. Incremental impact: full credential capture from any shared network.
+- **Chain test**: If exploiting B requires condition A, ask: "What can the attacker already do with just A?" If the answer is "everything B provides," then B is defense-in-depth.
+
+## 4. Kill weak leads fast — and push harder on strong ones
+
+Do not spend long stretches polishing low-confidence signals. Either validate quickly, chain them, or drop them. The inverse matters equally: when a signal is live, do not abandon it at the first ambiguous response — dig in until you have either the attacker outcome or a concrete reason the path fails.
 
 Kill signals include:
 
@@ -22,59 +49,68 @@ Kill signals include:
 - "Might be chainable" used instead of a proved chain
 - Static or generic surface with no meaningful attack paths after a short pass
 
-## 4. Five-minute rule for dead surface
+Push-harder signals include:
+
+- A response field, timing delta, or status code diverges between two otherwise-identical requests (different account, different header, different payload encoding) — divergence is evidence of state the application is keeping, and that state is usually where the finding lives
+- An error message, stack trace, or redirect leaks framework internals, file paths, or infrastructure hostnames
+- Repeating the exact same request produces different behavior — the target is carrying state across requests
+- A probe produces partial signal (OOB DNS fires but no body leak, time delta without error, 5xx on malformed input) — partial signal means the primitive exists; the next work is shaping the payload to complete it
+- A sibling route, method, or content-type behaves differently than the one you just tested — siblings are the fastest way to confirm or widen the finding
+- The response silently accepts an input shape the application shouldn't (alternate protocol, unexpected encoding, out-of-range value) without erroring — silent acceptance is almost never benign
+
+## 5. Five-minute rule for dead surface
 
 If a surface yields no meaningful routes, no privileged features, no object references, and no useful source intelligence after a short focused pass, rotate instead of grinding.
 
-## 5. Evidence beats volume
+## 6. Evidence beats volume
 
 Prefer a few decisive requests and exact proofs over broad noisy testing.
 
-## 6. Use skills before improvising
+## 7. Use skills before improvising
 
 Load the most relevant skill first. Only improvise when the existing skill/reference set is genuinely insufficient.
 
-## 7. Automation for recon, judgment for validation
+## 8. Automation for recon, judgment for validation
 
 Use automation to enumerate and classify. Use deliberate human-guided validation for auth, logic, chaining, and impact.
 
-## 8. The sibling rule
+## 9. The sibling rule
 
 When one route, method, or controller path is vulnerable, inspect its siblings before moving on.
 
-## 9. Think in chains
+## 10. Think in chains
 
 Use bug A as a signal for B and C nearby, but time-box chain exploration and stop when the cluster is dry.
 
-## 10. Impact first
+## 11. Impact first
 
 Prioritize surfaces where broken auth, object reference drift, privileged writes, or trust-boundary confusion would matter.
 
-## 11. Depth over breadth
+## 12. Depth over breadth
 
 One well-understood target or feature is worth more than shallow passes over many. Stay long enough to understand what the application actually values.
 
-## 12. Validate before writing
+## 13. Validate before writing
 
 Do not start report drafting before the lead is validated, reproducible, and worth a human reader's time.
 
-## 13. Credentials require proof
+## 14. Credentials require proof
 
 Leaked tokens, keys, or config only matter when you show what they actually grant.
 
-## 14. Rotate when progress stalls
+## 15. Rotate when progress stalls
 
 If repeated attempts produce no new information, switch endpoint, method, surface, or hypothesis instead of grinding.
 
-## 15. Time-box caps
+## 16. Time-box caps
 
 Three tiers prevent rabbit-holing:
 
-- **5 minutes** — dead surface with no routes, no features, no object references (rule 4)
+- **5 minutes** — dead surface with no routes, no features, no object references (rule 5)
 - **20 minutes** — a single endpoint producing no new signals. Rotate to a different endpoint, vuln class, or subdomain.
 - **45 minutes** — absolute cap on a single parameter or feature before forced rotation. If 45 minutes of focused testing yields nothing, the lead is dry.
 
-## 16. Stuck-state recovery
+## 17. Stuck-state recovery
 
 When progress stalls, use this table to pick a concrete next action instead of grinding:
 
@@ -84,12 +120,12 @@ When progress stalls, use this table to pick a concrete next action instead of g
 | I found a bug but can't escalate impact | Load the matching vuln-class skill and check the A->B chain table in `exploit-developer.md` |
 | Recon is huge but I don't know where to start testing | Rank by signal density: API endpoints with object IDs > authenticated-only routes > static pages |
 | Every parameter seems filtered | Try encoding bypass (double-URL, unicode, null bytes), then switch to a different vuln class entirely |
-| I keep finding duplicates of the same bug pattern | Apply the sibling rule (rule 8) to exhaust the cluster, then rotate to a different feature area |
+| I keep finding duplicates of the same bug pattern | Apply the sibling rule (rule 9) to exhaust the cluster, then rotate to a different feature area |
 | The app is simple with few endpoints | Go deeper: test business logic, race conditions, multi-step workflow abuse, parameter pollution |
 | I confirmed a low-severity bug but can't chain it | Check if it enables a higher-impact primitive (open redirect -> OAuth theft, SSRF -> metadata, XSS -> admin panel) |
 | Tools are returning nothing useful | Stop automation, test manually. Read the JS source, map the API by hand, test one request at a time |
 
-## 17. Developer psychology heuristics
+## 18. Developer psychology heuristics
 
 Use these to generate testable hypotheses about where developers introduced flaws:
 

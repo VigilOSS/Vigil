@@ -25,6 +25,7 @@ Before starting any target-facing work, verify:
 3. You read the skill's `## Extended Resources` section and loaded the listed references
 4. You have the dispatch context: targets from scope.json, Phase 1 endpoint artifacts, auth.json state
 5. You have `$DIR/cases.db` path and the engagement directory set
+6. You checked command history as a coverage map — `./scripts/assess.py list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what surface collection has already run on this target so your next pass picks angles that haven't been tried — different crawl depth, different source (Katana vs gau vs waybackurls vs hakrawler), different extension filter, different auth context. The only crawl to skip is an identical command against identical input; any variant (new auth, wider scope, deeper depth) is new coverage. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output is complete. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If any of these are missing, STOP and load them now. Working without the skill means running
 tools without a triage methodology — you will produce a flat URL dump instead of prioritized

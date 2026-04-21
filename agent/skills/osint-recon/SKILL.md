@@ -8,7 +8,7 @@ origin: AI Threat Hunting
 
 ## When to Activate
 
-- After TEST phase, intel.md has accumulated tech stack, people, domains, credentials
+- After TEST phase, the backend intel tables (`intel_tech_components`, `intel_people`, `intel_domains`, and `assessment_credentials`) have accumulated tech stack, people, domains, and credentials — query via `./scripts/assess.py list-intel <type>` or `./scripts/assess.py fetch intel`
 - Parallel with exploit phase to enrich attack context
 
 ## Tools
@@ -28,7 +28,7 @@ ingested, reviewed, or handed off.
 
 ### 1. CVE & Exploit Lookup
 
-From intel.md Technology Stack — for each component+version:
+Pull the tech stack from the backend (`./scripts/assess.py list-intel tech-component`) — for each component+version:
 
     # Exploit-DB local search
     searchsploit "<component> <version>"
@@ -48,7 +48,7 @@ From intel.md Technology Stack — for each component+version:
 
 ### 2. Breach & Credential Intelligence
 
-From intel.md Email Addresses and Domains:
+Pull emails and domains from the backend (`./scripts/assess.py list-intel email` and `./scripts/assess.py list-intel domain`):
 
     # theHarvester — email and subdomain enumeration
     theHarvester -d <domain> -b all -f scans/osint_harvester.json
@@ -66,7 +66,7 @@ From intel.md Email Addresses and Domains:
 
 ### 3. DNS & Infrastructure History
 
-From intel.md Domains & Infrastructure:
+Pull domains from the backend (`./scripts/assess.py list-intel domain`):
 
     # WHOIS
     whois <domain> | tee scans/osint_whois.txt
@@ -101,7 +101,7 @@ From intel.md Domains & Infrastructure:
 
 ### 4. Social & Organizational Intelligence
 
-From intel.md People & Organizations:
+Pull people and org facts from the backend (`./scripts/assess.py list-intel person` and `./scripts/assess.py list-intel org-fact`):
 
     # theHarvester — people and email enumeration
     theHarvester -d <domain> -b linkedin,google -f scans/osint_social.json
@@ -124,7 +124,7 @@ From intel.md People & Organizations:
 ## CVE Validation Gate
 
 CVE recording rules are defined in `agent/agents/osint-analyst.md` § Finding Recording.
-In short: version-only CVE matches are intel, not findings — record in intel.md and `#### Intelligence` output only. The operator dispatches exploit-developer to validate before any CVE becomes a durable finding.
+In short: version-only CVE matches are intel, not findings — record via `./scripts/assess.py record-intel cve <cve-json-file>` and list them under `#### Intelligence` in your output. The operator dispatches exploit-developer to validate before any CVE becomes a durable finding via `record-finding`.
 
 ## Priority Order
 
@@ -136,12 +136,15 @@ In short: version-only CVE matches are intel, not findings — record in intel.m
 
 ## Output Integration
 
-Raw OSINT collection goes to `intel.md`. CVE matches stay in intel.md until exploit-developer
-validates them. Do not treat `findings.md` as the canonical destination.
-- CVE matches → intel.md CVE table + `#### Intelligence` (NOT findings — needs validation)
-- Breached credentials → intel.md Breach table + finding only if target-specific proof exists
-- Historical URLs → intel.md DNS table, then ingest confirmed or high-value paths into backend coverage state
-- Social/org intel → intel.md Social table
+Raw OSINT collection is recorded via `./scripts/assess.py record-intel <type> <json-file>` so the
+backend intel tables (`intel_cves`, `intel_breach_records`, `intel_dns_records`,
+`intel_social_profiles`, etc.) are the canonical destination. CVE matches stay as intel until
+exploit-developer validates them.
+- CVE matches → `record-intel cve` + `#### Intelligence` (NOT findings — needs validation)
+- Breached credentials → `record-intel breach-record`; credentials with target-specific proof additionally go to `assess.py post credentials <json-file>` and a finding
+- Historical URLs → `record-intel dns-record` (record-type=URL or equivalent), then ingest confirmed or high-value paths into backend coverage state via `assess.py ingest-endpoints`
+- Social/org intel → `record-intel social-profile` for platform accounts, `record-intel org-fact` for structured organizational metadata
+- Free-form prose intel that doesn't fit a structured row → `record-intel note`
 - For each meaningful lead, record the hypothesis it supports: vulnerable component, reachable hidden surface, reusable credential, or escalation path
 
 ## Extended Resources

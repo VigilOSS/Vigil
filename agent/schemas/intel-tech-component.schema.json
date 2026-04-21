@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/intel-tech-component.schema.json",
+  "$comment": "Mirrors app.api.intel_schemas.TechComponentRecordRequest — the orchestrator is the source of truth for this contract.",
+  "title": "Intel Tech Component Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["component"],
+  "properties": {
+    "component": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Product or library name (for example, nginx, WordPress, Spring Boot)."
+    },
+    "version": {
+      "type": "string",
+      "maxLength": 128,
+      "default": "",
+      "description": "Observed version string."
+    },
+    "source_name": {
+      "type": "string",
+      "maxLength": 128,
+      "default": "",
+      "description": "Agent or tool that produced this record."
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["", "low", "medium", "high", "confirmed"],
+      "default": "",
+      "description": "Subjective confidence in the fingerprint."
+    },
+    "evidence_ref": {
+      "type": "string",
+      "maxLength": 1024,
+      "default": "",
+      "description": "Artifact reference (e.g., file:scans/whatweb.txt:12) proving the observation."
+    },
+    "first_seen_at": {
+      "type": "string",
+      "maxLength": 64,
+      "default": "",
+      "description": "ISO8601 timestamp of first observation; blank defaults to now."
+    },
+    "last_seen_at": {
+      "type": "string",
+      "maxLength": 64,
+      "default": "",
+      "description": "ISO8601 timestamp of most recent observation."
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 4096,
+      "default": ""
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "agent_name": { "type": "string" },
+        "artifact_ref": { "type": "string" },
+        "captured_at": { "type": "string" },
+        "evidence_quote": { "type": "string" }
+      }
+    }
+  }
+}

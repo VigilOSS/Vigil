@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/intel-note.schema.json",
+  "$comment": "Mirrors app.api.intel_schemas.NoteRecordRequest. Catch-all prose intel that doesn't fit a structured row; still FTS-indexed and engagement-scoped.",
+  "title": "Intel Note Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title"],
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Short descriptive title — unique per engagement."
+    },
+    "body_markdown": {
+      "type": "string",
+      "maxLength": 65536,
+      "default": "",
+      "description": "Prose body in GitHub-flavored markdown."
+    },
+    "source_agent": {
+      "type": "string",
+      "maxLength": 128,
+      "default": "",
+      "description": "Agent that produced the note (e.g., 'osint-analyst')."
+    },
+    "tags": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string",
+        "maxLength": 64
+      }
+    },
+    "source_name": {
+      "type": "string",
+      "maxLength": 128,
+      "default": ""
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "agent_name": { "type": "string" },
+        "artifact_ref": { "type": "string" },
+        "captured_at": { "type": "string" },
+        "evidence_quote": { "type": "string" }
+      }
+    }
+  }
+}

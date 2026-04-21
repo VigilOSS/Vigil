@@ -38,6 +38,41 @@ Do not fall back to host-side execution.
 Host-side commands are limited to coordination and non-target support only:
 `jq`, `sqlite3`, `python3`, `grep` / `rg`, `sed`, `awk`, `base64`, `openssl`.
 
+**Do not `echo` as commentary, section headers, or breadcrumbs inside Kali MCP commands.**
+Stdout is captured to the audit log, not shown to the user, and commentary-echoes bloat
+the preview and pollute FTS search without adding retrievable signal. Use the `X-Intent`
+header for a one-line purpose annotation. `echo` is only legitimate when its output is the
+command's real purpose — writing to a file (`echo X > file`), piping into another tool, or
+generating a payload.
+
+### Command Metadata
+
+Every target-facing Kali MCP call supports four optional audit headers. Set them when they
+apply; the runtime stores them on the audit row where they become filterable in
+`list-command-runs` and the Commands tab.
+
+- **`X-Technique`** — the vulnerability class this command tests. One of `SSRF`, `XSS`,
+  `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`, `RFI`, `OPEN-REDIRECT`,
+  `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`, `RATE-LIMIT`, `INFO-DISCLOSURE`,
+  `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `OTHER`. Derive
+  it from the skill you loaded: for skills whose name maps 1:1 to an enum value
+  (`ssrf-testing` → `SSRF`, `sqli-testing` → `SQLI`, `command-injection` → `CMDI`, etc.),
+  use that mapping. When the mapping isn't obvious (e.g. `aws-iam-privesc`,
+  `container-escape-detection`, `graphql-testing`), the skill file names the correct
+  value at the top.
+- **`X-Intent`** — a ≤200-char one-liner describing what this specific command is trying to
+  accomplish. Replaces the `echo "=== label ==="` pattern.
+- **`X-Probe-Kind`** — the kind of work this command represents:
+  - `fingerprint` — learning the target (versions, headers, tech stack), no payload
+  - `baseline` — vanilla control request against the target surface, for diff
+  - `payload` — crafted attack payload testing a hypothesis
+  - `exploit` — attacker-outcome proof (extract token, read a file, prove the impact)
+  - `replay` — captured primitive used against a new surface (lateral)
+  - `cleanup` — undoing target-side changes
+- **`X-Destructive`** — `1` when the command attempts a write, edit, or delete on the
+  target (POST/PUT/PATCH/DELETE, file upload, account creation, config change, shell exec
+  that modifies state). `0` for read-only probes. Used by cleanup-tracking workflows.
+
 ---
 
 ## 2a. Listeners, Tunnels & OOB Are Operator-Controlled
@@ -65,13 +100,62 @@ Agents CANNOT start, stop, or restart listener, tunnel, or OOB processes.
 
 ---
 
+## 2b. Coverage Check Before Probing
+
+Every Kali MCP call records its command, argv, tool, agent, phase, exit code,
+timeout state, timings, and an output preview (or artifact ref) to the
+orchestrator backend. Treat that history as a **coverage map** — a record of
+what's already been probed so your next probe goes somewhere the engagement
+hasn't covered yet.
+
+Before issuing a probing, scanning, fuzzing, or credential-testing command,
+search for prior work on this surface:
+
+```bash
+./scripts/assess.py list-command-runs --q <keyword>
+```
+
+Default to an unscoped search so you see every agent's and every phase's
+prior work on the target; narrow with `--agent-name` or `--phase` only if the
+broad result is overwhelming. Cross-agent and cross-phase context is usually
+the most valuable coverage signal.
+
+Read the results as a coverage map, not a reuse gate. Red-team depth comes
+from variants — different SQLi techniques, different SSRF payload encodings,
+different XXE entity styles, different wordlists, different auth contexts.
+If `sqlmap` already ran against this endpoint with `--technique=U`, your
+next probe picks a different technique. If `ffuf` ran `raft-medium-directories`,
+try `quickhits` or a tech-specific wordlist.
+
+**The only probe you should skip is an identical command against identical
+input.** Any variant — different payload family, different tool, different
+flag, different target scope, different credentials — is new coverage and
+belongs in the engagement. Don't ask for permission to probe a variant.
+
+When a prior run genuinely covers your current question, cite its id in your
+output — but first fetch the preview with `./scripts/assess.py get-command-run <id>`
+and confirm the stored evidence actually answers that question. A row with
+`success=true` only means `return_code=0`, not that the output is on-point.
+Open the preview to rule out soft-failure pages, WAF intercepts, and
+rate-limited stubs that exit cleanly. Citing an id you never looked at is
+worse than running a fresh probe.
+
+Full coverage-vs-duplicate decision table and output-field interpretation:
+`agent/references/runtime-guides/command-history-auditing.md`.
+
+---
+
 ## 3. Use Skills and References — They Are the Methodology
 
-**Step 1 — Check `agent/SKILL.md`** when you begin specialist work. It lists every available
-skill with "Use when:" criteria. Load the most relevant skill before improvising.
+**Step 1 — Read `agent/SKILL.md`** before starting any specialist work. It lists every available
+skill with "Use when:" criteria. Select and load the matching skill before doing anything else.
 
-**Step 2 — Check `agent/references/INDEX.md`** when the skill alone does not cover the target
-well enough or when you need payloads, OWASP checklists, or tool guidance.
+**Step 2 — Read `agent/references/INDEX.md`** after loading the skill. Identify the paired
+payload files, tool cheatsheets, and OWASP checklists that apply to your task and load them.
+
+**Do not begin target-facing work until both reads are complete.** Improvising a technique that
+already exists in the skill/reference set wastes tokens, produces inconsistent results, and
+misses methodology that the skill encodes (e.g., mitmproxy setup, payload libraries, tool flags).
 
 **References are not a fallback.** The `references/` library contains:
 - `payloads/` — 20 copy-pasteable attack payload files per bug class
@@ -82,7 +166,7 @@ well enough or when you need payloads, OWASP checklists, or tool guidance.
 When a skill's "Extended Resources" section lists reference files, those are required reading
 for that test class — not optional supplemental material.
 
-Only improvise after confirming the e erence set is genuinely insufficient.
+Only improvise after confirming the reference set is genuinely insufficient.
 
 ---
 
@@ -119,7 +203,7 @@ Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous
 
 If your CVSS score does not fall within the matching severity range, adjust one or the other before recording.
 
-**Deduplication:** Before recording, query existing findings via `assess.py fetch report-findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
+**Deduplication:** Before recording, query existing findings via `assess.py fetch findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
 
 Record every finding with:
 ```
@@ -147,6 +231,17 @@ Do not invent lifecycle fields from memory — `record-finding` fills the initia
 
 This keeps CVSS queryable from the API and gives report-writer structured data to format.
 
+When a finding is only reportable as part of a chain, keep it in the same finding lifecycle and
+set chain metadata in `details` during `record-finding` or `update-finding`:
+```json
+"details": {
+  "chain_required": true,
+  "chain_rationale": "This primitive becomes meaningful only after pivoting into the admin export flow.",
+  "required_followup": ["Test sibling privileged write routes", "Attempt authenticated export with stolen token"]
+}
+```
+Use this instead of inventing a special workflow status for chain-only findings.
+
 **The `notes` field must contain replayable commands** — not prose descriptions. Instead of
 "Login to phpMyAdmin with blank password," write the actual command: curl with headers, cookies,
 and POST body; sqlmap with exact flags; ysoserial with gadget chain and target; or whatever tool
@@ -170,8 +265,6 @@ When your output includes `#### Surface Candidates`, these must be synced by the
 Use only the supported `record-surface` types: `account_recovery`, `api_documentation`,
 `auth_entry`, `dynamic_render`, `file_handling`, `object_reference`, `privileged_write`,
 `workflow_token`. Do not invent local taxonomy labels.
-
-Do not patch `surfaces.jsonl` by hand.
 
 ---
 

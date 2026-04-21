@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   CodeAnalysisResult,
@@ -86,6 +86,91 @@ function phaseState(phase: PhaseKey, current: PhaseKey): "completed" | "active" 
   return "pending";
 }
 
+// ── Search tokenizer ────────────────────────────────────
+
+const SCOPES = [
+  "disposition",
+  "confidence",
+  "status",
+  "workflow",
+  "cwe",
+  "agent",
+  "slot",
+  "file",
+  "function",
+] as const;
+type Scope = (typeof SCOPES)[number];
+
+type ParsedQuery = {
+  tokens: { scope: Scope; value: string }[];
+  freeTerms: string[];
+};
+
+function parseQuery(q: string): ParsedQuery {
+  const tokens: ParsedQuery["tokens"] = [];
+  const freeTerms: string[] = [];
+  const re = /(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(q || "")) !== null) {
+    const tok = m[1];
+    const idx = tok.indexOf(":");
+    if (idx > 0) {
+      const scope = tok.slice(0, idx).toLowerCase();
+      if ((SCOPES as readonly string[]).includes(scope)) {
+        tokens.push({ scope: scope as Scope, value: tok.slice(idx + 1).toLowerCase() });
+        continue;
+      }
+    }
+    freeTerms.push(tok.toLowerCase());
+  }
+  return { tokens, freeTerms };
+}
+
+function buildCorpus(r: CodeAnalysisResult): string {
+  return [
+    r.function_name,
+    r.file_path ?? "",
+    r.hypothesis,
+    r.evidence,
+    r.notes,
+    r.agent_name,
+    r.finding_slug,
+    r.cwe_id,
+    r.slot_type,
+    r.disposition,
+    r.confidence,
+    r.finding_workflow_status ?? "",
+    r.finding_verification_state ?? "",
+    r.finding_verification_disposition ?? "",
+  ]
+    .filter(Boolean)
+    .join(" \n ")
+    .toLowerCase();
+}
+
+// ── Icons ───────────────────────────────────────────────
+
+const IconSearch = () => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className="search-icon"
+  >
+    <circle cx={11} cy={11} r={7} />
+    <path d="M21 21l-4.3-4.3" />
+  </svg>
+);
+
+const IconClose = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+    <path d="M6 6l12 12M18 6L6 18" />
+  </svg>
+);
+
 // ── Main component ──────────────────────────────────────
 
 type CodeAnalysisTabProps = {
@@ -97,6 +182,7 @@ type CodeAnalysisTabProps = {
 };
 
 const DISPOSITION_ORDER = ["finding", "suspicious", "needs_context", "clean"];
+const CONFIDENCE_ORDER = ["high", "medium", "low"];
 
 export function CodeAnalysisTab({
   repos,
@@ -108,22 +194,108 @@ export function CodeAnalysisTab({
   const currentPhase = resolvePhase(repos, queueStats, coverage, results);
   const [expandedModules, setExpandedModules] = useState<Set<number>>(new Set());
   const [expandedResults, setExpandedResults] = useState<Set<number>>(new Set());
-  const [resultFilter, setResultFilter] = useState<string>("all");
   const [resultPage, setResultPage] = useState(0);
+  const [query, setQuery] = useState("");
+  const [dispositionFilters, setDispositionFilters] = useState<Set<string>>(new Set());
+  const [confidenceFilters, setConfidenceFilters] = useState<Set<string>>(new Set());
+  const [workflowFilters, setWorkflowFilters] = useState<Set<string>>(new Set());
+  const searchRef = useRef<HTMLInputElement | null>(null);
+
+  // Pre-compute per-result corpus once
+  const corpora = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const r of results) map.set(r.id, buildCorpus(r));
+    return map;
+  }, [results]);
+
+  const parsedQuery = useMemo(() => parseQuery(query), [query]);
+
+  const matchesQuery = useCallback(
+    (r: CodeAnalysisResult, parsed: ParsedQuery): boolean => {
+      for (const tok of parsed.tokens) {
+        const v = tok.value;
+        switch (tok.scope) {
+          case "disposition":
+            if ((r.disposition || "").toLowerCase() !== v) return false;
+            break;
+          case "confidence":
+            if ((r.confidence || "").toLowerCase() !== v) return false;
+            break;
+          case "status":
+          case "workflow":
+            if ((r.finding_workflow_status || "").toLowerCase() !== v) return false;
+            break;
+          case "cwe":
+            if (!(r.cwe_id || "").toLowerCase().includes(v)) return false;
+            break;
+          case "agent":
+            if (!(r.agent_name || "").toLowerCase().includes(v)) return false;
+            break;
+          case "slot":
+            if (!(r.slot_type || "").toLowerCase().includes(v)) return false;
+            break;
+          case "file":
+            if (!(r.file_path || "").toLowerCase().includes(v)) return false;
+            break;
+          case "function":
+            if (!(r.function_name || "").toLowerCase().includes(v)) return false;
+            break;
+        }
+      }
+      if (parsed.freeTerms.length) {
+        const hay = corpora.get(r.id) || "";
+        for (const t of parsed.freeTerms) if (!hay.includes(t)) return false;
+      }
+      return true;
+    },
+    [corpora],
+  );
+
+  // Counts computed from the full results set (stable chip labels)
+  const dispositionCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const r of results) c[r.disposition] = (c[r.disposition] ?? 0) + 1;
+    return c;
+  }, [results]);
+
+  const confidenceCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const r of results) {
+      if (r.confidence) c[r.confidence] = (c[r.confidence] ?? 0) + 1;
+    }
+    return c;
+  }, [results]);
+
+  const workflowCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const r of results) {
+      const w = r.finding_workflow_status;
+      if (w) c[w] = (c[w] ?? 0) + 1;
+    }
+    return c;
+  }, [results]);
 
   const filteredResults = useMemo(() => {
-    const sorted = [...results].sort((a, b) => {
+    const list = results.filter((r) => {
+      if (dispositionFilters.size && !dispositionFilters.has(r.disposition)) return false;
+      if (confidenceFilters.size && !confidenceFilters.has(r.confidence)) return false;
+      if (workflowFilters.size) {
+        const w = r.finding_workflow_status || "";
+        if (!workflowFilters.has(w)) return false;
+      }
+      if (!matchesQuery(r, parsedQuery)) return false;
+      return true;
+    });
+    list.sort((a, b) => {
       const ai = DISPOSITION_ORDER.indexOf(a.disposition);
       const bi = DISPOSITION_ORDER.indexOf(b.disposition);
-      // Unknown dispositions sort after all known ones
       const da = ai === -1 ? DISPOSITION_ORDER.length : ai;
       const db = bi === -1 ? DISPOSITION_ORDER.length : bi;
       if (da !== db) return da - db;
       return b.id - a.id;
     });
-    if (resultFilter === "all") return sorted;
-    return sorted.filter((r) => r.disposition === resultFilter);
-  }, [results, resultFilter]);
+    return list;
+  }, [results, dispositionFilters, confidenceFilters, workflowFilters, parsedQuery, matchesQuery]);
 
   const PAGE_SIZE = 25;
   const totalResultPages = Math.max(1, Math.ceil(filteredResults.length / PAGE_SIZE));
@@ -131,19 +303,50 @@ export function CodeAnalysisTab({
 
   useEffect(() => {
     setResultPage(0);
-  }, [resultFilter]);
+  }, [dispositionFilters, confidenceFilters, workflowFilters, query]);
 
   useEffect(() => {
     setResultPage((current) => Math.min(current, totalResultPages - 1));
   }, [totalResultPages]);
 
-  const dispositionCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const r of results) {
-      counts[r.disposition] = (counts[r.disposition] ?? 0) + 1;
-    }
-    return counts;
-  }, [results]);
+  // Keyboard: "/" to focus, "Esc" to blur
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = (target?.tagName || "").toLowerCase();
+      const isTyping = tag === "input" || tag === "textarea";
+      if (!isTyping && e.key === "/") {
+        e.preventDefault();
+        searchRef.current?.focus();
+        return;
+      }
+      if (e.key === "Escape" && isTyping && document.activeElement === searchRef.current) {
+        searchRef.current?.blur();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const toggle = (set: Set<string>, setter: (s: Set<string>) => void, val: string) => {
+    const next = new Set(set);
+    if (next.has(val)) next.delete(val);
+    else next.add(val);
+    setter(next);
+  };
+
+  const clearAll = () => {
+    setDispositionFilters(new Set());
+    setConfidenceFilters(new Set());
+    setWorkflowFilters(new Set());
+    setQuery("");
+  };
+
+  const activeFilterCount =
+    dispositionFilters.size +
+    confidenceFilters.size +
+    workflowFilters.size +
+    (query ? 1 : 0);
 
   const hasData = repos.length > 0;
 
@@ -411,99 +614,177 @@ export function CodeAnalysisTab({
         <section className="panel">
           <div className="panel-header">
             <h2>Analysis Results</h2>
-            <span className="meta-text">{results.length} results</span>
+            <span className="meta-text">
+              {filteredResults.length} of {results.length} results
+            </span>
           </div>
 
-          {/* Filter chips */}
-          <div className="filter-bar" style={{ marginBottom: "12px" }}>
-            <span className="filter-label">Disposition</span>
-            <div className="filter-group">
-              <button
-                className={`filter-chip ${resultFilter === "all" ? "filter-active" : ""}`}
-                onClick={() => { setResultFilter("all"); setResultPage(0); }}
-              >
-                All <span className="filter-count">{results.length}</span>
-              </button>
-              {DISPOSITION_ORDER.map((disp) => {
-                const count = dispositionCounts[disp] ?? 0;
-                if (count === 0) return null;
-                return (
-                  <button
-                    key={disp}
-                    className={`filter-chip ${resultFilter === disp ? "filter-active" : ""}`}
-                    onClick={() => { setResultFilter(disp); setResultPage(0); }}
-                  >
-                    {disp} <span className="filter-count">{count}</span>
+          {/* Toolbar + filter chips (reuses FindingsTab redesign styles) */}
+          <div className="findings-redesign">
+            <div className="panel findings-toolbar-panel">
+              <div className="toolbar">
+                <div className="search-wrap">
+                  <IconSearch />
+                  <input
+                    ref={searchRef}
+                    className="search-input"
+                    placeholder="Search function, file, evidence… (try disposition:finding confidence:high cwe:79)"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                  />
+                  {query && (
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      onClick={() => setQuery("")}
+                      title="Clear"
+                      style={{ width: 22, height: 22 }}
+                    >
+                      <IconClose />
+                    </button>
+                  )}
+                  <span className="search-kbd">/</span>
+                </div>
+              </div>
+              <div className="filter-row">
+                <div className="filter-group">
+                  <span className="filter-label">Disposition</span>
+                  {DISPOSITION_ORDER.filter((d) => (dispositionCounts[d] ?? 0) > 0).map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      className={`filter-chip ${dispositionFilters.has(d) ? "is-active" : ""}`}
+                      onClick={() => toggle(dispositionFilters, setDispositionFilters, d)}
+                    >
+                      {d.replace(/_/g, " ")}
+                      <span className="filter-count">{dispositionCounts[d]}</span>
+                    </button>
+                  ))}
+                </div>
+                {Object.keys(confidenceCounts).length > 0 && (
+                  <div className="filter-group">
+                    <span className="filter-label">Confidence</span>
+                    {CONFIDENCE_ORDER.filter((c) => (confidenceCounts[c] ?? 0) > 0).map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        className={`filter-chip ${confidenceFilters.has(c) ? "is-active" : ""}`}
+                        onClick={() => toggle(confidenceFilters, setConfidenceFilters, c)}
+                      >
+                        {c}
+                        <span className="filter-count">{confidenceCounts[c]}</span>
+                      </button>
+                    ))}
+                    {/* Any non-standard confidence values */}
+                    {Object.keys(confidenceCounts)
+                      .filter((c) => !CONFIDENCE_ORDER.includes(c))
+                      .map((c) => (
+                        <button
+                          key={c}
+                          type="button"
+                          className={`filter-chip ${confidenceFilters.has(c) ? "is-active" : ""}`}
+                          onClick={() => toggle(confidenceFilters, setConfidenceFilters, c)}
+                        >
+                          {c}
+                          <span className="filter-count">{confidenceCounts[c]}</span>
+                        </button>
+                      ))}
+                  </div>
+                )}
+                {Object.keys(workflowCounts).length > 0 && (
+                  <div className="filter-group">
+                    <span className="filter-label">Status</span>
+                    {Object.keys(workflowCounts).map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        className={`filter-chip ${workflowFilters.has(s) ? "is-active" : ""}`}
+                        onClick={() => toggle(workflowFilters, setWorkflowFilters, s)}
+                      >
+                        {s.replace(/_/g, " ")}
+                        <span className="filter-count">{workflowCounts[s]}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {activeFilterCount > 0 && (
+                  <button type="button" className="filter-clear" onClick={clearAll}>
+                    Clear all ({activeFilterCount})
                   </button>
-                );
-              })}
+                )}
+              </div>
             </div>
           </div>
 
           {/* Results list */}
           <div className="code-results-list">
-            {pageResults.map((r) => {
-              const isExpanded = expandedResults.has(r.id);
-              const truncateAt = 200;
-              const needsTruncation = (r.evidence?.length ?? 0) > truncateAt || (r.hypothesis?.length ?? 0) > truncateAt;
-              return (
-                <article
-                  key={r.id}
-                  className={`code-result-row ${r.finding_workflow_status === "false_positive" ? "code-result-row-suppressed" : ""}`}
-                  style={needsTruncation ? { cursor: "pointer" } : undefined}
-                  onClick={needsTruncation ? () => {
-                    setExpandedResults((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(r.id)) next.delete(r.id);
-                      else next.add(r.id);
-                      return next;
-                    });
-                  } : undefined}
-                >
-                  <div className="code-result-header">
-                    <span className={`badge code-disposition-${r.disposition}`}>{r.disposition}</span>
-                    <strong className="mono-text">{r.function_name || (r.file_path ? r.file_path.split("/").pop() : `file #${r.file_id}`)}</strong>
-                    {r.cwe_id && <span className="badge">{r.cwe_id}</span>}
-                    {r.slot_type && <span className="badge">{r.slot_type}</span>}
-                    <span className={`badge code-confidence-${r.confidence}`}>{r.confidence} conf.</span>
-                    <span className="meta-text">{r.agent_name}</span>
-                  </div>
-                  {r.file_path && (
-                    <div className="code-result-detail">
-                      <span className="code-result-label">File:</span>
-                      <span className="mono-text">{r.file_path}</span>
+            {pageResults.length === 0 ? (
+              <p className="meta-text">No results match the current filters.</p>
+            ) : (
+              pageResults.map((r) => {
+                const isExpanded = expandedResults.has(r.id);
+                const truncateAt = 200;
+                const needsTruncation =
+                  (r.evidence?.length ?? 0) > truncateAt || (r.hypothesis?.length ?? 0) > truncateAt;
+                return (
+                  <article
+                    key={r.id}
+                    className={`code-result-row ${r.finding_workflow_status === "false_positive" ? "code-result-row-suppressed" : ""}`}
+                    style={needsTruncation ? { cursor: "pointer" } : undefined}
+                    onClick={needsTruncation ? () => {
+                      setExpandedResults((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(r.id)) next.delete(r.id);
+                        else next.add(r.id);
+                        return next;
+                      });
+                    } : undefined}
+                  >
+                    <div className="code-result-header">
+                      <span className={`badge code-disposition-${r.disposition}`}>{r.disposition}</span>
+                      <strong className="mono-text">{r.function_name || (r.file_path ? r.file_path.split("/").pop() : `file #${r.file_id}`)}</strong>
+                      {r.cwe_id && <span className="badge">{r.cwe_id}</span>}
+                      {r.slot_type && <span className="badge">{r.slot_type}</span>}
+                      <span className={`badge code-confidence-${r.confidence}`}>{r.confidence} conf.</span>
+                      <span className="meta-text">{r.agent_name}</span>
                     </div>
-                  )}
-                  {r.hypothesis && (
-                    <div className="code-result-detail" style={isExpanded ? { whiteSpace: "pre-wrap" } : undefined}>
-                      <span className="code-result-label">Hypothesis:</span>
-                      <span>{!isExpanded && r.hypothesis.length > truncateAt ? `${r.hypothesis.slice(0, truncateAt)}...` : r.hypothesis}</span>
-                    </div>
-                  )}
-                  {r.evidence && (
-                    <div className="code-result-detail" style={isExpanded ? { whiteSpace: "pre-wrap" } : undefined}>
-                      <span className="code-result-label">Evidence:</span>
-                      <span>{!isExpanded && r.evidence.length > truncateAt ? `${r.evidence.slice(0, truncateAt)}...` : r.evidence}</span>
-                    </div>
-                  )}
-                  {r.finding_slug && (
-                    <div className="code-result-detail">
-                      <span className="code-result-label">Finding:</span>
-                      <span className="mono-text">{r.finding_slug}</span>
-                      {r.finding_workflow_status && (
-                        <span className={`badge status-${r.finding_workflow_status}`}>{r.finding_workflow_status}</span>
-                      )}
-                      {r.finding_verification_disposition && r.finding_verification_disposition !== "none" && (
-                        <span className={`badge status-${r.finding_verification_disposition}`}>{r.finding_verification_disposition}</span>
-                      )}
-                      {r.finding_verification_state === "disputed" && (
-                        <span className="badge status-disputed">disputed</span>
-                      )}
-                    </div>
-                  )}
-                </article>
-              );
-            })}
+                    {r.file_path && (
+                      <div className="code-result-detail">
+                        <span className="code-result-label">File:</span>
+                        <span className="mono-text">{r.file_path}</span>
+                      </div>
+                    )}
+                    {r.hypothesis && (
+                      <div className="code-result-detail" style={isExpanded ? { whiteSpace: "pre-wrap" } : undefined}>
+                        <span className="code-result-label">Hypothesis:</span>
+                        <span>{!isExpanded && r.hypothesis.length > truncateAt ? `${r.hypothesis.slice(0, truncateAt)}...` : r.hypothesis}</span>
+                      </div>
+                    )}
+                    {r.evidence && (
+                      <div className="code-result-detail" style={isExpanded ? { whiteSpace: "pre-wrap" } : undefined}>
+                        <span className="code-result-label">Evidence:</span>
+                        <span>{!isExpanded && r.evidence.length > truncateAt ? `${r.evidence.slice(0, truncateAt)}...` : r.evidence}</span>
+                      </div>
+                    )}
+                    {r.finding_slug && (
+                      <div className="code-result-detail">
+                        <span className="code-result-label">Finding:</span>
+                        <span className="mono-text">{r.finding_slug}</span>
+                        {r.finding_workflow_status && (
+                          <span className={`badge status-${r.finding_workflow_status}`}>{r.finding_workflow_status}</span>
+                        )}
+                        {r.finding_verification_disposition && r.finding_verification_disposition !== "none" && (
+                          <span className={`badge status-${r.finding_verification_disposition}`}>{r.finding_verification_disposition}</span>
+                        )}
+                        {r.finding_verification_state === "disputed" && (
+                          <span className="badge status-disputed">disputed</span>
+                        )}
+                      </div>
+                    )}
+                  </article>
+                );
+              })
+            )}
           </div>
 
           {/* Pagination */}

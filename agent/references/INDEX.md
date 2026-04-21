@@ -103,10 +103,11 @@ Active Directory attack techniques. Used by: exploit-developer, operator.
 
 | File | Techniques |
 |------|-----------|
-| `active-directory/kerberos-attacks.md` | Kerberoasting, AS-REP roasting, Golden/Silver Tickets, delegation abuse, RBCD |
+| `active-directory/kerberos-attacks.md` | Kerberoasting, AS-REP roasting, Golden/Silver Tickets, delegation abuse, RBCD, detection via Event ID 4769, hashcat modes |
 | `active-directory/ad-enumeration.md` | BloodHound, PowerView, AD module, ACL/ACE abuse |
-| `active-directory/ad-persistence.md` | DCSync, DCShadow, AdminSDHolder, shadow credentials, trust abuse |
+| `active-directory/ad-persistence.md` | DCSync, DCShadow, AdminSDHolder, shadow credentials, trust abuse, DCSync detection via replication GUIDs |
 | `active-directory/adcs-attacks.md` | Certificate template abuse (ESC1), PetitPotam + NTLM relay, Certify/Certipy |
+| `active-directory/ad-detection.md` | AD attack detection: Pass-the-Ticket, Pass-the-Hash, Golden Ticket, Kerberoasting, DCSync — Event IDs, Splunk queries, Sigma rules |
 
 ## payloads/ — Attack Payload Library (from PayloadsAllTheThings)
 
@@ -134,11 +135,13 @@ Copy-pasteable payloads organized by attack type. Used by: exploit-developer, vu
 | `payloads/open-redirect-payloads.md` | URL parsing confusion, protocol-relative, unicode normalization |
 | `payloads/business-logic-payloads.md` | Negative quantity, coupon abuse, payment bypass, mass assignment |
 | `payloads/info-disclosure-probes.md` | Standard endpoints checklist (/metrics, /.env, /actuator, cloud metadata) |
+| `payloads/rate-limit-bypass-payloads.md` | IP spoofing headers by CDN, path variation, account rotation, parameter pollution |
+| `payloads/yara-cobalt-strike.md` | YARA rules for Cobalt Strike beacon config, default cert, shellcode stager, XOR keys |
 
 ## code-vuln-patterns/ — SAST-Surviving Vulnerability Patterns
 
 Source code vulnerability patterns that require multi-function reasoning and semantic understanding.
-Used by: code-vuln-hunter, code-variant-hunter, code-vuln-verifier.
+Used by: code-vuln-hunter, code-variant-hunter, code-vuln-verifier, code-fuzz-engineer.
 
 These are NOT traditional SAST patterns. They focus on bugs that survive CodeQL, Semgrep, and OSS-Fuzz —
 multi-function chains, combinatorial arithmetic, state machine bugs, and incomplete patches.
@@ -168,6 +171,7 @@ multi-function chains, combinatorial arithmetic, state machine bugs, and incompl
 | `code-vuln-patterns/web-app-injection.md` | ORM bypass, second-order injection, template injection, deserialization in web contexts, NoSQL injection | Python, JS, Java, Ruby |
 | `code-vuln-patterns/web-app-data-exposure.md` | IDOR in ORM queries, mass assignment, serializer over-exposure, GraphQL field auth, bulk endpoints | Python, JS, Java, Ruby, Go |
 | `code-vuln-patterns/ai-ml-security.md` | Prompt injection, MCP tool poisoning, RAG poisoning, unsafe tool execution, cross-user context leakage | Python, JS, Java |
+| `code-vuln-patterns/fuzz-harness-patterns.md` | libFuzzer/AFL++ harness templates, sanitizer flag reference, seed corpus construction, harness antipatterns, crash triage checklist | C/C++ |
 
 ## tools/ — CLI Tool Cheatsheets
 
@@ -186,6 +190,8 @@ Quick-reference per tool, organized by usage phase.
 | `tools/recon/puredns.md` | Active DNS brute-force with wildcard filtering |
 | `tools/recon/dnsx.md` | Bulk DNS resolution and record enumeration |
 | `tools/recon/gau.md` | Historical URL discovery (Wayback, OTX, Common Crawl, URLScan) |
+| `tools/recon/gf.md` | URL parameter-pattern classifier (xss, ssrf, redirect, idor, sqli, lfi, debug) with 1ndianl33t patterns |
+| `tools/recon/trufflehog.md` | Secret scanner (filesystem mode, 800+ detectors, v3 positional-path syntax, `--no-verification` default) |
 
 ### tools/fuzzing/ — Used by: fuzzer, recon-specialist
 
@@ -231,6 +237,16 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 | File | Purpose |
 |------|---------|
 | `runtime-guides/engagement-methodology.md` | Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase |
-| `runtime-guides/subagent-registry.md` | Registry schema, resume-vs-dispatch decision tree, and examples for `agent-registry.json` |
+| `runtime-guides/subagent-registry.md` | `agent-registry.json` schema and its role as the engagement audit trail; how to hand off state between dispatches by carrying prior output and durable-state pointers forward in the new dispatch prompt |
+| `runtime-guides/command-history-auditing.md` | How to read `assess.py list-command-runs` as a coverage map — use it to pick variants that haven't been probed, not to gate-keep reruns; includes field-interpretation guide for retention/suppression |
 | `handoff-protocols.md` | Agent-to-agent handoff rules and expected downstream actions |
 | `subdomain-enumeration.md` | Subdomain enumeration (when `*.domain` in hosts), prioritization, and sliding-window execution rules |
+
+## reporting/ — Disclosure & Reporting Formats
+
+| File | Purpose |
+|------|---------|
+| `disclosure-email-format.md` | Email disclosure format for vendor security teams: structure, rules, anti-patterns |
+| `bugbounty-submission-format.md` | Bug bounty submission format for Bugcrowd/HackerOne: per-finding submissions with POC, VRT, evidence |
+| `examples/disclosure-email-fast-import.txt` | Example: multi-sub-issue disclosure with control test and CI/CD framing |
+| `examples/bugbounty-submission-ldap-injection.md` | Example: LDAP injection bug bounty submission with working POC |

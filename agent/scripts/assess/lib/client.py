@@ -42,6 +42,10 @@ class AssessmentClient:
         return f"{self._path_prefix}/engagements/{self.engagement_key}/assessment"
 
     @property
+    def _engagement_prefix(self) -> str:
+        return f"{self._path_prefix}/engagements/{self.engagement_key}"
+
+    @property
     def _events_path(self) -> str:
         return f"{self._path_prefix}/engagements/{self.engagement_key}/events"
 
@@ -138,6 +142,27 @@ class AssessmentClient:
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
         _, resp_body = self._request("PATCH", path, body=body)
         return json.loads(resp_body)
+
+    def get_engagement(self, endpoint: str, query: str = "") -> Any:
+        """GET /engagements/{key}/{endpoint} — non-assessment scoped (intel, activity)."""
+        path = f"{self._engagement_prefix}/{endpoint}"
+        if query:
+            path = f"{path}?{query}"
+        _, body = self._request("GET", path)
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError:
+            return body
+
+    def post_engagement(self, endpoint: str, payload: dict) -> dict:
+        """POST /engagements/{key}/{endpoint} — non-assessment scoped (intel, activity)."""
+        path = f"{self._engagement_prefix}/{endpoint}"
+        body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+        _, resp_body = self._request("POST", path, body=body)
+        try:
+            return json.loads(resp_body)
+        except json.JSONDecodeError:
+            return {"raw": resp_body}
 
     def post_event(self, payload: dict) -> dict | None:
         """POST /events. Fire-and-forget: warn on failure, never raise."""

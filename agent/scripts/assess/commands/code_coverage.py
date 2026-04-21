@@ -117,8 +117,6 @@ def _run_cwe_matrix(cfg, args) -> None:
 
 def _print_cwe_matrix(files: list[dict]) -> None:
     """Print the per-file CWE effort matrix table."""
-    # Collect all vuln families across files.
-    # First: collect from applicable_families (the ground truth of what SHOULD be tested)
     all_families: list[str] = []
     seen: set[str] = set()
     for f in files:
@@ -126,7 +124,6 @@ def _print_cwe_matrix(files: list[dict]) -> None:
             if fam and fam not in seen:
                 all_families.append(fam)
                 seen.add(fam)
-    # Second: add any reported families not already in the set (covers ad-hoc testing)
     for f in files:
         for cwe in f.get('cwe_coverage', []):
             fam = cwe.get('family', '')
@@ -138,14 +135,13 @@ def _print_cwe_matrix(files: list[dict]) -> None:
         print("NOTE: No CWE effort data found in coverage response.\n")
         return
 
-    # Truncate family names for column headers (max 11 chars)
     col_width = 11
     headers = [fam[:col_width] for fam in all_families]
 
-    # Build header
     name_width = 28
+    struct_width = 22
     print("=== CWE Coverage Matrix ===")
-    header_line = f"{'File':<{name_width}}"
+    header_line = f"{'File':<{name_width}} {'Funcs/EP/Sinks':^{struct_width}}"
     for h in headers:
         header_line += f" | {h:^{col_width}}"
     print(header_line)
@@ -154,26 +150,29 @@ def _print_cwe_matrix(files: list[dict]) -> None:
     for f in files:
         classification = f.get('classification', '')
         file_path = f.get('file_path', f.get('file_name', '?'))
-        # Use just the filename for display
         display_name = file_path.rsplit('/', 1)[-1] if '/' in file_path else file_path
         if classification:
             abbr = classification[:4]
             display_name = f"{display_name} ({abbr})"
         display_name = display_name[:name_width]
 
-        # Build effort lookup for this file
         effort_map: dict[str, float] = {}
         for cwe in f.get('cwe_coverage', []):
             effort_map[cwe.get('family', '')] = _coerce_effort(cwe.get('effort', 0))
 
-        # Determine applicable families for this file
         applicable = f.get('applicable_families', set())
         if isinstance(applicable, list):
             applicable = set(applicable)
 
         threshold = EFFORT_THRESHOLDS.get(classification, 0)
 
-        row = f"{display_name:<{name_width}}"
+        total_funcs = f.get('total_functions', 0)
+        total_ep = f.get('total_entry_points', 0)
+        total_sinks = f.get('total_sinks', 0)
+        has_structural = total_funcs or total_ep or total_sinks
+        struct_cell = f"{total_funcs}/{total_ep}/{total_sinks}" if has_structural else "--"
+
+        row = f"{display_name:<{name_width}} {struct_cell:^{struct_width}}"
         for fam in all_families:
             if applicable and fam not in applicable:
                 cell = "--"
@@ -182,12 +181,53 @@ def _print_cwe_matrix(files: list[dict]) -> None:
                 marker = "!" if threshold > 0 and val < threshold else ""
                 cell = f"{_format_effort(val)}{marker}"
             else:
-                # Family is applicable but untested
                 cell = "0!" if threshold > 0 else "0"
             row += f" | {cell:^{col_width}}"
         print(row)
 
+    _print_structural_verification(files)
     print()
+
+
+def _print_structural_verification(files: list[dict]) -> None:
+    """Cross-check functions_analyzed against total_functions from structural index."""
+    has_structural = any(f.get('total_functions', 0) > 0 for f in files)
+    if not has_structural:
+        return
+
+    print("\n--- Structural Verification ---")
+    gaps: list[str] = []
+    for f in files:
+        total_funcs = f.get('total_functions', 0)
+        if total_funcs == 0:
+            continue
+
+        funcs_analyzed = 0
+        for cwe in f.get('cwe_coverage', []):
+            fa = cwe.get('functions_analyzed', 0)
+            try:
+                fa = int(fa)
+            except (TypeError, ValueError):
+                fa = 0
+            if fa > funcs_analyzed:
+                funcs_analyzed = fa
+
+        file_path = f.get('file_path', '?')
+        display = file_path.rsplit('/', 1)[-1] if '/' in file_path else file_path
+        classification = f.get('classification', '')
+
+        if funcs_analyzed < total_funcs:
+            pct = (funcs_analyzed / total_funcs * 100) if total_funcs > 0 else 0
+            gaps.append(
+                f"  {display} ({classification}): {funcs_analyzed}/{total_funcs} functions analyzed ({pct:.0f}%)"
+            )
+
+    if gaps:
+        print(f"Files with unanalyzed functions: {len(gaps)}")
+        for g in gaps:
+            print(g)
+    else:
+        print("All indexed files have full function coverage.")
 
 
 def _check_effort_gaps(files: list[dict]) -> bool:
