@@ -348,6 +348,13 @@ Step 4: Extract through reflected columns
 - sqlmap confirms injection → stop manual probing, proceed to exploitation depth
 - Target is cloud-hosted managed DB (RDS, Cloud SQL) → file read/OS command will fail, cap exploitation at data extraction
 
+## Escalate When
+- A syntactically invalid payload returns the same body as a valid one — errors are swallowed at a WAF/ORM layer, but boolean-blind and time-based channels are still live, switch probe style before moving on
+- Response time drifts beyond the measured network jitter baseline on a SLEEP/pg_sleep/WAITFOR payload — jitter is measured not guessed, and a clean delta warrants full boolean-blind extraction
+- The same parameter behaves differently under different encodings of the same character (URL-encoded quote, double URL-encoded, percent-encoded NUL, Unicode decomposition, backslash-escape) — frontend/backend parser disagreement is the classic filter-bypass tell
+- An OOB DNS or HTTP callback fires from a stacked-query or UNC-path payload — reproduce from a second independent payload shape before declaring, then chain to file read / xp_cmdshell where the DB supports it
+- The endpoint uses an ORM but a non-parameterized path exists (raw SQL escape hatch, LIKE with user-controlled pattern, ORDER BY / GROUP BY / column-name from input, reflective query builder), or a "generic" 500 leaks a driver / DB version / table name — those are the gaps the framework does not cover
+
 ## Extended Resources
 
 - `agent/references/payloads/sqli-payloads.md` -- UNION, blind, error-based, time-based, WAF bypass, auth bypass, OOB, stacked query payloads per database type. Use this as the payload library once you have identified the database and injection type from the decision tree above.

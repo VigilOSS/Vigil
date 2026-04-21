@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # DNS Tunneling Detection
 
+> **Kali MCP audit header:** use `X-Technique: RECON`; this skill's offensive side operates against in-scope DNS infrastructure, so `RECON` fits better than `OSINT` (which is passive external-zone lookups).
+
 ## Adversarial Context
 
 Attackers use DNS tunneling when HTTPS C2 is blocked or monitored. DNS is chosen because it is almost never blocked outbound, resolvers are usually allowed through firewalls, and most security teams only monitor HTTP/S. Detection must account for evasion: sophisticated tools use low-frequency queries, short labels, and legitimate-looking domain patterns to blend in. A detection strategy built on static thresholds (entropy > 3.5, query length > 50) will catch only the noisiest tunnels and miss everything purpose-built to evade.
@@ -346,6 +348,13 @@ index=dns earliest=-24h
 - Tier 2-3 anomalies found but all resolve to legitimate services (CDN, DKIM, SaaS) after false positive elimination → no tunneling, move on
 - No DNS logs available via Kali MCP or Splunk → cannot perform this analysis, skip skill entirely
 - Tunnel confirmed with C2 domain identified → record finding, provide domain IOC to operator for firewall blocking
+
+## Escalate When
+- A single internal host shows a sustained uplift in query volume for one domain (>3x baseline) AND the queries are predominantly TXT, NULL, CNAME, or oversized A — volume alone is noise, the record-type mix is the tunneling signature, pivot to entropy and subdomain-cardinality analysis
+- Subdomain labels under a single parent show high Shannon entropy (>3.5) OR base32/base64/hex character-class distribution across many unique labels — encoded payloads look random, run per-label entropy and character-class scoring before false-positive-eliminating
+- A domain is newly observed in the window (<30 days since first query), resolves from a cheap/free registrar, or has a single NS delegation — newly-registered tunneling infrastructure is the common pattern, pivot to WHOIS and passive-DNS for age and reputation
+- Query timing shows regular periodicity (beacon cadence of tens of seconds to minutes, low jitter) from a single source — human and CDN traffic is bursty, beacons are metronomic, run autocorrelation on inter-arrival times
+- Short TXT/NULL responses correlate in volume with outbound query volume from the same host (bidirectional byte-count roughly balanced) — one-way queries are exfiltration, balanced volumes are interactive C2, escalate severity when the pattern is interactive
 
 ## Extended Resources
 

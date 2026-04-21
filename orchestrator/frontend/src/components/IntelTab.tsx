@@ -15,6 +15,9 @@ import {
 } from "../lib/api";
 import { useResizableColumns } from "../lib/useResizableColumns";
 import { JsonTree } from "./ArtifactViewer";
+import { JsonView } from "./JsonView";
+import { useBodyScrollLock } from "../lib/modalScrollLock";
+import { NotesBody, ProvenanceBlock } from "./formatting";
 
 // ── Props ────────────────────────────────────────────────────────────
 type IntelTabProps = {
@@ -519,14 +522,54 @@ const IconExternal = () => (
     <path d="M19 14v6H4V4h6" />
   </svg>
 );
-const IconMaximize = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-    <path d="M4 9V4h5" />
-    <path d="M20 9V4h-5" />
-    <path d="M4 15v5h5" />
-    <path d="M20 15v5h-5" />
-  </svg>
-);
+// ── DetailModal ──────────────────────────────────────────────────────
+// Shared modal shell used across tabs. See CommandsTab.tsx for design
+// notes on focus trap, aria roles, and the z-index relationship with
+// the Cmd/Ctrl-K palette.
+function DetailModal({
+  children,
+  onClose,
+  titleId,
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+  titleId?: string;
+}) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    queueMicrotask(() => panelRef.current?.focus());
+  }, []);
+  useBodyScrollLock();
+  return (
+    <div
+      className="detail-modal-overlay"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      role="presentation"
+    >
+      <div
+        ref={panelRef}
+        className="detail-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+      >
+        <button
+          type="button"
+          className="detail-modal-close"
+          onClick={onClose}
+          aria-label="Close detail"
+          title="Close (Esc)"
+        >
+          <IconClose />
+        </button>
+        {children}
+      </div>
+    </div>
+  );
+}
 
 // ── Component ────────────────────────────────────────────────────────
 export function IntelTab({ engagementKey, summary }: IntelTabProps) {
@@ -561,15 +604,10 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
   const [urlLoading, setUrlLoading] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  // Drawer maximize is a layout state only — resets on selection change
-  // so opening a different record doesn't carry the maximized state.
-  // Esc still clears the selection via the keyboard handler; the
-  // top-right close-maximize icon only leaves maximized mode.
-  const [maximized, setMaximized] = useState(false);
-  useEffect(() => {
-    setMaximized(false);
-  }, [selectedId]);
+  // Detail-modal open state. See CommandsTab.tsx for design notes.
+  const [detailOpen, setDetailOpen] = useState(false);
+  const rowRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const lastFocusIdRef = useRef<string | null>(null);
 
   // Column widths for the Intel list. Separate storage key from the
   // Findings list so the two don't collide.
@@ -775,13 +813,12 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
   }, [totalPages]);
   const pageRows = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
-  // Auto-select first if nothing selected.
+  // Keep selection valid — if filters drop the currently selected row,
+  // fall through to the first filtered row. No auto-open-modal on mount.
   useEffect(() => {
-    if (!selectedId && derivedList.length > 0) {
-      setSelectedId(derivedList[0].id);
-    }
     if (selectedId && !derivedById.has(selectedId)) {
       setSelectedId(derivedList[0]?.id ?? null);
+      setDetailOpen(false);
     }
   }, [derivedList, derivedById, selectedId]);
 
@@ -792,6 +829,8 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
   filteredRef.current = filtered;
   const selectedRef = useRef(selectedId);
   selectedRef.current = selectedId;
+  const detailOpenRef = useRef(detailOpen);
+  detailOpenRef.current = detailOpen;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -800,6 +839,7 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
       const isTyping = tag === "input" || tag === "textarea";
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
+        setDetailOpen(false);
         setCmdOpen(true);
         return;
       }
@@ -811,6 +851,10 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
       if (e.key === "Escape") {
         if (isTyping) {
           searchRef.current?.blur();
+          return;
+        }
+        if (detailOpenRef.current) {
+          setDetailOpen(false);
         } else {
           setSelectedId(null);
         }
@@ -839,6 +883,10 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
         }
         const next = e.key === "k" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
         setSelectedId(list[next].id);
+      }
+      if (!isTyping && e.key === "Enter" && selectedRef.current != null) {
+        e.preventDefault();
+        setDetailOpen(true);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1144,72 +1192,80 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
         </div>
       )}
 
-      {/* List + drawer */}
-      <div
-        className={`findings-shell ${maximized && selectedDerived ? "is-maximized" : ""}`}
-      >
+      {/* List (detail renders as a centred modal below) */}
+      <div className="findings-shell">
         <section className="list-panel panel">
-          <div
-            className="list-header"
-            style={{ gridTemplateColumns: listGridTemplate }}
-          >
-            <span />
-            <span>
-              Type
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(1, e)}
-                onDoubleClick={() => resetListColumn(1)}
-              />
-            </span>
-            <span>
-              Title / subtitle
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(2, e)}
-                onDoubleClick={() => resetListColumn(2)}
-              />
-            </span>
-            <span>
-              Location
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(3, e)}
-                onDoubleClick={() => resetListColumn(3)}
-              />
-            </span>
-            <span>
-              Tags
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(4, e)}
-                onDoubleClick={() => resetListColumn(4)}
-              />
-            </span>
-            <span style={{ textAlign: "right" }}>Status</span>
-          </div>
-          <div className="list-scroll">
-            {pageRows.length === 0 ? (
-              <div className="empty">
-                {loadingAny ? "Loading intel…" : "No intel records match."}
-                <div style={{ marginTop: 10 }}>
-                  <button type="button" className="qa-btn" onClick={clearAll}>
-                    Clear filters
-                  </button>
-                </div>
-              </div>
-            ) : (
-              pageRows.map((d) => (
-                <IntelRow
-                  key={d.id}
-                  d={d}
-                  selected={selectedId === d.id}
-                  onClick={() => setSelectedId(d.id)}
-                  freeTerms={parsedQuery.freeTerms}
-                  gridTemplate={listGridTemplate}
+          <div className="list-scroll-x">
+            <div
+              className="list-header"
+              style={{ gridTemplateColumns: listGridTemplate, minWidth: "fit-content" }}
+            >
+              <span />
+              <span>
+                Type
+                <span
+                  className="col-resize-handle"
+                  onPointerDown={(e) => startListResize(1, e)}
+                  onDoubleClick={() => resetListColumn(1)}
                 />
-              ))
-            )}
+              </span>
+              <span>
+                Title / subtitle
+                <span
+                  className="col-resize-handle"
+                  onPointerDown={(e) => startListResize(2, e)}
+                  onDoubleClick={() => resetListColumn(2)}
+                />
+              </span>
+              <span>
+                Location
+                <span
+                  className="col-resize-handle"
+                  onPointerDown={(e) => startListResize(3, e)}
+                  onDoubleClick={() => resetListColumn(3)}
+                />
+              </span>
+              <span>
+                Tags
+                <span
+                  className="col-resize-handle"
+                  onPointerDown={(e) => startListResize(4, e)}
+                  onDoubleClick={() => resetListColumn(4)}
+                />
+              </span>
+              <span style={{ textAlign: "right" }}>Status</span>
+            </div>
+            <div className="list-scroll">
+              {pageRows.length === 0 ? (
+                <div className="empty">
+                  {loadingAny ? "Loading intel…" : "No intel records match."}
+                  <div style={{ marginTop: 10 }}>
+                    <button type="button" className="qa-btn" onClick={clearAll}>
+                      Clear filters
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                pageRows.map((d) => (
+                  <IntelRow
+                    key={d.id}
+                    d={d}
+                    selected={selectedId === d.id}
+                    onClick={() => {
+                      setSelectedId(d.id);
+                      lastFocusIdRef.current = d.id;
+                      setDetailOpen(true);
+                    }}
+                    freeTerms={parsedQuery.freeTerms}
+                    gridTemplate={listGridTemplate}
+                    registerRef={(id, el) => {
+                      if (el) rowRefs.current.set(id, el);
+                      else rowRefs.current.delete(id);
+                    }}
+                  />
+                ))
+              )}
+            </div>
           </div>
           <div className="list-footer">
             <span>
@@ -1247,20 +1303,31 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
             </div>
           )}
         </section>
-
-        <Drawer
-          d={selectedDerived}
-          maximized={maximized}
-          onToggleMaximize={() => setMaximized((m) => !m)}
-        />
       </div>
+
+      {detailOpen && selectedDerived && (
+        <DetailModal
+          onClose={() => {
+            setDetailOpen(false);
+            const el =
+              lastFocusIdRef.current != null
+                ? rowRefs.current.get(lastFocusIdRef.current)
+                : null;
+            queueMicrotask(() => el?.focus());
+          }}
+          titleId="intel-detail-modal-title"
+        >
+          <Drawer d={selectedDerived} titleId="intel-detail-modal-title" />
+        </DetailModal>
+      )}
 
       <div className="findings-shortcuts">
         <span><code>/</code> focus search</span>
         <span><code>⌘K</code> jump to record</span>
         <span><code>j / k</code> move</span>
         <span><code>[ / ]</code> prev / next</span>
-        <span><code>Esc</code> close drawer</span>
+        <span><code>Enter</code> open detail</span>
+        <span><code>Esc</code> close detail</span>
       </div>
 
       {cmdOpen && (
@@ -1268,7 +1335,9 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
           derivedList={derivedList}
           onSelect={(id) => {
             setSelectedId(id);
+            lastFocusIdRef.current = id;
             setCmdOpen(false);
+            setDetailOpen(true);
           }}
           onClose={() => setCmdOpen(false)}
         />
@@ -1312,12 +1381,14 @@ function IntelRow({
   onClick,
   freeTerms,
   gridTemplate,
+  registerRef,
 }: {
   d: Derived;
   selected: boolean;
   onClick: () => void;
   freeTerms: string[];
   gridTemplate?: string;
+  registerRef?: (id: string, el: HTMLButtonElement | null) => void;
 }) {
   const isCveWithSev = d.entity === "cve" && d.sev != null;
   const barClass = isCveWithSev ? `sevbar-${d.sev}` : `ibar-${d.entity}`;
@@ -1328,7 +1399,8 @@ function IntelRow({
       className={`frow ${selected ? "is-selected" : ""}`}
       onClick={onClick}
       data-id={d.id}
-      style={gridTemplate ? { gridTemplateColumns: gridTemplate } : undefined}
+      ref={(el) => registerRef?.(d.id, el)}
+      style={gridTemplate ? { gridTemplateColumns: gridTemplate, minWidth: "fit-content" } : { minWidth: "fit-content" }}
     >
       <span className={`frow-sevbar ${barClass}`} />
       <span className={`frow-sev ${pillClass}`}>{d.entityLabel}</span>
@@ -1370,31 +1442,17 @@ function IntelRow({
 
 // ── Drawer ───────────────────────────────────────────────────────────
 type DrawerProps = {
-  d: Derived | null;
-  maximized: boolean;
-  onToggleMaximize: () => void;
+  d: Derived;
+  titleId?: string;
 };
 
 type TabId = "overview" | "references" | "provenance" | "raw";
 
-function Drawer({ d, maximized, onToggleMaximize }: DrawerProps) {
+function Drawer({ d, titleId }: DrawerProps) {
   const [tab, setTab] = useState<TabId>("overview");
   useEffect(() => {
     setTab("overview");
   }, [d?.id]);
-
-  if (!d) {
-    return (
-      <aside className="drawer-panel panel">
-        <div className="empty" style={{ padding: "60px 20px" }}>
-          <p style={{ fontSize: "0.9rem", margin: 0 }}>Select a record to see details.</p>
-          <p style={{ fontSize: "0.78rem", color: "var(--muted)", marginTop: 10 }}>
-            Tip: press <code>⌘K</code> or <code>/</code> to search.
-          </p>
-        </div>
-      </aside>
-    );
-  }
 
   const provenance = (d.raw.provenance as Record<string, unknown>) || {};
   const hasProvenance = Object.keys(provenance).length > 0;
@@ -1437,25 +1495,10 @@ function Drawer({ d, maximized, onToggleMaximize }: DrawerProps) {
               id
             </button>
           </div>
-          <div className="drawer-nav">
-            {/*
-              Prev / next / close were removed: keyboard shortcuts
-              ( `[`, `]`, `Esc` ) already cover that. Maximize expands
-              the drawer over the list panel; its close-maximize icon
-              only un-maximizes — Esc still deselects.
-            */}
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={onToggleMaximize}
-              title={maximized ? "Restore drawer" : "Maximize drawer"}
-              aria-pressed={maximized}
-            >
-              {maximized ? <IconClose /> : <IconMaximize />}
-            </button>
-          </div>
+          {/* Maximize retired with the move to a centred modal. The
+              modal's own × close button handles dismissal. */}
         </div>
-        <h2 className="drawer-title">{d.title}</h2>
+        <h2 id={titleId} className="drawer-title">{d.title}</h2>
         <div className="hero-meta">
           <span className={`hero-sev ${heroPillClass}`}>
             <span className="sev-dot" style={{ background: heroDotColor }} />
@@ -1684,7 +1727,7 @@ function OverviewPane({ d }: { d: Derived }) {
       {bodyMarkdown && (
         <div className="section">
           <p className="section-title">Body</p>
-          <pre className="pre">{bodyMarkdown}</pre>
+          <NotesBody text={bodyMarkdown} />
         </div>
       )}
       {additional.length > 0 && (
@@ -1713,13 +1756,19 @@ function ReferencesPane({ d }: { d: Derived }) {
   return (
     <>
       {tags.length > 0 && (
-        <div className="section">
-          <p className="section-title">Tags <span className="count">{tags.length}</span></p>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+        <div className="section inline-row">
+          <p className="section-title section-title--inline">Tags</p>
+          <div className="tag-row tag-row--inline">
             {tags.map((t, i) => (
               <span key={`${i}-${t}`} className="tag">{t}</span>
             ))}
           </div>
+        </div>
+      )}
+      {notes && (
+        <div className="section">
+          <p className="section-title">Notes</p>
+          <NotesBody text={notes} />
         </div>
       )}
       {url && (
@@ -1736,12 +1785,6 @@ function ReferencesPane({ d }: { d: Derived }) {
           </ul>
         </div>
       )}
-      {notes && (
-        <div className="section">
-          <p className="section-title">Notes</p>
-          <pre className="pre">{notes}</pre>
-        </div>
-      )}
     </>
   );
 }
@@ -1750,30 +1793,24 @@ function ProvenancePane({ d }: { d: Derived }) {
   const prov = (d.raw.provenance as Record<string, unknown>) || {};
   if (Object.keys(prov).length === 0)
     return <p className="empty">No provenance recorded.</p>;
+  const extras = Object.entries(prov).filter(
+    ([k]) =>
+      !["agent_name", "captured_at", "artifact_ref", "evidence_quote"].includes(k),
+  );
   return (
     <div className="section">
       <p className="section-title">Provenance</p>
-      <div className="kv-grid">
-        <KV k="Agent" v={prov.agent_name} mono />
-        <KV k="Captured" v={prov.captured_at} mono />
-        <KV k="Artifact" v={prov.artifact_ref} mono />
-      </div>
-      {typeof prov.evidence_quote === "string" && prov.evidence_quote && (
-        <pre className="pre">&ldquo;{prov.evidence_quote}&rdquo;</pre>
-      )}
-      {Object.entries(prov).filter(
-        ([k]) =>
-          !["agent_name", "captured_at", "artifact_ref", "evidence_quote"].includes(k),
-      ).length > 0 && (
+      <ProvenanceBlock
+        agent={prov.agent_name as string | undefined}
+        captured={prov.captured_at as string | undefined}
+        artifactRef={prov.artifact_ref as string | undefined}
+        evidenceQuote={prov.evidence_quote as string | undefined}
+      />
+      {extras.length > 0 && (
         <div className="json-children" style={{ marginTop: 8 }}>
-          {Object.entries(prov)
-            .filter(
-              ([k]) =>
-                !["agent_name", "captured_at", "artifact_ref", "evidence_quote"].includes(k),
-            )
-            .map(([k, v]) => (
-              <JsonTree key={k} label={k} value={toJsonValue(v)} defaultOpen />
-            ))}
+          {extras.map(([k, v]) => (
+            <JsonTree key={k} label={k} value={toJsonValue(v)} defaultOpen />
+          ))}
         </div>
       )}
     </div>
@@ -1784,9 +1821,7 @@ function RawPane({ d }: { d: Derived }) {
   return (
     <div className="section">
       <p className="section-title">Raw record</p>
-      <div className="json-children">
-        <JsonTree value={toJsonValue(d.raw)} defaultOpen />
-      </div>
+      <JsonView value={d.raw} />
     </div>
   );
 }

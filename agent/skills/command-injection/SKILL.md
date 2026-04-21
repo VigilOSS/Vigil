@@ -280,6 +280,13 @@ Once injection is confirmed:
 - Blind detection via sleep AND DNS both fail with no timing delta → no injection path, move on
 - RCE confirmed via any method → CRITICAL, record finding, stop testing other injection vectors
 
+## Escalate When
+- A `sleep N` / `ping -c N` / `timeout /t N` payload produces an N-second response delta above measured jitter — walk separator variants (`;`, `&&`, `|`, `` ` `` , `$()`, newline `%0a`, `%0d`, `%00`) until one returns the full body, blind injection is still injection
+- An OOB DNS or HTTP callback fires from a backtick / `$(curl)` / `$(nslookup)` payload — reproduce with a second payload shape (wget, certutil on Windows, dig TXT) before declaring, then pivot to staged RCE
+- The parameter feeds a known wrapper tool (ffmpeg, ImageMagick, gm, ghostscript, pdfkit/wkhtmltopdf, rsvg-convert, ping, curl, git, tar, find -exec, xsltproc) — argument injection (`--use-tls=false`, `-processShellCommand`, `--upload-file`, `-o /dev/null`) bypasses shell sanitization entirely
+- Length, encoding, or character-class filters produce different error messages for different payloads — the filter is partial, enumerate shell-specific bypasses (`${IFS}` for spaces, `$@`, brace expansion, wildcard globbing, `cat<<<file`)
+- The endpoint handles filenames, URLs, git repos, or archive members — unsafe argument construction and filename-as-flag injection (`-oProxyCommand=…`, `--output=…`) are the persistent RCE paths modern frameworks miss
+
 ## Extended Resources
 
 - `agent/references/payloads/command-injection-payloads.md` — blind detection, filter bypass, Linux/Windows, argument injection

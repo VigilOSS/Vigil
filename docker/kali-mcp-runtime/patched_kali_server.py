@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-UPSTREAM_SERVER_PATH = Path("/usr/share/mcp-kali-server/server.py")
+UPSTREAM_SERVER_PATH = Path(
+    os.environ.get("KALI_MCP_SERVER_PATH", "/usr/share/mcp-kali-server/server.py")
+)
 
 # Target-facing routes require audit headers. Health, metrics, discovery,
 # and MCP capability routes stay open so container health checks and tool
@@ -57,11 +59,18 @@ ORCHESTRATOR_BASE_URL = (
     .replace("://127.0.0.1", "://host.docker.internal")
     .replace("://localhost", "://host.docker.internal")
 )
+try:
+    AUDIT_STREAM_MAX_BYTES = int(os.environ.get("KALI_MCP_AUDIT_STREAM_MAX_BYTES", "65536"))
+except ValueError:
+    AUDIT_STREAM_MAX_BYTES = 65_536
+if AUDIT_STREAM_MAX_BYTES < 0:
+    AUDIT_STREAM_MAX_BYTES = 65_536
 
 # Load the audit poster module that lives beside this file in the
 # container. Pure stdlib, zero upstream-server dependencies.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import kali_mcp_audit  # noqa: E402
+from audit_enums import PROBE_KIND_ENUM, TECHNIQUE_ENUM  # noqa: E402
 
 # Per-field env-fallback policy. engagement_key and artifact_dir are
 # session- or install-static and can honestly be defaulted from env.
@@ -69,8 +78,33 @@ import kali_mcp_audit  # noqa: E402
 # silently mis-attribute every call to whatever role was set at container
 # start, which breaks `list-command-runs --agent-name <self>` queries and
 # the entire dedup story. Attribution fields MUST come from headers.
+#
+# The four command-metadata fields (technique, intent, probe_kind,
+# destructive) are intentionally NOT listed here — they vary per call
+# within a single dispatch (one agent may fingerprint, then baseline,
+# then payload), so env fallback would mis-attribute every subsequent
+# call to the first value set at container start.
 _ENV_FALLBACK_ALLOWED = {"engagement_key", "artifact_dir"}
 _ENV_FALLBACK_WARNED: set[str] = set()
+
+# Warn-once sets for unknown technique / probe_kind header values. Soft
+# validation policy: log, then store verbatim so the audit row captures
+# what the agent actually sent (useful for diagnosing drift), and adding
+# a new enum value does not require a runtime redeploy to stop rejecting
+# rows.
+_TECHNIQUE_WARNED: set[str] = set()
+_PROBE_KIND_WARNED: set[str] = set()
+
+# X-Intent is free-form but capped server-side so a runaway description
+# never bloats the audit queue. Backend also trims to 200; duplicated
+# here so malformed headers don't ship over the wire first.
+_INTENT_MAX_CHARS = 200
+
+# X-Destructive parser. Match the permissive HTTP-header idioms LLMs
+# tend to emit — "1"/"true"/"yes"/"on" and their negatives. Anything
+# else falls through to None so we never silently coerce garbage to 0.
+_DESTRUCTIVE_TRUE = {"1", "true", "yes", "on"}
+_DESTRUCTIVE_FALSE = {"0", "false", "no", "off"}
 
 # Tool-name detection from the Flask request path. The upstream server exposes
 # routes like /api/tools/nmap/scan and /api/generic/execute, so we derive the
@@ -261,6 +295,136 @@ def _rollup_audit_source(sources: dict[str, str]) -> str:
     return "env_fallback"
 
 
+def _truncate_stream_for_queue(value: str, label: str) -> tuple[str, str]:
+    text = value or ""
+    raw = text.encode("utf-8", errors="replace")
+    if len(raw) <= AUDIT_STREAM_MAX_BYTES:
+        return text, ""
+    truncated = raw[:AUDIT_STREAM_MAX_BYTES].decode("utf-8", errors="ignore")
+    truncated_bytes = len(truncated.encode("utf-8", errors="replace"))
+    return (
+        truncated,
+        (
+            f"{label} truncated before audit enqueue from {len(raw)} bytes "
+            f"to {truncated_bytes} bytes"
+        ),
+    )
+
+
+def _parse_technique_header(raw: str) -> str | None:
+    """Soft-validate X-Technique. Unknown values warn-once and are stored
+    verbatim so the row captures what the agent actually sent."""
+    value = (raw or "").strip()
+    if not value:
+        return None
+    if value not in TECHNIQUE_ENUM and value not in _TECHNIQUE_WARNED:
+        _TECHNIQUE_WARNED.add(value)
+        logger.warning(
+            "X-Technique value '%s' is not in TECHNIQUE_ENUM (%d known values); storing verbatim",
+            value,
+            len(TECHNIQUE_ENUM),
+        )
+    return value
+
+
+def _parse_probe_kind_header(raw: str) -> str | None:
+    """Soft-validate X-Probe-Kind. Same policy as technique."""
+    value = (raw or "").strip()
+    if not value:
+        return None
+    if value not in PROBE_KIND_ENUM and value not in _PROBE_KIND_WARNED:
+        _PROBE_KIND_WARNED.add(value)
+        logger.warning(
+            "X-Probe-Kind value '%s' is not in PROBE_KIND_ENUM (%s); storing verbatim",
+            value,
+            ", ".join(PROBE_KIND_ENUM),
+        )
+    return value
+
+
+def _parse_intent_header(raw: str) -> str | None:
+    """Trim + truncate X-Intent to ``_INTENT_MAX_CHARS``. Empty/missing
+    → None so backend stores null (not empty string)."""
+    value = (raw or "").strip()
+    if not value:
+        return None
+    if len(value) > _INTENT_MAX_CHARS:
+        value = value[:_INTENT_MAX_CHARS]
+    return value
+
+
+def _parse_destructive_header(raw: str) -> int | None:
+    """Parse X-Destructive to 0/1/None. Accepts the usual permissive
+    boolean idioms (``1/0``, ``true/false``, ``yes/no``, ``on/off``,
+    case-insensitive). Unknown non-empty values → None so garbage never
+    coerces to ``0`` silently."""
+    value = (raw or "").strip().lower()
+    if not value:
+        return None
+    if value in _DESTRUCTIVE_TRUE:
+        return 1
+    if value in _DESTRUCTIVE_FALSE:
+        return 0
+    logger.warning(
+        "X-Destructive value '%s' not recognized (expected 1/0/true/false/yes/no/on/off); storing NULL",
+        value,
+    )
+    return None
+
+
+def _command_run_audit_payload(
+    run: dict[str, Any],
+    *,
+    tool_name: str,
+    route: str,
+    agent_name: str,
+    phase: str,
+    audit_source: str,
+    artifact_dir: str | None,
+    # Command-metadata fields default to None so older test fixtures
+    # and any call sites that pre-date these fields still build a valid
+    # payload (backend serializer returns ``null`` for missing columns).
+    technique: str | None = None,
+    intent: str | None = None,
+    probe_kind: str | None = None,
+    destructive: int | None = None,
+) -> dict[str, Any]:
+    stdout = run["stdout"] or ""
+    stderr = run["stderr"] or ""
+    bounded_stdout, stdout_note = _truncate_stream_for_queue(stdout, "stdout")
+    bounded_stderr, stderr_note = _truncate_stream_for_queue(stderr, "stderr")
+    notes = "\n".join(note for note in (stdout_note, stderr_note) if note)
+    return {
+        "command": run["command"],
+        "argv": run.get("argv"),
+        "tool_name": tool_name,
+        "route": route,
+        "agent_name": agent_name,
+        "phase": phase,
+        "return_code": run["return_code"],
+        "timed_out": run["timed_out"],
+        "success": run["success"],
+        "started_at": run["started_at"],
+        "completed_at": run["completed_at"],
+        "duration_ms": run["duration_ms"],
+        "stdout": bounded_stdout,
+        "stderr": bounded_stderr,
+        "stdout_sha256": hashlib.sha256(stdout.encode("utf-8", errors="replace")).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr.encode("utf-8", errors="replace")).hexdigest(),
+        "notes": notes,
+        "audit_source": audit_source,
+        "command_hash": hashlib.sha256(
+            run["command"].encode("utf-8", errors="replace")
+        ).hexdigest(),
+        "engagement_artifact_dir": artifact_dir,
+        "run_uuid": uuid.uuid4().hex,
+        "technique": technique,
+        "intent": intent,
+        "probe_kind": probe_kind,
+        "destructive": destructive,
+    }
+
+
 def _install_audit_hooks(flask_app) -> None:
     from flask import g, jsonify, request  # type: ignore
 
@@ -306,6 +470,23 @@ def _install_audit_hooks(flask_app) -> None:
         g.audit_artifact_dir = values["artifact_dir"]
         g.audit_sources = sources
         g.command_runs = []
+
+        # Command-metadata fields. These are per-call ONLY — no env
+        # fallback (technique varies per tool call inside a single
+        # dispatch). Missing headers are NOT an error; store None so the
+        # backend persists NULL and old rows stay consistent.
+        g.audit_technique = _parse_technique_header(
+            request.headers.get("X-Technique", "")
+        )
+        g.audit_intent = _parse_intent_header(
+            request.headers.get("X-Intent", "")
+        )
+        g.audit_probe_kind = _parse_probe_kind_header(
+            request.headers.get("X-Probe-Kind", "")
+        )
+        g.audit_destructive = _parse_destructive_header(
+            request.headers.get("X-Destructive", "")
+        )
 
         if not _should_require_audit(request.path):
             return None
@@ -364,30 +545,25 @@ def _install_audit_hooks(flask_app) -> None:
         audit_source = _rollup_audit_source(sources)
         tool_name = _tool_name_from_path(request.path)
         route = request.path
+        technique = getattr(g, "audit_technique", None)
+        intent = getattr(g, "audit_intent", None)
+        probe_kind = getattr(g, "audit_probe_kind", None)
+        destructive = getattr(g, "audit_destructive", None)
 
         for run in runs:
-            payload = {
-                "command": run["command"],
-                "argv": run.get("argv"),
-                "tool_name": tool_name,
-                "route": route,
-                "agent_name": agent_name,
-                "phase": phase,
-                "return_code": run["return_code"],
-                "timed_out": run["timed_out"],
-                "success": run["success"],
-                "started_at": run["started_at"],
-                "completed_at": run["completed_at"],
-                "duration_ms": run["duration_ms"],
-                "stdout": run["stdout"],
-                "stderr": run["stderr"],
-                "audit_source": audit_source,
-                "command_hash": hashlib.sha256(
-                    run["command"].encode("utf-8", errors="replace")
-                ).hexdigest(),
-                "engagement_artifact_dir": artifact_dir,
-                "run_uuid": uuid.uuid4().hex,
-            }
+            payload = _command_run_audit_payload(
+                run,
+                tool_name=tool_name,
+                route=route,
+                agent_name=agent_name,
+                phase=phase,
+                audit_source=audit_source,
+                artifact_dir=artifact_dir,
+                technique=technique,
+                intent=intent,
+                probe_kind=probe_kind,
+                destructive=destructive,
+            )
             kali_mcp_audit.default_poster().enqueue(engagement_key, payload)
         return response
 

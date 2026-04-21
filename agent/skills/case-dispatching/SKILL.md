@@ -79,7 +79,9 @@ sqlite3 "$DB" ".timeout 5000" "
 - Use reset-stale at start of each iteration
 - **DO NOT STOP EARLY** — loop until pending=0 for all consumable types
 - On subagent error: mark work items `error`, log, CONTINUE (don't halt loop)
-- Only stop on: pending=0 everywhere, or user /stop
+- Stop on any of:
+  - pending=0 everywhere (normal completion)
+  - the upstream work-buffer producer (surface-collector, ingestion, nuclei sweep) is itself stuck or failing — looping against an empty or broken producer burns dispatch budget on no real work. Escalate the producer issue first, then resume.
 
 ## Dispatcher Quick Reference
 

@@ -3030,7 +3030,7 @@ def _retention_config() -> dict[str, Any]:
     path = Path(override) if override else _DEFAULT_RETENTION_CONFIG
     try:
         raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    except OSError:
         return {"preview_bytes": _DEFAULT_PREVIEW_BYTES, "suppress_patterns": []}
     try:
         data = json.loads(raw)
@@ -3257,6 +3257,10 @@ def record_command_run(
     engagement_artifact_dir: str | None = None,
     run_uuid: str | None = None,
     audit_source: str = "header",
+    technique: str | None = None,
+    intent: str | None = None,
+    probe_kind: str | None = None,
+    destructive: bool | int | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
 
@@ -3308,6 +3312,40 @@ def record_command_run(
     else:
         row_status = "empty"
 
+    # Normalise the four command-metadata fields. Validation is intentionally
+    # soft — the API/runtime layer follows the `audit_source` precedent and
+    # stores values verbatim so we can add new technique/probe_kind values
+    # without a backend redeploy. We only trim/coerce shape here.
+    technique_value: str | None
+    if technique is None:
+        technique_value = None
+    else:
+        technique_stripped = str(technique).strip()
+        technique_value = technique_stripped or None
+
+    intent_value: str | None
+    if intent is None:
+        intent_value = None
+    else:
+        intent_stripped = str(intent).strip()
+        # Trim to 200 chars server-side — the contract in the plan. The API
+        # layer does not enforce max_length because this is the single
+        # authoritative trim point.
+        intent_value = intent_stripped[:200] or None
+
+    probe_kind_value: str | None
+    if probe_kind is None:
+        probe_kind_value = None
+    else:
+        probe_kind_stripped = str(probe_kind).strip()
+        probe_kind_value = probe_kind_stripped or None
+
+    destructive_value: int | None
+    if destructive is None:
+        destructive_value = None
+    else:
+        destructive_value = 1 if bool(destructive) else 0
+
     with get_connection() as connection:
         try:
             cursor = connection.execute(
@@ -3321,7 +3359,8 @@ def record_command_run(
                     stdout_preview, stderr_preview, output_retention_status,
                     stdout_suppression_reason, stderr_suppression_reason,
                     stdout_artifact_ref, stderr_artifact_ref,
-                    stdout_bytes, stderr_bytes, notes
+                    stdout_bytes, stderr_bytes, notes,
+                    technique, intent, probe_kind, destructive
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?,
@@ -3331,7 +3370,8 @@ def record_command_run(
                     ?, ?, ?,
                     ?, ?,
                     ?, ?,
-                    ?, ?, ?
+                    ?, ?, ?,
+                    ?, ?, ?, ?
                 )
                 """,
                 (
@@ -3364,6 +3404,10 @@ def record_command_run(
                     stdout_retention["bytes"],
                     stderr_retention["bytes"],
                     notes,
+                    technique_value,
+                    intent_value,
+                    probe_kind_value,
+                    destructive_value,
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -3390,6 +3434,20 @@ def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
         data["argv"] = []
     data["timed_out"] = bool(data.get("timed_out"))
     data["success"] = bool(data.get("success"))
+    # Command-metadata fields — surfaced explicitly so callers don't rely on
+    # sqlite3.Row dict coercion to include them. Default to None so rows
+    # written before this migration (where dict(row) simply won't have the
+    # key if the schema matched pre-ALTER) still serialize with a null
+    # present. `destructive` is stored as 0/1 INTEGER; coerce back to a
+    # Python bool for API consumers, preserving NULL.
+    data["technique"] = data.get("technique")
+    data["intent"] = data.get("intent")
+    data["probe_kind"] = data.get("probe_kind")
+    destructive_raw = data.get("destructive")
+    if destructive_raw is None:
+        data["destructive"] = None
+    else:
+        data["destructive"] = bool(destructive_raw)
     if not include_output:
         # Listings default to lightweight rows so a sub-agent fetching 50
         # records does not load 50 × 64 KiB of preview text into context.
@@ -3422,6 +3480,10 @@ def list_command_runs(
     audit_source: str = "",
     success: bool | None = None,
     timed_out: bool | None = None,
+    technique: str = "",
+    probe_kind: str = "",
+    destructive: bool | None = None,
+    intent_q: str = "",
     limit: int = 100,
     offset: int = 0,
     include_output: bool = False,
@@ -3430,12 +3492,29 @@ def list_command_runs(
     params: list[Any] = [engagement.id]
     where = ["r.engagement_id = ?"]
 
+    # ``q`` is a global FTS match across all content columns. ``intent_q`` is
+    # a scoped FTS match against the intent column only — SQLite FTS5 uses
+    # the ``column:term`` syntax for this. When both are provided the
+    # queries are AND-combined via an additional MATCH (FTS5 supports two
+    # MATCH clauses against the same virtual table via two JOINs; simpler
+    # here is to merge them into a single MATCH term joined with AND).
     join_sql = ""
+    match_terms: list[str] = []
     fts_term = _fts_escape(q) if q else ""
     if fts_term:
+        match_terms.append(fts_term)
+    intent_term = _fts_escape(intent_q) if intent_q else ""
+    if intent_term:
+        # Scope every escaped token to the intent column. ``_fts_escape``
+        # returns space-separated quoted phrases (implicit AND); prefixing
+        # each with ``intent:`` restricts the match to that column.
+        scoped_tokens = [f"intent:{tok}" for tok in intent_term.split(" ") if tok]
+        if scoped_tokens:
+            match_terms.append(" ".join(scoped_tokens))
+    if match_terms:
         join_sql = "JOIN assessment_command_runs_fts f ON f.rowid = r.id"
         where.append("f.assessment_command_runs_fts MATCH ?")
-        params.append(fts_term)
+        params.append(" ".join(match_terms))
 
     if agent_name:
         where.append("r.agent_name = ?")
@@ -3458,6 +3537,15 @@ def list_command_runs(
     if timed_out is not None:
         where.append("r.timed_out = ?")
         params.append(1 if timed_out else 0)
+    if technique:
+        where.append("r.technique = ?")
+        params.append(technique)
+    if probe_kind:
+        where.append("r.probe_kind = ?")
+        params.append(probe_kind)
+    if destructive is not None:
+        where.append("r.destructive = ?")
+        params.append(1 if destructive else 0)
 
     params.extend([int(limit), int(offset)])
     query = (

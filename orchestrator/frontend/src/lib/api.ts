@@ -486,6 +486,12 @@ export type AssessmentCommandRun = {
   indexed_for_embeddings_at: string | null;
   notes: string;
   created_at: string;
+  // Command-metadata audit fields. All nullable — pre-migration rows
+  // and calls that don't set the X-* headers land as null.
+  technique?: string | null;
+  intent?: string | null;
+  probe_kind?: string | null;
+  destructive?: boolean | null;
 };
 
 // Detail fetch always returns preview text (include_output=true server-side).
@@ -503,6 +509,13 @@ export type ListAssessmentCommandRunsParams = {
   // consumers derive that client-side.
   success?: boolean;
   timed_out?: boolean;
+  // Command-metadata filter axes. Technique + probe_kind are exact matches.
+  // intent_q runs an FTS5-scoped `intent:` match server-side. destructive
+  // is a tri-state: undefined = don't filter; true/false = exact match.
+  technique?: string;
+  probe_kind?: string;
+  destructive?: boolean;
+  intent_q?: string;
   include_output?: boolean;
   limit?: number;
   offset?: number;
@@ -521,6 +534,11 @@ export function listAssessmentCommandRuns(
   if (params.audit_source) query.set("audit_source", params.audit_source);
   if (params.success != null) query.set("success", params.success ? "true" : "false");
   if (params.timed_out != null) query.set("timed_out", params.timed_out ? "true" : "false");
+  if (params.technique) query.set("technique", params.technique);
+  if (params.probe_kind) query.set("probe_kind", params.probe_kind);
+  if (params.destructive != null)
+    query.set("destructive", params.destructive ? "true" : "false");
+  if (params.intent_q) query.set("intent_q", params.intent_q);
   if (params.include_output) query.set("include_output", "true");
   if (params.limit != null) query.set("limit", String(params.limit));
   if (params.offset != null) query.set("offset", String(params.offset));

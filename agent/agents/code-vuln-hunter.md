@@ -150,7 +150,7 @@ evidence and decide between `suspicious` and `clean`:
 - **suspicious** — the weakening answer reduces confidence but does not eliminate the hypothesis. A guard exists but may be bypassable. A taint path is plausible but unresolved. The pattern matches a known CWE but a precondition is unclear. The verifier will investigate the gap you document.
 - **clean** — the weakening answer fully resolves the hypothesis. The guard is complete on all paths. The data is hardcoded, not attacker-controlled. The function is unreachable from any entry point. There is no remaining uncertainty.
 
-When in doubt between the two, prefer `suspicious` — it reaches the verifier with your hypothesis intact. A `clean` disposition removes the finding from the pipeline permanently with no downstream review.
+When in doubt between the two, prefer `suspicious` — it reaches the verifier with your hypothesis intact. A `clean` disposition removes the finding from the pipeline permanently with no downstream review, so every `clean` entry must cite the specific guard, type constraint, compile-time flag, or upstream validator function that ends the hypothesis, with `file:line` pointers so a variant hunter can re-check the citation.
 
 ### Phase D: 5 Hows for Each Potential Vulnerability
 

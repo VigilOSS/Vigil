@@ -79,6 +79,16 @@ class CommandRunRecordRequest(BaseModel):
     engagement_artifact_dir: str | None = Field(default=None, max_length=1024)
     run_uuid: str | None = Field(default=None, max_length=64)
     audit_source: Literal["header", "env_fallback", "mixed"] = "header"
+    # Command-metadata fields. Soft validation — matches the audit_source
+    # precedent of plain TEXT storage. Technique/probe_kind are intentionally
+    # not Literal-typed so new enum members don't require a backend redeploy;
+    # the runtime logs a warning on unknown values and stores them verbatim.
+    # Intent is trimmed to 200 chars server-side in record_command_run;
+    # max_length here is a generous upper bound for transport.
+    technique: str | None = Field(default=None, max_length=128)
+    intent: str | None = Field(default=None, max_length=4096)
+    probe_kind: str | None = Field(default=None, max_length=64)
+    destructive: bool | None = None
 
 
 class SurfaceRecordRequest(BaseModel):
@@ -330,6 +340,14 @@ def get_command_runs(
     audit_source: str = "",
     success: bool | None = Query(default=None),
     timed_out: bool | None = Query(default=None),
+    # Command-metadata filter axes. Technique + probe_kind are plain str
+    # (matching the audit_source precedent) so new enum values don't force
+    # a backend redeploy. intent_q runs a FTS5 scoped match against the
+    # intent column; destructive coerces True→1, False→0 on the WHERE.
+    technique: str | None = None,
+    probe_kind: str | None = None,
+    destructive: bool | None = Query(default=None),
+    intent_q: str | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     include_output: bool = False,
@@ -345,6 +363,10 @@ def get_command_runs(
         audit_source=audit_source,
         success=success,
         timed_out=timed_out,
+        technique=technique or "",
+        probe_kind=probe_kind or "",
+        destructive=destructive,
+        intent_q=intent_q or "",
         limit=limit,
         offset=offset,
         include_output=include_output,

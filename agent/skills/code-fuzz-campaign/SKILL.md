@@ -506,6 +506,16 @@ Stop or skip fuzzing when:
 - **Existing coverage sufficient**: All high-value targets already have OSS-Fuzz harnesses with >70% branch coverage and active corpus — marginal value from additional harnesses is low.
 - **No memory-safety findings AND low structural risk**: If Phase 2 found zero memory-safety findings AND Stage 1 target selection scores all candidates below 8 (no attacker-reachable C/C++ parsers with size arithmetic or low fuzz coverage), fuzzing ROI is very low. Note: the absence of static findings alone does NOT justify skipping — high-risk parsers with no fuzz coverage are exactly where fuzzing discovers bugs that static analysis missed.
 
+## Escalate When
+
+Keep fuzzing and expand the campaign when:
+
+- **Coverage plateaus below the structural ceiling**: libFuzzer `cov:` / AFL++ `edges_found` stops growing but is well under the function's reachable basic-block count — the corpus is not exercising deeper paths, add structure-aware mutators, dictionary entries, or a grammar harness before declaring the target fuzzed.
+- **ASan/UBSan/MSan flags a near-miss without a crash**: heap-buffer-underflow warning, unsigned integer overflow in a size path, uninitialized-read in a pointer-adjacent allocation — the bug is reachable, tighten the harness constraints (remove input length caps, expose additional entry points) and re-run to turn near-miss into crash.
+- **A new sanitizer surface appears after enabling a build flag**: enabling `-fsanitize=integer`, `-fsanitize=bounds`, or MSan on a dependency exposes previously invisible bugs — do not stop at ASan-only results, stack sanitizers across at least two configurations before closing the campaign.
+- **A crash bucket has multiple distinct stack traces sharing one root cause**: several reports point at the same size-arithmetic function from different callers — each caller is a potential finding variant, run variant-hunting per caller rather than collapsing to one report.
+- **The harness rejects inputs the real caller accepts**: your LLVMFuzzerTestOneInput filters by magic bytes, CRC, or length that the production parser tolerates — rewrite the harness to match production's accept surface, filtered harnesses hide real bugs.
+
 ## Extended Resources
 
 - `references/code-vuln-patterns/buffer-overflow.md` — cross-function size propagation patterns

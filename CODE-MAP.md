@@ -43,7 +43,7 @@ Keep it light:
 
 ### Generated prompt outputs
 
-- `agent/scripts/render-operator-prompts.sh` - prompt renderer. Why: generates the committed operator-facing wrappers from `operator-core.md` plus hardcoded roster/banner templates.
+- `agent/scripts/render-operator-prompts.sh` - prompt renderer. Why: generates the committed operator-facing wrappers from `operator-core.md` plus hardcoded roster templates. `CLAUDE.md` and `AGENTS.md` share one template and are byte-identical outputs.
 - `agent/AGENTS.md` and `agent/CLAUDE.md` - generated operator wrappers. Why: committed outputs, not source-of-truth.
 - `agent/.codex/agents/` and `agent/.claude/agents/` - generated agent wrappers. Why: thin client-specific entrypoints that should stay derived from the source prompts.
 
@@ -80,7 +80,8 @@ Prompt changes are NOT prompt-only when the prompts define artifacts that the ba
 - Backend state is canonical for findings, coverage, services, and chains; readable artifacts are produced on demand via `export-findings` and `export-surfaces`.
 - `agent/scripts/assess/commands/code_index.py` writes per-file JSON under `tools/analysis-state/structural-index/` and writes `structural-index-manifest.json` beside that directory. `code_index_sync.py` pushes structural metadata (total_functions, total_entry_points, total_sinks, total_exports) from those index files to `code_files` rows in the backend via `POST code/files/bulk-structural-metadata`.
 - `agent/scripts/schema.sql` is not the orchestrator schema. It only defines the transient local queue DB.
-- Kali MCP audit context threads through five co-dependent files: upstream MCP tool schema changes in `docker/kali-mcp-runtime/patched_kali_client.py`, HTTP header extraction in `docker/kali-mcp-runtime/patched_kali_server.py`, async backend POST behavior in `docker/kali-mcp-runtime/kali_mcp_audit.py`, the Pydantic request model in `orchestrator/backend/app/api/assessment.py`, and the `assessment_command_runs` schema in `orchestrator/backend/app/db.py`. Any change to the audit header set (`X-Engagement-Key`, `X-Agent-Name`, `X-Phase`, `X-Engagement-Artifact-Dir`) must land in the relevant client/server/API/schema layers.
+- Kali MCP audit context threads through five co-dependent files: upstream MCP tool schema changes in `docker/kali-mcp-runtime/patched_kali_client.py`, HTTP header extraction in `docker/kali-mcp-runtime/patched_kali_server.py`, async backend POST behavior in `docker/kali-mcp-runtime/kali_mcp_audit.py`, the Pydantic request model in `orchestrator/backend/app/api/assessment.py`, and the `assessment_command_runs` schema in `orchestrator/backend/app/db.py`. Any change to the audit header set (`X-Engagement-Key`, `X-Agent-Name`, `X-Phase`, `X-Engagement-Artifact-Dir`, `X-Technique`, `X-Intent`, `X-Probe-Kind`, `X-Destructive`) must land in the relevant client/server/API/schema layers.
+- `docker/kali-mcp-runtime/audit_enums.py` is the single source of truth for `TECHNIQUE_ENUM` and `PROBE_KIND_ENUM` tuples shared between the patched Kali server, the FastMCP client tool-schema surface, and the `agent/scripts/assess/commands/list_command_runs.py` CLI.
 
 ### Easy-to-miss registration points
 
@@ -129,9 +130,16 @@ When adding a new code analysis phase or agent:
 - `orchestrator/frontend/src/components/CodeAnalysisTab.tsx` - code-analysis boundary. Why: separate file-centric review pipeline rendered in the same UI.
 - `orchestrator/frontend/src/components/ActivityTab.tsx` and `orchestrator/frontend/src/components/TaskTimeline.tsx` - activity/timeline views. Why: operator progress and session history.
 - `orchestrator/frontend/src/components/ArtifactViewer.tsx` - artifact inspection view. Why: read engagement artifacts without leaving the app.
+- `orchestrator/frontend/src/components/CommandsTab.tsx` - Kali MCP command-run audit tab. Why: durable operator view onto `assessment_command_runs` with chip filters, tokenized search, and the technique/intent/probe_kind/destructive metadata columns.
+- `orchestrator/frontend/src/components/IntelTab.tsx` - pre-attack intel surface. Why: durable operator view onto gathered intel before active findings exist.
 - `orchestrator/frontend/src/components/PhaseWaterfall.tsx` - phase visualization. Why: workflow phase is a first-class product concept.
 - `orchestrator/frontend/src/lib/api.ts` - shared client/types layer. Why: all REST helpers, websocket URL construction, and frontend-facing API types live here.
-- `orchestrator/frontend/src/app.css` - global styling system. Why: layout primitives, panel styles, status colors, severity vocabulary, and responsive rules are centralized here.
+- `orchestrator/frontend/src/lib/theme.ts` - theme contract. Why: single source of truth for the `data-theme` attribute on `<html>`, the `aith.theme` localStorage key, and cross-tab sync; all CSS in `app.css` is authored against theme variables overridden at `:root[data-theme="dark"]`.
+- `orchestrator/frontend/src/lib/modalScrollLock.ts` - body scroll lock primitive. Why: reference-counted `body.detail-modal-open` class so stacked or rapidly re-opened detail modals never leave the page-behind scrollable.
+- `orchestrator/frontend/src/components/JsonView.tsx` - syntax-highlighted JSON viewer. Why: single inline tokenizer + CSS-variable color scheme used by the Intel Raw-record pane and other drawers; switches with the theme.
+- `orchestrator/frontend/src/components/ThemeToggle.tsx` - light/dark toggle button. Why: mounted in both page headers; writes through `lib/theme.ts`.
+- `orchestrator/frontend/src/components/formatting.tsx` - shared Notes / Provenance / PoC render helpers. Why: consolidates the `NotesBody`, `ProvenanceBlock`, `CopyInline`, `RelTime`, and `CodeBlock` presentational primitives so Intel and Findings drawers render the same shapes.
+- `orchestrator/frontend/src/app.css` - global styling system. Why: layout primitives, panel styles, theme variables (light `:root` + dark `:root[data-theme="dark"]`), status colors, severity vocabulary, and responsive rules are centralized here.
 - `orchestrator/frontend/vite.config.ts` - frontend/runtime contract. Why: relative base path and local dev proxy/websocket assumptions live here.
 
 ## What Not To Map

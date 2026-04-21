@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # AWS IAM Privilege Escalation
 
+> **Kali MCP audit header:** use `X-Technique: AUTH` (cloud IAM privesc maps to the auth/authorization class in this taxonomy). Set `X-Destructive: 1` whenever the call mutates IAM state (`iam create-*`, `iam attach-*`, `iam put-*`, `iam set-default-policy-version`, or a `sts assume-role` that activates a broader session).
+
 ## When to Activate
 
 - AWS credentials obtained (access key, session token, role assumption)
@@ -120,6 +122,13 @@ aws iam attach-user-policy --user-name backdoor --policy-arn arn:aws:iam::aws:po
 - First escalation vector succeeds (e.g., CreatePolicyVersion) → CRITICAL, record and stop testing other vectors
 - All 14 escalation combos checked, none have required permissions → IAM is least-privilege, record as hardened
 - Metadata service returns credentials → test what those creds grant, record finding based on actual access achieved
+
+## Escalate When
+- `iam:PassRole` is allowed on any role, even scoped — chain with `iam:CreateFunction` / `ec2:RunInstances` / `glue:CreateDevEndpoint` / `sagemaker:CreateNotebookInstance` / `codebuild:CreateProject` to assume that role, the PassRole target is the new privilege boundary
+- Any `iam:*PolicyVersion`, `iam:AttachRolePolicy`, `iam:PutRolePolicy`, `iam:UpdateAssumeRolePolicy`, `iam:CreateLoginProfile`, `iam:UpdateLoginProfile`, or `iam:CreateAccessKey` is permitted — each is a direct self-privesc vector, walk the full Rhino 14-method matrix even after one succeeds (defenders patch one, often miss siblings)
+- The principal has `sts:AssumeRole` on any role in this or a linked account — enumerate trust policies (`aws iam get-role`) for conditions you can satisfy (session tag, external ID leakage, `aws:userid` patterns), cross-account assume-role is the common privilege jump
+- Lambda/EC2/ECS/Glue/SageMaker/CodeBuild compute resources exist with attached roles more privileged than the current principal — resource-hijack privesc (modify function code, attach userdata, container override) is usually viable where direct IAM writes are not
+- Secrets Manager, SSM Parameter Store, S3 buckets, or CodeCommit repos are readable — AWS creds and cross-service API tokens hide there, grep SecureString/AccessKey/aws_secret_access_key patterns before concluding "least-privilege"
 
 ## Extended Resources
 

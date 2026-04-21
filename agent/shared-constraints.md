@@ -38,6 +38,41 @@ Do not fall back to host-side execution.
 Host-side commands are limited to coordination and non-target support only:
 `jq`, `sqlite3`, `python3`, `grep` / `rg`, `sed`, `awk`, `base64`, `openssl`.
 
+**Do not `echo` as commentary, section headers, or breadcrumbs inside Kali MCP commands.**
+Stdout is captured to the audit log, not shown to the user, and commentary-echoes bloat
+the preview and pollute FTS search without adding retrievable signal. Use the `X-Intent`
+header for a one-line purpose annotation. `echo` is only legitimate when its output is the
+command's real purpose — writing to a file (`echo X > file`), piping into another tool, or
+generating a payload.
+
+### Command Metadata
+
+Every target-facing Kali MCP call supports four optional audit headers. Set them when they
+apply; the runtime stores them on the audit row where they become filterable in
+`list-command-runs` and the Commands tab.
+
+- **`X-Technique`** — the vulnerability class this command tests. One of `SSRF`, `XSS`,
+  `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`, `RFI`, `OPEN-REDIRECT`,
+  `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`, `RATE-LIMIT`, `INFO-DISCLOSURE`,
+  `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `OTHER`. Derive
+  it from the skill you loaded: for skills whose name maps 1:1 to an enum value
+  (`ssrf-testing` → `SSRF`, `sqli-testing` → `SQLI`, `command-injection` → `CMDI`, etc.),
+  use that mapping. When the mapping isn't obvious (e.g. `aws-iam-privesc`,
+  `container-escape-detection`, `graphql-testing`), the skill file names the correct
+  value at the top.
+- **`X-Intent`** — a ≤200-char one-liner describing what this specific command is trying to
+  accomplish. Replaces the `echo "=== label ==="` pattern.
+- **`X-Probe-Kind`** — the kind of work this command represents:
+  - `fingerprint` — learning the target (versions, headers, tech stack), no payload
+  - `baseline` — vanilla control request against the target surface, for diff
+  - `payload` — crafted attack payload testing a hypothesis
+  - `exploit` — attacker-outcome proof (extract token, read a file, prove the impact)
+  - `replay` — captured primitive used against a new surface (lateral)
+  - `cleanup` — undoing target-side changes
+- **`X-Destructive`** — `1` when the command attempts a write, edit, or delete on the
+  target (POST/PUT/PATCH/DELETE, file upload, account creation, config change, shell exec
+  that modifies state). `0` for read-only probes. Used by cleanup-tracking workflows.
+
 ---
 
 ## 2a. Listeners, Tunnels & OOB Are Operator-Controlled
@@ -65,50 +100,47 @@ Agents CANNOT start, stop, or restart listener, tunnel, or OOB processes.
 
 ---
 
-## 2b. Consult Command History Before Re-Running
+## 2b. Coverage Check Before Probing
 
 Every Kali MCP call records its command, argv, tool, agent, phase, exit code,
 timeout state, timings, and an output preview (or artifact ref) to the
-orchestrator backend. Treat that history as shared engagement state.
+orchestrator backend. Treat that history as a **coverage map** — a record of
+what's already been probed so your next probe goes somewhere the engagement
+hasn't covered yet.
 
 Before issuing a probing, scanning, fuzzing, or credential-testing command,
-search for prior runs that already cover the same objective. Default to an
-unscoped search so you see every agent's and every phase's prior work on the
-target; narrow with `--agent-name` or `--phase` only after the broad result is
-overwhelming:
+search for prior work on this surface:
 
 ```bash
 ./scripts/assess.py list-command-runs --q <keyword>
 ```
 
-The audit table exists to make prior work visible, not to discourage fresh
-probes. Shallow coverage is more expensive than a second probe: silently
-trusting a prior run that answered a different question misses findings.
-Re-running with a stated reason is cheap; under-probing is not. Reuse when the
-prior run actually answers your current question — not when it merely
-overlaps.
+Default to an unscoped search so you see every agent's and every phase's
+prior work on the target; narrow with `--agent-name` or `--phase` only if the
+broad result is overwhelming. Cross-agent and cross-phase context is usually
+the most valuable coverage signal.
 
-Re-run when any of the following apply — this list is not exhaustive, and you
-may re-run for a reason you can name that isn't listed:
+Read the results as a coverage map, not a reuse gate. Red-team depth comes
+from variants — different SQLi techniques, different SSRF payload encodings,
+different XXE entity styles, different wordlists, different auth contexts.
+If `sqlmap` already ran against this endpoint with `--technique=U`, your
+next probe picks a different technique. If `ffuf` ran `raft-medium-directories`,
+try `quickhits` or a tech-specific wordlist.
 
-1. The target's state has changed since the prior run (new port, deployed change, auth now available).
-2. The prior run was partial, timed out, or returned ambiguous output (success=true on a soft-failure page, rate-limited response, WAF interposition).
-3. The new hypothesis requires a materially different payload family, tool, or instrumentation (e.g. capturing headers you didn't last time).
-4. You need an independent baseline for your own reasoning — cross-agent or cross-phase runs may have used a context that doesn't map to yours.
-5. Time has passed and a regression check is warranted (networks drift, targets redeploy mid-engagement).
-6. You are probing a boundary or interaction between two prior runs that neither covered.
+**The only probe you should skip is an identical command against identical
+input.** Any variant — different payload family, different tool, different
+flag, different target scope, different credentials — is new coverage and
+belongs in the engagement. Don't ask for permission to probe a variant.
 
-When re-running, name the reason so the audit trail is legible. The reviewer
-is not the gatekeeper of re-running; they are the reader of your output.
+When a prior run genuinely covers your current question, cite its id in your
+output — but first fetch the preview with `./scripts/assess.py get-command-run <id>`
+and confirm the stored evidence actually answers that question. A row with
+`success=true` only means `return_code=0`, not that the output is on-point.
+Open the preview to rule out soft-failure pages, WAF intercepts, and
+rate-limited stubs that exit cleanly. Citing an id you never looked at is
+worse than running a fresh probe.
 
-Before reusing a prior run, fetch its preview with `./scripts/assess.py get-command-run <id>`
-and confirm the stored evidence answers your current question. A row with
-`success=true` only means `return_code=0`. Open the preview to rule out
-soft-failure pages, WAF intercepts, and rate-limited stubs that exit cleanly.
-Reuse is only cheap when the prior output actually speaks to your hypothesis;
-citing an id you never looked at is worse than running a fresh probe.
-
-Full reuse decision table and output-field interpretation:
+Full coverage-vs-duplicate decision table and output-field interpretation:
 `agent/references/runtime-guides/command-history-auditing.md`.
 
 ---

@@ -54,6 +54,7 @@ import { OverviewTab } from "../components/OverviewTab";
 import { SurfacesTab } from "../components/SurfacesTab";
 import { TabBar } from "../components/TabBar";
 import type { TabKey } from "../components/TabBar";
+import { ThemeToggle } from "../components/ThemeToggle";
 
 type EngagementPageProps = {
   engagementKey: string;
@@ -437,6 +438,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
             </div>
           </div>
           {loadError && <span className="error-text">{loadError}</span>}
+          <ThemeToggle />
           <button className="ghost-button" onClick={onBack}>Back</button>
         </div>
       </section>

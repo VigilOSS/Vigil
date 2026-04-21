@@ -268,6 +268,13 @@ Ordered by impact. If you find CSRF on any of these, it is worth reporting even 
 - Valid CSRF token required AND token properly validated AND not predictable → protection is effective, move on
 - CSRF PoC succeeds on state-changing endpoint → record finding, assess impact, stop testing other endpoints unless higher-value target exists
 
+## Escalate When
+- Removing the CSRF token, blanking it, or sending any non-empty string produces a success response — the server is checking presence or parsing leniency, not signature, push through token-tampering variants before declaring the protection valid
+- SameSite is Lax (default) and any state-changing verb is reachable via GET, or via a top-level navigation (window.open, form submit with method=GET/POST) — Lax does not protect top-level POSTs initiated by form submission from the attacker page
+- The endpoint accepts Content-Type `text/plain`, `application/x-www-form-urlencoded`, or `multipart/form-data` for a JSON body — simple-request CORS bypass lets a cross-origin form POST arbitrary JSON-shaped bodies without preflight
+- A token issued to user A is accepted on a request authenticated as user B, or a token from any session validates — the token is not bound to the session and CSRF is live
+- A WebSocket handshake succeeds without an Origin check or custom header — CSWSH lets the attacker page send arbitrary frames over the victim's authenticated socket, enumerate the command surface
+
 ## Extended Resources
 
 - `agent/references/payloads/csrf-payloads.md` — auto-submit forms, JSON CSRF, token bypass techniques

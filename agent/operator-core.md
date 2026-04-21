@@ -78,6 +78,15 @@ Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are 
 | osint-analyst | CVE/breach/DNS/social research backed by backend intel tables | Phase 5 (parallel with exploit) |
 | report-writer | Final or interim report | Phase 7 |
 
+### Runtime Dispatch Syntax
+
+Subagent invocation is runtime-specific. **Invoke the registered wrapper**, never a generic task-spawning tool — the wrapper is what points the specialist at its role file and shared constraints.
+
+- **Claude Code**: dispatch with `@agent-name` (e.g. `@recon-specialist`). Wrappers are registered in `.claude/agents/*.md`. The built-in `Task`/`Agent` tool spawns an unregistered subagent and skips the wrapper entirely, so the specialist would operate without its role context — do not use it for registered roles.
+- **Codex**: dispatch via the registered agent roster (`.codex/agents/*.toml`) using Codex's subagent-invocation mechanism. The TOML wrapper does the same role-bootstrap work as the Claude wrapper.
+
+The wrapper itself is a thin shim: it tells the specialist to load `agent/agents/<name>.md`, whose "Load First" section then bootstraps `shared-constraints.md` (web agents) or `shared-constraints-code.md` (code agents) plus the primary skill. Specialists never load the operator prompt (`CLAUDE.md`/`AGENTS.md`) — that's operator context, not theirs.
+
 ### Dispatch Context Template
 
 Every dispatch must include:
@@ -100,7 +109,7 @@ Before every dispatch, verify:
 - [ ] Matching skill's paired references identified from `agent/references/INDEX.md`
 - [ ] Prior relevant findings or existing finding slugs included (so the agent can reference them instead of creating duplicates)
 - [ ] Activity log checked for duplicate dispatch — `./scripts/assess.py fetch activity-entries` (DEDUP rule)
-- [ ] Command history checked — `./scripts/assess.py list-command-runs --agent-name <role> --phase <current>` reviewed for prior runs that already cover the objective
+- [ ] Command history checked — `./scripts/assess.py list-command-runs --q <keyword>` reviewed for prior runs that already cover the objective. Default to an unscoped search so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, open its preview with `./scripts/assess.py get-command-run <id>` — `success=true` only means return_code=0, not that the output answers the current question
 - [ ] Parallelism decision made (independent → parallel, dependent → sequential)
 
 DEDUP: Check the activity log (`assess.py fetch activity-entries`) before dispatch — re-dispatching the same agent for the same objective wastes a full context window and risks duplicate findings.
@@ -236,8 +245,10 @@ basename or `engagement.json`), `agent_name` (the dispatching role, e.g.
 `recon-specialist`), and `phase` (from `scope.json.current_phase`) — so the
 runtime can record the command, argv, stdout/stderr, exit code, timeout state,
 and timings to the orchestrator backend automatically. Treat that recording as
-shared engagement state: the operator and every specialist can search it via
-`./scripts/assess.py list-command-runs` before repeating work.
+shared engagement state: specialists check it before probing (their
+`shared-constraints.md §2b` covers the per-probe coverage check); the operator
+reads it to shape dispatches so each one covers a variant that hasn't been
+tried yet (`./scripts/assess.py list-command-runs`).
 
 - Use MCP tool discovery to inspect the currently available Kali tools instead of assuming a fixed tool inventory in the prompt.
 - When you need arbitrary shell execution inside the Kali runtime, use the Kali MCP command-execution tool.
@@ -247,49 +258,44 @@ shared engagement state: the operator and every specialist can search it via
 - If a required target-facing tool is missing from the active Kali MCP session, say so explicitly and stop to resolve the runtime gap rather than falling back to host or Docker-side execution paths.
 - Host-side runtime diagnosis may inspect local files, container metadata, mounts, and environment, but may not send scoped HTTP, DNS, or raw TCP probes from the host.
 
+Each Kali MCP call also supports four optional audit-metadata headers — `X-Technique`, `X-Intent`, `X-Probe-Kind`, and `X-Destructive` — that classify the call so it becomes filterable in `list-command-runs` and the Commands tab. Do not inline the schema here; see the `Command Metadata` sub-section in `agent/shared-constraints.md` for the value tables and the accompanying ban on echo-as-commentary breadcrumbs inside Kali MCP commands.
+
 ### Kali MCP Troubleshooting
 
 If Kali MCP tools are missing or MCP tool discovery returns no tools, see `agent/references/runtime-guides/kali-mcp-troubleshooting.md`.
 
-### Kali MCP Audit and Reuse
+### Kali MCP Audit — Shape Dispatches From Coverage
 
-Every Kali MCP tool call is recorded to the orchestrator backend as an
-`assessment_command_runs` row with FTS5 keyword search. Command output is
-retained with a configurable retention policy (noisy filter outputs are
-suppressed but still hashed; large outputs spill to engagement artifacts).
-Use that history to avoid duplicating work.
-
-Before dispatching a specialist for a probing, scanning, fuzzing, or test
-objective, check whether equivalent commands already ran this engagement.
-Default to an unscoped search so you see every agent's and every phase's
-prior work on the target; narrow with `--agent-name` or `--phase` only after
-the broad result is overwhelming. Cross-agent and cross-phase context is
-usually the most valuable reuse signal; scoping it out by default hides
-exactly the information you need:
+Specialists check `list-command-runs` before each probe (agent-side rule in
+`shared-constraints.md §2b`). The operator's use is different: between
+dispatches, scan the history to shape the *next* dispatch so it covers a
+variant that hasn't been tried — not to duplicate what the agents already
+have in hand.
 
 ```bash
 ./scripts/assess.py list-command-runs --q <keyword>
 ```
 
-Common reasons to re-run anyway — call them out in the dispatch context so
-the specialist does not repeat work that has already resolved. This list is
-not exhaustive; dispatch with any reason you can name:
+When planning the next dispatch:
 
-1. The target's state changed since the prior run (new port, new auth context, deployed change).
-2. The prior run was partial, timed out, or returned ambiguous output (success=true on a soft-failure page, rate-limited response, WAF interposition).
-3. The new hypothesis needs a materially different payload family, tool, or instrumentation, not just a retry.
-4. An independent baseline is needed — cross-agent or cross-phase runs may have used a context that doesn't map to the new specialist's.
-5. Time has passed and a regression check is warranted (networks drift, targets redeploy mid-engagement).
-6. The new dispatch is probing a boundary or interaction between two prior runs that neither covered.
+- **Name the coverage in the dispatch context.** If `sqlmap --technique=U` has
+  run against this endpoint, tell the vulnerability-analyst explicitly to try
+  `BT`/`E`/`Q`/`S` instead of leaving them to re-derive it. If the fuzzer
+  already burned `raft-medium-directories`, dispatch with a tech-specific
+  wordlist. This makes variant-selection deterministic instead of guesswork.
+- **Rotate variants across specialists.** The only dispatch that duplicates
+  work is the same agent, same command, same input. Any variant (different
+  payload family, tool, flag, target scope, credentials, auth context) is new
+  coverage — dispatch it without hesitation.
+- **Before citing a prior run**, fetch its preview with
+  `./scripts/assess.py get-command-run <id>` and confirm the stored evidence
+  actually answers the current question. `success=true` only means
+  `return_code=0` — soft-failure pages, WAF intercepts, and rate-limited stubs
+  all exit cleanly.
 
-Before telling a specialist to reuse a prior run, fetch its preview with
-`./scripts/assess.py get-command-run <id>` and confirm the stored evidence
-answers the current question. A row with `success=true` only means
-`return_code=0` — open the preview to rule out soft-failure pages, WAF
-intercepts, and rate-limited stubs that exit cleanly.
-
-See `agent/references/runtime-guides/command-history-auditing.md` for the
-full reuse decision table and output-field interpretation.
+See `agent/references/runtime-guides/command-history-auditing.md` for
+the full coverage-vs-duplicate decision table and output-field
+interpretation.
 
 ## Finding Format
 
