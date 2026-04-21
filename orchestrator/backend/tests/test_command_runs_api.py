@@ -304,6 +304,24 @@ def test_invalid_retention_preview_bytes_falls_back_to_default(client, isolate_s
     assert created["stdout_preview"] == "small output"
 
 
+def test_unreadable_retention_config_falls_back_to_default(client, isolate_settings, tmp_path, monkeypatch):
+    _write_engagement(isolate_settings["engagements_dir"])
+    bad_config_path = tmp_path / "command_run_retention.json"
+    bad_config_path.mkdir()
+    monkeypatch.setenv("COMMAND_RUN_RETENTION_CONFIG", str(bad_config_path))
+    state_manager._retention_config.cache_clear()
+
+    try:
+        response = _post(client, _base_payload(stdout="small output"))
+    finally:
+        state_manager._retention_config.cache_clear()
+
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["output_retention_status"] == "retained"
+    assert created["stdout_preview"] == "small output"
+
+
 def test_list_command_runs_strips_previews_unless_include_output(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
     big = "B" * 4_000  # well under the 64 KiB cap so it's a normal preview

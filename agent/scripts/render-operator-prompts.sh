@@ -112,7 +112,7 @@ EOF
 render_claude() {
   {
     cat <<'EOF'
-# AI Threat Hunting — Operator Instructions
+# AI Threat Hunting — Claude Code Entry
 
 EOF
     render_banner
@@ -129,16 +129,23 @@ When a session starts, display the banner above and then:
 
 <!-- Generated from operator-core.md via scripts/render-operator-prompts.sh -->
 
-EOF
-    render_prompt_locality
-    render_agent_roster
-    render_code_agent_roster
-    cat "$CORE_FILE"
-    cat <<'EOF'
+## Load Full Operator Instructions
+
+**Load and follow all instructions from `AGENTS.md` in this directory.**
+
+`AGENTS.md` is the single source of truth for operator methodology, agent
+roster, phase flow, finding format, skills, references, and Kali MCP rules.
+Every instruction there applies verbatim to a Claude Code session.
+
+This file (`CLAUDE.md`) exists so Claude Code has a default entry point and
+can attach the Claude-specific dispatch syntax below without duplicating the
+~700 lines of shared instructions that belong in `AGENTS.md`.
 
 ## Claude Dispatch Syntax
 
-Use `@agent-name` when dispatching subagents:
+Use `@agent-name` when dispatching subagents (Claude Code–specific — Codex
+uses its own `.codex/agents/*.toml` wrappers instead):
+
 - `@recon-specialist`
 - `@source-analyzer`
 - `@surface-collector`
@@ -151,13 +158,6 @@ Use `@agent-name` when dispatching subagents:
 - `@code-vuln-hunter`
 - `@code-variant-hunter`
 - `@code-vuln-verifier`
-
-## macOS/zsh Compatibility
-
-- Use absolute paths: `/usr/bin/curl`, `/bin/cat`, `/usr/bin/grep`, etc.
-- Do NOT use `grep -P` (Perl regex). Use `grep -E` (extended) or `rg` instead.
-- HEREDOC: Use unquoted delimiter (`<< EOF`), NOT single-quoted (`<< 'EOF'`).
-- New files: use bash commands (mkdir, cat >, echo >). Existing files: use Edit tool.
 EOF
   } > "$CLAUDE_OUT"
   perl -0pi -e 's/\n+\z/\n/' "$CLAUDE_OUT"
@@ -188,6 +188,13 @@ EOF
     render_code_agent_roster
     cat "$CORE_FILE"
     cat <<'EOF'
+
+## macOS/zsh Compatibility
+
+- Use absolute paths: `/usr/bin/curl`, `/bin/cat`, `/usr/bin/grep`, etc.
+- Do NOT use `grep -P` (Perl regex). Use `grep -E` (extended) or `rg` instead.
+- HEREDOC: Use unquoted delimiter (`<< EOF`), NOT single-quoted (`<< 'EOF'`).
+- New files: use bash commands (mkdir, cat >, echo >). Existing files: use Edit tool.
 
 ## Tool Promotion Workflow
 
@@ -282,6 +289,9 @@ case "$MODE" in
     render_all_wrappers
     ;;
   claude-install)
+    # CLAUDE.md is a thin pointer that directs Claude Code to AGENTS.md,
+    # so claude-install must also produce AGENTS.md (the real content file).
+    render_agents
     render_claude
     render_all_wrappers
     ;;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -172,6 +173,69 @@ def test_patched_kali_client_isolates_concurrent_async_audit_contexts(monkeypatc
         ],
     }
     assert module._AUDIT_CONTEXT.get() == {}
+
+
+def test_patched_kali_server_bounds_queued_audit_streams(monkeypatch, tmp_path: Path) -> None:
+    upstream_path = tmp_path / "fake_kali_server.py"
+    upstream_path.write_text(
+        "\n".join(
+            [
+                "import logging",
+                "import os",
+                "import threading",
+                "API_PORT = 5000",
+                "DEBUG_MODE = False",
+                "logger = logging.getLogger('fake_kali_server')",
+                "class CommandExecutor:",
+                "    pass",
+                "def execute_command(command):",
+                "    return {}",
+                "def parse_args():",
+                "    return type('Args', (), {'debug': False, 'port': API_PORT, 'ip': '127.0.0.1'})()",
+                "class App:",
+                "    def before_request(self, fn): return fn",
+                "    def after_request(self, fn): return fn",
+                "    def run(self, *args, **kwargs): pass",
+                "app = App()",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KALI_MCP_SERVER_PATH", str(upstream_path))
+    monkeypatch.setenv("KALI_MCP_AUDIT_STREAM_MAX_BYTES", "8")
+    module = _load_script_module(
+        "test_patched_kali_server_module",
+        "docker/kali-mcp-runtime/patched_kali_server.py",
+    )
+
+    payload = module._command_run_audit_payload(
+        {
+            "command": "printf output",
+            "argv": None,
+            "return_code": 0,
+            "timed_out": False,
+            "success": True,
+            "started_at": "2026-04-21T10:00:00Z",
+            "completed_at": "2026-04-21T10:00:01Z",
+            "duration_ms": 1000,
+            "stdout": "ABCDEFGHIJKLM",
+            "stderr": "123456789",
+        },
+        tool_name="execute_command",
+        route="/api/generic/execute",
+        agent_name="recon-specialist",
+        phase="recon",
+        audit_source="header",
+        artifact_dir="/eng/scans/command-runs",
+    )
+
+    assert payload["stdout"] == "ABCDEFGH"
+    assert payload["stderr"] == "12345678"
+    assert payload["stdout_sha256"] == hashlib.sha256(b"ABCDEFGHIJKLM").hexdigest()
+    assert payload["stderr_sha256"] == hashlib.sha256(b"123456789").hexdigest()
+    assert "stdout truncated before audit enqueue from 13 bytes to 8 bytes" in payload["notes"]
+    assert "stderr truncated before audit enqueue from 9 bytes to 8 bytes" in payload["notes"]
 
 
 def test_list_intel_search_uses_canonical_entity_type(monkeypatch, tmp_path: Path, capsys) -> None:
