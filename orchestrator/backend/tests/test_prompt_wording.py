@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import subprocess
 
 def test_operator_prompt_outputs_define_default_model_policy():
@@ -367,3 +368,205 @@ def test_prompt_stack_uses_current_report_and_dedup_contracts():
     assert 'fetch "report-findings?mode=final"' in report_writer
     assert "Review-and-fix QA mode" in report_writer
     assert "Publish mode" in report_writer
+
+
+def _prompt_corpus_paths(repo_root: Path) -> list[Path]:
+    """Collect the prompt corpus paths used for static cross-file drift checks."""
+    agent_dir = repo_root / "agent"
+    paths: list[Path] = []
+    paths.extend(sorted((agent_dir / "skills").rglob("*.md")))
+    paths.extend(sorted((agent_dir / "references").rglob("*.md")))
+    paths.extend(sorted((agent_dir / "agents").rglob("*.md")))
+    paths.extend(sorted((agent_dir / "rules").rglob("*.md")))
+    for name in (
+        "operator-core.md",
+        "operator-core-code.md",
+        "shared-constraints.md",
+        "shared-constraints-code.md",
+        "CLAUDE.md",
+        "AGENTS.md",
+    ):
+        candidate = agent_dir / name
+        if candidate.exists():
+            paths.append(candidate)
+    paths.extend(sorted((agent_dir / ".claude" / "agents").rglob("*.md")))
+    paths.extend(sorted((agent_dir / ".codex" / "agents").rglob("*.toml")))
+    return paths
+
+
+def test_no_bare_engagement_path_in_prompts():
+    """The runtime mount is `/engagements/$KEY/...` (trailing s). Any bare `/engagement/`
+    (with a literal trailing slash and no trailing s on `engagement`) left behind in the
+    prompt corpus means an agent will try to write to a dead path inside Kali. The
+    mitmproxy container has its own `/engagement` mount and is the only allowed exception
+    — it lives outside the Kali MCP runtime path namespace."""
+    repo_root = Path(__file__).resolve().parents[3]
+    # Match `/engagement/` as a literal path prefix but not `/engagements/`. The
+    # negative lookahead on `s/` keeps `/engagements/` out; anchoring on the trailing
+    # slash keeps unrelated substrings like `engagement-methodology.md`,
+    # `engagement.pot`, or `path/to/engagement` out too — those are not path prefixes.
+    pattern = re.compile(r"/engagement/")
+    offenders: list[str] = []
+    for path in _prompt_corpus_paths(repo_root):
+        text = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if pattern.search(line):
+                offenders.append(f"{path}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "Bare `/engagement/` references remain in the prompt corpus. Rewrite to "
+        "`/engagements/$ENGAGEMENT_KEY/...` — the Kali runtime bind-mounts `engagements/` "
+        "at `/engagements` (with trailing s). The mitmproxy container has its own "
+        "`/engagement` mount and is excluded from this check.\n" + "\n".join(offenders)
+    )
+
+
+def test_no_status_pending_surface_examples():
+    """`pending` is not a valid surface status — valid values are
+    `discovered|covered|not_applicable|deferred`. A `--status pending` example in the
+    prompt corpus teaches agents to pass an invalid enum to record-surface."""
+    repo_root = Path(__file__).resolve().parents[3]
+    offenders: list[str] = []
+    for path in _prompt_corpus_paths(repo_root):
+        text = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if "--status pending" in line:
+                offenders.append(f"{path}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "`--status pending` appears in the prompt corpus. Valid surface statuses are "
+        "`discovered`, `covered`, `not_applicable`, `deferred`. Use `discovered` for "
+        "newly-found surfaces.\n" + "\n".join(offenders)
+    )
+
+
+def test_no_tar_base64_ferry_blocks():
+    """The `/engagements` bind mount removed the need for tar+base64 ferries between the
+    host and Kali. Any remaining ferry blocks mean the skill is still writing through a
+    container filesystem boundary that no longer exists."""
+    repo_root = Path(__file__).resolve().parents[3]
+    agent_dir = repo_root / "agent"
+    # Two directions: outbound encoding and inbound decoding.
+    outbound = re.compile(r"tar\s+c[zx]f\s+-.*\|\s*base64")
+    inbound = re.compile(r"base64\s+-d.*\|\s*tar\s+[zx]f")
+    offenders: list[str] = []
+    targets = [
+        *sorted((agent_dir / "skills").rglob("*.md")),
+        *sorted((agent_dir / "references").rglob("*.md")),
+    ]
+    for path in targets:
+        text = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if outbound.search(line) or inbound.search(line):
+                offenders.append(f"{path}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "tar+base64 ferry blocks remain in the prompt corpus. The `/engagements` bind "
+        "mount lets skills write directly to `/engagements/$KEY/...` — remove the ferry "
+        "step.\n" + "\n".join(offenders)
+    )
+
+
+def test_reactive_nuclei_wording_present():
+    """The reactive-sweep rule lives in two places on purpose: the operator rule in
+    `operator-core.md` and the skill procedure in `nuclei-scanning/SKILL.md`. Losing
+    either header means the rule can silently disappear from an operator's context."""
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+    nuclei_skill = (
+        repo_root / "agent" / "skills" / "nuclei-scanning" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert "## Reactive Nuclei on URL Discovery" in operator_core, (
+        "operator-core.md is missing the `Reactive Nuclei on URL Discovery` section header"
+    )
+    assert "Reactive Sweep" in nuclei_skill, (
+        "nuclei-scanning/SKILL.md is missing the `Reactive Sweep` section — the operator "
+        "rule points at the skill for mechanics, so both must stay in sync"
+    )
+
+
+def test_phase_1a_1b_1c_structure_present():
+    """Phase 1 was restructured into 1a (wildcard enum) / 1b (parallel recon+source) /
+    1c (reactive nuclei sweep). Losing any of the sub-phase headers collapses the
+    ordering back to the pre-refactor single-step Phase 1."""
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+    # Sub-phase headers in operator-core.md are rendered as `**1a.`, `**1b.`, `**1c.`
+    # — the numeric-letter-dot form is the load-bearing marker, not the phrase
+    # "Phase 1a". Also verify the descriptive labels survive so a partial rename
+    # (e.g. renaming just one sub-phase) is caught.
+    markers = {
+        "1a.": "wildcard enum sub-phase header",
+        "1b.": "parallel recon+source sub-phase header",
+        "1c.": "reactive nuclei sub-phase header",
+        "Wildcard subdomain enumeration": "1a descriptive label",
+        "Parallel recon + source analysis": "1b descriptive label",
+        "Reactive nuclei sweep": "1c descriptive label",
+    }
+    for substring, label in markers.items():
+        assert substring in operator_core, (
+            f"operator-core.md is missing `{substring}` ({label}) — Phase 1 structure has drifted"
+        )
+
+
+def test_scope_coverage_gates_present():
+    """`check-scope-coverage` is the phase-gate CLI; its `--require-stage enum` and
+    `--require-stage collection` flags are what make the Phase 1->2 and Phase 2->3 exit
+    gates enforceable. Dropping either invocation silently disables the corresponding
+    gate."""
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+    assert "check-scope-coverage --require-stage enum" in operator_core, (
+        "operator-core.md is missing the Phase 1 exit gate "
+        "`check-scope-coverage --require-stage enum`"
+    )
+    assert "check-scope-coverage --require-stage collection" in operator_core, (
+        "operator-core.md is missing the Phase 2 exit gate "
+        "`check-scope-coverage --require-stage collection`"
+    )
+
+
+def test_priority_dispatch_wired_into_prompts():
+    """`classify-work`, `list-clusters`, `dispatch defer-cluster`, and
+    `dispatch fetch-by-priority` are the priority-mode CLIs. Without them referenced in
+    the operator loop and the case-dispatching skill, the priority-score columns on
+    `work_items` stay populated but unused, which is worse than not having them."""
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+    case_dispatching = (
+        repo_root / "agent" / "skills" / "case-dispatching" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    # classify-work must be called after Phase 2 ingestion and inside the priority-mode
+    # branch of the consumption loop.
+    assert "classify-work" in operator_core, (
+        "operator-core.md must call `assess.py classify-work` after Phase 2 ingestion "
+        "so Phase 3 priority-mode dispatch has scored rows to sort"
+    )
+    assert "classify-work" in case_dispatching, (
+        "case-dispatching/SKILL.md must document `classify-work` in the priority-mode "
+        "branch of the consumption loop"
+    )
+
+    # Priority-first dispatch branch wired in both files.
+    assert "fetch-by-priority" in operator_core, (
+        "operator-core.md must document the priority-first dispatch branch via "
+        "`dispatch fetch-by-priority`"
+    )
+    assert "fetch-by-priority" in case_dispatching, (
+        "case-dispatching/SKILL.md must document `dispatch fetch-by-priority` for "
+        "buffer-size-triggered priority dispatch"
+    )
+
+    # Cluster review + deferral CLIs.
+    assert "list-clusters" in case_dispatching, (
+        "case-dispatching/SKILL.md must reference `list-clusters` so operators can "
+        "inspect cluster manifests before dispatching"
+    )
+    assert "defer-cluster" in case_dispatching, (
+        "case-dispatching/SKILL.md must reference `dispatch defer-cluster` so "
+        "operators can drop low-signal clusters before specialist dispatch"
+    )
+
+    # Volume threshold: small buffer stays type-based; large buffer switches to priority.
+    assert "2000" in operator_core, (
+        "operator-core.md must state the 2000-pending threshold that switches between "
+        "type-based and priority-based dispatch"
+    )

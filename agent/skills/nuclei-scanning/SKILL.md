@@ -19,11 +19,240 @@ origin: AI Threat Hunting
 
 - `nuclei` — template-based vulnerability scanner (community templates updated weekly)
 
+## Reactive Sweep Mode (Phase 1-2 primary use)
+
+Reactive sweeps run in-phase against URL deltas each phase produces — they are additive to the
+phase they belong to, not a reason to jump ahead. Every time new live URLs land during Phase 1
+or Phase 2, fire a focused CVE/misconfig/exposure scan on that delta so classify-work can attach
+the `+10` nuclei bonus to matched work items before Phase 3 dispatch. Phase 3a below is a
+coverage audit that re-runs nuclei **only against gaps** left by the reactive passes — when
+reactive coverage was thorough, Phase 3a is a no-op summary, not a second broad sweep.
+
+### When to trigger a reactive sweep
+
+Run one as soon as any Phase 1-2 step adds live URLs to the engagement — early hits change
+priority_score on fresh work-buffer entries before specialists pull them. Trigger points:
+
+- After `recon-specialist` returns with an endpoint list (`endpoints.txt` or surfaces)
+- After `source-analyzer` harvests JS/HTML URLs (scans/js_urls.txt, extracted endpoint arrays)
+- After `surface-collector` ingests Katana / gau output (`assess.py ingest-endpoints` just ran)
+- After `subdomain-enumeration` produces live hosts (`subdomains_live.txt` entries land)
+- After wildcard expansion adds apex siblings that passed the httpx liveness check
+
+### Build the delta file (Kali MCP + assess.py)
+
+The delta is "live URLs not yet covered by a prior reactive nuclei run with the same template
+set." Build it on the host (coverage lookup is host-side `assess.py` work), then write the file
+under `/engagements/$ENGAGEMENT_KEY/scans/` so Kali sees it at the same path.
+
+```bash
+# Host side — compute the delta
+DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
+KEY=$(basename "$DIR")
+RID=$(date -u +%Y%m%dT%H%M%SZ)
+
+# 1. Gather the current live-URL universe from backend state.
+./scripts/assess.py fetch summary > "$DIR/scans/_summary_$RID.json"
+# Take services/hosts plus any freshly-ingested URLs you want covered. Example shape:
+jq -r '.. | .url? // empty' "$DIR/scans/_summary_$RID.json" | sort -u \
+  > "$DIR/scans/_all_live_$RID.txt"
+# (Or splice in the specific file that triggered this sweep — e.g. subdomains_live.txt or
+# katana output — so the reactive pass scans only the newly-added URLs.)
+
+# 2. Gather already-scanned URLs from prior reactive runs with the same template bucket.
+./scripts/assess.py list-command-runs --q nuclei --tool-bin nuclei --json > \
+  "$DIR/scans/_nuclei_runs_$RID.json"
+# Every prior reactive run wrote its input list at /engagements/$KEY/scans/nuclei_reactive_<RID>.txt
+# and its output JSONL alongside. Extract URLs already covered — use the JSONL artifacts as the
+# authoritative "scanned" set because the command field may be truncated.
+find "$DIR/scans" -name 'nuclei_reactive_*.jsonl' -print0 | \
+  xargs -0 -r jq -r '.["matched-at"] // .host // empty' 2>/dev/null | \
+  sort -u > "$DIR/scans/_already_scanned_$RID.txt"
+
+# 3. Subtract already-scanned from all-live and intersect with scope.
+jq -r '.hosts[]? | select(type=="string")' "$DIR/scope.json" > "$DIR/scans/_scope_hosts_$RID.txt"
+comm -23 \
+  "$DIR/scans/_all_live_$RID.txt" \
+  "$DIR/scans/_already_scanned_$RID.txt" | \
+  grep -Ff "$DIR/scans/_scope_hosts_$RID.txt" \
+  > "$DIR/scans/nuclei_reactive_$RID.txt"
+```
+
+The `comm` / `grep -Ff` step is the scope boundary — reactive nuclei only scans URLs that are
+both new this pass AND attached to a scope.json host. Skipping this guard risks sweeping an
+out-of-scope host that was pulled in from a passive source, which would break the engagement's
+authorization envelope.
+
+### Invocation (Kali MCP, exact)
+
+```bash
+nuclei -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_reactive_$RID.txt \
+  -t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/,http/technologies/,http/exposed-panels/ \
+  -severity medium,high,critical \
+  -as -stream -jsonl \
+  -rate-limit 150 -c 25 -bs 25 \
+  -stats -si 30 \
+  -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_reactive_$RID.jsonl
+```
+
+Flags explained — each flag earns its place because removing it breaks an assumption downstream:
+
+- `-l <delta file>` reads targets from the computed delta rather than an inline URL, because the
+  delta is the whole point of reactive mode — scanning the universe each time bills the same
+  templates repeatedly and inflates `list-command-runs`.
+- `-t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/,http/technologies/,http/exposed-panels/` scopes template
+  directories to the discovery-phase classes, because fuzzing/ and payload-heavy templates belong
+  to Phase 3 targeted work and would drown early signal in noise.
+- `-severity medium,high,critical` suppresses info/low during discovery, because info findings are
+  tech-detect data that nuclei's `-as` flag already produces elsewhere.
+- `-as` auto-aligns templates with detected tech stack, because untargeted template execution
+  wastes rate budget on irrelevant CVEs (no WordPress templates on a Spring app).
+- `-stream` processes inputs without buffering, because Phase 1-2 deltas can arrive in small
+  batches and buffering delays early hits that classify-work needs for priority_score writes.
+- `-jsonl` emits one JSON object per line, because ingestion tooling and `jq` both expect JSONL
+  and regular `-o` text loses the template metadata.
+- `-rate-limit 150 -c 25 -bs 25` caps outbound rps, concurrency, and bulk size, because in-scope
+  targets are often production-like and WAFs block aggressive scans.
+- `-stats -si 30` prints a 30-second stats tick so the operator sees progress without tailing the
+  JSONL file — useful when the delta is large.
+
+### Template selection rationale
+
+During discovery, stick to `http/cves/`, `http/misconfiguration/`, `http/exposures/`, `http/default-logins/`, `http/technologies/`,
+and `http/exposed-panels/`. Skip `http/fuzzing/` and payload-heavy template directories — they belong to
+Phase 3 targeted work because (1) their false-positive rate is higher, (2) they generate noisy
+request volume that trips WAFs before real testing starts, and (3) their matches require the
+specialist skill context to triage correctly. Dropping them from the reactive pass keeps
+classify-work's +10 nuclei bonus aligned with genuine CVE/misconfig/exposure signal.
+
+### Dedup across runs (Option A — no schema change)
+
+Use `assess.py list-command-runs --q nuclei` to compute the "already-scanned" set from prior
+reactive runs, then subtract it from the current delta before invoking nuclei. The artifact
+filenames and JSONL outputs are durable engagement state — no new column on
+`assessment_command_runs` is needed because the inputs (delta file) and outputs (JSONL) live
+under `/engagements/$ENGAGEMENT_KEY/scans/` and survive container recreate.
+
+```bash
+# jq exclusion-set pattern (runs before nuclei invocation)
+./scripts/assess.py list-command-runs --q nuclei --tool-bin nuclei --json | \
+  jq -r '.[].command
+         | capture("(?<path>/engagements/[^ ]+/scans/nuclei_reactive_[^ ]+\\.txt)")?.path
+         // empty' | \
+  while IFS= read -r input_list; do
+    host_path="${input_list/\/engagements\//$DIR/../}"
+    # Concatenate prior input lists into the exclusion set. The nuclei JSONL outputs
+    # are the source of truth for "what was actually scanned and returned" — the input
+    # list tells us what the run *attempted*, which is the correct exclusion semantic
+    # because a URL covered by a prior run doesn't need a retry just because that run
+    # returned zero matches.
+    [ -f "$host_path" ] && cat "$host_path"
+  done | sort -u > "$DIR/scans/_already_scanned_$RID.txt"
+```
+
+Option B (add a `coverage_key` column to `assessment_command_runs`) is deferred — Option A covers
+the reactive-dedup need today, and schema changes ripple through backend tests and migrations for
+little additional value.
+
+### Result ingestion
+
+Reactive nuclei hits enter the engagement as candidates, not auto-recorded findings — manual
+revalidation catches template false positives (SSRF probes against patched endpoints,
+version-string collisions, etc.) before they reach the finding lifecycle.
+
+- **Critical / high hits** — draft a finding JSON (see `./scripts/assess.py contract
+  record-finding` for the schema), re-validate the template's PoC manually via Kali MCP, then
+  record with `./scripts/assess.py record-finding vulnerability-analyst <finding-json-file>`
+  only if the re-test reproduces the hit.
+- **Medium hits** — record as intel with `./scripts/assess.py record-intel note <json-file>`,
+  noting the template-id and matched URL. Medium hits often seed Phase 3 targeted testing
+  rather than standalone findings.
+- **Tech fingerprints** (from `-as` template matches like `http/technologies/`) — record via
+  `./scripts/assess.py record-intel tech-component <json-file>` so classify-work can match them
+  against CVE intel.
+
+### Safety and scope boundary
+
+Reactive nuclei runs only against URLs present in the scope.json host list (enforced by the
+`grep -Ff scope_hosts` step above). Never sweep a host whose presence in the delta came from
+passive sources alone — an out-of-scope sweep breaks the authorization envelope even if the
+finding would be accurate.
+
+## Coverage Audit Mode (Phase 3a)
+
+Phase 3a is not a second broad sweep — it is an audit that confirms every in-scope live host
+received a reactive pass with the expected template set, and fills any gaps. When Phase 1 and
+Phase 2 reactive sweeps were thorough, Phase 3a prints a coverage summary and advances without
+running nuclei again. The audit replaces the old "broad nuclei sweep before the work-buffer
+loop" pattern because a blind rerun wastes rate budget and inflates `list-command-runs`
+without finding new signal.
+
+### Audit procedure
+
+```bash
+DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
+KEY=$(basename "$DIR")
+RID=$(date -u +%Y%m%dT%H%M%SZ)
+
+# 1. Universe: every in-scope live URL the engagement has observed.
+./scripts/assess.py fetch summary > "$DIR/scans/_summary_audit_$RID.json"
+jq -r '.. | .url? // empty' "$DIR/scans/_summary_audit_$RID.json" | sort -u \
+  > "$DIR/scans/_all_live_audit_$RID.txt"
+jq -r '.hosts[]? | select(type=="string")' "$DIR/scope.json" \
+  > "$DIR/scans/_scope_hosts_audit_$RID.txt"
+grep -Ff "$DIR/scans/_scope_hosts_audit_$RID.txt" \
+  "$DIR/scans/_all_live_audit_$RID.txt" \
+  > "$DIR/scans/_in_scope_live_audit_$RID.txt"
+
+# 2. Already-covered: every URL that appeared in a prior reactive run's input list.
+find "$DIR/scans" -name 'nuclei_reactive_*.txt' -print0 | \
+  xargs -0 -r cat 2>/dev/null | sort -u \
+  > "$DIR/scans/_already_swept_audit_$RID.txt"
+
+# 3. Gap: in-scope live ∖ already-covered.
+comm -23 \
+  "$DIR/scans/_in_scope_live_audit_$RID.txt" \
+  "$DIR/scans/_already_swept_audit_$RID.txt" \
+  > "$DIR/scans/nuclei_gap_$RID.txt"
+
+GAP_COUNT=$(wc -l < "$DIR/scans/nuclei_gap_$RID.txt")
+if [ "$GAP_COUNT" -eq 0 ]; then
+  ./scripts/assess.py log operator \
+    "Phase 3a nuclei coverage audit — reactive sweeps covered all $(wc -l < "$DIR/scans/_in_scope_live_audit_$RID.txt") in-scope live URLs; no rerun needed." ""
+  exit 0
+fi
+```
+
+### Invocation (gaps only, Kali MCP)
+
+```bash
+nuclei -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap_$RID.txt \
+  -t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/,http/technologies/,http/exposed-panels/ \
+  -severity medium,high,critical \
+  -as -stream -jsonl \
+  -rate-limit 150 -c 25 -bs 25 \
+  -stats -si 30 \
+  -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap_$RID.jsonl
+```
+
+Same template set and severity as reactive mode so Phase 3a coverage is directly comparable to
+what the reactive passes attempted. Any host reaching Phase 3a without reactive coverage usually
+came from a late ingestion (e.g., an endpoint `vulnerability-analyst` discovered mid-Phase-3 and
+re-ingested) — the audit picks it up.
+
+### Triage and ingestion
+
+Results triage identically to reactive mode: critical/high → finding candidates after manual
+revalidation; medium → intel; `-as` tech fingerprints → `record-intel tech-component`. Record
+the audit result in the engagement activity log even when the gap list is empty — the absence
+of a run is itself coverage evidence, which matters for the report.
+
 ## Methodology
 
-The shared Kali runtime does not mount `$ENGAGEMENT_DIR` at `/engagement`. Use `/tmp` for runtime-local
-input/output, then persist durable artifacts into `$ENGAGEMENT_DIR/scans/` on the host before triage,
-ingestion, or handoff.
+The engagement dir is bind-mounted into Kali at `/engagements/$ENGAGEMENT_KEY/` — write input lists
+and scan output directly under `/engagements/$ENGAGEMENT_KEY/scans/` so the host sees the same
+files as `$ENGAGEMENT_DIR/scans/` without a ferry. Reserve `/tmp` for transient scratch, because
+anything in `/tmp` disappears on container recreate.
 
 ### 1. Update Templates
 ```bash

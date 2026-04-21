@@ -35,6 +35,11 @@ Environment:
   KALI_MCP_CONTAINER_NAME     Container name (default: security-research)
   KALI_MCP_DATA_DIR           Host path mounted to /data (default: ../.runtime-data)
 
+Mounts:
+  $KALI_MCP_DATA_DIR -> /data           shared-infra state (OOB logs, pwncat sessions, frpc config)
+  $AGENT_DIR/engagements -> /engagements  per-engagement artifact tree; skills read/write
+                                         /engagements/<engagement_key>/... inside the container
+
 The root .env file is sourced before startup so shell-side defaults apply, then
 passed to docker with --env-file so the same values are available inside the
 runtime container.
@@ -62,6 +67,17 @@ validate_runtime_tools() {
     echo "[runtime] The local image is likely stale relative to the checked-in Dockerfile." >&2
     echo "[runtime] Rebuild and recreate the runtime, for example:" >&2
     echo "  docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile ." >&2
+    echo "  ./agent/scripts/start_kali_mcp_runtime.sh --recreate" >&2
+    exit 1
+  fi
+
+  # The /engagements bind mount is the contract skills rely on when writing
+  # /engagements/<engagement_key>/scans/... from inside Kali MCP. If it is
+  # missing the container was started by a stale launcher; fail loud so the
+  # operator recreates rather than silently writing to an ephemeral path.
+  if ! docker exec "$CONTAINER_NAME" test -d /engagements >/dev/null 2>&1; then
+    echo "[runtime] /engagements mount missing inside container: $CONTAINER_NAME" >&2
+    echo "[runtime] Recreate the runtime so the new bind mount is applied:" >&2
     echo "  ./agent/scripts/start_kali_mcp_runtime.sh --recreate" >&2
     exit 1
   fi
@@ -95,11 +111,15 @@ if ! docker inspect --type image "$IMAGE" >/dev/null 2>&1 \
 fi
 
 mkdir -p "$DATA_DIR"
+# Pre-create the engagements tree on the host so the bind mount below does
+# not materialize a root-owned directory inside the container on first run.
+mkdir -p "$AGENT_DIR/engagements"
 
 if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
   if [[ "$RECREATE" -eq 0 ]]; then
     echo "[runtime] Shared Kali MCP runtime already running: $CONTAINER_NAME"
     echo "[runtime] Shared data mount: $DATA_DIR"
+    echo "[runtime] Engagements mount: $AGENT_DIR/engagements -> /engagements"
     validate_runtime_tools
     exit 0
   fi
@@ -116,6 +136,11 @@ docker_args=(
   --cap-add=NET_RAW
   --cap-add=NET_ADMIN
   -v "$DATA_DIR:/data"
+  # Expose every engagement directory as /engagements/<engagement_key>/...
+  # inside the container so Kali MCP commands can read/write scans, tools,
+  # and downloads directly — the skills use /engagements/$ENGAGEMENT_KEY/...
+  # as the single canonical path on the Kali side.
+  -v "$AGENT_DIR/engagements:/engagements"
   # Docker Desktop on macOS/Windows resolves host.docker.internal
   # automatically; on Linux the alias must be set explicitly. Adding
   # the flag unconditionally is safe on all three platforms.
@@ -143,4 +168,5 @@ validate_runtime_tools
 
 echo "[runtime] Shared Kali MCP runtime started: $CONTAINER_NAME"
 echo "[runtime] Shared data mount: $DATA_DIR"
+echo "[runtime] Engagements mount: $AGENT_DIR/engagements -> /engagements"
 echo "[runtime] Attach client MCP to: docker exec -i $CONTAINER_NAME mcp-server"
