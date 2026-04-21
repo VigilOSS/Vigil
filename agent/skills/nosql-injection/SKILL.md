@@ -302,6 +302,13 @@ If the application does type checking, operator injection is blocked. Look for e
 - Blind $regex extraction exceeds 100 requests with rate limiting >2s/request → record as confirmed (HIGH) but note "manual extraction required", stop automated extraction
 - Auth bypass via operator injection succeeds → CRITICAL, record finding immediately
 
+## Escalate When
+- Sending `{"field": {"$ne": null}}` or `field[$ne]=x` produces a different response (different length, different count, different status) than the literal string `x` — the backend is parsing operator syntax, enumerate `$gt`, `$regex`, `$exists`, `$in`, `$where`, `$function` before declaring the parameter safe
+- A JSON body is accepted where the route originally took URL-encoded form data (or vice versa) — body-parser confusion lets attacker inject operator objects the validator never sees, retest every param with both encodings
+- `$regex` or `$where` triggers a measurable timing delta (regex catastrophic backtracking, sleep via `$where: "sleep(1000)"`, `$function` in modern Mongo) — blind extraction works even without body parity, build the per-character oracle
+- Login/search/filter endpoints accept nested JSON on any authentication, password-reset, or 2FA-verify route — these are auth-bypass gold, walk every operator against every auth-surface parameter
+- Response length or count differs when injecting an always-true operator (`{"$ne":""}`) vs an always-false operator (`{"$eq":"__nope__"}`) — the query is attacker-controllable, extract via boolean-blind regex even if errors are suppressed
+
 ## Extended Resources
 
 - `agent/references/payloads/nosql-injection-payloads.md` — MongoDB operators ($gt, $ne, $regex, $where), auth bypass, blind extraction

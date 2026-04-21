@@ -41,7 +41,7 @@ Target has query parameters reflecting in HTML?
         manual injection for stored fields)
 ```
 
-**When dalfox wastes time:** SPAs that render entirely client-side (React/Angular/Vue), WebSocket-driven UIs, multi-step stored XSS flows, targets behind heavy WAFs that rate-limit automated scanning. In these cases, go straight to manual.
+**When dalfox is unlikely to find anything:** SPAs that render entirely client-side (React/Angular/Vue), WebSocket-driven UIs, multi-step stored XSS flows, targets behind heavy WAFs that rate-limit automated scanning. In these cases, go straight to manual.
 
 **When dalfox is worth running:** Classic server-rendered pages with visible parameter reflection, large parameter surfaces (pipe hundreds of URLs), initial broad sweep before manual deep-dive.
 
@@ -420,6 +420,13 @@ Self-XSS + CSRF (login CSRF or state change) -> stored payload triggers for vict
 - dalfox + manual DOM analysis find zero reflection points after full parameter set tested → move on
 - Framework auto-escapes all output (React JSX, Angular templates, Vue {{ }}) AND no dangerouslySetInnerHTML/v-html/bypassSecurityTrust usage found → skip
 - Stored XSS confirmed → CRITICAL, record finding and stop testing other XSS vectors on this endpoint
+
+## Escalate When
+- Any injected marker survives into the response — even encoded — walk the sinks: attribute context, script-block context, URL context, JSON-embedded-in-HTML, and template literal each have distinct break-out payloads that a generic probe misses
+- Reflection lands inside an existing attribute, `<script>` body, `href`/`src`, `on*` handler, or JSON blob assigned to a JS variable — do not stop at "HTML-encoded"; test context-specific break-outs (`";alert(1)//`, backtick, `javascript:` scheme, JSON string escape with `</script>`)
+- Input flows into a DOM sink via `location`, `postMessage`, `document.referrer`, `window.name`, or `fetch().then(r=>r.text()).then(eval)` — source-to-sink tracing beats payload spraying for DOM XSS, trace the taint before declaring the parameter safe
+- CSP allows `unsafe-inline`, `unsafe-eval`, a wildcard host, a JSONP endpoint on an allowed origin, `data:` on script-src, or a missing `base-uri` — CSP bypass is gadget-driven, enumerate allowed hosts for known bypass gadgets (AngularJS, JSONP callbacks, script-gadgets.github.io entries)
+- A stored field accepts HTML-looking input and the server round-trips it unchanged to any user, admin panel, email template, PDF export, or activity log — stored XSS has multiple render surfaces, test each
 
 ## Extended Resources
 

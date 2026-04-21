@@ -327,6 +327,13 @@ Severity mapping:
 - Credentials found in actuator/env or .env file → CRITICAL, validate credentials work, record finding, stop disclosure hunting
 - .git exposed → extract repo, search for secrets in history, record findings, stop other disclosure tests
 
+## Escalate When
+- A 403 or 401 on `/actuator`, `/debug`, `/console`, `/swagger`, `/api-docs`, `/metrics`, `/.git/HEAD`, or `/.env` means the path exists — enumerate sub-resources (`/actuator/heapdump`, `/actuator/env`, `/.git/config`, `/swagger.json`) because parent ACLs frequently miss children
+- A verbose error or stack trace leaks a framework, DB driver, absolute path, internal hostname, queue name, cloud account ID, or commit hash — each is a pivot seed: framework enables targeted CVE checks, absolute paths enable LFI/traversal payloads, commit hashes enable source-code retrieval
+- A Backup/`.bak`/`.old`/`~`/`.swp`/`.DS_Store`/`Thumbs.db`/`.idea/`/`.vscode/` file returns 200 on any path — sweep the full file-extension backup list across every discovered directory, not just the site root
+- HTTP response headers leak Kubernetes pod names, internal service names (via `Via`, `X-Served-By`, `Server-Timing`), or AWS/Azure/GCP identifiers — the infrastructure is talking, map the internal architecture before moving on
+- Version banners match a known-vulnerable release OR the target runs a managed platform (Confluence, Jira, GitLab, Jenkins, Sitecore, Citrix, Fortinet) — pull the CVE list for that exact version and validate the highest-impact one
+
 ## Extended Resources
 
 - `agent/references/payloads/info-disclosure-probes.md` — standard endpoints checklist (/metrics, /.env, /actuator, cloud metadata)

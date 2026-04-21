@@ -118,6 +118,13 @@ origin: AI Threat Hunting
 - All mutations require valid authorization AND no IDOR found in query resolvers → authorization is effective, move on
 - Depth/complexity limits enforced AND rate limiting active → DoS not feasible, skip DoS testing
 
+## Escalate When
+- Introspection is disabled on `/graphql` but a malformed query returns a "Did you mean …" suggestion — field suggestions leak the schema, run clairvoyance/graphql-cop and rebuild the type map before moving on
+- Any resolver accepts an ID, UUID, or numeric handle as an argument — test cross-tenant reads by swapping to another user's ID, GraphQL IDOR is commonly missed because authorization lives on the resolver, not the gateway
+- Query batching or aliasing (`a: login(...), b: login(...), c: login(...)`) is accepted — rate limits apply per HTTP request not per operation, stack dozens of aliases against login/OTP/coupon endpoints
+- A mutation's input type accepts a nested object field that was not documented or exposed by the UI — over-posting/mass-assignment (setting `role`, `isAdmin`, `ownerId`, `createdBy`) routinely bypasses field-level checks
+- Query parameters are interpolated into a downstream SQL/NoSQL/OS call (visible via errors, timing, or OAST callback from a string arg) — GraphQL variables do not sanitize, classic injection works through the resolver
+
 ## Extended Resources
 
 - `agent/references/payloads/graphql-payloads.md` — introspection, batching, field suggestion, injection in variables

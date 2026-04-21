@@ -33,7 +33,7 @@ Audit trail requirement:
 
 ## Methodology — Five-Check Protocol
 
-Every finding must survive all 5 checks. Failure at any check results in KILL, DOWNGRADE, or escalation to voting. This protocol stress-tests the finding — but a kill requires counter-evidence at the same rigor bar as the original finding. Circumstantial or assumption-based counter-arguments produce downgrades or voting escalations, not kills.
+Every check produces one of four outcomes: PASS, KILL, DOWNGRADE, or ESCALATE. PASS and KILL carry the same evidence cost — PASS requires cited supporting evidence at the hunter's rigor bar, KILL requires cited counter-evidence at the same bar. DOWNGRADE applies when counter-evidence reduces exploitability but does not eliminate the bug. ESCALATE routes to the multi-perspective voting step (lines 215-249) when evidence fits neither PASS nor KILL — absence of counter-evidence is not PASS evidence, and plausibility of counter-evidence is not KILL evidence.
 
 ### Check 1: Reachability from External Entry
 
@@ -58,10 +58,11 @@ grep '^parse_header_value\t' tags
 ```
 
 **Decision:**
-- Entry point found with untrusted data flowing to vulnerable function: **PASS**
+- **PASS**: cite the external entry point (network handler, file parser, CLI argv, IPC endpoint), the concrete function chain from that entry to the sink (file:line for each hop), and at least one caller where attacker-controlled bytes reach the sink without being normalized to a constant. Naming the entry point alone is not sufficient — the taint must be traced.
 - Entry point found but data is hardcoded/constant by the time it reaches vulnerable function: **KILL** ("unreachable with untrusted data — all callers pass constants")
 - No external entry point found (dead code, internal-only function): **KILL** ("no external entry point — function is unreachable from attack surface")
 - Entry point found but only through test code: **KILL** ("only reachable from test harness, not production code")
+- **ESCALATE**: the evidence does not fit PASS or KILL — record the specific ambiguity (missing reachability witness, unresolved indirect call, callback registered at runtime, plugin-dispatched sink) and route to the **multi-perspective voting** step defined below (lines 215-249). Do not default to KILL or PASS.
 
 ### Check 2: Upstream Guards
 
@@ -76,7 +77,8 @@ The vulnerability analysis (Phase 3) evaluated guards within the vulnerable func
 **Decision:**
 - Complete guard found upstream that covers all paths: **KILL** ("upstream guard in `validate_request()` at request.c:85 bounds-checks length before passing to vulnerable function")
 - Partial guard found (some paths guarded, wrong bound, incomplete coverage): **DOWNGRADE** — the bug is real but exploitability is reduced. Document which paths are guarded and which remain unguarded. Do not KILL on a partial guard; partial means the attacker still has at least one unguarded path.
-- No upstream guard found: **PASS**
+- **PASS**: cite the specific callers examined 3-5 levels up (file:line for each) and confirm no guard is present on the tainted variable, OR name a present-but-ineffective check and show why it does not constrain the attacker-controlled value (wrong variable, wrong bound, wrong branch, executed after use). "No guard found" asserted without naming the callers inspected is not PASS evidence.
+- **ESCALATE**: a guard exists but its completeness is contested — macro-expanded check whose definition is conditional, guard enforced by a caller invariant that may or may not hold, compile-time check whose predicate depends on unverified config. Record the specific ambiguity and route to the **multi-perspective voting** step (lines 215-249).
 
 **Common upstream guard locations:**
 - Request validation layers (input sanitization before dispatch)
@@ -110,10 +112,11 @@ rg "FEATURE_NAME" .config defconfig
 ```
 
 **Decision:**
-- Code compiled in default production build: **PASS**
+- **PASS**: cite the build-system evidence that the vulnerable code is compiled into the default production build — the Makefile/CMakeLists/Cargo.toml/build.rs line enabling the relevant translation unit, the defconfig or release profile that sets the guarding symbol, or confirmation that no `#ifdef`/`#[cfg(...)]`/build-tag wraps the sink. If a guarding symbol exists, name it and show the config line that enables it. "No conditional compilation" asserted without the grep result is not PASS evidence.
 - Code behind debug-only flag (`#ifdef DEBUG`, `#[cfg(test)]`): **KILL** ("debug-only code, not compiled in production")
 - Code behind optional feature flag: **DOWNGRADE** severity + note the flag ("vulnerable code requires `--enable-experimental-parser` flag, not enabled by default")
 - Code excluded on common platforms: **DOWNGRADE** + note platforms affected
+- **ESCALATE**: the guarding symbol's default state is contested (vendor patch flips it, distro configs disagree, feature is on-by-default upstream but off in common downstreams). Record the specific config ambiguity and route to the **multi-perspective voting** step (lines 215-249).
 
 ### Check 4: Exploitation Feasibility (PoC-or-Proof Required)
 
@@ -151,10 +154,11 @@ Apply the constrained attacker persona with maximum rigor. You must reach one of
    - W^X (NX): does the attacker need injected code, or is ROP sufficient?
 
 **Decision:**
-- Concrete exploit path exists even with mitigations: **PASS** with full exploit description
-- Exploitation is probabilistic but feasible with standard attacker techniques: **PASS** with severity note documenting reliability constraints
+- **PASS (concrete)**: cite the exact bytes, entry point, end-to-end code path (file:line per hop), and concrete impact (bytes overflowed and what they overwrite, command executed and its privileges, object freed and what reuses it, access gained). A high-level "attacker sends oversized input" narrative without the byte-level trigger and landing-site description is not PASS evidence.
+- **PASS (probabilistic)**: cite the standard attacker technique that closes the gap (heap spray shape, ASLR brute-force budget, race-window widening mechanism, info-leak chain partner) and the conditions under which it succeeds. Name the technique — "probabilistic but feasible" asserted without naming the technique is not PASS evidence.
 - Exploit theoretically possible but mitigations make it impractical: **DOWNGRADE** severity + document mitigation effectiveness
-- No concrete or probabilistic exploit path AND specific blocking constraint identified: **KILL** ("exploitation requires [specific impossible condition]")
+- No concrete or probabilistic exploit path AND specific blocking constraint identified: **KILL** — you must cite (a) the specific constraint (guard, type-system limit, allocator cap, mitigation) with file:line, AND (b) demonstrate that the attacker cannot route around it. Enumerate and rule out: alternative input channels that bypass the constraint, encoding/normalization mismatches (UTF-8 vs. byte count, canonicalization before vs. after the check), partial-match or prefix bypasses, pre-guard-state mutation (TOCTOU on the checked value), integer-width or signedness escapes, and chained primitives that satisfy the constraint's precondition under attacker control. "Mitigation exists" is not sufficient; "mitigation exists AND these N routes around it are each closed by [specific evidence]" is.
+- **ESCALATE**: exploit construction is blocked by a condition whose attacker-controllability is contested (heap grooming feasibility on this allocator, timing window width on this scheduler, availability of a companion info leak). Record the specific ambiguity and route to the **multi-perspective voting** step (lines 215-249).
 
 ### Check 5: Devil's Advocate (Trail of Bits fp-check methodology)
 
@@ -203,18 +207,21 @@ What external protections exist?
 **Outcome:**
 - Counter-argument with specific code evidence **as rigorous as the original finding**: **KILL** with full counter-argument documentation
 - Counter-evidence weakens but does not fully refute the finding: **DOWNGRADE** severity — the bug is real but the counter-evidence reduces impact or exploitability
-- Counter-argument plausible but rests on assumptions, implicit invariants, or incomplete coverage proof: escalate to **multi-perspective voting** — do not kill on uncertainty
-- No convincing counter-argument after all 4 steps: the finding **SURVIVES** with higher confidence
+- **PASS (survives)**: cite what you tried to disprove in each of the 4 steps (guard search, constraint search, intent search, mitigation search), the file:line evidence you inspected in each, and why the counter-hypotheses fail. A survival asserted without naming the disproof attempts is not PASS evidence — silence across the 4 steps is not the same as discharge of the 4 steps.
+- **ESCALATE (multi-perspective voting)**: counter-argument is plausible but rests on assumptions, implicit invariants, or incomplete coverage proof — route to the **multi-perspective voting** step (lines 215-249). Do not kill on uncertainty, do not pass on absence of counter-evidence. Record the specific ambiguity that blocks a clean PASS or KILL.
 
 Document: what you tried to disprove, what evidence you found for and against, and the final determination. This documentation strengthens confirmed findings and makes kills auditable.
 
 ## Multi-Perspective Voting Protocol
 
-For findings where Check 5 produces an ambiguous result — the counter-argument is plausible but not conclusive:
+Entered when any of Checks 1-5 returns **ESCALATE** — the evidence fits neither the PASS bar nor the KILL bar for that check. Check 5 is one entry point; Checks 1-4 may also escalate when their specific ambiguity is recorded.
 
 **When to invoke voting:**
+- Reachability witness is indirect (runtime callback, plugin dispatch, FFI boundary) and the taint trace cannot be closed from source alone
+- Upstream guard's completeness depends on a macro, caller invariant, or compile-time predicate that cannot be resolved from the source checked out
+- Build-config default state is contested across vendors, distros, or release profiles
+- Exploit construction is blocked by a condition whose attacker-controllability is contested (heap grooming, timing window, info-leak availability)
 - Devil's advocate found a partial guard but it may be bypassable
-- Exploitation feasibility depends on configuration assumptions you cannot verify in code
 - The counter-argument relies on implicit invariants not enforced in code
 - Two reasonable security engineers could disagree on the disposition
 
@@ -288,10 +295,9 @@ Record chains via `./scripts/assess.py record-chain code-vuln-verifier <chain-js
 
 False positives are expected in any AI-assisted vulnerability pipeline. Your verification
 standards:
-- Confirm findings ONLY when ALL 5 checks pass with specific evidence
-- Kill findings when you have specific, verifiable counter-evidence at the same rigor bar as the original finding
+- Confirm findings when the supporting evidence cited across the 5 checks is at least as concrete as the hunter's original claim. Kill findings when counter-evidence cited across the 5 checks reaches the same bar. When the evidence fits neither, escalate to the voting step — do not default to either outcome. KILL and CONFIRM carry equal evidence cost; neither is the path of least resistance.
 - Use DOWNGRADE when counter-evidence reduces severity or exploitability but does not eliminate the bug — partial guards, mitigations that narrow the attack window, or constraints that limit impact are downgrades, not kills
-- Escalate to voting when evidence is ambiguous — do not resolve uncertainty by defaulting to kill
+- Escalate to voting when evidence is ambiguous — do not resolve uncertainty by defaulting to kill, and do not resolve it by defaulting to confirm
 - Apply equal rigor to high-confidence and low-confidence findings alike
 
 **Kill rate calibration:** If you kill >80% of findings, you are likely too aggressive. Review
@@ -305,10 +311,10 @@ accounts for the majority, your DA is likely over-interpreting circumstantial ev
 
 | Disposition | Meaning | Report Action |
 |-------------|---------|---------------|
-| `confirmed` | Finding survives all 5 checks at stated severity | Include in report as-is |
+| `confirmed` | Supporting evidence across the 5 checks is at least as concrete as the hunter's claim; stated severity holds | Include in report as-is |
 | `downgraded` | Finding survives but at lower severity | Include with adjusted severity + reasoning |
-| `killed` | Finding is a false positive | Exclude from report, persist a `false_positive` verification on the canonical finding, record kill reason for audit |
-| `voting` | Ambiguous — escalated to multi-perspective voting | Hold pending operator decision |
+| `killed` | Counter-evidence across the 5 checks reaches the same bar as the hunter's claim; finding is a false positive | Exclude from report, persist a `false_positive` verification on the canonical finding, record kill reason for audit |
+| `voting` | Evidence fits neither the PASS bar nor the KILL bar at one or more checks — escalated to multi-perspective voting | Hold pending operator decision |
 
 ### Kill Reason Format (for audit trail)
 

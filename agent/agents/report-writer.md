@@ -98,7 +98,8 @@ do not follow the formula — the report is the deliverable and titles must be c
 When a finding was validated by `vulnerability-analyst` or `exploit-developer`, the CVSS data
 may already be stored in the finding's `details` object as `cvss_vector` and `cvss_score`.
 Use that pre-computed vector as the starting point. Recalculate only if the final report scope
-or proved impact differs materially from what was recorded at validation time.
+or proved impact would shift at least one CVSS base metric (AV, AC, PR, UI, S, C, I, A) by one
+or more levels relative to what was recorded at validation time.
 
 ## CVSS 3.1 Guidance
 

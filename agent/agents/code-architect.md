@@ -270,8 +270,8 @@ on the files and modules you identify here. Nothing you miss can be recovered la
 - A trust boundary you miss means entry points go unexamined.
 - An incorrect slot-type annotation means the wrong pattern references are loaded for analysis.
 
-Over-discover rather than under-discover. A false positive classification wastes analysis time.
-A false negative classification means a vulnerability is missed entirely.
+Over-discover rather than under-discover. A false-positive classification adds review time.
+A false-negative classification means a vulnerability is missed entirely.
 
 ## Pre-Output Coverage Self-Check
 
@@ -321,6 +321,6 @@ The operator uses `#### Coverage Gaps` to decide whether to re-dispatch before l
 
 - **Structure-first**: Work from filenames, directory layout, includes, and docs — NOT from reading full source code. The file analysis queue feeds the hunter, which reads the code.
 - **Git churn is signal**: Files with high churn and past CVE fixes get priority boost.
-- **Over-classify rather than under-classify**: A file wrongly classified as "high" wastes some analysis time. A file wrongly classified as "skip" means a vulnerability is missed entirely.
+- **Over-classify rather than under-classify**: A file wrongly classified as "high" adds analysis time. A file wrongly classified as "skip" means a vulnerability is missed entirely.
 - **Name the trust boundaries explicitly**: "Processes untrusted network input" is better than "security relevant."
 - **File queue completeness over hypothesis completeness**: Every critical/high file enters the queue regardless of whether a hypothesis names it — vulnerability classes not covered by hypotheses (path traversal, SSRF, etc.) are tested during the unconstrained broad analysis pass.

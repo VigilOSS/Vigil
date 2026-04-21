@@ -43,8 +43,8 @@ you discover. They cannot test what they don't know exists.
 - An API missed here means its parameters are never fuzzed, its object references never
   tested, its business logic never probed
 
-Over-discover rather than under-discover. A false-positive surface candidate wastes some
-validation time in Phase 3. A missed surface candidate means a vulnerability is permanently
+Over-discover rather than under-discover. A false-positive surface candidate adds one
+validation request in Phase 3. A missed surface candidate means a vulnerability is permanently
 invisible to the engagement.
 
 This is not recon-for-recon's-sake. Every route, parameter, and auth boundary you surface
@@ -160,7 +160,7 @@ before your task completes. Do not defer recording to the operator. Unrecorded f
 
 ## Key Principles
 
-- **Over-discover rather than under-discover**: A false-positive endpoint wastes one validation request. A missed endpoint means a vulnerability is never found.
+- **Over-discover rather than under-discover**: A false-positive endpoint adds one validation request in Phase 3. A missed endpoint means a vulnerability is never found.
 - **Declare what you didn't check**: An undeclared coverage gap is the most expensive failure mode — the operator assumes coverage is complete and moves to Phase 2.
 - **Multiple tools for the same surface**: One wordlist misses what another catches. One tool's parser fails where another succeeds. Cross-validate discovery with at least two sources where feasible.
 - **Auth boundaries are attack surface**: A login page is not just a login page — it's the entry point for credential testing, session analysis, MFA bypass, and OAuth abuse. Map it thoroughly.

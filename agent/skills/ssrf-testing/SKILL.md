@@ -388,6 +388,13 @@ If the application uses one of these, basic bypass techniques will not work. DNS
 - OOB callback confirms SSRF but response is not returned AND no internal services are reachable → record as blind SSRF (MEDIUM), stop exploitation
 - Cloud metadata returns IAM credentials → CRITICAL, record immediately, stop testing other SSRF vectors
 
+## Escalate When
+- An OAST/Collaborator callback lands from any payload — even to a whitelisted domain — the server is fetching on your behalf, now enumerate which other schemes, ports, and internal hosts it will reach
+- Response time for an internal-looking target (127.0.0.1, 169.254.169.254, localhost-only ports, RFC1918 ranges) differs measurably from an external target even when bodies are identical — timing side channels survive when body parity does not
+- An error body, stack trace, redirect Location header, or Content-Length delta leaks an internal hostname, IP, cloud-metadata path, or closed-vs-open port oracle — partial SSRF still chains to IMDS and internal APIs
+- The parameter accepts a non-http(s) scheme (gopher://, dict://, file://, ftp://, ldap://) without a parser error, or DNS resolves before the blocklist check — URL-parser/fetcher split is a classic bypass surface and DNS rebinding is live
+- The application exposes avatar-fetch, URL preview, webhook tester, PDF/HTML render, OEmbed, RSS import, or image-import functionality — these are persistent high-value SSRF entry points, exhaust scheme/host/redirect-chain variants before moving on
+
 ## A->B Signal: SSRF Chains
 
 ```

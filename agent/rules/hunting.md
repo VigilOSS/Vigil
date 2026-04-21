@@ -1,7 +1,7 @@
 # Hunting Rules
 
 These rules are always active across the engagement. They are intentionally compact, but they are
-strict: breaking them wastes time and lowers finding quality.
+strict: breaking them lowers finding quality.
 
 ## 1. Read scope before target work
 
@@ -38,9 +38,9 @@ Examples:
 - **Not redundant**: "App disables TLS validation process-wide" — no precondition beyond network proximity. The app removes its own protection. Incremental impact: full credential capture from any shared network.
 - **Chain test**: If exploiting B requires condition A, ask: "What can the attacker already do with just A?" If the answer is "everything B provides," then B is defense-in-depth.
 
-## 4. Kill weak leads fast
+## 4. Kill weak leads fast — and push harder on strong ones
 
-Do not spend long stretches polishing low-confidence signals. Either validate quickly, chain them, or drop them.
+Do not spend long stretches polishing low-confidence signals. Either validate quickly, chain them, or drop them. The inverse matters equally: when a signal is live, do not abandon it at the first ambiguous response — dig in until you have either the attacker outcome or a concrete reason the path fails.
 
 Kill signals include:
 
@@ -48,6 +48,15 @@ Kill signals include:
 - More than two fragile preconditions stacked together
 - "Might be chainable" used instead of a proved chain
 - Static or generic surface with no meaningful attack paths after a short pass
+
+Push-harder signals include:
+
+- A response field, timing delta, or status code diverges between two otherwise-identical requests (different account, different header, different payload encoding) — divergence is evidence of state the application is keeping, and that state is usually where the finding lives
+- An error message, stack trace, or redirect leaks framework internals, file paths, or infrastructure hostnames
+- Repeating the exact same request produces different behavior — the target is carrying state across requests
+- A probe produces partial signal (OOB DNS fires but no body leak, time delta without error, 5xx on malformed input) — partial signal means the primitive exists; the next work is shaping the payload to complete it
+- A sibling route, method, or content-type behaves differently than the one you just tested — siblings are the fastest way to confirm or widen the finding
+- The response silently accepts an input shape the application shouldn't (alternate protocol, unexpected encoding, out-of-range value) without erroring — silent acceptance is almost never benign
 
 ## 5. Five-minute rule for dead surface
 
