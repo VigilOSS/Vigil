@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-UPSTREAM_SERVER_PATH = Path("/usr/share/mcp-kali-server/server.py")
+UPSTREAM_SERVER_PATH = Path(
+    os.environ.get("KALI_MCP_SERVER_PATH", "/usr/share/mcp-kali-server/server.py")
+)
 
 # Target-facing routes require audit headers. Health, metrics, discovery,
 # and MCP capability routes stay open so container health checks and tool
@@ -57,6 +59,12 @@ ORCHESTRATOR_BASE_URL = (
     .replace("://127.0.0.1", "://host.docker.internal")
     .replace("://localhost", "://host.docker.internal")
 )
+try:
+    AUDIT_STREAM_MAX_BYTES = int(os.environ.get("KALI_MCP_AUDIT_STREAM_MAX_BYTES", "65536"))
+except ValueError:
+    AUDIT_STREAM_MAX_BYTES = 65_536
+if AUDIT_STREAM_MAX_BYTES < 0:
+    AUDIT_STREAM_MAX_BYTES = 65_536
 
 # Load the audit poster module that lives beside this file in the
 # container. Pure stdlib, zero upstream-server dependencies.
@@ -261,6 +269,64 @@ def _rollup_audit_source(sources: dict[str, str]) -> str:
     return "env_fallback"
 
 
+def _truncate_stream_for_queue(value: str, label: str) -> tuple[str, str]:
+    text = value or ""
+    raw = text.encode("utf-8", errors="replace")
+    if len(raw) <= AUDIT_STREAM_MAX_BYTES:
+        return text, ""
+    truncated = raw[:AUDIT_STREAM_MAX_BYTES].decode("utf-8", errors="ignore")
+    truncated_bytes = len(truncated.encode("utf-8", errors="replace"))
+    return (
+        truncated,
+        (
+            f"{label} truncated before audit enqueue from {len(raw)} bytes "
+            f"to {truncated_bytes} bytes"
+        ),
+    )
+
+
+def _command_run_audit_payload(
+    run: dict[str, Any],
+    *,
+    tool_name: str,
+    route: str,
+    agent_name: str,
+    phase: str,
+    audit_source: str,
+    artifact_dir: str | None,
+) -> dict[str, Any]:
+    stdout = run["stdout"] or ""
+    stderr = run["stderr"] or ""
+    bounded_stdout, stdout_note = _truncate_stream_for_queue(stdout, "stdout")
+    bounded_stderr, stderr_note = _truncate_stream_for_queue(stderr, "stderr")
+    notes = "\n".join(note for note in (stdout_note, stderr_note) if note)
+    return {
+        "command": run["command"],
+        "argv": run.get("argv"),
+        "tool_name": tool_name,
+        "route": route,
+        "agent_name": agent_name,
+        "phase": phase,
+        "return_code": run["return_code"],
+        "timed_out": run["timed_out"],
+        "success": run["success"],
+        "started_at": run["started_at"],
+        "completed_at": run["completed_at"],
+        "duration_ms": run["duration_ms"],
+        "stdout": bounded_stdout,
+        "stderr": bounded_stderr,
+        "stdout_sha256": hashlib.sha256(stdout.encode("utf-8", errors="replace")).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr.encode("utf-8", errors="replace")).hexdigest(),
+        "notes": notes,
+        "audit_source": audit_source,
+        "command_hash": hashlib.sha256(
+            run["command"].encode("utf-8", errors="replace")
+        ).hexdigest(),
+        "engagement_artifact_dir": artifact_dir,
+        "run_uuid": uuid.uuid4().hex,
+    }
+
+
 def _install_audit_hooks(flask_app) -> None:
     from flask import g, jsonify, request  # type: ignore
 
@@ -366,28 +432,15 @@ def _install_audit_hooks(flask_app) -> None:
         route = request.path
 
         for run in runs:
-            payload = {
-                "command": run["command"],
-                "argv": run.get("argv"),
-                "tool_name": tool_name,
-                "route": route,
-                "agent_name": agent_name,
-                "phase": phase,
-                "return_code": run["return_code"],
-                "timed_out": run["timed_out"],
-                "success": run["success"],
-                "started_at": run["started_at"],
-                "completed_at": run["completed_at"],
-                "duration_ms": run["duration_ms"],
-                "stdout": run["stdout"],
-                "stderr": run["stderr"],
-                "audit_source": audit_source,
-                "command_hash": hashlib.sha256(
-                    run["command"].encode("utf-8", errors="replace")
-                ).hexdigest(),
-                "engagement_artifact_dir": artifact_dir,
-                "run_uuid": uuid.uuid4().hex,
-            }
+            payload = _command_run_audit_payload(
+                run,
+                tool_name=tool_name,
+                route=route,
+                agent_name=agent_name,
+                phase=phase,
+                audit_source=audit_source,
+                artifact_dir=artifact_dir,
+            )
             kali_mcp_audit.default_poster().enqueue(engagement_key, payload)
         return response
 

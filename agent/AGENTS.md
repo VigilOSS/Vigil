@@ -307,45 +307,51 @@ shared engagement state: the operator and every specialist can search it via
 
 If Kali MCP tools are missing or MCP tool discovery returns no tools, see `agent/references/runtime-guides/kali-mcp-troubleshooting.md`.
 
-### Kali MCP Audit and Reuse
+### Kali MCP Audit — Coverage Map
 
 Every Kali MCP tool call is recorded to the orchestrator backend as an
 `assessment_command_runs` row with FTS5 keyword search. Command output is
 retained with a configurable retention policy (noisy filter outputs are
 suppressed but still hashed; large outputs spill to engagement artifacts).
-Use that history to avoid duplicating work.
+Treat that history as a **coverage map**: when dispatching the next
+specialist, read what's already been probed so the dispatch targets a
+variant that hasn't been covered, not a duplicate of what's already done.
 
 Before dispatching a specialist for a probing, scanning, fuzzing, or test
-objective, check whether equivalent commands already ran this engagement.
-Default to an unscoped search so you see every agent's and every phase's
-prior work on the target; narrow with `--agent-name` or `--phase` only after
-the broad result is overwhelming. Cross-agent and cross-phase context is
-usually the most valuable reuse signal; scoping it out by default hides
-exactly the information you need:
+objective, check what this surface has already been hit with:
 
 ```bash
 ./scripts/assess.py list-command-runs --q <keyword>
 ```
 
-Common reasons to re-run anyway — call them out in the dispatch context so
-the specialist does not repeat work that has already resolved. This list is
-not exhaustive; dispatch with any reason you can name:
+Default to an unscoped search so you see every agent's and every phase's
+prior work on the target; narrow with `--agent-name` or `--phase` only if
+the broad result is overwhelming. Cross-agent and cross-phase context is
+usually the most valuable coverage signal.
 
-1. The target's state changed since the prior run (new port, new auth context, deployed change).
-2. The prior run was partial, timed out, or returned ambiguous output (success=true on a soft-failure page, rate-limited response, WAF interposition).
-3. The new hypothesis needs a materially different payload family, tool, or instrumentation, not just a retry.
-4. An independent baseline is needed — cross-agent or cross-phase runs may have used a context that doesn't map to the new specialist's.
-5. Time has passed and a regression check is warranted (networks drift, targets redeploy mid-engagement).
-6. The new dispatch is probing a boundary or interaction between two prior runs that neither covered.
+Dispatch variants aggressively — that's how the engagement gets depth.
+If `sqlmap` already ran with `--technique=U`, dispatch the next pass with
+`--technique=BT` or a different DBMS module. If `ffuf` already burned
+`raft-medium-directories`, dispatch with a tech-specific wordlist or a
+smaller list at a different extension. The only dispatch that duplicates
+work is the **identical command against identical input**; any variant
+(different payload family, tool, flag, target scope, credentials, auth
+context) is new coverage and should be dispatched without hesitation.
 
-Before telling a specialist to reuse a prior run, fetch its preview with
-`./scripts/assess.py get-command-run <id>` and confirm the stored evidence
-answers the current question. A row with `success=true` only means
-`return_code=0` — open the preview to rule out soft-failure pages, WAF
-intercepts, and rate-limited stubs that exit cleanly.
+Call out the coverage gap in the dispatch context so the specialist
+knows what's already been tried and what hasn't — it makes their
+variant-selection deterministic instead of guesswork.
 
-See `agent/references/runtime-guides/command-history-auditing.md` for the
-full reuse decision table and output-field interpretation.
+Before telling a specialist to cite a prior run instead of re-running,
+fetch its preview with `./scripts/assess.py get-command-run <id>` and
+confirm the stored evidence answers the current question. A row with
+`success=true` only means `return_code=0` — open the preview to rule out
+soft-failure pages, WAF intercepts, and rate-limited stubs that exit
+cleanly.
+
+See `agent/references/runtime-guides/command-history-auditing.md` for
+the full coverage-vs-duplicate decision table and output-field
+interpretation.
 
 ## Finding Format
 
@@ -452,6 +458,13 @@ Summary: recon→source-analyzer (bring source-analysis skill) + vuln-analyst (b
 ## Optional Final Validation
 
 If logs are available, run the optional Athena/log-investigation phase before closing the engagement — it determines whether the most important attack paths show signs of prior exploitation in the available telemetry window.
+
+## macOS/zsh Compatibility
+
+- Use absolute paths: `/usr/bin/curl`, `/bin/cat`, `/usr/bin/grep`, etc.
+- Do NOT use `grep -P` (Perl regex). Use `grep -E` (extended) or `rg` instead.
+- HEREDOC: Use unquoted delimiter (`<< EOF`), NOT single-quoted (`<< 'EOF'`).
+- New files: use bash commands (mkdir, cat >, echo >). Existing files: use Edit tool.
 
 ## Tool Promotion Workflow
 

@@ -3030,7 +3030,7 @@ def _retention_config() -> dict[str, Any]:
     path = Path(override) if override else _DEFAULT_RETENTION_CONFIG
     try:
         raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    except OSError:
         return {"preview_bytes": _DEFAULT_PREVIEW_BYTES, "suppress_patterns": []}
     try:
         data = json.loads(raw)

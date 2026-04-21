@@ -65,50 +65,47 @@ Agents CANNOT start, stop, or restart listener, tunnel, or OOB processes.
 
 ---
 
-## 2b. Consult Command History Before Re-Running
+## 2b. Coverage Check Before Probing
 
 Every Kali MCP call records its command, argv, tool, agent, phase, exit code,
 timeout state, timings, and an output preview (or artifact ref) to the
-orchestrator backend. Treat that history as shared engagement state.
+orchestrator backend. Treat that history as a **coverage map** — a record of
+what's already been probed so your next probe goes somewhere the engagement
+hasn't covered yet.
 
 Before issuing a probing, scanning, fuzzing, or credential-testing command,
-search for prior runs that already cover the same objective. Default to an
-unscoped search so you see every agent's and every phase's prior work on the
-target; narrow with `--agent-name` or `--phase` only after the broad result is
-overwhelming:
+search for prior work on this surface:
 
 ```bash
 ./scripts/assess.py list-command-runs --q <keyword>
 ```
 
-The audit table exists to make prior work visible, not to discourage fresh
-probes. Shallow coverage is more expensive than a second probe: silently
-trusting a prior run that answered a different question misses findings.
-Re-running with a stated reason is cheap; under-probing is not. Reuse when the
-prior run actually answers your current question — not when it merely
-overlaps.
+Default to an unscoped search so you see every agent's and every phase's
+prior work on the target; narrow with `--agent-name` or `--phase` only if the
+broad result is overwhelming. Cross-agent and cross-phase context is usually
+the most valuable coverage signal.
 
-Re-run when any of the following apply — this list is not exhaustive, and you
-may re-run for a reason you can name that isn't listed:
+Read the results as a coverage map, not a reuse gate. Red-team depth comes
+from variants — different SQLi techniques, different SSRF payload encodings,
+different XXE entity styles, different wordlists, different auth contexts.
+If `sqlmap` already ran against this endpoint with `--technique=U`, your
+next probe picks a different technique. If `ffuf` ran `raft-medium-directories`,
+try `quickhits` or a tech-specific wordlist.
 
-1. The target's state has changed since the prior run (new port, deployed change, auth now available).
-2. The prior run was partial, timed out, or returned ambiguous output (success=true on a soft-failure page, rate-limited response, WAF interposition).
-3. The new hypothesis requires a materially different payload family, tool, or instrumentation (e.g. capturing headers you didn't last time).
-4. You need an independent baseline for your own reasoning — cross-agent or cross-phase runs may have used a context that doesn't map to yours.
-5. Time has passed and a regression check is warranted (networks drift, targets redeploy mid-engagement).
-6. You are probing a boundary or interaction between two prior runs that neither covered.
+**The only probe you should skip is an identical command against identical
+input.** Any variant — different payload family, different tool, different
+flag, different target scope, different credentials — is new coverage and
+belongs in the engagement. Don't ask for permission to probe a variant.
 
-When re-running, name the reason so the audit trail is legible. The reviewer
-is not the gatekeeper of re-running; they are the reader of your output.
+When a prior run genuinely covers your current question, cite its id in your
+output — but first fetch the preview with `./scripts/assess.py get-command-run <id>`
+and confirm the stored evidence actually answers that question. A row with
+`success=true` only means `return_code=0`, not that the output is on-point.
+Open the preview to rule out soft-failure pages, WAF intercepts, and
+rate-limited stubs that exit cleanly. Citing an id you never looked at is
+worse than running a fresh probe.
 
-Before reusing a prior run, fetch its preview with `./scripts/assess.py get-command-run <id>`
-and confirm the stored evidence answers your current question. A row with
-`success=true` only means `return_code=0`. Open the preview to rule out
-soft-failure pages, WAF intercepts, and rate-limited stubs that exit cleanly.
-Reuse is only cheap when the prior output actually speaks to your hypothesis;
-citing an id you never looked at is worse than running a fresh probe.
-
-Full reuse decision table and output-field interpretation:
+Full coverage-vs-duplicate decision table and output-field interpretation:
 `agent/references/runtime-guides/command-history-auditing.md`.
 
 ---

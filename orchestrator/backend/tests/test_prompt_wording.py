@@ -225,20 +225,22 @@ def test_kali_mcp_audit_and_reuse_wording_is_present():
 
 def test_kali_specialist_prompts_document_history_check():
     repo_root = Path(__file__).resolve().parents[3]
-    expectations = {
-        "recon-specialist.md": "recon-specialist",
-        "surface-collector.md": "surface-collector",
-        "vulnerability-analyst.md": "vulnerability-analyst",
-        "exploit-developer.md": "exploit-developer",
-        "fuzzer.md": "fuzzer",
-        "osint-analyst.md": "osint-analyst",
-        "code-fuzz-engineer.md": "code-fuzz-engineer",
-    }
-    for filename, role in expectations.items():
+    filenames = [
+        "recon-specialist.md",
+        "surface-collector.md",
+        "vulnerability-analyst.md",
+        "exploit-developer.md",
+        "fuzzer.md",
+        "osint-analyst.md",
+        "code-fuzz-engineer.md",
+    ]
+    for filename in filenames:
         path = repo_root / "agent" / "agents" / filename
         text = path.read_text(encoding="utf-8")
         assert "list-command-runs" in text, f"{filename} missing list-command-runs reference"
-        assert f"--agent-name {role}" in text, f"{filename} missing --agent-name {role}"
+        assert "--q <" in text, f"{filename} missing broad command-history search example"
+        assert "unscoped" in text.lower(), f"{filename} missing unscoped search default"
+        assert "narrow with `--agent-name` or `--phase` only after the broad result is overwhelming" in text.lower()
         assert "command-history-auditing.md" in text, f"{filename} missing reuse reference"
 
 

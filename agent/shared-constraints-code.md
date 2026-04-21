@@ -42,24 +42,21 @@ Source code is read directly from the local filesystem via host Bash or Claude C
 This is NOT target-facing network work -- Kali MCP is not needed for reading source files.
 
 **When code analysis does reach for Kali MCP** (for example, a fuzz campaign or
-binary-triage pass that runs a tool through the runtime), the same audit-and-reuse
+binary-triage pass that runs a tool through the runtime), the same coverage-check
 rule as the web mode applies: every call carries `engagement_key`/`agent_name`/`phase`
-and runs land in `assessment_command_runs`. Before re-running an equivalent
-command, search history with an unscoped query first so you see every agent's
-and every phase's prior work on the target — `./scripts/assess.py list-command-runs --q <keyword>` —
-and narrow with `--agent-name` or `--phase` only after the broad result is
-overwhelming. Re-run when any of the following apply — this list is not
-exhaustive, and you may re-run for a reason you can name that isn't listed:
-the target's state has changed; the prior run was partial, timed out, or
-returned ambiguous output (success=true on a soft-failure page, rate-limited
-response, WAF interposition); the new hypothesis requires a materially
-different payload family, tool, or instrumentation; you need an independent
-baseline; time has passed and a regression check is warranted; or you are
-probing a boundary between two prior runs that neither covered. Before
-reusing a prior run, fetch its preview with `./scripts/assess.py get-command-run <id>` —
-`success=true` only means `return_code=0`, so open the preview to rule out
-soft-failure pages, WAF intercepts, and rate-limited stubs that exit cleanly.
-Full reuse decision table:
+and runs land in `assessment_command_runs`. Treat that history as a coverage
+map — a record of what harnesses/corpora/sanitizer configs have already been
+run so your next campaign picks a variant that hasn't been tried. Search with
+an unscoped query first so you see every agent's and every phase's prior work
+— `./scripts/assess.py list-command-runs --q <keyword>` — and narrow with
+`--agent-name` or `--phase` only if the broad result is overwhelming.
+The only campaign to skip is the identical binary + corpus + flags combination
+already run to completion; any variant (new sanitizer, new dictionary, new
+seed corpus, harness change) is new coverage. Before citing a prior run,
+fetch its preview with `./scripts/assess.py get-command-run <id>` —
+`success=true` only means `return_code=0`, and a campaign that exited cleanly
+under its time budget but produced no crashes is not the same as one that
+exhausted the search space. Full coverage-vs-duplicate decision table:
 `agent/references/runtime-guides/command-history-auditing.md`.
 
 **Available tools:**
