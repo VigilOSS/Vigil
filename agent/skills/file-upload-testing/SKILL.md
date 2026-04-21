@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # File Upload Vulnerability Testing
 
+> **Kali MCP audit header:** use `X-Technique: RCE` for webshell/polyglot uploads (the canonical dangerous outcome). Switch to `LFI` when the filename triggers path traversal, `XSS` for SVG/HTML reflected in a browser context, or `SSRF` when the upload path fetches a URL server-side.
+
 ## When to Activate
 
 - Application allows file upload (profile picture, document, attachment)
