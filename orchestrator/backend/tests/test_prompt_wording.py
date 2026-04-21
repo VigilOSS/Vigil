@@ -207,14 +207,15 @@ def test_kali_mcp_audit_and_reuse_wording_is_present():
     shared_code = (repo_root / "agent" / "shared-constraints-code.md").read_text(encoding="utf-8")
 
     # Operator source + rendered wrappers describe the audit channel and the
-    # reuse-search CLI so an operator reading any of the three sees both.
+    # coverage-search CLI so an operator reading any of the three sees both,
+    # under the current coverage-map framing (not the old reuse-gate framing).
     for text in (operator_core, operator_agents, operator_claude):
         assert "engagement_key" in text
         assert "agent_name" in text
         assert "phase" in text
         assert "list-command-runs" in text
-        assert "Kali MCP Audit and Reuse" in text
-        assert "command history checked" in text.lower()
+        assert "Kali MCP Audit — Shape Dispatches From Coverage" in text
+        assert "variant that hasn't been tried" in text
 
     # Shared-constraints: both modes mention the reuse rule so specialists see
     # it on first load.
@@ -240,15 +241,18 @@ def test_kali_specialist_prompts_document_history_check():
         assert "list-command-runs" in text, f"{filename} missing list-command-runs reference"
         assert "--q <" in text, f"{filename} missing broad command-history search example"
         assert "unscoped" in text.lower(), f"{filename} missing unscoped search default"
-        assert "narrow with `--agent-name` or `--phase` only after the broad result is overwhelming" in text.lower()
-        assert "command-history-auditing.md" in text, f"{filename} missing reuse reference"
+        assert "narrow with `--agent-name`/`--phase` only if swamped" in text, (
+            f"{filename} missing coverage-map scoping guidance"
+        )
+        assert "coverage map" in text.lower(), f"{filename} missing coverage-map framing"
+        assert "command-history-auditing.md" in text, f"{filename} missing history-guide reference"
 
 
 def test_command_history_reference_guide_exists():
     repo_root = Path(__file__).resolve().parents[3]
     path = repo_root / "agent" / "references" / "runtime-guides" / "command-history-auditing.md"
     text = path.read_text(encoding="utf-8")
-    assert "Reuse Decision Table" in text
+    assert "Coverage-vs-duplicate decision table" in text
     assert "output_retention_status" in text
     assert "list-command-runs" in text
     index = (repo_root / "agent" / "references" / "INDEX.md").read_text(encoding="utf-8")

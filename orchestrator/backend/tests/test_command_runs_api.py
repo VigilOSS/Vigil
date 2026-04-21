@@ -69,6 +69,13 @@ def _base_payload(**overrides):
         "stdout": "Nmap scan report for 10.0.0.1\n22/tcp open ssh\n",
         "stderr": "",
         "notes": "",
+        # Command-metadata fields default to None so every payload starts
+        # backward-compatible with the pre-metadata contract. Tests that
+        # exercise the new fields override these explicitly.
+        "technique": None,
+        "intent": None,
+        "probe_kind": None,
+        "destructive": None,
     }
     payload.update(overrides)
     return payload
@@ -539,3 +546,191 @@ def test_get_command_run_404_for_unknown_id(client, isolate_settings):
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/999"
     )
     assert response.status_code == 404
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Command-metadata fields: technique, intent, probe_kind, destructive
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_command_metadata_round_trip_with_all_four_fields(client, isolate_settings):
+    """POST + list round-trip with all four metadata fields set to representative values."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    response = _post(
+        client,
+        _base_payload(
+            command="curl -sS https://target/probe",
+            technique="SSRF",
+            intent="verify metadata-field plumbing end-to-end",
+            probe_kind="fingerprint",
+            destructive=False,
+        ),
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["technique"] == "SSRF"
+    assert created["intent"] == "verify metadata-field plumbing end-to-end"
+    assert created["probe_kind"] == "fingerprint"
+    assert created["destructive"] is False
+
+    listing = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?include_output=true"
+    )
+    assert listing.status_code == 200
+    rows = listing.json()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["technique"] == "SSRF"
+    assert row["intent"] == "verify metadata-field plumbing end-to-end"
+    assert row["probe_kind"] == "fingerprint"
+    assert row["destructive"] is False
+
+
+def test_command_metadata_filters_narrow_correctly(client, isolate_settings):
+    """Each of the four filter axes narrows the result set as expected."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    # Row A: SSRF / payload / destructive=True / intent mentions "verify"
+    assert _post(
+        client,
+        _base_payload(
+            command="curl -sS 'https://target/?url=http://169.254.169.254/'",
+            technique="SSRF",
+            intent="verify SSRF to instance metadata service",
+            probe_kind="payload",
+            destructive=True,
+        ),
+    ).status_code == 201
+    # Row B: SQLI / exploit / destructive=False / intent mentions "dump"
+    assert _post(
+        client,
+        _base_payload(
+            command="sqlmap -u https://target/?id=1 --dump",
+            tool_name="sqlmap_scan",
+            technique="SQLI",
+            intent="dump users table to prove impact",
+            probe_kind="exploit",
+            destructive=False,
+        ),
+    ).status_code == 201
+    # Row C: RECON / fingerprint / destructive unset / intent mentions "verify"
+    assert _post(
+        client,
+        _base_payload(
+            command="nmap -sV target",
+            technique="RECON",
+            intent="verify open ports and versions",
+            probe_kind="fingerprint",
+            destructive=None,
+        ),
+    ).status_code == 201
+
+    def fetch(query: str):
+        response = client.get(
+            f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?{query}"
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    ssrf_rows = fetch("technique=SSRF")
+    assert len(ssrf_rows) == 1
+    assert ssrf_rows[0]["technique"] == "SSRF"
+
+    exploit_rows = fetch("probe_kind=exploit")
+    assert len(exploit_rows) == 1
+    assert exploit_rows[0]["probe_kind"] == "exploit"
+
+    destructive_rows = fetch("destructive=true")
+    assert len(destructive_rows) == 1
+    assert destructive_rows[0]["destructive"] is True
+
+    not_destructive_rows = fetch("destructive=false")
+    assert len(not_destructive_rows) == 1
+    assert not_destructive_rows[0]["destructive"] is False
+
+    # intent_q uses FTS5 scoped to the intent column — two rows match "verify".
+    verify_rows = fetch("intent_q=verify")
+    assert len(verify_rows) == 2
+    for row in verify_rows:
+        assert "verify" in (row["intent"] or "").lower()
+
+
+def test_command_metadata_intent_is_fts_searchable_via_q(client, isolate_settings):
+    """Intent text is indexed in FTS5 — the global ?q= param finds substrings."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert _post(
+        client,
+        _base_payload(
+            command="curl -sS https://target/admin",
+            intent="checking administrative endpoint exposure",
+        ),
+    ).status_code == 201
+    assert _post(
+        client,
+        _base_payload(
+            command="curl -sS https://target/public",
+            intent="baseline of public home page",
+        ),
+    ).status_code == 201
+
+    # FTS5 tokenises words — searching a unique intent token should return
+    # exactly the row whose intent contains it.
+    response = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?q=administrative"
+    )
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 1
+    assert rows[0]["intent"] == "checking administrative endpoint exposure"
+
+
+def test_command_metadata_backward_compat_omitted_fields(client, isolate_settings):
+    """POST without the four new fields still works; serializer returns nulls."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    payload = _base_payload()
+    # Strip the metadata keys entirely to prove they're optional on the wire,
+    # not just nullable in the pydantic model.
+    for key in ("technique", "intent", "probe_kind", "destructive"):
+        payload.pop(key, None)
+
+    response = _post(client, payload)
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["technique"] is None
+    assert created["intent"] is None
+    assert created["probe_kind"] is None
+    assert created["destructive"] is None
+
+
+def test_command_metadata_enum_permissive_accepts_unknown_technique(client, isolate_settings):
+    """Technique stores values verbatim — no Literal validation at the API level."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    response = _post(
+        client,
+        _base_payload(
+            technique="MADEUP",
+            probe_kind="custom-not-in-enum",
+        ),
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["technique"] == "MADEUP"
+    assert created["probe_kind"] == "custom-not-in-enum"
+
+    # And the filter matches it back exactly.
+    rows = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?technique=MADEUP"
+    ).json()
+    assert len(rows) == 1
+    assert rows[0]["technique"] == "MADEUP"
+
+
+def test_command_metadata_intent_is_trimmed_to_200_chars(client, isolate_settings):
+    """Intent is trimmed server-side to 200 characters."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    long_intent = "A" * 500
+    response = _post(client, _base_payload(intent=long_intent))
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["intent"] is not None
+    assert len(created["intent"]) == 200
+    assert created["intent"] == "A" * 200

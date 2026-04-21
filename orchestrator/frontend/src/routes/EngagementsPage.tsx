@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { deleteEngagement, type Engagement } from "../lib/api";
+import { ThemeToggle } from "../components/ThemeToggle";
 
 type EngagementsPageProps = {
   engagements: Engagement[];
@@ -48,6 +49,9 @@ export function EngagementsPage({ engagements, onOpenEngagement, onEngagementDel
           <p className="lead">
             Local orchestrator view for the configured install root. Each engagement may carry multiple AI sessions.
           </p>
+        </div>
+        <div className="page-actions">
+          <ThemeToggle />
         </div>
       </section>
 

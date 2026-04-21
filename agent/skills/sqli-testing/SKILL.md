@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # SQL Injection Testing
 
+> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: SQLI` and `X-Probe-Kind` per the phase — `fingerprint` for DBMS/version probes, `payload` for injection attempts (boolean/time/error/UNION), `exploit` for extractable data or RCE-via-SQLi proof.
+
 ## When to Activate
 
 - Parameter reaches a database query — but be specific: search fields, login forms, filter/sort controls, ID lookups, API fields that drive WHERE/ORDER BY/LIKE clauses, bulk operations with IN(...), and **any parameter that changes the shape of the response** (column count, row ordering, data presence/absence)

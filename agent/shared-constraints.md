@@ -38,6 +38,37 @@ Do not fall back to host-side execution.
 Host-side commands are limited to coordination and non-target support only:
 `jq`, `sqlite3`, `python3`, `grep` / `rg`, `sed`, `awk`, `base64`, `openssl`.
 
+**Do not `echo` as commentary, section headers, or breadcrumbs inside Kali MCP commands.**
+Stdout is captured to the audit log, not shown to the user, and commentary-echoes bloat
+the preview and pollute FTS search without adding retrievable signal. Use the `X-Intent`
+header for a one-line purpose annotation. `echo` is only legitimate when its output is the
+command's real purpose — writing to a file (`echo X > file`), piping into another tool, or
+generating a payload.
+
+### Command Metadata
+
+Every target-facing Kali MCP call supports four optional audit headers. Set them when they
+apply; the runtime stores them on the audit row where they become filterable in
+`list-command-runs` and the Commands tab.
+
+- **`X-Technique`** — the vulnerability class this command tests. One of `SSRF`, `XSS`,
+  `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`, `RFI`, `OPEN-REDIRECT`,
+  `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`, `RATE-LIMIT`, `INFO-DISCLOSURE`,
+  `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `OTHER`. Use
+  the value from the skill you loaded.
+- **`X-Intent`** — a ≤200-char one-liner describing what this specific command is trying to
+  accomplish. Replaces the `echo "=== label ==="` pattern.
+- **`X-Probe-Kind`** — the kind of work this command represents:
+  - `fingerprint` — learning the target (versions, headers, tech stack), no payload
+  - `baseline` — vanilla control request against the target surface, for diff
+  - `payload` — crafted attack payload testing a hypothesis
+  - `exploit` — attacker-outcome proof (extract token, read a file, prove the impact)
+  - `replay` — captured primitive used against a new surface (lateral)
+  - `cleanup` — undoing target-side changes
+- **`X-Destructive`** — `1` when the command attempts a write, edit, or delete on the
+  target (POST/PUT/PATCH/DELETE, file upload, account creation, config change, shell exec
+  that modifies state). `0` for read-only probes. Used by cleanup-tracking workflows.
+
 ---
 
 ## 2a. Listeners, Tunnels & OOB Are Operator-Controlled

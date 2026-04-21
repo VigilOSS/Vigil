@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # CSRF Testing (Cross-Site Request Forgery)
 
+> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: CSRF` and `X-Probe-Kind` per the phase — `fingerprint` for cookie/SameSite/header probes, `payload` for forged cross-origin requests, `exploit` for state-change proof-of-impact. Set `X-Destructive: 1` whenever the forged request performs a write/edit/delete on the target.
+
 ## Reality Check
 
 SameSite=Lax is now the browser default (Chrome since 2020, Firefox since 2023). This kills classic CSRF for most POST-based state changes. CSRF in 2025 lives in: GET-based state changes, cross-site WebSocket hijacking, SameSite=None services, and the 2-minute Lax+POST window on new cookies. If you are testing a modern app with SameSite=Lax cookies and framework-provided CSRF tokens, classic CSRF is dead. Focus your time on the attack surfaces below where it is not dead.

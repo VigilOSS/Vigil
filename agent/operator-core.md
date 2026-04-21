@@ -236,8 +236,10 @@ basename or `engagement.json`), `agent_name` (the dispatching role, e.g.
 `recon-specialist`), and `phase` (from `scope.json.current_phase`) — so the
 runtime can record the command, argv, stdout/stderr, exit code, timeout state,
 and timings to the orchestrator backend automatically. Treat that recording as
-shared engagement state: the operator and every specialist can search it via
-`./scripts/assess.py list-command-runs` before repeating work.
+shared engagement state: specialists check it before probing (their
+`shared-constraints.md §2b` covers the per-probe coverage check); the operator
+reads it to shape dispatches so each one covers a variant that hasn't been
+tried yet (`./scripts/assess.py list-command-runs`).
 
 - Use MCP tool discovery to inspect the currently available Kali tools instead of assuming a fixed tool inventory in the prompt.
 - When you need arbitrary shell execution inside the Kali runtime, use the Kali MCP command-execution tool.
@@ -247,51 +249,40 @@ shared engagement state: the operator and every specialist can search it via
 - If a required target-facing tool is missing from the active Kali MCP session, say so explicitly and stop to resolve the runtime gap rather than falling back to host or Docker-side execution paths.
 - Host-side runtime diagnosis may inspect local files, container metadata, mounts, and environment, but may not send scoped HTTP, DNS, or raw TCP probes from the host.
 
+Each Kali MCP call also supports four optional audit-metadata headers — `X-Technique`, `X-Intent`, `X-Probe-Kind`, and `X-Destructive` — that classify the call so it becomes filterable in `list-command-runs` and the Commands tab. Do not inline the schema here; see the `Command Metadata` sub-section in `agent/shared-constraints.md` for the value tables and the accompanying ban on echo-as-commentary breadcrumbs inside Kali MCP commands.
+
 ### Kali MCP Troubleshooting
 
 If Kali MCP tools are missing or MCP tool discovery returns no tools, see `agent/references/runtime-guides/kali-mcp-troubleshooting.md`.
 
-### Kali MCP Audit — Coverage Map
+### Kali MCP Audit — Shape Dispatches From Coverage
 
-Every Kali MCP tool call is recorded to the orchestrator backend as an
-`assessment_command_runs` row with FTS5 keyword search. Command output is
-retained with a configurable retention policy (noisy filter outputs are
-suppressed but still hashed; large outputs spill to engagement artifacts).
-Treat that history as a **coverage map**: when dispatching the next
-specialist, read what's already been probed so the dispatch targets a
-variant that hasn't been covered, not a duplicate of what's already done.
-
-Before dispatching a specialist for a probing, scanning, fuzzing, or test
-objective, check what this surface has already been hit with:
+Specialists check `list-command-runs` before each probe (agent-side rule in
+`shared-constraints.md §2b`). The operator's use is different: between
+dispatches, scan the history to shape the *next* dispatch so it covers a
+variant that hasn't been tried — not to duplicate what the agents already
+have in hand.
 
 ```bash
 ./scripts/assess.py list-command-runs --q <keyword>
 ```
 
-Default to an unscoped search so you see every agent's and every phase's
-prior work on the target; narrow with `--agent-name` or `--phase` only if
-the broad result is overwhelming. Cross-agent and cross-phase context is
-usually the most valuable coverage signal.
+When planning the next dispatch:
 
-Dispatch variants aggressively — that's how the engagement gets depth.
-If `sqlmap` already ran with `--technique=U`, dispatch the next pass with
-`--technique=BT` or a different DBMS module. If `ffuf` already burned
-`raft-medium-directories`, dispatch with a tech-specific wordlist or a
-smaller list at a different extension. The only dispatch that duplicates
-work is the **identical command against identical input**; any variant
-(different payload family, tool, flag, target scope, credentials, auth
-context) is new coverage and should be dispatched without hesitation.
-
-Call out the coverage gap in the dispatch context so the specialist
-knows what's already been tried and what hasn't — it makes their
-variant-selection deterministic instead of guesswork.
-
-Before telling a specialist to cite a prior run instead of re-running,
-fetch its preview with `./scripts/assess.py get-command-run <id>` and
-confirm the stored evidence answers the current question. A row with
-`success=true` only means `return_code=0` — open the preview to rule out
-soft-failure pages, WAF intercepts, and rate-limited stubs that exit
-cleanly.
+- **Name the coverage in the dispatch context.** If `sqlmap --technique=U` has
+  run against this endpoint, tell the vulnerability-analyst explicitly to try
+  `BT`/`E`/`Q`/`S` instead of leaving them to re-derive it. If the fuzzer
+  already burned `raft-medium-directories`, dispatch with a tech-specific
+  wordlist. This makes variant-selection deterministic instead of guesswork.
+- **Rotate variants across specialists.** The only dispatch that duplicates
+  work is the same agent, same command, same input. Any variant (different
+  payload family, tool, flag, target scope, credentials, auth context) is new
+  coverage — dispatch it without hesitation.
+- **Before citing a prior run**, fetch its preview with
+  `./scripts/assess.py get-command-run <id>` and confirm the stored evidence
+  actually answers the current question. `success=true` only means
+  `return_code=0` — soft-failure pages, WAF intercepts, and rate-limited stubs
+  all exit cleanly.
 
 See `agent/references/runtime-guides/command-history-auditing.md` for
 the full coverage-vs-duplicate decision table and output-field

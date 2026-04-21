@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # AWS IAM Privilege Escalation
 
+> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: AUTH` (cloud IAM privesc falls under the auth/authorization class in this engagement's taxonomy) and `X-Probe-Kind` per the phase — `fingerprint` for identity/policy enumeration (`sts get-caller-identity`, `iam list-*`, `iam simulate-principal-policy`), `payload` for policy-abuse attempts (role assumption, policy version set, privileged `PassRole`), `exploit` for actual privilege-escalation proof (admin session, cross-account access, resource takeover). Set `X-Destructive: 1` whenever the call mutates IAM state (`iam create-*`, `iam attach-*`, `iam put-*`, `iam set-default-policy-version`, `sts assume-role` that activates a broader session).
+
 ## When to Activate
 
 - AWS credentials obtained (access key, session token, role assumption)

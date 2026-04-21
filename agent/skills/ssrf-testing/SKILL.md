@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # SSRF Testing
 
+> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: SSRF` and `X-Probe-Kind` per the phase — `fingerprint` for version/shape probes, `payload` for attack requests, `exploit` for proof-of-impact (e.g. reading cloud metadata, post-SSRF pivot).
+
 **REALITY:** Blind SSRF is 10x more common than SSRF with response. Most real SSRF findings are confirmed via OOB callbacks or timing, not by reading /etc/passwd in the response. If you are only testing `?url=http://169.254.169.254/latest/meta-data/` and reading the response body, you are missing 90% of the attack surface.
 
 ## When to Activate
