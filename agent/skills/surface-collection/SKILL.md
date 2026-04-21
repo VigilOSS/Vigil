@@ -164,7 +164,7 @@ Before returning to the operator:
 ```bash
 ./scripts/assess.py record-surface <surface-type> <url> <source> \
   --rationale "<why this is high-signal>" \
-  --status pending
+  --status discovered
 ```
 
 **Record findings** when triage produces decisive evidence (e.g., an API key with a

@@ -116,7 +116,7 @@ origin: AI Threat Hunting
 
 - [ ] Monitor all incoming messages for sensitive data:
       ```bash
-      websocat -H "Cookie: session=VALID" wss://target.example/ws | tee /engagement/scans/ws_messages.log
+      websocat -H "Cookie: session=VALID" wss://target.example/ws | tee /engagements/$ENGAGEMENT_KEY/scans/ws_messages.log
       # Review log for PII, tokens, internal IDs, other users' data
       ```
 - [ ] Check if server broadcasts data meant for other users (open two connections with different users, compare received messages)

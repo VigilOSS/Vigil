@@ -408,6 +408,12 @@ set -euo pipefail
 
 ENGAGEMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export ENGAGEMENT_DIR
+# ENGAGEMENT_KEY is the basename of the engagement directory and also the
+# path segment Kali MCP sees at /engagements/$ENGAGEMENT_KEY/ thanks to the
+# bind mount in start_kali_mcp_runtime.sh. Skills rely on this name to
+# resolve engagement-scoped artifacts from inside the container.
+ENGAGEMENT_KEY="$(basename "$ENGAGEMENT_DIR")"
+export ENGAGEMENT_KEY
 AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
 INSTALL_ROOT="$(cd "$AGENT_ROOT/.." && pwd)"
 
@@ -452,6 +458,12 @@ set -euo pipefail
 
 ENGAGEMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export ENGAGEMENT_DIR
+# ENGAGEMENT_KEY is the basename of the engagement directory and also the
+# path segment Kali MCP sees at /engagements/$ENGAGEMENT_KEY/ thanks to the
+# bind mount in start_kali_mcp_runtime.sh. Skills rely on this name to
+# resolve engagement-scoped artifacts from inside the container.
+ENGAGEMENT_KEY="$(basename "$ENGAGEMENT_DIR")"
+export ENGAGEMENT_KEY
 AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
 INSTALL_ROOT="$(cd "$AGENT_ROOT/.." && pwd)"
 

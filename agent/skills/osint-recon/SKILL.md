@@ -22,9 +22,10 @@ Optional when installed: `waymore`
 
 Treat OSINT as a hypothesis generator for realistic attack paths, not a passive appendix.
 Prioritize intel that changes exploit decisions, auth testing, chain construction, or log review.
-The shared Kali runtime does not mount `$ENGAGEMENT_DIR` at `/engagement`. Use `/tmp` for runtime-local
-output, then persist durable artifacts into `$ENGAGEMENT_DIR/scans/` on the host when they need to be
-ingested, reviewed, or handed off.
+The engagement dir is bind-mounted into Kali at `/engagements/$ENGAGEMENT_KEY/` — write durable
+artifacts directly under `/engagements/$ENGAGEMENT_KEY/scans/` (the host sees the same files as
+`$ENGAGEMENT_DIR/scans/`). Reserve `/tmp` for transient scratch files that do not need to survive
+the container, because anything under `/tmp` disappears on container recreate.
 
 ### 1. CVE & Exploit Lookup
 

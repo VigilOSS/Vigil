@@ -57,6 +57,16 @@ Before initializing any engagement, ensure the shared Kali MCP runtime is runnin
 
 This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install.
 
+**Migration note** — on the first engagement after upgrading to the mounted-engagements runtime, run `./scripts/start_kali_mcp_runtime.sh --recreate` so the container picks up the new `/engagements` bind mount. Existing artifacts under `$ROOT_DIR/engagements/` become directly visible at `/engagements/<engagement_key>/` inside Kali after recreate — no data moves, only the mount changes.
+
+## Kali MCP Artifact Paths
+
+Engagement artifacts live at one physical location on disk but have two names depending on where the command runs — reach for the right name so scans end up where downstream tools look for them.
+
+- **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR`. Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local file work, `assess.py` calls, and any script running on the host.
+- **Kali side** — `/engagements/$ENGAGEMENT_KEY` is the same directory via the bind mount in `start_kali_mcp_runtime.sh`. Launchers also export `ENGAGEMENT_KEY` (the basename of `$DIR`) so Kali MCP commands can resolve it.
+- **Skills running commands inside Kali MCP MUST use `/engagements/$ENGAGEMENT_KEY/...`** — the host path `$DIR` is not valid inside the container, and writing to `/tmp` or `/data` for engagement-scoped artifacts loses them outside the shared-infra conventions.
+
 ## Listener & Callback Management
 
 Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are operator-controlled — only the operator binds ports and exposes external surface. Agents emit `# MANUAL:` playbook steps; the operator executes them and records the result.
@@ -64,6 +74,14 @@ Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are 
 - **Operator** provisions per `agent/references/offensive-tactics/shell-handling.md` (reverse shells) and `agent/references/offensive-tactics/frp-tunneling.md` (tunnels, interactsh OOB), then writes `$DIR/.listener_url` and/or `$DIR/.oob_url`.
 - **Agents** read `$DIR/.listener_url` and `$DIR/.oob_url` from dispatch context (never write). If OOB is unavailable, fall back to time-based detection and note it in output. If a listener cannot be provisioned, record a blocked technique via `./scripts/assess.py post blocked-techniques <json-file>`.
 - **Hit-checking and log paths** (`/data/oob-client.log`, `/data/oob-server.log`, `/data/shell-*.log`, `/data/frpc.log`) are documented in `frp-tunneling.md` and `shell-handling.md`.
+
+## Reactive Nuclei on URL Discovery
+
+Nuclei runs in-phase against the URL deltas each phase produces — not as a single late pass. After any Phase 1-2 action yields new live URLs (recon-specialist endpoint output, source-analyzer URL extraction, surface-collector Katana/gau ingestion, subdomain-enumeration live-host confirmation, wildcard expansion), dispatch a reactive nuclei sweep via Kali MCP against that delta. Each phase still completes its own work before advancing — the sweep is additive, not a reason to skip ahead. Running it in-phase is what lets classify-work attach the `+10` priority bonus to nuclei-matched URLs before Phase 3 specialists dispatch.
+
+Methodology: see `agent/skills/nuclei-scanning/SKILL.md` — "Reactive Sweep Mode". The skill owns the delta computation, the exact `nuclei` invocation, the template selection rationale, and the `list-command-runs`-based dedup that prevents re-scanning host+template combos already covered by an earlier reactive pass. Do not duplicate that mechanics here.
+
+Phase 3a (in the CONSUME & TEST step below) is a **coverage audit**, not a second broad sweep — if every in-scope live host already received a reactive pass with the Phase-1/2 template set, Phase 3a runs only against gaps. When reactive sweeps were thorough, Phase 3a is a no-op that just prints a coverage summary.
 
 ## Subagent Dispatch
 
@@ -150,7 +168,16 @@ DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
 DB="$DIR/cases.db"
 ```
 
-1. **RECON** → dispatch recon-specialist + source-analyzer in parallel. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and then continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 rather than keeping that work on the operator.
+1. **Phase 1 — Reconnaissance**
+
+   **1a. Wildcard subdomain enumeration (when scope.json `hosts` contains `*.domain` entries)** — dispatch `recon-specialist` with `agent/skills/subdomain-enumeration/SKILL.md` loaded BEFORE the parallel recon+source pass. Subdomain expansion must land before downstream steps because 1b's endpoint inventory and 1c's reactive nuclei sweep both consume live hosts as input; running them first against the apex alone misses the wildcard surface entirely. Output: live subdomains ingested via `./scripts/assess.py ingest-endpoints "$DB" subdomain-enum` so they flow into the work buffer alongside apex hosts.
+   Skip 1a when scope.json contains only bare hosts — there is nothing to expand, so dispatching enum wastes a context window.
+
+   **1b. Parallel recon + source analysis** — dispatch `recon-specialist` + `source-analyzer` in parallel because their work is independent and sequential dispatch doubles wall time for no coverage gain. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 — leaving non-web triage on the operator loses the skill's methodology depth.
+
+   **1c. Reactive nuclei sweep against Phase 1 URL delta** — before leaving Phase 1, fire a reactive nuclei sweep via Kali MCP against the URL delta produced by 1a and 1b (methodology + dedup in `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Running it in-phase — instead of holding every URL until Phase 3 — lets nuclei hits raise `priority_score` on matched work items before Phase 3 specialists dispatch. The dedup pattern (`list-command-runs` + jq) ensures this pass and the Phase-2 reactive pass below do not re-scan the same host+template combo.
+
+   **Phase 1 exit gate.** Before leaving Phase 1, run `./scripts/assess.py check-scope-coverage --require-stage enum`. If any scoped entry is missing enumeration activity, dispatch the missing work before advancing — entering Phase 2 without enum means downstream surface-collection misses whole branches of the attack surface.
 2. **COLLECT** → dispatch surface-collector with `agent/skills/surface-collection/SKILL.md`.
    Provide: targets from scope.json, Phase 1 endpoint artifacts (paths to `endpoints.txt` and any source-analyzer output in `scans/`), auth.json state, and `$DIR/cases.db` path.
    On return:
@@ -158,19 +185,30 @@ DB="$DIR/cases.db"
    - Review `#### Priority Attack Surfaces` for Phase 3 dispatch ordering — surface-collector's triage signals override the default type-based dispatch order when risk-informed prioritization is available
    - Inspect work-buffer stats: `./scripts/assess.py dispatch "$DIR/cases.db" stats`
    - Inspect coverage gaps: `./scripts/assess.py fetch summary`
+   - Fire a reactive nuclei sweep against the Katana/gau URLs just ingested (see "Reactive Nuclei on URL Discovery" above and `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Surface-collector-ingested URLs are the largest URL injection of the engagement, so running the reactive sweep here maximizes the CVE/misconfig/exposure signal feeding classify-work before Phase 3 dispatch.
+   - **Classify the work buffer** — run `./scripts/assess.py classify-work "$DIR/cases.db"` once ingestion and the reactive nuclei sweep have settled. This populates `priority_score`, `priority_reason`, and `cluster_key` on pending work items using the deterministic gf-style bucketing in `classify_work.py`; without this step the Phase 3 priority-mode dispatch has nothing to sort by. Re-run after any later ingestion wave.
+   - **Review clusters, defer low-signal ones** — `./scripts/assess.py list-clusters "$DIR/cases.db"` prints cluster counts, max/avg priority, and representative URLs. Any cluster that is clearly not worth specialist attention (e.g., 10k static-asset URLs, out-of-scope-adjacent paths, already-covered admin endpoints) gets deferred with `./scripts/assess.py dispatch "$DIR/cases.db" defer-cluster <cluster_key> --reason "…"` before Phase 3 begins — leaving low-signal clusters pending pollutes the priority queue and forces specialists to re-triage what the operator already judged.
    Surface-collector records surfaces via `assess.py record-surface` and findings via `assess.py record-finding` before returning.
+   **Phase 2 exit gate.** Run `./scripts/assess.py check-scope-coverage --require-stage collection`. Every scoped entry must have collection activity attached; if not, redispatch surface-collector against the missing entries before advancing. Skipping this gate lets scope-entries drift into Phase 3 with zero work in the buffer.
    Update scope.json phase to `consume-test` when ingestion is complete.
 3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
-   a. **Nuclei sweep** (once, before the work-buffer loop) — run nuclei via Kali MCP against all live targets for a broad CVE and misconfiguration check:
-      `nuclei -l /tmp/live_targets.txt -severity critical,high -tags cve,misconfig,exposure -rate-limit 100 -jsonl -o /tmp/nuclei_sweep.jsonl`
-      The shared Kali runtime does not mount `$ENGAGEMENT_DIR` at `/engagement`. Stage input files into `/tmp` inside the runtime, then persist any durable artifacts back into `$DIR/scans/` on the host before triage or ingestion.
-      Triage results: critical/high hits become prioritized work-buffer entries or direct findings (after manual validation). Medium/low hits are intelligence. See `agent/skills/nuclei-scanning/SKILL.md` for triage rules.
+   a. **Nuclei coverage audit** (once, before the work-buffer loop) — audit what Phase 1/2 reactive sweeps already covered and run nuclei only against gaps. Do not blindly re-sweep: if every in-scope live host already received the reactive template set, this step prints a coverage summary and advances.
+      1. Build the coverage set: `./scripts/assess.py list-command-runs --q nuclei --tool-bin nuclei` → jq-extract each prior run's input-list path and template tag(s).
+      2. Compute gaps: live targets ∖ covered hosts (and/or template sets the reactive passes did not exercise).
+      3. If gaps exist, run nuclei via Kali MCP against the gap list only:
+         `nuclei -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap.txt -t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/ -severity medium,high,critical -as -stream -jsonl -rate-limit 150 -c 25 -bs 25 -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap_$RID.jsonl`
+      4. If no gaps, record `./scripts/assess.py log operator "Phase 3a coverage audit — reactive sweeps covered all in-scope hosts, no rerun needed" ""`.
+      See `agent/skills/nuclei-scanning/SKILL.md` "Coverage Audit Mode" for the detailed procedure. Triage policy is unchanged: critical/high hits → work-buffer priority entries or findings (after manual validation); medium → intelligence.
    b. Reset stale work items: `./scripts/assess.py dispatch "$DB" reset-stale 10`
    c. Check stats: `./scripts/assess.py dispatch "$DB" stats`
-   d. Fetch and route by type — dispatch independent types in parallel:
-      - `api`, `api-spec`, `form`, `upload`, `graphql`, `websocket` → vulnerability-analyst (load matching vuln-class skill from `agent/SKILL.md`)
-      - `page`, `javascript`, `stylesheet`, `data` → source-analyzer (load `source-analysis` skill)
-      `./scripts/assess.py dispatch "$DB" fetch <type> 10 <agent-name>`
+   d. Fetch and route — dispatch mode depends on pending-item volume:
+      - **Pending < 2000 → type-based dispatch.** Independent types run in parallel:
+        - `api`, `api-spec`, `form`, `upload`, `graphql`, `websocket` → vulnerability-analyst (load matching vuln-class skill from `agent/SKILL.md`)
+        - `page`, `javascript`, `stylesheet`, `data` → source-analyzer (load `source-analysis` skill)
+        `./scripts/assess.py dispatch "$DB" fetch <type> 10 <agent-name>`
+      - **Pending ≥ 2000 → priority-first dispatch.** Type-based fetch orders only by id within a type, so at 2000+ pending items specialists churn through low-signal work before reaching the high-signal clusters `classify-work` already scored. Switch to priority mode:
+        `./scripts/assess.py dispatch "$DB" fetch-by-priority 10 <agent-name>`
+        Rows come back sorted by `priority_score DESC, cluster_key, id` and the same agent-routing rule applies — a gf:ssrf row still goes to vulnerability-analyst, a gf:debug_logic page still goes to source-analyzer. Run `assess.py list-clusters "$DB"` between batches to decide whether new clusters warrant `defer-cluster` before they reach specialists.
       Pass the raw fetched JSON rows into the dispatch context. They carry canonical ids such as `request_variant_id`, `service_id`, and sometimes `coverage_item_id`, which subagents need for durable probe and coverage writes.
       If `$DIR/.oob_url` exists, include the callback URL in dispatch context for agents doing blind testing.
       If `$DIR/.listener_url` exists, include the tunnel address for agents that need a callback target.
@@ -179,6 +217,7 @@ DB="$DIR/cases.db"
    f. If vulnerability-analyst signals FUZZER_NEEDED for a parameter or directory, dispatch fuzzer with `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md` and a bounded objective (target URL, parameter name, max payloads).
    g. Repeat b-f until pending=0 for all consumable types.
    h. Before leaving: `./scripts/assess.py check-coverage`. If it fails, resolve each remaining surface as `covered`, `deferred`, or `not_applicable`. High-risk surfaces (`account_recovery`, `dynamic_render`, `object_reference`, `privileged_write`) must be resolved as `covered` or `not_applicable` before leaving this phase — deferring high-risk surfaces means they become invisible to the report.
+      `check-coverage` is surface-level; use `./scripts/assess.py check-scope-coverage --require-stage consumption` as the broader scope-entry-level gate when you need a pre-report readiness check that a whole scope host is fully consumed or explicitly deferred, not just individual surfaces.
 4. **VERIFY FINDINGS** → adversarial review of Phase 3 findings before investing in exploitation. This catches false positives, severity inflation, and weak evidence early — fixing a finding after exploitation wastes far more tokens than catching it here.
    a. Fetch all active findings: `./scripts/assess.py fetch findings`
    b. Triage the review scope:
@@ -390,7 +429,10 @@ Phases: [x] Recon  [x] Collect  [>] Test  [ ] Verify  [ ] Exploit  [ ] Report
 
 ## Subdomain Enumeration
 
-When `scope.json` `hosts` contains `*.domain` entries, subdomain enumeration is in scope for that domain. See `agent/references/subdomain-enumeration.md` for enumeration, prioritization, and sliding window rules.
+When `scope.json` `hosts` contains `*.domain` entries, subdomain enumeration runs as Phase 1a before the parallel recon+source pass — live subdomains must land in the backend before 1b/1c so downstream endpoint extraction and the reactive nuclei sweep cover the full wildcard surface, not just the apex host.
+
+Methodology: `agent/skills/subdomain-enumeration/SKILL.md`.
+Prioritization and sliding-window rules: `agent/references/subdomain-enumeration.md`.
 
 ## Handoff Reference
 
