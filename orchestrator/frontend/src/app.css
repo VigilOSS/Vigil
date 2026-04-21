@@ -67,6 +67,14 @@
   --json-bg: rgba(16, 18, 26, 0.045);
   --json-border: rgba(16, 18, 26, 0.08);
 
+  /* ── Drawer tabs + count badges (light) ─────────────────── */
+  --drawer-tab-bar-bg: rgba(255, 255, 255, 0.6);
+  --drawer-tab-active-ink: #17354c;
+  --count-bg: rgba(23, 53, 76, 0.08);
+  --count-ink: #17354c;
+  --count-bg-active: rgba(23, 53, 76, 0.14);
+  --count-ink-active: #17354c;
+
   background:
     radial-gradient(circle at top left, var(--page-bg-gradient-1), transparent 34%),
     radial-gradient(circle at top right, var(--page-bg-gradient-2), transparent 30%),
@@ -138,6 +146,14 @@
   --json-gutter: #555b6c;
   --json-bg: rgba(255, 255, 255, 0.03);
   --json-border: rgba(255, 255, 255, 0.08);
+
+  /* ── Drawer tabs + count badges (dark) ──────────────────── */
+  --drawer-tab-bar-bg: rgba(22, 25, 32, 0.7);
+  --drawer-tab-active-ink: #e6e8ee;
+  --count-bg: rgba(121, 169, 212, 0.16);
+  --count-ink: #b6d2ea;
+  --count-bg-active: rgba(121, 169, 212, 0.28);
+  --count-ink-active: #e6e8ee;
 }
 
 * {
@@ -2169,14 +2185,19 @@ input {
 .findings-redesign .qa-btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
 .findings-redesign .qa-btn.primary:hover { background: #0f2537; }
 
-/* Drawer tabs */
+/* Drawer tabs
+ *
+ * Theme-aware: --drawer-tab-bar-bg and --count-bg come from the :root
+ * theme layer so dark/light flip for free. In dark mode the active tab
+ * gets a brighter --drawer-tab-active-ink (near-white) with a thicker
+ * underline so it clearly wins against the muted/ink-2 idle color. */
 .findings-redesign .drawer-tabs {
   display: flex;
   gap: 2px;
   padding: 0 16px;
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--drawer-tab-bar-bg);
 }
 .findings-redesign .drawer-tab {
   background: none;
@@ -2184,7 +2205,7 @@ input {
   border-bottom: 2px solid transparent;
   padding: 10px 12px;
   font-size: 0.84rem;
-  color: var(--muted);
+  color: var(--ink-2);
   cursor: pointer;
   font-weight: 500;
   display: flex;
@@ -2193,10 +2214,12 @@ input {
   white-space: nowrap;
   font-family: inherit;
 }
-.findings-redesign .drawer-tab:hover { color: var(--accent); }
+.findings-redesign .drawer-tab:hover { color: var(--drawer-tab-active-ink); }
 .findings-redesign .drawer-tab.is-active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
+  color: var(--drawer-tab-active-ink);
+  border-bottom-color: var(--drawer-tab-active-ink);
+  border-bottom-width: 2px;
+  font-weight: 600;
 }
 .findings-redesign .drawer-tab .count,
 .findings-redesign .section-title .count,
@@ -2204,10 +2227,14 @@ input {
   font-size: 0.7rem;
   padding: 1px 6px;
   border-radius: 999px;
-  background: rgba(23, 53, 76, 0.08);
-  color: var(--accent);
+  background: var(--count-bg);
+  color: var(--count-ink);
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
   opacity: 1;
+}
+.findings-redesign .drawer-tab.is-active .count {
+  background: var(--count-bg-active);
+  color: var(--count-ink-active);
 }
 
 .findings-redesign .drawer-body {
@@ -2224,7 +2251,9 @@ input {
   text-transform: uppercase;
   color: var(--ink);
   font-weight: 600;
-  margin: 0 0 8px;
+  /* 8px → 6px: .section's own 4px grid gap already provides
+   * label→body breathing room. Previous 8px stacked with it. */
+  margin: 0 0 6px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -3014,7 +3043,28 @@ body.detail-modal-open {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin: 0 0 10px;
+  /* Tight gap to the following NotesBody. The old 10px plus
+   * the .section grid's 4px gap plus NotesBody's own rhythm
+   * stacked to ~18px of air; drop to a single 6px breath. */
+  margin: 0 0 6px;
+}
+/* Inline variant used in Intel Notes & tags: "Tags <chips>" on one
+ * flex row, no vertical margin — the parent .section.inline-row
+ * handles spacing via gap. */
+.findings-redesign .section.inline-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.findings-redesign .section-title--inline {
+  margin: 0;
+  min-width: 0;
+}
+.findings-redesign .tag-row--inline {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
 }
 .findings-redesign .tag-row .tag {
   padding: 2px 8px;
@@ -3037,6 +3087,11 @@ body.detail-modal-open {
   white-space: normal;
 }
 .findings-redesign .notes-body p { margin: 0; }
+/* Kill any top margin on the first child so the section-title sits
+ * flush against the first paragraph/heading/blockquote. Fixes the
+ * "Evidence" label floating ~20px above its own text in PoC. */
+.findings-redesign .notes-body > :first-child { margin-top: 0; }
+.findings-redesign .notes-body > :last-child { margin-bottom: 0; }
 .findings-redesign .notes-body a {
   color: var(--accent);
   text-decoration: underline;
@@ -3062,12 +3117,15 @@ body.detail-modal-open {
 
 .findings-redesign .provenance-list {
   display: grid;
-  gap: 12px;
+  /* Tightened from 12px — provenance rows already self-separate
+   * via a 1px divider; extra outer gap was double-spacing. */
+  gap: 6px;
 }
 .findings-redesign .provenance-row {
   display: grid;
-  gap: 6px;
-  padding-top: 10px;
+  /* Intra-row gap: label→value lines pack tight at 4px. */
+  gap: 4px;
+  padding-top: 6px;
   border-top: 1px solid var(--divider);
 }
 .findings-redesign .provenance-row:first-child {
@@ -3078,7 +3136,8 @@ body.detail-modal-open {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  /* Label→value gap: drop from 8px to 6px to feel crisper. */
+  gap: 6px;
   font-size: 0.88rem;
 }
 .findings-redesign .provenance-label {
@@ -3117,6 +3176,24 @@ body.detail-modal-open {
   color: var(--ink-2);
   font-style: italic;
   line-height: 1.5;
+}
+/* Compact evidence callout for short prose observations in the
+ * Findings PoC pane. Muted panel + accent bar; monospace tip-toed
+ * in via IBM Plex Mono to help the eye tell evidence from flavor
+ * prose. Longer (>200 char, multi-paragraph) evidence falls back to
+ * NotesBody so paragraph structure survives. */
+.findings-redesign .evidence-inline {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  padding: 10px 14px;
+  margin: 0;
+  background: var(--panel-soft);
+  border-left: 3px solid var(--accent-muted);
+  border-radius: 0 8px 8px 0;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .findings-redesign .copy-inline {
@@ -3401,11 +3478,12 @@ body.detail-modal-open {
 :root[data-theme="dark"] .event-type-phase   { background: rgba(184,171,146,0.18); color: #cec3ae; }
 :root[data-theme="dark"] .event-type-task    { background: rgba(121,169,212,0.18); color: #9ec5e8; }
 
-:root[data-theme="dark"] .tab-count,
-:root[data-theme="dark"] .findings-redesign .count {
+:root[data-theme="dark"] .tab-count {
   background: rgba(121,169,212,0.15);
   color: var(--accent);
 }
+/* .findings-redesign .count is now theme-aware via --count-bg /
+ * --count-ink variables defined on :root — no dark override needed. */
 :root[data-theme="dark"] .findings-redesign .hl {
   background: rgba(247,187,123,0.3);
   color: var(--ink);

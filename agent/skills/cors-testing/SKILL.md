@@ -6,8 +6,6 @@ origin: AI Threat Hunting
 
 # CORS Misconfiguration Testing
 
-> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: CORS` and `X-Probe-Kind` per the phase — `fingerprint` for ACAO/ACAC header probes, `payload` for crafted Origin-header attacks, `exploit` for cross-origin data-theft proof.
-
 ## When to Activate
 
 - API returns `Access-Control-Allow-Origin` header

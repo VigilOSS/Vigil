@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # GraphQL Security Testing
 
-> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: RECON` for schema introspection, field-suggestion, and endpoint-discovery probes — GraphQL's attack surface spans many vuln classes, so `RECON` captures the discovery phase cleanly. Switch to the specific vuln-class technique when you send an attack payload: `X-Technique: SQLI` for SQLi via resolver args, `AUTH` for missing-authorization queries/mutations, `IDOR` for cross-tenant object access, `INFO-DISCLOSURE` for sensitive-field exposure, and so on. Set `X-Probe-Kind` per the phase — `fingerprint` for introspection, `payload` for attack queries/mutations, `exploit` for proof-of-impact extractions.
+> **Kali MCP audit header:** use `X-Technique: RECON` for introspection and schema discovery; when sending attack payloads via resolvers, switch to the matching vuln class (`SQLI` / `AUTH` / `IDOR` / `INFO-DISCLOSURE`).
 
 ## When to Activate
 

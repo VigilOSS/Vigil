@@ -6,8 +6,6 @@ origin: AI Threat Hunting
 
 # Open Redirect Testing
 
-> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: OPEN-REDIRECT` and `X-Probe-Kind` per the phase — `fingerprint` for redirect-parameter discovery and Location-header echo probes, `payload` for crafted redirect URLs / `javascript:` URIs / OAuth `redirect_uri` manipulation, `exploit` for chained token-theft or phishing-impact proof.
-
 ## Reality Check
 
 Open redirect alone is typically Low severity. It becomes High/Critical when chained with: OAuth token theft (redirect_uri manipulation), XSS via `javascript:` URI, phishing from a trusted domain, or SSRF via server-side redirect following. If you find an open redirect and stop there, you have a Low. If you chain it, you have a real finding. This skill covers both discovery and the chains that make open redirects worth reporting.

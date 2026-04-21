@@ -6,8 +6,6 @@ origin: AI Threat Hunting
 
 # JWT Testing (JSON Web Token Attacks)
 
-> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: JWT` and `X-Probe-Kind` per the phase — `fingerprint` for header/claim/alg inspection, `payload` for forged-token attempts (alg=none, key confusion, claim tampering), `exploit` for privileged-action proof using the forged token.
-
 ## When to Activate
 
 - **Scope note:** Use this skill when JWT is the primary auth mechanism. If testing general login bypass where JWT is one component, load `auth-bypass` skill instead — it covers JWT briefly alongside other auth mechanisms. Do not load both skills for the same endpoint.

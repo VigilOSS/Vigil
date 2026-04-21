@@ -6,8 +6,6 @@ origin: AI Threat Hunting
 
 # XSS Testing
 
-> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: XSS` and `X-Probe-Kind` per the phase — `fingerprint` for reflection/context discovery, `payload` for payload delivery, `exploit` for cookie theft, session hijack, or admin-context RCE proof.
-
 Most XSS findings in 2025 are in client-side rendering contexts (React `dangerouslySetInnerHTML`, Angular `bypassSecurityTrustHtml`, Vue `v-html`), not classic server-reflected. Prioritize accordingly. dalfox finds reflected XSS in roughly 30% of test cases. For the other 70%, you need manual DOM analysis, framework-specific sink hunting, and stored/blind XSS methodology.
 
 ## When to Activate

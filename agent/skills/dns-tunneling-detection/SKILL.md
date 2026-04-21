@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # DNS Tunneling Detection
 
-> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: RECON` — DNS log inspection, query-pattern analysis, entropy scoring, and tunnel-tool probing are all forms of reconnaissance of the DNS egress channel (`OSINT` fits passive external-zone lookups, but the offensive side of this skill operates against in-scope DNS infrastructure, making `RECON` the more accurate class). Set `X-Probe-Kind` per the phase — `fingerprint` for passive log inspection and baseline-pattern surveys, `payload` for crafted tunneled queries (iodine, dnscat2, DNSExfiltrator test traffic), `exploit` for proven exfiltration or C2 round-trip across the monitored boundary.
+> **Kali MCP audit header:** use `X-Technique: RECON`; this skill's offensive side operates against in-scope DNS infrastructure, so `RECON` fits better than `OSINT` (which is passive external-zone lookups).
 
 ## Adversarial Context
 

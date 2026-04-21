@@ -54,8 +54,12 @@ apply; the runtime stores them on the audit row where they become filterable in
 - **`X-Technique`** — the vulnerability class this command tests. One of `SSRF`, `XSS`,
   `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`, `RFI`, `OPEN-REDIRECT`,
   `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`, `RATE-LIMIT`, `INFO-DISCLOSURE`,
-  `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `OTHER`. Use
-  the value from the skill you loaded.
+  `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `OTHER`. Derive
+  it from the skill you loaded: for skills whose name maps 1:1 to an enum value
+  (`ssrf-testing` → `SSRF`, `sqli-testing` → `SQLI`, `command-injection` → `CMDI`, etc.),
+  use that mapping. When the mapping isn't obvious (e.g. `aws-iam-privesc`,
+  `container-escape-detection`, `graphql-testing`), the skill file names the correct
+  value at the top.
 - **`X-Intent`** — a ≤200-char one-liner describing what this specific command is trying to
   accomplish. Replaces the `echo "=== label ==="` pattern.
 - **`X-Probe-Kind`** — the kind of work this command represents:

@@ -6,8 +6,6 @@ origin: AI Threat Hunting
 
 # Code Fuzz Campaign
 
-> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: FUZZ` and `X-Probe-Kind` per the phase — `fingerprint` for target/parser discovery and build-toolchain probes, `payload` for harness builds, corpus generation, and fuzzer launches (libFuzzer / AFL++ runs), `exploit` for crash-reproducer replays and minimized PoC runs that prove memory-safety impact.
-
 ## When to Activate
 
 - Phase 4 of the code analysis pipeline, after Phase 3 (Verify+Variant) confirms static findings.

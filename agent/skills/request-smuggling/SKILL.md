@@ -6,8 +6,6 @@ origin: AI Threat Hunting
 
 # HTTP Request Smuggling Testing
 
-> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: REQUEST-SMUGGLING` and `X-Probe-Kind` per the phase — `fingerprint` for frontend/backend discrepancy probes (CL vs TE parsing), `payload` for crafted desync requests (CL.TE, TE.CL, TE.TE, HTTP/2 downgrade), `exploit` for cache-poisoning or request-queue-hijack proof against another user.
-
 ## When to Activate
 
 - Application behind reverse proxy, load balancer, or CDN

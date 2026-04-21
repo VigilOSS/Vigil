@@ -118,6 +118,15 @@ Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are 
 | osint-analyst | CVE/breach/DNS/social research backed by backend intel tables | Phase 5 (parallel with exploit) |
 | report-writer | Final or interim report | Phase 7 |
 
+### Runtime Dispatch Syntax
+
+Subagent invocation is runtime-specific. **Invoke the registered wrapper**, never a generic task-spawning tool — the wrapper is what points the specialist at its role file and shared constraints.
+
+- **Claude Code**: dispatch with `@agent-name` (e.g. `@recon-specialist`). Wrappers are registered in `.claude/agents/*.md`. The built-in `Task`/`Agent` tool spawns an unregistered subagent and skips the wrapper entirely, so the specialist would operate without its role context — do not use it for registered roles.
+- **Codex**: dispatch via the registered agent roster (`.codex/agents/*.toml`) using Codex's subagent-invocation mechanism. The TOML wrapper does the same role-bootstrap work as the Claude wrapper.
+
+The wrapper itself is a thin shim: it tells the specialist to load `agent/agents/<name>.md`, whose "Load First" section then bootstraps `shared-constraints.md` (web agents) or `shared-constraints-code.md` (code agents) plus the primary skill. Specialists never load the operator prompt (`CLAUDE.md`/`AGENTS.md`) — that's operator context, not theirs.
+
 ### Dispatch Context Template
 
 Every dispatch must include:

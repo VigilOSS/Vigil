@@ -1429,9 +1429,15 @@ function Drawer({
     .map((l) => chainsByKey.get(l.target_ref))
     .filter((c): c is AssessmentAttackChainDetail => Boolean(c));
 
-  const pocCount = [d.poc_code, d.poc_request, d.poc_response, d.evidence].filter(
-    Boolean,
-  ).length;
+  // Steps to reproduce moved from Overview to PoC (Issue 3b): the tab
+  // count mirrors what PocPane actually renders so the badge stays
+  // honest. Count a non-empty steps_to_reproduce array as one section.
+  const hasStepsForCount = !!(
+    d.steps_to_reproduce && d.steps_to_reproduce.length > 0
+  );
+  const pocCount =
+    [d.poc_code, d.poc_request, d.poc_response, d.evidence].filter(Boolean)
+      .length + (hasStepsForCount ? 1 : 0);
   const codeCount = d.slot_type ? 1 : 0;
   const linksCount = linkedFindings.length + linkedChains.length;
   const historyCount = transitions.length;
@@ -1625,16 +1631,10 @@ function OverviewPane({ d }: { d: Derived }) {
           {d.chain_rationale && <p>{d.chain_rationale}</p>}
         </div>
       )}
-      {d.steps_to_reproduce && d.steps_to_reproduce.length > 0 && (
-        <div className="section">
-          <p className="section-title">Steps to reproduce</p>
-          <ol className="steps">
-            {d.steps_to_reproduce.map((s, i) => (
-              <li key={i}>{s}</li>
-            ))}
-          </ol>
-        </div>
-      )}
+      {/* Steps to reproduce now live in the Proof of Concept pane so
+       * reproduction steps read contiguously with Evidence / Payload /
+       * Request / Response. Required follow-up stays here because it's
+       * a remediation pointer, not a reproduction artifact. */}
       {d.required_followup && d.required_followup.length > 0 && (
         <div className="section">
           <p className="section-title">Required follow-up</p>
@@ -1687,16 +1687,52 @@ function OverviewPane({ d }: { d: Derived }) {
 }
 
 function PocPane({ d }: { d: Derived }) {
-  const hasAny = d.evidence || d.poc_code || d.poc_request || d.poc_response;
+  const hasSteps = !!(d.steps_to_reproduce && d.steps_to_reproduce.length > 0);
+  const hasAny =
+    hasSteps ||
+    d.evidence ||
+    d.poc_code ||
+    d.poc_request ||
+    d.poc_response;
   const pocCodeIsCurl = isCurlLike(d.poc_code);
   const reqText = d.poc_request ? formatHttp(d.poc_request, "req") : "";
   const respText = d.poc_response ? formatHttp(d.poc_response, "resp") : "";
+
+  // Pick a render mode for evidence: raw HTTP exchanges get the mono
+  // .pre treatment; short prose gets a compact blockquote; longer
+  // prose keeps NotesBody's paragraph layout but inside a callout.
+  const ev = (d.evidence || "").trim();
+  const looksLikeHttp =
+    /^HTTP\/\d\.\d\b/i.test(ev) ||
+    /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\S+\s+HTTP\/\d/i.test(ev);
+  const evidenceMode: "http" | "quote" | "prose" = looksLikeHttp
+    ? "http"
+    : ev.length > 0 && ev.length < 200 && !ev.includes("\n\n")
+    ? "quote"
+    : "prose";
+
   return (
     <>
-      {d.evidence && (
+      {hasSteps && (
+        <div className="section">
+          <p className="section-title">Steps to reproduce</p>
+          <ol className="steps">
+            {d.steps_to_reproduce!.map((s, i) => (
+              <li key={i}>{s}</li>
+            ))}
+          </ol>
+        </div>
+      )}
+      {ev && (
         <div className="section">
           <p className="section-title">Evidence</p>
-          <NotesBody text={d.evidence} />
+          {evidenceMode === "http" ? (
+            <pre className="pre resp">{ev}</pre>
+          ) : evidenceMode === "quote" ? (
+            <blockquote className="evidence-inline">{ev}</blockquote>
+          ) : (
+            <NotesBody text={ev} />
+          )}
         </div>
       )}
       {d.poc_code && (
