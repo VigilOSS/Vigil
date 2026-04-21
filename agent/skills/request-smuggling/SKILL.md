@@ -122,6 +122,19 @@ origin: AI Threat Hunting
 - Severity: Critical (credential theft, cache poisoning) or High (access bypass)
 - Remediation: normalize CL/TE handling, use HTTP/2 end-to-end, reject ambiguous requests
 
+## Kill Signals — Stop Testing When
+- Target uses HTTP/2 end-to-end with no downgrade → classic smuggling not applicable, test H2-specific only
+- No proxy/load balancer detected (single server) → smuggling requires parsing disagreement between 2+ servers, move on
+- CL.TE or TE.CL detection confirmed → record finding, proceed to exploitation, do NOT test remaining variants
+- All detection techniques (CL.TE, TE.CL, TE.TE, H2) fail → infrastructure is aligned, move on
+
+## Escalate When
+- A timing-based smuggle probe (long CL + short body, or vice versa) produces a >5s hang on one payload but returns immediately on its control — parser disagreement is present, walk the full CL.TE / TE.CL / TE.TE variant set before declaring
+- Response differs between `Content-Length: X` and `Transfer-Encoding: chunked` with the same body — the front and back disagree on framing, craft a smuggled prefix and hunt a cross-user cache or queue poison
+- Headers like `Transfer-Encoding: chunked\r\nX-Foo: bar` or obfuscated forms (`Transfer-Encoding : chunked`, `Transfer-encoding: xchunked`, tabbed whitespace, duplicate TE) change behavior between requests — one proxy ignores them, the other parses them, that is the disagreement
+- HTTP/2 is terminated at the edge and downgraded to HTTP/1.1 upstream — H2.CL and H2.TE request-splitting are live, test pseudo-header injection and H2 body desync even when H1 detection fails
+- A smuggled request lands authentication/auth-bypass semantics on another user's connection (prefix injection of `X-Forwarded-For`, cache-key manipulation, host-header rewrite) — escalate immediately to cross-user impact, this is the real severity driver
+
 ## Extended Resources
 
 - `agent/references/payloads/request-smuggling-payloads.md` — CL.TE, TE.CL, TE.TE obfuscation, HTTP/2 downgrade

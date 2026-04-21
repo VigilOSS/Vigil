@@ -56,7 +56,7 @@ Avoid vague titles like:
 
 ## 9. Use durable finding state as the source
 
-Do not invent details that are not present in recorded findings, synchronized artifacts, or confirmed evidence references.
+Do not invent details that are not present in recorded findings, backend state, or confirmed evidence references.
 
 ## 10. Section length limits
 
@@ -83,7 +83,7 @@ In addition to Rule 1 hedge phrases, these patterns are banned:
 - `It is worth noting that` · `It should be noted that`
 - `As demonstrated above` · `As mentioned earlier`
 - `During the course of our assessment` · `Upon further investigation`
-- `In conclusion` · `To summarize`
+- `In conclusion` · `To summarize` . `with a one-minute proof-of-concept`
 
 Preferred alternatives:
 - Start with the proof or outcome sentence immediately

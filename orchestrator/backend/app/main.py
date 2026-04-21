@@ -3,13 +3,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
+from .api.activity import router as activity_router
 from .api.artifacts import router as artifacts_router
 from .api.assessment import router as assessment_router
 from .api.code_analysis import router as code_analysis_router
 from .api.engagements import router as engagements_router
 from .api.events import router as events_router
+from .api.intel import router as intel_router
 from .config import settings
 from .db import init_db
+from .services.backup import start_scheduler as start_backup_scheduler, stop_scheduler as stop_backup_scheduler
 from .services.engagements import get_engagement_or_404, maybe_sync_engagements
 from .ws import broadcaster
 
@@ -18,7 +21,11 @@ from .ws import broadcaster
 async def lifespan(app: FastAPI):
     init_db()
     maybe_sync_engagements(force=True)
-    yield
+    start_backup_scheduler()
+    try:
+        yield
+    finally:
+        stop_backup_scheduler()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
@@ -27,6 +34,8 @@ app.include_router(events_router)
 app.include_router(artifacts_router)
 app.include_router(assessment_router)
 app.include_router(code_analysis_router)
+app.include_router(intel_router)
+app.include_router(activity_router)
 
 
 @app.get("/healthz")

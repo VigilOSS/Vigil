@@ -4,12 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.contracts import render_contract_epilog
-from assess.lib.findings import sync_finding_markdown, update_finding_count
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 
 
@@ -40,14 +38,6 @@ def register(subparsers) -> None:
     p.add_argument("--details-inline", help="Inline JSON object for details")
     p.add_argument("--provenance-inline", help="Inline JSON object for provenance")
     p.set_defaults(func=run)
-
-
-def _sync_findings_file(engagement_dir: str | Path, result: dict) -> None:
-    findings_file = Path(engagement_dir) / "findings.md"
-    finding = result.get("finding")
-    if isinstance(finding, dict) and findings_file.is_file():
-        sync_finding_markdown(str(findings_file), finding)
-        update_finding_count(str(findings_file))
 
 
 def run(args) -> None:
@@ -120,5 +110,4 @@ def run(args) -> None:
     finally:
         client.close()
 
-    _sync_findings_file(cfg.engagement_dir, result)
     print(json.dumps(result, indent=2, ensure_ascii=False))

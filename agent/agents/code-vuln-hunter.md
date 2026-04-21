@@ -33,7 +33,7 @@ Before producing any output, confirm:
       matching the slot types is present. WITHOUT IT, PATTERN-LEVEL DEPTH IS LOST.
 - [ ] **File batch provided**: file paths, priorities, batch theme, slot types, classification tier
 - [ ] **Structural index loaded (if available at `tools/analysis-state/structural-index/`)** -- provides
-      function map, entry points, security sinks as navigation checklist
+      function map as completeness anchor, plus entry points, sinks, exports, and import targets as advisory navigation metadata
 - [ ] **Threat model summary available** -- trust boundaries, entry points, high-value targets
 - [ ] **Call graph excerpt available** -- shows how functions connect to entry points and other modules
 - [ ] **Guidance hypotheses available** (optional -- test AFTER broad analysis, see Phase E.5)
@@ -88,20 +88,23 @@ For each file in the batch, build the analysis plan before diving into deep anal
 1. **Read the structural index** for this file (if available). Look up the index filename in
    `tools/analysis-state/structural-index-manifest.json`'s `path_to_index` mapping using the file's
    relative path, then read the corresponding JSON from `tools/analysis-state/structural-index/`.
-   The sink catalog is a minimum checklist -- account for every catalogued sink, but also look
-   beyond the catalog for patterns tree-sitter cannot detect (semantic issues, multi-function
-   logic errors, trust boundary violations). If no structural index exists, fall back to manual
-   triage from imports, exports, and class/function signatures.
+   The function map is the primary completeness anchor -- every listed function must receive
+   a disposition. Sinks, exports, and import targets are advisory metadata that helps you
+   navigate the file; they do not limit what you look for. Always look beyond the catalog
+   for patterns tree-sitter cannot detect (semantic issues, multi-function logic errors,
+   trust boundary violations). If no structural index exists, fall back to manual triage
+   from imports, exports, and class/function signatures.
 2. **Cross-reference with call graph**: identify entry-point chains reaching this file and
    untrusted data sources that flow into it.
 3. **Count total entry-point chains per applicable vulnerability class** -- this becomes the
    `total_entry_chains` denominator in the `cwe_coverage` output.
 4. **Prioritize**: functions at the intersection of untrusted input and security sinks first,
    then functions with complex control flow, then helpers and utilities.
-5. **Record planned function examination scope** -- this is the effort denominator. Every
-   function in the structural index (or discovered via manual triage) must be accounted for
-   in final dispositions, but not every function needs the same amount of prose. Use the
-   deepest write-up where the risk and ambiguity actually live.
+5. **Record planned function examination scope** -- the function map is the effort
+   denominator. Every function in the structural index (or discovered via manual triage)
+   must be accounted for in final dispositions. Sink annotations and export lists help
+   prioritize but are not exhaustive -- apply the same depth to functions without catalogued
+   sinks when they sit on traced entry-to-sink chains or contain security-relevant logic.
 
 When the structural index is unavailable, manual triage replaces it: scan imports for
 security-relevant libraries (crypto, file I/O, network, SQL), identify exported/public
@@ -147,7 +150,7 @@ evidence and decide between `suspicious` and `clean`:
 - **suspicious** — the weakening answer reduces confidence but does not eliminate the hypothesis. A guard exists but may be bypassable. A taint path is plausible but unresolved. The pattern matches a known CWE but a precondition is unclear. The verifier will investigate the gap you document.
 - **clean** — the weakening answer fully resolves the hypothesis. The guard is complete on all paths. The data is hardcoded, not attacker-controlled. The function is unreachable from any entry point. There is no remaining uncertainty.
 
-When in doubt between the two, prefer `suspicious` — it reaches the verifier with your hypothesis intact. A `clean` disposition removes the finding from the pipeline permanently with no downstream review.
+When in doubt between the two, prefer `suspicious` — it reaches the verifier with your hypothesis intact. A `clean` disposition removes the finding from the pipeline permanently with no downstream review, so every `clean` entry must cite the specific guard, type constraint, compile-time flag, or upstream validator function that ends the hypothesis, with `file:line` pointers so a variant hunter can re-check the citation.
 
 ### Phase D: 5 Hows for Each Potential Vulnerability
 
@@ -258,9 +261,9 @@ analysis. 80-100 = exhaustive analysis including cross-file chains, bypass attem
 all error paths.
 
 When the structural index is available, `functions_analyzed` should be verifiable against the
-structural index's function count and sink catalog. If the structural index shows 4 file_path
-sinks in 3 functions, reporting `functions_analyzed: 1` for path-traversal requires explanation
-in the notes.
+structural index's function count. If the structural index shows 8 functions and you report
+`functions_analyzed: 3` for a pass, the remaining 5 functions each need at least a brief
+disposition in the notes.
 
 Also produce a **`cross_file_triggers`** array -- if a finding or taint source/sink connects
 to another file via the call graph, emit a trigger so the operator re-queues that file:
@@ -390,8 +393,9 @@ conditional branches, not just the one active in the current build configuration
 ## Confidence Scale
 
 See skill file for the full confidence level table. Key mapping:
-- `high` → recorded as `confirmed`. `medium` → recorded as `draft`.
-- `low` → queued for re-analysis with more context, not reported as-is.
+- `high` → record with `workflow_status: "active"` (the default). Verification is the verifier's job in Phase 3.
+- `medium` → record with `workflow_status: "draft"`. Needs more context to promote.
+- `low` → queued for re-analysis with more context, not recorded as a finding.
 
 ## Filesystem Self-Service
 
@@ -428,10 +432,14 @@ defaults when omitted.
     "cwe_id": "CWE-XXX",
     "impact": "Concrete impact statement",
     "evidence": "Code snippet + taint path + guard failure",
+    "entry_point": "function or input source receiving attacker data",
+    "sink": "dangerous operation receiving tainted data",
     "taint_path": "entry -> transform1 -> ... -> sink",
     "guards_evaluated": "What guards exist, why they fail",
     "slot_type": "NETWORK-INPUT|URL-COMPONENT|...",
-    "steps_to_reproduce": ["Step 1", "Step 2", "..."]
+    "steps_to_reproduce": ["Step 1", "Step 2", "..."],
+    "references": ["https://cwe.mitre.org/data/definitions/XXX.html"],
+    "poc_code": "optional PoC exploit script"
   }
 }
 ```
@@ -534,7 +542,7 @@ Before returning results, verify:
 - [ ] `#ifdef` branches were checked for guard completeness across all conditional paths
 - [ ] `cwe_coverage` array produced with effort scores for ALL applicable vulnerability classes
 - [ ] `cross_file_triggers` produced for any findings that connect to other files via call graph
-- [ ] Structural index sinks accounted for (if structural index was available)
+- [ ] All structural index functions have dispositions (if structural index was available)
 - [ ] Guidance hypotheses checked AFTER the broad unconstrained pass (Phases A-E)
 
 ## Key Principles

@@ -2,11 +2,50 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+
+
+def _derive_module_key(name: str) -> str:
+    """Slugify a module name into a valid module_key."""
+    key = name.strip().lower()
+    key = re.sub(r"[^a-z0-9]+", "_", key)
+    return key.strip("_") or "unknown"
+
+
+def _check_auto_derived_key_collisions(modules: list[dict], existing_modules: list[dict]) -> None:
+    existing_by_key = {
+        str(module.get("module_key", "")): str(module.get("name", "")).strip()
+        for module in existing_modules
+        if module.get("module_key")
+    }
+    auto_derived_by_key: dict[str, str] = {}
+    for mod in modules:
+        if mod.get("_auto_derived_module_key") is not True:
+            continue
+        module_key = str(mod["module_key"])
+        module_name = str(mod.get("name", "")).strip()
+        previous_name = auto_derived_by_key.get(module_key)
+        if previous_name is not None and previous_name != module_name:
+            print(
+                f"Auto-derived module_key collision for '{module_key}': "
+                f"'{previous_name}' and '{module_name}'. Provide explicit module_key values.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        existing_name = existing_by_key.get(module_key)
+        if existing_name is not None and existing_name != module_name:
+            print(
+                f"Auto-derived module_key '{module_key}' for '{module_name}' collides with existing module "
+                f"'{existing_name}'. Provide an explicit module_key.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        auto_derived_by_key[module_key] = module_name
 
 
 def register(subparsers) -> None:
@@ -31,23 +70,38 @@ def run(args) -> None:
         print("No modules to submit.", file=sys.stderr)
         sys.exit(0)
 
-    # Validate required fields
+    # Validate and normalize required fields
     for i, mod in enumerate(modules):
         if not isinstance(mod, dict):
             print(f"Item {i} is not a JSON object", file=sys.stderr)
             sys.exit(1)
         if 'module_key' not in mod:
-            print(f"Item {i} missing required field 'module_key'", file=sys.stderr)
-            sys.exit(1)
+            name = mod.get('name', '')
+            if not name:
+                print(f"Item {i} missing both 'module_key' and 'name'", file=sys.stderr)
+                sys.exit(1)
+            mod['module_key'] = _derive_module_key(name)
+            mod['_auto_derived_module_key'] = True
+            print(f"Auto-derived module_key '{mod['module_key']}' from name '{name}'", file=sys.stderr)
 
-    payload = {
-        'repo_id': int(args.repo_id),
-        'modules': modules,
-    }
+    repo_id = int(args.repo_id)
 
     cfg = load_config(args.engagement_dir)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
+        existing_modules = client.get(f"code/modules?repo_id={repo_id}")
+        if not isinstance(existing_modules, list):
+            print(f"Unexpected response while fetching existing modules: {type(existing_modules)}", file=sys.stderr)
+            sys.exit(1)
+        _check_auto_derived_key_collisions(modules, existing_modules)
+
+        for mod in modules:
+            mod.pop('_auto_derived_module_key', None)
+
+        payload = {
+            'repo_id': repo_id,
+            'modules': modules,
+        }
         result = client.post('code/modules', payload)
     finally:
         client.close()

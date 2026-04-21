@@ -315,14 +315,14 @@ When PII or sensitive data is detected, report as:
 6. Contact information in bulk (social engineering enabler)
 7. Individual PII fields (privacy concern)
 
-## Integration with intel.md
+## Integration with Backend Intel Tables
 
-Detected PII feeds into intel.md:
-- Email addresses → intel.md Email Addresses table
-- People names + roles → intel.md People & Organizations table
-- Internal IPs / domains → intel.md Domains & Infrastructure table
-- Credentials → intel.md Credentials & Secrets table
-- Bulk PII exposure → durable finding via `assess.py record-finding` or assessment API, then keep `findings.md` synchronized
+Detected PII feeds into the backend intel tables via `./scripts/assess.py record-intel <type> <json-file>`:
+- Email addresses → `record-intel email` (intel_emails)
+- People names + roles → `record-intel person` (intel_people)
+- Internal IPs / domains → `record-intel domain` (intel_domains, use the right `kind`: `subdomain`/`ip`/`asn`/...)
+- Credentials → `./scripts/assess.py post credentials <credential-json-file>` (assessment_credentials — NOT record-intel; credentials live in the assessment domain with their own schema)
+- Bulk PII exposure → durable finding via `assess.py record-finding`
 
 ## Cryptographic Weakness Checks
 
@@ -349,3 +349,5 @@ Detected PII feeds into intel.md:
 ## Extended Resources
 
 - `agent/references/payloads/info-disclosure-probes.md` — standard probe endpoints and metadata paths
+- `agent/skills/gau-triage/SKILL.md` — pipeline-driven bulk scanning across large historical URL corpora (use this skill when scanning a single response or bundle; use gau-triage when you have hundreds of stored response bodies to scan with `trufflehog`)
+- `agent/references/tools/recon/trufflehog.md` — TruffleHog v3 CLI for structured secret detection with 800+ detectors

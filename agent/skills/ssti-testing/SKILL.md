@@ -99,6 +99,18 @@ origin: AI Threat Hunting
 - Severity: Critical (RCE) or High (info leak)
 - Remediation: use logic-less templates, sandbox, never pass raw user input to template render
 
+## Kill Signals — Stop Testing When
+- {{7*7}} and all probe variants return literal text (no evaluation) across all parameters → no template injection, move on
+- Template engine identified AND RCE payload succeeds → CRITICAL, record and stop
+- Template engine identified but sandbox blocks all RCE attempts after 5+ chains → record as MEDIUM (sandbox escape may require further research), move on
+
+## Escalate When
+- Any probe variant evaluates: `{{7*7}}`, `${7*7}`, `<%= 7*7 %>`, `#{7*7}`, `*{7*7}`, `@(7*7)` — 49 vs literal means the engine rendered, now fingerprint the engine by differential behavior (`{{7*'7'}}` is `7777777` in Jinja2, `49` in Twig, error in Freemarker) before payload selection
+- The parameter feeds a rendered email, PDF export, SMS body, report template, or error page — server-side template render surfaces are under-audited, test each even when the primary response is JSON
+- Literal evaluation works but direct RCE payloads fail — walk sandbox-escape gadget chains for the fingerprinted engine (`__class__.__mro__` / `config.__class__.__init__.__globals__` for Jinja2, `_self.env.registerUndefinedFilterCallback` for Twig, `freemarker.template.utility.Execute` for Freemarker)
+- Client-side template engines (AngularJS 1.x `{{ }}`, Vue 2 `{{ }}`, Handlebars) reflect user input inside a template scope — CSTI escalates to XSS even when server-side SSTI fails, test `{{constructor.constructor('alert(1)')()}}` style gadgets
+- A `#set`, `<%`, `{%`, `${...}`, or `#{...}` token in input changes the output shape (not just content) — partial template parsing is happening, push engine-specific gadget payloads even without arithmetic evaluation
+
 ## Extended Resources
 
 - `agent/references/payloads/ssti-payloads.md` — per-engine detection and RCE (Jinja2, Twig, Pug, Freemarker, ERB, etc.)

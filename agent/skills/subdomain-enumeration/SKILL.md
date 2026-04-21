@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # Subdomain Enumeration
 
+> **Kali MCP audit header:** use `X-Technique: RECON` when actively probing in-scope DNS infrastructure (DNS brute-force, wildcard tests, zone transfers). Switch to `OSINT` for passive external-source lookups (certificate transparency logs, public archives, OSINT APIs).
+
 ## When to Activate
 
 - Beginning of engagement when the `hosts` array in scope.json includes `*.domain` entries (e.g., `*.target.example`)

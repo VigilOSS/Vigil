@@ -1,8 +1,10 @@
 # Subagent Registry
 
-Maintain `$DIR/agent-registry.json` to track subagent identities for resumption.
-The registry is an array — multiple agents per role are common (e.g., two exploit-developer
-agents working different finding clusters in parallel).
+Maintain `$DIR/agent-registry.json` as the engagement audit trail of subagent
+dispatches. Each entry records who was dispatched, to which role, for which
+objective, and with which finding slugs attached. The registry is an array —
+multiple agents per role are common (e.g., two exploit-developer agents working
+different finding clusters in parallel).
 
 After every dispatch that returns an agentId, append to the registry:
 ```json
@@ -30,22 +32,55 @@ After every dispatch that returns an agentId, append to the registry:
 ]
 ```
 
-## Resume vs Fresh Dispatch
+## Why the Registry Exists
 
-**Resume before re-dispatch.** Before spawning a new agent:
-1. Check `agent-registry.json` for `returned` entries matching the role
-2. **Resume** (via `SendMessage` to the existing `agent_id`) when ALL of:
-   - Same target host (from the `hosts` array in scope.json, not a single URL — agents work many endpoints at one host)
-   - At least one overlapping `finding_slug`, OR new task continues the same exploit chain
-   - Dispatched within the current session (agents from prior sessions are stale — their context is gone)
-3. **Dispatch fresh** when ANY of:
-   - No matching entry exists
-   - Different `scope_host` or unrelated finding cluster
-   - The entry is from a prior session (check `dispatched_at` vs session start)
-   - The new task needs a different skill than `skill_loaded`
+- **Audit trail** — records what was tried, by whom, against which target and
+  finding cluster. Read back during report-writing and log-investigation phases.
+- **DEDUP input** — the pre-dispatch checklist checks the registry and the
+  backend activity log (`assess.py fetch activity-entries`) to avoid
+  re-dispatching the same role for the same objective.
+- **Handoff source** — when continuing a multi-step task, the registry entry for
+  the prior dispatch identifies which output transcript the new dispatch prompt
+  pulls context from.
 
-## Why This Matters
+## Continuing Work Across Dispatches
 
-A resumed agent retains its full context: session tokens, cookie jars, CSRF values, discovered
-endpoints, and intermediate state from prior tool calls. Re-dispatching from scratch forces the
-agent to re-discover all of that — the most expensive failure mode in multi-step exploitation.
+Every dispatch launches a fresh agent, so continuity lives in what the operator
+hands to the new agent. When the current task continues work the registry shows
+was already started, build the new dispatch prompt from the prior agent's
+relevant output and durable state:
+
+1. **Same base dispatch template** — role, target, phase, skill to load.
+2. **Prior agent's output excerpts** — paste the specific commands, captured
+   tokens, intermediate PoC steps, and observations from the previous transcript.
+   Narrative continuity (what was tried and why it matters) lives in the prompt,
+   because the new agent rebuilds its mental model from what the dispatch carries.
+3. **Durable-state pointers** — finding slugs, file paths under `$DIR/`, credential
+   ids. The new agent resolves these with `assess.py fetch` instead of relying on
+   stale inline copies, which keeps the prompt small and the state canonical.
+4. **Specific next step** — the exact action the prior agent would have taken
+   next ("replay captured token at `/api/vault` and read the victim's items"), not
+   a rehash of the original objective.
+
+## Making Handoffs Cheap
+
+The cheaper the handoff, the more productive each dispatch is — if the prior
+agent left state on the floor, the next dispatch spends its context window
+re-discovering session tokens, endpoints, and partial PoCs instead of moving the
+attack forward.
+
+Capture transient state during the prior dispatch so it survives the handoff:
+
+- **Backend state first.** Findings, credentials, access records, credential-tests,
+  attack-chains, surfaces, and probes go in via `./scripts/assess.py` helpers.
+  The next agent queries the backend directly (`assess.py fetch ...`) rather than
+  being handed this inline.
+- **Engagement files for transient state.** Session cookies, captured JWTs, CSRF
+  tokens, upload paths, and working PoC scripts go under `$DIR/tools/`,
+  `$DIR/scans/`, or `$DIR/downloads/` so the next dispatch can reference them
+  by path.
+- **Backend activity log for the narrative.** A condensed per-dispatch summary
+  (what was tried, what worked, what the next step is) goes to the
+  `activity_entries` table via `./scripts/assess.py log <agent> <title>
+  <action> <result>`. Query with `./scripts/assess.py fetch activity-entries`
+  — the log is engagement-scoped and FTS-searchable.

@@ -8,7 +8,7 @@ origin: AI Threat Hunting
 
 ## When to Activate
 
-- Phase 5 (Report) — operator dispatches report-writer after exploit phase completes
+- Phase 7 (Report) — operator dispatches report-writer after Verify and exploit work complete
 - On-demand interim report requested by the operator mid-engagement
 
 ## Query Backend First
@@ -17,8 +17,12 @@ Before writing anything, pull the canonical state from the orchestrator API.
 Use the helper script or `curl` — never query the SQLite database file directly.
 
 ```bash
-# Report-ready findings: sorted by severity, CVSS/remediation extracted, sequential report IDs assigned
-./scripts/assess.py fetch report-findings
+# Final report gate and final-mode findings
+./scripts/assess.py check-report-readiness
+./scripts/assess.py fetch "report-findings?mode=final"
+
+# Interim report findings when the operator explicitly wants a draft before final readiness passes
+./scripts/assess.py fetch "report-findings?mode=draft"
 
 # Attack chains with narrative and severity
 ./scripts/assess.py fetch attack-chains
@@ -58,30 +62,13 @@ proved impact at report time materially differs from what was recorded at valida
 
 ## Writing Style
 
-Factual, evidence-based, active voice. No speculation — state conditions if impact is theoretical.
-Quantify where possible. No hyperbole or marketing language.
+Follow `agent/rules/reporting.md` for all writing rules — banned language, active voice,
+evidence formatting, remediation specificity, filler/padding, and section length limits.
 
-**Voice:** Active by default. The endpoint does X. The attacker sends Y. The response contains Z.
-Not "it was discovered that" or "testing revealed that."
+**Audience:** Technical reader who knows vulnerability classes. Do not define standard terms.
 
-**Audience:** Technical reader who knows vulnerability classes. Do not define XSS, SQLi, IDOR, or other
-standard terms. Do not explain how HTTP works. State what is broken and prove it.
-
-**Executive summary audience exception:** The executive summary is for non-technical stakeholders.
+**Executive summary exception:** The executive summary is for non-technical stakeholders.
 Use business language there. "An attacker can download all customer records" not "IDOR on /api/users."
-
-Banned phrases: `could potentially`, `may allow`, `might be possible`, `could lead to`.
-Use instead: `An attacker can [exact action] by [exact method].`
-
-Banned filler: `Furthermore` · `Additionally` · `Moreover` · `It is worth noting` · `It should be noted` ·
-`As demonstrated above` · `During the course of our assessment` · `Upon further investigation` ·
-`This finding describes` · `This vulnerability allows` (as an opener) · `In conclusion` · `To summarize`.
-
-Banned remediation: `Implement proper input validation` · `Use appropriate access controls` ·
-`Follow security best practices` · `Sanitize user input`. Name the technology and the specific fix.
-
-**Padding test:** After writing each finding, re-read it. If you can remove a sentence without reducing
-the reader's understanding, remove it. Every sentence must contribute new information.
 
 ## Report Structure
 
@@ -112,7 +99,7 @@ No unexplained jargon. "SQL injection (direct database access)" not just "SQL in
 ```markdown
 ## Methodology
 **Approach:** [Black/Grey/White-box, Manual/Automated/Hybrid]
-**Phases:** 1. Recon 2. Collection 3. Testing 4. Exploitation 5. Reporting
+**Phases:** 1. Recon 2. Collection 3. Testing 4. Verify 5. Exploitation 6. Optional log investigation 7. Reporting
 
 | Tool | Purpose |
 |------|---------|
@@ -208,18 +195,19 @@ Tool output in `<details>` blocks, generated scripts, scope verification table, 
 
 Before generating the report body, run these checks against the backend data. If any check fails, **stop and flag the issue to the operator** — do not silently fix or ignore it.
 
-1. **Duplicate check:** scan findings for pairs sharing the same root cause + endpoint. Flag: "FINDING-VA-003 and FINDING-EX-001 appear to describe the same root cause on /api/users — resolve before report."
-2. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
-3. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
+1. **Readiness gate:** for final reports, run `./scripts/assess.py check-report-readiness`. If it fails, stop and flag the blockers to the operator.
+2. **Duplicate check:** scan findings for pairs sharing the same root cause + endpoint. Flag: "FINDING-VA-003 and FINDING-EX-001 appear to describe the same root cause on /api/users — resolve before report."
+3. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
+4. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
 
 Only proceed to report generation after validation passes or the operator resolves flagged issues.
 
 ## Generation Procedure
 
 1. **Pull backend state** using the queries in "Query Backend First" above
-2. **Use `report-findings`** as the authoritative finding list — do not re-read `findings.md`
-3. **Use pre-computed CVSS** from finding details. Recalculate only if proved impact at report time materially differs from what was validated
-4. **Use pre-computed remediation** from finding details. Augment only if the exploit chain revealed additional fix requirements
+2. **Use `report-findings?mode=final`** as the authoritative finding list for final reports, or `report-findings?mode=draft` for interim drafts
+3. **Use pre-computed CVSS** from finding details. Recalculate only if proved impact at report time would shift at least one CVSS base metric (AV, AC, PR, UI, S, C, I, A) by one or more levels versus the validated vector
+4. **Use pre-computed remediation** from finding details. Augment only when one of these is true: (a) the chain revealed a prerequisite weakness the original remediation did not address, (b) the exploit bypassed the suggested fix, or (c) the chain spans multiple findings and fixing this one alone does not close the chain
 5. Populate all template fields (flag missing evidence with `[EVIDENCE MISSING]`, never fabricate)
 6. Build attack path narrative from `attack-chains` endpoint data and enrich it with `credentials` / `access-records` when those records explain the authenticated foothold or post-auth scope
 7. Compile coverage summary from `summary` endpoint
@@ -227,10 +215,45 @@ Only proceed to report generation after validation passes or the operator resolv
 9. Write executive summary LAST — it depends on the complete finding set and chain analysis
 10. Verify: severity counts in executive summary match the actual finding list
 
-## After Writing the Report
+## After Writing the Draft
 
 1. **Write report to `$ENGAGEMENT_DIR/report.md`**
-2. **Emit a runtime event** so the orchestrator and UI know the report exists:
+2. **Run the post-generation self-review below**
+3. **Fix report-local failures before returning to the operator**
+4. **Return the completed checklist and current QA status**
+
+Do not emit `report.generated` or mark findings `reported` during draft generation. Publication belongs after the operator dispatches a fresh report-writer in review-and-fix QA mode and receives `QA PASS`, because lifecycle transitions before QA make an unreviewed report look final.
+
+## Post-Generation Self-Review
+
+After writing the report, verify every finding against `agent/rules/reporting.md`. If any check fails, fix it.
+
+1. First sentence states attacker outcome (Rule 6)
+2. No title echo in description (Rule 11)
+3. No vulnerability class definitions (Rule 11)
+4. No banned filler phrases (Rule 11)
+5. Active voice throughout (Rule 12)
+6. Evidence blocks ≤ 15 lines with annotated proof (Rule 13)
+7. Remediation names specific technology (Rule 14)
+8. Every sentence is load-bearing (Rule 15)
+9. Steps to reproduce: one action per step, copy-pasteable (Rule 10)
+10. Executive summary ≤ one page (Rule 10)
+11. Severity counts in executive summary match actual finding list
+12. Every finding appears in the slug cross-reference table
+
+## Review-and-Fix QA Mode
+
+When the operator dispatches report-writer in review-and-fix QA mode, load the existing `$ENGAGEMENT_DIR/report.md`, pull the same backend report state, and run the 12 checks above against the rendered report.
+
+- Fix report-local failures directly in `report.md`: wording, structure, counts, cross-reference rows, missing annotations, overlong evidence, title echoes, passive voice, and non-load-bearing sentences.
+- Return `QA PASS` only when all 12 checks pass after fixes.
+- Return `QA BLOCKED` when the report cannot be corrected without new backend state: missing evidence, missing remediation, unresolved duplicate findings, severity/CVSS mismatch, or a finding that no longer belongs in final output. Include exact finding slugs and the required operator action.
+
+## Publish After QA Pass
+
+Run these publication steps only after the operator confirms the report QA gate passed:
+
+1. **Emit a runtime event** so the orchestrator and UI know the report exists:
    ```bash
    ./scripts/assess.py emit-event \
        "report.generated" \
@@ -239,7 +262,7 @@ Only proceed to report generation after validation passes or the operator resolv
        "report-writer" \
        "Report generated with N findings"
    ```
-3. **Update finding workflow status to `reported`** for all findings included in the report:
+2. **Update finding workflow status to `reported`** for all findings included in the report:
    ```bash
    # For each finding slug included in the report, use the finding-specific helper so the
    # workflow transition stays explicit at the command line:
@@ -250,25 +273,31 @@ Only proceed to report generation after validation passes or the operator resolv
      --source-name report-writer \
      --provenance-inline '{"reported_by":"report-writer"}'
    ```
-   This advances the workflow lifecycle after verification has already established the durable disposition.
+   This advances the workflow lifecycle after verification and report QA have established the durable disposition.
 
-## Post-Generation Self-Review
+## Email Disclosure Reports
 
-After writing the report, run this checklist against every finding before delivering. If any check fails, fix it.
+When the operator requests a disclosure email instead of an internal report, switch to the
+email disclosure format — a separate output mode, not a variation of report.md.
 
-1. **First sentence test:** Does sentence one of each description state what the attacker gains? Not the bug class, not the endpoint, not "This finding describes..." — the attacker outcome.
-2. **Title echo test:** Did the description restate the title? Remove the duplication.
-3. **Class definition test:** Did you explain what any standard vulnerability class is? (IDOR, XSS, SQLi, SSRF, etc.) Remove it. The audience is security practitioners.
-4. **Filler scan:** Search for `Furthermore`, `Additionally`, `It should be noted`, `It is worth noting`, `During the course of`, `As demonstrated above`, `In conclusion`. Remove all instances.
-5. **Passive voice scan:** Search for `It was discovered`, `was found to be`, `was observed`, `testing revealed`. Rewrite to active voice.
-6. **Evidence length test:** Is any response block longer than 15 lines? Truncate to the relevant excerpt and annotate the proof.
-7. **Remediation specificity test:** Does every remediation name a technology or specific control? Flag any that say "implement proper X" or "follow best practices."
-8. **Sentence removal test:** Re-read each finding. For every sentence, ask: does removing it reduce the reader's understanding? If no, remove it.
-9. **Reproduction test:** Can someone with no context copy the steps-to-reproduce and replay the finding? Each step must be a single action.
-10. **Executive summary length:** Is it one page or less? If not, cut.
-11. **Severity count match:** Do the counts in the executive summary match the actual finding list?
-12. **Cross-reference completeness:** Does every finding in the body appear in the slug cross-reference table?
+Load before writing:
+- `agent/references/disclosure-email-format.md` — authoritative spec (structure, rules, anti-patterns)
+- `agent/references/examples/disclosure-email-fast-import.txt` — working example with control test
+
+Output path: `$ENGAGEMENT_DIR/tools/exploit-state/pocs/report-<slug>.txt`
+
+## Bug Bounty Submissions
+
+When the operator requests bug bounty submissions (Bugcrowd, HackerOne, or similar),
+each finding becomes a standalone submission — never bundle findings.
+
+Load before writing:
+- `agent/references/bugbounty-submission-format.md` — authoritative spec (structure, rules)
+- `agent/references/examples/bugbounty-submission-ldap-injection.md` — working example with POC
 
 ## Extended Resources
 
 - `agent/references/runtime-guides/engagement-methodology.md` — methodology narrative source
+- `agent/references/disclosure-email-format.md` — email disclosure format and rules
+- `agent/references/bugbounty-submission-format.md` — bug bounty submission format
+- `agent/references/examples/` — working examples for both output modes

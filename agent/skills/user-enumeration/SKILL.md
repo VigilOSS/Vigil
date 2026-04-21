@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # User Enumeration
 
+> **Kali MCP audit header:** use `X-Technique: AUTH` (user enumeration is an authentication-failure primitive that enables credential stuffing and targeted brute-force).
+
 ## Core Principle
 
 User enumeration is NOT limited to HTTP APIs. ANY interface that accepts a user

@@ -25,6 +25,7 @@ Before starting any target-facing work, verify:
 3. You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
 4. You read `scope.json` and confirmed the in-scope hosts plus the active `exploit_policy` before making any target-facing decisions
 5. You have the dispatch context (target URL, phase, task objective, prior findings)
+6. You checked command history as a coverage map — `./scripts/assess.py list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what recon has already been done on this target so your next probes pick angles that haven't been covered — different nmap scripts, a different wordlist, different subdomain sources, different VHost probes. The only probe to skip is an identical command against identical input; any variant is new coverage. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output answers your question. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your recon quality will be significantly lower.
 
@@ -42,8 +43,8 @@ you discover. They cannot test what they don't know exists.
 - An API missed here means its parameters are never fuzzed, its object references never
   tested, its business logic never probed
 
-Over-discover rather than under-discover. A false-positive surface candidate wastes some
-validation time in Phase 3. A missed surface candidate means a vulnerability is permanently
+Over-discover rather than under-discover. A false-positive surface candidate adds one
+validation request in Phase 3. A missed surface candidate means a vulnerability is permanently
 invisible to the engagement.
 
 This is not recon-for-recon's-sake. Every route, parameter, and auth boundary you surface
@@ -74,7 +75,7 @@ Work through the target in this order unless the operator provides a narrower ta
 - Prefer concrete, reproducible observations over broad speculative scan output
 - Use automation to expand recon efficiently, but do not mistake automation output for confirmed attack surface
 - Keep target-facing execution in Kali MCP only
-- Do not hand-edit synchronized artifacts when helper scripts or backend sync paths exist
+- Do not hand-edit backend state when helper scripts exist — use `assess.py` commands
 - Do not claim a surface candidate unless it is evidenced by a real response, artifact, or protocol signal
 
 ## Recon Kill Check
@@ -159,7 +160,7 @@ before your task completes. Do not defer recording to the operator. Unrecorded f
 
 ## Key Principles
 
-- **Over-discover rather than under-discover**: A false-positive endpoint wastes one validation request. A missed endpoint means a vulnerability is never found.
+- **Over-discover rather than under-discover**: A false-positive endpoint adds one validation request in Phase 3. A missed endpoint means a vulnerability is never found.
 - **Declare what you didn't check**: An undeclared coverage gap is the most expensive failure mode — the operator assumes coverage is complete and moves to Phase 2.
 - **Multiple tools for the same surface**: One wordlist misses what another catches. One tool's parser fails where another succeeds. Cross-validate discovery with at least two sources where feasible.
 - **Auth boundaries are attack surface**: A login page is not just a login page — it's the entry point for credential testing, session analysis, MFA bypass, and OAuth abuse. Map it thoroughly.

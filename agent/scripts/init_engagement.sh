@@ -176,6 +176,138 @@ default_orchestrator_base_url() {
   printf '%s\n' "http://127.0.0.1:18000"
 }
 
+resolve_orchestrator_db_path() {
+  # Mirrors orchestrator/backend/app/config.py:settings.data_dir resolution.
+  # Explicit env vars win. Otherwise we prefer AI_THREAT_HUNTING_INSTALL_DIR
+  # (the canonical install-root pointer used by the backend itself) so a
+  # script invoked from a worktree or a symlinked path still targets the
+  # same file the running backend is reading. Only fall back to a ROOT_DIR
+  # heuristic when no install pointer is set.
+  local data_dir=""
+  if [[ -n "${AI_THREAT_HUNTING_DATA_DIR:-}" ]]; then
+    data_dir="$AI_THREAT_HUNTING_DATA_DIR"
+  elif [[ -n "${REDTEAM_ORCHESTRATOR_DATA_DIR:-}" ]]; then
+    data_dir="$REDTEAM_ORCHESTRATOR_DATA_DIR"
+  elif [[ -n "${AI_THREAT_HUNTING_INSTALL_DIR:-}" ]]; then
+    data_dir="$AI_THREAT_HUNTING_INSTALL_DIR/orchestrator/backend/data"
+  else
+    local install_root
+    install_root="$(cd "$ROOT_DIR/.." && pwd)"
+    data_dir="$install_root/orchestrator/backend/data"
+  fi
+  printf '%s/orchestrator.sqlite3\n' "$data_dir"
+}
+
+snapshot_orchestrator_database() {
+  # Always take a WAL-coherent snapshot of the orchestrator DB before a new
+  # engagement begins. The backend sets journal_mode=WAL at init_db(), so
+  # `sqlite3 .backup` runs concurrent with live writes without lock
+  # contention. Non-fatal: if the DB is not present (first engagement,
+  # fresh install) we silently skip. Failure modes (disk full, EPERM,
+  # cross-device) surface sqlite3's own stderr so the operator sees the
+  # actual error rather than a generic "continuing without backup".
+  local db_path
+  db_path="$(resolve_orchestrator_db_path)"
+  if [[ ! -f "$db_path" ]]; then
+    return 0
+  fi
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    printf '[init_engagement] sqlite3 missing; skipping orchestrator DB snapshot for %s\n' "$db_path" >&2
+    return 0
+  fi
+  # Collision-safe suffix: timestamp + PID + random. Two init_engagement.sh
+  # invocations in the same second cannot overwrite each other's backup.
+  local ts bak err_file
+  ts="$(date +%Y%m%dT%H%M%SZ).$$.${RANDOM}"
+  bak="${db_path}.bak.${ts}"
+  err_file="$(mktemp -t init_engagement_backup_err.XXXXXX)"
+  if sqlite3 "$db_path" ".backup '$bak'" >/dev/null 2>"$err_file"; then
+    printf '[init_engagement] orchestrator DB snapshot: %s\n' "$bak" >&2
+    rm -f "$err_file"
+  else
+    printf '[init_engagement] WARNING: orchestrator DB snapshot failed for %s\n' "$db_path" >&2
+    if [[ -s "$err_file" ]]; then
+      printf '[init_engagement]   sqlite3 said: %s\n' "$(tr '\n' ' ' < "$err_file")" >&2
+    fi
+    printf '[init_engagement]   engagement creation will continue WITHOUT a fresh backup.\n' >&2
+    rm -f "$err_file"
+  fi
+}
+
+tool_exists() {
+  local tool="${1:?tool required}"
+  if [[ "$tool" == */* ]]; then
+    [[ -x "$tool" ]]
+  else
+    command -v "$tool" >/dev/null 2>&1
+  fi
+}
+
+homebrew_llvm_clang() {
+  for candidate in \
+    /opt/homebrew/opt/llvm/bin/clang \
+    /usr/local/opt/llvm/bin/clang
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+afl_compiler_available() {
+  tool_exists afl-clang-lto || tool_exists afl-clang-fast || tool_exists afl-cc
+}
+
+check_code_fuzz_toolchain() {
+  local needs_llvm=0
+  local needs_afl=0
+  local packages=()
+
+  if ! homebrew_llvm_clang >/dev/null 2>&1; then
+    needs_llvm=1
+    packages+=("llvm")
+  fi
+
+  if ! tool_exists afl-fuzz || ! afl_compiler_available || ! tool_exists afl-tmin; then
+    needs_afl=1
+    packages+=("afl++")
+  fi
+
+  if [[ "$needs_llvm" -eq 0 && "$needs_afl" -eq 0 ]]; then
+    return 0
+  fi
+
+  printf 'Code fuzzing toolchain check: missing ' >&2
+  local sep=""
+  if [[ "$needs_llvm" -eq 1 ]]; then
+    printf '%sHomebrew LLVM clang/libFuzzer' "$sep" >&2
+    sep=", "
+  fi
+  if [[ "$needs_afl" -eq 1 ]]; then
+    printf '%sAFL++ (afl-fuzz, afl-tmin, afl-clang-fast/afl-cc)' "$sep" >&2
+  fi
+  printf '.\n' >&2
+
+  if ! command -v brew >/dev/null 2>&1; then
+    printf 'Homebrew is not installed. Install the missing tools manually before Phase 4 fuzzing.\n' >&2
+    return 0
+  fi
+
+  if [[ -t 0 ]]; then
+    printf 'Install missing code fuzzing tools now with `brew install %s`? [y/N]: ' "${packages[*]}" >&2
+    local install_tools
+    read -r install_tools
+    if [[ "$install_tools" =~ ^[Yy] ]]; then
+      brew install "${packages[@]}"
+      return 0
+    fi
+  fi
+
+  printf 'Skipping code fuzzing tool installation. Before Phase 4, run: brew install %s\n' "${packages[*]}" >&2
+}
+
 install_client_kind() {
   local has_codex=0
   local has_claude=0
@@ -219,8 +351,11 @@ This engagement directory is only the run-artifact root. When you start Codex he
 - Always-active rules: ${ROOT_DIR}/rules
 - Skill index: ${ROOT_DIR}/SKILL.md
 - Skills: ${ROOT_DIR}/skills
+- References index: ${ROOT_DIR}/references/INDEX.md
 - References: ${ROOT_DIR}/references
 - Scripts: ${ROOT_DIR}/scripts
+
+Read SKILL.md and references/INDEX.md before starting specialist work — they define the methodology and tooling that must be used before improvising.
 
 Artifact sync:
 - Use ${ROOT_DIR}/scripts/assess.py for all assessment operations (record-finding, record-surface, fetch, post, etc.)
@@ -246,8 +381,11 @@ This engagement directory is only the run-artifact root. When you start Claude h
 - Always-active rules: ${ROOT_DIR}/rules
 - Skill index: ${ROOT_DIR}/SKILL.md
 - Skills: ${ROOT_DIR}/skills
+- References index: ${ROOT_DIR}/references/INDEX.md
 - References: ${ROOT_DIR}/references
 - Scripts: ${ROOT_DIR}/scripts
+
+Read SKILL.md and references/INDEX.md before starting specialist work — they define the methodology and tooling that must be used before improvising.
 
 Artifact sync:
 - Use ${ROOT_DIR}/scripts/assess.py for all assessment operations (record-finding, record-surface, fetch, post, etc.)
@@ -556,6 +694,8 @@ esac
 cd "$ROOT_DIR"
 mkdir -p engagements
 
+snapshot_orchestrator_database
+
 DATE=$(date +%Y-%m-%d)
 TIME=$(date +%H%M%S)
 START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -592,6 +732,7 @@ if [[ "$MODE" == "code" || "$MODE" == "both" ]]; then
     REPOS_JSON="[]"
     REPOS_DISPLAY="(none — add source to ./source/)"
   fi
+  check_code_fuzz_toolchain
 fi
 
 # --- Create engagement directory ---
@@ -623,7 +764,7 @@ if [[ "$MODE" == "code" ]]; then
   "hosts": [],
   "exploit_policy": "${EXPLOIT_POLICY}",
   "exploit_review_state": "pending",
-  "approved_findings": [],
+  "approved_targets": [],
   "source_repos": [],
   "status": "in_progress",
   "current_phase": "ingest"
@@ -637,7 +778,7 @@ elif [[ "$MODE" == "web" ]]; then
   "hosts": ${HOSTS_JSON},
   "exploit_policy": "${EXPLOIT_POLICY}",
   "exploit_review_state": "pending",
-  "approved_findings": [],
+  "approved_targets": [],
   "status": "in_progress",
   "current_phase": "recon"
 }
@@ -653,7 +794,7 @@ else
   "repos": ${REPOS_JSON},
   "exploit_policy": "${EXPLOIT_POLICY}",
   "exploit_review_state": "pending",
-  "approved_findings": [],
+  "approved_targets": [],
   "source_repos": [],
   "status": "in_progress",
   "current_phase": "recon"
@@ -661,86 +802,9 @@ else
 EOF
 fi
 
-# --- Write log.md ---
-if [[ "$MODE" == "code" ]]; then
-  cat > "$DIR/log.md" <<EOF
-# Engagement Log
-
-- **Type**: Code Analysis
-- **Name**: ${NAME}
-- **Repositories**: ${REPOS_DISPLAY}
-- **Date**: ${DATE}
-- **Status**: In Progress
-- **Exploit Policy**: ${EXPLOIT_POLICY}
-
----
-EOF
-elif [[ "$MODE" == "web" ]]; then
-  cat > "$DIR/log.md" <<EOF
-# Engagement Log
-
-- **Type**: Web
-- **Target**: ${TARGET_NORMALIZED}
-- **Date**: ${DATE}
-- **Status**: In Progress
-- **Hosts**: $(printf '%s' "$HOSTS_RAW" | tr ',' ', ')
-- **Auth Mode**: ${AUTH_MODE}
-- **Exploit Policy**: ${EXPLOIT_POLICY}
-
----
-EOF
-else
-  cat > "$DIR/log.md" <<EOF
-# Engagement Log
-
-- **Type**: Web + Code
-- **Name**: ${NAME}
-- **Target**: ${TARGET_NORMALIZED}
-- **Repositories**: ${REPOS_DISPLAY}
-- **Date**: ${DATE}
-- **Status**: In Progress
-- **Hosts**: $(printf '%s' "$HOSTS_RAW" | tr ',' ', ')
-- **Auth Mode**: ${AUTH_MODE}
-- **Exploit Policy**: ${EXPLOIT_POLICY}
-
----
-EOF
-fi
-
-# --- Write findings.md ---
-if [[ "$MODE" == "code" ]]; then
-  cat > "$DIR/findings.md" <<EOF
-# Findings
-
-- **Name**: ${NAME}
-- **Repositories**: ${REPOS_DISPLAY}
-- **Engagement Date**: ${DATE}
-- **Finding Count**: 0
-
----
-EOF
-elif [[ "$MODE" == "web" ]]; then
-  cat > "$DIR/findings.md" <<EOF
-# Findings
-
-- **Target**: ${TARGET_NORMALIZED}
-- **Engagement Date**: ${DATE}
-- **Finding Count**: 0
-
----
-EOF
-else
-  cat > "$DIR/findings.md" <<EOF
-# Findings
-
-- **Name**: ${NAME}
-- **Target**: ${TARGET_NORMALIZED}
-- **Engagement Date**: ${DATE}
-- **Finding Count**: 0
-
----
-EOF
-fi
+# Narrative activity log now lives in the orchestrator backend
+# (activity_entries table). init no longer writes a local log.md — agents
+# and the post-tool hook POST to /engagements/{key}/activity-entries.
 
 # --- Write report.md ---
 if [[ "$MODE" == "code" ]]; then
@@ -809,7 +873,6 @@ else
 EOF
 fi
 
-: > "$DIR/surfaces.jsonl"
 write_auth_scaffold "$DIR" "$AUTH_MODE" "$START_TIME"
 printf '[]\n' > "$DIR/sessions/index.json"
 printf '[]\n' > "$DIR/agent-registry.json"
@@ -818,11 +881,10 @@ printf 'ORCHESTRATOR_BASE_URL=%q\n' "$(default_orchestrator_base_url)" > "$DIR/.
 
 sqlite3 "$DIR/cases.db" < "$SCRIPT_DIR/schema.sql" >/dev/null
 
-if [[ -f "$SCRIPT_DIR/templates/intel.md" ]]; then
-  cp "$SCRIPT_DIR/templates/intel.md" "$DIR/intel.md"
-else
-  printf '# Intelligence Collection\n' > "$DIR/intel.md"
-fi
+# Structured intel now lives in the orchestrator backend
+# (intel_* tables). init no longer writes a local intel.md — agents POST
+# via `./scripts/assess.py record-intel <type> <json-file>` to the
+# /engagements/{key}/intel/{type-plural} endpoints.
 
 CLIENT_KIND="$(install_client_kind)"
 write_engagement_prompt_wrappers "$DIR" "$CLIENT_KIND"

@@ -63,7 +63,7 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       ln -sf /opt/mitmproxy-venv/bin/mitmproxy /usr/local/bin/mitmproxy && \
       gem install evil-winrm --no-document && \
       git clone --depth 1 https://github.com/lgandx/Responder.git /opt/Responder && \
-      python3 -m pip install --no-cache-dir --break-system-packages impacket==0.13.0 mitm6 dpapick3 aioquic flask && \
+      python3 -m pip install --no-cache-dir --break-system-packages impacket==0.13.0 mitm6 dpapick3 aioquic flask uro && \
       curl -fsSL "https://github.com/jpillora/chisel/releases/download/v1.11.4/chisel_1.11.4_linux_${release_arch}.gz" | gunzip > /usr/local/bin/chisel && chmod +x /usr/local/bin/chisel && \
       mkdir -p /tmp/ligolo && \
       curl -fsSL "https://github.com/nicocha30/ligolo-ng/releases/download/v0.8.2/ligolo-ng_proxy_0.8.2_linux_${release_arch}.tar.gz" | tar xzf - -C /tmp/ligolo && \
@@ -84,12 +84,31 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       cp /root/go/bin/dalfox /usr/local/bin/dalfox && \
       GOPATH=/root/go go install github.com/d3mondev/puredns/v2@latest && \
       cp /root/go/bin/puredns /usr/local/bin/puredns && \
+      GOPATH=/root/go go install github.com/tomnomnom/gf@latest && \
+      cp /root/go/bin/gf /usr/local/bin/gf && \
+      mkdir -p /root/.gf && \
+      git clone --depth 1 https://github.com/1ndianl33t/Gf-Patterns /tmp/gf-patterns && \
+      cp /tmp/gf-patterns/*.json /root/.gf/ && \
+      rm -rf /tmp/gf-patterns && \
       rm -rf /root/go && \
       mkdir -p /tmp/ferox && \
       curl -fsSL "https://github.com/epi052/feroxbuster/releases/latest/download/${ferox_arch}-linux-feroxbuster.zip" \
         -o /tmp/ferox/ferox.zip && unzip /tmp/ferox/ferox.zip -d /tmp/ferox && \
       mv /tmp/ferox/feroxbuster /usr/local/bin/feroxbuster && chmod +x /usr/local/bin/feroxbuster && \
       rm -rf /tmp/ferox; \
+    fi
+
+RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
+      arch="$(dpkg --print-architecture)" && \
+      case "$arch" in \
+        amd64) th_arch=amd64 ;; \
+        arm64) th_arch=arm64 ;; \
+        *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
+      esac && \
+      TRUFFLEHOG_VERSION=3.94.3 && \
+      curl -fsSL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_${th_arch}.tar.gz" \
+        | tar -xzf - -C /usr/local/bin trufflehog && \
+      chmod +x /usr/local/bin/trufflehog; \
     fi
 
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
@@ -133,12 +152,14 @@ RUN chmod +x /usr/bin/mcp-server
 RUN mkdir -p /opt/mcp-tools
 RUN mkdir -p /data
 COPY docker/kali-mcp-runtime/patched_kali_server.py /opt/mcp-tools/patched_kali_server.py
+COPY docker/kali-mcp-runtime/patched_kali_client.py /opt/mcp-tools/patched_kali_client.py
+COPY docker/kali-mcp-runtime/kali_mcp_audit.py /opt/mcp-tools/kali_mcp_audit.py
 COPY docker/callback_listener.py /opt/mcp-tools/callback_listener.py
 COPY docker/start-callback.sh /usr/local/bin/start-callback
 RUN chmod +x /usr/local/bin/start-callback
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD command -v mcp-server >/dev/null && command -v katana >/dev/null && test -f /opt/mcp-tools/patched_kali_server.py || exit 1
+  CMD command -v mcp-server >/dev/null && command -v katana >/dev/null && command -v trufflehog >/dev/null && command -v gf >/dev/null && test -f /opt/mcp-tools/patched_kali_server.py && test -f /opt/mcp-tools/patched_kali_client.py && test -f /opt/mcp-tools/kali_mcp_audit.py || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bash", "-lc", "mkdir -p /data && exec sleep infinity"]

@@ -59,17 +59,16 @@ def _finding_record_examples() -> list[dict[str, Any]]:
         normalized.setdefault("summary", normalized.get("title", ""))
         normalized.setdefault("evidence_ref", "")
         normalized.setdefault("notes", "")
-        normalized.setdefault("source_name", "code-vuln-hunter")
+        normalized.setdefault("source_name", "vulnerability-analyst")
         details = normalized.get("details") or {}
         if not isinstance(details, dict):
             details = {}
-        details.setdefault("discovered_by", "code-vuln-hunter")
+        details.setdefault("discovered_by", "vulnerability-analyst")
         normalized["details"] = details
         normalized.setdefault(
             "provenance",
             {
-                "agent_name": "code-vuln-hunter",
-                "artifact": "findings.md",
+                "agent_name": "vulnerability-analyst",
             },
         )
         normalized.setdefault("links", [])
@@ -117,9 +116,17 @@ _FINDING_DETAIL_PROPERTIES = {
         "maximum": 5,
         "description": "Verification check number responsible for the false-positive verdict",
     },
+    "entry_point": {
+        "type": "string",
+        "description": "Source of attacker-controlled data (for example, function name, HTTP parameter, file read site)",
+    },
+    "sink": {
+        "type": "string",
+        "description": "Dangerous operation receiving tainted data (for example, memcpy call, SQL query, exec invocation)",
+    },
     "taint_path": {
         "type": "string",
-        "description": "Ordered attacker-controlled data flow from entry point to sink",
+        "description": "Ordered attacker-controlled data flow from entry point to sink (narrative form)",
     },
     "guards_evaluated": {
         "type": "string",
@@ -148,6 +155,47 @@ _FINDING_DETAIL_PROPERTIES = {
         "type": "array",
         "items": {"type": "string"},
         "description": "Ordered reproduction steps, one string per step",
+    },
+    "poc_code": {
+        "type": "string",
+        "description": "Proof-of-concept exploit code or script that demonstrates the vulnerability",
+    },
+    "poc_request": {
+        "type": "object",
+        "description": "Structured HTTP request that triggers the vulnerability",
+        "properties": {
+            "method": {"type": "string"},
+            "url": {"type": "string"},
+            "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+            "body": {"type": "string"},
+        },
+    },
+    "poc_response": {
+        "type": "object",
+        "description": "Observed HTTP response confirming the vulnerability",
+        "properties": {
+            "status": {"type": "integer"},
+            "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+            "body_excerpt": {"type": "string"},
+        },
+    },
+    "references": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "External references such as CVE IDs, advisory URLs, or related documentation links",
+    },
+    "chain_required": {
+        "type": "boolean",
+        "description": "Whether this finding remains actionable only as part of a larger exploit chain",
+    },
+    "chain_rationale": {
+        "type": "string",
+        "description": "Why the finding matters primarily as a chain step instead of a standalone report item",
+    },
+    "required_followup": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Concrete follow-up steps needed to validate or complete the chain",
     },
     "variant_of": {
         "type": "string",
@@ -272,7 +320,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                             },
                             "artifact": {
                                 "type": "string",
-                                "description": "Artifact path where this finding is synchronized (for example, findings.md)",
+                                "description": "Optional artifact reference associated with the finding provenance",
                             },
                         },
                     },

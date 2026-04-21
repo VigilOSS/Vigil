@@ -27,44 +27,133 @@ def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
     return {row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
-def _database_requires_reset(db_path: Path) -> bool:
+class IncompatibleDatabaseError(RuntimeError):
+    """Raised when the on-disk orchestrator DB does not match the current schema.
+
+    Auto-reset was removed intentionally: the engagement database holds
+    canonical findings, probe runs, command-run audit, and code analysis
+    state. Silently unlinking it on a schema mismatch is unrecoverable
+    data loss. Operators must triage an incompatibility explicitly.
+    """
+
+
+def _incompatible_message(db_path: Path, reason: str) -> str:
+    return (
+        f"Orchestrator database at {db_path} is incompatible with the current schema: {reason}.\n"
+        "Refusing to start — auto-reset would delete engagement history (findings, probes, "
+        "command runs, code analysis) with no backup.\n"
+        "Resolve manually, in order of preference:\n"
+        "  1. Investigate the schema drift and migrate the data in place.\n"
+        f"  2. If the data is not needed, move the file aside yourself, e.g.:\n"
+        f"       ts=$(date +%Y%m%dT%H%M%S)\n"
+        f"       for s in '' '-shm' '-wal'; do\n"
+        f"         [[ -f {db_path}$s ]] && mv {db_path}$s {db_path}.incompatible.$ts$s\n"
+        f"       done\n"
+        "     Then restart the orchestrator; it will initialise a fresh database.\n"
+        "No files have been modified."
+    )
+
+
+_ENGAGEMENT_SCOPED_TABLES = {
+    "engagement_sessions",
+    "events",
+    "assessment_targets",
+    "assessment_services",
+    "assessment_request_variants",
+    "assessment_request_observations",
+    "assessment_coverage_items",
+    "assessment_probe_runs",
+    "assessment_surfaces",
+    "assessment_findings",
+    "assessment_finding_transitions",
+    "assessment_finding_links",
+    "assessment_attack_chains",
+    "assessment_attack_chain_links",
+    "assessment_credentials",
+    "assessment_credential_tests",
+    "assessment_access_records",
+    "assessment_pivots",
+    "assessment_tunnels",
+    "assessment_blocked_techniques",
+    "assessment_command_runs",
+    "code_repos",
+    "code_modules",
+    "code_files",
+    "code_analysis_queue",
+    "code_analysis_results",
+    "code_analysis_triggers",
+    "intel_tech_components",
+    "intel_people",
+    "intel_emails",
+    "intel_domains",
+    "intel_cves",
+    "intel_dns_records",
+    "intel_social_profiles",
+    "intel_breach_records",
+    "intel_org_facts",
+    "intel_notes",
+    "intel_search_index",
+    "activity_entries",
+}
+
+
+def _check_database_compatibility(db_path: Path) -> None:
+    """Raise :class:`IncompatibleDatabaseError` if the DB cannot safely serve
+    the current schema. Never modifies the filesystem.
+
+    Only known engagement-scoped tables must carry ``engagement_id``. A future
+    shared, non-engagement-scoped table may still use an ``assessment_`` or
+    ``code_`` prefix without tripping this check, but current scoped tables
+    missing ``engagement_id`` would fail later CRUD and must refuse startup.
+    """
     if not db_path.exists():
-        return False
+        return
 
     try:
         with sqlite3.connect(str(db_path)) as connection:
             tables = {
                 row[0]
-                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
             }
 
-            if {"projects", "runs", "users"} & tables:
-                return True
+            legacy = {"projects", "runs", "users"} & tables
+            if legacy:
+                raise IncompatibleDatabaseError(
+                    _incompatible_message(
+                        db_path, f"legacy pre-engagement tables present: {sorted(legacy)}"
+                    )
+                )
 
-            engagement_scoped_tables = {"engagement_sessions", "events"}
-            engagement_scoped_tables.update(
-                table_name for table_name in tables if table_name.startswith("assessment_") or table_name.startswith("code_")
-            )
-            for table_name in engagement_scoped_tables:
-                if table_name not in tables:
-                    continue
+            scoped_tables = _ENGAGEMENT_SCOPED_TABLES & tables
+            for table_name in scoped_tables:
                 columns = _table_columns(connection, table_name)
-                if "run_id" in columns or "engagement_id" not in columns:
-                    return True
-    except sqlite3.DatabaseError:
-        return True
-
-    return False
-
-
-def _reset_incompatible_database(db_path: Path) -> None:
-    if not _database_requires_reset(db_path):
-        return
-
-    for suffix in ("", "-shm", "-wal"):
-        candidate = Path(f"{db_path}{suffix}")
-        if candidate.exists():
-            candidate.unlink()
+                if "run_id" in columns:
+                    raise IncompatibleDatabaseError(
+                        _incompatible_message(
+                            db_path,
+                            f"{table_name} still has pre-engagement `run_id` column",
+                        )
+                    )
+                if "engagement_id" not in columns:
+                    raise IncompatibleDatabaseError(
+                        _incompatible_message(
+                            db_path,
+                            f"{table_name} is missing required `engagement_id` column",
+                        )
+                    )
+    except sqlite3.OperationalError:
+        # `database is locked` and friends are transient — let the caller see
+        # the raw OperationalError so uvicorn's retry/startup logic can
+        # distinguish contention from real incompatibility. Converting this to
+        # IncompatibleDatabaseError would tell the operator to move the DB
+        # aside for what is actually a concurrent-access race.
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise IncompatibleDatabaseError(
+            _incompatible_message(db_path, f"SQLite refused to open the file: {exc}")
+        ) from exc
 
 
 def database_path() -> Path:
@@ -100,14 +189,29 @@ def _verify_database_fingerprint() -> Path:
     return db_path
 
 
+def _require_fts5(connection: sqlite3.Connection) -> None:
+    row = connection.execute("SELECT sqlite_compileoption_used('ENABLE_FTS5')").fetchone()
+    if not row or not row[0]:
+        raise RuntimeError(
+            "Orchestrator SQLite build lacks FTS5 support, which assessment_command_runs search requires. "
+            "Rebuild the interpreter's SQLite with ENABLE_FTS5 or use a Python/SQLite distribution that ships it."
+        )
+
+
 def init_db() -> None:
     global _startup_database_fingerprint
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     db_path = database_path()
-    _reset_incompatible_database(db_path)
+    _check_database_compatibility(db_path)
     with sqlite3.connect(str(db_path)) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
+        # WAL mode lets readers (including `sqlite3 .backup` snapshots and the
+        # 15-minute backend backup task) run concurrently with writers without
+        # taking an exclusive lock. Without this, the rollback-journal default
+        # causes backups to collide with active writes and return SQLITE_BUSY.
+        connection.execute("PRAGMA journal_mode = WAL")
+        _require_fts5(connection)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS engagements (
@@ -130,7 +234,7 @@ def init_db() -> None:
                 session_path TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
                 merge_state TEXT NOT NULL DEFAULT 'pending',
-                assigned_findings_json TEXT NOT NULL DEFAULT '[]',
+                assigned_targets_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 merged_at TEXT,
@@ -566,6 +670,247 @@ def init_db() -> None:
             )
             """
         )
+        # assessment_command_runs is the source of truth for every Kali MCP
+        # command executed during an engagement. A shadow FTS5 virtual table
+        # plus three sync triggers provide keyword search. A later change can
+        # add assessment_command_run_chunks (cols: command_run_id, seq,
+        # chunk_text, embedding_blob, indexed_at) for embedding search without
+        # touching the source rows.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_command_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                run_uuid TEXT NOT NULL UNIQUE,
+                command TEXT NOT NULL,
+                argv_json TEXT NOT NULL DEFAULT '[]',
+                tool_name TEXT NOT NULL,
+                tool_bin TEXT NOT NULL DEFAULT '',
+                route TEXT NOT NULL DEFAULT '',
+                agent_name TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                audit_source TEXT NOT NULL DEFAULT 'header',
+                return_code INTEGER,
+                timed_out INTEGER NOT NULL DEFAULT 0,
+                success INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                command_hash TEXT NOT NULL,
+                stdout_sha256 TEXT NOT NULL DEFAULT '',
+                stderr_sha256 TEXT NOT NULL DEFAULT '',
+                stdout_preview TEXT NOT NULL DEFAULT '',
+                stderr_preview TEXT NOT NULL DEFAULT '',
+                output_retention_status TEXT NOT NULL DEFAULT 'retained',
+                stdout_suppression_reason TEXT NOT NULL DEFAULT '',
+                stderr_suppression_reason TEXT NOT NULL DEFAULT '',
+                stdout_artifact_ref TEXT NOT NULL DEFAULT '',
+                stderr_artifact_ref TEXT NOT NULL DEFAULT '',
+                stdout_bytes INTEGER NOT NULL DEFAULT 0,
+                stderr_bytes INTEGER NOT NULL DEFAULT 0,
+                indexed_for_embeddings_at TEXT,
+                notes TEXT NOT NULL DEFAULT '',
+                technique TEXT,
+                intent TEXT,
+                probe_kind TEXT,
+                destructive INTEGER,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        # Additive migration for existing deployments of the pre-tool_bin,
+        # pre-audit_source schema. Safe to run on fresh DBs (CREATE TABLE
+        # above already includes the columns, so _table_columns returns them
+        # and the ALTER is skipped).
+        cmdrun_columns = _table_columns(connection, "assessment_command_runs")
+        if cmdrun_columns and "tool_bin" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN tool_bin TEXT NOT NULL DEFAULT ''"
+            )
+        if cmdrun_columns and "audit_source" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN audit_source TEXT NOT NULL DEFAULT 'header'"
+            )
+        # Command-metadata additive migrations — all NULLable so pre-rollout
+        # rows stay valid and agents that don't yet set the fields continue
+        # writing without a schema error. Re-check columns after each ALTER
+        # in case the first ALTER mutated the cached list.
+        if cmdrun_columns and "technique" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN technique TEXT"
+            )
+        if cmdrun_columns and "intent" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN intent TEXT"
+            )
+        if cmdrun_columns and "probe_kind" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN probe_kind TEXT"
+            )
+        if cmdrun_columns and "destructive" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN destructive INTEGER"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_created "
+            "ON assessment_command_runs(engagement_id, created_at DESC, id DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_agent "
+            "ON assessment_command_runs(engagement_id, agent_name)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_phase "
+            "ON assessment_command_runs(engagement_id, phase)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_tool "
+            "ON assessment_command_runs(engagement_id, tool_name)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_hash "
+            "ON assessment_command_runs(engagement_id, command_hash)"
+        )
+        # Chip-filter indexes for the four command-metadata fields. Scoped by
+        # engagement_id so they stay useful in per-engagement queries (which
+        # is every query the UI and CLI issue). Partial NULL handling is
+        # left to SQLite defaults — the planner skips NULL rows naturally
+        # when the filter value is concrete.
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_acr_technique "
+            "ON assessment_command_runs(engagement_id, technique)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_acr_probe_kind "
+            "ON assessment_command_runs(engagement_id, probe_kind)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_acr_destructive "
+            "ON assessment_command_runs(engagement_id, destructive)"
+        )
+        # If the FTS schema predates tool_bin, drop it so CREATE VIRTUAL
+        # TABLE below rebuilds with the new column set. Old triggers are
+        # re-created as CREATE TRIGGER IF NOT EXISTS — but they reference
+        # the old fts table, so force a clean slate on any shape mismatch.
+        fts_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(assessment_command_runs_fts)").fetchall()
+        }
+        existing_cmdrun_count = connection.execute("SELECT COUNT(*) FROM assessment_command_runs").fetchone()[0]
+        rebuild_command_runs_fts = not fts_columns and existing_cmdrun_count > 0
+        if fts_columns and "tool_bin" not in fts_columns:
+            connection.execute("DROP TABLE IF EXISTS assessment_command_runs_fts")
+            for trigger in ("assessment_command_runs_ai", "assessment_command_runs_ad", "assessment_command_runs_au"):
+                connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            rebuild_command_runs_fts = existing_cmdrun_count > 0
+            fts_columns = set()
+        # Shape-change guard for the command-metadata FTS5 additions
+        # (`intent`, `technique`). Mirrors the tool_bin precedent: when the
+        # existing virtual table lacks the new column, drop+recreate so the
+        # CREATE VIRTUAL TABLE IF NOT EXISTS below rebuilds with the current
+        # column set. probe_kind/destructive are filter axes only — not in
+        # FTS — so they are deliberately NOT included in this check.
+        if fts_columns and "intent" not in fts_columns:
+            connection.execute("DROP TABLE IF EXISTS assessment_command_runs_fts")
+            for trigger in ("assessment_command_runs_ai", "assessment_command_runs_ad", "assessment_command_runs_au"):
+                connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            rebuild_command_runs_fts = existing_cmdrun_count > 0
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS assessment_command_runs_fts
+            USING fts5(
+                command,
+                tool_name,
+                tool_bin,
+                agent_name,
+                phase,
+                stdout_preview,
+                stderr_preview,
+                stdout_suppression_reason,
+                stderr_suppression_reason,
+                notes,
+                intent,
+                technique,
+                content='assessment_command_runs',
+                content_rowid='id',
+                tokenize='unicode61'
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS assessment_command_runs_ai
+            AFTER INSERT ON assessment_command_runs BEGIN
+                INSERT INTO assessment_command_runs_fts(
+                    rowid, command, tool_name, tool_bin, agent_name, phase,
+                    stdout_preview, stderr_preview,
+                    stdout_suppression_reason, stderr_suppression_reason, notes,
+                    intent, technique
+                )
+                VALUES (
+                    new.id, new.command, new.tool_name, new.tool_bin, new.agent_name, new.phase,
+                    new.stdout_preview, new.stderr_preview,
+                    new.stdout_suppression_reason, new.stderr_suppression_reason, new.notes,
+                    new.intent, new.technique
+                );
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS assessment_command_runs_ad
+            AFTER DELETE ON assessment_command_runs BEGIN
+                INSERT INTO assessment_command_runs_fts(
+                    assessment_command_runs_fts, rowid, command, tool_name, tool_bin, agent_name, phase,
+                    stdout_preview, stderr_preview,
+                    stdout_suppression_reason, stderr_suppression_reason, notes,
+                    intent, technique
+                )
+                VALUES (
+                    'delete', old.id, old.command, old.tool_name, old.tool_bin, old.agent_name, old.phase,
+                    old.stdout_preview, old.stderr_preview,
+                    old.stdout_suppression_reason, old.stderr_suppression_reason, old.notes,
+                    old.intent, old.technique
+                );
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS assessment_command_runs_au
+            AFTER UPDATE ON assessment_command_runs BEGIN
+                INSERT INTO assessment_command_runs_fts(
+                    assessment_command_runs_fts, rowid, command, tool_name, tool_bin, agent_name, phase,
+                    stdout_preview, stderr_preview,
+                    stdout_suppression_reason, stderr_suppression_reason, notes,
+                    intent, technique
+                )
+                VALUES (
+                    'delete', old.id, old.command, old.tool_name, old.tool_bin, old.agent_name, old.phase,
+                    old.stdout_preview, old.stderr_preview,
+                    old.stdout_suppression_reason, old.stderr_suppression_reason, old.notes,
+                    old.intent, old.technique
+                );
+                INSERT INTO assessment_command_runs_fts(
+                    rowid, command, tool_name, tool_bin, agent_name, phase,
+                    stdout_preview, stderr_preview,
+                    stdout_suppression_reason, stderr_suppression_reason, notes,
+                    intent, technique
+                )
+                VALUES (
+                    new.id, new.command, new.tool_name, new.tool_bin, new.agent_name, new.phase,
+                    new.stdout_preview, new.stderr_preview,
+                    new.stdout_suppression_reason, new.stderr_suppression_reason, new.notes,
+                    new.intent, new.technique
+                );
+            END
+            """
+        )
+        if rebuild_command_runs_fts:
+            connection.execute(
+                "INSERT INTO assessment_command_runs_fts(assessment_command_runs_fts) VALUES ('rebuild')"
+            )
         # ── Code Analysis Tables ──────────────────────────────────
         connection.execute(
             """
@@ -729,6 +1074,10 @@ def init_db() -> None:
         if "secret_locator" in cred_columns and "secret" not in cred_columns:
             connection.execute("ALTER TABLE assessment_credentials RENAME COLUMN secret_locator TO secret")
 
+        session_columns = _table_columns(connection, "engagement_sessions")
+        if "assigned_findings_json" in session_columns and "assigned_targets_json" not in session_columns:
+            connection.execute("ALTER TABLE engagement_sessions RENAME COLUMN assigned_findings_json TO assigned_targets_json")
+
         finding_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_findings)").fetchall()}
         finding_column_defaults = {
             "verification_state": "TEXT NOT NULL DEFAULT 'unreviewed'",
@@ -815,6 +1164,435 @@ def init_db() -> None:
             connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cwe_coverage_json TEXT NOT NULL DEFAULT '[]'")
         if result_columns and "cross_file_triggers_json" not in result_columns:
             connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cross_file_triggers_json TEXT NOT NULL DEFAULT '[]'")
+
+        # Migrate code_files: add structural metadata columns from tree-sitter index
+        file_columns = _table_columns(connection, "code_files")
+        structural_columns = {
+            "total_functions": "INTEGER NOT NULL DEFAULT 0",
+            "total_entry_points": "INTEGER NOT NULL DEFAULT 0",
+            "total_sinks": "INTEGER NOT NULL DEFAULT 0",
+            "total_exports": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for col_name, col_def in structural_columns.items():
+            if file_columns and col_name not in file_columns:
+                connection.execute(f"ALTER TABLE code_files ADD COLUMN {col_name} {col_def}")
+
+        # ── Intel Tables ───────────────────────────────────────────
+        # Per-engagement intel replaces the legacy `intel.md` scratch pad.
+        # Every table is engagement-scoped, carries UNIQUE(engagement_id,
+        # <natural key>), created_at/updated_at, provenance_json, and CASCADE
+        # on engagement delete. Naming mirrors the existing `assessment_*`
+        # convention so helpers/FTS triggers/cascade tests can reuse the
+        # pattern at db.py:668-838.
+        #
+        # FTS design decision: the unified `intel_search_fts` virtual table
+        # is backed by a **dedicated shadow table** `intel_search_index`
+        # rather than a SQL view.  SQLite FTS5 external-content triggers
+        # are already per-source-table; driving them from a view would
+        # duplicate every trigger across 10 underlying tables and still
+        # require a shadow rowid to stay stable across view updates.
+        # A single shadow table is simpler, keeps rowids stable, and lets
+        # state_manager helpers make a single write per intel insert/
+        # update/delete that keeps the FTS index in sync automatically.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intel_tech_components (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                component TEXT NOT NULL,
+                version TEXT NOT NULL DEFAULT '',
+                source_name TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT '',
+                evidence_ref TEXT NOT NULL DEFAULT '',
+                first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, component, version),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intel_people (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT '',
+                organization TEXT NOT NULL DEFAULT '',
+                email TEXT NOT NULL DEFAULT '',
+                source_name TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, name),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intel_emails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                address TEXT NOT NULL,
+                role_hint TEXT NOT NULL DEFAULT '',
+                linked_person_id INTEGER,
+                source_name TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, address),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(linked_person_id) REFERENCES intel_people(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intel_domains (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                identity TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'subdomain',
+                value TEXT NOT NULL DEFAULT '',
+                source_name TEXT NOT NULL DEFAULT '',
+                live_status TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, identity, kind),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intel_cves (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                cve_id TEXT NOT NULL,
+                affected_component TEXT NOT NULL DEFAULT '',
+                affected_version_range TEXT NOT NULL DEFAULT '',
+                cvss_score REAL,
+                cvss_vector TEXT NOT NULL DEFAULT '',
+                cwe_id TEXT NOT NULL DEFAULT '',
+                poc_available INTEGER NOT NULL DEFAULT 0,
+                source_name TEXT NOT NULL DEFAULT '',
+                validation_status TEXT NOT NULL DEFAULT 'unverified',
+                linked_finding_slug TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, cve_id, affected_component),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intel_dns_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                record_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                value TEXT NOT NULL DEFAULT '',
+                first_seen TEXT NOT NULL DEFAULT '',
+                last_seen TEXT NOT NULL DEFAULT '',
+                source_name TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, record_type, name, value),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intel_social_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                subject_kind TEXT NOT NULL,
+                subject_ref TEXT NOT NULL DEFAULT '',
+                platform TEXT NOT NULL,
+                handle TEXT NOT NULL DEFAULT '',
+                url TEXT NOT NULL DEFAULT '',
+                source_name TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, subject_kind, subject_ref, platform, handle),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intel_breach_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                subject TEXT NOT NULL,
+                breach_name TEXT NOT NULL,
+                breach_date TEXT NOT NULL DEFAULT '',
+                data_types TEXT NOT NULL DEFAULT '',
+                source_name TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, subject, breach_name),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intel_org_facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                fact_key TEXT NOT NULL,
+                fact_value TEXT NOT NULL DEFAULT '',
+                source_name TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, fact_key),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intel_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                body_markdown TEXT NOT NULL DEFAULT '',
+                source_agent TEXT NOT NULL DEFAULT '',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                source_name TEXT NOT NULL DEFAULT '',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, title),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+        # Shadow table for unified FTS across every intel_* source table.
+        # Service helpers (to be built in Phase B1) write one row here per
+        # intel_* insert/update/delete, keyed by (entity_type, source_id),
+        # and the three FTS triggers below keep intel_search_fts in sync
+        # with the shadow content. This is the "shadow table" branch of
+        # the view-vs-shadow decision documented at the top of this block.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intel_search_index (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                entity_type TEXT NOT NULL,
+                source_id INTEGER NOT NULL,
+                key TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                source_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, entity_type, source_id),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_intel_search_index_engagement_entity "
+            "ON intel_search_index(engagement_id, entity_type)"
+        )
+
+        # Activity log narrative table replaces the legacy `log.md` scratch
+        # pad. Every row is engagement-scoped and CASCADEs on engagement
+        # delete. The existing `events` table stays for structured state
+        # transitions — this table holds prose.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS activity_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                actor_kind TEXT NOT NULL DEFAULT 'operator',
+                actor_name TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                action TEXT NOT NULL DEFAULT '',
+                result TEXT NOT NULL DEFAULT '',
+                artifact_ref TEXT NOT NULL DEFAULT '',
+                body_markdown TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_activity_entries_engagement_occurred "
+            "ON activity_entries(engagement_id, occurred_at DESC, id DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_activity_entries_actor "
+            "ON activity_entries(engagement_id, actor_kind, actor_name)"
+        )
+
+        # FTS5 virtual tables + rebuild-on-drift guard follow the pattern
+        # at db.py:724-801 for assessment_command_runs_fts.
+        intel_fts_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(intel_search_fts)").fetchall()
+        }
+        existing_intel_search_count = connection.execute(
+            "SELECT COUNT(*) FROM intel_search_index"
+        ).fetchone()[0]
+        rebuild_intel_search_fts = not intel_fts_columns and existing_intel_search_count > 0
+        expected_intel_fts_columns = {"key", "body", "source_name", "entity_type"}
+        if intel_fts_columns and not expected_intel_fts_columns.issubset(intel_fts_columns):
+            connection.execute("DROP TABLE IF EXISTS intel_search_fts")
+            for trigger in (
+                "intel_search_index_ai",
+                "intel_search_index_ad",
+                "intel_search_index_au",
+            ):
+                connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            rebuild_intel_search_fts = existing_intel_search_count > 0
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS intel_search_fts
+            USING fts5(
+                key,
+                body,
+                source_name,
+                entity_type,
+                content='intel_search_index',
+                content_rowid='id',
+                tokenize='unicode61'
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS intel_search_index_ai
+            AFTER INSERT ON intel_search_index BEGIN
+                INSERT INTO intel_search_fts(rowid, key, body, source_name, entity_type)
+                VALUES (new.id, new.key, new.body, new.source_name, new.entity_type);
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS intel_search_index_ad
+            AFTER DELETE ON intel_search_index BEGIN
+                INSERT INTO intel_search_fts(intel_search_fts, rowid, key, body, source_name, entity_type)
+                VALUES ('delete', old.id, old.key, old.body, old.source_name, old.entity_type);
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS intel_search_index_au
+            AFTER UPDATE ON intel_search_index BEGIN
+                INSERT INTO intel_search_fts(intel_search_fts, rowid, key, body, source_name, entity_type)
+                VALUES ('delete', old.id, old.key, old.body, old.source_name, old.entity_type);
+                INSERT INTO intel_search_fts(rowid, key, body, source_name, entity_type)
+                VALUES (new.id, new.key, new.body, new.source_name, new.entity_type);
+            END
+            """
+        )
+        if rebuild_intel_search_fts:
+            connection.execute(
+                "INSERT INTO intel_search_fts(intel_search_fts) VALUES ('rebuild')"
+            )
+
+        activity_fts_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(activity_entries_fts)").fetchall()
+        }
+        existing_activity_count = connection.execute(
+            "SELECT COUNT(*) FROM activity_entries"
+        ).fetchone()[0]
+        rebuild_activity_fts = not activity_fts_columns and existing_activity_count > 0
+        expected_activity_fts_columns = {
+            "title",
+            "action",
+            "result",
+            "body_markdown",
+            "actor_name",
+        }
+        if activity_fts_columns and not expected_activity_fts_columns.issubset(activity_fts_columns):
+            connection.execute("DROP TABLE IF EXISTS activity_entries_fts")
+            for trigger in (
+                "activity_entries_ai",
+                "activity_entries_ad",
+                "activity_entries_au",
+            ):
+                connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            rebuild_activity_fts = existing_activity_count > 0
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS activity_entries_fts
+            USING fts5(
+                title,
+                action,
+                result,
+                body_markdown,
+                actor_name,
+                content='activity_entries',
+                content_rowid='id',
+                tokenize='unicode61'
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS activity_entries_ai
+            AFTER INSERT ON activity_entries BEGIN
+                INSERT INTO activity_entries_fts(rowid, title, action, result, body_markdown, actor_name)
+                VALUES (new.id, new.title, new.action, new.result, new.body_markdown, new.actor_name);
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS activity_entries_ad
+            AFTER DELETE ON activity_entries BEGIN
+                INSERT INTO activity_entries_fts(activity_entries_fts, rowid, title, action, result, body_markdown, actor_name)
+                VALUES ('delete', old.id, old.title, old.action, old.result, old.body_markdown, old.actor_name);
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS activity_entries_au
+            AFTER UPDATE ON activity_entries BEGIN
+                INSERT INTO activity_entries_fts(activity_entries_fts, rowid, title, action, result, body_markdown, actor_name)
+                VALUES ('delete', old.id, old.title, old.action, old.result, old.body_markdown, old.actor_name);
+                INSERT INTO activity_entries_fts(rowid, title, action, result, body_markdown, actor_name)
+                VALUES (new.id, new.title, new.action, new.result, new.body_markdown, new.actor_name);
+            END
+            """
+        )
+        if rebuild_activity_fts:
+            connection.execute(
+                "INSERT INTO activity_entries_fts(activity_entries_fts) VALUES ('rebuild')"
+            )
+        # ── End Intel Tables ──────────────────────────────────────
 
         connection.commit()
 
@@ -1047,25 +1825,25 @@ def upsert_engagement_session(
     session_path: str,
     status: str,
     merge_state: str,
-    assigned_findings_json: str,
+    assigned_targets_json: str,
     merged_at: str | None,
 ) -> None:
     with get_connection() as connection:
         connection.execute(
             """
             INSERT INTO engagement_sessions (
-                engagement_id, session_id, session_path, status, merge_state, assigned_findings_json, merged_at
+                engagement_id, session_id, session_path, status, merge_state, assigned_targets_json, merged_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(engagement_id, session_id) DO UPDATE SET
                 session_path = excluded.session_path,
                 status = excluded.status,
                 merge_state = excluded.merge_state,
-                assigned_findings_json = excluded.assigned_findings_json,
+                assigned_targets_json = excluded.assigned_targets_json,
                 merged_at = excluded.merged_at,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (engagement_id, session_id, session_path, status, merge_state, assigned_findings_json, merged_at),
+            (engagement_id, session_id, session_path, status, merge_state, assigned_targets_json, merged_at),
         )
 
 
@@ -1073,7 +1851,7 @@ def list_engagement_sessions_for_engagement(engagement_id: int) -> list[Engageme
     with get_connection() as connection:
         rows = connection.execute(
             """
-            SELECT id, engagement_id, session_id, session_path, status, merge_state, assigned_findings_json, created_at, updated_at, merged_at
+            SELECT id, engagement_id, session_id, session_path, status, merge_state, assigned_targets_json, created_at, updated_at, merged_at
             FROM engagement_sessions
             WHERE engagement_id = ?
             ORDER BY id ASC
