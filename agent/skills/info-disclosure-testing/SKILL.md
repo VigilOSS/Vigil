@@ -6,8 +6,6 @@ origin: AI Threat Hunting
 
 # Information Disclosure Testing
 
-> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: INFO-DISCLOSURE` and `X-Probe-Kind` per the phase — `fingerprint` for header/banner/stack-trace probes, `payload` for directed requests to known high-value paths (`/actuator/env`, `/.git/config`, `/.env`, debug endpoints), `exploit` for retrieval of secrets, credentials, heap dumps, or internal state that proves impact.
-
 ## Reality Check
 
 Info disclosure severity depends entirely on WHAT is disclosed. A stack trace with internal paths = low. An exposed `/actuator/env` with database credentials = critical. This skill is about finding the HIGH-VALUE disclosures, not cataloging every verbose header. If you spend 30 minutes documenting `Server: nginx/1.24.0` headers, you have wasted your time. If you spend 5 minutes finding `/actuator/heapdump` with cleartext secrets, you have a critical finding.

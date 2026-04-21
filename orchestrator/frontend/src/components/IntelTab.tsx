@@ -1755,20 +1755,20 @@ function ReferencesPane({ d }: { d: Derived }) {
   }
   return (
     <>
-      {(tags.length > 0 || notes) && (
+      {tags.length > 0 && (
+        <div className="section inline-row">
+          <p className="section-title section-title--inline">Tags</p>
+          <div className="tag-row tag-row--inline">
+            {tags.map((t, i) => (
+              <span key={`${i}-${t}`} className="tag">{t}</span>
+            ))}
+          </div>
+        </div>
+      )}
+      {notes && (
         <div className="section">
-          <p className="section-title">
-            Notes
-            {tags.length > 0 && <span className="count">{tags.length} tag{tags.length === 1 ? "" : "s"}</span>}
-          </p>
-          {tags.length > 0 && (
-            <div className="tag-row">
-              {tags.map((t, i) => (
-                <span key={`${i}-${t}`} className="tag">{t}</span>
-              ))}
-            </div>
-          )}
-          {notes && <NotesBody text={notes} />}
+          <p className="section-title">Notes</p>
+          <NotesBody text={notes} />
         </div>
       )}
       {url && (

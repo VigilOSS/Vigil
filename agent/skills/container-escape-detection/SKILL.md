@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Container Escape Detection
 
-> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: RECON` for the bulk of work in this skill — capability, cgroup, mount, socket, and kernel-version enumeration is fundamentally reconnaissance of the container boundary (`INFO-DISCLOSURE` also fits parts of it, but `RECON` better captures the deliberate probing of an attack surface for escape paths). When an actual breakout is attempted and succeeds, switch to `X-Technique: EXPLOIT-CHAIN` for those calls. Set `X-Probe-Kind` per the phase — `fingerprint` for capability/cgroup/mount/socket probes, `payload` for escape attempts (privileged mount, runc CVE exploits, cgroup release_agent abuse), `exploit` for proven host-root shell or node compromise.
+> **Kali MCP audit header:** use `X-Technique: RECON` for capability/cgroup/mount/socket/kernel enumeration; switch to `EXPLOIT-CHAIN` on an actual breakout attempt.
 
 ## When to Activate
 
