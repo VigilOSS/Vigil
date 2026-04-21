@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # Surface Collection
 
+> **Kali MCP audit header:** use `X-Technique: DISCOVERY` (Katana, gau, and wayback URL collection plus triage expand the attack-surface inventory without sending attack payloads).
+
 Guides surface-collector through the Phase 2 URL collection pipeline: live crawling, historical
 enrichment, deduplication, intelligent triage, and work-buffer population. The goal is to turn
 raw tool output into a prioritized, attack-signal-enriched work buffer that drives Phase 3.

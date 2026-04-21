@@ -63,6 +63,7 @@ def run(args) -> None:
             print("Merge cancelled.")
             sys.exit(1)
 
+    session_index = load_session_index(eng_dir)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
 
     try:
@@ -132,16 +133,9 @@ def run(args) -> None:
     finally:
         client.close()
 
-    session_index = load_session_index(eng_dir)
     if session_index:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         for row in session_index:
-            legacy_targets = row.get("assigned_findings")
-            current_targets = row.get("assigned_targets")
-            if (not isinstance(current_targets, list) or not current_targets) and isinstance(legacy_targets, list):
-                row["assigned_targets"] = [str(item) for item in legacy_targets]
-            if "assigned_findings" in row:
-                del row["assigned_findings"]
             if row.get("session_id") == session_id:
                 row["status"] = "merged"
                 row["merge_state"] = "merged"

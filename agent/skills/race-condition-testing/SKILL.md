@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # Race Condition / TOCTOU Testing
 
+> **Kali MCP audit header:** use `X-Technique: OTHER` (race/TOCTOU has no dedicated enum class; outcomes span double-spend, auth-bypass, and state corruption).
+
 ## When to Activate
 
 - Application has single-use actions (coupons, vouchers, invites)

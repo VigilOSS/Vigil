@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # Mass Assignment Testing
 
+> **Kali MCP audit header:** use `X-Technique: AUTH` (mass assignment is authorization bypass via client-controlled fields — the attacker escalates privileges by injecting `is_admin`, `role`, or `permissions` into the request body). Set `X-Destructive: 1` whenever the forged request creates, modifies, or deletes a resource.
+
 ## When to Activate
 
 - API accepts JSON or form-encoded bodies for create/update operations

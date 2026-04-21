@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # Authentication & Authorization Bypass
 
+> **Kali MCP audit header:** use `X-Technique: AUTH` (all auth-bypass variants — header spoofing, role drift, logic flaws, forced browsing — collapse to the AUTH class). Switch to `JWT` when attacking a JSON Web Token specifically.
+
 ## When to Activate
 
 - Login/register/reset forms, protected resources, admin panels

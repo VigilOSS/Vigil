@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # Port Scanning
 
+> **Kali MCP audit header:** use `X-Technique: RECON` (port and service enumeration against in-scope hosts is canonical reconnaissance).
+
 ## When to Activate
 
 - Initial recon of new target, need to discover services before vuln testing

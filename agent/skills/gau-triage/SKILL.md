@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # GAU Triage
 
+> **Kali MCP audit header:** use `X-Technique: DISCOVERY` (gau harvests historical URLs from public archives; triage runs classify them without attacking the live target).
+
 Operator-dispatched deeper pass over a gau (or any large URL) corpus **after** mechanical
 ingestion in Phase 2. Produces classified URL buckets, stored response bodies, secret-scan
 results, and a ranked review list. This skill does not replace `surface-collection` — it

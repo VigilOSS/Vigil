@@ -174,6 +174,8 @@ def _build_query(args) -> str:
         params.append(("success", "true"))
     if args.failed:
         params.append(("success", "false"))
+        if not args.timed_out:
+            params.append(("timed_out", "false"))
     if getattr(args, "destructive", False):
         params.append(("destructive", "true"))
     if getattr(args, "not_destructive", False):

@@ -727,6 +727,128 @@ def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, 
     assert "assigned_findings" not in session_index[0]
 
 
+def test_merge_session_validates_session_index_before_backend_posts(monkeypatch, tmp_path: Path) -> None:
+    module = _load_script_module(
+        "test_merge_session_prevalidate_module",
+        "agent/scripts/assess/commands/merge_session.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    session_dir = engagement_dir / "sessions" / "session-a"
+    proposals_dir = session_dir / "proposals"
+    proposals_dir.mkdir(parents=True)
+    (proposals_dir / "proposals.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "finding_record",
+                "payload": {
+                    "title": "Parser trust boundary bypass",
+                    "status": "confirmed",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (engagement_dir / "sessions" / "index.json").write_text(
+        json.dumps(
+            [{"session_id": "session-a", "status": "open", "assigned_findings": ["FINDING-EX-001"]}]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+    monkeypatch.setattr(module, "session_dir_path", lambda eng_dir, session_id: str(session_dir))
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            raise AssertionError("should validate session index before backend posts")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit, match="assigned_findings is no longer supported"):
+        module.run(SimpleNamespace(engagement_dir=engagement_dir, session_id="session-a", yes=True))
+
+
+def test_list_command_runs_failed_excludes_timeouts_by_default() -> None:
+    module = _load_script_module(
+        "test_list_command_runs_module",
+        "agent/scripts/assess/commands/list_command_runs.py",
+    )
+
+    query = module._build_query(
+        SimpleNamespace(
+            q="",
+            agent_name="",
+            phase="",
+            tool_name="",
+            tool_bin="",
+            audit_source="",
+            technique="",
+            probe_kind="",
+            intent_q="",
+            success=False,
+            failed=True,
+            destructive=False,
+            not_destructive=False,
+            timed_out=False,
+            include_output=False,
+            limit=50,
+            offset=0,
+        )
+    )
+
+    assert "success=false" in query
+    assert "timed_out=false" in query
+
+
+def test_list_command_runs_failed_with_timed_out_preserves_timeout_filter() -> None:
+    module = _load_script_module(
+        "test_list_command_runs_timeout_module",
+        "agent/scripts/assess/commands/list_command_runs.py",
+    )
+
+    query = module._build_query(
+        SimpleNamespace(
+            q="",
+            agent_name="",
+            phase="",
+            tool_name="",
+            tool_bin="",
+            audit_source="",
+            technique="",
+            probe_kind="",
+            intent_q="",
+            success=False,
+            failed=True,
+            destructive=False,
+            not_destructive=False,
+            timed_out=True,
+            include_output=False,
+            limit=50,
+            offset=0,
+        )
+    )
+
+    assert "success=false" in query
+    assert "timed_out=true" in query
+    assert "timed_out=false" not in query
+
+
 def test_session_index_rejects_legacy_assigned_findings_key(tmp_path: Path) -> None:
     module = _load_script_module(
         "test_sessions_module",

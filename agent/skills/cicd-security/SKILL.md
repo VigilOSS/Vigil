@@ -6,6 +6,8 @@ origin: AI Threat Hunting (adapted from claude-bug-bounty sisakulint integration
 
 # CI/CD Pipeline Security Testing
 
+> **Kali MCP audit header:** use `X-Technique: OTHER` for generic CI/CD abuse. Switch to `CMDI` or `RCE` when the pipeline step accepts attacker-controlled shell input, `AUTH` for token or secret leakage that grants further access, or `INFO-DISCLOSURE` for build-log exposure.
+
 ## When to Activate
 
 - Target has public GitHub repositories with `.github/workflows/` files
