@@ -92,6 +92,19 @@ def _load_activity_signals(engagement_id: int) -> list[_ActivitySignal]:
     ]
 
 
+def _legacy_activity_signals(events: list[Event]) -> list[_ActivitySignal]:
+    return [
+        _ActivitySignal(
+            engagement_id=event.engagement_id,
+            actor_name=event.agent_name or "",
+            title=event.summary or "",
+            occurred_at=event.created_at or "",
+        )
+        for event in events
+        if event.event_type == "artifact.updated" and event.task_name == "log.md"
+    ]
+
+
 def _project_timeline_events(
     events: list[Event], activity: list[_ActivitySignal]
 ) -> list[Event]:
@@ -159,6 +172,8 @@ def list_events_for_engagement(engagement_id: int) -> list[Event]:
     engagement = _engagement_or_404(engagement_id)
     events = db.list_events_for_engagement(engagement.id)
     activity = _load_activity_signals(engagement.id)
+    if not activity:
+        activity = _legacy_activity_signals(events)
     return _project_timeline_events(events, activity)
 
 

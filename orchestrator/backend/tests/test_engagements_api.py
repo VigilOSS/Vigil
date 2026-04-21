@@ -392,6 +392,42 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     assert [row["slug"] for row in final_report.json()] == ["FINDING-VA-001"]
 
 
+def test_events_synthesizes_legacy_log_artifact_timeline(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    create_start = client.post(
+        "/engagements/2026-03-30-120000-example/events",
+        json={
+            "event_type": "artifact.updated",
+            "phase": "recon",
+            "task_name": "log.md",
+            "agent_name": "recon-specialist",
+            "summary": "Recon start",
+        },
+    )
+    assert create_start.status_code == 201
+
+    create_complete = client.post(
+        "/engagements/2026-03-30-120000-example/events",
+        json={
+            "event_type": "artifact.updated",
+            "phase": "recon",
+            "task_name": "log.md",
+            "agent_name": "recon-specialist",
+            "summary": "Recon summary",
+        },
+    )
+    assert create_complete.status_code == 201
+
+    response = client.get("/engagements/2026-03-30-120000-example/events")
+
+    assert response.status_code == 200, response.text
+    event_types = [event["event_type"] for event in response.json()]
+    assert "phase.started" in event_types
+    assert "task.started" in event_types
+    assert "task.completed" in event_types
+
+
 def test_final_report_mode_returns_conflict_when_readiness_fails(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
