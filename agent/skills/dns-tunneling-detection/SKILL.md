@@ -347,6 +347,13 @@ index=dns earliest=-24h
 - No DNS logs available via Kali MCP or Splunk → cannot perform this analysis, skip skill entirely
 - Tunnel confirmed with C2 domain identified → record finding, provide domain IOC to operator for firewall blocking
 
+## Escalate When
+- A single internal host shows a sustained uplift in query volume for one domain (>3x baseline) AND the queries are predominantly TXT, NULL, CNAME, or oversized A — volume alone is noise, the record-type mix is the tunneling signature, pivot to entropy and subdomain-cardinality analysis
+- Subdomain labels under a single parent show high Shannon entropy (>3.5) OR base32/base64/hex character-class distribution across many unique labels — encoded payloads look random, run per-label entropy and character-class scoring before false-positive-eliminating
+- A domain is newly observed in the window (<30 days since first query), resolves from a cheap/free registrar, or has a single NS delegation — newly-registered tunneling infrastructure is the common pattern, pivot to WHOIS and passive-DNS for age and reputation
+- Query timing shows regular periodicity (beacon cadence of tens of seconds to minutes, low jitter) from a single source — human and CDN traffic is bursty, beacons are metronomic, run autocorrelation on inter-arrival times
+- Short TXT/NULL responses correlate in volume with outbound query volume from the same host (bidirectional byte-count roughly balanced) — one-way queries are exfiltration, balanced volumes are interactive C2, escalate severity when the pattern is interactive
+
 ## Extended Resources
 
 - `agent/references/offensive-tactics/frp-tunneling.md` -- tunnel exposure for DNS C2 callback infrastructure

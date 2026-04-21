@@ -107,6 +107,13 @@ origin: AI Threat Hunting
 - All three above fail AND kid/jku injection returns errors → JWT implementation is robust, test only claim tampering and lifecycle
 - Server validates all claims strictly (exp enforced, iss checked, aud validated) → move on
 
+## Escalate When
+- The header contains `kid`, `jku`, `jwk`, or `x5u` — each is a distinct injection surface (path traversal in kid, attacker-controlled JWKS URL in jku/x5u, embedded attacker key in jwk), walk all four before moving on
+- Changing `alg` casing (`None`, `NONE`, `nOnE`) or trimming the signature produces a different error than an outright-invalid token — the verifier has a normalization gap, push alg-confusion variants and empty-signature acceptance
+- Two tokens with different claims but identical signatures are both accepted, or a token signed with a different key validates — signature verification is partial or cached, forge further
+- `exp`, `nbf`, `iat` tampering (expired token, future `nbf`, negative `iat`) is not rejected on at least one endpoint — claim validation is applied inconsistently across services, test each authenticated route
+- The token carries a `role`, `is_admin`, `tenant_id`, `sub`, `scope`, or similar authorization claim and the signature model allows any of the above — privilege escalation via claim rewrite is the real impact, tamper the claim and replay
+
 ## Extended Resources
 
 - `agent/references/payloads/jwt-payloads.md` — alg:none, key confusion (RS256→HS256), JWK/kid injection, weak secret brute-force

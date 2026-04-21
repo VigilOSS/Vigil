@@ -118,6 +118,13 @@ Falco rule example:
 - No dangerous capabilities, no socket, seccomp enforced, AppArmor active → container hardened, move on
 - Kubernetes service account token has no create-pod or exec permissions → K8s escape not feasible from this pod
 
+## Escalate When
+- `capsh --print` shows any of `CAP_SYS_ADMIN`, `CAP_SYS_MODULE`, `CAP_SYS_PTRACE`, `CAP_DAC_READ_SEARCH`, `CAP_NET_ADMIN`, `CAP_NET_RAW` beyond the default set — each has a documented escape path (release_agent for SYS_ADMIN, insmod for SYS_MODULE, ptrace host processes, /proc/*/mem raw read for DAC_READ_SEARCH), test the matching gadget
+- The host filesystem, `/proc/1/root`, `/var/run/`, `/var/lib/docker`, `/etc/kubernetes`, or a docker.sock/containerd.sock/crio.sock unix socket is mounted into the container — any one escalates to host root, enumerate mounts beyond the obvious docker.sock
+- `/proc/self/status` shows CapEff with high-order bits set OR `/proc/1/cgroup` indicates no cgroup namespace isolation (cgroup v1 with writable release_agent) — even a non-privileged container may be mis-configured for cgroup release_agent escape
+- Kernel version is older than the host patch level (`uname -r` on a CVE-vulnerable kernel — Dirty Pipe, OverlayFS, CVE-2022-0847, CVE-2024-1086) — container-to-host kernel exploitation is live regardless of capabilities, confirm kernel exposure before concluding hardened
+- The pod's service account token (`/var/run/secrets/kubernetes.io/serviceaccount/token`) can list/get/create any of: `pods`, `pods/exec`, `secrets`, `configmaps`, `nodes`, `clusterrolebindings` — each enables lateral movement or privilege escalation inside the cluster even when the host itself is sealed
+
 ## Extended Resources
 
 None -- this skill works from container internals, capability enumeration, and runtime detection logs.

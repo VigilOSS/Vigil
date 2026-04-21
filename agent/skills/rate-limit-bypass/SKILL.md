@@ -385,6 +385,13 @@ Rate limit bypass severity depends entirely on what becomes possible without the
 - Race condition (HTTP/2 single-packet) succeeds → record as highest-priority bypass, stop other methods
 - All bypass methods fail after systematic testing → rate limiting is robust, record as "tested, no bypass found"
 
+## Escalate When
+- Rotating IP-spoofing headers (`X-Forwarded-For`, `X-Real-IP`, `X-Client-IP`, `True-Client-IP`, `CF-Connecting-IP`, `Forwarded: for=`) changes the remaining-quota header or resets the block — the limiter trusts client-supplied identity, enumerate the full header set including CDN-specific ones (Cloudflare, Akamai, Fastly)
+- Path mutations (`/login/`, `/login/.`, `/LOGIN`, `/login%00`, `/login?x=1`, `/login;foo`) against the same handler produce different rate-limit counters — the key is path-string not route, walk normalization variants
+- Parameter-case, parameter-order, or parameter-pollution (`user=a&user=b`, mixed-case keys) changes the counter — the key includes the raw query string, explore every permutation before declaring the limiter uniform
+- The endpoint answers on HTTP/2 and accepts an OTP / password / coupon / voucher / 2FA code field — single-packet-attack (HTTP/2 last-byte sync) delivers 20-100 requests inside the same TCP window and defeats per-second limits
+- A rate-limited endpoint is reachable via an alternative vhost, origin IP, API subdomain, mobile API, GraphQL mutation, or websocket RPC — the limiter is bound to one edge, the others are unrated
+
 ## Extended Resources
 
 - `agent/references/payloads/rate-limit-bypass-payloads.md` -- IP spoofing headers, path variations, parameter pollution techniques

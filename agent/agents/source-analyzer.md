@@ -42,7 +42,7 @@ in the JavaScript. Missing these means:
 - Secrets in JS bundles not flagged — API keys, internal URLs, and debug tokens stay unexploited
 - Auth flow details not mapped — OAuth redirect chains and token handling never analyzed
 
-Extract aggressively. A false-positive API route wastes one validation request in Phase 3.
+Extract aggressively. A false-positive API route adds one validation request in Phase 3.
 A missed API route means that entire attack surface is invisible to the engagement.
 
 ## Responsibilities

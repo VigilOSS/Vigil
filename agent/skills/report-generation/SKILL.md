@@ -206,8 +206,8 @@ Only proceed to report generation after validation passes or the operator resolv
 
 1. **Pull backend state** using the queries in "Query Backend First" above
 2. **Use `report-findings?mode=final`** as the authoritative finding list for final reports, or `report-findings?mode=draft` for interim drafts
-3. **Use pre-computed CVSS** from finding details. Recalculate only if proved impact at report time materially differs from what was validated
-4. **Use pre-computed remediation** from finding details. Augment only if the exploit chain revealed additional fix requirements
+3. **Use pre-computed CVSS** from finding details. Recalculate only if proved impact at report time would shift at least one CVSS base metric (AV, AC, PR, UI, S, C, I, A) by one or more levels versus the validated vector
+4. **Use pre-computed remediation** from finding details. Augment only when one of these is true: (a) the chain revealed a prerequisite weakness the original remediation did not address, (b) the exploit bypassed the suggested fix, or (c) the chain spans multiple findings and fixing this one alone does not close the chain
 5. Populate all template fields (flag missing evidence with `[EVIDENCE MISSING]`, never fabricate)
 6. Build attack path narrative from `attack-chains` endpoint data and enrich it with `credentials` / `access-records` when those records explain the authenticated foothold or post-auth scope
 7. Compile coverage summary from `summary` endpoint
