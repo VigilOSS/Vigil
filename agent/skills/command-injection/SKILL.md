@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # Command Injection Testing
 
+> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: CMDI` and `X-Probe-Kind` per the phase — `fingerprint` for metachar-reflection and error-shape probes, `payload` for injection attempts (shell metacharacters, argument injection via dangerous flags), `exploit` for RCE proof (arbitrary command output, OOB callback, file read, reverse shell).
+
 ## When to Activate
 
 - User input flows into system commands (file conversion, DNS lookup, ping, git operations, PDF generation, archive handling)

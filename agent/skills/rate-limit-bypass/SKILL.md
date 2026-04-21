@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # Rate Limit Bypass
 
+> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: RATE-LIMIT` and `X-Probe-Kind` per the phase — `fingerprint` for counter-identification probes (what the limiter keys on), `payload` for crafted bypass attempts (IP spoofing headers, session rotation, structural mutation, GraphQL batching), `exploit` for high-volume abuse proof (OTP brute force, credential stuffing, quota bypass at impact).
+
 ## Operational Reality
 
 Rate limiting implementation varies wildly: some track by IP (bypassed by header spoofing), some by session/token (bypassed by rotating auth), some by request signature (requires structural mutation). The first step is IDENTIFYING the limiting mechanism, not blindly trying headers. Most bug reports fail because the tester tried a list of X-Forwarded-For values without first understanding what the application actually counts.

@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # DNS Tunneling Detection
 
+> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: RECON` — DNS log inspection, query-pattern analysis, entropy scoring, and tunnel-tool probing are all forms of reconnaissance of the DNS egress channel (`OSINT` fits passive external-zone lookups, but the offensive side of this skill operates against in-scope DNS infrastructure, making `RECON` the more accurate class). Set `X-Probe-Kind` per the phase — `fingerprint` for passive log inspection and baseline-pattern surveys, `payload` for crafted tunneled queries (iodine, dnscat2, DNSExfiltrator test traffic), `exploit` for proven exfiltration or C2 round-trip across the monitored boundary.
+
 ## Adversarial Context
 
 Attackers use DNS tunneling when HTTPS C2 is blocked or monitored. DNS is chosen because it is almost never blocked outbound, resolvers are usually allowed through firewalls, and most security teams only monitor HTTP/S. Detection must account for evasion: sophisticated tools use low-frequency queries, short labels, and legitimate-looking domain patterns to blend in. A detection strategy built on static thresholds (entropy > 3.5, query length > 50) will catch only the noisiest tunnels and miss everything purpose-built to evade.

@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # NoSQL Injection Testing
 
+> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: NOSQLI` and `X-Probe-Kind` per the phase — `fingerprint` for type-confusion/operator-echo probes, `payload` for operator-injection attempts (`$ne`, `$gt`, `$where` legacy), `exploit` for auth-bypass or data-extraction proof.
+
 ## When to Activate
 
 - Application uses MongoDB, CouchDB, or another document database

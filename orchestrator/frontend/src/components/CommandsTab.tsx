@@ -8,6 +8,7 @@ import {
   listAssessmentCommandRuns,
 } from "../lib/api";
 import { useResizableColumns } from "../lib/useResizableColumns";
+import { useBodyScrollLock } from "../lib/modalScrollLock";
 
 // ── Props ─────────────────────────────────────────────────────────────
 type CommandsTabProps = {
@@ -124,6 +125,79 @@ function agentColor(name: string): string {
   }
   if (!n) return "#6b685d";
   return TOOL_HASH_PALETTE[hashString(n) % TOOL_HASH_PALETTE.length];
+}
+
+// ── Technique color map ───────────────────────────────────────────────
+// Five tiers, grouped by vulnerability family. Follows the inline-style
+// + CSS-class pattern used for TOOL_COLORS / AGENT_ROLE_COLORS /
+// ITYPE_COLORS in IntelTab. Unknown values fall back to a hash-derived
+// color from TOOL_HASH_PALETTE — the enum may grow at the server side
+// without needing a frontend redeploy.
+const TECHNIQUE_COLORS: Record<string, string> = {
+  // Red tier — classic high-severity web/app injection + exec.
+  SSRF: "#991b1b",
+  XSS: "#991b1b",
+  XXE: "#991b1b",
+  SSTI: "#991b1b",
+  CMDI: "#991b1b",
+  RCE: "#991b1b",
+  // Orange tier — injection + smuggling + redirect families.
+  SQLI: "#c64d15",
+  NOSQLI: "#c64d15",
+  LFI: "#c64d15",
+  RFI: "#c64d15",
+  "REQUEST-SMUGGLING": "#c64d15",
+  "OPEN-REDIRECT": "#c64d15",
+  // Purple tier — authz / session / CSRF-family.
+  IDOR: "#7c3aed",
+  AUTH: "#7c3aed",
+  JWT: "#7c3aed",
+  CSRF: "#7c3aed",
+  CORS: "#7c3aed",
+  // Teal tier — discovery / validation (non-attack probes).
+  RECON: "#0d6b6b",
+  DISCOVERY: "#0d6b6b",
+  OSINT: "#0d6b6b",
+  FUZZ: "#0d6b6b",
+  "CVE-VALIDATION": "#0d6b6b",
+  // Muted tier — catch-all / miscellaneous.
+  "INFO-DISCLOSURE": "#6b685d",
+  "RATE-LIMIT": "#6b685d",
+  "EXPLOIT-CHAIN": "#6b685d",
+  OTHER: "#6b685d",
+};
+
+function techniqueColor(t: string | null | undefined): string {
+  if (!t) return "#6b685d";
+  const up = t.toUpperCase();
+  if (TECHNIQUE_COLORS[up]) return TECHNIQUE_COLORS[up];
+  return TOOL_HASH_PALETTE[hashString(up) % TOOL_HASH_PALETTE.length];
+}
+
+// Probe_kind is a closed 6-value enum — no hash fallback needed.
+const PROBE_KIND_ORDER = [
+  "fingerprint",
+  "baseline",
+  "payload",
+  "exploit",
+  "replay",
+  "cleanup",
+] as const;
+type ProbeKind = (typeof PROBE_KIND_ORDER)[number];
+
+const PROBE_KIND_COLORS: Record<ProbeKind, string> = {
+  fingerprint: "#0d6b6b", // teal — low-touch recon probes
+  baseline: "#4b5563", // slate — control requests
+  payload: "#c64d15", // orange — attack payload
+  exploit: "#991b1b", // red — attacker-outcome proof
+  replay: "#7c3aed", // purple — lateral primitive use
+  cleanup: "#6b685d", // muted — post-op tidy
+};
+
+function probeKindColor(pk: string | null | undefined): string {
+  if (!pk) return "#6b685d";
+  const k = pk.toLowerCase() as ProbeKind;
+  return PROBE_KIND_COLORS[k] || "#6b685d";
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -262,6 +336,10 @@ function extractTarget(row: AssessmentCommandRun): string {
 }
 
 // ── Search tokenizer ─────────────────────────────────────────────────
+// Scopes recognised in the search box. The new scopes (technique / probe /
+// intent / destructive / write) match against the four command-metadata
+// audit fields added in 2026-04. `write` is an intentional alias for
+// `destructive` — reads naturally for operators ("show me every write").
 const SCOPES = [
   "tool",
   "agent",
@@ -270,6 +348,11 @@ const SCOPES = [
   "status",
   "target",
   "hash",
+  "technique",
+  "probe",
+  "intent",
+  "destructive",
+  "write",
 ] as const;
 type Scope = (typeof SCOPES)[number];
 
@@ -278,18 +361,34 @@ type ParsedQuery = {
   freeTerms: string[];
 };
 
+// Pull one whitespace-delimited token from the input, but allow a quoted
+// string on the value side of a `scope:"multi word"` pair so the intent
+// scope can do substring matches on phrases. Quotes are stripped from
+// the returned value.
+const TOKEN_RE = /(\S+?:"[^"]*"|"[^"]*"|\S+)/g;
+
 function parseQuery(q: string): ParsedQuery {
   const tokens: ParsedQuery["tokens"] = [];
   const freeTerms: string[] = [];
-  const re = /(\S+)/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(q || "")) !== null) {
-    const tok = m[1];
+  while ((m = TOKEN_RE.exec(q || "")) !== null) {
+    let tok = m[1];
+    // Bare quoted phrase → free term (with quotes stripped).
+    if (tok.startsWith('"') && tok.endsWith('"')) {
+      const inner = tok.slice(1, -1).toLowerCase();
+      if (inner) freeTerms.push(inner);
+      continue;
+    }
     const idx = tok.indexOf(":");
     if (idx > 0) {
       const scope = tok.slice(0, idx).toLowerCase();
+      let value = tok.slice(idx + 1);
+      // scope:"multi word" — strip the quotes, preserve spaces.
+      if (value.startsWith('"') && value.endsWith('"')) {
+        value = value.slice(1, -1);
+      }
       if ((SCOPES as readonly string[]).includes(scope)) {
-        tokens.push({ scope: scope as Scope, value: tok.slice(idx + 1).toLowerCase() });
+        tokens.push({ scope: scope as Scope, value: value.toLowerCase() });
         continue;
       }
     }
@@ -324,6 +423,12 @@ type Derived = {
   agentName: string;
   phase: string;
   rcBucket: "zero" | "nonzero" | "timeout" | "none";
+  // Command-metadata audit fields, normalised for filtering. Values stay
+  // nullable; consumers must render null as "—", not "null".
+  techniqueKey: string; // upper-cased match key, "" when absent
+  probeKind: string; // lower-cased match key, "" when absent
+  intent: string; // verbatim, trimmed — may be ""
+  destructive: boolean | null;
   searchCorpus: string;
 };
 
@@ -337,6 +442,10 @@ function derive(row: AssessmentCommandRun): Derived {
     : row.return_code == null
     ? "none"
     : "nonzero";
+  const techniqueKey = (row.technique || "").trim().toUpperCase();
+  const probeKind = (row.probe_kind || "").trim().toLowerCase();
+  const intent = (row.intent || "").trim();
+  const destructive = row.destructive == null ? null : Boolean(row.destructive);
   const corpusParts = [
     row.command,
     (row.argv || []).join(" "),
@@ -349,6 +458,11 @@ function derive(row: AssessmentCommandRun): Derived {
     row.stdout_suppression_reason,
     row.stderr_suppression_reason,
     row.notes,
+    // Include the metadata fields in the free-term corpus so typing a bare
+    // term like "ssrf" still matches — the scope: tokens are exact-match.
+    techniqueKey,
+    probeKind,
+    intent,
   ];
   return {
     row,
@@ -361,6 +475,10 @@ function derive(row: AssessmentCommandRun): Derived {
     agentName: row.agent_name || "",
     phase: row.phase || "",
     rcBucket,
+    techniqueKey,
+    probeKind,
+    intent,
+    destructive,
     searchCorpus: corpusParts.filter(Boolean).join(" \n ").toLowerCase(),
   };
 }
@@ -409,28 +527,70 @@ const IconClose = () => (
     <path d="M6 6l12 12M18 6L6 18" />
   </svg>
 );
-const IconMaximize = () => (
-  <svg
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={2}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M4 9V4h5" />
-    <path d="M20 9V4h-5" />
-    <path d="M4 15v5h5" />
-    <path d="M20 15v5h-5" />
-  </svg>
-);
-
 function copyToClipboard(text: string): void {
   try {
     void navigator.clipboard?.writeText(text);
   } catch {
     // ignore
   }
+}
+
+// ── DetailModal ───────────────────────────────────────────────────────
+// Centred modal that hosts the per-row Drawer. Shared shell: three tabs
+// (Commands / Intel / Findings) reuse the same .detail-modal-* CSS.
+// Backdrop click + Esc + × button all close; focus moves into the panel
+// on open so keyboard users land inside the dialog. Restoring focus to
+// the row that opened it is done by the caller via onClose.
+function DetailModal({
+  children,
+  onClose,
+  titleId,
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+  titleId?: string;
+}) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    // Focus the panel on open. Use a microtask so the ref is attached.
+    queueMicrotask(() => panelRef.current?.focus());
+  }, []);
+  // Lock body scroll while the modal is mounted so wheel / trackpad /
+  // PageUp/PageDown never bubble to the page behind. Reference-counted
+  // via modalScrollLock so stacked or rapidly re-opened modals never
+  // leave the lock stuck on.
+  useBodyScrollLock();
+  return (
+    <div
+      className="detail-modal-overlay"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      role="presentation"
+    >
+      <div
+        ref={panelRef}
+        className="detail-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+      >
+        <button
+          type="button"
+          className="detail-modal-close"
+          onClick={onClose}
+          aria-label="Close detail"
+          title="Close (Esc)"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+        {children}
+      </div>
+    </div>
+  );
 }
 
 // ── Component ────────────────────────────────────────────────────────
@@ -443,14 +603,20 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
   const [toolFilters, setToolFilters] = useState<Set<string>>(new Set());
   const [agentFilters, setAgentFilters] = useState<Set<string>>(new Set());
   const [statusFilters, setStatusFilters] = useState<Set<StatusBucket>>(new Set());
+  const [techniqueFilters, setTechniqueFilters] = useState<Set<string>>(new Set());
+  const [probeKindFilters, setProbeKindFilters] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
   const [cmdOpen, setCmdOpen] = useState(false);
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [maximized, setMaximized] = useState(false);
-  useEffect(() => {
-    setMaximized(false);
-  }, [selectedId]);
+  // Detail-modal open state. Separate from `selectedId` so j/k can walk
+  // the list without forcing the modal open, and so the modal closes on
+  // Escape without discarding the keyboard-navigation cursor.
+  const [detailOpen, setDetailOpen] = useState(false);
+  // Ref to the row that opened the modal — focus is restored here on
+  // close so keyboard users land back where they were.
+  const rowRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
+  const lastFocusIdRef = useRef<number | null>(null);
 
   // Detail cache for full stdout/stderr. Keyed by command-run id and
   // populated lazily when the drawer's stdout/stderr tab is opened.
@@ -565,6 +731,30 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
     return c;
   }, [derivedList]);
 
+  // Technique counts over the full fetched set (rendered chips are top-10
+  // by count, the rest are addressable via the `technique:` search scope).
+  // Blank-technique rows don't render a chip — they show up under the
+  // "absent" bucket in the drawer, not in the filter bar.
+  const techniqueCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const d of derivedList) {
+      if (!d.techniqueKey) continue;
+      c[d.techniqueKey] = (c[d.techniqueKey] || 0) + 1;
+    }
+    return c;
+  }, [derivedList]);
+
+  // Probe-kind counts. Closed 6-value enum — render all six present
+  // buckets in fixed order so the chip row is stable across result sets.
+  const probeKindCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const d of derivedList) {
+      if (!d.probeKind) continue;
+      c[d.probeKind] = (c[d.probeKind] || 0) + 1;
+    }
+    return c;
+  }, [derivedList]);
+
   // ── Filtering ────
   const parsedQuery = useMemo(() => parseQuery(query), [query]);
 
@@ -610,6 +800,37 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
           case "hash":
             if (!(d.row.command_hash || "").toLowerCase().startsWith(v)) return false;
             break;
+          case "technique": {
+            // Exact match on the normalised upper-case key. Tokenizer lower-
+            // cased v; compare against the lower-cased technique key.
+            if ((d.techniqueKey || "").toLowerCase() !== v) return false;
+            break;
+          }
+          case "probe": {
+            if ((d.probeKind || "") !== v) return false;
+            break;
+          }
+          case "intent": {
+            // Substring match — intent is free-form, operators search for
+            // phrases like intent:"verify token leak" via the quoted form.
+            if (!d.intent.toLowerCase().includes(v)) return false;
+            break;
+          }
+          case "destructive":
+          case "write": {
+            // Boolean match with common spellings. NULL destructive never
+            // matches either true or false (intentional — NULL = undeclared,
+            // not "not destructive").
+            const want =
+              v === "true" || v === "1" || v === "yes"
+                ? true
+                : v === "false" || v === "0" || v === "no"
+                ? false
+                : null;
+            if (want == null) return false;
+            if (d.destructive !== want) return false;
+            break;
+          }
         }
       }
       if (parsed.freeTerms.length) {
@@ -626,6 +847,8 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
       if (toolFilters.size && !toolFilters.has(toolKey)) return false;
       if (agentFilters.size && !agentFilters.has(d.agentName)) return false;
       if (statusFilters.size && !statusFilters.has(d.bucket)) return false;
+      if (techniqueFilters.size && !techniqueFilters.has(d.techniqueKey)) return false;
+      if (probeKindFilters.size && !probeKindFilters.has(d.probeKind)) return false;
       if (!matchesQuery(d, parsedQuery)) return false;
       return true;
     });
@@ -638,7 +861,16 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
       return b.id - a.id;
     });
     return list;
-  }, [derivedList, toolFilters, agentFilters, statusFilters, parsedQuery, matchesQuery]);
+  }, [
+    derivedList,
+    toolFilters,
+    agentFilters,
+    statusFilters,
+    techniqueFilters,
+    probeKindFilters,
+    parsedQuery,
+    matchesQuery,
+  ]);
 
   // Duplicate detection — compute a count map keyed by command_hash on
   // the *filtered* rows so operators see cluster density of what's
@@ -656,7 +888,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
   // Reset page when filters/search change.
   useEffect(() => {
     setPage(0);
-  }, [toolFilters, agentFilters, statusFilters, query]);
+  }, [toolFilters, agentFilters, statusFilters, techniqueFilters, probeKindFilters, query]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   useEffect(() => {
@@ -664,14 +896,15 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
   }, [totalPages]);
   const pageRows = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
-  // Auto-select first row when one's needed / when the current selection
-  // falls out of the filtered view.
+  // Keep selection valid — if the current selected row drops out of the
+  // filtered set (filters changed, rows removed), pick the first
+  // filtered row so j/k still has something to anchor on. We do NOT
+  // auto-select on first mount any more; the modal should only open on
+  // an explicit user click.
   useEffect(() => {
-    if (!selectedId && filtered.length > 0) {
-      setSelectedId(filtered[0].id);
-    }
     if (selectedId != null && !derivedById.has(selectedId)) {
       setSelectedId(filtered[0]?.id ?? null);
+      setDetailOpen(false);
     }
   }, [filtered, derivedById, selectedId]);
 
@@ -715,6 +948,9 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
   const selectedRef = useRef(selectedId);
   selectedRef.current = selectedId;
 
+  const detailOpenRef = useRef(detailOpen);
+  detailOpenRef.current = detailOpen;
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -722,6 +958,9 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
       const isTyping = tag === "input" || tag === "textarea";
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
+        // Cmd/Ctrl-K closes the detail modal before opening the palette
+        // so the palette sits cleanly on top of the table, not the modal.
+        setDetailOpen(false);
         setCmdOpen(true);
         return;
       }
@@ -733,6 +972,12 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
       if (e.key === "Escape") {
         if (isTyping) {
           searchRef.current?.blur();
+          return;
+        }
+        // Escape closes the modal without clearing selection so j/k keeps
+        // its anchor. A second Escape (modal already closed) un-selects.
+        if (detailOpenRef.current) {
+          setDetailOpen(false);
         } else {
           setSelectedId(null);
         }
@@ -764,6 +1009,12 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
           e.key === "k" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
         setSelectedId(list[next].id);
       }
+      // Enter opens the modal for the currently selected row (handy when
+      // j/k has moved the cursor but the modal is closed).
+      if (!isTyping && e.key === "Enter" && selectedRef.current != null) {
+        e.preventDefault();
+        setDetailOpen(true);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -781,11 +1032,18 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
     setToolFilters(new Set());
     setAgentFilters(new Set());
     setStatusFilters(new Set());
+    setTechniqueFilters(new Set());
+    setProbeKindFilters(new Set());
     setQuery("");
   };
 
   const activeFilterCount =
-    toolFilters.size + agentFilters.size + statusFilters.size + (query ? 1 : 0);
+    toolFilters.size +
+    agentFilters.size +
+    statusFilters.size +
+    techniqueFilters.size +
+    probeKindFilters.size +
+    (query ? 1 : 0);
 
   // Top 10 tools by count for the chip bar. Everything else is accessible
   // via the free-text `tool:` scope.
@@ -800,6 +1058,23 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 10);
   }, [agentCounts]);
+
+  // Top 10 techniques by count. Everything else is accessible via the
+  // free-text `technique:` scope — same approach as the tool chip group.
+  const topTechniques = useMemo(() => {
+    return Object.entries(techniqueCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
+  }, [techniqueCounts]);
+
+  // Probe-kind chips render in the canonical PROBE_KIND_ORDER (not count
+  // order) so operators scan them in the same place every time. Buckets
+  // with 0 count drop out unless they're currently an active filter.
+  const probeKindChips = useMemo(() => {
+    return PROBE_KIND_ORDER.map((k) => [k, probeKindCounts[k] || 0] as const).filter(
+      ([k, n]) => n > 0 || probeKindFilters.has(k),
+    );
+  }, [probeKindCounts, probeKindFilters]);
 
   return (
     <div className="findings-redesign">
@@ -836,7 +1111,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
             <input
               ref={searchRef}
               className="search-input"
-              placeholder="Search command / argv / notes… (try tool:curl status:failed target:example.com)"
+              placeholder="Search command / argv / notes… (try tool:curl technique:ssrf probe:exploit write:true)"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
@@ -933,6 +1208,52 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
               );
             })}
           </div>
+          {topTechniques.length > 0 && (
+            <div className="filter-group">
+              <span className="filter-label">Technique</span>
+              {topTechniques.map(([tech, n]) => {
+                const color = techniqueColor(tech);
+                return (
+                  <button
+                    key={`tech:${tech}`}
+                    type="button"
+                    className={`filter-chip ctech ${techniqueFilters.has(tech) ? "is-active" : ""}`}
+                    onClick={() => toggle(techniqueFilters, setTechniqueFilters, tech)}
+                    style={
+                      techniqueFilters.has(tech)
+                        ? { borderColor: color, background: `${color}1a`, color }
+                        : undefined
+                    }
+                  >
+                    <span className="sev-dot" style={{ background: color }} />
+                    {tech}
+                    <span className="filter-count">{n}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {probeKindChips.length > 0 && (
+            <div className="filter-group">
+              <span className="filter-label">Kind</span>
+              {probeKindChips.map(([pk, n]) => {
+                const color = probeKindColor(pk);
+                const active = probeKindFilters.has(pk);
+                return (
+                  <button
+                    key={`pk:${pk}`}
+                    type="button"
+                    className={`filter-chip cpk-${pk} ${active ? "is-active" : ""}`}
+                    onClick={() => toggle(probeKindFilters, setProbeKindFilters, pk)}
+                  >
+                    <span className="sev-dot" style={{ background: color }} />
+                    {pk}
+                    <span className="filter-count">{n}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
           {activeFilterCount > 0 && (
             <button type="button" className="filter-clear" onClick={clearAll}>
               Clear all ({activeFilterCount})
@@ -949,15 +1270,16 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
         </div>
       )}
 
-      {/* List + drawer */}
-      <div className={`findings-shell ${maximized && selectedDerived ? "is-maximized" : ""}`}>
+      {/* List (detail renders as a centred modal below) */}
+      <div className="findings-shell">
         <section className="list-panel panel">
+          <div className="list-scroll-x">
           <div
             className="list-header"
-            style={{ gridTemplateColumns: listGridTemplate }}
+            style={{ gridTemplateColumns: listGridTemplate, minWidth: "fit-content" }}
           >
             <span />
-            <span>
+            <span className="col-sticky">
               Time
               <span
                 className="col-resize-handle"
@@ -1041,15 +1363,24 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
                   key={d.id}
                   d={d}
                   selected={selectedId === d.id}
-                  onClick={() => setSelectedId(d.id)}
+                  onClick={() => {
+                    setSelectedId(d.id);
+                    lastFocusIdRef.current = d.id;
+                    setDetailOpen(true);
+                  }}
                   onTargetClick={(target) => setQuery(`target:${target}`)}
                   onDupClick={(hash) => setQuery(`hash:${hash.slice(0, 12)}`)}
                   dupCount={dupCounts.get(d.row.command_hash) || 0}
                   freeTerms={parsedQuery.freeTerms}
                   gridTemplate={listGridTemplate}
+                  registerRef={(id, el) => {
+                    if (el) rowRefs.current.set(id, el);
+                    else rowRefs.current.delete(id);
+                  }}
                 />
               ))
             )}
+          </div>
           </div>
           <div className="list-footer">
             <span>
@@ -1076,15 +1407,32 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
           </div>
         </section>
 
-        <Drawer
-          d={selectedDerived}
-          detail={selectedDerived ? detailCache.get(selectedDerived.id) ?? null : null}
-          detailLoading={selectedDerived ? detailLoading.has(selectedDerived.id) : false}
-          onRequestDetail={ensureDetail}
-          maximized={maximized}
-          onToggleMaximize={() => setMaximized((m) => !m)}
-        />
       </div>
+
+      {detailOpen && selectedDerived && (
+        <DetailModal
+          onClose={() => {
+            setDetailOpen(false);
+            // Restore focus to the row that opened the modal so
+            // keyboard-only users don't lose their place.
+            const el = lastFocusIdRef.current != null
+              ? rowRefs.current.get(lastFocusIdRef.current)
+              : null;
+            // queueMicrotask is enough — React will unmount the modal
+            // on the next tick, and focus() after that lands cleanly.
+            queueMicrotask(() => el?.focus());
+          }}
+          titleId="commands-detail-modal-title"
+        >
+          <Drawer
+            d={selectedDerived}
+            detail={detailCache.get(selectedDerived.id) ?? null}
+            detailLoading={detailLoading.has(selectedDerived.id)}
+            onRequestDetail={ensureDetail}
+            titleId="commands-detail-modal-title"
+          />
+        </DetailModal>
+      )}
 
       <div className="findings-shortcuts">
         <span>
@@ -1100,7 +1448,10 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
           <code>[ / ]</code> prev / next
         </span>
         <span>
-          <code>Esc</code> close drawer
+          <code>Enter</code> open detail
+        </span>
+        <span>
+          <code>Esc</code> close detail
         </span>
       </div>
 
@@ -1109,7 +1460,9 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
           derivedList={derivedList}
           onSelect={(id) => {
             setSelectedId(id);
+            lastFocusIdRef.current = id;
             setCmdOpen(false);
+            setDetailOpen(true);
           }}
           onClose={() => setCmdOpen(false)}
         />
@@ -1158,6 +1511,7 @@ function CommandRow({
   dupCount,
   freeTerms,
   gridTemplate,
+  registerRef,
 }: {
   d: Derived;
   selected: boolean;
@@ -1167,6 +1521,7 @@ function CommandRow({
   dupCount: number;
   freeTerms: string[];
   gridTemplate?: string;
+  registerRef?: (id: number, el: HTMLButtonElement | null) => void;
 }) {
   const bucket = d.bucket;
   const color = STATUS_COLORS[bucket];
@@ -1181,10 +1536,11 @@ function CommandRow({
       className={`frow ${selected ? "is-selected" : ""}`}
       onClick={onClick}
       data-id={d.id}
-      style={gridTemplate ? { gridTemplateColumns: gridTemplate } : undefined}
+      ref={(el) => registerRef?.(d.id, el)}
+      style={gridTemplate ? { gridTemplateColumns: gridTemplate, minWidth: "fit-content" } : { minWidth: "fit-content" }}
     >
       <span className={`frow-sevbar cbar-${bucket}`} style={{ background: color }} />
-      <span className="frow-main" style={{ gridTemplateColumns: "unset" }}>
+      <span className="frow-main col-sticky" style={{ gridTemplateColumns: "unset" }}>
         <span className="mono" style={{ fontSize: "0.76rem", color: "var(--muted)" }}>
           {relTime(d.row.created_at || d.row.started_at)}
         </span>
@@ -1272,15 +1628,13 @@ function Drawer({
   detail,
   detailLoading,
   onRequestDetail,
-  maximized,
-  onToggleMaximize,
+  titleId,
 }: {
-  d: Derived | null;
+  d: Derived;
   detail: AssessmentCommandRunDetail | null;
   detailLoading: boolean;
   onRequestDetail: (id: number) => void;
-  maximized: boolean;
-  onToggleMaximize: () => void;
+  titleId?: string;
 }) {
   const [tab, setTab] = useState<DrawerTabId>("overview");
   useEffect(() => {
@@ -1294,21 +1648,6 @@ function Drawer({
       onRequestDetail(d.id);
     }
   }, [tab, d, onRequestDetail]);
-
-  if (!d) {
-    return (
-      <aside className="drawer-panel panel">
-        <div className="empty" style={{ padding: "60px 20px" }}>
-          <p style={{ fontSize: "0.9rem", margin: 0 }}>
-            Select a command run to see details.
-          </p>
-          <p style={{ fontSize: "0.78rem", color: "var(--muted)", marginTop: 10 }}>
-            Tip: press <code>⌘K</code> or <code>/</code> to search.
-          </p>
-        </div>
-      </aside>
-    );
-  }
 
   const color = STATUS_COLORS[d.bucket];
   const tabs: { id: DrawerTabId; label: string; count?: number }[] = [
@@ -1364,19 +1703,16 @@ function Drawer({
               uuid
             </button>
           </div>
-          <div className="drawer-nav">
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={onToggleMaximize}
-              title={maximized ? "Restore drawer" : "Maximize drawer"}
-              aria-pressed={maximized}
-            >
-              {maximized ? <IconClose /> : <IconMaximize />}
-            </button>
-          </div>
+          {/* Maximize was retired with the move to a centred modal —
+              the modal already fills the viewport, so there's no
+              meaningful "expand" operation left. The modal's own ×
+              close button (upper-right) handles the dismiss. */}
         </div>
-        <h2 className="drawer-title mono" style={{ color: toolColor(d.toolBin) }}>
+        <h2
+          id={titleId}
+          className="drawer-title mono"
+          style={{ color: toolColor(d.toolBin) }}
+        >
           {d.toolBin || "(unknown)"}
         </h2>
         <div className="hero-meta">
@@ -1460,6 +1796,132 @@ function KV({ k, v, mono, onCopy }: { k: string; v: unknown; mono?: boolean; onC
   );
 }
 
+// ── Command-metadata KV cells ────────────────────────────────────────
+// Unlike the generic `KV` helper, these always render a row even when
+// the value is null — the rule is "null → em-dash", never a missing row
+// or the string "null". Shapes match the existing .kv / .k / .v classes
+// so they slot into .kv-grid without CSS churn.
+const MUTED_DASH = "—";
+
+function MutedValue() {
+  return (
+    <p className="v" style={{ color: "var(--muted)" }}>
+      {MUTED_DASH}
+    </p>
+  );
+}
+
+function TechniqueKV({ technique }: { technique: string }) {
+  if (!technique) {
+    return (
+      <div className="kv">
+        <p className="k">Technique</p>
+        <MutedValue />
+      </div>
+    );
+  }
+  const color = techniqueColor(technique);
+  return (
+    <div className="kv">
+      <p className="k">Technique</p>
+      <p className="v">
+        <span
+          className="pill"
+          style={{ background: `${color}1a`, color, letterSpacing: "0.06em" }}
+        >
+          <span className="sev-dot" style={{ background: color }} />
+          {technique}
+        </span>
+      </p>
+    </div>
+  );
+}
+
+function ProbeKindKV({ probeKind }: { probeKind: string }) {
+  if (!probeKind) {
+    return (
+      <div className="kv">
+        <p className="k">Probe kind</p>
+        <MutedValue />
+      </div>
+    );
+  }
+  const color = probeKindColor(probeKind);
+  return (
+    <div className="kv">
+      <p className="k">Probe kind</p>
+      <p className="v">
+        <span
+          className={`pill cpk-${probeKind}`}
+          style={{ background: `${color}1a`, color }}
+        >
+          <span className="sev-dot" style={{ background: color }} />
+          {probeKind}
+        </span>
+      </p>
+    </div>
+  );
+}
+
+function IntentKV({ intent }: { intent: string }) {
+  if (!intent) {
+    return (
+      <div className="kv">
+        <p className="k">Intent</p>
+        <MutedValue />
+      </div>
+    );
+  }
+  // Intent is free-form ≤200 chars. Render as a soft-accent pill so it's
+  // visually distinct from the mono technical fields around it — operators
+  // scan for it as prose, not as a code token.
+  return (
+    <div className="kv">
+      <p className="k">Intent</p>
+      <p className="v" style={{ whiteSpace: "normal" }}>
+        <span
+          className="pill"
+          style={{
+            background: "rgba(23,53,76,0.08)",
+            color: "var(--accent)",
+            textTransform: "none",
+            letterSpacing: 0,
+            fontWeight: 400,
+            fontSize: "0.78rem",
+          }}
+        >
+          {intent}
+        </span>
+      </p>
+    </div>
+  );
+}
+
+function DestructiveKV({ destructive }: { destructive: boolean | null }) {
+  if (destructive == null) {
+    return (
+      <div className="kv">
+        <p className="k">Destructive</p>
+        <MutedValue />
+      </div>
+    );
+  }
+  // True gets the warn-tinted pill (amber/red) so operators can scan a
+  // drawer and immediately see "this touched target state". False gets
+  // the ok-tinted pill — still a positive signal, just reversed.
+  const pillClass = destructive ? "pill-active" : "pill-reported";
+  return (
+    <div className="kv">
+      <p className="k">Destructive</p>
+      <p className="v">
+        <span className={`pill ${pillClass}`}>
+          {destructive ? "yes — writes target state" : "no"}
+        </span>
+      </p>
+    </div>
+  );
+}
+
 function OverviewPane({ d }: { d: Derived }) {
   const row = d.row;
   return (
@@ -1508,6 +1970,14 @@ function OverviewPane({ d }: { d: Derived }) {
             onCopy={() => copyToClipboard(row.run_uuid)}
           />
           {d.target && <KV k="Target" v={d.target} mono />}
+          {/* Command-metadata audit fields. Always render the row even when
+              null so operators see "field is absent" vs. "field is missing
+              from the UI". Null renders as the em-dash muted — a deliberate
+              choice for rows posted before the 2026-04 schema migration. */}
+          <TechniqueKV technique={d.techniqueKey} />
+          <ProbeKindKV probeKind={d.probeKind} />
+          <IntentKV intent={d.intent} />
+          <DestructiveKV destructive={d.destructive} />
         </div>
       </div>
       {row.notes && (
@@ -1727,6 +2197,27 @@ function CommandPalette({
             else if (v === "!0" && d.rcBucket !== "nonzero") return false;
             else if (v === "timeout" && d.rcBucket !== "timeout") return false;
             break;
+          case "technique":
+            if ((d.techniqueKey || "").toLowerCase() !== v) return false;
+            break;
+          case "probe":
+            if ((d.probeKind || "") !== v) return false;
+            break;
+          case "intent":
+            if (!d.intent.toLowerCase().includes(v)) return false;
+            break;
+          case "destructive":
+          case "write": {
+            const want =
+              v === "true" || v === "1" || v === "yes"
+                ? true
+                : v === "false" || v === "0" || v === "no"
+                ? false
+                : null;
+            if (want == null) return false;
+            if (d.destructive !== want) return false;
+            break;
+          }
         }
       }
       for (const t of parsed.freeTerms) if (!d.searchCorpus.includes(t)) return false;

@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # Server-Side Template Injection (SSTI) Testing
 
+> **Kali MCP audit headers:** when calling Kali MCP for work governed by this skill, set `X-Technique: SSTI` and `X-Probe-Kind` per the phase — `fingerprint` for template-engine detection (`{{7*7}}`, error provocation), `payload` for engine-specific payloads, `exploit` for RCE or sensitive-file-read proof.
+
 ## When to Activate
 
 - User input rendered in dynamic templates (emails, PDFs, pages)

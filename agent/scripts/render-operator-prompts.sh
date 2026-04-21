@@ -46,21 +46,6 @@ agent_description() {
   esac
 }
 
-render_banner() {
-  cat <<'EOF'
-```
-╔══════════════════════════════════════════════════════════════╗
-║                                                              ║
-║   ██████  ███████ ██████  ████████ ███████  █████  ███    ███║
-║   ██   ██ ██      ██   ██    ██    ██      ██   ██ ████  ████║
-║   ██████  █████   ██   ██    ██    █████   ███████ ██ ████ ██║
-║   ██   ██ ██      ██   ██    ██    ██      ██   ██ ██  ██  ██║
-║   ██   ██ ███████ ██████     ██    ███████ ██   ██ ██      ██║
-║                                                              ║
-║   Autonomous Red Team Simulation Agent                       ║
-EOF
-}
-
 render_prompt_locality() {
   cat <<'EOF'
 ## Prompt Locality
@@ -109,76 +94,14 @@ render_code_agent_roster() {
 EOF
 }
 
-render_claude() {
+render_operator_prompt() {
+  local out="$1"
   {
     cat <<'EOF'
-# AI Threat Hunting — Claude Code Entry
+# AI Threat Hunting — Operator Instructions
 
-EOF
-    render_banner
-    cat <<'EOF'
-║   Powered by Claude Code  ║
-║                                                              ║
-╚══════════════════════════════════════════════════════════════╝
-```
-
-When a session starts, display the banner above and then:
+When a session starts, display:
 "[operator] AI Threat Hunting ready. Ensure `./agent/scripts/start_kali_mcp_runtime.sh` is running, then use `cd agent && ./scripts/init_engagement.sh <target_url>` to start a new engagement."
-
----
-
-<!-- Generated from operator-core.md via scripts/render-operator-prompts.sh -->
-
-## Load Full Operator Instructions
-
-**Load and follow all instructions from `AGENTS.md` in this directory.**
-
-`AGENTS.md` is the single source of truth for operator methodology, agent
-roster, phase flow, finding format, skills, references, and Kali MCP rules.
-Every instruction there applies verbatim to a Claude Code session.
-
-This file (`CLAUDE.md`) exists so Claude Code has a default entry point and
-can attach the Claude-specific dispatch syntax below without duplicating the
-~700 lines of shared instructions that belong in `AGENTS.md`.
-
-## Claude Dispatch Syntax
-
-Use `@agent-name` when dispatching subagents (Claude Code–specific — Codex
-uses its own `.codex/agents/*.toml` wrappers instead):
-
-- `@recon-specialist`
-- `@source-analyzer`
-- `@surface-collector`
-- `@vulnerability-analyst`
-- `@exploit-developer`
-- `@fuzzer`
-- `@osint-analyst`
-- `@report-writer`
-- `@code-architect`
-- `@code-vuln-hunter`
-- `@code-variant-hunter`
-- `@code-vuln-verifier`
-EOF
-  } > "$CLAUDE_OUT"
-  perl -0pi -e 's/\n+\z/\n/' "$CLAUDE_OUT"
-}
-
-render_agents() {
-  {
-    cat <<'EOF'
-# AI Threat Hunting
-
-EOF
-    render_banner
-    cat <<'EOF'
-║                                                              ║
-╚══════════════════════════════════════════════════════════════╝
-```
-
-When a session starts, display the banner above and then:
-"[operator] AI Threat Hunting ready. Ensure `./agent/scripts/start_kali_mcp_runtime.sh` is running, then use `cd agent && ./scripts/init_engagement.sh <target_url>` to start a new engagement."
-
----
 
 <!-- Generated from operator-core.md via scripts/render-operator-prompts.sh -->
 
@@ -202,8 +125,16 @@ After an engagement, review generated tools in `agent/engagements/<...>/tools/`:
 1. Identify reusable tools -> create a skill in `agent/skills/<name>/SKILL.md`
 2. Add the new skill to `agent/references/INDEX.md` and note it in the relevant Claude/Codex instructions
 EOF
-  } > "$AGENTS_OUT"
-  perl -0pi -e 's/\n+\z/\n/' "$AGENTS_OUT"
+  } > "$out"
+  perl -0pi -e 's/\n+\z/\n/' "$out"
+}
+
+render_claude() {
+  render_operator_prompt "$CLAUDE_OUT"
+}
+
+render_agents() {
+  render_operator_prompt "$AGENTS_OUT"
 }
 
 render_claude_wrapper() {
@@ -289,9 +220,6 @@ case "$MODE" in
     render_all_wrappers
     ;;
   claude-install)
-    # CLAUDE.md is a thin pointer that directs Claude Code to AGENTS.md,
-    # so claude-install must also produce AGENTS.md (the real content file).
-    render_agents
     render_claude
     render_all_wrappers
     ;;

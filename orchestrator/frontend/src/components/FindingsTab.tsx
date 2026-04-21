@@ -15,6 +15,9 @@ import type {
 import { listAssessmentFindingLinks, listAssessmentFindingTransitions } from "../lib/api";
 import { useResizableColumns } from "../lib/useResizableColumns";
 import { JsonTree } from "./ArtifactViewer";
+import { JsonView } from "./JsonView";
+import { useBodyScrollLock } from "../lib/modalScrollLock";
+import { CodeBlock, NotesBody, ProvenanceBlock, isCurlLike } from "./formatting";
 
 // ── Types & helpers ───────────────────────────────────────────────────
 
@@ -447,21 +450,54 @@ const IconExternal = () => (
     <path d="M19 14v6H4V4h6" />
   </svg>
 );
-const IconMaximize = () => (
-  <svg
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={2}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M4 9V4h5" />
-    <path d="M20 9V4h-5" />
-    <path d="M4 15v5h5" />
-    <path d="M20 15v5h-5" />
-  </svg>
-);
+// ── DetailModal ──────────────────────────────────────────────────────
+// Shared modal shell used across tabs. See CommandsTab.tsx for design
+// notes on focus trap, aria roles, and the z-index relationship with
+// the Cmd/Ctrl-K palette.
+function DetailModal({
+  children,
+  onClose,
+  titleId,
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+  titleId?: string;
+}) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    queueMicrotask(() => panelRef.current?.focus());
+  }, []);
+  useBodyScrollLock();
+  return (
+    <div
+      className="detail-modal-overlay"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      role="presentation"
+    >
+      <div
+        ref={panelRef}
+        className="detail-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+      >
+        <button
+          type="button"
+          className="detail-modal-close"
+          onClick={onClose}
+          aria-label="Close detail"
+          title="Close (Esc)"
+        >
+          <IconClose />
+        </button>
+        {children}
+      </div>
+    </div>
+  );
+}
 
 // ── JsonTree value safety ─────────────────────────────────────────────
 
@@ -523,16 +559,12 @@ export function FindingsTab({
       return null;
     }
   });
-
-  // Drawer maximize is a layout state only — does NOT persist across
-  // reloads (intentional: a maximized drawer with stale selection is a
-  // confusing first impression) and resets whenever the selection
-  // changes. Esc still un-selects via the existing keyboard handler; the
-  // top-right close-maximize icon only leaves maximized mode.
-  const [maximized, setMaximized] = useState(false);
-  useEffect(() => {
-    setMaximized(false);
-  }, [selected]);
+  // Detail-modal open state. See CommandsTab.tsx for design notes.
+  // Intentionally does NOT mirror the persisted `selected` — we don't
+  // want the modal to pop open automatically on a page refresh.
+  const [detailOpen, setDetailOpen] = useState(false);
+  const rowRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const lastFocusSlugRef = useRef<string | null>(null);
 
   // Column widths for the Findings list. 6 cols: [sev-bar, sev, title,
   // location, tags, status]. Persisted per-key so the Findings and
@@ -819,15 +851,14 @@ export function FindingsTab({
   }, [totalPages]);
   const pageRows = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
-  // Auto-select first if none selected and we have findings
+  // Keep selection valid — if the persisted slug no longer exists in
+  // the filtered set, fall through to the first row so j/k still has
+  // an anchor. We no longer auto-select the first row on mount: the
+  // modal opens only on an explicit user click / keypress.
   useEffect(() => {
-    if (!selected && derivedList.length > 0) {
-      const persisted = derivedBySlug.get(selected || "");
-      if (!persisted) setSelected(derivedList[0].slug);
-    }
-    // If selected slug no longer exists, clear it
     if (selected && !derivedBySlug.has(selected)) {
       setSelected(derivedList[0]?.slug ?? null);
+      setDetailOpen(false);
     }
   }, [derivedList, derivedBySlug, selected]);
 
@@ -870,6 +901,9 @@ export function FindingsTab({
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
 
+  const detailOpenRef = useRef(detailOpen);
+  detailOpenRef.current = detailOpen;
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -877,6 +911,7 @@ export function FindingsTab({
       const isTyping = tag === "input" || tag === "textarea";
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
+        setDetailOpen(false);
         setCmdOpen(true);
         return;
       }
@@ -888,6 +923,10 @@ export function FindingsTab({
       if (e.key === "Escape") {
         if (isTyping) {
           searchRef.current?.blur();
+          return;
+        }
+        if (detailOpenRef.current) {
+          setDetailOpen(false);
         } else {
           setSelected(null);
         }
@@ -918,6 +957,10 @@ export function FindingsTab({
         const next =
           e.key === "k" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
         setSelected(list[next].slug);
+      }
+      if (!isTyping && e.key === "Enter" && selectedRef.current != null) {
+        e.preventDefault();
+        setDetailOpen(true);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1073,72 +1116,80 @@ export function FindingsTab({
         </div>
       </div>
 
-      {/* List + drawer */}
-      <div
-        className={`findings-shell ${maximized && selectedDerived ? "is-maximized" : ""}`}
-      >
+      {/* List (detail renders as a centred modal below) */}
+      <div className="findings-shell">
         <section className="list-panel panel">
-          <div
-            className="list-header"
-            style={{ gridTemplateColumns: listGridTemplate }}
-          >
-            <span />
-            <span>
-              Sev
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(1, e)}
-                onDoubleClick={() => resetListColumn(1)}
-              />
-            </span>
-            <span>
-              Title / slug
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(2, e)}
-                onDoubleClick={() => resetListColumn(2)}
-              />
-            </span>
-            <span>
-              Location
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(3, e)}
-                onDoubleClick={() => resetListColumn(3)}
-              />
-            </span>
-            <span>
-              Tags
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(4, e)}
-                onDoubleClick={() => resetListColumn(4)}
-              />
-            </span>
-            <span style={{ textAlign: "right" }}>Status</span>
-          </div>
-          <div className="list-scroll">
-            {pageRows.length === 0 ? (
-              <div className="empty">
-                No findings match.
-                <div style={{ marginTop: 10 }}>
-                  <button type="button" className="qa-btn" onClick={clearAll}>
-                    Clear filters
-                  </button>
-                </div>
-              </div>
-            ) : (
-              pageRows.map((d) => (
-                <FindingRow
-                  key={d.slug}
-                  d={d}
-                  selected={selected === d.slug}
-                  onClick={() => setSelected(d.slug)}
-                  freeTerms={parsedQuery.freeTerms}
-                  gridTemplate={listGridTemplate}
+          <div className="list-scroll-x">
+            <div
+              className="list-header"
+              style={{ gridTemplateColumns: listGridTemplate, minWidth: "fit-content" }}
+            >
+              <span />
+              <span>
+                Sev
+                <span
+                  className="col-resize-handle"
+                  onPointerDown={(e) => startListResize(1, e)}
+                  onDoubleClick={() => resetListColumn(1)}
                 />
-              ))
-            )}
+              </span>
+              <span>
+                Title / slug
+                <span
+                  className="col-resize-handle"
+                  onPointerDown={(e) => startListResize(2, e)}
+                  onDoubleClick={() => resetListColumn(2)}
+                />
+              </span>
+              <span>
+                Location
+                <span
+                  className="col-resize-handle"
+                  onPointerDown={(e) => startListResize(3, e)}
+                  onDoubleClick={() => resetListColumn(3)}
+                />
+              </span>
+              <span>
+                Tags
+                <span
+                  className="col-resize-handle"
+                  onPointerDown={(e) => startListResize(4, e)}
+                  onDoubleClick={() => resetListColumn(4)}
+                />
+              </span>
+              <span style={{ textAlign: "right" }}>Status</span>
+            </div>
+            <div className="list-scroll">
+              {pageRows.length === 0 ? (
+                <div className="empty">
+                  No findings match.
+                  <div style={{ marginTop: 10 }}>
+                    <button type="button" className="qa-btn" onClick={clearAll}>
+                      Clear filters
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                pageRows.map((d) => (
+                  <FindingRow
+                    key={d.slug}
+                    d={d}
+                    selected={selected === d.slug}
+                    onClick={() => {
+                      setSelected(d.slug);
+                      lastFocusSlugRef.current = d.slug;
+                      setDetailOpen(true);
+                    }}
+                    freeTerms={parsedQuery.freeTerms}
+                    gridTemplate={listGridTemplate}
+                    registerRef={(slug, el) => {
+                      if (el) rowRefs.current.set(slug, el);
+                      else rowRefs.current.delete(slug);
+                    }}
+                  />
+                ))
+              )}
+            </div>
           </div>
           <div className="list-footer">
             <span>
@@ -1164,20 +1215,39 @@ export function FindingsTab({
             </div>
           </div>
         </section>
-
-        <Drawer
-          d={selectedDerived}
-          derivedBySlug={derivedBySlug}
-          chainsByKey={chainsByKey}
-          chainMembersByKey={chainMembersByKey}
-          transitions={transitions}
-          transitionsLoading={transitionsLoading}
-          transitionsError={transitionsError}
-          onSelect={setSelected}
-          maximized={maximized}
-          onToggleMaximize={() => setMaximized((m) => !m)}
-        />
       </div>
+
+      {detailOpen && selectedDerived && (
+        <DetailModal
+          onClose={() => {
+            setDetailOpen(false);
+            const el =
+              lastFocusSlugRef.current != null
+                ? rowRefs.current.get(lastFocusSlugRef.current)
+                : null;
+            queueMicrotask(() => el?.focus());
+          }}
+          titleId="findings-detail-modal-title"
+        >
+          <Drawer
+            d={selectedDerived}
+            derivedBySlug={derivedBySlug}
+            chainsByKey={chainsByKey}
+            chainMembersByKey={chainMembersByKey}
+            transitions={transitions}
+            transitionsLoading={transitionsLoading}
+            transitionsError={transitionsError}
+            onSelect={(slug) => {
+              // Cross-link selection (e.g. from LinksPane). Keep the
+              // modal open so the operator can navigate through related
+              // findings without re-clicking.
+              setSelected(slug);
+              if (slug) lastFocusSlugRef.current = slug;
+            }}
+            titleId="findings-detail-modal-title"
+          />
+        </DetailModal>
+      )}
 
       <div className="findings-shortcuts">
         <span>
@@ -1193,7 +1263,10 @@ export function FindingsTab({
           <code>[ / ]</code> prev / next
         </span>
         <span>
-          <code>Esc</code> close drawer
+          <code>Enter</code> open detail
+        </span>
+        <span>
+          <code>Esc</code> close detail
         </span>
       </div>
 
@@ -1202,7 +1275,9 @@ export function FindingsTab({
           derivedList={derivedList}
           onSelect={(slug) => {
             setSelected(slug);
+            lastFocusSlugRef.current = slug;
             setCmdOpen(false);
+            setDetailOpen(true);
           }}
           onClose={() => setCmdOpen(false)}
         />
@@ -1250,12 +1325,14 @@ function FindingRow({
   onClick,
   freeTerms,
   gridTemplate,
+  registerRef,
 }: {
   d: Derived;
   selected: boolean;
   onClick: () => void;
   freeTerms: string[];
   gridTemplate?: string;
+  registerRef?: (slug: string, el: HTMLButtonElement | null) => void;
 }) {
   const chainRefs = d.links.filter((l) => l.target_kind === "chain");
   const cveRefs = d.links.filter((l) => l.target_kind === "cve");
@@ -1267,7 +1344,8 @@ function FindingRow({
       className={`frow ${selected ? "is-selected" : ""} ${suppressed ? "is-suppressed" : ""}`}
       onClick={onClick}
       data-slug={d.slug}
-      style={gridTemplate ? { gridTemplateColumns: gridTemplate } : undefined}
+      ref={(el) => registerRef?.(d.slug, el)}
+      style={gridTemplate ? { gridTemplateColumns: gridTemplate, minWidth: "fit-content" } : { minWidth: "fit-content" }}
     >
       <span className={`frow-sevbar sevbar-${d.severity}`} />
       <span className={`frow-sev ${d.severity}`}>{d.severity}</span>
@@ -1316,7 +1394,7 @@ function FindingRow({
 // ── Drawer ────────────────────────────────────────────────────────────
 
 type DrawerProps = {
-  d: Derived | null;
+  d: Derived;
   derivedBySlug: Map<string, Derived>;
   chainsByKey: Map<string, AssessmentAttackChainDetail>;
   chainMembersByKey: Map<string, Derived[]>;
@@ -1324,8 +1402,7 @@ type DrawerProps = {
   transitionsLoading: boolean;
   transitionsError: string | null;
   onSelect: (slug: string | null) => void;
-  maximized: boolean;
-  onToggleMaximize: () => void;
+  titleId?: string;
 };
 
 type TabId = "overview" | "poc" | "code" | "links" | "history" | "intel";
@@ -1339,28 +1416,12 @@ function Drawer({
   transitionsLoading,
   transitionsError,
   onSelect,
-  maximized,
-  onToggleMaximize,
+  titleId,
 }: DrawerProps) {
   const [tab, setTab] = useState<TabId>("overview");
   useEffect(() => {
     setTab("overview");
   }, [d?.slug]);
-
-  if (!d) {
-    return (
-      <aside className="drawer-panel panel">
-        <div className="empty" style={{ padding: "60px 20px" }}>
-          <p style={{ fontSize: "0.9rem", margin: 0 }}>
-            Select a finding to see details.
-          </p>
-          <p style={{ fontSize: "0.78rem", color: "var(--muted)", marginTop: "10px" }}>
-            Tip: press <code>⌘K</code> or <code>/</code> to search.
-          </p>
-        </div>
-      </aside>
-    );
-  }
 
   const linkedFindings = d.links.filter((l) => l.target_kind === "finding");
   const linkedChains = d.links
@@ -1421,27 +1482,10 @@ function Drawer({
               <IconCopy />
             </button>
           </div>
-          <div className="drawer-nav">
-            {/*
-              Prev / next / close were removed: keyboard shortcuts
-              ( `[`, `]`, `Esc` ) already cover that and the three
-              buttons cluttered the hero. The maximize toggle expands
-              the drawer over the list panel; its close-maximize icon
-              only un-maximizes (it does NOT deselect the finding —
-              Esc still does that via the existing global handler).
-            */}
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={onToggleMaximize}
-              title={maximized ? "Restore drawer" : "Maximize drawer"}
-              aria-pressed={maximized}
-            >
-              {maximized ? <IconClose /> : <IconMaximize />}
-            </button>
-          </div>
+          {/* Maximize retired with the move to a centred modal. The
+              modal's own × close button handles dismissal. */}
         </div>
-        <h2 className="drawer-title">{d.title}</h2>
+        <h2 id={titleId} className="drawer-title">{d.title}</h2>
         <div className="hero-meta">
           <span className={`hero-sev ${d.severity}`}>
             <span className="sev-dot" style={{ background: sevDotColor(d.severity) }} />
@@ -1620,7 +1664,7 @@ function OverviewPane({ d }: { d: Derived }) {
       {d.notes && (
         <div className="section">
           <p className="section-title">Notes</p>
-          <pre className="pre">{d.notes}</pre>
+          <NotesBody text={d.notes} />
         </div>
       )}
       {additionalDetailKeys.length > 0 && (
@@ -1644,12 +1688,15 @@ function OverviewPane({ d }: { d: Derived }) {
 
 function PocPane({ d }: { d: Derived }) {
   const hasAny = d.evidence || d.poc_code || d.poc_request || d.poc_response;
+  const pocCodeIsCurl = isCurlLike(d.poc_code);
+  const reqText = d.poc_request ? formatHttp(d.poc_request, "req") : "";
+  const respText = d.poc_response ? formatHttp(d.poc_response, "resp") : "";
   return (
     <>
       {d.evidence && (
         <div className="section">
           <p className="section-title">Evidence</p>
-          <p>{d.evidence}</p>
+          <NotesBody text={d.evidence} />
         </div>
       )}
       {d.poc_code && (
@@ -1657,20 +1704,21 @@ function PocPane({ d }: { d: Derived }) {
           <p className="section-title">
             Payload
             {d.poc_language && <span className="count">{d.poc_language}</span>}
+            {pocCodeIsCurl && <span className="count">curl</span>}
           </p>
-          <pre className="pre">{d.poc_code}</pre>
+          <CodeBlock text={d.poc_code} />
         </div>
       )}
-      {d.poc_request && (
+      {reqText && (
         <div className="section">
           <p className="section-title">Request</p>
-          <pre className="pre req">{formatHttp(d.poc_request, "req")}</pre>
+          <pre className="pre req">{reqText}</pre>
         </div>
       )}
-      {d.poc_response && (
+      {respText && (
         <div className="section">
           <p className="section-title">Response</p>
-          <pre className="pre resp">{formatHttp(d.poc_response, "resp")}</pre>
+          <pre className="pre resp">{respText}</pre>
         </div>
       )}
       {!hasAny && (
@@ -2003,14 +2051,12 @@ function IntelPane({ d }: { d: Derived }) {
       {hasProvenance && prov && (
         <div className="section">
           <p className="section-title">Provenance</p>
-          <div className="kv-grid">
-            <KV k="Agent" v={prov.agent_name} mono />
-            <KV k="Captured" v={prov.captured_at} mono />
-            <KV k="Artifact" v={prov.artifact_ref} mono />
-          </div>
-          {prov.evidence_quote && (
-            <pre className="pre">&ldquo;{prov.evidence_quote}&rdquo;</pre>
-          )}
+          <ProvenanceBlock
+            agent={prov.agent_name}
+            captured={prov.captured_at}
+            artifactRef={prov.artifact_ref}
+            evidenceQuote={prov.evidence_quote}
+          />
         </div>
       )}
       {refs.length === 0 && !hasProvenance && (
