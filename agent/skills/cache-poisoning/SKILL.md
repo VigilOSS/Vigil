@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # Cache Poisoning Testing
 
+> **Kali MCP audit header:** use `X-Technique: OTHER` (cache poisoning spans web-cache-deception, CPDoS, and unkeyed-header abuse — no dedicated enum class). Switch to `REQUEST-SMUGGLING` when the poisoning rides on a smuggled request.
+
 ## When to Activate
 
 - Target sits behind a CDN, reverse proxy, or caching layer (Cloudflare, Akamai, Varnish, Nginx, Fastly)

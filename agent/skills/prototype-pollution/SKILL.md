@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # Prototype Pollution Testing
 
+> **Kali MCP audit header:** use `X-Technique: OTHER` (prototype pollution is a primitive with variable outcomes). Switch to `XSS` or `RCE` when the pollution produces that specifically.
+
 ## When to Activate
 
 - JavaScript/Node.js application accepts JSON input that may flow through deep merge or recursive assignment

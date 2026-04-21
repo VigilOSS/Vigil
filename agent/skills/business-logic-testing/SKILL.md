@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # Business Logic Testing
 
+> **Kali MCP audit header:** use `X-Technique: OTHER` (business-logic flaws are workflow abuse, not a vuln class in the technique taxonomy).
+
 ## When to Activate
 
 - Application has multi-step workflows (checkout, registration, KYC, approval)

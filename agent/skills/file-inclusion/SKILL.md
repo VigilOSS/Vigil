@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # File Inclusion Testing
 
+> **Kali MCP audit header:** use `X-Technique: LFI` for local-file inclusion (`/etc/passwd`, PHP filter wrappers, log poisoning). Switch to `RFI` when the payload fetches a remote URL the server loads.
+
 ## When to Activate
 
 - Parameter references file paths: `page=`, `file=`, `template=`, `include=`, `path=`, `doc=`, `lang=`

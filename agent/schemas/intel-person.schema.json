@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-research.local/schemas/intel-person.schema.json",
+  "$comment": "Mirrors app.api.intel_schemas.PersonRecordRequest.",
+  "title": "Intel Person Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Full name of the individual."
+    },
+    "role": {
+      "type": "string",
+      "maxLength": 256,
+      "default": "",
+      "description": "Job title or organizational role."
+    },
+    "organization": {
+      "type": "string",
+      "maxLength": 256,
+      "default": "",
+      "description": "Employer or affiliation."
+    },
+    "email": {
+      "type": "string",
+      "maxLength": 320,
+      "default": "",
+      "description": "Primary email address if known. Additional emails go in intel_emails."
+    },
+    "source_name": {
+      "type": "string",
+      "maxLength": 128,
+      "default": ""
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 4096,
+      "default": ""
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "agent_name": { "type": "string" },
+        "artifact_ref": { "type": "string" },
+        "captured_at": { "type": "string" },
+        "evidence_quote": { "type": "string" }
+      }
+    }
+  }
+}

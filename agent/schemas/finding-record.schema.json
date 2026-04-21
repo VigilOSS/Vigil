@@ -169,9 +169,17 @@
           "maximum": 5,
           "description": "Verification check number responsible for the false-positive verdict"
         },
+        "entry_point": {
+          "type": "string",
+          "description": "Source of attacker-controlled data (for example, function name, HTTP parameter, file read site)"
+        },
+        "sink": {
+          "type": "string",
+          "description": "Dangerous operation receiving tainted data (for example, memcpy call, SQL query, exec invocation)"
+        },
         "taint_path": {
           "type": "string",
-          "description": "Ordered attacker-controlled data flow from entry point to sink"
+          "description": "Ordered attacker-controlled data flow from entry point to sink (narrative form)"
         },
         "guards_evaluated": {
           "type": "string",
@@ -203,6 +211,71 @@
           },
           "description": "Ordered reproduction steps, one string per step"
         },
+        "poc_code": {
+          "type": "string",
+          "description": "Proof-of-concept exploit code or script that demonstrates the vulnerability"
+        },
+        "poc_request": {
+          "type": "object",
+          "description": "Structured HTTP request that triggers the vulnerability",
+          "properties": {
+            "method": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "body": {
+              "type": "string"
+            }
+          }
+        },
+        "poc_response": {
+          "type": "object",
+          "description": "Observed HTTP response confirming the vulnerability",
+          "properties": {
+            "status": {
+              "type": "integer"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "body_excerpt": {
+              "type": "string"
+            }
+          }
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "External references such as CVE IDs, advisory URLs, or related documentation links"
+        },
+        "chain_required": {
+          "type": "boolean",
+          "description": "Whether this finding remains actionable only as part of a larger exploit chain"
+        },
+        "chain_rationale": {
+          "type": "string",
+          "description": "Why the finding matters primarily as a chain step instead of a standalone report item"
+        },
+        "required_followup": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Concrete follow-up steps needed to validate or complete the chain"
+        },
         "variant_of": {
           "type": "string",
           "description": "Finding slug of the original finding when this record is a verified variant"
@@ -224,7 +297,7 @@
         },
         "artifact": {
           "type": "string",
-          "description": "Artifact path where this finding is synchronized (for example, findings.md)"
+          "description": "Optional artifact reference associated with the finding provenance"
         }
       }
     },
@@ -342,17 +415,35 @@
           "Send GET /search?q=test'+AND+1=1--+-",
           "Observe normal search results returned"
         ],
-        "discovered_by": "code-vuln-hunter"
+        "poc_request": {
+          "method": "GET",
+          "url": "https://target.example/search?q=test'+AND+1=1--+-",
+          "headers": {
+            "Accept": "text/html"
+          },
+          "body": ""
+        },
+        "poc_response": {
+          "status": 200,
+          "headers": {
+            "Content-Type": "text/html"
+          },
+          "body_excerpt": "<div class='results'>3 items found</div>"
+        },
+        "chain_required": false,
+        "references": [
+          "https://cwe.mitre.org/data/definitions/89.html"
+        ],
+        "discovered_by": "vulnerability-analyst"
       },
       "workflow_status": "active",
       "verification_state": "unreviewed",
       "verification_disposition": "none",
       "root_cause_key": "",
       "auth_context": "anonymous",
-      "source_name": "code-vuln-hunter",
+      "source_name": "vulnerability-analyst",
       "provenance": {
-        "agent_name": "code-vuln-hunter",
-        "artifact": "findings.md"
+        "agent_name": "vulnerability-analyst"
       },
       "links": []
     },
@@ -366,10 +457,21 @@
         "cwe_id": "CWE-122",
         "impact": "Remote code execution via heap corruption",
         "evidence": "memcpy(buf, scheme, schemelen) copies attacker-controlled bytes without a bounds check",
+        "entry_point": "curl_url_set(CURLURLPART_URL, attacker_url)",
+        "sink": "memcpy(buf, scheme, schemelen) at lib/urlapi.c:342",
         "taint_path": "curl_url_set(CURLURLPART_URL, attacker_url) -> parseurl() -> memcpy(buf, scheme, schemelen)",
         "guards_evaluated": "No bounds check on schemelen before memcpy",
         "slot_type": "URL-COMPONENT",
-        "discovered_by": "code-vuln-hunter"
+        "chain_required": true,
+        "chain_rationale": "The primitive is meaningful for exploitation, but final report impact depends on chaining it to a reachable crash or controlled allocation path.",
+        "required_followup": [
+          "Exercise the URL parser through a network-reachable caller",
+          "Confirm whether the overflow produces controlled corruption under sanitizer instrumentation"
+        ],
+        "references": [
+          "https://cwe.mitre.org/data/definitions/122.html"
+        ],
+        "discovered_by": "vulnerability-analyst"
       },
       "workflow_status": "active",
       "verification_state": "unreviewed",
@@ -378,10 +480,9 @@
       "auth_context": "anonymous",
       "evidence_ref": "",
       "notes": "",
-      "source_name": "code-vuln-hunter",
+      "source_name": "vulnerability-analyst",
       "provenance": {
-        "agent_name": "code-vuln-hunter",
-        "artifact": "findings.md"
+        "agent_name": "vulnerability-analyst"
       },
       "links": []
     }

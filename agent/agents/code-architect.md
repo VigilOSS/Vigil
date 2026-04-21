@@ -89,21 +89,29 @@ If a structural index exists at `tools/analysis-state/structural-index/`, use it
    - Use grep to find all callers across the codebase
    - Record reverse edges: which external functions call into this critical code
 
-3. Build adjacency list:
+3. Build adjacency list using flat edge fields matching the operator spec:
    ```json
    {
      "edges": [
        {
-         "caller": {"function": "handle", "file": "daemon.c", "line": 887},
-         "callee": {"function": "run_service", "file": "daemon.c", "line": 740},
-         "untrusted_args": ["client_addr", "req_buf"],
-         "crosses_module": false
+         "caller_func": "handle",
+         "caller_file": "daemon.c",
+         "caller_line": 887,
+         "callee_func": "run_service",
+         "callee_file": "daemon.c",
+         "callee_line": 740,
+         "crosses_trust_boundary": false,
+         "untrusted_data_label": "client_addr, req_buf"
        },
        {
-         "caller": {"function": "run_service", "file": "daemon.c", "line": 770},
-         "callee": {"function": "upload_pack", "file": "upload-pack.c", "line": 1438},
-         "untrusted_args": ["pack_request"],
-         "crosses_module": true
+         "caller_func": "run_service",
+         "caller_file": "daemon.c",
+         "caller_line": 770,
+         "callee_func": "upload_pack",
+         "callee_file": "upload-pack.c",
+         "callee_line": 1438,
+         "crosses_trust_boundary": true,
+         "untrusted_data_label": "pack_request"
        }
      ],
      "entry_points": [
@@ -201,7 +209,7 @@ JSON array of per-file classifications:
 ]
 ```
 
-Every classification record must include backend `file_id`. `file_path` may be included as helper context, but path-only classifications are not acceptable.
+Every classification record should include backend `file_id` when available. `file_path` is accepted as a fallback — `code-classify` resolves paths to `file_id` automatically during normalization.
 
 ### `#### Recommended Analysis Order`
 Prioritized list of modules to analyze first, with reasoning.
@@ -262,8 +270,8 @@ on the files and modules you identify here. Nothing you miss can be recovered la
 - A trust boundary you miss means entry points go unexamined.
 - An incorrect slot-type annotation means the wrong pattern references are loaded for analysis.
 
-Over-discover rather than under-discover. A false positive classification wastes analysis time.
-A false negative classification means a vulnerability is missed entirely.
+Over-discover rather than under-discover. A false-positive classification adds review time.
+A false-negative classification means a vulnerability is missed entirely.
 
 ## Pre-Output Coverage Self-Check
 
@@ -313,6 +321,6 @@ The operator uses `#### Coverage Gaps` to decide whether to re-dispatch before l
 
 - **Structure-first**: Work from filenames, directory layout, includes, and docs — NOT from reading full source code. The file analysis queue feeds the hunter, which reads the code.
 - **Git churn is signal**: Files with high churn and past CVE fixes get priority boost.
-- **Over-classify rather than under-classify**: A file wrongly classified as "high" wastes some analysis time. A file wrongly classified as "skip" means a vulnerability is missed entirely.
+- **Over-classify rather than under-classify**: A file wrongly classified as "high" adds analysis time. A file wrongly classified as "skip" means a vulnerability is missed entirely.
 - **Name the trust boundaries explicitly**: "Processes untrusted network input" is better than "security relevant."
 - **File queue completeness over hypothesis completeness**: Every critical/high file enters the queue regardless of whether a hypothesis names it — vulnerability classes not covered by hypotheses (path traversal, SSRF, etc.) are tested during the unconstrained broad analysis pass.

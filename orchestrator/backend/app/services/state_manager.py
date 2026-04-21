@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import sqlite3
+import uuid
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -10,6 +15,7 @@ from fastapi import HTTPException, status
 
 from ..db import get_connection
 from .events import _engagement_or_404
+from .search import fts_escape as _fts_escape_shared
 
 SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 WORKFLOW_STATUSES = {"draft", "active", "blocked", "exploited", "false_positive", "merged", "reported"}
@@ -2083,14 +2089,75 @@ def list_findings(engagement_id: int) -> list[dict[str, Any]]:
     return [_serialize_finding_record(row) for row in rows]
 
 
-def list_report_findings(engagement_id: int) -> list[dict[str, Any]]:
-    """Return findings formatted for report generation.
+def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM assessment_findings
+            WHERE engagement_id = ?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (engagement.id,),
+        ).fetchall()
 
-    Excludes merged and false-positive findings, orders by severity (critical
-    first), and extracts CVSS/remediation/steps_to_reproduce from the
-    ``details_json`` blob so the report-writer has structured fields without
-    manual JSON parsing.
-    """
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        record = _serialize_finding_record(row)
+        workflow_status = record.get("workflow_status", "draft")
+        if workflow_status in {"merged", "false_positive", "reported", "exploited"}:
+            continue
+        if record.get("verification_state") != "verified":
+            continue
+        if record.get("verification_disposition") not in {"confirmed", "downgraded"}:
+            continue
+        details = _json_object(record.get("details_json", "{}"))
+        severity = _normalize_severity(str(record.get("severity", "info")))
+        chain_required = details.get("chain_required") is True
+        if SEVERITY_RANK[severity] < SEVERITY_RANK["medium"] and not chain_required:
+            continue
+        if chain_required and SEVERITY_RANK[severity] < SEVERITY_RANK["medium"]:
+            candidate_reason = "verified_chain_required"
+        else:
+            candidate_reason = f"verified_{severity}"
+        record["candidate_reason"] = candidate_reason
+        record["chain_required"] = chain_required
+        candidates.append(record)
+
+    return sorted(
+        candidates,
+        key=lambda row: (
+            {
+                "verified_critical": 0,
+                "verified_high": 1,
+                "verified_medium": 2,
+                "verified_chain_required": 3,
+            }.get(str(row.get("candidate_reason", "")), 99),
+            str(row.get("slug", "")),
+        ),
+    )
+
+
+def coverage_readiness(engagement_id: int) -> dict[str, Any]:
+    surfaces = list_surfaces(engagement_id)
+    unresolved = [row for row in surfaces if row.get("status") == "discovered"]
+    high_risk_deferred = [
+        row
+        for row in surfaces
+        if row.get("status") == "deferred"
+        and row.get("surface_type") in {"account_recovery", "dynamic_render", "object_reference", "privileged_write"}
+    ]
+    blocker_count = len(unresolved) + len(high_risk_deferred)
+    return {
+        "ready": blocker_count == 0,
+        "blocker_count": blocker_count,
+        "unresolved_surfaces": unresolved,
+        "high_risk_deferred_surfaces": high_risk_deferred,
+    }
+
+
+def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         rows = connection.execute(
@@ -2099,33 +2166,138 @@ def list_report_findings(engagement_id: int) -> list[dict[str, Any]]:
             FROM assessment_findings
             WHERE engagement_id = ?
               AND status NOT IN ('merged', 'false_positive')
-              AND verification_state != 'disputed'
-            ORDER BY
-                CASE severity
-                    WHEN 'critical' THEN 0
-                    WHEN 'high' THEN 1
-                    WHEN 'medium' THEN 2
-                    WHEN 'low' THEN 3
-                    WHEN 'info' THEN 4
-                    ELSE 5
-                END,
-                CASE status
-                    WHEN 'exploited' THEN 0
-                    WHEN 'active' THEN 1
-                    WHEN 'reported' THEN 2
-                    WHEN 'blocked' THEN 3
-                    WHEN 'draft' THEN 4
-                    ELSE 5
-                END,
-                updated_at DESC,
-                id DESC
+            ORDER BY updated_at DESC, id DESC
             """,
             (engagement.id,),
         ).fetchall()
+    return [_serialize_finding_record(row) for row in rows]
+
+
+def report_readiness(engagement_id: int) -> dict[str, Any]:
+    coverage = coverage_readiness(engagement_id)
+    blockers: list[dict[str, Any]] = []
+    if not coverage["ready"]:
+        blockers.append(
+            {
+                "kind": "coverage",
+                "detail": "Coverage blockers remain",
+                "blocker_count": coverage["blocker_count"],
+            }
+        )
+
+    reportable_statuses = {"active", "blocked", "exploited", "reported"}
+    candidates = [
+        row
+        for row in _report_candidate_records(engagement_id)
+        if row.get("workflow_status") in reportable_statuses
+    ]
+
+    for row in candidates:
+        if row.get("verification_state") != "verified":
+            blockers.append(
+                {
+                    "kind": "finding_verification_state",
+                    "slug": row.get("slug", ""),
+                    "title": row.get("title", ""),
+                    "detail": f"verification_state={row.get('verification_state', 'unknown')}",
+                }
+            )
+            continue
+        if row.get("verification_disposition") not in {"confirmed", "downgraded"}:
+            blockers.append(
+                {
+                    "kind": "finding_verification_disposition",
+                    "slug": row.get("slug", ""),
+                    "title": row.get("title", ""),
+                    "detail": f"verification_disposition={row.get('verification_disposition', 'unknown')}",
+                }
+            )
+
+    duplicate_groups: dict[tuple[str, str], list[str]] = {}
+    root_cause_groups: dict[str, list[str]] = {}
+    for row in candidates:
+        slug = str(row.get("slug", ""))
+        root_cause_key = str(row.get("root_cause_key", "") or "").strip()
+        if root_cause_key:
+            root_cause_groups.setdefault(root_cause_key, []).append(slug)
+        location = str(row.get("canonical_location", "") or "").strip()
+        defect_family = str(row.get("defect_family", "") or "").strip()
+        if location and defect_family:
+            duplicate_groups.setdefault((location, defect_family), []).append(slug)
+
+    for root_cause_key, slugs in root_cause_groups.items():
+        if len(slugs) > 1:
+            blockers.append(
+                {
+                    "kind": "duplicate_root_cause",
+                    "slugs": sorted(slugs),
+                    "detail": f"root_cause_key={root_cause_key}",
+                }
+            )
+    for (location, defect_family), slugs in duplicate_groups.items():
+        if len(slugs) > 1:
+            blockers.append(
+                {
+                    "kind": "duplicate_location_family",
+                    "slugs": sorted(slugs),
+                    "detail": f"{defect_family} @ {location}",
+                }
+            )
+
+    return {
+        "ready": len(blockers) == 0,
+        "blocker_count": len(blockers),
+        "blockers": blockers,
+        "coverage": coverage,
+    }
+
+
+def list_report_findings(engagement_id: int, *, mode: str = "draft") -> list[dict[str, Any]]:
+    """Return findings formatted for report generation.
+
+    Excludes merged and false-positive findings, orders by severity (critical
+    first), and extracts structured fields from the ``details_json`` blob so
+    the report-writer has them at the top level without manual JSON parsing:
+    CVSS, remediation, steps_to_reproduce, CWE, OWASP, impact, evidence,
+    entry_point, sink, poc_code, poc_request, poc_response, and references.
+    """
+    rows = _report_candidate_records(engagement_id)
+    if mode == "draft":
+        rows = [row for row in rows if row.get("verification_state") != "disputed"]
+    elif mode == "final":
+        rows = [
+            row
+            for row in rows
+            if row.get("workflow_status") in {"active", "blocked", "exploited", "reported"}
+            and row.get("verification_state") == "verified"
+            and row.get("verification_disposition") in {"confirmed", "downgraded"}
+        ]
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"unsupported report mode: {mode}")
+
+    rows.sort(
+        key=lambda row: (
+            {
+                "critical": 0,
+                "high": 1,
+                "medium": 2,
+                "low": 3,
+                "info": 4,
+            }.get(str(row.get("severity", "")), 5),
+            {
+                "exploited": 0,
+                "active": 1,
+                "reported": 2,
+                "blocked": 3,
+                "draft": 4,
+            }.get(str(row.get("workflow_status", "")), 5),
+            -int(row.get("id", 0)),
+        )
+    )
 
     results: list[dict[str, Any]] = []
     for idx, row in enumerate(rows, start=1):
-        record = _serialize_finding_record(row)
+        record = dict(row)
         details = _json_object(record.get("details_json", "{}"))
         record["report_id"] = f"FINDING-{idx:03d}"
         record["cvss_vector"] = details.get("cvss_vector", "")
@@ -2136,6 +2308,15 @@ def list_report_findings(engagement_id: int) -> list[dict[str, Any]]:
         record["owasp_category"] = details.get("owasp_category", "")
         record["impact"] = details.get("impact", record.get("summary", ""))
         record["evidence_detail"] = details.get("evidence", "")
+        record["entry_point"] = details.get("entry_point", "")
+        record["sink"] = details.get("sink", "")
+        record["poc_code"] = details.get("poc_code", "")
+        raw_req = details.get("poc_request")
+        record["poc_request"] = raw_req if isinstance(raw_req, dict) else None
+        raw_resp = details.get("poc_response")
+        record["poc_response"] = raw_resp if isinstance(raw_resp, dict) else None
+        raw_refs = details.get("references", [])
+        record["references"] = raw_refs if isinstance(raw_refs, list) else []
         results.append(record)
 
     return results
@@ -2661,6 +2842,9 @@ def update_coverage_item_status(
 
 def assessment_summary(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    exploit_candidate_count = len(list_exploit_candidates(engagement.id))
+    coverage_gate = coverage_readiness(engagement.id)
+    report_gate = report_readiness(engagement.id)
     with get_connection() as connection:
         target_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_targets WHERE engagement_id = ?", (engagement.id,))
         service_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_services WHERE engagement_id = ?", (engagement.id,))
@@ -2814,6 +2998,9 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
         "tunnel_count": tunnel_count,
         "blocked_technique_count": blocked_technique_count,
         "attack_chain_count": chain_count,
+        "exploit_candidate_count": exploit_candidate_count,
+        "coverage_blocker_count": int(coverage_gate["blocker_count"]),
+        "report_blocker_count": int(report_gate["blocker_count"]),
         "coverage_statuses": {row["status"]: int(row["total"]) for row in coverage_rows},
         "finding_workflow_statuses": {row["status"]: int(row["total"]) for row in finding_rows},
         "finding_verification_states": {row["verification_state"]: int(row["total"]) for row in verification_state_rows},
@@ -2827,3 +3014,558 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
         "attack_chains": [dict(row) for row in attack_chains],
         "service_coverage_gaps": [dict(row) for row in service_coverage_gaps],
     }
+
+
+# ── Command-run audit ───────────────────────────────────────────────
+
+_DEFAULT_PREVIEW_BYTES = 65_536
+_DEFAULT_RETENTION_CONFIG = Path(__file__).resolve().parents[1] / "config" / "command_run_retention.json"
+_RUN_UUID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_ARTIFACT_LABEL_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+
+@lru_cache(maxsize=1)
+def _retention_config() -> dict[str, Any]:
+    override = os.environ.get("COMMAND_RUN_RETENTION_CONFIG")
+    path = Path(override) if override else _DEFAULT_RETENTION_CONFIG
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return {"preview_bytes": _DEFAULT_PREVIEW_BYTES, "suppress_patterns": []}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"preview_bytes": _DEFAULT_PREVIEW_BYTES, "suppress_patterns": []}
+    try:
+        preview = int(data.get("preview_bytes") or _DEFAULT_PREVIEW_BYTES)
+    except (TypeError, ValueError):
+        preview = _DEFAULT_PREVIEW_BYTES
+    if preview <= 0:
+        preview = _DEFAULT_PREVIEW_BYTES
+    patterns: list[dict[str, Any]] = []
+    for entry in data.get("suppress_patterns") or []:
+        if not isinstance(entry, dict):
+            continue
+        regex_src = entry.get("command_regex", "")
+        if not regex_src:
+            continue
+        try:
+            compiled = re.compile(regex_src)
+        except re.error:
+            continue
+        patterns.append(
+            {
+                "tool_name": entry.get("tool_name", "*"),
+                "reason": entry.get("reason", "suppressed"),
+                "regex": compiled,
+            }
+        )
+    return {"preview_bytes": preview, "suppress_patterns": patterns}
+
+
+def _match_suppress_rule(command: str, tool_name: str) -> dict[str, Any] | None:
+    config = _retention_config()
+    for rule in config["suppress_patterns"]:
+        if rule["tool_name"] not in ("*", tool_name):
+            continue
+        if rule["regex"].search(command):
+            return rule
+    return None
+
+
+def _apply_output_retention(
+    stream_bytes: bytes,
+    *,
+    suppression_reason: str,
+    preview_bytes: int,
+    artifact_writer,
+    artifact_label: str,
+) -> dict[str, Any]:
+    size = len(stream_bytes)
+    sha = hashlib.sha256(stream_bytes).hexdigest() if size else ""
+    result: dict[str, Any] = {
+        "sha256": sha,
+        "bytes": size,
+        "preview": "",
+        "suppression_reason": "",
+        "artifact_ref": "",
+        "status": "empty",
+    }
+    if size == 0:
+        return result
+    if suppression_reason:
+        result["suppression_reason"] = suppression_reason
+        result["status"] = "suppressed"
+        return result
+    if size <= preview_bytes:
+        result["preview"] = stream_bytes.decode("utf-8", errors="replace")
+        result["status"] = "retained"
+        return result
+    # large — store preview + full artifact
+    result["preview"] = stream_bytes[:preview_bytes].decode("utf-8", errors="replace")
+    artifact_ref = artifact_writer(artifact_label, stream_bytes)
+    result["artifact_ref"] = artifact_ref
+    result["status"] = "artifact"
+    return result
+
+
+def _write_command_run_artifact(
+    engagement_artifact_dir: str | None,
+    run_uuid: str,
+) -> Any:
+    """Return a closure(label, bytes) → artifact_ref. Empty string when
+    disabled. ``engagement_artifact_dir`` is the exact directory files
+    land in — callers and the resolver are responsible for any subdir
+    conventions (e.g. ``<root>/scans/command-runs/``)."""
+
+    if not engagement_artifact_dir:
+
+        def _noop(_label: str, _data: bytes) -> str:
+            return ""
+
+        return _noop
+
+    base = Path(engagement_artifact_dir).expanduser().resolve()
+
+    def _write(label: str, data: bytes) -> str:
+        if not _ARTIFACT_LABEL_RE.fullmatch(label):
+            raise RuntimeError(f"invalid command-run artifact label: {label}")
+        base.mkdir(parents=True, exist_ok=True)
+        target = (base / f"{run_uuid}.{label}.log").resolve()
+        if target.parent != base:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="command-run artifact path escaped its base directory",
+            )
+        try:
+            with target.open("xb") as handle:
+                handle.write(data)
+        except FileExistsError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="command-run artifact already exists for run_uuid",
+            ) from exc
+        return str(target)
+
+    return _write
+
+
+def _ensure_command_run_uuid_available(run_uuid: str) -> None:
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT id FROM assessment_command_runs WHERE run_uuid = ?",
+            (run_uuid,),
+        ).fetchone()
+    if row:
+        _raise_duplicate_command_run_uuid()
+
+
+def _raise_duplicate_command_run_uuid() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="command-run run_uuid already exists",
+    )
+
+
+def _remove_written_command_run_artifacts(*artifact_refs: str) -> None:
+    for artifact_ref in artifact_refs:
+        if not artifact_ref:
+            continue
+        try:
+            Path(artifact_ref).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _normalize_run_uuid(value: str) -> str:
+    run_uuid = str(value or "").strip()
+    if not _RUN_UUID_RE.fullmatch(run_uuid):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="run_uuid must contain only letters, numbers, underscores, or hyphens",
+        )
+    return run_uuid
+
+
+def _derive_tool_bin(command: str, argv: list[str] | None) -> str:
+    """Return the first executable token of the command. The route-derived
+    ``tool_name`` collapses every /api/command call to ``command``; tool_bin
+    is the discriminator (cat vs curl vs sqlmap) that operator filtering
+    actually needs."""
+    if argv:
+        first = (argv[0] or "").strip()
+        if first:
+            return Path(first).name
+    text = (command or "").strip()
+    if not text:
+        return ""
+    # Strip leading env assignments (``FOO=bar BAR=baz cmd ...``) and pick
+    # the first bare token. Not a full shell parse, but correct for the
+    # 95% case in practice.
+    for token in text.split():
+        if "=" in token and token.split("=", 1)[0].replace("_", "").isalnum():
+            continue
+        bare = Path(token).name.split(";")[0].split("|")[0].strip()
+        return bare or token
+    return text.split()[0]
+
+
+def _resolve_artifact_dir(engagement, override: str | None) -> str | None:
+    root = getattr(engagement, "engagement_root", "") or ""
+    if not root:
+        return None
+    engagement_root = Path(root).expanduser().resolve()
+    if override:
+        candidate = Path(override).expanduser().resolve()
+        try:
+            candidate.relative_to(engagement_root)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="engagement_artifact_dir must be inside the engagement root",
+            ) from exc
+        if candidate == engagement_root:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="engagement_artifact_dir must be an engagement-root subdirectory",
+            )
+        return str(candidate)
+    return str(engagement_root / "scans" / "command-runs")
+
+
+def record_command_run(
+    engagement_id: int,
+    *,
+    command: str,
+    argv: list[str] | None = None,
+    tool_name: str,
+    route: str = "",
+    agent_name: str,
+    phase: str,
+    return_code: int | None = None,
+    timed_out: bool = False,
+    success: bool | None = None,
+    started_at: str,
+    completed_at: str,
+    duration_ms: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+    command_hash: str = "",
+    stdout_sha256: str = "",
+    stderr_sha256: str = "",
+    notes: str = "",
+    engagement_artifact_dir: str | None = None,
+    run_uuid: str | None = None,
+    audit_source: str = "header",
+    technique: str | None = None,
+    intent: str | None = None,
+    probe_kind: str | None = None,
+    destructive: bool | int | None = None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+
+    run_uuid = _normalize_run_uuid(run_uuid or uuid.uuid4().hex)
+    _ensure_command_run_uuid_available(run_uuid)
+    command_hash = command_hash or hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()
+    tool_bin = _derive_tool_bin(command, argv)
+
+    effective_success = bool(success) if success is not None else (return_code == 0 and not timed_out)
+
+    config = _retention_config()
+    preview_bytes = int(config["preview_bytes"])
+
+    suppress_rule = _match_suppress_rule(command, tool_name)
+    suppress_reason = suppress_rule["reason"] if suppress_rule else ""
+
+    effective_artifact_dir = _resolve_artifact_dir(engagement, engagement_artifact_dir)
+    artifact_writer = _write_command_run_artifact(effective_artifact_dir, run_uuid)
+
+    stdout_raw = stdout.encode("utf-8", errors="replace") if isinstance(stdout, str) else bytes(stdout or b"")
+    stderr_raw = stderr.encode("utf-8", errors="replace") if isinstance(stderr, str) else bytes(stderr or b"")
+
+    stdout_retention = _apply_output_retention(
+        stdout_raw,
+        suppression_reason=suppress_reason,
+        preview_bytes=preview_bytes,
+        artifact_writer=artifact_writer,
+        artifact_label="stdout",
+    )
+    stderr_retention = _apply_output_retention(
+        stderr_raw,
+        suppression_reason=suppress_reason,
+        preview_bytes=preview_bytes,
+        artifact_writer=artifact_writer,
+        artifact_label="stderr",
+    )
+
+    stdout_sha256 = stdout_sha256 or stdout_retention["sha256"]
+    stderr_sha256 = stderr_sha256 or stderr_retention["sha256"]
+
+    # Row-level retention status rolls up stream statuses.
+    statuses = {stdout_retention["status"], stderr_retention["status"]}
+    if "artifact" in statuses:
+        row_status = "artifact"
+    elif "suppressed" in statuses and "retained" not in statuses:
+        row_status = "suppressed"
+    elif "retained" in statuses:
+        row_status = "retained"
+    else:
+        row_status = "empty"
+
+    # Normalise the four command-metadata fields. Validation is intentionally
+    # soft — the API/runtime layer follows the `audit_source` precedent and
+    # stores values verbatim so we can add new technique/probe_kind values
+    # without a backend redeploy. We only trim/coerce shape here.
+    technique_value: str | None
+    if technique is None:
+        technique_value = None
+    else:
+        technique_stripped = str(technique).strip()
+        technique_value = technique_stripped or None
+
+    intent_value: str | None
+    if intent is None:
+        intent_value = None
+    else:
+        intent_stripped = str(intent).strip()
+        # Trim to 200 chars server-side — the contract in the plan. The API
+        # layer does not enforce max_length because this is the single
+        # authoritative trim point.
+        intent_value = intent_stripped[:200] or None
+
+    probe_kind_value: str | None
+    if probe_kind is None:
+        probe_kind_value = None
+    else:
+        probe_kind_stripped = str(probe_kind).strip()
+        probe_kind_value = probe_kind_stripped or None
+
+    destructive_value: int | None
+    if destructive is None:
+        destructive_value = None
+    else:
+        destructive_value = 1 if bool(destructive) else 0
+
+    with get_connection() as connection:
+        try:
+            cursor = connection.execute(
+                """
+                INSERT INTO assessment_command_runs (
+                    engagement_id, run_uuid, command, argv_json, tool_name, tool_bin, route,
+                    agent_name, phase, audit_source,
+                    return_code, timed_out, success,
+                    started_at, completed_at, duration_ms,
+                    command_hash, stdout_sha256, stderr_sha256,
+                    stdout_preview, stderr_preview, output_retention_status,
+                    stdout_suppression_reason, stderr_suppression_reason,
+                    stdout_artifact_ref, stderr_artifact_ref,
+                    stdout_bytes, stderr_bytes, notes,
+                    technique, intent, probe_kind, destructive
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?,
+                    ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?, ?
+                )
+                """,
+                (
+                    engagement.id,
+                    run_uuid,
+                    command,
+                    json.dumps(list(argv) if argv else [], ensure_ascii=False),
+                    tool_name,
+                    tool_bin,
+                    route,
+                    agent_name,
+                    phase,
+                    audit_source or "header",
+                    return_code,
+                    1 if timed_out else 0,
+                    1 if effective_success else 0,
+                    started_at,
+                    completed_at,
+                    int(duration_ms or 0),
+                    command_hash,
+                    stdout_sha256,
+                    stderr_sha256,
+                    stdout_retention["preview"],
+                    stderr_retention["preview"],
+                    row_status,
+                    stdout_retention["suppression_reason"],
+                    stderr_retention["suppression_reason"],
+                    stdout_retention["artifact_ref"],
+                    stderr_retention["artifact_ref"],
+                    stdout_retention["bytes"],
+                    stderr_retention["bytes"],
+                    notes,
+                    technique_value,
+                    intent_value,
+                    probe_kind_value,
+                    destructive_value,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            if "run_uuid" in str(exc):
+                _remove_written_command_run_artifacts(
+                    str(stdout_retention["artifact_ref"] or ""),
+                    str(stderr_retention["artifact_ref"] or ""),
+                )
+                _raise_duplicate_command_run_uuid()
+            raise
+        row = connection.execute(
+            "SELECT * FROM assessment_command_runs WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        assert row is not None
+        return _serialize_command_run(row, include_output=True)
+
+
+def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["argv"] = json.loads(data.pop("argv_json", None) or "[]")
+    except json.JSONDecodeError:
+        data["argv"] = []
+    data["timed_out"] = bool(data.get("timed_out"))
+    data["success"] = bool(data.get("success"))
+    # Command-metadata fields — surfaced explicitly so callers don't rely on
+    # sqlite3.Row dict coercion to include them. Default to None so rows
+    # written before this migration (where dict(row) simply won't have the
+    # key if the schema matched pre-ALTER) still serialize with a null
+    # present. `destructive` is stored as 0/1 INTEGER; coerce back to a
+    # Python bool for API consumers, preserving NULL.
+    data["technique"] = data.get("technique")
+    data["intent"] = data.get("intent")
+    data["probe_kind"] = data.get("probe_kind")
+    destructive_raw = data.get("destructive")
+    if destructive_raw is None:
+        data["destructive"] = None
+    else:
+        data["destructive"] = bool(destructive_raw)
+    if not include_output:
+        # Listings default to lightweight rows so a sub-agent fetching 50
+        # records does not load 50 × 64 KiB of preview text into context.
+        # Hashes, suppression reasons, artifact refs, and byte counts stay
+        # so the caller can decide whether a follow-up get-command-run is
+        # warranted. The full preview is always available via that detail
+        # endpoint or by passing include_output=true on the list call.
+        stdout_len = len(data.get("stdout_preview") or "")
+        stderr_len = len(data.get("stderr_preview") or "")
+        data["stdout_preview"] = ""
+        data["stderr_preview"] = ""
+        data["stdout_preview_chars"] = stdout_len
+        data["stderr_preview_chars"] = stderr_len
+    return data
+
+
+def _fts_escape(term: str) -> str:
+    """Back-compat shim; real implementation lives in ``services.search``."""
+    return _fts_escape_shared(term)
+
+
+def list_command_runs(
+    engagement_id: int,
+    *,
+    q: str = "",
+    agent_name: str = "",
+    phase: str = "",
+    tool_name: str = "",
+    tool_bin: str = "",
+    audit_source: str = "",
+    success: bool | None = None,
+    timed_out: bool | None = None,
+    technique: str = "",
+    probe_kind: str = "",
+    destructive: bool | None = None,
+    intent_q: str = "",
+    limit: int = 100,
+    offset: int = 0,
+    include_output: bool = False,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    params: list[Any] = [engagement.id]
+    where = ["r.engagement_id = ?"]
+
+    # ``q`` is a global FTS match across all content columns. ``intent_q`` is
+    # a scoped FTS match against the intent column only — SQLite FTS5 uses
+    # the ``column:term`` syntax for this. When both are provided the
+    # queries are AND-combined via an additional MATCH (FTS5 supports two
+    # MATCH clauses against the same virtual table via two JOINs; simpler
+    # here is to merge them into a single MATCH term joined with AND).
+    join_sql = ""
+    match_terms: list[str] = []
+    fts_term = _fts_escape(q) if q else ""
+    if fts_term:
+        match_terms.append(fts_term)
+    intent_term = _fts_escape(intent_q) if intent_q else ""
+    if intent_term:
+        # Scope every escaped token to the intent column. ``_fts_escape``
+        # returns space-separated quoted phrases (implicit AND); prefixing
+        # each with ``intent:`` restricts the match to that column.
+        scoped_tokens = [f"intent:{tok}" for tok in intent_term.split(" ") if tok]
+        if scoped_tokens:
+            match_terms.append(" ".join(scoped_tokens))
+    if match_terms:
+        join_sql = "JOIN assessment_command_runs_fts f ON f.rowid = r.id"
+        where.append("f.assessment_command_runs_fts MATCH ?")
+        params.append(" ".join(match_terms))
+
+    if agent_name:
+        where.append("r.agent_name = ?")
+        params.append(agent_name)
+    if phase:
+        where.append("r.phase = ?")
+        params.append(phase)
+    if tool_name:
+        where.append("r.tool_name = ?")
+        params.append(tool_name)
+    if tool_bin:
+        where.append("r.tool_bin = ?")
+        params.append(tool_bin)
+    if audit_source:
+        where.append("r.audit_source = ?")
+        params.append(audit_source)
+    if success is not None:
+        where.append("r.success = ?")
+        params.append(1 if success else 0)
+    if timed_out is not None:
+        where.append("r.timed_out = ?")
+        params.append(1 if timed_out else 0)
+    if technique:
+        where.append("r.technique = ?")
+        params.append(technique)
+    if probe_kind:
+        where.append("r.probe_kind = ?")
+        params.append(probe_kind)
+    if destructive is not None:
+        where.append("r.destructive = ?")
+        params.append(1 if destructive else 0)
+
+    params.extend([int(limit), int(offset)])
+    query = (
+        f"SELECT r.* FROM assessment_command_runs r {join_sql} "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY r.created_at DESC, r.id DESC LIMIT ? OFFSET ?"
+    )
+
+    with get_connection() as connection:
+        rows = connection.execute(query, tuple(params)).fetchall()
+    return [_serialize_command_run(row, include_output=include_output) for row in rows]
+
+
+def get_command_run(engagement_id: int, command_run_id: int) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
+            (engagement.id, int(command_run_id)),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="command run not found")
+    return _serialize_command_run(row, include_output=True)

@@ -1,6 +1,11 @@
 #!/bin/bash
 # post-tool-log.sh — Claude Code PostToolUse hook
-# Reads hook JSON from stdin, extracts tool info + agent context, appends to engagement log.md
+# Reads hook JSON from stdin, extracts tool info + agent context, POSTs to the
+# orchestrator's /engagements/{key}/activity-entries endpoint.
+#
+# The backend is now authoritative for the narrative activity log (formerly
+# log.md). This script constructs a JSON payload and delegates the HTTP call
+# to `assess.py log`, which centralizes URL resolution, retry, and auth.
 #
 # Hook JSON fields used:
 #   tool_name        — Bash, Write, Edit, Agent, etc.
@@ -18,6 +23,8 @@ source "$SCRIPT_DIR/../lib/engagement.sh"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/../lib/scope.sh"
 
+ASSESS_PY="$SCRIPT_DIR/../assess.py"
+
 # Parse fields
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 [ -z "$TOOL_NAME" ] && exit 0
@@ -27,18 +34,38 @@ AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "operator"' 2>/dev/null || ec
 # Find active engagement directory
 ENG_DIR=$(resolve_engagement_dir "$(pwd)" || true)
 [ -z "$ENG_DIR" ] && exit 0
-[ ! -f "$ENG_DIR/log.md" ] && exit 0
 
-# Check scope.json status
+# Check scope.json status — only log in-progress engagements.
 STATUS=$(jq -r '.status // "unknown"' "$ENG_DIR/scope.json" 2>/dev/null || echo "unknown")
 [ "$STATUS" != "in_progress" ] && exit 0
 
-TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
 # --- Deduplication ---
 # Use a stamp file to track last logged command (within this engagement).
-# Skip if the same command was logged within the last 3 seconds.
+# Skip if the same command was logged within the last 3 seconds. This prevents
+# loud hooks from flooding the activity_entries table when a command triggers
+# multiple PostToolUse events.
 DEDUP_FILE="$ENG_DIR/.last_hook_log"
+
+# post_activity_entry <actor_kind> <title> <action> <result>
+# Delegates to assess.py log so URL resolution, retry, and schema shaping all
+# live in one place. The hook is best-effort: failure is logged to stderr but
+# does not block the agent's next step.
+post_activity_entry() {
+  local actor_kind="$1"
+  local title="$2"
+  local action="$3"
+  local result="$4"
+
+  ENGAGEMENT_DIR="$ENG_DIR" \
+    python3 "$ASSESS_PY" --engagement-dir "$ENG_DIR" log \
+      --actor-kind "$actor_kind" \
+      "$AGENT_TYPE" \
+      "$title" \
+      "$action" \
+      "$result" \
+      >/dev/null 2>&1 \
+    || true
+}
 
 case "$TOOL_NAME" in
   Bash)
@@ -66,34 +93,37 @@ case "$TOOL_NAME" in
     OUTPUT_SUMMARY=$(echo "$INPUT" | jq -r '.tool_response.stdout // empty' 2>/dev/null | head -c 300 || true)
     EXIT_CODE=$(echo "$INPUT" | jq -r '.tool_response.exitCode // empty' 2>/dev/null || true)
 
-    # Truncate command for log
     SHORT_CMD=$(echo "$COMMAND" | head -c 200)
 
-    {
-      printf '\n## [%s] %s — Bash\n' "$TIMESTAMP" "$AGENT_TYPE"
-      printf '**Command**: `%s`\n' "$SHORT_CMD"
-      [ -n "$EXIT_CODE" ] && [ "$EXIT_CODE" != "0" ] && printf '**Exit code**: %s\n' "$EXIT_CODE"
-      if [ -n "$OUTPUT_SUMMARY" ]; then
-        printf '**Output**: %s\n' "$OUTPUT_SUMMARY"
+    ACTION="bash: $SHORT_CMD"
+    RESULT=""
+    if [ -n "$EXIT_CODE" ] && [ "$EXIT_CODE" != "0" ]; then
+      RESULT="exit=${EXIT_CODE}"
+    fi
+    if [ -n "$OUTPUT_SUMMARY" ]; then
+      if [ -n "$RESULT" ]; then
+        RESULT="${RESULT} | ${OUTPUT_SUMMARY}"
+      else
+        RESULT="$OUTPUT_SUMMARY"
       fi
-      if command_hits_in_scope_target_with_raw_curl "$ENG_DIR" "$COMMAND"; then
-        printf '**Violation**: In-scope host-side target traffic bypassed the Kali MCP policy.\n'
-      fi
-    } >> "$ENG_DIR/log.md"
+    fi
+    if command_hits_in_scope_target_with_raw_curl "$ENG_DIR" "$COMMAND"; then
+      RESULT="VIOLATION: host-side target traffic bypassed Kali MCP. ${RESULT}"
+    fi
+
+    post_activity_entry "hook" "Bash" "$ACTION" "$RESULT"
     ;;
 
   Agent)
-    # Log subagent dispatch — critical for debugging
     SUBAGENT=$(echo "$INPUT" | jq -r '.tool_input.subagent_type // .tool_input.description // empty' 2>/dev/null || true)
     DESCRIPTION=$(echo "$INPUT" | jq -r '.tool_input.description // empty' 2>/dev/null || true)
     PROMPT_PREVIEW=$(echo "$INPUT" | jq -r '.tool_input.prompt // empty' 2>/dev/null | head -c 150 || true)
 
-    {
-      printf '\n## [%s] %s — Dispatch Agent\n' "$TIMESTAMP" "$AGENT_TYPE"
-      [ -n "$SUBAGENT" ] && printf '**Subagent**: %s\n' "$SUBAGENT"
-      [ -n "$DESCRIPTION" ] && printf '**Task**: %s\n' "$DESCRIPTION"
-      [ -n "$PROMPT_PREVIEW" ] && printf '**Prompt preview**: %s...\n' "$PROMPT_PREVIEW"
-    } >> "$ENG_DIR/log.md"
+    TITLE="Dispatch: ${SUBAGENT:-unknown}"
+    ACTION="${DESCRIPTION:-dispatch}"
+    RESULT="${PROMPT_PREVIEW:-}"
+
+    post_activity_entry "hook" "$TITLE" "$ACTION" "$RESULT"
     ;;
 
   Write|Edit)
@@ -104,7 +134,7 @@ case "$TOOL_NAME" in
     case "$FILE_PATH" in
       *engagements/*|*findings.md|*scope.json|*auth.json)
         SHORT_PATH=$(echo "$FILE_PATH" | sed 's|.*/engagements/|engagements/|')
-        printf '\n## [%s] %s — %s\n**File**: `%s`\n' "$TIMESTAMP" "$AGENT_TYPE" "$TOOL_NAME" "$SHORT_PATH" >> "$ENG_DIR/log.md"
+        post_activity_entry "hook" "$TOOL_NAME" "file=${SHORT_PATH}" ""
         ;;
     esac
     ;;

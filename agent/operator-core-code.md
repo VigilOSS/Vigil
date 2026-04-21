@@ -36,12 +36,13 @@ analyzed or user signals stop:
 2. **DECIDE NEXT ACTION** -- Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified, call graph complete, structural index generated). In Phase 2A, analyze critical files first using the file analysis queue priority order. In Phase 2B, close CWE effort gaps on critical/high files before proceeding. In Phase 3, drive precise FP elimination on all findings — kills require counter-evidence as rigorous as the original finding. Coverage gaps drive decisions.
 3. **FORMULATE PLAN** -- Select agent, skill, file batch, and applicable vulnerability classes. Batch size must stay small enough that source code remains the primary context. Use adaptive batching by module, entry-chain cluster, or trust-boundary/behavior family instead of a fixed-size handoff. When unrelated queue items are ready at the same time, split them into multiple independent hunter dispatches so broad hunt parallelizes across modules instead of serializing on fetch order. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
 4. **PRESENT OR PROCEED** -- Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.
-5. **USE SKILLS FIRST** -- Check `agent/SKILL.md` for the right skill.
+5. **USE SKILLS FIRST** -- Read `agent/SKILL.md` and load the matching skill before starting target work. After loading the skill, read `agent/references/INDEX.md` to identify paired CWE pattern references and tool cheatsheets. Do not begin analysis work until both reads are complete.
    - **Phase 0 (Ingest + Index):** operator-mechanical, no agent dispatch needed
    - **Phase 1 (Classify + Map):** `code-architect` -> `agent/skills/code-architecture-mapping/SKILL.md`
    - **Phase 2 (Hunt):** `code-vuln-hunter` -> `agent/skills/code-vulnerability-analysis/SKILL.md` + CWE-specific refs
    - **Phase 3 (Verify + Variant):** `code-vuln-verifier` -> `agent/skills/code-finding-verification/SKILL.md` AND `code-variant-hunter` -> `agent/skills/code-variant-analysis/SKILL.md` (parallel)
-6. **HOST BASH FOR SOURCE READING** -- Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work -- Kali MCP is not needed for reading source files.
+   - **Phase 4 (Fuzz):** `code-fuzz-engineer` -> `agent/skills/code-fuzz-campaign/SKILL.md` + memory-safety CWE refs (conditional, C/C++ only)
+6. **HOST BASH FOR SOURCE READING** -- Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work -- Kali MCP is not needed for reading source files. When code analysis does reach for Kali MCP (for example, a fuzz campaign or binary-triage pass that runs a tool through the runtime), the same audit-and-reuse rules from `operator-core.md` apply: calls carry `engagement_key`/`agent_name`/`phase` and runs land in `assessment_command_runs`. Default to an unscoped search — `./scripts/assess.py list-command-runs --q <keyword>` — so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, fetch its preview with `./scripts/assess.py get-command-run <id>` — `success=true` only means `return_code=0`, so open the preview to confirm the stored evidence actually answers the current question. See `agent/references/runtime-guides/command-history-auditing.md`. Kali MCP calls made from code-analysis workflows (fuzz campaigns, binary triage) should also set the four optional audit-metadata headers — `X-Technique`, `X-Intent`, `X-Probe-Kind`, `X-Destructive` — so the command row is filterable alongside web engagement calls; see the `Command Metadata` sub-section in `agent/shared-constraints.md` for the value tables and the companion ban on echo-as-commentary breadcrumbs.
 7. **DISPATCH** -- Dispatch to the appropriate subagent for all analysis work. The operator's job is orchestration: fetching metadata, providing paths, recording outputs, gating quality, and managing the analysis queue. Subagents read source files directly and produce structured outputs. Source reading, file-level analysis, and vulnerability judgment belong to subagents -- the operator provides paths, structural index, and metadata, not content.
 8. **PATH-FIRST HANDOFFS** -- Pass repo-relative file paths and artifact paths instead of pasting large JSON blobs or long source excerpts, because specialist agents can read the artifacts directly and operator tokens are better spent on scope control and quality gates.
 9. **RECORD FINDINGS IMMEDIATELY** -- Code findings use the same `./scripts/assess.py record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
@@ -66,7 +67,10 @@ git clone <repo-url> $DIR/source/<repo-name>
 # 3. Generate structural index
 ./scripts/assess.py code-index "$DIR/source/<repo-name>"
 
-# 4. Verify ingestion and index
+# 4. Sync structural metadata to backend
+./scripts/assess.py code-index-sync
+
+# 5. Verify ingestion and index
 ./scripts/assess.py code-coverage
 ```
 
@@ -92,7 +96,7 @@ The `code-index` command:
 - Writes a manifest at `tools/analysis-state/structural-index-manifest.json` with aggregate statistics and a `path_to_index` mapping (file relative path -> index filename) so consumers can look up index files by path
 - If tree-sitter is still unavailable, fix the local `uv` environment and rerun. Do not skip
   structural indexing for a fresh engagement.
-- The structural index accelerates Phase 2 hunting by giving the hunter a pre-built function map and sink catalog instead of requiring manual code triage
+- The structural index accelerates Phase 2 hunting by giving the hunter a pre-built function map, export list, import dependency graph, and advisory sink annotations instead of requiring manual code triage. The function map is the primary completeness anchor -- every function must be accounted for. Sinks, exports, and import targets are advisory metadata that aids navigation but does not constrain the hunter's analysis scope
 
 Output: `tools/analysis-state/structural-index/` directory with per-file JSON + manifest.
 
@@ -118,8 +122,8 @@ Phase 1 produces six deliverables. The call graph and attack hypotheses provide 
 
 1. **File classifications** -- every file tagged with priority (critical/high/medium/low/skip) and
    slot types (NETWORK-INPUT, PROTOCOL-FIELD, CMD-ARGUMENT, URL-COMPONENT, FILE-CONTENT,
-   CALLBACK-DATA, ENV-VARIABLE). Each record must include backend `file_id`; `file_path` is
-   helper context, not the primary key.
+   CALLBACK-DATA, ENV-VARIABLE, SERIALIZED-DATA). Each record must include backend `file_id`;
+   `file_path` is helper context, not the primary key.
 
 2. **Module map** -- logical groupings of related files. Same as before.
 
@@ -287,9 +291,11 @@ using the available subagent budget.
   predictions.
 - **Structural index** -- pass the manifest path plus the relevant per-file index paths from
   `tools/analysis-state/structural-index/`. If the manifest is missing, stop and run
-  `./scripts/assess.py code-index` before dispatching. Inline only the minimal function/sink
-  excerpt needed for prioritization. The hunter uses the index as a navigation map and
-  completeness checklist: every catalogued sink still needs to be accounted for.
+  `./scripts/assess.py code-index` before dispatching. Inline only the minimal function
+  excerpt needed for prioritization. The function map is the primary completeness anchor:
+  every listed function must receive a disposition. Sinks, exports, and import targets are
+  advisory metadata that helps the hunter navigate -- they do not limit what the hunter looks
+  for. The hunter's unconstrained analysis may find issues tree-sitter cannot detect.
 - **Call graph excerpt** -- give a short summary of the relevant entry chain plus the artifact path
   to `tools/analysis-state/call-graph.json`. Inline only the edges that materially change the
   hunter's reasoning for this dispatch.
@@ -405,8 +411,8 @@ This displays:
 - For each critical/high file: expected vulnerability classes from `SLOT_VULN_CLASSES`, current
   effort scores per class, and threshold flags (! marks below-threshold scores)
 - Structural index cross-check: if the structural index is available, compare self-reported
-  `functions_analyzed` against structural index sink counts -- discrepancies indicate the hunter
-  may have skipped sinks
+  `functions_analyzed` against the structural index function count -- discrepancies indicate the
+  hunter may have skipped functions that need a disposition
 - Effort thresholds: critical >= 70, high >= 50, medium >= 30 (medium is best-effort, not blocking)
 
 If all critical/high files meet their effort thresholds AND no cross-file triggers are pending,
@@ -624,13 +630,176 @@ similar `defect_family` across hunter and variant-hunter prefixes):
 ./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"
 ```
 
-**Report dispatch:**
-Dispatch `report-writer` with `agent/skills/report-generation/SKILL.md`. Report-writer queries
-the `report-findings` endpoint which includes both code and web findings.
+**Pre-report deduplication (cross-phase):**
+Before dispatching report-writer, also check for duplicate findings between Phase 3 and Phase 4
+(fuzz findings that confirm static findings):
+```bash
+./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"
+```
+
+**Phase 3 exit:**
+```bash
+jq '.current_phase = "fuzz"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+```
+
+Exit: All findings verified. Variant scan complete. Transition to Phase 4 (Fuzz) if the
+codebase is C/C++ with memory-safety targets, otherwise skip directly to report.
+
+### Phase 4: FUZZ
+
+Phase 4 uses AI-driven fuzz campaign orchestration to find memory-safety vulnerabilities that
+static analysis missed. AI selects targets, writes harnesses, compiles under sanitizers, and
+triages crashes. Coverage-guided mutation engines (libFuzzer, AFL++) do the actual exploration.
+
+**Phase 4 is conditional.** Run it when ANY of the following are true:
+- Phase 2/3 produced confirmed memory-safety findings (buffer overflow, integer overflow, UAF)
+- Critical/high C/C++ files have attacker-reachable parsers with size arithmetic but low or
+  no existing fuzz coverage (high structural risk even without a confirmed static finding)
+
+Skip it when ALL of the following are true:
+- Codebase is entirely memory-safe (Python, Go, Java, Rust without unsafe), OR
+- No critical/high C/C++ files with attacker-reachable parsing code exist, OR
+- All high-value parsing targets already have OSS-Fuzz coverage with >70% branch coverage
+
+**Phase 4 entry gate:**
+```bash
+# Verify Phase 3 complete
+./scripts/assess.py code-coverage --require-gate-pass
+
+# Check for memory-safety findings OR high structural risk in C/C++ code.
+# Filter findings for defect_family in: buffer-overflow, integer-overflow,
+# use-after-free, uninitialized-memory.
+./scripts/assess.py fetch findings
+
+# Check for critical/high C/C++ files — fuzzing for memory-safety needs C/C++ targets.
+# Even without confirmed memory-safety findings, high-risk C/C++ parsers with low
+# existing fuzz coverage warrant a campaign.
+./scripts/assess.py fetch "code/files?repo_id=<id>&limit=5000"
+# If no C/C++ files at critical/high classification, skip Phase 4.
+
+# Verify build toolchain
+which clang && clang --version
+```
+
+#### Phase 4A: Target Selection + Harness Construction
+
+Dispatch `code-fuzz-engineer` with `agent/skills/code-fuzz-campaign/SKILL.md`.
+
+Provide:
+
+**Backend state (operator fetches and summarizes):**
+- Memory-safety findings: `./scripts/assess.py fetch findings` — extract findings with
+  `defect_family` in `buffer-overflow`, `integer-overflow`, `use-after-free`,
+  `uninitialized-memory`. Include slugs, canonical locations, severity, and
+  `verification_state` (confirmed/unreviewed). Pass as a concise summary, not raw JSON dump.
+- File classifications: `./scripts/assess.py fetch "code/files?repo_id=<id>&limit=5000"` —
+  identify critical/high C/C++ files with relevant slot types. The fuzz engineer uses these to
+  cross-reference targets against structural index data.
+
+**Filesystem artifact paths (the fuzz engineer reads these directly):**
+- Structural index manifest: `tools/analysis-state/structural-index-manifest.json`
+- Threat model: `tools/analysis-state/threat-model.json`
+- Call graph: `tools/analysis-state/call-graph.json`
+- Source repo root path for direct code reads
+
+**Operator-provided context:**
+- Build system type (Makefile/CMake/etc.) and compiler availability (`which clang`)
+- Existing fuzzer inventory paths (from `rg 'LLVMFuzzerTestOneInput'` or `ls oss-fuzz/`)
+- CWE pattern references: `buffer-overflow.md`, `integer-overflow.md`, `use-after-free.md`,
+  `uninitialized-memory.md`, `fuzz-harness-patterns.md`
+
+The fuzz engineer:
+- Selects and ranks targets using structural index, threat model, and Phase 2 findings
+- Audits selected targets for specific BOF/integer-overflow patterns
+- Writes libFuzzer/AFL++ harnesses using real parser entrypoints
+- Compiles under ASAN+UBSAN, validates seeds run clean
+- Runs quick local campaigns (60-second validation runs)
+- Configures longer campaigns for overnight execution
+
+**On return from target selection + harness construction:**
+```bash
+# Campaign state written to tools/fuzz-state/
+ls tools/fuzz-state/targets.json
+ls tools/fuzz-state/harnesses/*/harness.c
+ls tools/fuzz-state/campaigns/*.json
+
+# Record any findings from quick validation runs or pre-fuzz audit
+./scripts/assess.py record-finding code-fuzz-engineer <finding-json>
+```
+
+#### Phase 4B: Campaign Execution
+
+Campaign execution is a traditional tool run, not an AI agent task. The operator starts
+campaigns based on the configurations from Phase 4A.
+
+```bash
+# Short campaigns (libFuzzer, 5-10 min) -- run immediately
+for config in tools/fuzz-state/campaigns/*.json; do
+    target_id=$(jq -r .target_id "$config")
+    timeout=$(jq -r .run_budget.max_total_time "$config")
+    ./fuzz_${target_id} \
+        -artifact_prefix=tools/fuzz-state/crashes/${target_id}/ \
+        tools/fuzz-state/harnesses/${target_id}/corpus/ \
+        tools/fuzz-state/harnesses/${target_id}/seeds/ \
+        -max_total_time=${timeout} -print_final_stats=1
+done
+
+# Deep campaigns (AFL++, overnight) -- start in screen/tmux
+screen -dmS fuzz-campaign bash -c '
+    for config in tools/fuzz-state/campaigns/*-deep.json; do
+        target_id=$(jq -r .target_id "$config")
+        # If campaign config has cmplog=true, build a CmpLog binary first:
+        #   AFL_LLVM_CMPLOG=1 make fuzz_${target_id}_cmplog
+        # Then pass -c ./fuzz_${target_id}_cmplog -l 2 to afl-fuzz.
+        afl-fuzz -i tools/fuzz-state/harnesses/${target_id}/seeds/ \
+                 -o tools/fuzz-state/harnesses/${target_id}/afl-out/ \
+                 -t 1000 -- ./fuzz_${target_id}_afl @@
+    done
+'
+```
+
+#### Phase 4C: Crash Triage
+
+After campaigns complete (or produce crashes during quick runs), dispatch `code-fuzz-engineer`
+for crash triage.
+
+Provide:
+- Crash artifacts from `tools/fuzz-state/crashes/`
+- Campaign configs from `tools/fuzz-state/campaigns/`
+- Harness source from `tools/fuzz-state/harnesses/`
+- Source code paths for the target functions
+
+The fuzz engineer triages each crash through the false-positive pipeline:
+minimize -> reproduce -> trace -> validate -> classify
+
+**On return from crash triage:**
+```bash
+# Record true findings
+./scripts/assess.py record-finding code-fuzz-engineer <finding-json>
+
+# Triage reports written to tools/fuzz-state/reports/
+ls tools/fuzz-state/reports/*-triage.json
+```
+
+**Phase 4 exit gate:**
+- [ ] All quick campaigns completed
+- [ ] All crashes triaged (no untriaged crash artifacts)
+- [ ] True findings recorded with full false-positive gate evidence
+- [ ] Harness bugs fixed and campaigns re-run (if applicable)
+- [ ] Campaign summary written to `tools/fuzz-state/reports/campaign-summary.json`
 
 ```bash
 jq '.current_phase = "complete"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
 ```
+
+**Report dispatch:**
+For a final report, run `./scripts/assess.py check-report-readiness` before dispatching
+`report-writer`. Report-writer queries `report-findings?mode=final` for final output and
+`report-findings?mode=draft` for interim output; both include code and web findings from the
+shared backend. Fuzz findings (CF-xxx) include crash inputs and ASAN reports as evidence.
+Use the same draft → review-and-fix QA → publish gate as runtime engagements: draft generation
+writes `report.md` and returns the 12-step checklist, a fresh `report-writer` reviews and fixes
+the rendered report, and publication plus `reported` lifecycle transitions wait for `QA PASS`.
 
 ## Agent Roster -- Code Analysis
 
@@ -640,7 +809,8 @@ jq '.current_phase = "complete"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv
 | `code-vuln-hunter` | Deep file-level vulnerability analysis with TOB-style methodology | Phase 2 (batched, parallel) |
 | `code-variant-hunter` | Systematic variant scanning for confirmed bug patterns | Phase 3 (parallel with verifier) |
 | `code-vuln-verifier` | FP elimination with devil's advocate verification + clean-file spot-check | Phase 3 (parallel with variant) |
-| `report-writer` | Final report generation (reused from web engagement) | Phase 3 (after verify) |
+| `code-fuzz-engineer` | AI-driven fuzz campaigns: target selection, harness construction, crash triage | Phase 4 (conditional, C/C++ only) |
+| `report-writer` | Final report generation (reused from web engagement) | After Phase 3 or 4 completes |
 
 ## Finding Prefixes -- Code Analysis
 
@@ -650,6 +820,7 @@ jq '.current_phase = "complete"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv
 | code-vuln-hunter | CH | FINDING-CH-001 |
 | code-variant-hunter | CV | FINDING-CV-001 |
 | code-vuln-verifier | VF | (updates only, no new findings -- except spot-check) |
+| code-fuzz-engineer | CF | FINDING-CF-001 |
 
 ## Dispatch Context Template
 
@@ -671,6 +842,12 @@ Every code analysis dispatch must include:
   system configuration, list of critical clean files for spot-check
 - **For Phase 3 variant**: confirmed findings with abstract patterns, candidate file list,
   CWE pattern refs, threat model summary
+- **For Phase 4 (Fuzz)**: memory-safety finding summaries from `assess.py fetch findings`
+  (slugs, locations, severity, verification_state — not raw JSON dump), critical/high C/C++ file
+  list from `assess.py fetch "code/files?..."`, filesystem artifact paths (structural index
+  manifest, threat model, call graph — fuzz engineer reads these directly), source repo root,
+  build system type, compiler availability, existing fuzzer inventory paths, CWE pattern refs
+  (buffer-overflow, integer-overflow, use-after-free, uninitialized-memory, fuzz-harness-patterns)
 
 ### Pre-Dispatch Checklist
 
@@ -723,16 +900,20 @@ Phase-specific resume actions:
   scores. Resume CWE-directed re-dispatch for files below threshold.
 - **Phase 3 (verify-variant)**: Check if both verifier and variant hunter have returned.
   Resume whichever is incomplete.
+- **Phase 4 (fuzz)**: Check `tools/fuzz-state/` for existing targets, harnesses, campaigns,
+  and crashes. If targets.json exists but no harnesses, resume from Stage 3. If crashes
+  exist without triage reports, resume from Stage 6 (crash triage).
 
 ## Coverage Communication
 
 After each phase transition, display:
 ```
-Code Analysis: [x] Ingest  [x] Classify+Map  [>] Hunt  [ ] Verify+Variant
+Code Analysis: [x] Ingest  [x] Classify+Map  [>] Hunt  [ ] Verify+Variant  [ ] Fuzz
 [coverage] 45/687 files critical | 89 high | 203 medium | 112 low | 238 skipped
 [queue] 0 pending | 0 processing | 0 done | 0 needs-context
 [findings] 0 confirmed | 0 suspicious
 [cwe-effort] critical: 12/15 meet threshold | high: 34/40 meet threshold
+[fuzz] 0 targets | 0 harnesses | 0 campaigns | 0 crashes | 0 true findings
 ```
 
 ## Integration with Web Engagement

@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # WebSocket Security Testing
 
+> **Kali MCP audit header:** use `X-Technique: OTHER` for generic WebSocket protocol and CSWSH probing. Switch to the specific vuln class when the WS message carries a `SQLI`, `XSS`, `CMDI`, or `AUTH` payload.
+
 ## When to Activate
 
 - Application uses WebSocket connections (`ws://` or `wss://`)
@@ -131,3 +133,5 @@ origin: AI Threat Hunting
 
 ## Extended Resources
 
+- `agent/skills/source-analysis/SKILL.md` — for discovering WebSocket endpoints in JavaScript source
+- WebSocket testing methodology is otherwise self-contained

@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # GraphQL Security Testing
 
+> **Kali MCP audit header:** use `X-Technique: RECON` for introspection and schema discovery; when sending attack payloads via resolvers, switch to the matching vuln class (`SQLI` / `AUTH` / `IDOR` / `INFO-DISCLOSURE`).
+
 ## When to Activate
 
 - Application exposes a GraphQL endpoint (`/graphql`, `/gql`, `/api/graphql`)
@@ -41,6 +43,8 @@ origin: AI Threat Hunting
 - [ ] Mutation types: `{ __schema { mutationType { fields { name } } } }`
 - [ ] If introspection disabled, test partial: `{ __type(name: "User") { fields { name } } }`
 - [ ] Field suggestion: send typo, observe "Did you mean..." errors
+- [ ] If introspection fully disabled, use clairvoyance for field/type brute-forcing:
+      `clairvoyance -o schema.json -w /path/to/wordlist.txt -d https://target/graphql`
 
 ### 3. Information Gathering
 
@@ -79,9 +83,17 @@ origin: AI Threat Hunting
       { a: user(id:1){name} b: user(id:2){name} ... z: user(id:26){name} }
       ```
 - [ ] Test depth limit, complexity limit, rate limit
+- [ ] Fragment circular reference: `fragment A on User { friends { ...B } }` + `fragment B on User { friends { ...A } }` — causes infinite recursion
+- [ ] Unbounded pagination: `{ users(first: 1000000) { id name } }` — server may attempt to load all records
 
 ### 7. Batched Query Attacks
 
+- [ ] Array-body batching: `[{"query":"{ me { id } }"},{"query":"{ me { id } }"},...]` — many operations in single HTTP request
+- [ ] Alias-based batching for rate limit bypass:
+      ```graphql
+      { a1: login(user:"admin",pass:"pass1"){token} a2: login(user:"admin",pass:"pass2"){token} }
+      ```
+      Single request, N login attempts — bypasses per-request rate limits
 - [ ] Brute-force via batching: send 1000 login mutations in one request
 - [ ] OTP bypass: batch OTP verification attempts
 - [ ] Rate limit bypass: single HTTP request with multiple operations
@@ -102,6 +114,18 @@ origin: AI Threat Hunting
 - DoS threshold (depth/complexity before failure)
 - Severity based on impact (data leak, RCE, DoS)
 - Remediation: disable introspection in prod, enforce depth/complexity limits, field-level authz
+
+## Kill Signals — Stop Testing When
+- Introspection disabled AND clairvoyance/field suggestion finds zero types → limited attack surface, test only known query names from source analysis
+- All mutations require valid authorization AND no IDOR found in query resolvers → authorization is effective, move on
+- Depth/complexity limits enforced AND rate limiting active → DoS not feasible, skip DoS testing
+
+## Escalate When
+- Introspection is disabled on `/graphql` but a malformed query returns a "Did you mean …" suggestion — field suggestions leak the schema, run clairvoyance/graphql-cop and rebuild the type map before moving on
+- Any resolver accepts an ID, UUID, or numeric handle as an argument — test cross-tenant reads by swapping to another user's ID, GraphQL IDOR is commonly missed because authorization lives on the resolver, not the gateway
+- Query batching or aliasing (`a: login(...), b: login(...), c: login(...)`) is accepted — rate limits apply per HTTP request not per operation, stack dozens of aliases against login/OTP/coupon endpoints
+- A mutation's input type accepts a nested object field that was not documented or exposed by the UI — over-posting/mass-assignment (setting `role`, `isAdmin`, `ownerId`, `createdBy`) routinely bypasses field-level checks
+- Query parameters are interpolated into a downstream SQL/NoSQL/OS call (visible via errors, timing, or OAST callback from a string arg) — GraphQL variables do not sanitize, classic injection works through the resolver
 
 ## Extended Resources
 

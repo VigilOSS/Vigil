@@ -3,7 +3,7 @@
 Quick-reference for processing each agent's return output. These rules are subordinate
 to the Phase Flow in `operator-core.md` — agent output is processed within the current
 phase, then queued for later phases where appropriate. Exploit-developer dispatch is
-governed by `exploit_policy` in scope.json and belongs to Phase 4, not earlier phases.
+governed by `exploit_policy` in scope.json and belongs after Verify in Phase 5, not earlier phases.
 
 ## Skill Passing Protocol
 
@@ -20,8 +20,8 @@ Output: endpoint lists, technologies, JS file URLs, parameters, surface candidat
 
 1. **Read `#### Coverage Gaps` first** — this drives the Recon Coverage Gate. If material gaps exist, re-dispatch recon-specialist with a targeted objective and specific skill before proceeding. See Phase 1 gate checklist in operator-core.
 2. Pass JS file URLs → dispatch source-analyzer (if not already running in parallel) — **bring `agent/skills/source-analysis/SKILL.md`**
-3. Record technology stack → durable state update + intel.md
-4. Turn auth boundaries, framework clues, and proxy hints into hypotheses for Phase 3/4
+3. Record technology stack → durable state update via `./scripts/assess.py record-intel tech-component <json-file>` (intel_tech_components table)
+4. Turn auth boundaries, framework clues, and proxy hints into hypotheses for Phase 3-5
 
 ### SOURCE-ANALYZER
 
@@ -29,7 +29,7 @@ Output: new API endpoints, routes, secrets/tokens, config objects, coverage gaps
 
 1. **Read `#### Coverage Gaps` first** — if JS analysis was incomplete (files behind auth, opaque minification), re-dispatch with additional context before proceeding.
 2. New requestable endpoints → `./scripts/assess.py ingest-endpoints "$DIR/cases.db" source-analysis`
-3. Secrets/tokens → durable findings immediately via `assess.py record-finding` + credential backend record + intel.md Credentials table
+3. Secrets/tokens → durable findings immediately via `assess.py record-finding` + credential backend record via `./scripts/assess.py post credentials <credential-json-file>` (assessment_credentials table)
 4. API routes, object references, mutation paths, parameter names → queued for Phase 3 dispatch (these enter the work buffer via endpoint ingestion, not via immediate agent dispatch)
 
 ### Phase 1 → Phase 2 Transition
@@ -44,7 +44,7 @@ After both recon-specialist and source-analyzer return:
 
 Output: priority manifest, work-buffer stats, intelligence, coverage gaps, recorded surfaces and findings
 
-1. Append `#### Intelligence` to intel.md
+1. Translate each `#### Intelligence` row into a JSON payload and record it via `./scripts/assess.py record-intel <type> <json-file>` (one call per row). Verify with `./scripts/assess.py list-intel`.
 2. Review `#### Priority Attack Surfaces` for Phase 3 dispatch ordering
 3. Inspect work-buffer stats: `./scripts/assess.py dispatch "$DIR/cases.db" stats`
 4. Update scope.json phase to `consume-test`
@@ -56,8 +56,8 @@ Output: priority manifest, work-buffer stats, intelligence, coverage gaps, recor
 Output: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED signals
 
 1. Record all findings durably via `assess.py record-finding` — this is the immediate obligation
-2. HIGH/MEDIUM findings → queued for Phase 4 exploit dispatch (governed by `exploit_policy` in scope.json)
-3. LOW findings → record as draft, do not queue for exploit yet
+2. Queue live findings for Phase 4 Verify, not exploitation. Verification decides which findings become confirmed, downgraded, killed, or chain-required before exploit work is spent.
+3. When a finding is real only as part of a chain, keep it in the normal finding table and set `details.chain_required`, `details.chain_rationale`, and `details.required_followup` via `record-finding` or `update-finding`
 4. FUZZER_NEEDED → dispatch fuzzer within Phase 3 — **bring `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md`**, feed results back through vuln-analyst
 5. Mark work-buffer batch done: `./scripts/assess.py dispatch "$DB" done "id1,id2,..."`
 6. Continue the Phase 3 consumption loop (steps b–f in Phase Flow)
@@ -70,12 +70,23 @@ Output: discovered paths, valid parameters, anomalous responses, confirmed findi
 2. Anomalous responses → dispatch vuln-analyst for analysis within Phase 3
 3. Confirmed findings (e.g., valid credentials) → durable findings directly via `assess.py record-finding`
 
-## Phase 4 Returns (EXPLOIT)
+## Phase 4 Returns (VERIFY)
+
+### VULNERABILITY-ANALYST IN REVIEW MODE
+
+Output: confirmed, downgraded, disputed, or killed findings with updated evidence
+
+1. Confirmed or downgraded findings remain eligible for later exploit review
+2. Killed findings are suppressed from exploit and final report output
+3. Chain-only findings stay in the normal finding table and carry `details.chain_required` metadata instead of a special workflow status
+4. Duplicate findings are merged before moving into exploit or report readiness
+
+## Phase 5 Returns (EXPLOIT)
 
 Exploit-developer dispatch is gated by `exploit_policy` in scope.json:
-- `pause` → present confirmed findings to the human, ask which are approved
-- `selected` → exploit only the approved finding slugs
-- `full_send` → dispatch exploit-developer immediately
+- `pause` → present backend exploit candidates to the human, ask which are approved
+- `selected` → exploit only the approved target slugs that are still current backend exploit candidates
+- `full_send` → dispatch exploit-developer immediately on the current backend exploit candidates
 
 ### EXPLOIT-DEVELOPER
 
@@ -86,34 +97,41 @@ Output: CONFIRMED/PARTIAL/FAILED status, extracted data, PoC, chains, credential
 3. CONFIRMED + multi-step chain → verify `assess.py record-chain` was called and steps are linked
 4. CONFIRMED + new attack surface → ingest auth-aware variants and retest obligations
 5. PARTIAL → record as MEDIUM, validate partial signals in stages before giving up
-6. FAILED → log.md, move to next finding
-7. Needs OSINT context → dispatch osint-analyst within Phase 4 — **bring `agent/skills/osint-recon/SKILL.md`**
-8. Exploit failed, lead needs targeted re-evaluation → dispatch vulnerability-analyst for a single-finding retest (this is a Phase 4 feedback loop, not a return to the Phase 3 work-buffer consumption loop) — **bring the same vuln-class skill**
+6. FAILED → record the result via `./scripts/assess.py log exploit-developer "<title>" "<action>" "<result>"` (activity_entries), move to next finding
+7. Needs OSINT context → dispatch osint-analyst within Phase 5 — **bring `agent/skills/osint-recon/SKILL.md`**
+8. Exploit failed, lead needs targeted re-evaluation → dispatch vulnerability-analyst for a single-finding retest (this is a Phase 5 feedback loop, not a return to the Phase 3 work-buffer consumption loop) — **bring the same vuln-class skill**
 
 ### OSINT-ANALYST
 
-Output: intel.md updates (technology, CVE, breach, credential intel)
+Output: backend intel-table updates via `record-intel` (technology, CVE, breach, credential intel, people, domains, social, org facts, notes)
 
 1. Read Intelligence Assessment section
-2. HIGH-value CVE + PoC match → dispatch exploit-developer to **validate** against the live target — **bring the matching skill from `agent/SKILL.md`**. Do NOT record a finding until exploit-developer confirms exploitability. Version-only CVE matches are intel, not findings.
-3. Breached credentials with target-specific proof → record finding + dispatch exploit-developer to test access
-4. Historical endpoints → ingest into backend coverage state
-5. MEDIUM/LOW intel without target proof → keep in intel.md only
+2. HIGH-value CVE + PoC match → record via `./scripts/assess.py record-intel cve <json-file>` and dispatch exploit-developer to **validate** against the live target — **bring the matching skill from `agent/SKILL.md`**. Do NOT record a finding until exploit-developer confirms exploitability. Version-only CVE matches are intel, not findings.
+3. Breached credentials with target-specific proof → record finding + credential via `assess.py post credentials` + dispatch exploit-developer to test access
+4. Historical endpoints → ingest into backend coverage state via `assess.py ingest-endpoints`
+5. MEDIUM/LOW intel without target proof → keep in backend intel tables via `record-intel` only — do not promote to findings
 
-## Phase 6 (REPORT)
+## Phase 7 (REPORT)
 
 ### REPORT-WRITER ← backend API (self-service)
 
-Report-writer queries the backend directly via `assess.py fetch report-findings`, `attack-chains`,
+For final reports, run `assess.py check-report-readiness` first. Report-writer queries the backend
+directly via `assess.py fetch "report-findings?mode=final"` for final output or
+`assess.py fetch "report-findings?mode=draft"` for interim output, plus `attack-chains`,
 `surfaces`, and `summary`. The operator does not pre-assemble findings context.
 
-Before dispatching report-writer, merge duplicates so `report-findings` returns a clean set:
+Before dispatching a final report, resolve readiness blockers so `report-findings?mode=final` succeeds:
 - Check for overlapping `root_cause_key` or `canonical_location` + `defect_family` across agent findings
 - `./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"`
-- The source finding's status becomes `merged` and is excluded from `report-findings`
+- The source finding's status becomes `merged` and is excluded from final report output
+
+After draft generation, dispatch a fresh `report-writer` in review-and-fix QA mode. The QA writer
+checks the rendered `report.md` against backend report state and the 12-step post-generation
+self-review, fixes report-local issues, and returns `QA PASS` or `QA BLOCKED`. Only publish the
+report, mark findings `reported`, and complete the engagement after `QA PASS`.
 
 ## Wildcard Mode Specifics
 
-- BACKEND-FIRST FINDING WRITE: every finding lands in canonical backend state, then synchronize child's findings.md and parent's findings.md exports
+- BACKEND-ONLY FINDING WRITE: every finding lands in the backend via `assess.py record-finding`. No local file sync required.
 - Parent prefix: `## [sub.domain.com / FINDING-XX-NNN] Title`
 - Set ENGAGEMENT_DIR to specific child directory before each operation

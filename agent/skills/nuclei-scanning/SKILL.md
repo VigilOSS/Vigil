@@ -6,6 +6,8 @@ origin: AI Threat Hunting
 
 # Nuclei Scanning
 
+> **Kali MCP audit header:** set `X-Technique` per the template-tag focus — `CVE-VALIDATION` for `-tags cve` runs, `DISCOVERY` for tech-detect and fingerprint templates, `INFO-DISCLOSURE` for exposure templates, and `OTHER` for mixed sweeps spanning many classes.
+
 ## When to Activate
 
 - After recon/collect phases when live targets and tech stacks are identified

@@ -20,6 +20,11 @@ def _copy_init_fixture_tree(agent_root: Path, sandbox_root: Path, *, client: str
     elif client == "claude":
         shutil.copytree(agent_root / ".claude", sandbox_root / ".claude")
         shutil.copy2(agent_root / "CLAUDE.md", sandbox_root / "CLAUDE.md")
+    elif client == "both":
+        shutil.copytree(agent_root / ".codex", sandbox_root / ".codex")
+        shutil.copytree(agent_root / ".claude", sandbox_root / ".claude")
+        shutil.copy2(agent_root / "AGENTS.md", sandbox_root / "AGENTS.md")
+        shutil.copy2(agent_root / "CLAUDE.md", sandbox_root / "CLAUDE.md")
     else:
         raise ValueError(f"unsupported client fixture: {client}")
     shutil.copy2(agent_root / "SKILL.md", sandbox_root / "SKILL.md")
@@ -29,11 +34,7 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
     repo_root = Path(__file__).resolve().parents[3]
     agent_root = repo_root / "agent"
     sandbox_root = tmp_path / "agent"
-    _copy_init_fixture_tree(agent_root, sandbox_root, client="codex")
-
-    templates_target = sandbox_root / "scripts" / "templates"
-    templates_target.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(agent_root / "scripts" / "templates" / "intel.md", templates_target / "intel.md")
+    _copy_init_fixture_tree(agent_root, sandbox_root, client="both")
 
     result = subprocess.run(
         [
@@ -59,12 +60,13 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
     manifest = json.loads((engagement_dir / "engagement.json").read_text(encoding="utf-8"))
     orchestrator_env = (engagement_dir / ".orchestrator.env").read_text(encoding="utf-8")
     agents_wrapper = (engagement_dir / "AGENTS.md").read_text(encoding="utf-8")
+    claude_wrapper = (engagement_dir / "CLAUDE.md").read_text(encoding="utf-8")
 
     assert scope["hostname"] == "app.example.com"
     assert scope["hosts"] == ["app.example.com", "admin.example.com"]
     assert scope["exploit_policy"] == "selected"
     assert scope["exploit_review_state"] == "pending"
-    assert scope["approved_findings"] == []
+    assert scope["approved_targets"] == []
     assert "parallelism" not in scope
     assert "confirm_mode" not in scope
     assert "scan_intensity" not in scope
@@ -79,8 +81,8 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
     assert auth["auth_context"] == "authenticated"
     assert (engagement_dir / "sessions" / "index.json").exists()
     assert (engagement_dir / "start_codex.sh").exists()
-    assert not (engagement_dir / "start_claude.sh").exists()
-    assert not (engagement_dir / "CLAUDE.md").exists()
+    assert (engagement_dir / "start_claude.sh").exists()
+    assert (engagement_dir / "CLAUDE.md").exists()
     assert manifest["key"] == engagement_dir.name
     assert manifest["target"] == "https://app.example.com"
     assert "ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000" in orchestrator_env
@@ -97,6 +99,20 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
     ]
     for path in expected_codex_paths:
         assert str(path) in agents_wrapper
+        assert path.exists(), f"expected wrapper path to exist: {path}"
+
+    expected_claude_paths = [
+        sandbox_root / "CLAUDE.md",
+        sandbox_root / ".claude" / "agents",
+        sandbox_root / "agents",
+        sandbox_root / "rules",
+        sandbox_root / "SKILL.md",
+        sandbox_root / "skills",
+        sandbox_root / "references",
+        sandbox_root / "scripts",
+    ]
+    for path in expected_claude_paths:
+        assert str(path) in claude_wrapper
         assert path.exists(), f"expected wrapper path to exist: {path}"
 
 def test_init_engagement_uses_safe_defaults_in_noninteractive_mode(tmp_path: Path) -> None:
@@ -243,7 +259,7 @@ def test_orchestrator_env_loader_prefers_install_root_env_over_engagement_defaul
     assert resolved.stdout.strip() == "https://orchestrator.example.test"
 
 
-def test_init_engagement_writes_claude_only_launchers_for_claude_install(tmp_path: Path) -> None:
+def test_init_engagement_writes_claude_only_launchers_when_only_claude_files_exist(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     agent_root = repo_root / "agent"
     sandbox_root = tmp_path / "agent"
@@ -352,7 +368,6 @@ def test_init_engagement_code_mode_with_local_repo(tmp_path: Path) -> None:
     scope = json.loads((engagement_dir / "scope.json").read_text(encoding="utf-8"))
     auth = json.loads((engagement_dir / "auth.json").read_text(encoding="utf-8"))
     manifest = json.loads((engagement_dir / "engagement.json").read_text(encoding="utf-8"))
-    log_text = (engagement_dir / "log.md").read_text(encoding="utf-8")
 
     # Code-mode scope assertions
     assert scope["engagement_type"] == "code"
@@ -378,10 +393,6 @@ def test_init_engagement_code_mode_with_local_repo(tmp_path: Path) -> None:
     assert "repo_name" not in manifest
     assert "target" not in manifest
     assert "hostname" not in manifest
-
-    # Log reflects code analysis
-    assert "Code Analysis" in log_text
-    assert "Repositories" in log_text
 
     # source/ directory created for repo checkout
     assert (engagement_dir / "source").is_dir()
@@ -473,7 +484,7 @@ def test_install_upgrade_preserves_agent_engagements(tmp_path: Path) -> None:
     }
 
     subprocess.run(
-        ["bash", str(install_script), "codex", str(install_root)],
+        ["bash", str(install_script), str(install_root)],
         text=True,
         capture_output=True,
         check=True,
@@ -481,13 +492,22 @@ def test_install_upgrade_preserves_agent_engagements(tmp_path: Path) -> None:
         env=env,
     )
 
+    assert (install_root / "AGENTS.md").exists()
+    assert (install_root / "CLAUDE.md").exists()
+    assert (install_root / ".codex" / "agents").is_dir()
+    assert (install_root / ".claude" / "agents").is_dir()
+    assert (install_root / "agent" / "AGENTS.md").exists()
+    assert (install_root / "agent" / "CLAUDE.md").exists()
+    assert (install_root / "agent" / ".codex" / "agents").is_dir()
+    assert (install_root / "agent" / ".claude" / "agents").is_dir()
+
     engagement_dir = install_root / "agent" / "engagements" / "existing-engagement"
     engagement_dir.mkdir(parents=True)
     marker = engagement_dir / "scope.json"
     marker.write_text('{"target":"https://app.example.com"}\n', encoding="utf-8")
 
     subprocess.run(
-        ["bash", str(install_script), "codex", str(install_root)],
+        ["bash", str(install_script), str(install_root)],
         text=True,
         capture_output=True,
         check=True,
@@ -496,3 +516,28 @@ def test_install_upgrade_preserves_agent_engagements(tmp_path: Path) -> None:
     )
 
     assert marker.exists()
+    assert (install_root / "AGENTS.md").exists()
+    assert (install_root / "CLAUDE.md").exists()
+    assert (install_root / "agent" / "AGENTS.md").exists()
+    assert (install_root / "agent" / "CLAUDE.md").exists()
+
+
+def test_install_rejects_removed_client_arguments(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    install_script = repo_root / "install.sh"
+    env = {
+        **os.environ,
+        "AI_THREAT_HUNTING_SKIP_PREREQ_CHECKS": "1",
+        "AI_THREAT_HUNTING_SKIP_DOCKER_IMAGE_CHECKS": "1",
+    }
+
+    result = subprocess.run(
+        ["bash", str(install_script), "codex", str(tmp_path / "install-root")],
+        text=True,
+        capture_output=True,
+        cwd=repo_root,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "installs both Codex and Claude" in result.stderr

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Literal
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..services import state_manager
@@ -54,6 +55,40 @@ class ProbeRunRecordRequest(BaseModel):
     signal_type: str = Field(default="", max_length=128)
     evidence_ref: str = Field(default="", max_length=1024)
     notes: str = Field(default="", max_length=4096)
+
+
+class CommandRunRecordRequest(BaseModel):
+    command: str = Field(min_length=1, max_length=65536)
+    argv: list[str] | None = None
+    tool_name: str = Field(min_length=1, max_length=128)
+    route: str = Field(default="", max_length=256)
+    agent_name: str = Field(min_length=1, max_length=128)
+    phase: str = Field(min_length=1, max_length=64)
+    return_code: int | None = None
+    timed_out: bool = False
+    success: bool | None = None
+    started_at: str = Field(min_length=1, max_length=64)
+    completed_at: str = Field(min_length=1, max_length=64)
+    duration_ms: int = 0
+    stdout: str = ""
+    stderr: str = ""
+    command_hash: str = Field(default="", max_length=128)
+    stdout_sha256: str = Field(default="", max_length=128)
+    stderr_sha256: str = Field(default="", max_length=128)
+    notes: str = Field(default="", max_length=4096)
+    engagement_artifact_dir: str | None = Field(default=None, max_length=1024)
+    run_uuid: str | None = Field(default=None, max_length=64)
+    audit_source: Literal["header", "env_fallback", "mixed"] = "header"
+    # Command-metadata fields. Soft validation — matches the audit_source
+    # precedent of plain TEXT storage. Technique/probe_kind are intentionally
+    # not Literal-typed so new enum members don't require a backend redeploy;
+    # the runtime logs a warning on unknown values and stores them verbatim.
+    # Intent is trimmed to 200 chars server-side in record_command_run;
+    # max_length here is a generous upper bound for transport.
+    technique: str | None = Field(default=None, max_length=128)
+    intent: str | None = Field(default=None, max_length=4096)
+    probe_kind: str | None = Field(default=None, max_length=64)
+    destructive: bool | None = None
 
 
 class SurfaceRecordRequest(BaseModel):
@@ -240,6 +275,24 @@ def get_assessment_summary(engagement_key: str) -> dict[str, Any]:
     return state_manager.assessment_summary(engagement.id)
 
 
+@router.get("/exploit-candidates")
+def get_exploit_candidates(engagement_key: str) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_exploit_candidates(engagement.id)
+
+
+@router.get("/coverage-readiness")
+def get_coverage_readiness(engagement_key: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.coverage_readiness(engagement.id)
+
+
+@router.get("/report-readiness")
+def get_report_readiness(engagement_key: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.report_readiness(engagement.id)
+
+
 @router.get("/targets")
 def get_targets(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
@@ -276,6 +329,56 @@ def get_probe_runs(engagement_key: str) -> list[dict[str, Any]]:
     return state_manager.list_probe_runs(engagement.id)
 
 
+@router.get("/command-runs")
+def get_command_runs(
+    engagement_key: str,
+    q: str = "",
+    agent_name: str = "",
+    phase: str = "",
+    tool_name: str = "",
+    tool_bin: str = "",
+    audit_source: str = "",
+    success: bool | None = Query(default=None),
+    timed_out: bool | None = Query(default=None),
+    # Command-metadata filter axes. Technique + probe_kind are plain str
+    # (matching the audit_source precedent) so new enum values don't force
+    # a backend redeploy. intent_q runs a FTS5 scoped match against the
+    # intent column; destructive coerces True→1, False→0 on the WHERE.
+    technique: str | None = None,
+    probe_kind: str | None = None,
+    destructive: bool | None = Query(default=None),
+    intent_q: str | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    include_output: bool = False,
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_command_runs(
+        engagement.id,
+        q=q,
+        agent_name=agent_name,
+        phase=phase,
+        tool_name=tool_name,
+        tool_bin=tool_bin,
+        audit_source=audit_source,
+        success=success,
+        timed_out=timed_out,
+        technique=technique or "",
+        probe_kind=probe_kind or "",
+        destructive=destructive,
+        intent_q=intent_q or "",
+        limit=limit,
+        offset=offset,
+        include_output=include_output,
+    )
+
+
+@router.get("/command-runs/{command_run_id}")
+def get_command_run(engagement_key: str, command_run_id: int) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_command_run(engagement.id, command_run_id)
+
+
 @router.get("/surfaces")
 def get_surfaces(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
@@ -295,7 +398,7 @@ def get_finding_transitions(engagement_key: str, finding_slug: str) -> list[dict
 
 
 @router.get("/report-findings")
-def get_report_findings(engagement_key: str) -> list[dict[str, Any]]:
+def get_report_findings(engagement_key: str, mode: Literal["draft", "final"] = "draft") -> list[dict[str, Any]]:
     """Findings formatted for report generation.
 
     Sorted by severity (critical first), excludes merged and false-positive
@@ -306,7 +409,11 @@ def get_report_findings(engagement_key: str) -> list[dict[str, Any]]:
     available for cross-referencing.
     """
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_report_findings(engagement.id)
+    if mode == "final":
+        readiness = state_manager.report_readiness(engagement.id)
+        if not readiness["ready"]:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=readiness)
+    return state_manager.list_report_findings(engagement.id, mode=mode)
 
 
 @router.get("/finding-links")
@@ -376,6 +483,19 @@ async def create_probe_run(engagement_key: str, request: ProbeRunRecordRequest) 
     engagement = get_engagement_or_404(engagement_key)
     record = state_manager.record_probe_run(engagement.id, **request.model_dump())
     await _broadcast(engagement.key, "probe_run", record)
+    return record
+
+
+@router.post("/command-runs", status_code=status.HTTP_201_CREATED)
+async def create_command_run(engagement_key: str, request: CommandRunRecordRequest) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    payload = request.model_dump()
+    if not payload.get("command_hash"):
+        payload["command_hash"] = hashlib.sha256(
+            payload["command"].encode("utf-8", errors="replace")
+        ).hexdigest()
+    record = state_manager.record_command_run(engagement.id, **payload)
+    await _broadcast(engagement.key, "command_run", record)
     return record
 
 

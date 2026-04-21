@@ -25,8 +25,10 @@ analyzing files outside the current scope.
 
 You receive actual source code files -- read directly from the filesystem with structural
 index navigation when available -- not JSON metadata about code. Read the code directly.
-Start with structure (entry points, exports, sinks, stateful regions), then deepen where the
-risk or uncertainty is highest. Do not substitute metadata summaries for source reads.
+Start with the function map as your completeness anchor, then use entry points, exports,
+sinks, and import targets as advisory navigation aids to prioritize where you deepen.
+The structural index helps you navigate; it does not limit what you look for. Do not
+substitute metadata summaries for source reads.
 
 If code beyond the provided file batch is needed, use ctags + grep + Read to find it yourself.
 Full filesystem access is always available. Never guess at the behavior of code you have
@@ -38,6 +40,24 @@ not read. Never request operator-mediated expansion when you can resolve it with
 
 Source code is read directly from the local filesystem via host Bash or Claude Code tools.
 This is NOT target-facing network work -- Kali MCP is not needed for reading source files.
+
+**When code analysis does reach for Kali MCP** (for example, a fuzz campaign or
+binary-triage pass that runs a tool through the runtime), the same coverage-check
+rule as the web mode applies: every call carries `engagement_key`/`agent_name`/`phase`
+and runs land in `assessment_command_runs`. Treat that history as a coverage
+map — a record of what harnesses/corpora/sanitizer configs have already been
+run so your next campaign picks a variant that hasn't been tried. Search with
+an unscoped query first so you see every agent's and every phase's prior work
+— `./scripts/assess.py list-command-runs --q <keyword>` — and narrow with
+`--agent-name` or `--phase` only if the broad result is overwhelming.
+The only campaign to skip is the identical binary + corpus + flags combination
+already run to completion; any variant (new sanitizer, new dictionary, new
+seed corpus, harness change) is new coverage. Before citing a prior run,
+fetch its preview with `./scripts/assess.py get-command-run <id>` —
+`success=true` only means `return_code=0`, and a campaign that exited cleanly
+under its time budget but produced no crashes is not the same as one that
+exhausted the search space. Full coverage-vs-duplicate decision table:
+`agent/references/runtime-guides/command-history-auditing.md`.
 
 **Available tools:**
 
@@ -80,7 +100,8 @@ Use `./scripts/assess.py record-finding <agent-name> <finding-json-file>` to rec
 | `code-architect` | `CA` | `FINDING-CA-001` |
 | `code-vuln-hunter` | `CH` | `FINDING-CH-001` |
 | `code-variant-hunter` | `CV` | `FINDING-CV-001` |
-| `code-vuln-verifier` | `VF` | `FINDING-VF-001` |
+| `code-vuln-verifier` | `VF` | `FINDING-VF-001` (spot-check only — verifier updates existing findings, not new ones) |
+| `code-fuzz-engineer` | `CF` | `FINDING-CF-001` |
 
 **Title formula:** `[Bug Class] in [file:line or component] allows [attacker role] to [impact]`
 
@@ -104,9 +125,12 @@ finding table.
 - `defect_family` uses CWE-based names: `buffer-overflow`, `integer-overflow`, `use-after-free`, `injection`, `race-condition`, `crypto-misuse`, `auth-bypass`, `format-string`
 - `details.cwe_id` must be a specific CWE ID (e.g., `CWE-122`, not generic `CWE-119`)
 - `source_name` is your agent name (e.g., `code-vuln-hunter`)
-- `evidence` must include: the vulnerable code snippet, the taint path from untrusted input to sink, and why existing guards are insufficient
+- `details.evidence` must include: the vulnerable code snippet, the taint path from untrusted input to sink, and why existing guards are insufficient
+- `details.entry_point` and `details.sink` decompose the taint path into structured fields — populate both alongside the narrative `details.taint_path`
+- `details.references` is an array of CVE links, advisory URLs, or CWE documentation links
+- `details.poc_code` holds a PoC exploit script; for web findings use `details.poc_request` / `details.poc_response` for structured HTTP pairs
 
-**Deduplication:** Before recording, query existing findings via `./scripts/assess.py fetch report-findings`.
+**Deduplication:** Before recording, query existing findings via `./scripts/assess.py fetch findings`.
 If the same root cause at the same canonical location already exists, update or merge that finding
 instead of creating a duplicate. Variant instances in different files or materially different sink
 sites are new findings; repeated commentary on the same `file:path:line` is not.
