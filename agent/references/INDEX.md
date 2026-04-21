@@ -230,6 +230,32 @@ Quick-reference per tool, organized by usage phase.
 | `tools/cracking/john.md` | Offline password hash cracking (CPU) |
 | `tools/cracking/hashcat.md` | Offline password hash cracking (GPU) |
 
+## gf-patterns/ — GF Pattern Library
+
+Per-bucket reference files for the gf URL classifier, keyed to the buckets that
+`agent/scripts/assess/commands/classify_work.py` recognizes. Used by: surface-collector,
+gau-triage, operator.
+
+Each file documents what the bucket classifies, the parameter keys and path fragments that
+match, the baseline `priority_score` weight, representative examples, and false-positive
+surface to keep operator calibration honest. Skills cite these files with a "Load because X"
+reason before invoking a bucket.
+
+| File | Bucket | Baseline weight | What it classifies |
+|------|--------|-----------------|--------------------|
+| `gf-patterns/rce.md` | `rce` | 50 | Command-exec parameters (`cmd`, `exec`) and `/exec/`, `/cmd/`, `/shell/` paths |
+| `gf-patterns/ssrf.md` | `ssrf` | 45 | URL-fetch parameters (`url`, `callback`, `feed`) and `/proxy/`, `/fetch/` paths |
+| `gf-patterns/sqli.md` | `sqli` | 40 | Query/identifier parameters (`id`, `q`, `sort`, `filter`) |
+| `gf-patterns/lfi.md` | `lfi` | 40 | File-handling parameters (`file`, `path`, `template`, `include`) |
+| `gf-patterns/idor.md` | `idor` | 35 | Object-reference parameters (`id`, `user`, `account`, `order`) |
+| `gf-patterns/debug_logic.md` | `debug_logic` | 30 | Privileged paths (`/admin`, `/actuator`, `/.git`, `/.env`) |
+| `gf-patterns/redirect.md` | `redirect` | 25 | Return-URL parameters (`next`, `redirect_uri`, `return`) |
+| `gf-patterns/ssti.md` | `ssti` | 25 | Template-resolver parameters (`template`, `theme`, `view`) |
+| `gf-patterns/xss.md` | `xss` | 20 | Reflected-input parameters (`q`, `message`, `comment`) |
+| `gf-patterns/interestingparams.md` | `interestingparams` | 15 | Credential parameters (`api_key`, `token`, `password`) |
+| `gf-patterns/interestingsubs.md` | conceptual | n/a | Subdomain conventions (`staging.`, `internal.`) — surfaces via subdomain-enumeration, not a direct classify-work bucket |
+| `gf-patterns/interestingEXT.md` | conceptual | n/a | Backup/config extensions (`.bak`, `.env`, `.sql`) — surfaces via `path:` cluster fallback plus trufflehog body scan |
+
 ## runtime-guides/ — Shared Runtime References
 
 Shared operator/runtime references. Used by: operator, Claude, Codex.

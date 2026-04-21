@@ -13,9 +13,26 @@ _SCHEMA_FILE = Path(__file__).resolve().parent.parent.parent / "schema.sql"
 
 _SKIP_TYPES = frozenset({"image", "video", "font", "archive"})
 
+# Idempotent ALTER-based migration for pre-existing work_items tables that
+# predate the signal-first dispatch columns. SQLite lacks `ADD COLUMN IF NOT
+# EXISTS`, so we inspect PRAGMA table_info and add only the missing columns.
+_WORK_ITEMS_PRIORITY_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("priority_score", "INTEGER NOT NULL DEFAULT 0"),
+    ("priority_reason", "TEXT"),
+    ("cluster_key", "TEXT"),
+    ("terminal_reason", "TEXT"),
+)
+
 
 def db_init(db_path: str) -> None:
-    """Ensure database exists and schema is applied."""
+    """Ensure the database exists and schema is applied.
+
+    Run the column-add migration before the full schema executescript so that
+    older DBs pick up the priority columns before any CREATE INDEX statement
+    references them. The CREATE TABLE IF NOT EXISTS path is still authoritative
+    for fresh DBs; the migration helper is a no-op when the table does not
+    exist yet, and a no-op when the columns are already present.
+    """
     if not Path(db_path).is_file():
         raise SystemExit(f"db_init: database not found: {db_path}")
 
@@ -23,11 +40,29 @@ def db_init(db_path: str) -> None:
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        _apply_work_items_priority_migration(conn)
         schema_sql = _SCHEMA_FILE.read_text(encoding="utf-8")
         conn.executescript(schema_sql)
         conn.commit()
     finally:
         conn.close()
+
+
+def _apply_work_items_priority_migration(conn: sqlite3.Connection) -> None:
+    """Add priority/cluster columns when missing.
+
+    PRAGMA table_info tells us which columns the current file already has. We
+    only issue ALTER TABLE for the missing ones because ALTER TABLE is not
+    wrapped by `IF NOT EXISTS` in SQLite, and a duplicate add would abort the
+    whole db_init flow. When the table does not exist yet (fresh DB) we leave
+    the work to the CREATE TABLE IF NOT EXISTS in schema.sql.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(work_items)").fetchall()}
+    if not existing:
+        return
+    for name, decl in _WORK_ITEMS_PRIORITY_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE work_items ADD COLUMN {name} {decl}")
 
 
 def db_query(db_path: str, sql: str, params: tuple = ()) -> list[dict[str, Any]]:

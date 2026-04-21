@@ -48,7 +48,7 @@ ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/dirb/common.txt \
 ```bash
 # feroxbuster for recursive content discovery (faster, auto-recurses, Rust-based)
 feroxbuster -u https://TARGET -w /usr/share/wordlists/dirb/common.txt --smart --auto-tune \
-  -d 3 -t 50 -o /engagement/scans/ferox_results.txt
+  -d 3 -t 50 -o /engagements/$ENGAGEMENT_KEY/scans/ferox_results.txt
 
 # feroxbuster with extensions
 feroxbuster -u https://TARGET -w /usr/share/wordlists/dirb/common.txt \
@@ -105,7 +105,7 @@ ffuf -u https://TARGET -w /usr/share/seclists/Discovery/DNS/subdomains-top1milli
 
 ### 10. Output
 ```bash
-ffuf -u https://TARGET/FUZZ -w wordlist.txt -ac -o /engagement/scans/dir_fuzz_results.json -of json
+ffuf -u https://TARGET/FUZZ -w wordlist.txt -ac -o /engagements/$ENGAGEMENT_KEY/scans/dir_fuzz_results.json -of json
 curl -sI https://TARGET/discovered_path  # Verify
 ```
 

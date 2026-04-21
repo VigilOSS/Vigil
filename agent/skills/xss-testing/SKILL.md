@@ -58,7 +58,7 @@ cat urls_with_params.txt | dalfox pipe --silence
 dalfox url "https://TARGET/search?q=test" --blind "$OOB_CALLBACK_URL"
 
 # JSON output for triage
-dalfox url "https://TARGET/page?param=test" -o /engagement/scans/xss_results.json --format json
+dalfox url "https://TARGET/page?param=test" -o /engagements/$ENGAGEMENT_KEY/scans/xss_results.json --format json
 
 # WAF fingerprinting (run before payload selection)
 dalfox url "https://TARGET/search?q=test" --waf-evasion

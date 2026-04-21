@@ -14,8 +14,17 @@ from assess.lib.params import extract_url_path, extract_query_params, extract_pa
 def register(subparsers) -> None:
     p = subparsers.add_parser("dispatch", help="Work-buffer dispatch engine")
     p.add_argument("db_path", help="Path to cases.db")
-    p.add_argument("action", help="stats|fetch|done|error|reset-stale|retry-errors|migrate|requeue")
+    p.add_argument(
+        "action",
+        help="stats|fetch|fetch-by-priority|defer-cluster|done|error|reset-stale|retry-errors|migrate|requeue",
+    )
     p.add_argument("extra", nargs="*", help="Action-specific arguments")
+    p.add_argument(
+        "--reason",
+        default="",
+        help="Reason for defer-cluster (required for that action). Free text; "
+        "stored in terminal_reason so operators can audit why a cluster was skipped.",
+    )
     p.set_defaults(func=run)
 
 
@@ -33,6 +42,30 @@ def run(args) -> None:
             print("Usage: dispatch <db> fetch <type> <limit> <agent>", file=sys.stderr)
             sys.exit(1)
         _fetch(db_path, extra[0], int(extra[1]), extra[2])
+    elif action == "fetch-by-priority":
+        if len(extra) < 2:
+            print(
+                "Usage: dispatch <db> fetch-by-priority <limit> <agent>",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _fetch_by_priority(db_path, int(extra[0]), extra[1])
+    elif action == "defer-cluster":
+        if not extra:
+            print(
+                "Usage: dispatch <db> defer-cluster <cluster_key> --reason TEXT",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        reason = (getattr(args, "reason", "") or "").strip()
+        if not reason:
+            print(
+                "defer-cluster: --reason is required so terminal_reason records why "
+                "the cluster was deferred; rerun with --reason \"<explanation>\".",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _defer_cluster(db_path, extra[0], reason)
     elif action == "done":
         if not extra:
             print("Usage: dispatch <db> done <id_list>", file=sys.stderr)
@@ -57,7 +90,11 @@ def run(args) -> None:
         _requeue(db_path)
     else:
         print(f"Unknown action: {action}", file=sys.stderr)
-        print("Actions: stats, fetch, done, error, reset-stale, retry-errors, migrate, requeue", file=sys.stderr)
+        print(
+            "Actions: stats, fetch, fetch-by-priority, defer-cluster, done, error, "
+            "reset-stale, retry-errors, migrate, requeue",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -99,6 +136,89 @@ def _fetch(db_path: str, type_val: str, limit: int, agent: str) -> None:
         conn.commit()
         result = [dict(row) for row in rows]
         print(json.dumps(result, indent=2, ensure_ascii=False))
+    finally:
+        conn.close()
+
+
+_SKIP_TYPES = ("image", "video", "font", "archive")
+
+
+def _fetch_by_priority(db_path: str, limit: int, agent: str) -> None:
+    """Claim the top-K pending rows globally, ranked by priority_score DESC.
+
+    Mirrors the atomic transition shape of `_fetch` so operators can swap one
+    for the other without downstream callers changing. We sort by
+    (priority_score DESC, cluster_key, id) because the dispatcher consumes the
+    ordered list cluster-by-cluster — batching rows from the same cluster into
+    a single specialist dispatch keeps context warm and cuts token churn.
+
+    We exclude rows with terminal_reason set because classify-work already
+    stamped those as skip-worthy, and we exclude inert types as a belt-and-
+    suspenders guard in case an older DB predates the terminal_reason stamp.
+    """
+    import sqlite3
+
+    placeholders = ",".join("?" * len(_SKIP_TYPES))
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        rows = conn.execute(
+            f"""UPDATE work_items
+                SET status = 'processing',
+                    assigned_agent = ?,
+                    consumed_at = datetime('now')
+                WHERE id IN (
+                    SELECT id FROM work_items
+                    WHERE status = 'pending'
+                      AND terminal_reason IS NULL
+                      AND type NOT IN ({placeholders})
+                    ORDER BY priority_score DESC, cluster_key, id
+                    LIMIT ?
+                )
+                RETURNING *""",
+            (agent, *_SKIP_TYPES, limit),
+        ).fetchall()
+        conn.commit()
+        # SQLite's UPDATE...RETURNING streams rows in rowid order, which
+        # scrambles the priority ordering the inner SELECT established. Re-sort
+        # in Python so downstream callers see the same shape they expected
+        # from the ORDER BY — priority_score DESC, cluster_key, id.
+        result = sorted(
+            (dict(row) for row in rows),
+            key=lambda r: (
+                -(r.get("priority_score") or 0),
+                r.get("cluster_key") or "",
+                r.get("id") or 0,
+            ),
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    finally:
+        conn.close()
+
+
+def _defer_cluster(db_path: str, cluster_key: str, reason: str) -> None:
+    """Mark every pending row in a cluster as skipped with a terminal reason.
+
+    Operators use this after review to silence low-signal clusters from the
+    priority dispatcher. We only flip pending rows so that an in-flight
+    `processing` dispatch is not clobbered mid-work; the operator can
+    reset-stale + defer if they want to pull a cluster back.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        cursor = conn.execute(
+            """UPDATE work_items
+               SET status = 'skipped',
+                   terminal_reason = ?
+               WHERE status = 'pending' AND cluster_key = ?""",
+            (reason, cluster_key),
+        )
+        conn.commit()
+        print(f"Deferred {cursor.rowcount} pending item(s) in cluster '{cluster_key}' (reason: {reason})")
     finally:
         conn.close()
 
