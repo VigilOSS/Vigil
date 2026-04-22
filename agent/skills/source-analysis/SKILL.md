@@ -17,6 +17,8 @@ origin: AI Threat Hunting
 
 - `LinkFinder` — automated endpoint extraction from JavaScript files
 - `SecretFinder` — scan JS files for API keys, tokens, and secrets
+- `trufflehog` — scan saved JS/source-map artifacts through Kali MCP; host-side
+  PATH availability is not part of the contract
 - `curl`, `grep`/`sed`/`awk`, `jq` — manual extraction and verification
 
 ## Division of Labor
@@ -67,6 +69,8 @@ done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_secrets.txt
 
 Use LinkFinder and SecretFinder as the primary extraction pass. Fall back to manual grep
 for edge cases they miss (inline scripts, dynamically loaded chunks, non-standard patterns).
+When scanning saved artifacts for secrets, invoke `trufflehog filesystem` via Kali MCP against
+`/engagements/$ENGAGEMENT_KEY/...` paths so the runtime-owned install is used consistently.
 
 - API calls: fetch(), axios, XHR, $.ajax patterns
 - SPA routes: React `path="/..."`, Vue `{ path: }`, Angular `{ path: }`

@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any
 
+from .intel_types import INTEL_TYPES
 from .schema_validation import load_schema
 
 
@@ -23,6 +24,37 @@ class CommandContract:
 
 
 _CONTRACTS: dict[str, CommandContract] = {
+    "record-intel": CommandContract(
+        name="record-intel",
+        summary="Record structured intelligence through the helper-owned intel schemas.",
+        schema_name="type-specific intel schema",
+        preferred_invocations=(
+            "assess.py record-intel <type> <intel-json-file>",
+            "assess.py contract record-intel <type>",
+        ),
+        author_supplied_fields=(
+            "type-specific required fields",
+            "source_name",
+            "evidence_ref or provenance when available",
+        ),
+        notes=(
+            "Use a type-specific contract before authoring JSON. Intel schemas are strict (`additionalProperties=false`), so guessed aliases such as `source` fail validation when the contract says `source_name`.",
+            "Valid intel types: " + ", ".join(sorted(INTEL_TYPES)),
+        ),
+        common_mistakes=(
+            ("source", "use source_name"),
+            ("agent", "use source_name or provenance.agent_name"),
+        ),
+        examples=(
+            {
+                "component": "nginx",
+                "version": "1.24.0",
+                "source_name": "osint-analyst",
+                "confidence": "medium",
+                "evidence_ref": "scans/whatweb.txt:12",
+            },
+        ),
+    ),
     "record-finding": CommandContract(
         name="record-finding",
         summary="Create or upsert a finding through helper-normalized lifecycle defaults.",
@@ -291,10 +323,15 @@ _RAW_ENDPOINT_RULES = (
 
 
 def contract_names() -> list[str]:
-    return sorted(_CONTRACTS)
+    names = list(_CONTRACTS)
+    names.extend(f"record-intel {intel_type}" for intel_type in sorted(INTEL_TYPES))
+    return sorted(names)
 
 
 def get_contract(name: str) -> CommandContract | None:
+    if name.startswith("record-intel "):
+        _, _, intel_type = name.partition(" ")
+        return _record_intel_contract(intel_type)
     return _CONTRACTS.get(name)
 
 
@@ -338,6 +375,16 @@ def render_contract(name: str) -> str:
             ]
         )
         lines.extend(f"  - {entry}" for entry in schema_properties)
+
+    schema_required = _schema_required_names(contract.schema_name)
+    if schema_required:
+        lines.extend(
+            [
+                "",
+                "Required top-level fields:",
+            ]
+        )
+        lines.extend(f"  - {entry}" for entry in schema_required)
 
     if contract.common_mistakes:
         lines.extend(
@@ -455,6 +502,109 @@ def _schema_property_names(schema_name: str) -> list[str]:
     if not isinstance(properties, dict):
         return []
     return sorted(str(name) for name in properties)
+
+
+def _schema_required_names(schema_name: str) -> list[str]:
+    if not schema_name.endswith(".schema.json"):
+        return []
+    schema = load_schema(schema_name)
+    required = schema.get("required", [])
+    if not isinstance(required, list):
+        return []
+    return sorted(str(name) for name in required)
+
+
+def _record_intel_contract(intel_type: str) -> CommandContract | None:
+    if intel_type not in INTEL_TYPES:
+        return None
+    schema_name, endpoint_segment = INTEL_TYPES[intel_type]
+    required = tuple(_schema_required_names(schema_name))
+    schema = load_schema(schema_name)
+    properties = schema.get("properties", {})
+    author_fields = list(required or ("type-specific fields",))
+    for optional in ("source_name", "confidence", "evidence_ref", "provenance", "notes"):
+        if isinstance(properties, dict) and optional in properties and optional not in author_fields:
+            author_fields.append(optional)
+
+    example = _intel_example_payload(intel_type)
+    return CommandContract(
+        name=f"record-intel {intel_type}",
+        summary=f"Record one `{intel_type}` intel row via the record-intel helper.",
+        schema_name=schema_name,
+        preferred_invocations=(
+            f"assess.py record-intel {intel_type} {intel_type}.json",
+        ),
+        author_supplied_fields=tuple(author_fields),
+        notes=(
+            f"Posts to /intel/{endpoint_segment}; use the helper rather than raw post so local schema validation catches payload drift first.",
+            "Intel schemas are strict. If a field is not listed under Allowed top-level fields, the CLI will reject it before contacting the backend.",
+        ),
+        common_mistakes=(
+            ("source", "use source_name"),
+            ("agent_name", "use source_name, or provenance.agent_name when provenance detail is useful"),
+        ),
+        examples=(example,) if example else (),
+    )
+
+
+def _intel_example_payload(intel_type: str) -> dict[str, Any]:
+    examples: dict[str, dict[str, Any]] = {
+        "tech-component": {
+            "component": "Salesforce",
+            "version": "",
+            "source_name": "source-analyzer",
+            "confidence": "confirmed",
+            "evidence_ref": "scans/httpx-tech.txt:7",
+        },
+        "person": {
+            "name": "Jane Doe",
+            "role": "Engineering",
+            "source_name": "osint-analyst",
+        },
+        "email": {
+            "address": "security@example.com",
+            "source_name": "osint-analyst",
+        },
+        "domain": {
+            "identity": "api.example.com",
+            "kind": "subdomain",
+            "source_name": "subdomain-enumeration",
+        },
+        "cve": {
+            "cve_id": "CVE-2024-1234",
+            "affected_component": "example-app",
+            "source_name": "osint-analyst",
+        },
+        "dns-record": {
+            "name": "api.example.com",
+            "record_type": "A",
+            "value": "192.0.2.10",
+            "source_name": "subdomain-enumeration",
+        },
+        "social-profile": {
+            "subject_kind": "org",
+            "platform": "linkedin",
+            "handle": "example",
+            "url": "https://www.linkedin.com/company/example/",
+            "source_name": "osint-analyst",
+        },
+        "breach-record": {
+            "subject": "user@example.com",
+            "breach_name": "Example breach",
+            "source_name": "osint-analyst",
+        },
+        "org-fact": {
+            "fact_key": "helpdesk-provider",
+            "fact_value": "ExampleDesk",
+            "source_name": "osint-analyst",
+        },
+        "note": {
+            "title": "Login page leaks stack trace",
+            "body_markdown": "Verbose error references internal package names.",
+            "source_name": "vulnerability-analyst",
+        },
+    }
+    return examples.get(intel_type, {})
 
 
 def _looks_like_verification_payload(payload: Any | None) -> bool:

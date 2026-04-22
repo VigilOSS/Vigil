@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -98,6 +99,58 @@ def test_patched_kali_client_preserves_audit_context_for_async_tools(monkeypatch
     assert module._AUDIT_CONTEXT.get() == {}
 
 
+def test_patched_kali_client_injects_audit_headers_for_requests_session(monkeypatch) -> None:
+    module = _load_script_module(
+        "test_patched_kali_client_requests_session_module",
+        "docker/kali-mcp-runtime/patched_kali_client.py",
+    )
+
+    observed_headers: list[dict[str, str]] = []
+
+    def fake_request(self, method, url, **kwargs):  # noqa: ANN001, ANN202
+        observed_headers.append(dict(kwargs.get("headers") or {}))
+        return SimpleNamespace(status_code=200, text="ok")
+
+    class FakeSession:
+        request = fake_request
+
+    requests_module = ModuleType("requests")
+    requests_module.sessions = SimpleNamespace(Session=FakeSession)
+    requests_module.Session = FakeSession
+    requests_module.request = lambda method, url, **kwargs: FakeSession().request(method, url, **kwargs)
+    requests_module.get = lambda url, **kwargs: FakeSession().request("GET", url, **kwargs)
+    requests_module.post = lambda url, **kwargs: FakeSession().request("POST", url, **kwargs)
+    monkeypatch.setitem(sys.modules, "requests", requests_module)
+
+    module._patch_requests_functions()
+    token = module._set_audit_context(
+        "eng-1",
+        "recon-agent",
+        "recon",
+        technique="RECON",
+        intent="fingerprint target",
+        probe_kind="fingerprint",
+        destructive=False,
+    )
+    try:
+        response = requests_module.Session().request("GET", "http://127.0.0.1:5000/api/test")
+    finally:
+        module._clear_audit_context(token)
+
+    assert response.status_code == 200
+    assert observed_headers == [
+        {
+            "X-Engagement-Key": "eng-1",
+            "X-Agent-Name": "recon-agent",
+            "X-Phase": "recon",
+            "X-Technique": "RECON",
+            "X-Intent": "fingerprint target",
+            "X-Probe-Kind": "fingerprint",
+            "X-Destructive": "0",
+        }
+    ]
+
+
 def test_patched_kali_client_isolates_concurrent_async_audit_contexts(monkeypatch) -> None:
     module = _load_script_module(
         "test_patched_kali_client_concurrent_module",
@@ -173,6 +226,68 @@ def test_patched_kali_client_isolates_concurrent_async_audit_contexts(monkeypatc
         ],
     }
     assert module._AUDIT_CONTEXT.get() == {}
+
+
+def test_patched_kali_client_exposes_command_metadata_params(monkeypatch) -> None:
+    module = _load_script_module(
+        "test_patched_kali_client_metadata_module",
+        "docker/kali-mcp-runtime/patched_kali_client.py",
+    )
+
+    class FakeFastMCP:
+        def tool(self, *args, **kwargs):
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+    mcp_module = ModuleType("mcp")
+    server_module = ModuleType("mcp.server")
+    fastmcp_module = ModuleType("mcp.server.fastmcp")
+    fastmcp_module.FastMCP = FakeFastMCP
+    monkeypatch.setitem(sys.modules, "mcp", mcp_module)
+    monkeypatch.setitem(sys.modules, "mcp.server", server_module)
+    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp_module)
+
+    module._wrap_fastmcp_tool_decorator()
+    observed_headers: list[dict[str, str]] = []
+
+    async def upstream_tool() -> str:
+        observed_headers.append(module._current_audit_headers())
+        return "ok"
+
+    wrapped = FakeFastMCP().tool(name="execute_command")(upstream_tool)
+    signature = module.inspect.signature(wrapped)
+
+    for name in ("technique", "probe_kind", "intent", "destructive"):
+        assert name in signature.parameters
+        assert signature.parameters[name].kind == module.inspect.Parameter.KEYWORD_ONLY
+        assert signature.parameters[name].default is None
+
+    result = asyncio.run(
+        wrapped(
+            engagement_key="eng-1",
+            agent_name="recon-agent",
+            phase="recon",
+            technique="RECON",
+            probe_kind="fingerprint",
+            intent="confirm live host",
+            destructive=False,
+        )
+    )
+
+    assert result == "ok"
+    assert observed_headers == [
+        {
+            "X-Engagement-Key": "eng-1",
+            "X-Agent-Name": "recon-agent",
+            "X-Phase": "recon",
+            "X-Technique": "RECON",
+            "X-Probe-Kind": "fingerprint",
+            "X-Intent": "confirm live host",
+            "X-Destructive": "0",
+        }
+    ]
 
 
 def test_patched_kali_server_bounds_queued_audit_streams(monkeypatch, tmp_path: Path) -> None:
@@ -814,6 +929,63 @@ def test_list_command_runs_failed_excludes_timeouts_by_default() -> None:
 
     assert "success=false" in query
     assert "timed_out=false" in query
+
+
+def test_list_command_runs_table_displays_tool_bin_for_execute_command() -> None:
+    module = _load_script_module(
+        "test_list_command_runs_render_module",
+        "agent/scripts/assess/commands/list_command_runs.py",
+    )
+
+    rendered = module._render_table(
+        [
+            {
+                "id": 1,
+                "created_at": "2026-04-22T00:00:00Z",
+                "phase": "recon",
+                "agent_name": "recon-specialist",
+                "tool_name": "command",
+                "tool_bin": "nuclei",
+                "technique": "RECON",
+                "probe_kind": "fingerprint",
+                "destructive": False,
+                "return_code": 0,
+                "timed_out": False,
+                "intent": "reactive sweep",
+                "command": "nuclei -l /engagements/eng/scans/targets.txt",
+            }
+        ]
+    )
+
+    assert "nuclei(command)" in rendered
+    assert "\tcommand\t" not in rendered
+
+
+def test_log_actor_kind_parses_before_or_after_subcommand() -> None:
+    module = _load_script_module(
+        "test_log_entry_actor_kind_module",
+        "agent/scripts/assess/commands/log_entry.py",
+    )
+
+    parser = argparse.ArgumentParser(prog="assess.py")
+    parser.add_argument(
+        "--actor-kind",
+        dest="actor_kind",
+        default=None,
+        choices=["operator", "agent", "hook", "system"],
+    )
+    subparsers = parser.add_subparsers(dest="command")
+    module.register(subparsers)
+
+    before = parser.parse_args(
+        ["--actor-kind", "operator", "log", "agent", "title", "action", "result"]
+    )
+    after = parser.parse_args(
+        ["log", "agent", "title", "action", "result", "--actor-kind", "operator"]
+    )
+
+    assert before.actor_kind == "operator"
+    assert after.actor_kind == "operator"
 
 
 def test_list_command_runs_failed_with_timed_out_preserves_timeout_filter() -> None:

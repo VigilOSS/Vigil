@@ -216,6 +216,10 @@ def _render_table(rows: list[dict]) -> str:
         intent = (row.get("intent") or "").replace("\t", " ").replace("\n", " ⏎ ")
         if len(intent) > 60:
             intent = intent[:57] + "..."
+        tool_display = str(row.get("tool_bin") or row.get("tool_name") or "")
+        route_tool = str(row.get("tool_name") or "")
+        if tool_display and route_tool and tool_display != route_tool:
+            tool_display = f"{tool_display}({route_tool})"
         destructive = row.get("destructive")
         if destructive is None:
             dest_str = "-"
@@ -228,7 +232,7 @@ def _render_table(rows: list[dict]) -> str:
                     str(row.get("created_at", "")),
                     str(row.get("phase", "")),
                     str(row.get("agent_name", "")),
-                    str(row.get("tool_name", "")),
+                    tool_display,
                     str(row.get("technique") or "-"),
                     str(row.get("probe_kind") or "-"),
                     dest_str,

@@ -13,6 +13,7 @@ is treated as the engagement dir; with four, it's the agent name.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import sys
@@ -35,9 +36,13 @@ def register(subparsers) -> None:
     p.add_argument("result")
     p.add_argument(
         "--actor-kind",
-        default="agent",
+        default=argparse.SUPPRESS,
         choices=["operator", "agent", "hook", "system"],
-        help="Actor kind — defaults to 'agent' since assess.py log is specialist-driven",
+        help=(
+            "Actor kind — defaults to 'agent' since assess.py log is "
+            "specialist-driven. Also accepted before the subcommand as "
+            "`assess.py --actor-kind operator log ...`."
+        ),
     )
     p.set_defaults(func=run)
 
@@ -68,7 +73,7 @@ def run(args) -> None:
     # to slightly under the caps so callers don't trip the 422 path for
     # prose-style input that's a few chars over.
     payload = {
-        "actor_kind": args.actor_kind,
+        "actor_kind": getattr(args, "actor_kind", None) or "agent",
         "actor_name": agent,
         "title": _truncate(title, 480),
         "action": _truncate(action, 3800),

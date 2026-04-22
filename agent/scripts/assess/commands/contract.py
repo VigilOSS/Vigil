@@ -17,16 +17,26 @@ def register(subparsers) -> None:
             "  assess.py contract record-finding\n"
             "  assess.py contract verify-finding\n"
             "  assess.py contract update-finding\n"
-            "  assess.py contract reset-finding"
+            "  assess.py contract reset-finding\n"
+            "  assess.py contract record-intel tech-component"
         ),
     )
     p.add_argument("name", help=f"Contract name ({', '.join(contract_names())})")
+    p.add_argument(
+        "variant",
+        nargs="?",
+        help="Optional contract variant, e.g. record-intel tech-component",
+    )
     p.set_defaults(func=run)
 
 
 def run(args) -> None:
+    name = args.name
+    variant = getattr(args, "variant", None)
+    if variant:
+        name = f"{name} {variant}"
     try:
-        print(render_contract(args.name))
+        print(render_contract(name))
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
