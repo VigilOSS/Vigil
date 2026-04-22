@@ -228,6 +228,7 @@ Code analysis can also run mid-engagement alongside web testing when source code
 - Katana and Chromium for authenticated crawling
 - ProjectDiscovery recon utilities including `httpx`, `dnsx`, `gau`, `katana`, `nuclei`, `dalfox`, and `puredns`
 - nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, WhatWeb, hydra, john, hashcat
+- TruffleHog for filesystem/git secret scanning from inside the Kali runtime
 - post-access tooling such as evil-winrm, impacket, mitm6, chisel, ligolo-ng, proxychains-ng, Responder
 - pwncat-vl for interactive reverse shell handling, with tmux for session management
 - interactsh for OOB callback detection (blind SSRF, XXE, XSS, DNS)

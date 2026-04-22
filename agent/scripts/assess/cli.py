@@ -18,6 +18,13 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="Engagement directory (default: $ENGAGEMENT_DIR or cwd if it contains scope.json)",
     )
+    parser.add_argument(
+        "--actor-kind",
+        dest="actor_kind",
+        default=None,
+        choices=["operator", "agent", "hook", "system"],
+        help="Actor kind for commands that write activity entries (currently log)",
+    )
 
     sub = parser.add_subparsers(dest="command")
 

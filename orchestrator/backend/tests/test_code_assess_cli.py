@@ -1094,6 +1094,19 @@ def test_contract_prints_reset_finding_contract(capsys):
     assert "assess.py reset-finding <slug>" in out
 
 
+def test_contract_prints_record_intel_variant_contract(capsys):
+    module = _load_contract_module()
+
+    module.run(SimpleNamespace(name="record-intel", variant="tech-component"))
+
+    out = capsys.readouterr().out
+    assert "Command: record-intel tech-component" in out
+    assert "Schema: intel-tech-component.schema.json" in out
+    assert "Required top-level fields:" in out
+    assert "component" in out
+    assert "source -> use source_name" in out
+
+
 def test_verify_finding_help_is_rendered_from_contract_registry(capsys):
     cli = _load_cli_module()
 

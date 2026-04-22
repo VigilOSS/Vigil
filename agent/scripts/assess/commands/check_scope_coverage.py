@@ -14,8 +14,10 @@ The audit is rolled up from three data sources:
 - Backend `GET /engagements/{key}/assessment/command-runs` filtered by
   `tool_bin` — detects whether `subfinder`/`puredns`/`dnsx`/`ffuf`/`httpx`
   ran (enum activity), whether `katana`/`gau`/`hakrawler` ran (collection
-  activity), and how many `nuclei` sweeps targeted the entry (reactive
-  nuclei Phase 1-2 signal).
+  activity), and how many `nuclei` sweeps targeted the entry. File-driven
+  runs such as `nuclei -l /engagements/<key>/scans/targets.txt` are resolved
+  back to the host engagement directory when the referenced target list is
+  still present.
 - Local `$DIR/cases.db` `work_items` grouped by status (pending / processing
   / done / skipped / error). Scoping is a coarse URL `LIKE '%<host>%'` match
   because the backend carries the canonical surface/service FK but the
@@ -50,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sqlite3
 import sys
 from pathlib import Path
@@ -79,6 +82,18 @@ _COLLECTION_TOOLS: frozenset[str] = frozenset({
     "waybackurls",
 })
 _REACTIVE_NUCLEI_TOOL = "nuclei"
+_COMMAND_TARGET_FILE_FLAGS: frozenset[str] = frozenset({
+    "-l",
+    "-list",
+    "--list",
+    "-input",
+    "--input",
+    "-targets",
+    "--targets",
+    "-target-list",
+    "--target-list",
+})
+_MAX_TARGET_FILE_BYTES = 2_000_000
 
 # Services count as "live" when the backend state is anything except
 # `down`/`filtered`. We prefer an allow list over a block list so new
@@ -178,6 +193,7 @@ def run(args: argparse.Namespace) -> None:
                 entry=entry,
                 services=services_list,
                 command_runs=command_runs_list,
+                engagement_dir=Path(cfg.engagement_dir),
                 summary=summary_dict,
                 work_by_host=work_by_host,
                 scope_metadata=scope_metadata,
@@ -287,22 +303,160 @@ def _entry_matches_host(entry: dict[str, Any], host: str) -> bool:
     return host == entry_host
 
 
-def _command_run_mentions_host(row: dict[str, Any], entry: dict[str, Any]) -> bool:
+def _command_run_mentions_host(
+    row: dict[str, Any],
+    entry: dict[str, Any],
+    *,
+    engagement_dir: Path | None = None,
+) -> bool:
     """Return True when a command-run row references this scope entry.
 
-    We search the command string (argv) because the backend doesn't tag
-    command runs with a canonical host — the Kali MCP runtime records the
-    invocation verbatim. A substring match against a lowercased
-    command text plus the matcher's wildcard rules is good enough for audit
-    purposes.
+    We search the command string (argv) and, when a command references a
+    target-list file under `/engagements/<key>/...`, read that file from the
+    host engagement directory. This catches MCP/Kali patterns such as
+    `nuclei -l /engagements/<key>/scans/delta.txt`, where the command text
+    contains only a mounted artifact path rather than the actual host names.
     """
     entry_host = entry["host"]
     command = (row.get("command") or "").lower()
+    if command:
+        if entry["entry_kind"] == "wildcard":
+            if ("." + entry_host) in command or entry_host in command:
+                return True
+        elif entry_host in command:
+            return True
+
+    for host in _command_run_target_hosts(row, engagement_dir=engagement_dir):
+        if _entry_matches_host(entry, host):
+            return True
+    return False
+
+
+def _command_run_target_hosts(row: dict[str, Any], *, engagement_dir: Path | None) -> set[str]:
+    """Extract best-effort target hosts from command text, argv, and target files."""
+    tokens = _command_tokens(row)
+    hosts: set[str] = set()
+    for token in tokens:
+        host = _host_from_token(token)
+        if host:
+            hosts.add(host)
+
+    if engagement_dir is None:
+        return hosts
+
+    for file_token in _target_file_tokens(tokens):
+        path = _resolve_command_target_file(file_token, engagement_dir)
+        if path is None:
+            continue
+        hosts.update(_hosts_from_target_file(path))
+    return hosts
+
+
+def _command_tokens(row: dict[str, Any]) -> list[str]:
+    argv = row.get("argv")
+    if isinstance(argv, list) and argv:
+        return [str(item) for item in argv]
+    command = str(row.get("command") or "")
     if not command:
+        return []
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def _target_file_tokens(tokens: list[str]) -> list[str]:
+    targets: list[str] = []
+    for idx, token in enumerate(tokens):
+        if token in _COMMAND_TARGET_FILE_FLAGS and idx + 1 < len(tokens):
+            targets.append(tokens[idx + 1])
+            continue
+        for flag in _COMMAND_TARGET_FILE_FLAGS:
+            if token.startswith(flag + "="):
+                targets.append(token.split("=", 1)[1])
+                break
+    return targets
+
+
+def _resolve_command_target_file(raw: str, engagement_dir: Path) -> Path | None:
+    value = raw.strip().strip("'\"")
+    if not value:
+        return None
+
+    if value.startswith("/engagements/"):
+        parts = Path(value).parts
+        # /engagements/<engagement_key>/relative/path maps to the current
+        # host engagement directory regardless of the fixture/key name.
+        if len(parts) < 4:
+            return None
+        candidate = engagement_dir.joinpath(*parts[3:])
+    else:
+        path = Path(value).expanduser()
+        candidate = path if path.is_absolute() else engagement_dir / path
+
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(engagement_dir.resolve())
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_file():
+        return None
+    try:
+        if resolved.stat().st_size > _MAX_TARGET_FILE_BYTES:
+            return None
+    except OSError:
+        return None
+    return resolved
+
+
+def _hosts_from_target_file(path: Path) -> set[str]:
+    hosts: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                value = line.strip()
+                if not value or value.startswith("#"):
+                    continue
+                token = value.split()[0]
+                host = _host_from_token(token)
+                if host:
+                    hosts.add(host)
+    except OSError:
+        return hosts
+    return hosts
+
+
+def _host_from_token(raw: str) -> str:
+    token = raw.strip().strip("'\"<>()[],;")
+    if not token or token.startswith("-"):
+        return ""
+    if "://" in token:
+        try:
+            host = urlsplit(token).hostname or ""
+        except ValueError:
+            return ""
+    elif "/" in token and "." in token:
+        try:
+            host = urlsplit("http://" + token).hostname or ""
+        except ValueError:
+            return ""
+    else:
+        host = token.split(":", 1)[0]
+    host = host.rstrip(".").lower()
+    if not _looks_like_host(host):
+        return ""
+    return host
+
+
+def _looks_like_host(host: str) -> bool:
+    if not host:
         return False
-    if entry["entry_kind"] == "wildcard":
-        return ("." + entry_host) in command or entry_host in command
-    return entry_host in command
+    if host == "localhost":
+        return True
+    if "." in host:
+        return True
+    parts = host.split(".")
+    return len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +469,7 @@ def _build_entry_report(
     entry: dict[str, Any],
     services: list[dict[str, Any]],
     command_runs: list[dict[str, Any]],
+    engagement_dir: Path,
     summary: dict[str, Any],
     work_by_host: dict[str, dict[str, int]],
     scope_metadata: dict[str, dict[str, Any]],
@@ -342,7 +497,7 @@ def _build_entry_report(
     reactive_nuclei_runs = 0
 
     for row in command_runs:
-        if not _command_run_mentions_host(row, entry):
+        if not _command_run_mentions_host(row, entry, engagement_dir=engagement_dir):
             continue
         bin_name = str(row.get("tool_bin") or "").lower()
         tool_name = str(row.get("tool_name") or "").lower()

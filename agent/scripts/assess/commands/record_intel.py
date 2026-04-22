@@ -22,23 +22,8 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.intel_types import INTEL_TYPES
 from assess.lib.schema_validation import collect_validation_errors, load_schema
-
-
-# Mapping: CLI type → (schema file, endpoint-plural segment).
-# Endpoint-plural is appended to ``/engagements/{key}/intel/``.
-INTEL_TYPES: dict[str, tuple[str, str]] = {
-    "tech-component": ("intel-tech-component.schema.json", "tech-components"),
-    "person": ("intel-person.schema.json", "people"),
-    "email": ("intel-email.schema.json", "emails"),
-    "domain": ("intel-domain.schema.json", "domains"),
-    "cve": ("intel-cve.schema.json", "cves"),
-    "dns-record": ("intel-dns-record.schema.json", "dns-records"),
-    "social-profile": ("intel-social-profile.schema.json", "social-profiles"),
-    "breach-record": ("intel-breach-record.schema.json", "breach-records"),
-    "org-fact": ("intel-org-fact.schema.json", "org-facts"),
-    "note": ("intel-note.schema.json", "notes"),
-}
 
 
 def register(subparsers) -> None:
