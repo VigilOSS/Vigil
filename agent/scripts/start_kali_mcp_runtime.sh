@@ -83,6 +83,25 @@ validate_runtime_tools() {
   fi
 }
 
+validate_runtime_image_current() {
+  local container_image_id
+  local configured_image_id
+
+  container_image_id="$(docker inspect -f '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+  configured_image_id="$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
+  if [[ -z "$container_image_id" || -z "$configured_image_id" ]]; then
+    return 0
+  fi
+  if [[ "$container_image_id" != "$configured_image_id" ]]; then
+    echo "[runtime] Runtime container image drift detected for: $CONTAINER_NAME" >&2
+    echo "[runtime] Container image: $container_image_id" >&2
+    echo "[runtime] Configured image: $IMAGE -> $configured_image_id" >&2
+    echo "[runtime] Recreate the runtime so Kali MCP tool versions and patched client code match the checked-in image:" >&2
+    echo "  ./agent/scripts/start_kali_mcp_runtime.sh --recreate" >&2
+    exit 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --recreate)
@@ -120,6 +139,7 @@ if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
     echo "[runtime] Shared Kali MCP runtime already running: $CONTAINER_NAME"
     echo "[runtime] Shared data mount: $DATA_DIR"
     echo "[runtime] Engagements mount: $AGENT_DIR/engagements -> /engagements"
+    validate_runtime_image_current
     validate_runtime_tools
     exit 0
   fi
@@ -164,6 +184,7 @@ docker_args+=("$IMAGE")
 
 docker "${docker_args[@]}" >/dev/null
 
+validate_runtime_image_current
 validate_runtime_tools
 
 echo "[runtime] Shared Kali MCP runtime started: $CONTAINER_NAME"

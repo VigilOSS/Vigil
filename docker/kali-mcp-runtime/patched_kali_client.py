@@ -4,11 +4,11 @@
 Loads the upstream ``/usr/share/mcp-kali-server/client.py`` module after
 applying two patches so every Kali MCP tool call carries audit context:
 
-1. ``requests.get``, ``requests.post``, and ``requests.request`` (module-
-   level shortcuts — upstream does NOT use ``requests.Session``) are
-   wrapped so every outbound HTTP call to the local Kali API server
-   includes the audit headers (``X-Engagement-Key``, ``X-Agent-Name``,
-   ``X-Phase``, ``X-Engagement-Artifact-Dir``).
+1. ``requests.get``, ``requests.post``, ``requests.request``, and
+   ``requests.Session.request`` are wrapped so every outbound HTTP call to
+   the local Kali API server includes the audit headers
+   (``X-Engagement-Key``, ``X-Agent-Name``, ``X-Phase``,
+   ``X-Engagement-Artifact-Dir``).
 
 2. ``fastmcp.FastMCP.tool`` is wrapped so every ``@mcp.tool(name=...)``
    decorator the upstream applies extends the handler signature with
@@ -151,19 +151,22 @@ def _clear_audit_context(token: contextvars.Token[dict[str, str]]) -> None:
 
 
 def _patch_requests_functions() -> None:
-    """Wrap module-level ``requests.get/post/request`` so every outbound
-    call picks up audit headers from the current call context.
-    Upstream client.py uses these shortcuts (not ``Session``), so
-    patching ``Session.request`` alone would be a silent no-op."""
+    """Wrap requests entrypoints so every outbound call picks up audit
+    headers from the current call context. Upstream client.py currently uses
+    module-level shortcuts, but Session.request is covered too so an
+    upstream requests refactor does not silently drop audit metadata."""
     import requests  # type: ignore
+
+    def _inject_headers(kwargs):
+        headers = dict(kwargs.get("headers") or {})
+        for name, value in _current_audit_headers().items():
+            headers.setdefault(name, value)
+        kwargs["headers"] = headers
 
     def _inject(method):
         @functools.wraps(method)
         def wrapper(*args, **kwargs):
-            headers = dict(kwargs.get("headers") or {})
-            for name, value in _current_audit_headers().items():
-                headers.setdefault(name, value)
-            kwargs["headers"] = headers
+            _inject_headers(kwargs)
             return method(*args, **kwargs)
 
         return wrapper
@@ -171,6 +174,7 @@ def _patch_requests_functions() -> None:
     requests.get = _inject(requests.get)
     requests.post = _inject(requests.post)
     requests.request = _inject(requests.request)
+    requests.sessions.Session.request = _inject(requests.sessions.Session.request)
 
 
 def _wrap_fastmcp_tool_decorator() -> None:

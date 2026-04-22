@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sqlite3
 import uuid
 from functools import lru_cache
@@ -3187,27 +3188,105 @@ def _normalize_run_uuid(value: str) -> str:
     return run_uuid
 
 
+_SHELL_TOOL_WRAPPERS = {"bash", "dash", "ksh", "sh", "zsh"}
+_PREFIX_TOOL_WRAPPERS = {
+    "command",
+    "env",
+    "gtimeout",
+    "ionice",
+    "nice",
+    "nohup",
+    "stdbuf",
+    "sudo",
+    "timeout",
+}
+_SINGLE_ARG_WRAPPER_OPTIONS = {
+    "env": {"-C", "--chdir", "-S", "--split-string", "-u", "--unset"},
+    "gtimeout": {"-k", "--kill-after", "-s", "--signal"},
+    "ionice": {"-c", "--class", "-n", "--classdata"},
+    "nice": {"-n", "--adjustment"},
+    "stdbuf": {"-e", "-i", "-o"},
+    "sudo": {"-C", "-g", "-h", "-p", "-r", "-T", "-t", "-u"},
+    "timeout": {"-k", "--kill-after", "-s", "--signal"},
+}
+_TIMEOUT_DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+
+
+def _shell_tokens(command: str) -> list[str]:
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def _is_env_assignment(token: str) -> bool:
+    if "=" not in token:
+        return False
+    name, _value = token.split("=", 1)
+    return bool(name) and name.replace("_", "").isalnum()
+
+
+def _strip_wrapper_options(wrapper: str, tokens: list[str]) -> list[str]:
+    remaining = list(tokens)
+    options_with_arg = _SINGLE_ARG_WRAPPER_OPTIONS.get(wrapper, set())
+    while remaining:
+        token = remaining[0]
+        if wrapper == "env" and _is_env_assignment(token):
+            remaining.pop(0)
+            continue
+        if not token.startswith("-") or token == "-":
+            break
+        option = remaining.pop(0)
+        option_name = option.split("=", 1)[0]
+        if option_name in options_with_arg and "=" not in option and remaining:
+            remaining.pop(0)
+    if wrapper in {"timeout", "gtimeout"} and remaining and _TIMEOUT_DURATION_RE.fullmatch(remaining[0]):
+        remaining.pop(0)
+    return remaining
+
+
+def _derive_tool_bin_from_tokens(tokens: list[str], *, depth: int = 0) -> str:
+    if depth > 4:
+        return ""
+    remaining = list(tokens)
+    while remaining:
+        token = remaining.pop(0).strip()
+        if not token:
+            continue
+        if _is_env_assignment(token):
+            continue
+        bare = Path(token).name
+        if bare in _SHELL_TOOL_WRAPPERS:
+            for idx, arg in enumerate(remaining):
+                if arg == "-c" or (arg.startswith("-") and "c" in arg[1:]):
+                    if idx + 1 < len(remaining):
+                        return _derive_tool_bin_from_tokens(
+                            _shell_tokens(remaining[idx + 1]),
+                            depth=depth + 1,
+                        )
+                    break
+            return bare
+        if bare in _PREFIX_TOOL_WRAPPERS:
+            remaining = _strip_wrapper_options(bare, remaining)
+            continue
+        return bare.split(";", 1)[0].split("|", 1)[0].strip() or bare
+    return ""
+
+
 def _derive_tool_bin(command: str, argv: list[str] | None) -> str:
     """Return the first executable token of the command. The route-derived
     ``tool_name`` collapses every /api/command call to ``command``; tool_bin
     is the discriminator (cat vs curl vs sqlmap) that operator filtering
     actually needs."""
     if argv:
-        first = (argv[0] or "").strip()
-        if first:
-            return Path(first).name
+        derived = _derive_tool_bin_from_tokens([str(token) for token in argv])
+        if derived:
+            return derived
     text = (command or "").strip()
     if not text:
         return ""
-    # Strip leading env assignments (``FOO=bar BAR=baz cmd ...``) and pick
-    # the first bare token. Not a full shell parse, but correct for the
-    # 95% case in practice.
-    for token in text.split():
-        if "=" in token and token.split("=", 1)[0].replace("_", "").isalnum():
-            continue
-        bare = Path(token).name.split(";")[0].split("|")[0].strip()
-        return bare or token
-    return text.split()[0]
+    derived = _derive_tool_bin_from_tokens(_shell_tokens(text))
+    return derived or text.split()[0]
 
 
 def _resolve_artifact_dir(engagement, override: str | None) -> str | None:
