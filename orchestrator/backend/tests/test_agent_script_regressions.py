@@ -99,6 +99,58 @@ def test_patched_kali_client_preserves_audit_context_for_async_tools(monkeypatch
     assert module._AUDIT_CONTEXT.get() == {}
 
 
+def test_patched_kali_client_injects_audit_headers_for_requests_session(monkeypatch) -> None:
+    module = _load_script_module(
+        "test_patched_kali_client_requests_session_module",
+        "docker/kali-mcp-runtime/patched_kali_client.py",
+    )
+
+    observed_headers: list[dict[str, str]] = []
+
+    def fake_request(self, method, url, **kwargs):  # noqa: ANN001, ANN202
+        observed_headers.append(dict(kwargs.get("headers") or {}))
+        return SimpleNamespace(status_code=200, text="ok")
+
+    class FakeSession:
+        request = fake_request
+
+    requests_module = ModuleType("requests")
+    requests_module.sessions = SimpleNamespace(Session=FakeSession)
+    requests_module.Session = FakeSession
+    requests_module.request = lambda method, url, **kwargs: FakeSession().request(method, url, **kwargs)
+    requests_module.get = lambda url, **kwargs: FakeSession().request("GET", url, **kwargs)
+    requests_module.post = lambda url, **kwargs: FakeSession().request("POST", url, **kwargs)
+    monkeypatch.setitem(sys.modules, "requests", requests_module)
+
+    module._patch_requests_functions()
+    token = module._set_audit_context(
+        "eng-1",
+        "recon-agent",
+        "recon",
+        technique="RECON",
+        intent="fingerprint target",
+        probe_kind="fingerprint",
+        destructive=False,
+    )
+    try:
+        response = requests_module.Session().request("GET", "http://127.0.0.1:5000/api/test")
+    finally:
+        module._clear_audit_context(token)
+
+    assert response.status_code == 200
+    assert observed_headers == [
+        {
+            "X-Engagement-Key": "eng-1",
+            "X-Agent-Name": "recon-agent",
+            "X-Phase": "recon",
+            "X-Technique": "RECON",
+            "X-Intent": "fingerprint target",
+            "X-Probe-Kind": "fingerprint",
+            "X-Destructive": "0",
+        }
+    ]
+
+
 def test_patched_kali_client_isolates_concurrent_async_audit_contexts(monkeypatch) -> None:
     module = _load_script_module(
         "test_patched_kali_client_concurrent_module",

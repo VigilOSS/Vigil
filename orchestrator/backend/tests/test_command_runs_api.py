@@ -369,16 +369,39 @@ def test_tool_bin_is_derived_and_filterable(client, isolate_settings):
             tool_name="execute_command",
         ),
     ).status_code == 201
+    assert _post(
+        client,
+        _base_payload(
+            command="bash -lc 'nuclei -l /engagements/example/scans/targets.txt'",
+            argv=["bash", "-lc", "nuclei -l /engagements/example/scans/targets.txt"],
+            tool_name="execute_command",
+        ),
+    ).status_code == 201
+    assert _post(
+        client,
+        _base_payload(
+            command="timeout 120 httpx -l targets.txt -json",
+            argv=None,
+            tool_name="execute_command",
+        ),
+    ).status_code == 201
 
     rows = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs").json()
     bins = {r["tool_bin"] for r in rows}
     assert "curl" in bins
     assert "sqlmap" in bins  # env-assignment prefix stripped
+    assert "nuclei" in bins  # shell wrapper stripped
+    assert "httpx" in bins  # timeout wrapper stripped
     curl_only = client.get(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?tool_bin=curl"
     ).json()
     assert len(curl_only) == 1
     assert curl_only[0]["command"].startswith("curl")
+    nuclei_only = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?tool_bin=nuclei"
+    ).json()
+    assert len(nuclei_only) == 1
+    assert "nuclei -l" in nuclei_only[0]["command"]
 
 
 def test_audit_source_stored_and_filterable(client, isolate_settings):
