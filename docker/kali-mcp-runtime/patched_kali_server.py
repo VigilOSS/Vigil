@@ -148,6 +148,34 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _command_env_from_audit_context() -> dict[str, str]:
+    """Build subprocess env for target-facing commands.
+
+    The runtime container is shared across engagements, so container-level
+    ``ENGAGEMENT_KEY`` cannot be correct for every request. The MCP client
+    already sends the engagement key on each tool call for audit attribution;
+    expose that same per-call value to the shell so snippets can write to the
+    mounted engagement tree with ``/engagements/$ENGAGEMENT_KEY/...``.
+    """
+    env = os.environ.copy()
+    g = _flask_g()
+    if g is None:
+        return env
+
+    engagement_key = _safe_engagement_key(getattr(g, "audit_engagement_key", "") or "")
+    if engagement_key:
+        env["ENGAGEMENT_KEY"] = engagement_key
+        env["ENGAGEMENT_DIR"] = f"/engagements/{engagement_key}"
+    return env
+
+
+def _safe_engagement_key(raw: str) -> str:
+    key = str(raw).strip()
+    if not key or key in {".", ".."} or "/" in key or "\\" in key:
+        return ""
+    return key
+
+
 class PatchedCommandExecutor(upstream.CommandExecutor):
     def execute(self) -> Dict[str, Any]:
         upstream.logger.info("Executing command: %s", self.command)
@@ -169,6 +197,7 @@ class PatchedCommandExecutor(upstream.CommandExecutor):
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
+                env=_command_env_from_audit_context(),
             )
 
             self.stdout_thread = upstream.threading.Thread(target=self._read_stdout, daemon=True)

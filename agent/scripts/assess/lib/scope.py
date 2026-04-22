@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 def normalize_scope_payload(scope: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -52,3 +53,108 @@ def save_scope(engagement_dir: str, scope: dict[str, Any]) -> None:
     normalized, _ = normalize_scope_payload(dict(scope))
     normalized.pop("approved_findings", None)
     _write_scope_file(scope_path, normalized)
+
+
+def scope_entries(scope: dict[str, Any]) -> list[dict[str, str]]:
+    """Return normalized host entries from ``scope.json``.
+
+    Entries use the same coarse semantics as ``check-scope-coverage``: URL
+    entries collapse to their host, bare hosts match exactly, and wildcards
+    match the apex plus subdomains.
+    """
+    raw_hosts = scope.get("hosts") or []
+    if not isinstance(raw_hosts, list):
+        raise SystemExit("scope.json `hosts` must be a list")
+    entries: list[dict[str, str]] = []
+    for item in raw_hosts:
+        if not isinstance(item, str):
+            continue
+        entry = classify_scope_entry(item)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def classify_scope_entry(raw: str) -> dict[str, str] | None:
+    stripped = raw.strip()
+    if not stripped:
+        return None
+
+    if stripped.startswith("*.") and len(stripped) > 2:
+        host = stripped[2:].strip().rstrip(".").lower()
+        if not host:
+            return None
+        return {
+            "scope_entry": stripped,
+            "entry_kind": "wildcard",
+            "host": host,
+        }
+
+    if "://" in stripped:
+        try:
+            host = (urlsplit(stripped).hostname or "").rstrip(".").lower()
+        except ValueError:
+            return None
+        if not host:
+            return None
+        return {
+            "scope_entry": stripped,
+            "entry_kind": "url",
+            "host": host,
+        }
+
+    host = host_from_token(stripped)
+    if not host:
+        return None
+    return {
+        "scope_entry": stripped,
+        "entry_kind": "bare_host",
+        "host": host,
+    }
+
+
+def host_from_token(raw: str) -> str:
+    """Extract a lowercased host from a URL, host:port, or line token."""
+    token = raw.strip().strip("'\"<>()[],;")
+    if not token or token.startswith("-"):
+        return ""
+    first = token.split()[0]
+    if "://" in first:
+        try:
+            host = urlsplit(first).hostname or ""
+        except ValueError:
+            return ""
+    elif "/" in first and "." in first:
+        try:
+            host = urlsplit("http://" + first).hostname or ""
+        except ValueError:
+            return ""
+    else:
+        host = first.split(":", 1)[0]
+    host = host.rstrip(".").lower()
+    return host if looks_like_host(host) else ""
+
+
+def looks_like_host(host: str) -> bool:
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    if "." in host:
+        return True
+    parts = host.split(".")
+    return len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
+
+
+def entry_matches_host(entry: dict[str, str], host: str) -> bool:
+    if not host:
+        return False
+    normalized = host.rstrip(".").lower()
+    entry_host = entry["host"]
+    if entry["entry_kind"] == "wildcard":
+        return normalized == entry_host or normalized.endswith("." + entry_host)
+    return normalized == entry_host
+
+
+def host_in_scope(host: str, entries: list[dict[str, str]]) -> bool:
+    return any(entry_matches_host(entry, host) for entry in entries)
