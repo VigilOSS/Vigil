@@ -353,6 +353,84 @@ def test_patched_kali_server_bounds_queued_audit_streams(monkeypatch, tmp_path: 
     assert "stderr truncated before audit enqueue from 9 bytes to 8 bytes" in payload["notes"]
 
 
+def test_patched_kali_server_injects_engagement_env_into_commands(monkeypatch, tmp_path: Path) -> None:
+    upstream_path = tmp_path / "fake_kali_server.py"
+    upstream_path.write_text(
+        "\n".join(
+            [
+                "import logging",
+                "import os",
+                "import threading",
+                "API_PORT = 5000",
+                "DEBUG_MODE = False",
+                "logger = logging.getLogger('fake_kali_server')",
+                "class CommandExecutor:",
+                "    pass",
+                "def execute_command(command):",
+                "    return {}",
+                "def parse_args():",
+                "    return type('Args', (), {'debug': False, 'port': API_PORT, 'ip': '127.0.0.1'})()",
+                "class App:",
+                "    def before_request(self, fn): return fn",
+                "    def after_request(self, fn): return fn",
+                "    def run(self, *args, **kwargs): pass",
+                "app = App()",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KALI_MCP_SERVER_PATH", str(upstream_path))
+    module = _load_script_module(
+        "test_patched_kali_server_env_module",
+        "docker/kali-mcp-runtime/patched_kali_server.py",
+    )
+
+    captured_env: dict[str, str] = {}
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):  # noqa: ANN001, ANN204
+            captured_env.update(kwargs["env"])
+            self.returncode = 0
+
+        def wait(self, timeout=None):  # noqa: ANN001, ANN202
+            return 0
+
+        def terminate(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+    monkeypatch.setattr(module.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(
+        module,
+        "_flask_g",
+        lambda: SimpleNamespace(
+            audit_engagement_key="eng-123",
+            audit_artifact_dir="/engagements/eng-123/scans/command-runs",
+            command_runs=[],
+        ),
+    )
+    monkeypatch.setattr(module.PatchedCommandExecutor, "_read_stdout", lambda self: None, raising=False)
+    monkeypatch.setattr(module.PatchedCommandExecutor, "_read_stderr", lambda self: None, raising=False)
+
+    executor = module.PatchedCommandExecutor.__new__(module.PatchedCommandExecutor)
+    executor.command = "printf '%s' \"$ENGAGEMENT_KEY\""
+    executor.timeout = 1
+    executor.stdout_data = ""
+    executor.stderr_data = ""
+    executor.timed_out = False
+    executor.return_code = None
+
+    result = executor.execute()
+
+    assert result["success"] is True
+    assert captured_env["ENGAGEMENT_KEY"] == "eng-123"
+    assert captured_env["ENGAGEMENT_DIR"] == "/engagements/eng-123"
+    assert module._safe_engagement_key("../other") == ""
+
+
 def test_list_intel_search_uses_canonical_entity_type(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_script_module(
         "test_list_intel_search_module",
@@ -482,6 +560,66 @@ def test_proxy_addon_loads_legacy_scope_keys(tmp_path: Path) -> None:
     assert collector._is_in_scope("api.example.com") is True
     assert collector._is_in_scope("legacy.example.net") is True
     assert collector._is_in_scope("out-of-scope.test") is False
+
+
+def test_filter_scope_keeps_only_exactly_scoped_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_script_module(
+        "test_filter_scope_module",
+        "agent/scripts/assess/commands/filter_scope.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text(
+        json.dumps(
+            {
+                "hosts": [
+                    "*.example.com",
+                    "https://app.other.test/base",
+                    "api.example.net",
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    input_file = tmp_path / "urls.txt"
+    input_file.write_text(
+        "\n".join(
+            [
+                "https://api.example.com/a",
+                "https://example.com/apex",
+                "https://evil-example.com/no",
+                "https://app.other.test/v1",
+                "api.example.net:8443",
+                "https://api.example.net.evil.test",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir=None: SimpleNamespace(
+            engagement_dir=str(engagement_dir),
+            engagement_key="eng",
+            base_url="http://example.test",
+        ),
+    )
+    module.run(
+        SimpleNamespace(
+            engagement_dir=engagement_dir,
+            input_file=str(input_file),
+            output=None,
+        )
+    )
+
+    assert capsys.readouterr().out.splitlines() == [
+        "https://api.example.com/a",
+        "https://example.com/apex",
+        "https://app.other.test/v1",
+        "api.example.net:8443",
+    ]
 
 
 def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) -> None:

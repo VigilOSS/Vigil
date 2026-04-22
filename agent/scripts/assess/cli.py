@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> None:
         export_findings,
         export_surfaces,
         fetch,
+        filter_scope,
         get_command_run,
         ingest_endpoints,
         ingest_spec,
@@ -78,6 +79,7 @@ def main(argv: list[str] | None = None) -> None:
 
     for mod in (
         fetch,
+        filter_scope,
         list_command_runs,
         get_command_run,
         list_findings,

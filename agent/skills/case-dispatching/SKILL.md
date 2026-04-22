@@ -42,8 +42,17 @@ Each iteration (set `DB="$DIR/cases.db"`):
     ./scripts/assess.py list-clusters "$DB"
     ./scripts/assess.py dispatch "$DB" defer-cluster <cluster_key> --reason "..."
 
-    # Fetch across types by priority (routing rule still applies per-row):
-    ./scripts/assess.py dispatch "$DB" fetch-by-priority 10 <agent_name>
+    # Fetch across types by priority. `fetch-by-priority` is route-aware: it
+    # only claims rows whose type maps to a real specialist route and rejects
+    # free-form agent names so stray labels can't mix work types.
+    #   auto                      — claim the top N routable rows globally and
+    #                               stamp each with its canonical owner.
+    #   vulnerability-analyst[-N] — claim only api/api-spec/form/upload/graphql/
+    #                               websocket rows (N is an optional instance label).
+    #   source-analyzer[-N]       — claim only page/javascript/stylesheet/data rows.
+    ./scripts/assess.py dispatch "$DB" fetch-by-priority 10 auto
+    ./scripts/assess.py dispatch "$DB" fetch-by-priority 10 vulnerability-analyst
+    ./scripts/assess.py dispatch "$DB" fetch-by-priority 10 source-analyzer-2
 
 4. On subagent return:
    - Done: ./scripts/assess.py dispatch "$DB" done "id1,id2,..."
@@ -59,17 +68,27 @@ Each iteration (set `DB="$DIR/cases.db"`):
 `classify-work` populates four fields on each work item from the URL structure (see
 `agent/scripts/assess/commands/classify_work.py` for the exact weight table):
 
-- `cluster_key` — `gf:<bucket>` when a parameter or path pattern matches a gf bucket; otherwise
-  `path:/<first-two-url-segments>`.
-- `priority_score` — integer 0-50. Highest weights: rce (50), ssrf (45), sqli/lfi (40),
-  idor (35), debug_logic (30), ssti/redirect (25), xss (20), interestingparams (15).
-- `priority_reason` — `"gf:<a>+gf:<b>+..."` listing every matched bucket, so the operator sees
-  why an item scored high without running gf manually.
+- `cluster_key` — prefixed by match family:
+  - `gf:<bucket>` when a parameter or path pattern matches a gf bucket (vuln-class signal).
+  - `overlay:<name>` when a narrowly-scoped platform overlay fires on controller names or
+    platform-specific path fragments. Overlays cover high-volume surfaces whose controller
+    names don't map cleanly to generic gf buckets; they do not outrank concrete vuln buckets
+    when a stronger gf signal is present.
+  - `path:/<first-two-url-segments>` as the fallback when nothing matches.
+- `priority_score` — integer 0-50. Weights (highest first): rce (50), ssrf (45), sqli/lfi (40),
+  idor (35), debug_logic (30), ssti/redirect (25), xss (20), overlay:salesforce (18),
+  interestingparams (15). Cluster_key and priority_score track the single highest-weight match;
+  when two buckets tie, earlier declaration order wins deterministically.
+- `priority_reason` — e.g. `"gf:ssrf+gf:idor+overlay:salesforce"` listing every matched bucket,
+  so the operator sees why an item scored high without running gf manually. The prefix (`gf:` /
+  `overlay:`) is part of the reason string — sub-clusters can be deferred by either prefix.
 - `terminal_reason` — set on hopeless items (`inert_type` for image/video/font/archive); these
   are excluded from `fetch-by-priority`.
 
 Each gf bucket has a reference at `agent/references/gf-patterns/<bucket>.md` — consult it when
-you're unsure why a cluster scored the way it did.
+you're unsure why a cluster scored the way it did. Platform overlays (`overlay:salesforce`,
+etc.) are documented alongside the classifier at `agent/scripts/assess/commands/classify_work.py`
+— the fragment/suffix tables there are the source of truth.
 
 ## Type → Agent Routing
 

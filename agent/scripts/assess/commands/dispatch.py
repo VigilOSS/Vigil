@@ -43,13 +43,13 @@ def run(args) -> None:
             sys.exit(1)
         _fetch(db_path, extra[0], int(extra[1]), extra[2])
     elif action == "fetch-by-priority":
-        if len(extra) < 2:
+        if len(extra) < 1:
             print(
-                "Usage: dispatch <db> fetch-by-priority <limit> <agent>",
+                "Usage: dispatch <db> fetch-by-priority <limit> [auto|agent]",
                 file=sys.stderr,
             )
             sys.exit(1)
-        _fetch_by_priority(db_path, int(extra[0]), extra[1])
+        _fetch_by_priority(db_path, int(extra[0]), extra[1] if len(extra) > 1 else "auto")
     elif action == "defer-cluster":
         if not extra:
             print(
@@ -140,17 +140,39 @@ def _fetch(db_path: str, type_val: str, limit: int, agent: str) -> None:
         conn.close()
 
 
-_SKIP_TYPES = ("image", "video", "font", "archive")
+_VULN_ANALYST_TYPES = ("api", "api-spec", "form", "upload", "graphql", "websocket")
+_SOURCE_ANALYZER_TYPES = ("page", "javascript", "stylesheet", "data")
+_ROUTED_TYPES = _VULN_ANALYST_TYPES + _SOURCE_ANALYZER_TYPES
+
+
+def _agent_route(agent: str) -> tuple[str, ...] | None:
+    """Return the work-item types this agent can safely receive."""
+    normalized = (agent or "").strip().lower()
+    if not normalized:
+        return None
+    if "vulnerability" in normalized or normalized.startswith("vuln"):
+        return _VULN_ANALYST_TYPES
+    if "source" in normalized:
+        return _SOURCE_ANALYZER_TYPES
+    return None
+
+
+def _assigned_agent_for_type(case_type: str) -> str | None:
+    if case_type in _VULN_ANALYST_TYPES:
+        return "vulnerability-analyst"
+    if case_type in _SOURCE_ANALYZER_TYPES:
+        return "source-analyzer"
+    return None
 
 
 def _fetch_by_priority(db_path: str, limit: int, agent: str) -> None:
-    """Claim the top-K pending rows globally, ranked by priority_score DESC.
+    """Claim the top-K pending rows ranked by priority_score DESC.
 
-    Mirrors the atomic transition shape of `_fetch` so operators can swap one
-    for the other without downstream callers changing. We sort by
-    (priority_score DESC, cluster_key, id) because the dispatcher consumes the
-    ordered list cluster-by-cluster — batching rows from the same cluster into
-    a single specialist dispatch keeps context warm and cuts token churn.
+    Priority mode still respects type-to-agent ownership. ``auto`` claims the
+    highest-signal routable rows globally and assigns each row to the canonical
+    specialist for its type. A concrete specialist name claims only the types
+    that specialist can handle, preserving custom instance labels like
+    ``vulnerability-analyst-1`` without handing it JavaScript/page work.
 
     We exclude rows with terminal_reason set because classify-work already
     stamped those as skip-worthy, and we exclude inert types as a belt-and-
@@ -158,34 +180,53 @@ def _fetch_by_priority(db_path: str, limit: int, agent: str) -> None:
     """
     import sqlite3
 
-    placeholders = ",".join("?" * len(_SKIP_TYPES))
+    agent = (agent or "auto").strip()
+    auto_route = agent.lower() in {"auto", "routed", "route"}
+    allowed_types = _ROUTED_TYPES if auto_route else _agent_route(agent)
+    if allowed_types is None:
+        print(
+            "fetch-by-priority: agent is not a routed agent; use 'auto', "
+            "'vulnerability-analyst', or 'source-analyzer'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    placeholders = ",".join("?" * len(allowed_types))
     conn = sqlite3.connect(db_path, timeout=5.0)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA busy_timeout=5000")
-        rows = conn.execute(
-            f"""UPDATE work_items
-                SET status = 'processing',
-                    assigned_agent = ?,
-                    consumed_at = datetime('now')
-                WHERE id IN (
-                    SELECT id FROM work_items
-                    WHERE status = 'pending'
-                      AND terminal_reason IS NULL
-                      AND type NOT IN ({placeholders})
-                    ORDER BY priority_score DESC, cluster_key, id
-                    LIMIT ?
-                )
-                RETURNING *""",
-            (agent, *_SKIP_TYPES, limit),
+        conn.execute("BEGIN IMMEDIATE")
+        candidates = conn.execute(
+            f"""SELECT *
+                FROM work_items
+                WHERE status = 'pending'
+                  AND terminal_reason IS NULL
+                  AND type IN ({placeholders})
+                ORDER BY priority_score DESC, cluster_key, id
+                LIMIT ?""",
+            (*allowed_types, limit),
         ).fetchall()
+        claimed: list[dict] = []
+        for row in candidates:
+            row_agent = _assigned_agent_for_type(row["type"]) if auto_route else agent
+            if not row_agent:
+                continue
+            updated = conn.execute(
+                """UPDATE work_items
+                   SET status = 'processing',
+                       assigned_agent = ?,
+                       consumed_at = datetime('now')
+                   WHERE id = ? AND status = 'pending'
+                   RETURNING *""",
+                (row_agent, row["id"]),
+            ).fetchone()
+            if updated is not None:
+                claimed.append(dict(updated))
         conn.commit()
-        # SQLite's UPDATE...RETURNING streams rows in rowid order, which
-        # scrambles the priority ordering the inner SELECT established. Re-sort
-        # in Python so downstream callers see the same shape they expected
-        # from the ORDER BY — priority_score DESC, cluster_key, id.
+        # Preserve the SELECT ordering for downstream dispatch context.
         result = sorted(
-            (dict(row) for row in rows),
+            claimed,
             key=lambda r: (
                 -(r.get("priority_score") or 0),
                 r.get("cluster_key") or "",

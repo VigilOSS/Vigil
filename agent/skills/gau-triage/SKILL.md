@@ -102,8 +102,18 @@ routing and the extension filter in Step 2 — they are documented in the refere
 for analyst context but are not direct `gf` runs.
 
 For each loaded bucket, capture: the URL count, 3-5 sample URLs, and the proposed
-`cluster_key = gf:<bucket>` that will be attached to matching work items when the operator
-runs `assess.py classify-work`.
+`cluster_key` that will be attached to matching work items when the operator runs
+`assess.py classify-work`. Prefixes the classifier emits:
+
+- `gf:<bucket>` — standard vuln-class buckets (`gf:ssrf`, `gf:sqli`, `gf:rce`, ...)
+- `overlay:<name>` — narrowly-scoped platform overlays (e.g. `overlay:salesforce` for
+  Aura/Lightning controllers such as `ApexActionController.execute`). Overlays sit below
+  full gf buckets in weight and are meant to catch high-volume platform surfaces whose
+  controller names don't map cleanly to a generic bucket.
+- `path:/<first-two-segments>` — fallback when nothing matched.
+
+Capture overlay clusters in the manifest too — they are a valid defer target when the
+overlay fired on a low-signal corner of the platform (static asset CDN, localization paths).
 
 If `gf` patterns are missing, the Dockerfile install of Gf-Patterns is broken — stop and reseed `~/.gf/` from `github.com/1ndianl33t/Gf-Patterns`.
 

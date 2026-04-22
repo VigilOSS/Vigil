@@ -180,7 +180,11 @@ def run(args: argparse.Namespace) -> None:
                 """
                 SELECT id, type, url_path, query_params, body_params, path_params
                 FROM work_items
-                WHERE priority_score = 0
+                WHERE (
+                    status = 'pending'
+                    OR (status = 'skipped' AND type IN ('image', 'video', 'font', 'archive'))
+                  )
+                  AND priority_score = 0
                   AND cluster_key IS NULL
                   AND terminal_reason IS NULL
                 LIMIT ?

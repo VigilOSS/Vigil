@@ -17,8 +17,8 @@ origin: AI Threat Hunting
 
 - `LinkFinder` — automated endpoint extraction from JavaScript files
 - `SecretFinder` — scan JS files for API keys, tokens, and secrets
-- `trufflehog` — scan saved JS/source-map artifacts through Kali MCP; host-side
-  PATH availability is not part of the contract
+- `trufflehog` — scan saved JS/source-map artifacts through Kali MCP (host-side installs
+  aren't required; the Kali runtime image ships trufflehog)
 - `curl`, `grep`/`sed`/`awk`, `jq` — manual extraction and verification
 
 ## Division of Labor
