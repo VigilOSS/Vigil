@@ -54,8 +54,19 @@ something that hasn't.
 ./scripts/assess.py list-command-runs \
     --agent-name recon-specialist --phase recon
 
-# Only successful runs with a specific tool
+# Only successful runs with a specific MCP tool route
 ./scripts/assess.py list-command-runs --tool-name nmap_scan --success
+
+# Filter by the underlying binary, even when it ran inside the generic
+# execute_command wrapper. The backend derives tool_bin from the command
+# string (peeling off timeout/sudo/env/sh -c wrappers), so --tool-bin catches
+# generic-wrapper rows that --tool-name would miss.
+./scripts/assess.py list-command-runs --q nuclei --tool-bin nuclei
+./scripts/assess.py list-command-runs --tool-bin sqlmap
+./scripts/assess.py list-command-runs --tool-bin httpx --success
+
+# Table rendering shows `tool_bin(tool_name)` whenever the two differ — e.g.
+# `nuclei(command)` means nuclei was invoked through the execute_command wrapper.
 
 # Runs that timed out (prior coverage likely incomplete)
 ./scripts/assess.py list-command-runs --timed-out

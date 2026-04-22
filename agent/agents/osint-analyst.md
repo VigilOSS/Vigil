@@ -53,7 +53,9 @@ Return concise structured output with these sections when relevant:
 **CVE matches are intel, not findings.** When you discover CVEs that match the target's version
 strings, record them in `#### Intelligence` output AND via
 `./scripts/assess.py record-intel cve <cve-json-file>` (matches
-`schemas/intel-cve.schema.json` — see `assess.py contract` if unsure of the field list)
+`schemas/intel-cve.schema.json` — run `./scripts/assess.py contract record-intel cve`
+to print the allowed/required fields and a worked example before authoring the JSON;
+intel schemas are strict and reject guessed aliases like `source` vs `source_name`)
 — NOT as durable findings via `record-finding`. A CVE with a public PoC does not become
 a finding until exploit-developer validates it against the actual target (backported patches,
 missing CGI binaries, disabled modules, and firewall rules all invalidate version-only matches).

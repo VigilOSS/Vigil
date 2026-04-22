@@ -335,6 +335,42 @@ def test_classify_work_deterministic(tmp_path: Path, capsys) -> None:
     assert second_summary["updated"] == 0
 
 
+def test_classify_work_ignores_non_pending_consumable_rows(tmp_path: Path, capsys) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="done:rce",
+        url_path="/api/run",
+        status="done",
+        query_params={"cmd": "id"},
+    )
+    _insert_work_item(
+        db_path,
+        queue_key="pending:rce",
+        url_path="/api/run",
+        query_params={"cmd": "id"},
+    )
+
+    _run_classify(db_path)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                "SELECT queue_key, status, cluster_key, priority_score, priority_reason "
+                "FROM work_items ORDER BY queue_key"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+    assert rows["done:rce"] == ("done", None, 0, None)
+    assert rows["pending:rce"] == ("pending", "gf:rce", 50, "gf:rce")
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["classified"] == 1
+
+
 def test_classify_work_inert_type_terminates(tmp_path: Path, capsys) -> None:
     db_path = _make_fresh_db(tmp_path)
     _insert_work_item(
@@ -388,39 +424,82 @@ def test_classify_work_path_fallback(tmp_path: Path) -> None:
     assert row[2] is None
 
 
-def test_fetch_by_priority_orders_correctly(tmp_path: Path, capsys) -> None:
+def test_fetch_by_priority_auto_routes_by_type(tmp_path: Path, capsys) -> None:
     db_path = _make_fresh_db(tmp_path)
     seeds = [
-        ("low", 5, "path:/misc"),
-        ("ssrf-top", 45, "gf:ssrf"),
-        ("rce-top", 50, "gf:rce"),
-        ("sqli", 40, "gf:sqli"),
-        ("redirect", 25, "gf:redirect"),
-        ("zero", 0, "path:/x"),
+        ("api-rce", "api", 50, "gf:rce"),
+        ("js-ssrf", "javascript", 45, "gf:ssrf"),
+        ("unknown-high", "unknown", 99, "path:/unknown"),
+        ("page-low", "page", 5, "path:/page"),
     ]
-    for key, score, cluster in seeds:
+    for key, case_type, score, cluster in seeds:
         _insert_work_item(
             db_path,
             queue_key=key,
             url_path=f"/{key}",
+            case_type=case_type,
             priority_score=score,
             cluster_key=cluster,
         )
 
-    _run_dispatch(db_path, "fetch-by-priority", ["5", "priority-agent"])
+    _run_dispatch(db_path, "fetch-by-priority", ["10", "auto"])
 
     output = capsys.readouterr().out
     payload = json.loads(output)
     assert [row["queue_key"] for row in payload] == [
-        "rce-top",
-        "ssrf-top",
-        "sqli",
-        "redirect",
-        "low",
+        "api-rce",
+        "js-ssrf",
+        "page-low",
     ]
-    for row in payload:
-        assert row["status"] == "processing"
-        assert row["assigned_agent"] == "priority-agent"
+    assert [row["assigned_agent"] for row in payload] == [
+        "vulnerability-analyst",
+        "source-analyzer",
+        "source-analyzer",
+    ]
+
+
+def test_fetch_by_priority_known_agent_filters_to_routed_types(tmp_path: Path, capsys) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="api-low",
+        url_path="/api/low",
+        case_type="api",
+        priority_score=10,
+        cluster_key="path:/api",
+    )
+    _insert_work_item(
+        db_path,
+        queue_key="js-high",
+        url_path="/static/app.js",
+        case_type="javascript",
+        priority_score=50,
+        cluster_key="path:/static/app.js",
+    )
+
+    _run_dispatch(db_path, "fetch-by-priority", ["10", "vulnerability-analyst-1"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["queue_key"] for row in payload] == ["api-low"]
+    assert payload[0]["assigned_agent"] == "vulnerability-analyst-1"
+
+
+def test_fetch_by_priority_rejects_unroutable_agent_name(tmp_path: Path, capsys) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="api",
+        url_path="/api",
+        case_type="api",
+        priority_score=10,
+        cluster_key="path:/api",
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_dispatch(db_path, "fetch-by-priority", ["10", "priority-agent"])
+
+    assert excinfo.value.code == 1
+    assert "not a routed agent" in capsys.readouterr().err
 
 
 def test_fetch_by_priority_skips_terminal(tmp_path: Path, capsys) -> None:
@@ -441,7 +520,7 @@ def test_fetch_by_priority_skips_terminal(tmp_path: Path, capsys) -> None:
         terminal_reason="low-signal",
     )
 
-    _run_dispatch(db_path, "fetch-by-priority", ["10", "priority-agent"])
+    _run_dispatch(db_path, "fetch-by-priority", ["10", "auto"])
 
     payload = json.loads(capsys.readouterr().out)
     assert [row["queue_key"] for row in payload] == ["keep"]

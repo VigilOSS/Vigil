@@ -10,7 +10,7 @@
 
 ---
 
-### Description
+### Summary
 
 An attacker with edit access to a shared credential record changes the `login` field and takes over any Active Directory account during the next password rotation. The AD rotation plugin interpolates the login field directly into the LDAP search filter without escaping: `f'(&(objectClass=user)(sAMAccountName={name}))'`. The `escape_filter_chars()` function from `ldap3` is already used elsewhere in the same codebase but was not applied here. The attached POC calls the installed rotation function and captures the LDAP filters it constructs.
 

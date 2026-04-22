@@ -23,10 +23,12 @@ origin: AI Threat Hunting
 
 Reactive sweeps run in-phase against URL deltas each phase produces — they are additive to the
 phase they belong to, not a reason to jump ahead. Every time new live URLs land during Phase 1
-or Phase 2, fire a focused CVE/misconfig/exposure scan on that delta so classify-work can attach
-the `+10` nuclei bonus to matched work items before Phase 3 dispatch. Phase 3a below is a
-coverage audit that re-runs nuclei **only against gaps** left by the reactive passes — when
-reactive coverage was thorough, Phase 3a is a no-op summary, not a second broad sweep.
+or Phase 2, fire a focused CVE/misconfig/exposure scan on that delta so template hits become
+intel (`record-intel tech-component`, `record-intel note`, `record-intel cve`) and finding
+candidates *before* Phase 3 specialists dispatch — that way specialists inherit the signal
+rather than rediscovering it from the buffer. Phase 3a below is a coverage audit that re-runs
+nuclei **only against gaps** left by the reactive passes — when reactive coverage was thorough,
+Phase 3a is a no-op summary, not a second broad sweep.
 
 ### When to trigger a reactive sweep
 
@@ -69,19 +71,20 @@ find "$DIR/scans" -name 'nuclei_reactive_*.jsonl' -print0 | \
   xargs -0 -r jq -r '.["matched-at"] // .host // empty' 2>/dev/null | \
   sort -u > "$DIR/scans/_already_scanned_$RID.txt"
 
-# 3. Subtract already-scanned from all-live and intersect with scope.
-jq -r '.hosts[]? | select(type=="string")' "$DIR/scope.json" > "$DIR/scans/_scope_hosts_$RID.txt"
+# 3. Subtract already-scanned from all-live, then filter the result to scope via assess.py
+#    filter-scope. filter-scope does exact-host and wildcard-aware matching against scope.json,
+#    so it correctly handles `*.example.com` entries that naive `grep -Ff` treats as literals.
 comm -23 \
   "$DIR/scans/_all_live_$RID.txt" \
   "$DIR/scans/_already_scanned_$RID.txt" | \
-  grep -Ff "$DIR/scans/_scope_hosts_$RID.txt" \
+  ./scripts/assess.py filter-scope - \
   > "$DIR/scans/nuclei_reactive_$RID.txt"
 ```
 
-The `comm` / `grep -Ff` step is the scope boundary — reactive nuclei only scans URLs that are
-both new this pass AND attached to a scope.json host. Skipping this guard risks sweeping an
-out-of-scope host that was pulled in from a passive source, which would break the engagement's
-authorization envelope.
+The `filter-scope` step is the scope boundary — reactive nuclei only scans URLs that are both
+new this pass AND attached to a scope.json host (including wildcard expansions). Skipping this
+guard risks sweeping an out-of-scope host that was pulled in from a passive source, which would
+break the engagement's authorization envelope.
 
 ### Invocation (Kali MCP, exact)
 
@@ -108,7 +111,8 @@ Flags explained — each flag earns its place because removing it breaks an assu
 - `-as` auto-aligns templates with detected tech stack, because untargeted template execution
   wastes rate budget on irrelevant CVEs (no WordPress templates on a Spring app).
 - `-stream` processes inputs without buffering, because Phase 1-2 deltas can arrive in small
-  batches and buffering delays early hits that classify-work needs for priority_score writes.
+  batches and buffering delays early hits that should land as intel/findings before Phase 3
+  specialists dispatch.
 - `-jsonl` emits one JSON object per line, because ingestion tooling and `jq` both expect JSONL
   and regular `-o` text loses the template metadata.
 - `-rate-limit 150 -c 25 -bs 25` caps outbound rps, concurrency, and bulk size, because in-scope
@@ -122,8 +126,9 @@ During discovery, stick to `http/cves/`, `http/misconfiguration/`, `http/exposur
 and `http/exposed-panels/`. Skip `http/fuzzing/` and payload-heavy template directories — they belong to
 Phase 3 targeted work because (1) their false-positive rate is higher, (2) they generate noisy
 request volume that trips WAFs before real testing starts, and (3) their matches require the
-specialist skill context to triage correctly. Dropping them from the reactive pass keeps
-classify-work's +10 nuclei bonus aligned with genuine CVE/misconfig/exposure signal.
+specialist skill context to triage correctly. Dropping them from the reactive pass keeps the
+intel/finding writes (and any future priority-boost mechanism) aligned with genuine
+CVE/misconfig/exposure signal rather than fuzzing noise.
 
 ### Dedup across runs (Option A — no schema change)
 
@@ -174,9 +179,9 @@ version-string collisions, etc.) before they reach the finding lifecycle.
 ### Safety and scope boundary
 
 Reactive nuclei runs only against URLs present in the scope.json host list (enforced by the
-`grep -Ff scope_hosts` step above). Never sweep a host whose presence in the delta came from
-passive sources alone — an out-of-scope sweep breaks the authorization envelope even if the
-finding would be accurate.
+`assess.py filter-scope` step above, which handles wildcards correctly). Never sweep a host
+whose presence in the delta came from passive sources alone — an out-of-scope sweep breaks
+the authorization envelope even if the finding would be accurate.
 
 ## Coverage Audit Mode (Phase 3a)
 
@@ -194,14 +199,12 @@ DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
 KEY=$(basename "$DIR")
 RID=$(date -u +%Y%m%dT%H%M%SZ)
 
-# 1. Universe: every in-scope live URL the engagement has observed.
+# 1. Universe: every in-scope live URL the engagement has observed. assess.py filter-scope
+#    handles wildcard entries in scope.json correctly; the raw grep -Ff pattern misses
+#    `*.example.com` expansions and must not be reintroduced.
 ./scripts/assess.py fetch summary > "$DIR/scans/_summary_audit_$RID.json"
 jq -r '.. | .url? // empty' "$DIR/scans/_summary_audit_$RID.json" | sort -u \
-  > "$DIR/scans/_all_live_audit_$RID.txt"
-jq -r '.hosts[]? | select(type=="string")' "$DIR/scope.json" \
-  > "$DIR/scans/_scope_hosts_audit_$RID.txt"
-grep -Ff "$DIR/scans/_scope_hosts_audit_$RID.txt" \
-  "$DIR/scans/_all_live_audit_$RID.txt" \
+  | ./scripts/assess.py filter-scope - \
   > "$DIR/scans/_in_scope_live_audit_$RID.txt"
 
 # 2. Already-covered: every URL that appeared in a prior reactive run's input list.
@@ -217,8 +220,12 @@ comm -23 \
 
 GAP_COUNT=$(wc -l < "$DIR/scans/nuclei_gap_$RID.txt")
 if [ "$GAP_COUNT" -eq 0 ]; then
+  COVERED_COUNT=$(wc -l < "$DIR/scans/_in_scope_live_audit_$RID.txt")
   ./scripts/assess.py log operator \
-    "Phase 3a nuclei coverage audit — reactive sweeps covered all $(wc -l < "$DIR/scans/_in_scope_live_audit_$RID.txt") in-scope live URLs; no rerun needed." ""
+    "Phase 3a nuclei coverage audit" \
+    "check-scope-coverage --require-stage consumption" \
+    "Reactive sweeps covered all ${COVERED_COUNT} in-scope live URLs; no rerun needed." \
+    --actor-kind operator
   exit 0
 fi
 ```
