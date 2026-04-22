@@ -226,6 +226,32 @@ def test_apex_host_full_coverage(monkeypatch, tmp_path: Path, capsys) -> None:
     assert entry["gaps"] == []
 
 
+def test_nuclei_target_list_counts_as_reactive_coverage(monkeypatch, tmp_path: Path, capsys) -> None:
+    """File-driven nuclei runs map back to scope entries via /engagements target lists."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    _make_cases_db(eng)
+    target_file = eng / "scans" / "nuclei_delta.txt"
+    target_file.parent.mkdir()
+    target_file.write_text("https://target.example/login\n", encoding="utf-8")
+
+    services = [{"endpoint": "target.example", "state": "up"}]
+    runs = [
+        {
+            "command": "nuclei -l /engagements/eng/scans/nuclei_delta.txt -jsonl",
+            "tool_bin": "nuclei",
+            "tool_name": "command",
+        },
+    ]
+
+    _run(monkeypatch, eng, services=services, command_runs=runs)
+    report = json.loads(capsys.readouterr().out)
+
+    entry = report["entries"][0]
+    assert entry["reactive_nuclei_runs"] == 1
+
+
 def test_wildcard_zero_live_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
     """Wildcard with enum attempted but zero live hosts is informational, not a gate failure."""
     eng = tmp_path / "engagement"

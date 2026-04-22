@@ -106,6 +106,16 @@ RUN arch="$(dpkg --print-architecture)" && \
     curl -fsSL "https://github.com/epi052/feroxbuster/releases/latest/download/${ferox_arch}-linux-feroxbuster.zip" \
     -o /tmp/ferox/ferox.zip && unzip /tmp/ferox/ferox.zip -d /tmp/ferox && \
     mv /tmp/ferox/feroxbuster /usr/local/bin/feroxbuster && chmod +x /usr/local/bin/feroxbuster && rm -rf /tmp/ferox
+RUN arch="$(dpkg --print-architecture)" && \
+    case "$arch" in \
+      amd64) th_arch=amd64 ;; \
+      arm64) th_arch=arm64 ;; \
+      *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac && \
+    TRUFFLEHOG_VERSION=3.94.3 && \
+    curl -fsSL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_${th_arch}.tar.gz" \
+      | tar -xzf - -C /usr/local/bin trufflehog && \
+    chmod +x /usr/local/bin/trufflehog
 
 RUN ln -sf /usr/share/wordlists /wordlists && \
     ln -sf /usr/share/seclists /seclists
