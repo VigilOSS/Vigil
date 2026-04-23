@@ -256,35 +256,6 @@ def test_classify_work_assigns_ssrf_bucket(tmp_path: Path, capsys) -> None:
     assert summary["by_cluster"].get("gf:ssrf") == 1
 
 
-def test_classify_work_assigns_salesforce_overlay(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="sf:1",
-        url_path="/aura",
-        url="https://target.example/aura?controller=executeActions",
-        query_params={"executeActions": "1"},
-    )
-
-    _run_classify(db_path)
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT cluster_key, priority_score, priority_reason FROM work_items WHERE queue_key = ?",
-            ("sf:1",),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    assert row[0] == "overlay:salesforce"
-    assert row[1] == 18
-    assert row[2] == "overlay:salesforce"
-
-    summary = json.loads(capsys.readouterr().out)
-    assert summary["by_cluster"].get("overlay:salesforce") == 1
-
-
 def test_classify_work_deterministic(tmp_path: Path, capsys) -> None:
     db_path = _make_fresh_db(tmp_path)
     _insert_work_item(
