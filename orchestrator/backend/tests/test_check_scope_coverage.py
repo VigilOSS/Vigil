@@ -669,3 +669,37 @@ def test_wildcard_scope_normalizes_trailing_dot_for_metadata_and_matching(monkey
     assert entry["status"] == "active"
     assert entry["live_hosts"] == 2
     assert entry["collection_attempted"] is True
+
+
+def test_wildcard_and_bare_entries_keep_distinct_metadata_status(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Wildcard metadata must not leak onto a separate bare-host scope row for the same host."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(
+        eng,
+        hosts=["target.example", "*.target.example"],
+        deferred_hosts=["*.target.example"],
+    )
+    db = _make_cases_db(eng)
+    _insert_work_item(db, queue_key="b:1", url="https://target.example/work", url_path="/work", status="pending")
+
+    services = [
+        {"endpoint": "target.example", "state": "up"},
+        {"endpoint": "api.target.example", "state": "up"},
+    ]
+    runs = [
+        {"command": "subfinder -d target.example", "tool_bin": "subfinder", "tool_name": "subfinder"},
+        {"command": "katana -u https://target.example", "tool_bin": "katana", "tool_name": "katana"},
+        {"command": "katana -u https://api.target.example", "tool_bin": "katana", "tool_name": "katana"},
+    ]
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="consumption")
+    assert excinfo.value.code == 1
+
+    report = json.loads(capsys.readouterr().out)
+    by_scope = {entry["scope_entry"]: entry for entry in report["entries"]}
+    assert by_scope["target.example"]["status"] is None
+    assert "pending-work-remains" in by_scope["target.example"]["gaps"]
+    assert by_scope["*.target.example"]["status"] == "deferred"
+    assert by_scope["*.target.example"]["gaps"] == []

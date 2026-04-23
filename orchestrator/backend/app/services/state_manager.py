@@ -3258,7 +3258,7 @@ def _derive_tool_bin_from_tokens(tokens: list[str], *, depth: int = 0) -> str:
         bare = Path(token).name
         if bare in _SHELL_TOOL_WRAPPERS:
             for idx, arg in enumerate(remaining):
-                if arg == "-c" or (arg.startswith("-") and "c" in arg[1:]):
+                if _is_shell_command_string_flag(arg):
                     if idx + 1 < len(remaining):
                         return _derive_tool_bin_from_tokens(
                             _shell_tokens(remaining[idx + 1]),
@@ -3271,6 +3271,17 @@ def _derive_tool_bin_from_tokens(tokens: list[str], *, depth: int = 0) -> str:
             continue
         return bare.split(";", 1)[0].split("|", 1)[0].strip() or bare
     return ""
+
+
+def _is_shell_command_string_flag(arg: str) -> bool:
+    if not arg.startswith("-"):
+        return False
+    if arg == "-c":
+        return True
+    if not arg.startswith("-") or arg.startswith("--"):
+        return False
+    short_flags = arg[1:]
+    return bool(short_flags) and short_flags.endswith("c") and set(short_flags) <= {"l", "i", "s", "r", "c"}
 
 
 def _derive_tool_bin(command: str, argv: list[str] | None) -> str:
