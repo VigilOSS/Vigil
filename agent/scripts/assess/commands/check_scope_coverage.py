@@ -557,7 +557,7 @@ def _build_entry_report(
 
     observation_count = _extract_observation_count(entry, summary, total_services)
 
-    metadata = scope_metadata.get(entry["host"], {})
+    metadata = scope_metadata.get(_scope_metadata_lookup_key(entry), {})
     entry_status = str(metadata.get("status") or "").lower()
 
     gaps: list[str] = []
@@ -708,18 +708,18 @@ def _extract_scope_metadata(scope_data: dict[str, Any]) -> dict[str, dict[str, A
     if isinstance(raw_map, dict):
         for host, info in raw_map.items():
             if isinstance(host, str) and isinstance(info, dict):
-                normalized_host = _normalize_scope_metadata_key(host)
-                if normalized_host:
-                    metadata[normalized_host] = dict(info)
+                normalized_key = _normalize_scope_metadata_key(host)
+                if normalized_key:
+                    metadata[normalized_key] = dict(info)
 
     raw_deferred = scope_data.get("deferred_hosts")
     if isinstance(raw_deferred, list):
         for host in raw_deferred:
             if isinstance(host, str):
-                normalized_host = _normalize_scope_metadata_key(host)
-                if not normalized_host:
+                normalized_key = _normalize_scope_metadata_key(host)
+                if not normalized_key:
                     continue
-                bucket = metadata.setdefault(normalized_host, {})
+                bucket = metadata.setdefault(normalized_key, {})
                 if "status" not in bucket:
                     bucket["status"] = "deferred"
     return metadata
@@ -729,7 +729,11 @@ def _normalize_scope_metadata_key(raw: str) -> str:
     entry = _classify_entry(raw)
     if entry is None:
         return ""
-    return str(entry["host"])
+    return _scope_metadata_lookup_key(entry)
+
+
+def _scope_metadata_lookup_key(entry: dict[str, Any]) -> str:
+    return f"{entry['entry_kind']}:{entry['host']}"
 
 
 # ---------------------------------------------------------------------------
