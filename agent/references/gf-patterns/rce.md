@@ -29,7 +29,6 @@ hit usually translates to direct pre-auth RCE.
 ## Weight and priority interpretation
 
 - Baseline priority score: 50 (highest bucket — rce trumps everything else)
-- When combined with a nuclei match on the same URL: +10 bonus
 - Terminal reasons that suppress this bucket: `inert_type`
 
 ## Example URLs that match

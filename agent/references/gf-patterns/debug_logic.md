@@ -31,7 +31,6 @@ None — debug_logic matches on path fragments only.
 ## Weight and priority interpretation
 
 - Baseline priority score: 30
-- When combined with a nuclei match on the same URL: +10 bonus
 - Terminal reasons that suppress this bucket: `inert_type`
 
 ## Example URLs that match
