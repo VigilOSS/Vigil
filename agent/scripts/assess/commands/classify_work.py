@@ -13,14 +13,10 @@ Design notes:
   community gf-patterns repo uses. Keys are matched as whole tokens against
   query/body/path maps; path fragments are matched as substrings so
   `/admin/users` both lands in `debug_logic` and exposes `id` for `idor`.
-- We layer narrowly-scoped platform overlays after gf matching. These overlays
-  add deterministic coverage for high-volume platform surfaces whose controller
-  names do not map cleanly to generic vuln buckets; they do not outrank concrete
-  vuln buckets when a stronger gf signal is present.
 - We intentionally record every matching bucket in `priority_reason` (as
-  `gf:a+overlay:b+...`) even though `cluster_key` and `priority_score` track
-  the single highest-weight bucket. That lets operators triage sub-clusters
-  later without re-running classification.
+  `gf:a+gf:b+...`) even though `cluster_key` and `priority_score` track the
+  single highest-weight bucket. That lets operators triage sub-clusters later
+  without re-running classification.
 - Inert types (image/video/font/archive) are already `status='skipped'` at
   insert time; we clean them up by stamping `terminal_reason='inert_type'` so
   that `fetch-by-priority` can exclude them with a single predicate.
@@ -133,17 +129,6 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
 )
 
 _INERT_TYPES = frozenset({"image", "video", "font", "archive"})
-_SALESFORCE_AURA_PATH_FRAGMENTS: tuple[str, ...] = (
-    "/aura",
-    "/s/sfsites/aura",
-)
-_SALESFORCE_CONTROLLER_SUFFIXES: tuple[str, ...] = (
-    "executeactions",
-    "getobjectinfo",
-    "getrecordactions",
-    "getlistviewdata",
-)
-_SALESFORCE_OVERLAY_WEIGHT = 18
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -261,18 +246,14 @@ def _classify_row(row: sqlite3.Row) -> dict[str, Any] | None:
     if matches:
         # Prefer the largest weight; break ties by bucket declaration order so
         # the output is fully deterministic across runs and platforms.
-        best_weight = max(weight for _, weight, _ in matches)
-        top_buckets = [
-            (name, prefix)
-            for name, weight, prefix in matches
-            if weight == best_weight
-        ]
-        best_name, best_prefix = top_buckets[0]
-        reason = "+".join(f"{prefix}:{name}" for name, _, prefix in matches)
+        best_weight = max(weight for _, weight in matches)
+        top_buckets = [name for name, weight in matches if weight == best_weight]
+        best_name = top_buckets[0]
+        reason = "+".join(f"gf:{name}" for name, _ in matches)
         return {
             "priority_score": best_weight,
             "priority_reason": reason,
-            "cluster_key": f"{best_prefix}:{best_name}",
+            "cluster_key": f"gf:{best_name}",
             "terminal_reason": None,
         }
 
@@ -292,11 +273,11 @@ def _collect_keys(*columns: str | None) -> set[str]:
     be inspecting client-side. Columns that are null, empty, or malformed are
     quietly skipped so classification never fails on a partial row.
 
-    Compound keys (e.g. Salesforce's `aura.token`, Rails-style `user[id]`, or
-    ASP.NET `user.email`) are expanded so each recognizable leaf token is
-    exposed to bucket matching. Without this, exact set-membership against
-    `{"token", "id", ...}` misses the bulk of real-world Salesforce, Rails,
-    and .NET payloads where interesting keys are nested under a namespace.
+    Compound keys (e.g. `auth.token`, Rails-style `user[id]`, or ASP.NET
+    `user.email`) are expanded so each recognizable leaf token is exposed to
+    bucket matching. Without this, exact set-membership against `{"token",
+    "id", ...}` misses the bulk of real-world payloads where interesting keys
+    are nested under a namespace.
     """
     keys: set[str] = set()
     for raw in columns:
@@ -316,7 +297,7 @@ def _collect_keys(*columns: str | None) -> set[str]:
 def _expand_compound_key(key: str) -> set[str]:
     """Expand a single parameter key into its matchable tokens.
 
-    `aura.token` → {`aura.token`, `aura`, `token`}
+    `auth.token` → {`auth.token`, `auth`, `token`}
     `user[id]` → {`user[id]`, `user`, `id`}
     `order.sort` → {`order.sort`, `order`, `sort`}
     `plain` → {`plain`}
@@ -336,33 +317,20 @@ def _expand_compound_key(key: str) -> set[str]:
     return tokens
 
 
-def _bucket_matches(url_path_lower: str, keys: set[str]) -> list[tuple[str, int, str]]:
+def _bucket_matches(url_path_lower: str, keys: set[str]) -> list[tuple[str, int]]:
     """Return matching buckets in declaration order.
 
     A bucket matches when either a parameter key is in its key set OR the URL
-    path contains one of its declared fragments. Platform overlays append after
-    the gf buckets. We preserve declaration order so ties resolve
-    deterministically downstream.
+    path contains one of its declared fragments. We preserve declaration order
+    so ties resolve deterministically downstream.
     """
-    matches: list[tuple[str, int, str]] = []
+    matches: list[tuple[str, int]] = []
     for name, weight, key_set, path_fragments in _BUCKETS:
         key_hit = bool(keys & key_set) if key_set else False
         path_hit = any(fragment in url_path_lower for fragment in path_fragments)
         if key_hit or path_hit:
-            matches.append((name, weight, "gf"))
-    if _salesforce_overlay_matches(url_path_lower, keys):
-        matches.append(("salesforce", _SALESFORCE_OVERLAY_WEIGHT, "overlay"))
+            matches.append((name, weight))
     return matches
-
-
-def _salesforce_overlay_matches(url_path_lower: str, keys: set[str]) -> bool:
-    if any(fragment in url_path_lower for fragment in _SALESFORCE_AURA_PATH_FRAGMENTS):
-        return True
-    return any(
-        suffix in key
-        for key in keys
-        for suffix in _SALESFORCE_CONTROLLER_SUFFIXES
-    )
 
 
 def _first_two_path_segments(url_path: str) -> str:
