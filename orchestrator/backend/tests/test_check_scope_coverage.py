@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import parse_qs
 
 import pytest
 
@@ -111,17 +112,27 @@ class FakeClient:
         self,
         *,
         services: list[dict[str, Any]] | None = None,
-        command_runs: list[dict[str, Any]] | None = None,
+        command_runs: list[dict[str, Any]] | dict[str, Any] | None = None,
         summary: dict[str, Any] | None = None,
+        endpoint_handler=None,
     ) -> None:
         self._services = services or []
         self._command_runs = command_runs or []
         self._summary = summary or {}
+        self._endpoint_handler = endpoint_handler
+        self.calls: list[str] = []
 
     def get(self, endpoint: str) -> Any:
+        self.calls.append(endpoint)
+        if self._endpoint_handler is not None:
+            handled = self._endpoint_handler(endpoint)
+            if handled is not None:
+                return handled
         if endpoint == "services":
             return self._services
         if endpoint.startswith("command-runs"):
+            if isinstance(self._command_runs, dict):
+                return self._command_runs[endpoint]
             return self._command_runs
         if endpoint == "summary":
             return self._summary
@@ -131,15 +142,24 @@ class FakeClient:
         return None
 
 
-def _patch_client(monkeypatch, module, *, services=None, command_runs=None, summary=None) -> None:
+def _patch_client(monkeypatch, module, *, services=None, command_runs=None, summary=None, endpoint_handler=None) -> list[FakeClient]:
     fake_services = services or []
     fake_runs = command_runs or []
     fake_summary = summary or {}
+    created: list[FakeClient] = []
 
     def _factory(base_url: str, engagement_key: str) -> FakeClient:
-        return FakeClient(services=fake_services, command_runs=fake_runs, summary=fake_summary)
+        client = FakeClient(
+            services=fake_services,
+            command_runs=fake_runs,
+            summary=fake_summary,
+            endpoint_handler=endpoint_handler,
+        )
+        created.append(client)
+        return client
 
     monkeypatch.setattr(module, "AssessmentClient", _factory)
+    return created
 
 
 def _patch_config(monkeypatch, module, engagement_dir: Path, key: str = "eng") -> None:
@@ -162,13 +182,21 @@ def _run(
     services=None,
     command_runs=None,
     summary=None,
+    endpoint_handler=None,
     require_stage: str | None = None,
     as_json: bool = True,
     verbose: bool = False,
-) -> None:
+) -> FakeClient | None:
     module = _load_module()
     _patch_config(monkeypatch, module, engagement_dir)
-    _patch_client(monkeypatch, module, services=services, command_runs=command_runs, summary=summary)
+    clients = _patch_client(
+        monkeypatch,
+        module,
+        services=services,
+        command_runs=command_runs,
+        summary=summary,
+        endpoint_handler=endpoint_handler,
+    )
     module.run(
         SimpleNamespace(
             engagement_dir=str(engagement_dir),
@@ -177,6 +205,7 @@ def _run(
             verbose=verbose,
         )
     )
+    return clients[0] if clients else None
 
 
 # ---------------------------------------------------------------------------
@@ -465,3 +494,178 @@ def test_require_stage_consumption_passes_when_all_done_or_skipped(monkeypatch, 
     assert entry["work_queued"]["pending"] == 0
     assert entry["work_queued"]["done"] == 2
     assert entry["work_queued"]["skipped"] == 1
+
+
+def test_collection_gate_ignores_superdomain_substring_false_positive(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A different host containing the scope host as a substring must not count as collection."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    _make_cases_db(eng)
+
+    services = [{"endpoint": "target.example", "state": "up"}]
+    runs = [
+        {"command": "katana -u https://target.example.evil.org", "tool_bin": "katana", "tool_name": "katana"},
+        {"command": "gau https://nottarget.example", "tool_bin": "gau", "tool_name": "gau"},
+    ]
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="collection")
+    assert excinfo.value.code == 1
+
+    report = json.loads(capsys.readouterr().out)
+    entry = report["entries"][0]
+    assert entry["collection_attempted"] is False
+    assert entry["collection_tools"] == []
+    assert "no-collection" in entry["gaps"]
+
+
+def test_old_cases_db_schema_fails_closed_instead_of_claiming_readiness(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Legacy/malformed work buffer schemas must abort the audit instead of silently passing."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db_path = eng / "cases.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE work_items (url TEXT NOT NULL, status TEXT NOT NULL)")
+        conn.execute("INSERT INTO work_items (url, status) VALUES ('https://target.example/a', 'pending')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, eng, services=[], command_runs=[], summary={})
+    assert excinfo.value.code == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "unable to read work buffer" in captured.err
+    assert "terminal_reason" in captured.err
+
+
+def test_command_run_fetch_paginates_past_first_page(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Coverage must consider command runs beyond the first 1000 rows."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    _make_cases_db(eng)
+
+    first_page = [
+        {"command": f"katana -u https://unrelated-{idx}.example", "tool_bin": "katana", "tool_name": "katana"}
+        for idx in range(1000)
+    ]
+    second_page = [
+        {"command": "katana -u https://target.example", "tool_bin": "katana", "tool_name": "katana"},
+    ]
+
+    def endpoint_handler(endpoint: str) -> Any:
+        if not endpoint.startswith("command-runs?"):
+            return None
+        query = endpoint.split("?", 1)[1]
+        params = parse_qs(query)
+        offset = int(params["offset"][0])
+        if offset == 0:
+            return first_page
+        if offset == 1000:
+            return second_page
+        raise AssertionError(f"Unexpected command-runs offset: {offset}")
+
+    client = _run(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        summary={"request_observation_count": 1, "service_count": 1},
+        endpoint_handler=endpoint_handler,
+        require_stage="collection",
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    entry = report["entries"][0]
+    assert entry["collection_attempted"] is True
+    assert "katana" in entry["collection_tools"]
+    assert client is not None
+    assert "command-runs?limit=1000&offset=1000" in client.calls
+
+
+def test_deferred_url_metadata_normalizes_trailing_dot(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Deferred URL entries should normalize URL form and trailing dots before lookup."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(
+        eng,
+        hosts=["https://api.target.example./health"],
+        deferred_hosts=["https://api.target.example./defer"],
+    )
+    db = _make_cases_db(eng)
+    _insert_work_item(db, queue_key="u:1", url="https://api.target.example/work", url_path="/work", status="pending")
+
+    services = [{"endpoint": "https://api.target.example/health", "state": "up"}]
+    runs = [{"command": "katana -u https://api.target.example", "tool_bin": "katana", "tool_name": "katana"}]
+
+    _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="consumption")
+    report = json.loads(capsys.readouterr().out)
+    entry = report["entries"][0]
+    assert entry["host"] == "api.target.example"
+    assert entry["status"] == "deferred"
+    assert entry["gaps"] == []
+
+
+def test_host_metadata_status_beats_deferred_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
+    """An explicit host_metadata status must not be overwritten by deferred_hosts fallback."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(
+        eng,
+        hosts=["target.example"],
+        host_metadata={"target.example": {"status": "active"}},
+        deferred_hosts=["target.example"],
+    )
+    db = _make_cases_db(eng)
+    _insert_work_item(db, queue_key="p:1", url="https://target.example/work", url_path="/work", status="pending")
+
+    runs = [{"command": "katana -u https://target.example", "tool_bin": "katana", "tool_name": "katana"}]
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            command_runs=runs,
+            require_stage="consumption",
+        )
+    assert excinfo.value.code == 1
+
+    report = json.loads(capsys.readouterr().out)
+    entry = report["entries"][0]
+    assert entry["status"] == "active"
+    assert "pending-work-remains" in entry["gaps"]
+
+
+def test_wildcard_scope_normalizes_trailing_dot_for_metadata_and_matching(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Wildcard scope rows with trailing dots should still match services and metadata."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(
+        eng,
+        hosts=["*.target.example."],
+        host_metadata={"*.target.example.": {"status": "active"}},
+    )
+    _make_cases_db(eng)
+
+    services = [
+        {"endpoint": "api.target.example", "state": "up"},
+        {"endpoint": "www.target.example", "state": "up"},
+    ]
+    runs = [
+        {"command": "subfinder -d target.example", "tool_bin": "subfinder", "tool_name": "subfinder"},
+        {"command": "katana -u https://api.target.example", "tool_bin": "katana", "tool_name": "katana"},
+    ]
+
+    _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="collection")
+    report = json.loads(capsys.readouterr().out)
+    entry = report["entries"][0]
+    assert entry["host"] == "target.example"
+    assert entry["status"] == "active"
+    assert entry["live_hosts"] == 2
+    assert entry["collection_attempted"] is True
