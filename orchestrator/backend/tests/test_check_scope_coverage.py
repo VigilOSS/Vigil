@@ -634,6 +634,29 @@ def test_url_scope_entry_accepts_host_keyed_deferral(monkeypatch, tmp_path: Path
     assert entry["gaps"] == []
 
 
+def test_bare_scope_host_with_port_matches_host_keyed_services_and_work(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Bare scope rows with ports should normalize to the host for service/work matching."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["api.target.example:8443"])
+    db = _make_cases_db(eng)
+    _insert_work_item(db, queue_key="hp:1", url="https://api.target.example/work", url_path="/work", status="pending")
+
+    services = [{"endpoint": "https://api.target.example:8443/health", "state": "up"}]
+    runs = [{"command": "katana -u https://api.target.example:8443", "tool_bin": "katana", "tool_name": "katana"}]
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="consumption")
+    assert excinfo.value.code == 1
+
+    report = json.loads(capsys.readouterr().out)
+    entry = report["entries"][0]
+    assert entry["host"] == "api.target.example"
+    assert entry["live_hosts"] == 1
+    assert entry["work_queued"]["pending"] == 1
+    assert "pending-work-remains" in entry["gaps"]
+
+
 def test_host_metadata_status_beats_deferred_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
     """An explicit host_metadata status must not be overwritten by deferred_hosts fallback."""
     eng = tmp_path / "engagement"
@@ -726,3 +749,26 @@ def test_wildcard_and_bare_entries_keep_distinct_metadata_status(monkeypatch, tm
     assert "pending-work-remains" in by_scope["target.example"]["gaps"]
     assert by_scope["*.target.example"]["status"] == "deferred"
     assert by_scope["*.target.example"]["gaps"] == []
+
+
+def test_non_target_host_like_filename_does_not_count_as_collection(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Host-like output filenames must not count as collection for the scoped host."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    _make_cases_db(eng)
+
+    services = [{"endpoint": "target.example", "state": "up"}]
+    runs = [
+        {"command": "gau admin.target.example -o target.example", "tool_bin": "gau", "tool_name": "gau"},
+        {"command": "katana -o target.example -list urls.txt", "tool_bin": "katana", "tool_name": "katana"},
+    ]
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="collection")
+    assert excinfo.value.code == 1
+
+    report = json.loads(capsys.readouterr().out)
+    entry = report["entries"][0]
+    assert entry["collection_attempted"] is False
+    assert "no-collection" in entry["gaps"]

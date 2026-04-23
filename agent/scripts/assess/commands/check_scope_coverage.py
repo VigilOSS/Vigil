@@ -94,6 +94,64 @@ _COMMAND_TARGET_FILE_FLAGS: frozenset[str] = frozenset({
     "-target-list",
     "--target-list",
 })
+_COMMAND_TARGET_VALUE_FLAGS: frozenset[str] = frozenset({
+    "-d",
+    "--domain",
+    "-host",
+    "--host",
+    "--hostname",
+    "-target",
+    "--target",
+    "-u",
+    "--url",
+})
+_POSITIONAL_TARGET_TOOLS: frozenset[str] = frozenset({
+    "assetfinder",
+    "gau",
+    "waybackurls",
+})
+_NON_TARGET_VALUE_FLAGS: frozenset[str] = frozenset({
+    "-H",
+    "--header",
+    "-c",
+    "--config",
+    "--cookie",
+    "-o",
+    "--output",
+    "-p",
+    "--port",
+    "--proxy",
+    "-w",
+    "--wordlist",
+})
+_PREFIX_TOOL_WRAPPERS: frozenset[str] = frozenset({
+    "command",
+    "env",
+    "gtimeout",
+    "ionice",
+    "nice",
+    "nohup",
+    "stdbuf",
+    "sudo",
+    "timeout",
+})
+_SHELL_TOOL_WRAPPERS: frozenset[str] = frozenset({
+    "bash",
+    "dash",
+    "ksh",
+    "sh",
+    "zsh",
+})
+_SINGLE_ARG_WRAPPER_OPTIONS: dict[str, frozenset[str]] = {
+    "env": frozenset({"-C", "--chdir", "-S", "--split-string", "-u", "--unset"}),
+    "gtimeout": frozenset({"-k", "--kill-after", "-s", "--signal"}),
+    "ionice": frozenset({"-c", "--class", "-n", "--classdata"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "stdbuf": frozenset({"-e", "-i", "-o"}),
+    "sudo": frozenset({"-C", "-g", "-h", "-p", "-r", "-T", "-t", "-u"}),
+    "timeout": frozenset({"-k", "--kill-after", "-s", "--signal"}),
+}
+_TIMEOUT_DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
 _MAX_TARGET_FILE_BYTES = 2_000_000
 
 # Services count as "live" when the backend state is anything except
@@ -279,7 +337,22 @@ def _classify_entry(raw: str) -> dict[str, Any] | None:
 
 
 def _normalize_scope_host(raw: str) -> str:
-    return raw.strip().rstrip(".").lower()
+    value = raw.strip()
+    if not value:
+        return ""
+    if "://" in value:
+        try:
+            return (urlsplit(value).hostname or "").rstrip(".").lower()
+        except ValueError:
+            return ""
+    try:
+        parsed = urlsplit("http://" + value)
+        host = parsed.hostname or ""
+    except ValueError:
+        host = value
+    if not host:
+        host = value.split("/", 1)[0]
+    return host.rstrip(".").lower()
 
 
 def _endpoint_host(endpoint: str) -> str:
@@ -330,58 +403,170 @@ def _command_run_mentions_host(
     `nuclei -l /engagements/<key>/scans/delta.txt`, where the command text
     contains only a mounted artifact path rather than the actual host names.
     """
-    entry_host = entry["host"]
-    command = (row.get("command") or "").lower()
-    if command:
-        if _command_text_mentions_host(command, entry):
-            return True
-
     for host in _command_run_target_hosts(row, engagement_dir=engagement_dir):
         if _entry_matches_host(entry, host):
             return True
     return False
 
 
-def _command_text_mentions_host(command: str, entry: dict[str, Any]) -> bool:
-    host_pattern = re.escape(entry["host"])
-    if entry["entry_kind"] == "wildcard":
-        pattern = rf"(?<![a-z0-9.-])(?:[a-z0-9-]+\.)*{host_pattern}(?![a-z0-9.-])"
-    else:
-        pattern = rf"(?<![a-z0-9.-]){host_pattern}(?![a-z0-9.-])"
-    return re.search(pattern, command, flags=re.IGNORECASE) is not None
-
-
 def _command_run_target_hosts(row: dict[str, Any], *, engagement_dir: Path | None) -> set[str]:
-    """Extract best-effort target hosts from command text, argv, and target files."""
-    tokens = _command_tokens(row)
     hosts: set[str] = set()
+    token_sets: list[list[str]] = []
+
+    argv = row.get("argv")
+    if isinstance(argv, list) and argv:
+        token_sets.append([str(item) for item in argv])
+
+    command = str(row.get("command") or "").strip()
+    if command:
+        try:
+            command_tokens = shlex.split(command)
+        except ValueError:
+            command_tokens = command.split()
+        if command_tokens:
+            token_sets.append(command_tokens)
+
+    for tokens in token_sets:
+        hosts.update(_extract_target_hosts_from_tokens(tokens, engagement_dir=engagement_dir))
+    return hosts
+
+
+def _extract_target_hosts_from_tokens(
+    tokens: list[str],
+    *,
+    engagement_dir: Path | None,
+    depth: int = 0,
+) -> set[str]:
+    if depth > 4:
+        return set()
+
+    remaining = list(tokens)
+    while remaining:
+        token = remaining.pop(0).strip()
+        if not token:
+            continue
+        if _is_env_assignment(token):
+            continue
+        bare = Path(token).name
+        if bare in _SHELL_TOOL_WRAPPERS:
+            nested = _nested_shell_command_tokens(remaining)
+            if nested:
+                return _extract_target_hosts_from_tokens(
+                    nested,
+                    engagement_dir=engagement_dir,
+                    depth=depth + 1,
+                )
+            return set()
+        if bare in _PREFIX_TOOL_WRAPPERS:
+            remaining = _strip_wrapper_options(bare, remaining)
+            continue
+        return _target_hosts_for_tool(bare.lower(), remaining, engagement_dir=engagement_dir)
+    return set()
+
+
+def _is_env_assignment(token: str) -> bool:
+    if "=" not in token:
+        return False
+    name, _value = token.split("=", 1)
+    return bool(name) and name.replace("_", "").isalnum()
+
+
+def _nested_shell_command_tokens(tokens: list[str]) -> list[str]:
+    for idx, arg in enumerate(tokens):
+        if _is_shell_command_string_flag(arg) and idx + 1 < len(tokens):
+            nested = tokens[idx + 1]
+            try:
+                return shlex.split(nested)
+            except ValueError:
+                return nested.split()
+    return []
+
+
+def _is_shell_command_string_flag(arg: str) -> bool:
+    if not arg.startswith("-"):
+        return False
+    if arg == "-c":
+        return True
+    if arg.startswith("--"):
+        return False
+    short_flags = arg[1:]
+    return bool(short_flags) and short_flags.endswith("c") and set(short_flags) <= {"l", "i", "s", "r", "c"}
+
+
+def _strip_wrapper_options(wrapper: str, tokens: list[str]) -> list[str]:
+    remaining = list(tokens)
+    options_with_arg = _SINGLE_ARG_WRAPPER_OPTIONS.get(wrapper, frozenset())
+    while remaining:
+        token = remaining[0]
+        if wrapper == "env" and _is_env_assignment(token):
+            remaining.pop(0)
+            continue
+        if not token.startswith("-") or token == "-":
+            break
+        option = remaining.pop(0)
+        option_name = option.split("=", 1)[0]
+        if option_name in options_with_arg and "=" not in option and remaining:
+            remaining.pop(0)
+    if wrapper in {"timeout", "gtimeout"} and remaining and _TIMEOUT_DURATION_RE.fullmatch(remaining[0]):
+        remaining.pop(0)
+    return remaining
+
+
+def _target_hosts_for_tool(tool: str, tokens: list[str], *, engagement_dir: Path | None) -> set[str]:
+    hosts: set[str] = set()
+
+    for file_token in _target_file_tokens(tokens):
+        path = _resolve_command_target_file(file_token, engagement_dir) if engagement_dir is not None else None
+        if path is None:
+            continue
+        hosts.update(_hosts_from_target_file(path))
+
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        option_name = token.split("=", 1)[0]
+        if option_name in _COMMAND_TARGET_VALUE_FLAGS:
+            value = token.split("=", 1)[1] if "=" in token else (tokens[idx + 1] if idx + 1 < len(tokens) else "")
+            host = _host_from_token(value)
+            if host:
+                hosts.add(host)
+            idx += 1 if "=" in token else 2
+            continue
+        idx += 1
+
     for token in tokens:
+        if "://" not in token:
+            continue
         host = _host_from_token(token)
         if host:
             hosts.add(host)
 
-    if engagement_dir is None:
-        return hosts
-
-    for file_token in _target_file_tokens(tokens):
-        path = _resolve_command_target_file(file_token, engagement_dir)
-        if path is None:
-            continue
-        hosts.update(_hosts_from_target_file(path))
+    positional = _first_positional_target_token(tool, tokens)
+    if positional:
+        host = _host_from_token(positional)
+        if host:
+            hosts.add(host)
     return hosts
 
 
-def _command_tokens(row: dict[str, Any]) -> list[str]:
-    argv = row.get("argv")
-    if isinstance(argv, list) and argv:
-        return [str(item) for item in argv]
-    command = str(row.get("command") or "")
-    if not command:
-        return []
-    try:
-        return shlex.split(command)
-    except ValueError:
-        return command.split()
+def _first_positional_target_token(tool: str, tokens: list[str]) -> str:
+    if tool not in _POSITIONAL_TARGET_TOOLS:
+        return ""
+    skip_next = False
+    for token in tokens:
+        option_name = token.split("=", 1)[0]
+        if skip_next:
+            skip_next = False
+            continue
+        if option_name in _COMMAND_TARGET_VALUE_FLAGS | _COMMAND_TARGET_FILE_FLAGS | _NON_TARGET_VALUE_FLAGS:
+            if "=" not in token:
+                skip_next = True
+            continue
+        if token.startswith("-"):
+            continue
+        if _host_from_token(token):
+            return token
+    return ""
 
 
 def _target_file_tokens(tokens: list[str]) -> list[str]:
