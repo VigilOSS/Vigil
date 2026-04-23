@@ -3210,11 +3210,32 @@ _SINGLE_ARG_WRAPPER_OPTIONS = {
     "timeout": {"-k", "--kill-after", "-s", "--signal"},
 }
 _TIMEOUT_DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+_SHELL_COMMAND_SEPARATORS = {"&&", "||", ";", "|", "|&", "&"}
+_SHELL_PREAMBLE_BUILTINS = {
+    ".",
+    "alias",
+    "cd",
+    "export",
+    "local",
+    "popd",
+    "pushd",
+    "readonly",
+    "set",
+    "shopt",
+    "source",
+    "typeset",
+    "ulimit",
+    "umask",
+    "unalias",
+    "unset",
+}
 
 
 def _shell_tokens(command: str) -> list[str]:
     try:
-        return shlex.split(command)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        return list(lexer)
     except ValueError:
         return command.split()
 
@@ -3269,6 +3290,11 @@ def _derive_tool_bin_from_tokens(tokens: list[str], *, depth: int = 0) -> str:
         if bare in _PREFIX_TOOL_WRAPPERS:
             remaining = _strip_wrapper_options(bare, remaining)
             continue
+        if bare in _SHELL_PREAMBLE_BUILTINS:
+            post_preamble = _skip_shell_preamble_tokens(remaining)
+            if post_preamble is not None:
+                remaining = post_preamble
+                continue
         return bare.split(";", 1)[0].split("|", 1)[0].strip() or bare
     return ""
 
@@ -3282,6 +3308,13 @@ def _is_shell_command_string_flag(arg: str) -> bool:
         return False
     short_flags = arg[1:]
     return bool(short_flags) and short_flags.endswith("c") and set(short_flags) <= {"l", "i", "s", "r", "c"}
+
+
+def _skip_shell_preamble_tokens(tokens: list[str]) -> list[str] | None:
+    for idx, token in enumerate(tokens):
+        if token in _SHELL_COMMAND_SEPARATORS:
+            return tokens[idx + 1 :]
+    return None
 
 
 def _derive_tool_bin(command: str, argv: list[str] | None) -> str:

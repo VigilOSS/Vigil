@@ -733,7 +733,9 @@ def _normalize_scope_metadata_key(raw: str) -> str:
 
 
 def _scope_metadata_lookup_key(entry: dict[str, Any]) -> str:
-    return f"{entry['entry_kind']}:{entry['host']}"
+    if entry["entry_kind"] == "wildcard":
+        return f"wildcard:{entry['host']}"
+    return f"host:{entry['host']}"
 
 
 # ---------------------------------------------------------------------------
