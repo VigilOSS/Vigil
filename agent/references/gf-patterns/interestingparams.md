@@ -30,7 +30,6 @@ None — interestingparams is keyed entirely off parameter names.
 ## Weight and priority interpretation
 
 - Baseline priority score: 15 (lowest weight because URL-borne secrets are frequently test/expired values)
-- When combined with a nuclei match on the same URL: +10 bonus
 - Terminal reasons that suppress this bucket: `inert_type`
 
 ## Example URLs that match

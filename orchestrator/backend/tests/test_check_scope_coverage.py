@@ -772,3 +772,22 @@ def test_non_target_host_like_filename_does_not_count_as_collection(monkeypatch,
     entry = report["entries"][0]
     assert entry["collection_attempted"] is False
     assert "no-collection" in entry["gaps"]
+
+
+def test_positional_target_tools_skip_long_output_alias_before_real_host(monkeypatch, tmp_path: Path, capsys) -> None:
+    """`gau --o file host` should use the host, not the output filename, as the positional target."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["api.example.com"])
+    _make_cases_db(eng)
+
+    services = [{"endpoint": "api.example.com", "state": "up"}]
+    runs = [
+        {"command": "gau --o target.example.txt api.example.com", "tool_bin": "gau", "tool_name": "gau"},
+    ]
+
+    _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="collection")
+    report = json.loads(capsys.readouterr().out)
+    entry = report["entries"][0]
+    assert entry["collection_attempted"] is True
+    assert entry["collection_tools"] == ["gau"]

@@ -64,24 +64,22 @@ from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 
 
-# tool_bin labels that mark each stage of activity. We keep these lowercase
-# and match against the lowercased argv[0] the backend stores because tool
-# invocations inside Kali MCP use the canonical binary names.
-_ENUM_TOOLS: frozenset[str] = frozenset({
-    "subfinder",
-    "puredns",
-    "dnsx",
-    "ffuf",
-    "httpx",
-    "amass",
-    "assetfinder",
-})
-_COLLECTION_TOOLS: frozenset[str] = frozenset({
-    "katana",
-    "gau",
-    "hakrawler",
-    "waybackurls",
-})
+# Single registry for scope-coverage tool semantics. Adding a new enum or
+# collection tool should start here; only tools with unusual CLI shapes need
+# extra flag-table changes below.
+_TOOL_COVERAGE_SPECS: dict[str, tuple[frozenset[str], bool]] = {
+    "subfinder": (frozenset({"enum"}), False),
+    "puredns": (frozenset({"enum"}), False),
+    "dnsx": (frozenset({"enum"}), False),
+    "ffuf": (frozenset({"enum"}), False),
+    "httpx": (frozenset({"enum"}), False),
+    "amass": (frozenset({"enum"}), False),
+    "assetfinder": (frozenset({"enum"}), True),
+    "katana": (frozenset({"collection"}), False),
+    "gau": (frozenset({"collection"}), True),
+    "hakrawler": (frozenset({"collection"}), False),
+    "waybackurls": (frozenset({"collection"}), True),
+}
 _REACTIVE_NUCLEI_TOOL = "nuclei"
 _COMMAND_TARGET_FILE_FLAGS: frozenset[str] = frozenset({
     "-l",
@@ -105,17 +103,13 @@ _COMMAND_TARGET_VALUE_FLAGS: frozenset[str] = frozenset({
     "-u",
     "--url",
 })
-_POSITIONAL_TARGET_TOOLS: frozenset[str] = frozenset({
-    "assetfinder",
-    "gau",
-    "waybackurls",
-})
 _NON_TARGET_VALUE_FLAGS: frozenset[str] = frozenset({
     "-H",
     "--header",
     "-c",
     "--config",
     "--cookie",
+    "--o",
     "-o",
     "--output",
     "-p",
@@ -550,7 +544,8 @@ def _target_hosts_for_tool(tool: str, tokens: list[str], *, engagement_dir: Path
 
 
 def _first_positional_target_token(tool: str, tokens: list[str]) -> str:
-    if tool not in _POSITIONAL_TARGET_TOOLS:
+    tool_spec = _tool_coverage_spec(tool)
+    if tool_spec is None or not tool_spec[1]:
         return ""
     skip_next = False
     for token in tokens:
@@ -567,6 +562,10 @@ def _first_positional_target_token(tool: str, tokens: list[str]) -> str:
         if _host_from_token(token):
             return token
     return ""
+
+
+def _tool_coverage_spec(tool: str) -> tuple[frozenset[str], bool] | None:
+    return _TOOL_COVERAGE_SPECS.get(tool)
 
 
 def _target_file_tokens(tokens: list[str]) -> list[str]:
@@ -708,9 +707,10 @@ def _build_entry_report(
         label = bin_name or tool_name
         if not label:
             continue
-        if label in _ENUM_TOOLS:
+        tool_spec = _tool_coverage_spec(label)
+        if tool_spec is not None and "enum" in tool_spec[0]:
             enum_tools_seen.add(label)
-        if label in _COLLECTION_TOOLS:
+        if tool_spec is not None and "collection" in tool_spec[0]:
             collection_tools_seen.add(label)
         if label == _REACTIVE_NUCLEI_TOOL:
             reactive_nuclei_runs += 1

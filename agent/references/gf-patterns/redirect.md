@@ -30,7 +30,6 @@ None — redirect is keyed entirely off parameter names.
 ## Weight and priority interpretation
 
 - Baseline priority score: 25
-- When combined with a nuclei match on the same URL: +10 bonus
 - Terminal reasons that suppress this bucket: `inert_type`
 
 ## Example URLs that match

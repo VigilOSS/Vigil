@@ -29,7 +29,6 @@ covered by `debug_logic`.
 ## Weight and priority interpretation
 
 - Baseline priority score: 40 (tied with sqli)
-- When combined with a nuclei match on the same URL: +10 bonus
 - Terminal reasons that suppress this bucket: `inert_type`
 
 ## Example URLs that match
