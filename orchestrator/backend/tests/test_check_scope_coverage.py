@@ -611,6 +611,29 @@ def test_deferred_url_metadata_normalizes_trailing_dot(monkeypatch, tmp_path: Pa
     assert entry["gaps"] == []
 
 
+def test_url_scope_entry_accepts_host_keyed_deferral(monkeypatch, tmp_path: Path, capsys) -> None:
+    """URL scope rows should honor deferred metadata keyed by the normalized host string."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(
+        eng,
+        hosts=["https://api.target.example/v1"],
+        deferred_hosts=["api.target.example"],
+    )
+    db = _make_cases_db(eng)
+    _insert_work_item(db, queue_key="u:2", url="https://api.target.example/work", url_path="/work", status="pending")
+
+    services = [{"endpoint": "https://api.target.example/health", "state": "up"}]
+    runs = [{"command": "katana -u https://api.target.example", "tool_bin": "katana", "tool_name": "katana"}]
+
+    _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="consumption")
+    report = json.loads(capsys.readouterr().out)
+    entry = report["entries"][0]
+    assert entry["host"] == "api.target.example"
+    assert entry["status"] == "deferred"
+    assert entry["gaps"] == []
+
+
 def test_host_metadata_status_beats_deferred_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
     """An explicit host_metadata status must not be overwritten by deferred_hosts fallback."""
     eng = tmp_path / "engagement"
