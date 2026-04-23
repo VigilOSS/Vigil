@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import sqlite3
 import sys
@@ -101,6 +102,7 @@ _MAX_TARGET_FILE_BYTES = 2_000_000
 # out explicitly), which keeps the audit optimistic during backend
 # schema evolution.
 _NON_LIVE_SERVICE_STATES: frozenset[str] = frozenset({"down", "filtered", "unreachable"})
+_COMMAND_RUN_PAGE_SIZE = 1000
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -167,7 +169,7 @@ def run(args: argparse.Namespace) -> None:
             print(f"check-scope-coverage: backend services fetch failed: {exc}", file=sys.stderr)
             sys.exit(1)
         try:
-            command_runs = client.get("command-runs?limit=1000")
+            command_runs = _fetch_all_command_runs(client)
         except AssessError as exc:
             print(f"check-scope-coverage: backend command-runs fetch failed: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -184,7 +186,11 @@ def run(args: argparse.Namespace) -> None:
     summary_dict = summary if isinstance(summary, dict) else {}
 
     db_path = Path(cfg.engagement_dir) / "cases.db"
-    work_by_host = _load_work_items_by_host(db_path)
+    try:
+        work_by_host = _load_work_items_by_host(db_path)
+    except sqlite3.Error as exc:
+        print(f"check-scope-coverage: unable to read work buffer: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     report_entries: list[dict[str, Any]] = []
     for entry in entries:
@@ -239,7 +245,7 @@ def _classify_entry(raw: str) -> dict[str, Any] | None:
         return None
 
     if stripped.startswith("*.") and len(stripped) > 2:
-        host = stripped[2:]
+        host = _normalize_scope_host(stripped[2:])
         if not host:
             return None
         return {
@@ -253,7 +259,7 @@ def _classify_entry(raw: str) -> dict[str, Any] | None:
             parts = urlsplit(stripped)
         except ValueError:
             return None
-        host = (parts.hostname or "").lower()
+        host = _normalize_scope_host(parts.hostname or "")
         if not host:
             return None
         return {
@@ -262,11 +268,18 @@ def _classify_entry(raw: str) -> dict[str, Any] | None:
             "host": host,
         }
 
+    host = _normalize_scope_host(stripped)
+    if not host:
+        return None
     return {
         "scope_entry": stripped,
         "entry_kind": "bare_host",
-        "host": stripped.lower(),
+        "host": host,
     }
+
+
+def _normalize_scope_host(raw: str) -> str:
+    return raw.strip().rstrip(".").lower()
 
 
 def _endpoint_host(endpoint: str) -> str:
@@ -320,16 +333,22 @@ def _command_run_mentions_host(
     entry_host = entry["host"]
     command = (row.get("command") or "").lower()
     if command:
-        if entry["entry_kind"] == "wildcard":
-            if ("." + entry_host) in command or entry_host in command:
-                return True
-        elif entry_host in command:
+        if _command_text_mentions_host(command, entry):
             return True
 
     for host in _command_run_target_hosts(row, engagement_dir=engagement_dir):
         if _entry_matches_host(entry, host):
             return True
     return False
+
+
+def _command_text_mentions_host(command: str, entry: dict[str, Any]) -> bool:
+    host_pattern = re.escape(entry["host"])
+    if entry["entry_kind"] == "wildcard":
+        pattern = rf"(?<![a-z0-9.-])(?:[a-z0-9-]+\.)*{host_pattern}(?![a-z0-9.-])"
+    else:
+        pattern = rf"(?<![a-z0-9.-]){host_pattern}(?![a-z0-9.-])"
+    return re.search(pattern, command, flags=re.IGNORECASE) is not None
 
 
 def _command_run_target_hosts(row: dict[str, Any], *, engagement_dir: Path | None) -> set[str]:
@@ -654,6 +673,19 @@ def _extract_observation_count(
     return round(total * total_services / total_services_all)
 
 
+def _fetch_all_command_runs(client: AssessmentClient) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        page = client.get(f"command-runs?limit={_COMMAND_RUN_PAGE_SIZE}&offset={offset}")
+        if not isinstance(page, list):
+            raise AssessError("backend command-runs fetch returned non-list payload")
+        rows.extend(page)
+        if len(page) < _COMMAND_RUN_PAGE_SIZE:
+            return rows
+        offset += _COMMAND_RUN_PAGE_SIZE
+
+
 # ---------------------------------------------------------------------------
 # scope.json metadata helpers
 # ---------------------------------------------------------------------------
@@ -676,14 +708,28 @@ def _extract_scope_metadata(scope_data: dict[str, Any]) -> dict[str, dict[str, A
     if isinstance(raw_map, dict):
         for host, info in raw_map.items():
             if isinstance(host, str) and isinstance(info, dict):
-                metadata[host.lower()] = info
+                normalized_host = _normalize_scope_metadata_key(host)
+                if normalized_host:
+                    metadata[normalized_host] = dict(info)
 
     raw_deferred = scope_data.get("deferred_hosts")
     if isinstance(raw_deferred, list):
         for host in raw_deferred:
             if isinstance(host, str):
-                metadata.setdefault(host.lower(), {})["status"] = "deferred"
+                normalized_host = _normalize_scope_metadata_key(host)
+                if not normalized_host:
+                    continue
+                bucket = metadata.setdefault(normalized_host, {})
+                if "status" not in bucket:
+                    bucket["status"] = "deferred"
     return metadata
+
+
+def _normalize_scope_metadata_key(raw: str) -> str:
+    entry = _classify_entry(raw)
+    if entry is None:
+        return ""
+    return str(entry["host"])
 
 
 # ---------------------------------------------------------------------------
@@ -705,31 +751,28 @@ def _load_work_items_by_host(db_path: Path) -> dict[str, dict[str, int]]:
 
     rows: list[tuple[str, str, int]] = []
     rows_with_reason: list[tuple[str, str, int]] = []
+    conn = sqlite3.connect(str(db_path), timeout=5.0)
     try:
-        conn = sqlite3.connect(str(db_path), timeout=5.0)
-        try:
-            conn.execute("PRAGMA busy_timeout=5000")
-            cursor = conn.execute(
-                """
-                SELECT url, status, COUNT(*) AS total
-                FROM work_items
-                GROUP BY url, status
-                """
-            )
-            rows = [(str(r[0] or ""), str(r[1] or ""), int(r[2] or 0)) for r in cursor.fetchall()]
-            cursor = conn.execute(
-                """
-                SELECT url, COUNT(*) AS total
-                FROM work_items
-                WHERE status = 'pending' AND (terminal_reason IS NULL OR terminal_reason = '')
-                GROUP BY url
-                """
-            )
-            rows_with_reason = [(str(r[0] or ""), "pending_without_terminal_reason", int(r[1] or 0)) for r in cursor.fetchall()]
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return {}
+        conn.execute("PRAGMA busy_timeout=5000")
+        cursor = conn.execute(
+            """
+            SELECT url, status, COUNT(*) AS total
+            FROM work_items
+            GROUP BY url, status
+            """
+        )
+        rows = [(str(r[0] or ""), str(r[1] or ""), int(r[2] or 0)) for r in cursor.fetchall()]
+        cursor = conn.execute(
+            """
+            SELECT url, COUNT(*) AS total
+            FROM work_items
+            WHERE status = 'pending' AND (terminal_reason IS NULL OR terminal_reason = '')
+            GROUP BY url
+            """
+        )
+        rows_with_reason = [(str(r[0] or ""), "pending_without_terminal_reason", int(r[1] or 0)) for r in cursor.fetchall()]
+    finally:
+        conn.close()
 
     agg: dict[str, dict[str, int]] = {}
     for url, status, count in rows + rows_with_reason:
