@@ -100,10 +100,9 @@ When adding a new agent or changing the agent roster:
 When adding a new code analysis phase or agent:
 - Dispatch context in `operator-core-code.md` must separate backend data (fetched via `aith assess`) from filesystem artifacts (under `tools/analysis-state/`). Agents read filesystem artifacts directly; the operator fetches and summarizes backend state.
 
-When adding or changing a tool that should affect scope-coverage gates:
-- Start in `agent/scripts/assess/commands/check_scope_coverage.py` `_TOOL_COVERAGE_SPECS`. That registry is the single source of truth for which `tool_bin` values count as enum vs collection and whether a tool accepts positional host targets.
-- If the tool uses a non-standard CLI shape, update the neighboring target-parsing flag tables in the same file (`_COMMAND_TARGET_VALUE_FLAGS`, `_COMMAND_TARGET_FILE_FLAGS`, `_NON_TARGET_VALUE_FLAGS`) and extend `orchestrator/backend/tests/test_check_scope_coverage.py`.
-- If the tool is typically invoked through a new shell or prefix wrapper, update both `agent/scripts/assess/commands/check_scope_coverage.py` and `orchestrator/backend/app/services/state_manager.py`; the agent-side coverage parser and backend `tool_bin` derivation run in separate layers and intentionally duplicate wrapper-skipping knowledge.
+When working on scope-coverage gates:
+- `check-scope-coverage` reads durable state directly (`GET /services`, `GET /surfaces`, local `work_items`) — there is no per-tool registry or argv-parsing layer. A scope entry "enumerated" when a live service, surface, or work item exists under it; "collected" when a surface or work item exists under it. If a tool should feed the gate, make sure its output lands in services/surfaces/work_items (via `record-surface`, `ingest-endpoints`, etc.). Extend `orchestrator/backend/tests/test_check_scope_coverage.py` for new fixtures.
+- `state_manager._derive_tool_bin` still shell-parses command strings for audit/UI filtering (Commands tab), not for coverage. Wrapper-stripping changes there are independent of the scope-coverage gate.
 
 When adding new patchable code-analysis fields or structural metadata totals:
 - Update the backend schema in `orchestrator/backend/app/db.py`, the API layer in `orchestrator/backend/app/api/code_analysis.py`, and the service-layer allowlists in `orchestrator/backend/app/services/code_analysis.py` together. `update_code_repo`, `update_code_file`, and `bulk_update_structural_metadata` only persist fields that appear in their hard-coded allowlists/field sets; new columns otherwise fail silently at the PATCH/sync layer.
