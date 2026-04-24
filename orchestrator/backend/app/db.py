@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ class DatabaseFingerprint:
 
 _startup_database_fingerprint: DatabaseFingerprint | None = None
 _LEGACY_FINDING_PREFIX = "FINDING" + "-"
+_LEGACY_FINDING_REF_RE = re.compile(rf"\b{_LEGACY_FINDING_PREFIX}([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d{{3}}[A-Z]?)\b")
 
 
 def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
@@ -35,15 +37,27 @@ def _strip_legacy_finding_prefix(value: str) -> str:
     return value
 
 
-def _strip_legacy_finding_prefixes(value):
+def _normalize_legacy_finding_refs(value: str, slug_map: dict[tuple[int, str], str], engagement_id: int | None) -> str:
+    def replace(match: re.Match[str]) -> str:
+        old_slug = match.group(0)
+        if engagement_id is not None:
+            mapped_slug = slug_map.get((engagement_id, old_slug))
+            if mapped_slug is not None:
+                return mapped_slug
+        return match.group(1)
+
+    return _LEGACY_FINDING_REF_RE.sub(replace, value)
+
+
+def _strip_legacy_finding_prefixes(value, slug_map: dict[tuple[int, str], str] | None = None, engagement_id: int | None = None):
     if isinstance(value, str):
-        normalized = _strip_legacy_finding_prefix(value)
+        normalized = _normalize_legacy_finding_refs(value, slug_map or {}, engagement_id)
         return normalized, normalized != value
     if isinstance(value, list):
         changed = False
         normalized_items = []
         for item in value:
-            normalized_item, item_changed = _strip_legacy_finding_prefixes(item)
+            normalized_item, item_changed = _strip_legacy_finding_prefixes(item, slug_map, engagement_id)
             normalized_items.append(normalized_item)
             changed = changed or item_changed
         return normalized_items, changed
@@ -51,24 +65,89 @@ def _strip_legacy_finding_prefixes(value):
         changed = False
         normalized_dict = {}
         for key, item in value.items():
-            normalized_item, item_changed = _strip_legacy_finding_prefixes(item)
+            normalized_item, item_changed = _strip_legacy_finding_prefixes(item, slug_map, engagement_id)
             normalized_dict[key] = normalized_item
             changed = changed or item_changed
         return normalized_dict, changed
     return value, False
 
 
-def _migrate_legacy_finding_prefix_in_text_column(connection: sqlite3.Connection, table_name: str, column_name: str) -> None:
-    if column_name not in _table_columns(connection, table_name):
-        return
+def _next_legacy_collision_slug(connection: sqlite3.Connection, engagement_id: int, preferred_slug: str, row_id: int) -> str:
+    candidate = f"{preferred_slug}-legacy-{row_id}"
+    suffix = 2
+    while connection.execute(
+        "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+        (engagement_id, candidate),
+    ).fetchone():
+        candidate = f"{preferred_slug}-legacy-{row_id}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _migrate_legacy_finding_slugs(connection: sqlite3.Connection) -> dict[tuple[int, str], str]:
+    if not {"id", "engagement_id", "slug"}.issubset(_table_columns(connection, "assessment_findings")):
+        return {}
+
+    slug_map: dict[tuple[int, str], str] = {}
     rows = connection.execute(
-        f"SELECT id, {column_name} FROM {table_name} WHERE {column_name} LIKE ?",
+        """
+        SELECT id, engagement_id, slug
+        FROM assessment_findings
+        WHERE slug LIKE ?
+        ORDER BY engagement_id ASC, id ASC
+        """,
         (f"{_LEGACY_FINDING_PREFIX}%",),
     ).fetchall()
-    for row_id, value in rows:
+    for row_id, engagement_id, old_slug in rows:
+        if not isinstance(old_slug, str):
+            continue
+        normalized = _strip_legacy_finding_prefix(old_slug)
+        collision = connection.execute(
+            """
+            SELECT 1
+            FROM assessment_findings
+            WHERE engagement_id = ?
+              AND slug = ?
+              AND id != ?
+            """,
+            (engagement_id, normalized, row_id),
+        ).fetchone()
+        if collision is not None:
+            normalized = _next_legacy_collision_slug(connection, int(engagement_id), normalized, int(row_id))
+        if normalized != old_slug:
+            connection.execute(
+                "UPDATE assessment_findings SET slug = ? WHERE id = ?",
+                (normalized, row_id),
+            )
+            slug_map[(int(engagement_id), old_slug)] = normalized
+    return slug_map
+
+
+def _migrate_legacy_finding_prefix_in_text_column(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    slug_map: dict[tuple[int, str], str],
+) -> None:
+    columns = _table_columns(connection, table_name)
+    if column_name not in columns:
+        return
+    select_columns = "id, engagement_id, " + column_name if "engagement_id" in columns else "id, " + column_name
+    rows = connection.execute(
+        f"SELECT {select_columns} FROM {table_name} WHERE {column_name} LIKE ?",
+        (f"{_LEGACY_FINDING_PREFIX}%",),
+    ).fetchall()
+    for row in rows:
+        row_id = row[0]
+        if "engagement_id" in columns:
+            engagement_id = int(row[1])
+            value = row[2]
+        else:
+            engagement_id = None
+            value = row[1]
         if not isinstance(value, str):
             continue
-        normalized = _strip_legacy_finding_prefix(value)
+        normalized = slug_map.get((engagement_id, value), _strip_legacy_finding_prefix(value)) if engagement_id is not None else _strip_legacy_finding_prefix(value)
         if normalized != value:
             connection.execute(
                 f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",
@@ -76,21 +155,35 @@ def _migrate_legacy_finding_prefix_in_text_column(connection: sqlite3.Connection
             )
 
 
-def _migrate_legacy_finding_prefix_in_json_column(connection: sqlite3.Connection, table_name: str, column_name: str) -> None:
-    if column_name not in _table_columns(connection, table_name):
+def _migrate_legacy_finding_prefix_in_json_column(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    slug_map: dict[tuple[int, str], str],
+) -> None:
+    columns = _table_columns(connection, table_name)
+    if column_name not in columns:
         return
+    select_columns = "id, engagement_id, " + column_name if "engagement_id" in columns else "id, " + column_name
     rows = connection.execute(
-        f"SELECT id, {column_name} FROM {table_name} WHERE {column_name} LIKE ?",
+        f"SELECT {select_columns} FROM {table_name} WHERE {column_name} LIKE ?",
         (f"%{_LEGACY_FINDING_PREFIX}%",),
     ).fetchall()
-    for row_id, value in rows:
+    for row in rows:
+        row_id = row[0]
+        if "engagement_id" in columns:
+            engagement_id = int(row[1])
+            value = row[2]
+        else:
+            engagement_id = None
+            value = row[1]
         if not isinstance(value, str):
             continue
         try:
             payload = json.loads(value)
         except json.JSONDecodeError:
             continue
-        normalized, changed = _strip_legacy_finding_prefixes(payload)
+        normalized, changed = _strip_legacy_finding_prefixes(payload, slug_map, engagement_id)
         if changed:
             connection.execute(
                 f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",
@@ -99,20 +192,22 @@ def _migrate_legacy_finding_prefix_in_json_column(connection: sqlite3.Connection
 
 
 def _migrate_legacy_finding_slug_references(connection: sqlite3.Connection) -> None:
+    slug_map = _migrate_legacy_finding_slugs(connection)
     for table_name, column_name in (
-        ("assessment_findings", "slug"),
         ("assessment_finding_links", "target_ref"),
         ("assessment_attack_chain_links", "entity_ref"),
         ("code_analysis_results", "finding_slug"),
         ("intel_notes", "linked_finding_slug"),
     ):
-        _migrate_legacy_finding_prefix_in_text_column(connection, table_name, column_name)
+        _migrate_legacy_finding_prefix_in_text_column(connection, table_name, column_name, slug_map)
 
     for table_name, column_name in (
+        ("assessment_findings", "details_json"),
+        ("assessment_findings", "provenance_json"),
         ("engagement_sessions", "assigned_targets_json"),
         ("assessment_finding_transitions", "metadata_json"),
     ):
-        _migrate_legacy_finding_prefix_in_json_column(connection, table_name, column_name)
+        _migrate_legacy_finding_prefix_in_json_column(connection, table_name, column_name, slug_map)
 
 
 class IncompatibleDatabaseError(RuntimeError):
