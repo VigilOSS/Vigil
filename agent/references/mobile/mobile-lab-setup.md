@@ -14,7 +14,7 @@
 - Older root-friendly Pixel or secondary OEM Android device for root workflows and OEM comparison.
 - Linux KVM host for Cuttlefish, Android emulator containers, high-parallel automation, and fuzzing throughput.
 - Device shelf with powered USB hub, labeled cables, dedicated access point, managed VLAN, Appium/WebDriverAgent runners, and scripted reset.
-- Device farms for compatibility and UI coverage, not privileged security conclusions unless the provider grants the needed access.
+- Device farms for compatibility and UI coverage; for security conclusions, confirm the provider grants rooted/jailbroken access, isolated network tenancy, and API-level tool availability.
 
 ## What Requires Physical Devices
 

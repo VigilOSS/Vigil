@@ -239,6 +239,18 @@ Load these skills for authorized Android/iOS app, device-lab, and mobile fuzzing
   **Use when:** Fuzzing mobile app APIs, imported files, parsers, deep links, intents, URL schemes, WebView inputs, native libraries, Android Binder/AIDL, iOS XPC/Mach, or mobile crash triage.
   **Paired references:** `references/mobile/mobile-fuzzing.md`, `references/code-vuln-patterns/fuzz-harness-patterns.md`, `references/mobile/android-app-security.md`, `references/mobile/ios-app-security.md`
 
+- `agent/skills/masvs-privacy-testing/SKILL.md`
+  **Use when:** Testing OWASP MASVS-PRIVACY controls: identifier collection (IDFA/GAID/IMEI/MAC), App Tracking Transparency compliance, Android Privacy Sandbox migration, data deletion completeness, privacy label vs actual behavior, or analytics/telemetry over-collection.
+  **Paired references:** `references/mobile/masvs-privacy-testing.md`, `references/mobile/android-app-security.md`, `references/mobile/ios-app-security.md`, `references/mobile/mobile-lab-setup.md`
+
+- `agent/skills/ai-ml-on-device-security/SKILL.md`
+  **Use when:** App bundles on-device ML models (Core ML, TFLite, ONNX), integrates LLM features (Apple Intelligence, Gemini Nano, OpenAI/Anthropic SDK), uses ML Kit or Vision/NL frameworks, or participates in federated learning. Covers model extraction, inference data leakage, content filter bypass, prompt injection, and federated learning assessment.
+  **Paired references:** `references/mobile/ai-ml-on-device-security.md`, `references/mobile/android-app-security.md`, `references/mobile/ios-app-security.md`, `references/mobile/mobile-lab-setup.md`, `references/code-vuln-patterns/ai-ml-security.md`
+
+- `agent/skills/sdk-supply-chain-security/SKILL.md`
+  **Use when:** Assessing third-party SDK supply chain risk: building SDK BOM, checking bundled SDK versions against CVEs, detecting known malicious SDKs (SpinOK/Goldoson), auditing SDK data exfiltration, or analyzing SDK permission scope versus app needs.
+  **Paired references:** `references/mobile/sdk-supply-chain-security.md`, `references/mobile/android-app-security.md`, `references/mobile/ios-app-security.md`, `references/mobile/masvs-privacy-testing.md`
+
 ---
 
 ## Code Analysis Skills

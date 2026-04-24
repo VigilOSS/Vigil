@@ -47,7 +47,7 @@ Name the entrypoint, input format, caller preconditions, authorization scope, ta
 
 - Record build hash, OS/device version, sanitizer flags, corpus source, fuzzer version, command line, timeout, and reset behavior.
 - Minimize crashing inputs, reproduce them on a clean build, collect symbolized traces, deduplicate by crash state, and separate harness bugs from product bugs.
-- Convert confirmed crashes into findings only when the input is reachable under the engagement threat model and the crash has security impact or reliable denial-of-service impact.
+- Convert confirmed crashes into findings only when the input is reachable under the engagement threat model and the crash demonstrates memory corruption, information disclosure, privilege boundary crossing, or reliable denial of service affecting other users.
 
 ## Mobile-Specific Notes
 
@@ -56,6 +56,42 @@ Name the entrypoint, input format, caller preconditions, authorization scope, ta
 - iOS app fuzzing commonly targets imported files, URL schemes, universal links, pasteboard-driven parsing, WebView bridges, app extensions, and native libraries.
 - iOS platform fuzzing requires owned research devices, source builds, public research harnesses, or approved virtual platforms for meaningful crash visibility.
 - Docker helps Linux fuzzing toolchains, OSS-Fuzz-style layouts, and CI replay; Mac ARM hosts should prefer native arm64 builds or remote Linux/x86 workers for throughput-sensitive campaigns.
+
+## Evidence Standard
+
+Map each crash to OWASP MASVS, affected app version, device/OS version, build hash, sanitizer flags, input reachability, and security impact. A crash becomes a finding when:
+
+- **Reachable:** the crashing input can be delivered through a path an attacker controls under the engagement threat model (file import, API request, IPC message, deep link parameter, WebView bridge call).
+- **Impactful:** the crash produces a security consequence beyond local lab instability — memory corruption with write primitive, denial of service against other users, information disclosure via crash report or error response, or a stepping stone to code execution.
+- **Reproducible:** the minimized input reproduces on a clean build with symbolized traces, and the crash state is distinct from harness artifacts.
+
+Evidence tiers for severity differentiation:
+
+| Signal | Classification | Severity Guidance |
+|---|---|---|
+| Crash in harness only, not reachable from production input path | Harness bug | Not reportable — fix the harness |
+| Crash on attacker-controlled input, caught by parser rejection | Expected rejection | Not reportable — defense working |
+| ASan/MTE crash on attacker-controlled input, no write primitive | Denial of service | Low-Medium depending on multi-user impact |
+| ASan/MTE crash with heap/stack write primitive | Memory corruption | High — write primitive enables code execution |
+| Controlled write to specific address via crafted input | Arbitrary write | Critical — code execution path |
+| Crash in platform service (Binder/XPC) from app-delivered input | Cross-boundary DoS | Medium-High depending on service criticality |
+
+## Kill Signals and Escalation Triggers
+
+### Kill Signals — stop the campaign when these hold
+
+- **Parser target:** fuzzer has run 10M+ iterations with no new coverage edges and no crashes beyond the initial corpus warm-up; coverage has plateaued for 2+ hours.
+- **IPC target:** all exported service methods return permission errors or input validation rejections; no Binder/XPC transaction code accepts the fuzzed parcel shape.
+- **Native library:** library uses safe wrappers (Rust, bounds-checked C++) and sanitizers confirm no memory safety violations after sustained fuzzing.
+- **API target:** all mutated requests return 400/422 validation errors with no divergence in timing, error structure, or server behavior.
+
+### Escalation Triggers — extend the campaign when these appear
+
+- **New coverage edge discovered after plateau** — the fuzzer found a new code path; extend the campaign and seed the corpus with the triggering input.
+- **ASan/MTE report but crash is non-deterministic** — race condition or timing-dependent bug; switch to TSan or add thread-stress to the harness.
+- **Crash in third-party SDK or system library** — verify reachability from the app's input surface; if reachable, the app inherits the vulnerability.
+- **Partial signal: timeout or hang without crash** — the parser hit an algorithmic complexity or infinite loop; add timeout instrumentation and test with progressively larger inputs.
+- **Crash only under specific sanitizer** (UBSan but not ASan) — the bug is real but does not produce visible corruption without sanitizer; check whether it's exploitable without sanitizer on production builds.
 
 ## Extended Resources
 

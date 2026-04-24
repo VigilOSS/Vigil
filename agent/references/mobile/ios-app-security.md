@@ -32,6 +32,28 @@ Primary tools: Xcode tooling, `otool`, `nm`, `strings`, `rabin2`, Ghidra/IDA/rad
 - Pasteboard bugs leak sensitive data, persist data too long, miss local-only/expiration controls, or read external pasteboard content without user intent.
 - WebView bugs expose JavaScript bridges, unsafe origin checks, attacker-controlled navigation, file/content loading, mixed web-native trust, or uncleared web data.
 
+## Privacy Testing (MASVS-PRIVACY)
+
+- **Identifier audit:** check for IDFA usage via `ASIdentifierManager`, `advertisingIdentifier`; check `identifierForVendor` scope; check for fingerprinting signals (screen metrics, timezone, language, installed fonts, device model, carrier). Frida hook: `Interceptor.attach(ObjC.classes.ASIdentifierManager['- advertisingIdentifier'].implementation, { onLeave: function(retval) { console.log('[IDFA] ' + new ObjC.Object(retval)); } });`
+- **App Tracking Transparency (ATT):** verify the app calls `ATTrackingManager.requestTrackingAuthorization` before accessing IDFA; check whether tracking occurs when ATT consent is denied (fingerprinting workaround, server-side attribution, probabilistic matching). Capture outbound traffic with ATT denied and compare against ATT-granted traffic.
+- **Data deletion:** after account deletion request, verify that Keychain items, UserDefaults, SQLite/Core Data, cached files, WebView storage, cookies, app group containers, and iCloud-synced data are actually removed. Re-login and check whether any prior state persists.
+- **Privacy Nutrition Label vs behavior:** compare App Store privacy label declarations against actual network traffic and local storage. Use proxy captures to identify analytics/ad SDKs sending data types (location, contacts, identifiers) not declared in the privacy label.
+- **Analytics/telemetry audit:** identify Firebase Analytics, Amplitude, Mixpanel, Adjust, AppsFlyer, and ad SDKs in binary symbols and framework bundles; capture their outbound requests; assess whether data collection scope exceeds what the app's stated purpose requires.
+
+## AI/ML On-Device Features
+
+- **Model file extraction:** search IPA for Core ML models (`.mlmodel`, `.mlmodelc` in `Payload/App.app/`), TFLite models, and ONNX models. Extract and inspect model architecture, input/output shapes, and embedded metadata. Core ML compiled models are in `App.app/*.mlmodelc/` directories.
+- **Inference data leakage:** after exercising AI features (Apple Intelligence integration, smart compose, image classification, summarization), check UserDefaults, SQLite, logs, crash reports, and Keychain for model input/output data persisting in cleartext.
+- **Prompt injection:** if the app integrates Apple Intelligence, on-device LLM, or cloud LLM features, test whether user input fields that feed the model accept prompt injection payloads that change model behavior, bypass content filters, or extract system prompts.
+- **On-device processing audit:** verify on-device AI processing claims by capturing network traffic during AI feature usage — any outbound connections to inference endpoints contradict on-device claims and indicate server-side data processing.
+
+## SDK Supply Chain
+
+- **SDK bill of materials:** enumerate third-party frameworks from `Payload/App.app/Frameworks/`, CocoaPods `Podfile.lock` (if source available), SPM `Package.resolved`, and binary symbol patterns (`nm`, `strings`, class-dump). Record framework name, version, and purpose.
+- **SDK CVE checking:** check bundled framework versions against NVD, Snyk, and vendor advisories. Focus on high-value frameworks: Alamofire, AFNetworking, Firebase, React Native, Flutter engine, WebKit extensions.
+- **SDK data exfiltration:** capture outbound traffic from analytics/ad SDKs and compare against the app's privacy label declarations. SDKs that collect IDFA, location, contacts, or device data beyond the app's declared purposes indicate supply chain risk.
+- **SDK permission scope:** check entitlements and Info.plist privacy purpose strings against actual SDK usage. SDKs that request location (`NSLocationWhenInUseUsageDescription`), contacts, camera, or microphone access beyond the app's core features indicate over-scoped permissions.
+
 ## Source Anchors
 
 - Apple app security overview: https://support.apple.com/guide/security/app-security-overview-sec35dd877d0/web

@@ -22,7 +22,7 @@ Use jailbreakable legacy devices only when authorized runtime visibility, Frida 
 
 Use Apple Security Research Device or approved virtual iOS platforms for deeper platform research that needs shell access, custom entitlements, or kernel-level observability.
 
-Do not assume modern A12+ devices on current iOS are jailbreakable because public jailbreak support is version- and chipset-dependent.
+Verify jailbreak availability before planning invasive iOS research — public jailbreak support is version- and chipset-dependent, and A12+ devices on current iOS releases are frequently not jailbreakable.
 
 ## Observability
 
