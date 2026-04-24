@@ -5,11 +5,8 @@ Intercept browser traffic to capture authenticated sessions (cookies, tokens, he
 ## Quick Start
 
 ```bash
-# From inside an engagement directory, or with ENGAGEMENT_DIR set:
-aith mitmproxy start
-
-# Or explicitly:
-aith mitmproxy start /path/to/engagement
+aith engagement list --json
+aith mitmproxy start <engagement-key>
 ```
 
 ## Browser Proxy Setup (FoxyProxy)
@@ -55,13 +52,14 @@ The launcher stores CA keys in a named Docker volume (`mitmproxy-ca`). Container
 If you need to regenerate the CA (e.g., compromise, rotation):
 ```bash
 docker volume rm mitmproxy-ca
-aith mitmproxy start
+aith engagement list --json
+aith mitmproxy start <engagement-key>
 # Re-install the new cert using Option A or B above
 ```
 
 ## Login Capture Workflow
 
-1. Start the proxy: `aith mitmproxy start`
+1. List engagements and start the proxy explicitly: `aith engagement list --json` then `aith mitmproxy start <engagement-key>`
 2. Configure browser proxy (see above)
 3. Navigate to the target login page and authenticate
 4. Browse a few authenticated pages (admin, settings, API endpoints)
@@ -89,16 +87,16 @@ If auto-capture misses the session (addon error, non-standard login flow):
 aith mitmproxy status
 
 # Logs
-aith logs mitmproxy --follow
+aith logs mitmproxy --lines 80
 
 # Stop
 aith mitmproxy stop
 
 # Restart (reuses same CA cert from volume)
-aith mitmproxy start
+aith mitmproxy start <engagement-key>
 
 # Custom port
-aith mitmproxy start --port 9090
+aith mitmproxy start <engagement-key> --port 9090
 ```
 
 ## How It Works

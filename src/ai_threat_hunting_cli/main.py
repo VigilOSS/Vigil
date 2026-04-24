@@ -108,27 +108,22 @@ def main(argv: list[str] | None = None) -> None:
     path_p = engagement_sub.add_parser("path")
     path_p.add_argument("key", nargs="?")
     path_p.add_argument("--select", action="store_true")
-    path_p.add_argument("--latest", action="store_true")
     cd_p = engagement_sub.add_parser("cd-init")
     cd_p.add_argument("shell", choices=["zsh", "bash"], default="zsh", nargs="?")
     start_p = engagement_sub.add_parser("start")
     start_p.add_argument("key", nargs="?")
     start_p.add_argument("--select", action="store_true")
-    start_p.add_argument("--latest", action="store_true")
     start_p.add_argument("--client", choices=["codex", "claude"], required=True)
     start_p.add_argument("client_args", nargs="*")
     open_p = engagement_sub.add_parser("open")
     open_p.add_argument("key", nargs="?")
     open_p.add_argument("--select", action="store_true")
-    open_p.add_argument("--latest", action="store_true")
     archive_p = engagement_sub.add_parser("archive")
     archive_p.add_argument("key", nargs="?")
     archive_p.add_argument("--select", action="store_true")
-    archive_p.add_argument("--latest", action="store_true")
     export_p = engagement_sub.add_parser("export")
     export_p.add_argument("key", nargs="?")
     export_p.add_argument("--select", action="store_true")
-    export_p.add_argument("--latest", action="store_true")
     export_p.add_argument("--output")
 
     orch_p = sub.add_parser("orchestrator")
@@ -152,12 +147,15 @@ def main(argv: list[str] | None = None) -> None:
     runtime_sub.add_parser("restart")
     runtime_sub.add_parser("status")
     runtime_sub.add_parser("shell")
+    runtime_shell_exec = runtime_sub.add_parser("shell-exec", help="Run a non-interactive shell command inside the Kali runtime")
+    runtime_shell_exec.add_argument("shell_command", nargs=argparse.REMAINDER, metavar="COMMAND")
     runtime_sub.add_parser("mcp-server")
 
     mitm_p = sub.add_parser("mitmproxy")
     mitm_sub = mitm_p.add_subparsers(dest="mitmproxy_command", required=True)
     mitm_start = mitm_sub.add_parser("start")
     mitm_start.add_argument("engagement", nargs="?")
+    mitm_start.add_argument("--select", action="store_true")
     mitm_start.add_argument("--port", type=int, default=8080)
     mitm_sub.add_parser("stop")
     mitm_sub.add_parser("status")
@@ -179,12 +177,10 @@ def main(argv: list[str] | None = None) -> None:
         auth_cmd = auth_sub.add_parser(auth_name)
         auth_cmd.add_argument("engagement", nargs="?")
         auth_cmd.add_argument("--select", action="store_true")
-        auth_cmd.add_argument("--latest", action="store_true")
     auth_import = auth_sub.add_parser("import")
     auth_import.add_argument("engagement", nargs="?")
     auth_import.add_argument("--source")
     auth_import.add_argument("--select", action="store_true")
-    auth_import.add_argument("--latest", action="store_true")
 
     backup_p = sub.add_parser("backup")
     backup_sub = backup_p.add_subparsers(dest="backup_command", required=True)
@@ -209,7 +205,7 @@ def main(argv: list[str] | None = None) -> None:
     oob_client_start = oob_client_sub.add_parser("start")
     oob_client_start.add_argument("name")
     oob_client_start.add_argument("--engagement")
-    oob_client_start.add_argument("--latest", action="store_true")
+    oob_client_start.add_argument("--select", action="store_true")
     oob_client_start.add_argument("--agent")
     oob_client_logs = oob_client_sub.add_parser("logs")
     oob_client_logs.add_argument("name")
@@ -415,25 +411,25 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         )
         print(created.path)
     elif command == "path":
-        print(resolve_engagement_path(install_root, args.key, select=args.select, latest=args.latest))
+        print(_resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select))
     elif command == "cd-init":
         print(print_shell_cd_init(args.shell), end="")
     elif command == "start":
-        path = resolve_engagement_path(install_root, args.key, select=args.select, latest=args.latest)
+        path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         client_args = args.client_args[1:] if args.client_args[:1] == ["--"] else args.client_args
         start_engagement(install_root, path, args.client, client_args)
     elif command == "open":
-        path = resolve_engagement_path(install_root, args.key, select=args.select, latest=args.latest)
+        path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         webbrowser.open(path.as_uri())
     elif command == "archive":
-        path = resolve_engagement_path(install_root, args.key, select=args.select, latest=args.latest)
+        path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         scope_path = path / "scope.json"
         scope = json.loads(scope_path.read_text(encoding="utf-8"))
         scope["status"] = "archived"
         scope_path.write_text(json.dumps(scope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(path)
     elif command == "export":
-        path = resolve_engagement_path(install_root, args.key, select=args.select, latest=args.latest)
+        path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         output = Path(args.output).expanduser() if args.output else install_root / ".runtime-data" / "exports" / f"{path.name}.tar.gz"
         output.parent.mkdir(parents=True, exist_ok=True)
         with tarfile.open(output, "w:gz") as tar:
@@ -482,17 +478,38 @@ def _runtime(args: argparse.Namespace, install_root: Path) -> None:
         print(runtime_status())
     elif args.runtime_command == "shell":
         os.execvp("docker", ["docker", "exec", "-it", "security-research", "bash"])
+    elif args.runtime_command == "shell-exec":
+        _runtime_shell_exec(args.shell_command)
     elif args.runtime_command == "mcp-server":
         os.execvp("docker", ["docker", "exec", "-i", "security-research", "mcp-server"])
 
 
+def _runtime_shell_exec(command_parts: list[str]) -> None:
+    if command_parts[:1] == ["--"]:
+        command_parts = command_parts[1:]
+    if not command_parts:
+        raise SystemExit("Specify a command string for `aith runtime shell-exec`.")
+    command = command_parts[0] if len(command_parts) == 1 else " ".join(shlex.quote(part) for part in command_parts)
+    if not command.strip():
+        raise SystemExit("Specify a non-empty command string for `aith runtime shell-exec`.")
+    try:
+        result = subprocess.run(["docker", "exec", "security-research", "sh", "-lc", command], check=False)
+    except FileNotFoundError as exc:
+        raise SystemExit("docker CLI not found on PATH") from exc
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+
+
 def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
     if args.mitmproxy_command == "start":
-        engagement = (
-            Path(args.engagement).expanduser()
-            if args.engagement
-            else current_engagement_path() or resolve_engagement_path(install_root, latest=True)
-        )
+        if args.engagement:
+            engagement = _resolve_engagement_reference(install_root, args.engagement)
+        elif args.select:
+            engagement = resolve_engagement_path(install_root, select=True)
+        elif current := current_engagement_path():
+            engagement = current
+        else:
+            raise SystemExit("Specify an engagement key/path or --select, or run from inside an engagement")
         start_proxy(MitmproxyOptions(install_root=install_root, engagement_dir=engagement, port=args.port))
     elif args.mitmproxy_command == "stop":
         stop_proxy()
@@ -526,13 +543,13 @@ def _install_mcp(client: str) -> None:
         _replace_mcp_server(
             "claude",
             ["claude", "mcp", "remove", "-s", "user", "kali"],
-            ["claude", "mcp", "add", "-s", "user", "kali", "--", "docker", "exec", "-i", "security-research", "mcp-server"],
+            ["claude", "mcp", "add", "-s", "user", "kali", "--", "aith", "runtime", "mcp-server"],
         )
     if client in {"codex", "both"}:
         _replace_mcp_server(
             "codex",
             ["codex", "mcp", "remove", "kali"],
-            ["codex", "mcp", "add", "kali", "--", "docker", "exec", "-i", "security-research", "mcp-server"],
+            ["codex", "mcp", "add", "kali", "--", "aith", "runtime", "mcp-server"],
         )
 
 
@@ -613,9 +630,15 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
 
 def _oob_client(args: argparse.Namespace, install_root: Path, options: OobOptions) -> None:
     if args.oob_client_command == "start":
-        engagement_key = args.engagement
-        if args.latest:
-            engagement_key = resolve_engagement_path(install_root, latest=True).name
+        if args.engagement and args.select:
+            raise SystemExit("Specify either --engagement or --select, not both")
+        engagement_key = None
+        if args.engagement:
+            engagement_key = resolve_engagement_path(install_root, args.engagement).name
+        elif args.select:
+            engagement_key = resolve_engagement_path(install_root, select=True).name
+        elif current := current_engagement_path():
+            engagement_key = current.name
         start_oob_client(options, args.name, engagement=engagement_key, agent=args.agent, runner=docker_run_command)
     elif args.oob_client_command == "logs":
         client = sanitize_name(args.name)
@@ -639,16 +662,27 @@ def _oob_options(install_root: Path) -> OobOptions:
 
 def _resolve_command_engagement(install_root: Path, args: argparse.Namespace) -> Path:
     key = getattr(args, "engagement", None)
+    return _resolve_current_or_selected_engagement(install_root, key=key, select=getattr(args, "select", False))
+
+
+def _resolve_current_or_selected_engagement(install_root: Path, *, key: str | None = None, select: bool = False) -> Path:
     if key:
         return resolve_engagement_path(install_root, key)
-    select = getattr(args, "select", False)
-    latest = getattr(args, "latest", False)
-    if select or latest:
-        return resolve_engagement_path(install_root, select=select, latest=latest)
-    current = current_engagement_path()
-    if current:
+    if select:
+        return resolve_engagement_path(install_root, select=True)
+    if current := current_engagement_path():
         return current
-    return resolve_engagement_path(install_root, latest=True)
+    raise SystemExit("Specify an engagement key or --select, or run from inside an engagement")
+
+
+def _resolve_engagement_reference(install_root: Path, value: str) -> Path:
+    try:
+        return resolve_engagement_path(install_root, value)
+    except SystemExit as exc:
+        candidate = Path(value).expanduser()
+        if candidate.exists() or candidate.is_absolute() or "/" in value:
+            return candidate
+        raise exc
 
 
 def _replace_mcp_server(client: str, remove_argv: list[str], add_argv: list[str]) -> None:

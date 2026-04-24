@@ -287,9 +287,77 @@ def test_mcp_install_registers_codex_and_claude_servers(monkeypatch: pytest.Monk
     main_module.main(["mcp", "install", "both"])
 
     assert ["claude", "mcp", "remove", "-s", "user", "kali"] in calls
-    assert ["claude", "mcp", "add", "-s", "user", "kali", "--", "docker", "exec", "-i", "security-research", "mcp-server"] in calls
+    assert ["claude", "mcp", "add", "-s", "user", "kali", "--", "aith", "runtime", "mcp-server"] in calls
     assert ["codex", "mcp", "remove", "kali"] in calls
-    assert ["codex", "mcp", "add", "kali", "--", "docker", "exec", "-i", "security-research", "mcp-server"] in calls
+    assert ["codex", "mcp", "add", "kali", "--", "aith", "runtime", "mcp-server"] in calls
+
+
+def test_mcp_status_recognizes_aith_runtime_registration(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import status as status_module
+
+    def fake_which(command: str) -> str | None:
+        return f"/usr/bin/{command}"
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, "kali\taith runtime mcp-server\n", "")
+
+    monkeypatch.setattr(status_module.shutil, "which", fake_which)
+    monkeypatch.setattr(status_module.subprocess, "run", fake_run)
+
+    status = status_module.collect_mcp_status()
+
+    assert status["codex"]["configured"] is True
+    assert status["claude"]["configured"] is True
+
+
+def test_runtime_shell_exec_passes_symbol_heavy_command_as_single_shell_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    command = (
+        "printf '%s\\n' \"a b\" | tee /data/symbols.log >/dev/null; "
+        "tmux new-session -d -s shell-4444 'pwncat -l -p 4444 2>&1 | tee /data/shell-4444.log'"
+    )
+    monkeypatch.setattr(main_module.subprocess, "run", fake_run)
+
+    main_module.main(["runtime", "shell-exec", command])
+
+    assert calls == [["docker", "exec", "security-research", "sh", "-lc", command]]
+
+
+def test_runtime_shell_exec_propagates_container_command_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 37, "", "boom")
+
+    monkeypatch.setattr(main_module.subprocess, "run", fake_run)
+
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main(["runtime", "shell-exec", "false"])
+
+    assert excinfo.value.code == 37
+
+
+def test_runtime_shell_exec_strips_separator_and_quotes_multiple_parts(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(main_module.subprocess, "run", fake_run)
+
+    main_module.main(["runtime", "shell-exec", "--", "printf", "%s", "a b"])
+
+    assert calls == [["docker", "exec", "security-research", "sh", "-lc", "printf %s 'a b'"]]
 
 
 def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path) -> None:
@@ -308,8 +376,8 @@ def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path) -> None:
     assert manifest["target"] == "http://localhost:8080"
 
 
-def test_latest_engagement_uses_created_at_not_directory_sort(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.engagements import resolve_engagement_path
+def test_engagement_select_uses_fzf_when_requested(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import engagements
 
     root = tmp_path / "install" / "agent" / "engagements"
     older = root / "2026-04-24-120000-z-last"
@@ -322,7 +390,17 @@ def test_latest_engagement_uses_created_at_not_directory_sort(tmp_path: Path) ->
         (path / "scope.json").write_text('{"status":"in_progress","current_phase":"recon"}', encoding="utf-8")
         (path / "engagement.json").write_text(json.dumps({"key": path.name, "target": path.name, "created_at": created_at}), encoding="utf-8")
 
-    assert resolve_engagement_path(tmp_path / "install", latest=True) == newer.resolve()
+    def fake_which(command: str) -> str | None:
+        return "/usr/bin/fzf" if command == "fzf" else None
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        assert argv == ["fzf", "--with-nth", "1,2,3,4"]
+        return subprocess.CompletedProcess(argv, 0, f"{newer.name}\tin_progress\trecon\t{newer.name}\t{newer.resolve()}\n", "")
+
+    monkeypatch.setattr(engagements.shutil, "which", fake_which)
+    monkeypatch.setattr(engagements.subprocess, "run", fake_run)
+
+    assert engagements.resolve_engagement_path(tmp_path / "install", select=True) == newer.resolve()
 
 
 def test_runtime_start_rejects_running_container_with_wrong_mount(tmp_path: Path) -> None:
@@ -491,8 +569,9 @@ def test_auth_status_and_clear_operate_on_engagement_auth(tmp_path: Path, capsys
     assert auth["cookies"] == {}
 
 
-def test_auth_latest_selector_overrides_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import main as main_module
+    from ai_threat_hunting_cli import engagements
 
     install_root = tmp_path / "install"
     root = install_root / "agent" / "engagements"
@@ -510,9 +589,17 @@ def test_auth_latest_selector_overrides_current_engagement(tmp_path: Path, monke
             encoding="utf-8",
         )
 
+    def fake_which(command: str) -> str | None:
+        return "/usr/bin/fzf" if command == "fzf" else None
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, f"{newer.name}\tin_progress\trecon\t{newer.name}\t{newer.resolve()}\n", "")
+
+    monkeypatch.setattr(engagements.shutil, "which", fake_which)
+    monkeypatch.setattr(engagements.subprocess, "run", fake_run)
     monkeypatch.chdir(older)
 
-    main_module.main(["--root", str(install_root), "auth", "clear", "--latest"])
+    main_module.main(["--root", str(install_root), "auth", "clear", "--select"])
 
     older_auth = json.loads((older / "auth.json").read_text(encoding="utf-8"))
     newer_auth = json.loads((newer / "auth.json").read_text(encoding="utf-8"))
@@ -520,6 +607,34 @@ def test_auth_latest_selector_overrides_current_engagement(tmp_path: Path, monke
     assert older_auth["cookies"] == {"sid": older.name}
     assert newer_auth["state"] == "missing"
     assert newer_auth["cookies"] == {}
+
+
+def test_auth_without_engagement_context_requires_key_or_select(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+    (engagement / "engagement.json").write_text(json.dumps({"key": "eng-1", "created_at": "2026-04-24T12:00:00Z"}), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit, match="Specify an engagement key or --select"):
+        main_module.main(["--root", str(install_root), "auth", "status"])
+
+
+def test_mitmproxy_without_engagement_context_requires_key_path_or_select(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+    (engagement / "engagement.json").write_text(json.dumps({"key": "eng-1", "created_at": "2026-04-24T12:00:00Z"}), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit, match="Specify an engagement key/path or --select"):
+        main_module.main(["--root", str(install_root), "mitmproxy", "start"])
 
 
 def test_backup_create_and_list_uses_sqlite_backup(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -540,6 +655,37 @@ def test_backup_create_and_list_uses_sqlite_backup(tmp_path: Path, capsys: pytes
 
     main_module.main(["--root", str(install_root), "backup", "list"])
     assert "orchestrator." in capsys.readouterr().out
+
+
+def test_backup_create_uses_suffix_when_timestamp_collides(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.backup import create_backup, list_backups
+
+    install_root = tmp_path / "install"
+    data_dir = install_root / "orchestrator" / "backend" / "data"
+    data_dir.mkdir(parents=True)
+
+    import sqlite3
+
+    live = data_dir / "orchestrator.sqlite3"
+    with sqlite3.connect(live) as connection:
+        connection.execute("CREATE TABLE t (value TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO t (value) VALUES ('first')")
+
+    first = create_backup(install_root, timestamp="20260424T120000Z")
+
+    with sqlite3.connect(live) as connection:
+        connection.execute("INSERT INTO t (value) VALUES ('second')")
+
+    second = create_backup(install_root, timestamp="20260424T120000Z")
+
+    assert first.name == "orchestrator.20260424T120000Z.sqlite3"
+    assert second.name == "orchestrator.20260424T120000Z_0001.sqlite3"
+    assert [item.path.name for item in list_backups(install_root)] == [first.name, second.name]
+
+    with sqlite3.connect(first) as connection:
+        assert connection.execute("SELECT value FROM t ORDER BY value").fetchall() == [("first",)]
+    with sqlite3.connect(second) as connection:
+        assert connection.execute("SELECT value FROM t ORDER BY value").fetchall() == [("first",), ("second",)]
 
 
 def test_backup_restore_removes_stale_sqlite_wal_sidecars(tmp_path: Path) -> None:
