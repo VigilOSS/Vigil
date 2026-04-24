@@ -213,7 +213,7 @@ def list_engagements(install_root: Path) -> list[EngagementRow]:
                 created_at=str(manifest.get("created_at") or ""),
             )
         )
-    return rows
+    return sorted(rows, key=lambda row: (row.created_at or "", row.key))
 
 
 def resolve_engagement_path(install_root: Path, key: str | None = None, *, select: bool = False, latest: bool = False) -> Path:

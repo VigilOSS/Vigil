@@ -56,7 +56,9 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
     with log_file.open("ab") as log:
         process = subprocess.Popen(argv, cwd=install_root, env=env, stdout=log, stderr=subprocess.STDOUT)
     pid_file.write_text(f"{process.pid}\n", encoding="utf-8")
-    _wait_for_health(options.host, options.port)
+    if not _wait_for_health(options.host, options.port, process=process):
+        pid_file.unlink(missing_ok=True)
+        raise SystemExit(f"Orchestrator did not become healthy on http://{options.host}:{options.port}/healthz")
 
 
 def stop_orchestrator(install_root: Path) -> None:
@@ -95,12 +97,15 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _wait_for_health(host: str, port: int) -> None:
+def _wait_for_health(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None) -> bool:
     url = f"http://{host}:{port}/healthz"
     for _ in range(30):
+        if process is not None and process.poll() is not None:
+            return False
         try:
             with urllib.request.urlopen(url, timeout=1) as response:
-                if response.status < 500:
-                    return
+                if response.status == 200:
+                    return True
         except OSError:
             time.sleep(0.2)
+    return False
