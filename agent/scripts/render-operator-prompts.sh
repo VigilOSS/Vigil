@@ -101,7 +101,7 @@ render_operator_prompt() {
 # AI Threat Hunting — Operator Instructions
 
 When a session starts, display:
-"[operator] AI Threat Hunting ready. Ensure `./agent/scripts/start_kali_mcp_runtime.sh` is running, then use `cd agent && ./scripts/init_engagement.sh <target_url>` to start a new engagement."
+"[operator] AI Threat Hunting ready. Ensure `aith runtime start` is running, then use `aith engagement create <target_url>` to start a new engagement."
 
 <!-- Generated from operator-core.md via scripts/render-operator-prompts.sh -->
 

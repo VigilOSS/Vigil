@@ -32,13 +32,13 @@ Recon-specialist and source-analyzer produce endpoint lists during Phase 1. Inge
 as the baseline work-buffer seed:
 
 ```bash
-cat "$DIR/scans/endpoints.txt" | ./scripts/assess.py ingest-endpoints "$DB" recon
+cat "$DIR/scans/endpoints.txt" | aith assess ingest-endpoints "$DB" recon
 ```
 
 If source-analyzer produced a separate endpoint file, ingest it with a distinct source tag:
 
 ```bash
-cat "$DIR/scans/source-endpoints.txt" | ./scripts/assess.py ingest-endpoints "$DB" source-analysis
+cat "$DIR/scans/source-endpoints.txt" | aith assess ingest-endpoints "$DB" source-analysis
 ```
 
 ### Step 2: Live Crawl via Katana
@@ -67,7 +67,7 @@ output files or ingest each separately with the same source tag.
 
 Ingest:
 ```bash
-cat /tmp/katana_output.txt | ./scripts/assess.py ingest-endpoints "$DB" katana
+cat /tmp/katana_output.txt | aith assess ingest-endpoints "$DB" katana
 ```
 
 ### Step 3: Historical URL Enrichment via gau
@@ -83,7 +83,7 @@ gau output contains duplicates — deduplicate before ingestion:
 
 ```bash
 sort -u /tmp/gau_output.txt > /tmp/gau_deduped.txt
-cat /tmp/gau_deduped.txt | ./scripts/assess.py ingest-endpoints "$DB" gau
+cat /tmp/gau_deduped.txt | aith assess ingest-endpoints "$DB" gau
 ```
 
 **Multi-domain:** Run gau for each domain in scope.json hosts. Use `--subs` when wildcard
@@ -98,7 +98,7 @@ were once public. These are often still functional but hidden from the live site
 If Phase 1 discovered API specifications (source-analyzer may have saved them to `scans/`):
 
 ```bash
-./scripts/assess.py ingest-spec "$DB" "$DIR/scans/openapi.json"
+aith assess ingest-spec "$DB" "$DIR/scans/openapi.json"
 ```
 
 This creates `api-spec` work items with full endpoint/parameter schemas and generates
@@ -109,7 +109,7 @@ coverage candidates automatically.
 After all sources are ingested, verify the work buffer is clean:
 
 ```bash
-./scripts/assess.py dispatch "$DB" stats
+aith assess dispatch "$DB" stats
 ```
 
 The ingestion pipeline handles param-structure deduplication automatically (same endpoint
@@ -131,16 +131,16 @@ replacement.
 
 **Retrieve work items for analysis:**
 ```bash
-./scripts/assess.py dispatch "$DB" fetch api 50 surface-collector
-./scripts/assess.py dispatch "$DB" fetch page 50 surface-collector
-./scripts/assess.py dispatch "$DB" fetch unknown 50 surface-collector
+aith assess dispatch "$DB" fetch api 50 surface-collector
+aith assess dispatch "$DB" fetch page 50 surface-collector
+aith assess dispatch "$DB" fetch unknown 50 surface-collector
 ```
 
 Analyze the fetched URLs (without testing them — triage is classification, not probing)
 and produce the priority manifest. Then release them back:
 
 ```bash
-./scripts/assess.py dispatch "$DB" reset-stale 0
+aith assess dispatch "$DB" reset-stale 0
 ```
 
 **Triage categories** (see agent prompt for full pattern lists):
@@ -162,7 +162,7 @@ Before returning to the operator:
 
 **Record surfaces** for all high-signal discoveries:
 ```bash
-./scripts/assess.py record-surface <surface-type> <url> <source> \
+aith assess record-surface <surface-type> <url> <source> \
   --rationale "<why this is high-signal>" \
   --status discovered
 ```
@@ -170,14 +170,14 @@ Before returning to the operator:
 **Record findings** when triage produces decisive evidence (e.g., an API key with a
 non-empty value visible in a URL parameter):
 ```bash
-./scripts/assess.py record-finding surface-collector <finding-json-file>
+aith assess record-finding surface-collector <finding-json-file>
 ```
 
 ### Step 8: Stats and Priority Manifest
 
 Produce the final stats:
 ```bash
-./scripts/assess.py dispatch "$DB" stats
+aith assess dispatch "$DB" stats
 ```
 
 Build the priority manifest in the output — a ranked list of attack surface clusters
@@ -186,9 +186,9 @@ with triage signals, recommended dispatch order, and suggested vuln-class skills
 ## Key Rules
 
 - Keep all URL crawling and enrichment in Kali MCP — host-side crawling bypasses runtime isolation
-- Use `assess.py ingest-endpoints` for all work-buffer writes — direct DB inserts bypass backend sync
-- Use `assess.py record-surface` for all surface writes — bypassing loses backend sync
-- Use `assess.py record-finding` for any findings — unrecorded findings are lost data
+- Use `aith assess ingest-endpoints` for all work-buffer writes — direct DB inserts bypass backend sync
+- Use `aith assess record-surface` for all surface writes — bypassing loses backend sync
+- Use `aith assess record-finding` for any findings — unrecorded findings are lost data
 - Triage is classification and pattern matching — analyze URLs without sending target-facing probes during triage
 - Tag each ingestion source correctly (recon, katana, gau, source-analysis, spec) — source provenance matters for coverage tracking
 

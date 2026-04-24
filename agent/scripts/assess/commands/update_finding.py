@@ -1,4 +1,4 @@
-"""assess.py update-finding — finding-specific PATCH helper."""
+"""aith assess update-finding — finding-specific PATCH helper."""
 from __future__ import annotations
 
 import argparse

@@ -1,4 +1,4 @@
-"""Tests for `assess.py check-scope-coverage`.
+"""Tests for `aith assess check-scope-coverage`.
 
 The CLI reads scope.json, calls the backend for services/command-runs/summary,
 and reads the local cases.db work_items table. We drive it in-process via a

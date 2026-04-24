@@ -1,4 +1,4 @@
-"""assess.py ingest-endpoints — read endpoint lines, POST observations, insert work items.
+"""aith assess ingest-endpoints — read endpoint lines, POST observations, insert work items.
 
 Highest volume command. Key improvement: connection reuse eliminates ~3000 subprocess spawns per 500 endpoints.
 """

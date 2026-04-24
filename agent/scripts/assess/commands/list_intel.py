@@ -1,4 +1,4 @@
-"""assess.py list-intel — read-only intel listing / search.
+"""aith assess list-intel — read-only intel listing / search.
 
 If ``<type>`` is given, list rows of that type (backed by
 ``GET /engagements/{key}/intel/{type-plural}``). If ``<type>`` is omitted,
@@ -38,10 +38,10 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  assess.py list-intel                           # counts per type (summary)\n"
-            "  assess.py list-intel tech-component            # all tech components\n"
-            "  assess.py list-intel --q 'nginx'               # FTS search across all intel\n"
-            "  assess.py list-intel cve --q '2024'            # FTS search narrowed to cves\n"
+            "  aith assess list-intel                           # counts per type (summary)\n"
+            "  aith assess list-intel tech-component            # all tech components\n"
+            "  aith assess list-intel --q 'nginx'               # FTS search across all intel\n"
+            "  aith assess list-intel cve --q '2024'            # FTS search narrowed to cves\n"
             f"\nValid types: {types_list}"
         ),
     )

@@ -44,7 +44,7 @@ AUDIT_REQUIRED = os.environ.get("KALI_MCP_AUDIT_REQUIRED", "1") != "0"
 # POST to nothing and returns ECONNREFUSED. Docker Desktop exposes the
 # host via ``host.docker.internal`` (automatically resolved on macOS and
 # Windows; Linux needs ``--add-host=host.docker.internal:host-gateway``,
-# which ``start_kali_mcp_runtime.sh`` sets on recreate). Also normalize
+# which ``aith runtime start`` sets on recreate). Also normalize
 # any loopback values the operator passed through env to the same host
 # alias so a stale ``.env`` with ``127.0.0.1:18000`` still works.
 # Empty string and missing are both "no value" — without the strip/``or``

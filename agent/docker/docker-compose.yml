@@ -8,8 +8,10 @@ services:
       - NET_RAW
       - NET_ADMIN
 
-  runtime-lightweight:
-    profiles: ["lightweight"]
+  runtime-lightweight-dev:
+    # Development-only image for faster local Dockerfile iteration. Operator
+    # workflows and docs use the full runtime image.
+    profiles: ["dev"]
     build:
       context: ../..
       dockerfile: agent/docker/runtime-lightweight/Dockerfile
@@ -23,15 +25,3 @@ services:
       context: ..
       dockerfile: docker/mitmproxy/Dockerfile
     image: security-research-proxy:latest
-
-  metasploit:
-    build:
-      context: ./metasploit
-    image: security-research-metasploit:latest
-    environment:
-      MSF_USER: ${MSF_USER:-msf}
-      MSF_PASSWORD: ${MSF_PASSWORD:-msf}
-      MSF_PORT: ${MSF_PORT:-55553}
-      MSF_SSL: ${MSF_SSL:-false}
-    ports:
-      - "127.0.0.1:${MSF_PORT:-55553}:55553"

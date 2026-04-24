@@ -1,0 +1,91 @@
+from __future__ import annotations
+
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+
+@dataclass(frozen=True, slots=True)
+class DockerResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+Runner = Callable[..., DockerResult]
+HOST_GATEWAY_ARG = "--add-host=host.docker.internal:host-gateway"
+
+
+def run_command(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> DockerResult:
+    completed = subprocess.run(
+        argv,
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return DockerResult(completed.returncode, completed.stdout, completed.stderr)
+
+
+def require_success(result: DockerResult, argv: list[str]) -> None:
+    if result.returncode != 0:
+        command = " ".join(argv)
+        raise SystemExit(f"Command failed ({result.returncode}): {command}\n{result.stderr or result.stdout}")
+
+
+def run_with_host_gateway_fallback(argv: list[str], *, runner: Runner = run_command) -> None:
+    result = runner(argv)
+    if result.returncode == 0:
+        return
+    if HOST_GATEWAY_ARG in argv:
+        retry_argv = [item for item in argv if item != HOST_GATEWAY_ARG]
+        retry_result = runner(retry_argv)
+        require_success(retry_result, retry_argv)
+        return
+    require_success(result, argv)
+
+
+def image_exists(image: str, *, runner: Runner = run_command) -> bool:
+    for argv in (
+        ["docker", "image", "inspect", image],
+        ["docker", "inspect", "--type", "image", image],
+    ):
+        if runner(argv).returncode == 0:
+            return True
+    result = runner(["docker", "images", "-q", image])
+    return bool(result.stdout.strip())
+
+
+def container_names(*, all_containers: bool = False, runner: Runner = run_command) -> set[str]:
+    argv = ["docker", "ps"]
+    if all_containers:
+        argv.append("-a")
+    argv.extend(["--format", "{{.Names}}"])
+    result = runner(argv)
+    if result.returncode != 0:
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def container_running(name: str, *, runner: Runner = run_command) -> bool:
+    return name in container_names(runner=runner)
+
+
+def container_exists(name: str, *, runner: Runner = run_command) -> bool:
+    return name in container_names(all_containers=True, runner=runner)
+
+
+def image_id(image: str, *, runner: Runner = run_command) -> str:
+    result = runner(["docker", "image", "inspect", "-f", "{{.Id}}", image])
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def container_image_id(name: str, *, runner: Runner = run_command) -> str:
+    result = runner(["docker", "inspect", "-f", "{{.Image}}", name])
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()

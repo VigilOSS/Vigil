@@ -1,4 +1,4 @@
-"""assess.py get-command-run — fetch a single command-run record with full previews."""
+"""aith assess get-command-run — fetch a single command-run record with full previews."""
 from __future__ import annotations
 
 import json

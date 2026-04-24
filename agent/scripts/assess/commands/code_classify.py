@@ -1,4 +1,4 @@
-"""assess.py code-classify — bulk-classify code files by tier and role."""
+"""aith assess code-classify — bulk-classify code files by tier and role."""
 from __future__ import annotations
 
 from fnmatch import fnmatch

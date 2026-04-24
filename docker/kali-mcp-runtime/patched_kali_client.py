@@ -383,7 +383,7 @@ def _wrap_fastmcp_tool_decorator() -> None:
             shim.__doc__ = (fn.__doc__ or "") + (
                 "\n\nAudit: every call MUST pass engagement_key, agent_name, "
                 "and phase. These attribute the command to the dispatching "
-                "agent so `assess.py list-command-runs --agent-name <self>` "
+                "agent so `aith assess list-command-runs --agent-name <self>` "
                 "returns only this agent's prior work."
                 "\n\nOptional command-metadata kwargs — set them when they "
                 "apply and they become filterable in the Commands tab and "

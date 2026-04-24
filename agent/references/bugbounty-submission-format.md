@@ -70,7 +70,7 @@ Bug bounty submissions are standalone deliverables — nothing inside them shoul
 - **No finding slugs** (`VA-003`, `NNN`, any prefix) in the submission body.
 - **No engagement keys, engagement directory paths, `$DIR/`, `$ENGAGEMENT_KEY/`, or backend URLs.**
 - **No cross-references to other findings in the same engagement** — each submission stands alone. If two findings share a root cause, file two submissions; if one finding genuinely depends on another, describe the dependency in plain English, not via a finding ID.
-- **No operator/tool metadata breadcrumbs** — tool run IDs, MCP command IDs, activity log references, `assess.py` invocations.
+- **No operator/tool metadata breadcrumbs** — tool run IDs, MCP command IDs, activity log references, `aith assess` invocations.
 - **No internal tooling breadcrumbs** — references to alternate reproducers, "bundled" all-in-one scripts, operator convenience wrappers, or `tools/` paths belong in the internal report. The submission points at one POC — the one the triager should run. "Also available at…" creates ambiguity and exposes research-time scaffolding the platform does not need.
 
 ### Format-specific

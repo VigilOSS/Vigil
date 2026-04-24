@@ -1,4 +1,4 @@
-"""assess.py filter-scope — filter URL/host lists to scope.json hosts."""
+"""aith assess filter-scope — filter URL/host lists to scope.json hosts."""
 from __future__ import annotations
 
 import argparse

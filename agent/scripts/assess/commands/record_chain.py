@@ -1,4 +1,4 @@
-"""assess.py record-chain — POST attack chain + emit event."""
+"""aith assess record-chain — POST attack chain + emit event."""
 from __future__ import annotations
 
 import json

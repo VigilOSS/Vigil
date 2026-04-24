@@ -116,7 +116,7 @@ curl -sI https://TARGET/discovered_path  # Verify
 - Admin/management interfaces discovered
 - Wordlists used and filter/matcher settings
 - Whether authenticated fuzzing was performed
-- New endpoints to feed into work buffer via `assess.py ingest-endpoints`
+- New endpoints to feed into work buffer via `aith assess ingest-endpoints`
 
 ## Extended Resources
 

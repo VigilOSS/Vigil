@@ -23,7 +23,7 @@ Before starting any target-facing work, verify:
 2. You loaded the source-analysis skill (`agent/skills/source-analysis/SKILL.md`)
 3. You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
 4. You have the dispatch context (target URL, phase, task objective, prior findings)
-5. You know the backend write paths for what you discover: requestable endpoints go through `./scripts/assess.py ingest-endpoints "$DIR/cases.db" source-analysis`, durable surface candidates go through `./scripts/assess.py record-surface ...`, and confirmed findings go through `./scripts/assess.py record-finding ...`
+5. You know the backend write paths for what you discover: requestable endpoints go through `aith assess ingest-endpoints "$DIR/cases.db" source-analysis`, durable surface candidates go through `aith assess record-surface ...`, and confirmed findings go through `aith assess record-finding ...`
 
 If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your source analysis quality will be significantly lower.
 
@@ -111,14 +111,14 @@ Use `#### Surface Candidates` when the operator should sync new durable attack s
 
 ## Backend Sync Rules
 
-- New requestable endpoints belong in `./scripts/assess.py ingest-endpoints "$DIR/cases.db" source-analysis` because endpoint ingestion is how later phases pick them up for testing
-- `#### Surface Candidates` belong in `./scripts/assess.py record-surface ...` because durable surface state must survive beyond your markdown output
-- Confirmed secrets, tokens, or decisive exposures belong in `./scripts/assess.py record-finding source-analyzer <finding-json-file>` because findings that exist only in your output are lost data
+- New requestable endpoints belong in `aith assess ingest-endpoints "$DIR/cases.db" source-analysis` because endpoint ingestion is how later phases pick them up for testing
+- `#### Surface Candidates` belong in `aith assess record-surface ...` because durable surface state must survive beyond your markdown output
+- Confirmed secrets, tokens, or decisive exposures belong in `aith assess record-finding source-analyzer <finding-json-file>` because findings that exist only in your output are lost data
 
 ## Finding Recording
 
 **MANDATORY:** If source analysis produces findings (e.g., leaked secrets, exposed API keys),
-record each via `./scripts/assess.py record-finding source-analyzer <finding-json-file>`
+record each via `aith assess record-finding source-analyzer <finding-json-file>`
 before your task completes. Do not defer recording to the operator. Unrecorded findings are lost data.
 
 ## Key Principles

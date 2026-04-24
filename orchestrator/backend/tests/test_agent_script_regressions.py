@@ -1105,7 +1105,7 @@ def test_log_actor_kind_parses_before_or_after_subcommand() -> None:
         "agent/scripts/assess/commands/log_entry.py",
     )
 
-    parser = argparse.ArgumentParser(prog="assess.py")
+    parser = argparse.ArgumentParser(prog="aith assess")
     parser.add_argument(
         "--actor-kind",
         dest="actor_kind",

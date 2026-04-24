@@ -6,10 +6,10 @@ Intercept browser traffic to capture authenticated sessions (cookies, tokens, he
 
 ```bash
 # From inside an engagement directory, or with ENGAGEMENT_DIR set:
-./scripts/start_mitmproxy.sh
+aith mitmproxy start
 
 # Or explicitly:
-ENGAGEMENT_DIR=/path/to/engagement ./scripts/start_mitmproxy.sh
+aith mitmproxy start /path/to/engagement
 ```
 
 ## Browser Proxy Setup (FoxyProxy)
@@ -53,13 +53,13 @@ The launcher stores CA keys in a named Docker volume (`mitmproxy-ca`). Container
 If you need to regenerate the CA (e.g., compromise, rotation):
 ```bash
 docker volume rm mitmproxy-ca
-./scripts/start_mitmproxy.sh
+aith mitmproxy start
 # Re-install the new cert using Option A or B above
 ```
 
 ## Login Capture Workflow
 
-1. Start the proxy: `./scripts/start_mitmproxy.sh`
+1. Start the proxy: `aith mitmproxy start`
 2. Configure browser proxy (see above)
 3. Navigate to the target login page and authenticate
 4. Browse a few authenticated pages (admin, settings, API endpoints)
@@ -93,10 +93,10 @@ docker logs -f security-research-proxy
 docker stop security-research-proxy
 
 # Restart (reuses same CA cert from volume)
-./scripts/start_mitmproxy.sh
+aith mitmproxy start
 
 # Custom port
-MITMPROXY_PORT=9090 ./scripts/start_mitmproxy.sh
+aith mitmproxy start --port 9090
 ```
 
 ## How It Works
