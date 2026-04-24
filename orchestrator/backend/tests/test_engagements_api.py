@@ -223,6 +223,105 @@ def test_init_db_migrates_legacy_finding_slug_references(isolate_settings):
         assert connection.execute("SELECT finding_slug FROM code_analysis_results").fetchone()[0] == "VA-001"
 
 
+def test_init_db_migrates_legacy_finding_slug_collision_without_startup_crash(isolate_settings):
+    db_module.init_db()
+    db_path = db_module.database_path()
+    legacy = legacy_finding_slug()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        engagement_id = connection.execute(
+            """
+            INSERT INTO engagements (key, target, status, engagement_root)
+            VALUES ('eng', 'https://example.com', 'in_progress', '/tmp/eng')
+            """
+        ).lastrowid
+        legacy_id = connection.execute(
+            """
+            INSERT INTO assessment_findings (engagement_id, slug, title)
+            VALUES (?, ?, 'Legacy slug')
+            """,
+            (engagement_id, legacy),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO assessment_findings (engagement_id, slug, title)
+            VALUES (?, 'VA-001', 'Already migrated slug')
+            """,
+            (engagement_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO code_analysis_results (engagement_id, file_id, finding_slug)
+            VALUES (?, 1, ?)
+            """,
+            (engagement_id, legacy),
+        )
+        connection.commit()
+
+    db_module.init_db()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        rows = connection.execute(
+            "SELECT id, slug FROM assessment_findings ORDER BY id ASC"
+        ).fetchall()
+        migrated_legacy_slug = rows[0][1]
+        assert migrated_legacy_slug.startswith("VA-001-legacy-")
+        assert rows[1][1] == "VA-001"
+        assert legacy not in {row[1] for row in rows}
+        assert connection.execute(
+            "SELECT finding_slug FROM code_analysis_results WHERE engagement_id = ?",
+            (engagement_id,),
+        ).fetchone()[0] == migrated_legacy_slug
+        assert str(legacy_id) in migrated_legacy_slug
+
+
+def test_init_db_migrates_legacy_finding_slugs_in_finding_json(isolate_settings):
+    db_module.init_db()
+    db_path = db_module.database_path()
+    legacy = legacy_finding_slug("CH-001")
+
+    with sqlite3.connect(str(db_path)) as connection:
+        engagement_id = connection.execute(
+            """
+            INSERT INTO engagements (key, target, status, engagement_root)
+            VALUES ('eng', 'https://example.com', 'in_progress', '/tmp/eng')
+            """
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO assessment_findings (
+                engagement_id, slug, title, details_json, provenance_json
+            )
+            VALUES (?, 'CV-001', 'Variant slug', ?, ?)
+            """,
+            (
+                engagement_id,
+                json.dumps({"variant_of": legacy, "related": [legacy]}),
+                json.dumps(
+                    {
+                        "source_slug": legacy,
+                        "review": {"target_slug": legacy},
+                        "evidence": f"Same root cause as {legacy}.",
+                    }
+                ),
+            ),
+        )
+        connection.commit()
+
+    db_module.init_db()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        details_json, provenance_json = connection.execute(
+            "SELECT details_json, provenance_json FROM assessment_findings"
+        ).fetchone()
+    assert json.loads(details_json) == {"variant_of": "CH-001", "related": ["CH-001"]}
+    assert json.loads(provenance_json) == {
+        "source_slug": "CH-001",
+        "review": {"target_slug": "CH-001"},
+        "evidence": "Same root cause as CH-001.",
+    }
+
+
 def test_engagement_artifacts_and_sessions_are_scoped_by_engagement_key(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
