@@ -1053,7 +1053,7 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
     finding_a = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "FINDING-CODE-A-001",
+            "slug": "CODE-A-001",
             "title": "Parser trust boundary bypass",
             "severity": "high",
             "workflow_status": "active",
@@ -1083,7 +1083,7 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
     finding_b = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "FINDING-CODE-B-001",
+            "slug": "CODE-B-001",
             "title": "Helper sink exposure",
             "severity": "critical",
             "workflow_status": "active",
@@ -1185,7 +1185,7 @@ def test_coverage_summary_excludes_false_positive_variants(client, isolate_setti
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "FINDING-CODE-VARIANT-001",
+            "slug": "CODE-VARIANT-001",
             "title": "Parser variant",
             "severity": "high",
             "workflow_status": "active",
@@ -1217,12 +1217,12 @@ def test_coverage_summary_excludes_false_positive_variants(client, isolate_setti
     assert baseline.json()["findings_summary"]["variant_count"] == 1
 
     verify = client.post(
-        f"/engagements/{engagement_key}/assessment/findings/FINDING-CODE-VARIANT-001/verify",
+        f"/engagements/{engagement_key}/assessment/findings/CODE-VARIANT-001/verify",
         json={
             "disposition": "false_positive",
             "reason_code": "guarded-path",
             "reason_text": "Guard closes the variant in production.",
-            "artifact_ref": "tools/analysis-state/code-verification/FINDING-CODE-VARIANT-001.json",
+            "artifact_ref": "tools/analysis-state/code-verification/CODE-VARIANT-001.json",
             "source_name": "code-vuln-verifier",
             "details": {
                 "kill_check": 4,
@@ -1251,7 +1251,7 @@ def test_coverage_summary_excludes_non_code_variants(client, isolate_settings):
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "FINDING-WEB-VARIANT-001",
+            "slug": "WEB-VARIANT-001",
             "title": "HTTP variant",
             "severity": "high",
             "workflow_status": "active",
@@ -1329,7 +1329,7 @@ def test_repo_scoped_coverage_excludes_ambiguous_shared_file_paths(client, isola
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "FINDING-SHARED-PATH-001",
+            "slug": "SHARED-PATH-001",
             "title": "Shared path finding",
             "severity": "high",
             "workflow_status": "active",
@@ -2148,7 +2148,7 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "FINDING-CH-777",
+            "slug": "CH-777",
             "title": "Suppressed parser finding",
             "severity": "medium",
             "workflow_status": "false_positive",
@@ -2184,7 +2184,7 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
             "evidence": "Attacker-controlled data reaches arithmetic.",
             "disposition": "finding",
             "confidence": "high",
-            "finding_slug": "FINDING-CH-777",
+            "finding_slug": "CH-777",
             "cwe_id": "CWE-190",
             "slot_type": "NETWORK-INPUT",
             "notes": "Original hunt output.",

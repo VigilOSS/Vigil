@@ -97,11 +97,11 @@ Use `./scripts/assess.py record-finding <agent-name> <finding-json-file>` to rec
 
 | Agent | Prefix | Example |
 |---|---|---|
-| `code-architect` | `CA` | `FINDING-CA-001` |
-| `code-vuln-hunter` | `CH` | `FINDING-CH-001` |
-| `code-variant-hunter` | `CV` | `FINDING-CV-001` |
-| `code-vuln-verifier` | `VF` | `FINDING-VF-001` (spot-check only — verifier updates existing findings, not new ones) |
-| `code-fuzz-engineer` | `CF` | `FINDING-CF-001` |
+| `code-architect` | `CA` | `CA-001` |
+| `code-vuln-hunter` | `CH` | `CH-001` |
+| `code-variant-hunter` | `CV` | `CV-001` |
+| `code-vuln-verifier` | `VF` | `VF-001` (spot-check only — verifier updates existing findings, not new ones) |
+| `code-fuzz-engineer` | `CF` | `CF-001` |
 
 **Title formula:** `[Bug Class] in [file:line or component] allows [attacker role] to [impact]`
 

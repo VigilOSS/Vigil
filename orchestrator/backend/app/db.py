@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -21,10 +22,97 @@ class DatabaseFingerprint:
 
 
 _startup_database_fingerprint: DatabaseFingerprint | None = None
+_LEGACY_FINDING_PREFIX = "FINDING" + "-"
 
 
 def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
     return {row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _strip_legacy_finding_prefix(value: str) -> str:
+    if value.startswith(_LEGACY_FINDING_PREFIX):
+        return value[len(_LEGACY_FINDING_PREFIX) :]
+    return value
+
+
+def _strip_legacy_finding_prefixes(value):
+    if isinstance(value, str):
+        normalized = _strip_legacy_finding_prefix(value)
+        return normalized, normalized != value
+    if isinstance(value, list):
+        changed = False
+        normalized_items = []
+        for item in value:
+            normalized_item, item_changed = _strip_legacy_finding_prefixes(item)
+            normalized_items.append(normalized_item)
+            changed = changed or item_changed
+        return normalized_items, changed
+    if isinstance(value, dict):
+        changed = False
+        normalized_dict = {}
+        for key, item in value.items():
+            normalized_item, item_changed = _strip_legacy_finding_prefixes(item)
+            normalized_dict[key] = normalized_item
+            changed = changed or item_changed
+        return normalized_dict, changed
+    return value, False
+
+
+def _migrate_legacy_finding_prefix_in_text_column(connection: sqlite3.Connection, table_name: str, column_name: str) -> None:
+    if column_name not in _table_columns(connection, table_name):
+        return
+    rows = connection.execute(
+        f"SELECT id, {column_name} FROM {table_name} WHERE {column_name} LIKE ?",
+        (f"{_LEGACY_FINDING_PREFIX}%",),
+    ).fetchall()
+    for row_id, value in rows:
+        if not isinstance(value, str):
+            continue
+        normalized = _strip_legacy_finding_prefix(value)
+        if normalized != value:
+            connection.execute(
+                f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",
+                (normalized, row_id),
+            )
+
+
+def _migrate_legacy_finding_prefix_in_json_column(connection: sqlite3.Connection, table_name: str, column_name: str) -> None:
+    if column_name not in _table_columns(connection, table_name):
+        return
+    rows = connection.execute(
+        f"SELECT id, {column_name} FROM {table_name} WHERE {column_name} LIKE ?",
+        (f"%{_LEGACY_FINDING_PREFIX}%",),
+    ).fetchall()
+    for row_id, value in rows:
+        if not isinstance(value, str):
+            continue
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            continue
+        normalized, changed = _strip_legacy_finding_prefixes(payload)
+        if changed:
+            connection.execute(
+                f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",
+                (json.dumps(normalized, ensure_ascii=True), row_id),
+            )
+
+
+def _migrate_legacy_finding_slug_references(connection: sqlite3.Connection) -> None:
+    for table_name, column_name in (
+        ("assessment_findings", "slug"),
+        ("assessment_finding_links", "target_ref"),
+        ("assessment_attack_chain_links", "entity_ref"),
+        ("code_analysis_results", "finding_slug"),
+        ("intel_notes", "linked_finding_slug"),
+    ):
+        _migrate_legacy_finding_prefix_in_text_column(connection, table_name, column_name)
+
+    for table_name, column_name in (
+        ("engagement_sessions", "assigned_targets_json"),
+        ("assessment_finding_transitions", "metadata_json"),
+    ):
+        _migrate_legacy_finding_prefix_in_json_column(connection, table_name, column_name)
 
 
 class IncompatibleDatabaseError(RuntimeError):
@@ -1593,6 +1681,8 @@ def init_db() -> None:
                 "INSERT INTO activity_entries_fts(activity_entries_fts) VALUES ('rebuild')"
             )
         # ── End Intel Tables ──────────────────────────────────────
+
+        _migrate_legacy_finding_slug_references(connection)
 
         connection.commit()
 

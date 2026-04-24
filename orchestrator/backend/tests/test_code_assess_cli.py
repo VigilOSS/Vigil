@@ -542,7 +542,7 @@ def test_verify_finding_posts_verification_payload(monkeypatch, tmp_path, capsys
                 "disposition": "false_positive",
                 "reason_code": "check-2-guard",
                 "reason_text": "Guard proves the path is unreachable.",
-                "artifact_ref": "tools/analysis-state/code-verification/FINDING-VA-001.json",
+                "artifact_ref": "tools/analysis-state/code-verification/VA-001.json",
                 "details": {
                     "kill_check": 2,
                     "kill_reason": "Guard proves the path is unreachable.",
@@ -575,7 +575,7 @@ def test_verify_finding_posts_verification_payload(monkeypatch, tmp_path, capsys
             captured["payload"] = payload
             return {
                 "finding": {
-                    "slug": "FINDING-VA-001",
+                    "slug": "VA-001",
                     "title": "Suppressed parser finding",
                     "severity": "medium",
                     "workflow_status": "false_positive",
@@ -594,13 +594,13 @@ def test_verify_finding_posts_verification_payload(monkeypatch, tmp_path, capsys
     module.run(
         SimpleNamespace(
             engagement_dir=tmp_path,
-            finding_slug="FINDING-VA-001",
+            finding_slug="VA-001",
             payload=str(payload_path),
             inline_payload=None,
         )
     )
 
-    assert captured["endpoint"] == "findings/FINDING-VA-001/verify"
+    assert captured["endpoint"] == "findings/VA-001/verify"
     assert captured["payload"]["disposition"] == "false_positive"
     assert "\"verified_false_positive\"" in capsys.readouterr().out
 
@@ -1034,7 +1034,7 @@ def test_post_rejects_raw_verify_endpoint_and_points_to_helper(capsys):
         module.run(
             SimpleNamespace(
                 engagement_dir=Path("/tmp/eng"),
-                endpoint="findings/FINDING-VA-001/verify",
+                endpoint="findings/VA-001/verify",
                 payload='{"disposition":"confirmed","reason_text":"reproduced"}',
                 inline_payload=None,
             )
@@ -1054,7 +1054,7 @@ def test_patch_rejects_raw_finding_patch_and_points_to_helper(capsys):
         module.run(
             SimpleNamespace(
                 engagement_dir=Path("/tmp/eng"),
-                endpoint="findings/FINDING-VA-001",
+                endpoint="findings/VA-001",
                 payload='{"workflow_status":"draft"}',
                 inline_payload=None,
             )
@@ -1155,7 +1155,7 @@ def test_kill_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_
         def post(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
-            return {"finding": {"slug": "FINDING-VA-001", "title": "Parser issue"}}
+            return {"finding": {"slug": "VA-001", "title": "Parser issue"}}
 
         def close(self) -> None:
             return None
@@ -1165,7 +1165,7 @@ def test_kill_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_
     module.run(
         SimpleNamespace(
             engagement_dir=tmp_path,
-            finding_slug="FINDING-VA-001",
+            finding_slug="VA-001",
             payload=None,
             inline_payload=None,
             reason_text="Guard blocks the path",
@@ -1181,17 +1181,17 @@ def test_kill_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_
         )
     )
 
-    assert captured["endpoint"] == "findings/FINDING-VA-001/verify"
+    assert captured["endpoint"] == "findings/VA-001/verify"
     assert captured["payload"]["disposition"] == "false_positive"
     assert captured["payload"]["details"]["kill_reason"] == "validate_length() enforces an 8KB cap"
     assert captured["payload"]["details"]["kill_check"] == 2
-    assert "FINDING-VA-001" in capsys.readouterr().out
+    assert "VA-001" in capsys.readouterr().out
 
 
 def test_record_finding_reports_normalized_contract_errors_before_backend(monkeypatch, tmp_path, capsys):
     module = _load_record_finding_module()
 
-    monkeypatch.setattr(module, "next_finding_id", lambda base_url, engagement_key, agent_name: "FINDING-CH-001")
+    monkeypatch.setattr(module, "next_finding_id", lambda base_url, engagement_key, agent_name: "CH-001")
 
     payload_path = tmp_path / "finding.json"
     payload_path.write_text(
@@ -1268,7 +1268,7 @@ def test_update_finding_patches_by_slug_from_flags(monkeypatch, tmp_path):
         def patch(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
-            return {"finding": {"slug": "FINDING-VA-002", "title": "Updated"}}
+            return {"finding": {"slug": "VA-002", "title": "Updated"}}
 
         def close(self) -> None:
             return None
@@ -1278,7 +1278,7 @@ def test_update_finding_patches_by_slug_from_flags(monkeypatch, tmp_path):
     module.run(
         SimpleNamespace(
             engagement_dir=tmp_path,
-            finding_slug="FINDING-VA-002",
+            finding_slug="VA-002",
             payload=None,
             inline_payload=None,
             title=None,
@@ -1300,7 +1300,7 @@ def test_update_finding_patches_by_slug_from_flags(monkeypatch, tmp_path):
         )
     )
 
-    assert captured["endpoint"] == "findings/FINDING-VA-002"
+    assert captured["endpoint"] == "findings/VA-002"
     assert captured["payload"]["workflow_status"] == "active"
     assert captured["payload"]["severity"] == "low"
     assert captured["payload"]["details"] == {"impact": "limited"}
@@ -1329,7 +1329,7 @@ def test_reset_finding_reopens_to_draft(monkeypatch, tmp_path):
         def patch(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
-            return {"finding": {"slug": "FINDING-VA-003", "title": "Reset"}}
+            return {"finding": {"slug": "VA-003", "title": "Reset"}}
 
         def close(self) -> None:
             return None
@@ -1339,7 +1339,7 @@ def test_reset_finding_reopens_to_draft(monkeypatch, tmp_path):
     module.run(
         SimpleNamespace(
             engagement_dir=tmp_path,
-            finding_slug="FINDING-VA-003",
+            finding_slug="VA-003",
             workflow_status="draft",
             severity=None,
             reason_text="Needs another review pass",
@@ -1351,7 +1351,7 @@ def test_reset_finding_reopens_to_draft(monkeypatch, tmp_path):
         )
     )
 
-    assert captured["endpoint"] == "findings/FINDING-VA-003"
+    assert captured["endpoint"] == "findings/VA-003"
     assert captured["payload"]["workflow_status"] == "draft"
     assert captured["payload"]["reason_text"] == "Needs another review pass"
 
@@ -1374,7 +1374,7 @@ def test_list_findings_filters_by_status_and_severity(monkeypatch, capsys):
             assert endpoint == "findings"
             return [
                 {
-                    "slug": "FINDING-ACTIVE-001",
+                    "slug": "ACTIVE-001",
                     "severity": "high",
                     "workflow_status": "active",
                     "verification_state": "unreviewed",
@@ -1385,7 +1385,7 @@ def test_list_findings_filters_by_status_and_severity(monkeypatch, capsys):
                     "source_name": "vulnerability-analyst",
                 },
                 {
-                    "slug": "FINDING-DRAFT-001",
+                    "slug": "DRAFT-001",
                     "severity": "high",
                     "workflow_status": "draft",
                     "verification_state": "unreviewed",
@@ -1417,8 +1417,8 @@ def test_list_findings_filters_by_status_and_severity(monkeypatch, capsys):
     )
 
     output = capsys.readouterr().out
-    assert "FINDING-ACTIVE-001" in output
-    assert "FINDING-DRAFT-001" not in output
+    assert "ACTIVE-001" in output
+    assert "DRAFT-001" not in output
 
 
 def test_code_dispatch_done_supports_dry_run(monkeypatch, tmp_path, capsys):

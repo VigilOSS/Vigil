@@ -41,8 +41,8 @@ Use the helper script or `curl` — never query the SQLite database file directl
 ```
 
 The `report-findings` endpoint returns each finding with:
-- `report_id` — sequential `FINDING-001`, `FINDING-002`, etc. (for the report body)
-- `slug` — the original backend slug, e.g. `FINDING-VA-003` (for cross-reference)
+- `report_id` — sequential `001`, `002`, etc. (for the report body)
+- `slug` — the original backend slug, e.g. `VA-003` (for cross-reference)
 - `cvss_vector`, `cvss_score` — extracted from `details_json`
 - `remediation`, `steps_to_reproduce`, `cwe_id`, `owasp_category` — extracted from `details_json`
 - `impact`, `evidence_detail` — extracted from `details_json`
@@ -120,8 +120,8 @@ No unexplained jargon. "SQL injection (direct database access)" not just "SQL in
 | Remediation | 1-2 sentences | Names the technology and the specific fix. No generic advice. |
 
 ```markdown
-### FINDING-001: [Title] [SEVERITY]
-**Slug:** FINDING-VA-003  **OWASP:** A03:2021  **CWE:** CWE-89  **CVSS:** 7.5 (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N)
+### 001: [Title] [SEVERITY]
+**Slug:** VA-003  **OWASP:** A03:2021  **CWE:** CWE-89  **CVSS:** 7.5 (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N)
 
 #### Description
 [2-4 sentences. First sentence: what the attacker gains. Remaining: how, where, auth context.]
@@ -152,10 +152,10 @@ No unexplained jargon. "SQL injection (direct database access)" not just "SQL in
 ```markdown
 ## Attack Path Narrative
 ### Scenario 1: [Title]
-**Findings Used:** FINDING-001 (FINDING-VA-003), FINDING-003 (FINDING-EX-001)
+**Findings Used:** 001 (VA-003), 003 (EX-001)
 **Starting Point:** [attacker type]
-1. **Initial Access** - [FINDING-X] -> [foothold]
-2. **Escalation** - [FINDING-Y] -> [escalate]
+1. **Initial Access** - [X] -> [foothold]
+2. **Escalation** - [Y] -> [escalate]
 3. **Objective** - [outcome]
 **Combined Impact:** [what chain achieves]  **Priority Fix:** [which fix breaks chain]
 ```
@@ -181,8 +181,8 @@ If no chains: "No multi-step attack paths identified."
 ## Finding Cross-Reference
 | Report ID | Backend Slug | Title |
 |-----------|-------------|-------|
-| FINDING-001 | FINDING-VA-003 | Blind SQL injection in search |
-| FINDING-002 | FINDING-EX-001 | Auth bypass via JWT alg:none |
+| 001 | VA-003 | Blind SQL injection in search |
+| 002 | EX-001 | Auth bypass via JWT alg:none |
 ```
 
 This table maps report IDs back to canonical backend slugs for traceability.
@@ -196,7 +196,7 @@ Tool output in `<details>` blocks, generated scripts, scope verification table, 
 Before generating the report body, run these checks against the backend data. If any check fails, **stop and flag the issue to the operator** — do not silently fix or ignore it.
 
 1. **Readiness gate:** for final reports, run `./scripts/assess.py check-report-readiness`. If it fails, stop and flag the blockers to the operator.
-2. **Duplicate check:** scan findings for pairs sharing the same root cause + endpoint. Flag: "FINDING-VA-003 and FINDING-EX-001 appear to describe the same root cause on /api/users — resolve before report."
+2. **Duplicate check:** scan findings for pairs sharing the same root cause + endpoint. Flag: "VA-003 and EX-001 appear to describe the same root cause on /api/users — resolve before report."
 3. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
 4. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
 
@@ -266,7 +266,7 @@ Run these publication steps only after the operator confirms the report QA gate 
    ```bash
    # For each finding slug included in the report, use the finding-specific helper so the
    # workflow transition stays explicit at the command line:
-   ./scripts/assess.py update-finding FINDING-VA-003 \
+   ./scripts/assess.py update-finding VA-003 \
      --status reported \
      --notes "Included in report.md" \
      --reason "Included in the generated report deliverable." \

@@ -82,6 +82,7 @@ def test_init_engagement_writes_explicit_scope_and_exploit_policy(tmp_path: Path
     assert (engagement_dir / "sessions" / "index.json").exists()
     assert (engagement_dir / "start_codex.sh").exists()
     assert (engagement_dir / "start_claude.sh").exists()
+    assert (engagement_dir / ".codex" / "config.toml").exists()
     assert (engagement_dir / "CLAUDE.md").exists()
     assert manifest["key"] == engagement_dir.name
     assert manifest["target"] == "https://app.example.com"
@@ -316,6 +317,7 @@ def test_start_codex_exports_engagement_orchestrator_url(tmp_path: Path) -> None
     (bin_dir / "codex").write_text(
         "#!/usr/bin/env bash\n"
         "printf 'ENGAGEMENT_DIR=%s\\n' \"${ENGAGEMENT_DIR:-}\"\n"
+        "printf 'AI_THREAT_HUNTING_AGENT_ROOT=%s\\n' \"${AI_THREAT_HUNTING_AGENT_ROOT:-}\"\n"
         "printf 'ORCHESTRATOR_BASE_URL=%s\\n' \"${ORCHESTRATOR_BASE_URL:-}\"\n",
         encoding="utf-8",
     )
@@ -331,6 +333,7 @@ def test_start_codex_exports_engagement_orchestrator_url(tmp_path: Path) -> None
     )
 
     assert f"ENGAGEMENT_DIR={engagement_dir}" in launch.stdout
+    assert f"AI_THREAT_HUNTING_AGENT_ROOT={sandbox_root}" in launch.stdout
     assert "ORCHESTRATOR_BASE_URL=https://override.example.test" in launch.stdout
 
 
@@ -495,10 +498,12 @@ def test_install_upgrade_preserves_agent_engagements(tmp_path: Path) -> None:
     assert (install_root / "AGENTS.md").exists()
     assert (install_root / "CLAUDE.md").exists()
     assert (install_root / ".codex" / "agents").is_dir()
+    assert (install_root / ".codex" / "config.toml").exists()
     assert (install_root / ".claude" / "agents").is_dir()
     assert (install_root / "agent" / "AGENTS.md").exists()
     assert (install_root / "agent" / "CLAUDE.md").exists()
     assert (install_root / "agent" / ".codex" / "agents").is_dir()
+    assert (install_root / "agent" / ".codex" / "config.toml").exists()
     assert (install_root / "agent" / ".claude" / "agents").is_dir()
 
     engagement_dir = install_root / "agent" / "engagements" / "existing-engagement"
