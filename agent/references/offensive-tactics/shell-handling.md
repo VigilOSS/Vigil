@@ -127,7 +127,7 @@ Agents **MUST NOT:**
 
 Agents **CAN:**
 - Read listener log files (`tail /data/shell-*.log`) via Kali MCP
-- Read OOB callback logs (`tail /data/oob-server.log`) via Kali MCP to check for hits
+- Read OOB callback logs (`tail /data/oob/clients/<name>.log` or `tail /data/oob/server.log`) via Kali MCP to check for hits
 - Provide reverse shell payloads for the operator to deploy
 - Verify that a shell connected by checking log output
 - Send commands to an established shell via `tmux send-keys` (if operator authorizes)

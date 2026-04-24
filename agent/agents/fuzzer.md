@@ -74,11 +74,11 @@ When fuzzing blind injection surfaces with OOB payloads, check the callback logs
 after each batch:
 
 ```bash
-# Preferred — correlated hits only (filters AWS noise)
-tail -50 /data/oob-client.log
+# Preferred — correlated hits only
+tail -50 /data/oob/clients/<name>.log
 
 # Raw server log (noisy)
-tail -50 /data/oob-server.log
+tail -50 /data/oob/server.log
 ```
 
 If `$DIR/.oob_url` was provided in your dispatch context, include the callback URL in blind

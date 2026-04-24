@@ -60,7 +60,7 @@ Attack techniques organized by kill chain phase. Used by: operator, exploit-deve
 | File | Techniques |
 |------|-----------|
 | `offensive-tactics/shell-handling.md` | pwncat-vl listeners, tmux session management, reverse shell payloads, log tailing for LLM visibility |
-| `offensive-tactics/frp-tunneling.md` | frp SSH tunnel setup (HTTP + TCP modes), interactsh OOB callback servers, tunnel logging, standard engagement tunnels (reverse shell, OOB DNS/HTTPS/HTTP) |
+| `offensive-tactics/frp-tunneling.md` | `aith oob` frp/interactsh setup, per-agent OOB clients, tunnel logging, reverse shell and OOB DNS/HTTP callback conventions |
 
 ### offensive-tactics/persistence/
 

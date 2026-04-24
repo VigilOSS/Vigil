@@ -18,14 +18,17 @@ HOST_GATEWAY_ARG = "--add-host=host.docker.internal:host-gateway"
 
 
 def run_command(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> DockerResult:
-    completed = subprocess.run(
-        argv,
-        cwd=str(cwd) if cwd else None,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        return DockerResult(127, "", str(exc))
     return DockerResult(completed.returncode, completed.stdout, completed.stderr)
 
 
@@ -89,3 +92,24 @@ def container_image_id(name: str, *, runner: Runner = run_command) -> str:
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
+
+
+def daemon_available(*, runner: Runner = run_command) -> bool:
+    return runner(["docker", "info"]).returncode == 0
+
+
+def container_mounts(name: str, *, runner: Runner = run_command) -> dict[str, str]:
+    template = '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+    result = runner(["docker", "inspect", "-f", template, name])
+    if result.returncode != 0:
+        return {}
+    mounts: dict[str, str] = {}
+    for raw_line in result.stdout.splitlines():
+        source, sep, destination = raw_line.partition(" -> ")
+        if sep:
+            mounts[destination.strip()] = source.strip()
+    return mounts
+
+
+def volume_exists(name: str, *, runner: Runner = run_command) -> bool:
+    return runner(["docker", "volume", "inspect", name]).returncode == 0

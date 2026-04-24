@@ -37,6 +37,7 @@ def start_runtime(options: RuntimeOptions, *, runner: docker.Runner = docker.run
 
     if docker.container_running(options.container_name, runner=runner) and not options.recreate:
         _validate_image_current(options, runner=runner)
+        _validate_mounts(options.container_name, data_dir, engagements_dir, runner=runner)
         if validate_tools:
             _validate_tools(options.container_name, runner=runner)
         return
@@ -67,6 +68,7 @@ def start_runtime(options: RuntimeOptions, *, runner: docker.Runner = docker.run
     argv.extend(["-e", f"ORCHESTRATOR_BASE_URL={base_url}", options.image])
     docker.run_with_host_gateway_fallback(argv, runner=runner)
     _validate_image_current(options, runner=runner)
+    _validate_mounts(options.container_name, data_dir, engagements_dir, runner=runner)
     if validate_tools:
         _validate_tools(options.container_name, runner=runner)
 
@@ -78,6 +80,17 @@ def stop_runtime(container_name: str = "security-research", *, runner: docker.Ru
 
 def runtime_status(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> str:
     return "running" if docker.container_running(container_name, runner=runner) else "stopped"
+
+
+def runtime_mounts_ok(install_root: Path, container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> bool:
+    install_root = install_root.expanduser().resolve()
+    data_dir = Path(os.environ.get("KALI_MCP_DATA_DIR", install_root / ".runtime-data"))
+    engagements_dir = install_root / "agent" / "engagements"
+    try:
+        _validate_mounts(container_name, data_dir, engagements_dir, runner=runner)
+    except SystemExit:
+        return False
+    return True
 
 
 def _validate_image_current(options: RuntimeOptions, *, runner: docker.Runner) -> None:
@@ -98,3 +111,20 @@ def _validate_tools(container_name: str, *, runner: docker.Runner) -> None:
     result = runner(["docker", "exec", container_name, "test", "-d", "/engagements"])
     if result.returncode != 0:
         raise SystemExit("Runtime /engagements mount missing. Recreate with `aith runtime restart`.")
+
+
+def _validate_mounts(container_name: str, data_dir: Path, engagements_dir: Path, *, runner: docker.Runner) -> None:
+    mounts = docker.container_mounts(container_name, runner=runner)
+    expected = {
+        "/data": data_dir.expanduser().resolve(),
+        "/engagements": engagements_dir.expanduser().resolve(),
+    }
+    for destination, expected_source in expected.items():
+        actual_source = mounts.get(destination)
+        if not actual_source:
+            raise SystemExit(f"Runtime mount drift detected: missing {destination}. Recreate with `aith runtime restart`.")
+        if Path(actual_source).expanduser().resolve() != expected_source:
+            raise SystemExit(
+                f"Runtime mount drift detected for {destination}: {actual_source} != {expected_source}. "
+                "Recreate with `aith runtime restart`."
+            )

@@ -17,7 +17,7 @@ Keep it light:
 
 - `README.md` - operator/install guide. Why: defines the supported runtime model and engagement startup flow.
 - `AGENTS.md` - maintainer workflow. Why: local development rules, verification steps, and prompt regeneration requirements live here.
-- `pyproject.toml` and `src/ai_threat_hunting_cli/` - universal CLI package. Why: `aith` / `security-research` owns install/upgrade, engagement creation/listing/selection, orchestrator lifecycle, Kali runtime lifecycle, mitmproxy capture startup, MCP registration guidance, and `aith assess` pass-through.
+- `pyproject.toml` and `src/ai_threat_hunting_cli/` - universal CLI package. Why: `aith` / `security-research` owns install/update, config, doctor/status, centralized logs, engagement creation/listing/selection, orchestrator lifecycle, Kali runtime lifecycle, mitmproxy capture startup, OOB/frp/interactsh control, backup/auth helpers, MCP registration guidance, and `aith assess` pass-through.
 - `docker/kali-mcp-runtime/mcp-server-wrapper.sh` - container entry shim. Why: waits for the Kali API and then starts the MCP client.
 - `docker/kali-mcp-runtime/patched_kali_server.py` - local patch over the upstream Kali API server. Why: normalizes command execution, timeout, partial-result behavior, and audit-record emission. Extracts `X-Engagement-Key`/`X-Agent-Name`/`X-Phase` audit headers (or env-var defaults), rejects tool calls missing them when `KALI_MCP_AUDIT_REQUIRED=1`, injects per-call `ENGAGEMENT_KEY`/`ENGAGEMENT_DIR` into command subprocesses, and enqueues each run for backend recording.
 - `docker/kali-mcp-runtime/kali_mcp_audit.py` - async Kali command-run audit poster. Why: decouples backend `/engagements/{key}/assessment/command-runs` POSTs from the Flask response path with a bounded queue and circuit breaker.
@@ -61,6 +61,7 @@ Keep it light:
 - `src/ai_threat_hunting_cli/runtime.py` - shared runtime bootstrap. Why: starts and validates the canonical Kali MCP container, including image-ID drift against the configured image tag. Bind-mounts `$INSTALL_ROOT/agent/engagements` at `/engagements` inside Kali (alongside the shared `/data` mount) so skills can reach engagement artifacts at `/engagements/$ENGAGEMENT_KEY/...` without ferrying files across the container boundary.
 - `src/ai_threat_hunting_cli/orchestrator.py` - local UI/backend lifecycle. Why: builds the frontend when needed and manages the backend process on `127.0.0.1:18000`.
 - `src/ai_threat_hunting_cli/mitmproxy.py` - mitmproxy capture lifecycle. Why: builds/starts/stops the Dockerized browser-capture proxy with an engagement bind mount and persistent CA volume.
+- `src/ai_threat_hunting_cli/status.py`, `config.py`, `backup.py`, `auth.py`, and `oob.py` - operator control helpers. Why: these modules own readiness/live-state checks, local CLI config, DB snapshot commands, engagement auth file operations, and shared OOB/frp/interactsh tmux orchestration.
 - `agent/docker/runtime-full/Dockerfile` - primary runtime image. Why: supported target-facing tool surface.
 - `agent/docker/runtime-lightweight/Dockerfile` - development-only runtime image. Why: faster Dockerfile iteration, not an operator runtime.
 - `agent/docker/docker-compose.yml` - local runtime composition. Why: runtime and mitmproxy images can be built together for development.

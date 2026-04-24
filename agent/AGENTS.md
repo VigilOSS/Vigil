@@ -113,7 +113,7 @@ Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are 
 
 - **Operator** provisions per `agent/references/offensive-tactics/shell-handling.md` (reverse shells) and `agent/references/offensive-tactics/frp-tunneling.md` (tunnels, interactsh OOB), then writes `$DIR/.listener_url` and/or `$DIR/.oob_url`.
 - **Agents** read `$DIR/.listener_url` and `$DIR/.oob_url` from dispatch context (never write). If OOB is unavailable, fall back to time-based detection and note it in output. If a listener cannot be provisioned, record a blocked technique via `aith assess post blocked-techniques <json-file>`.
-- **Hit-checking and log paths** (`/data/oob-client.log`, `/data/oob-server.log`, `/data/shell-*.log`, `/data/frpc.log`) are documented in `frp-tunneling.md` and `shell-handling.md`.
+- **Hit-checking and log paths** (`/data/oob/clients/<name>.log`, `/data/oob/server.log`, `/data/shell-*.log`, `/data/oob/frpc.log`) are documented in `frp-tunneling.md` and `shell-handling.md`.
 
 ## Reactive Nuclei on URL Discovery
 
@@ -229,7 +229,7 @@ DB="$DIR/cases.db"
    - **Classify the work buffer** — run `aith assess classify-work "$DIR/cases.db"` once ingestion and the reactive nuclei sweep have settled. This populates `priority_score`, `priority_reason`, and `cluster_key` on pending work items using the deterministic gf-style bucketing in `classify_work.py`; without this step the Phase 3 priority-mode dispatch has nothing to sort by. Re-run after any later ingestion wave.
    - **Review clusters, defer low-signal ones** — `aith assess list-clusters "$DIR/cases.db"` prints cluster counts, max/avg priority, and representative URLs. Any cluster that is clearly not worth specialist attention (e.g., 10k static-asset URLs, out-of-scope-adjacent paths, already-covered admin endpoints) gets deferred with `aith assess dispatch "$DIR/cases.db" defer-cluster <cluster_key> --reason "…"` before Phase 3 begins — leaving low-signal clusters pending pollutes the priority queue and forces specialists to re-triage what the operator already judged.
    Surface-collector records surfaces via `aith assess record-surface` and findings via `aith assess record-finding` before returning.
-   **Phase 2 exit gate.** Run `aith assess check-scope-coverage --require-stage collection`. Every scoped entry must have collection activity attached; if not, redispatch surface-collector against the missing entries before advancing. Skipping this gate lets scope-entries drift into Phase 3 with zero work in the buffer.
+   **Phase 2 exit gate.** Run `aith assess check-scope-coverage --require-stage collection`. Every scoped entry must have collection evidence — a recorded surface or a work-buffer row under its host. If an entry has neither, redispatch surface-collector against it or mark the entry deferred in `scope.json` before advancing. Skipping this gate lets scope-entries drift into Phase 3 with zero work in the buffer.
    Update scope.json phase to `consume-test` when ingestion is complete.
 3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
    a. **Nuclei coverage audit** (once, before the work-buffer loop) — audit what Phase 1/2 reactive sweeps already covered and run nuclei only against gaps. Do not blindly re-sweep: if every in-scope live host already received the reactive template set, this step prints a coverage summary and advances.
