@@ -1,4 +1,4 @@
-"""assess.py export-findings — generate findings.md from backend state on demand."""
+"""aith assess export-findings — generate findings.md from backend state on demand."""
 from __future__ import annotations
 
 import json

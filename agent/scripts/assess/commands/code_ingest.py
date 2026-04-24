@@ -1,4 +1,4 @@
-"""assess.py code-ingest — walk a repo, fingerprint files, POST to code analysis backend."""
+"""aith assess code-ingest — walk a repo, fingerprint files, POST to code analysis backend."""
 from __future__ import annotations
 
 import hashlib

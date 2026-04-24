@@ -8,8 +8,8 @@ Usage (from the repo root)::
         [--engagement 2026-04-12-072244-acme-info] \
         [--dry-run]
 
-Defaults ``--data-dir`` to the installed location
-(``/path/to/vigil``). Processes every engagement whose
+Defaults ``--data-dir`` to ``$AI_THREAT_HUNTING_INSTALL_DIR`` or
+``~/security-research``. Processes every engagement whose
 DB row exists AND whose filesystem folder still carries an ``intel.md`` or
 ``log.md``. On success, source files are renamed ``*.imported`` so the
 operator can verify without them being re-read.
@@ -1332,7 +1332,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--data-dir",
-        default="/path/to/vigil",
+        default=os.environ.get("AI_THREAT_HUNTING_INSTALL_DIR", str(Path.home() / "security-research")),
         help="Install root containing agent/engagements and orchestrator/backend/data.",
     )
     parser.add_argument(

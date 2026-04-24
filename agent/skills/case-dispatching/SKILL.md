@@ -24,23 +24,23 @@ This skill is coordination-only. Use it to inspect the work buffer, route batche
 
 Each iteration (set `DB="$DIR/cases.db"`):
 ```
-1. Reset stale: ./scripts/assess.py dispatch "$DB" reset-stale 10
-2. Check stats: ./scripts/assess.py dispatch "$DB" stats    # read total pending
+1. Reset stale: aith assess dispatch "$DB" reset-stale 10
+2. Check stats: aith assess dispatch "$DB" stats    # read total pending
 3a. Pending < 2000 → type-based dispatch (vulnerability-analyst and source-analyzer can run IN PARALLEL):
 
     vulnerability-analyst: api, api-spec, form, upload, graphql, websocket
     source-analyzer: page, javascript, stylesheet, data
 
-    ./scripts/assess.py dispatch "$DB" fetch <type> 10 <agent_name>
+    aith assess dispatch "$DB" fetch <type> 10 <agent_name>
 
 3b. Pending >= 2000 → priority-first dispatch:
 
     # Populate priority/cluster once (idempotent):
-    ./scripts/assess.py classify-work "$DB"
+    aith assess classify-work "$DB"
 
     # Optional: review clusters, defer low-signal ones before dispatch:
-    ./scripts/assess.py list-clusters "$DB"
-    ./scripts/assess.py dispatch "$DB" defer-cluster <cluster_key> --reason "..."
+    aith assess list-clusters "$DB"
+    aith assess dispatch "$DB" defer-cluster <cluster_key> --reason "..."
 
     # Fetch across types by priority. `fetch-by-priority` is route-aware: it
     # only claims rows whose type maps to a real specialist route and rejects
@@ -50,15 +50,15 @@ Each iteration (set `DB="$DIR/cases.db"`):
     #   vulnerability-analyst[-N] — claim only api/api-spec/form/upload/graphql/
     #                               websocket rows (N is an optional instance label).
     #   source-analyzer[-N]       — claim only page/javascript/stylesheet/data rows.
-    ./scripts/assess.py dispatch "$DB" fetch-by-priority 10 auto
-    ./scripts/assess.py dispatch "$DB" fetch-by-priority 10 vulnerability-analyst
-    ./scripts/assess.py dispatch "$DB" fetch-by-priority 10 source-analyzer-2
+    aith assess dispatch "$DB" fetch-by-priority 10 auto
+    aith assess dispatch "$DB" fetch-by-priority 10 vulnerability-analyst
+    aith assess dispatch "$DB" fetch-by-priority 10 source-analyzer-2
 
 4. On subagent return:
-   - Done: ./scripts/assess.py dispatch "$DB" done "id1,id2,..."
-   - New endpoints: feed them back through `assess.py ingest-endpoints "$DB" <source>` or `assess.py ingest-spec "$DB" <spec-file>` so backend state is created first, then rerun `classify-work` so the new rows enter the priority queue with scores
-   - Findings: write structured finding state with `assess.py record-finding`
-   - Errors: ./scripts/assess.py dispatch "$DB" error "id1,id2,..."
+   - Done: aith assess dispatch "$DB" done "id1,id2,..."
+   - New endpoints: feed them back through `aith assess ingest-endpoints "$DB" <source>` or `aith assess ingest-spec "$DB" <spec-file>` so backend state is created first, then rerun `classify-work` so the new rows enter the priority queue with scores
+   - Findings: write structured finding state with `aith assess record-finding`
+   - Errors: aith assess dispatch "$DB" error "id1,id2,..."
 5. pending=0 and producers stopped → report completion
 6. Otherwise → loop back to step 1
 ```
@@ -114,9 +114,9 @@ sqlite3 "$DB" ".timeout 5000" "
 
 ## Key Rules
 
-- Use `./scripts/assess.py dispatch "$DB" <action>` for all work-buffer operations — reading cases.db directly bypasses the backend sync layer and can produce stale or inconsistent state
+- Use `aith assess dispatch "$DB" <action>` for all work-buffer operations — reading cases.db directly bypasses the backend sync layer and can produce stale or inconsistent state
 - Treat this skill as host-side coordination only. All real target testing stays in Kali MCP.
-- Record findings in backend state immediately via `assess.py record-finding`
+- Record findings in backend state immediately via `aith assess record-finding`
 - Re-ingest new endpoints through backend-first producers; let the work buffer mirror the resulting canonical ids
 - Use reset-stale at start of each iteration
 - **DO NOT STOP EARLY** — loop until pending=0 for all consumable types
@@ -129,11 +129,11 @@ sqlite3 "$DB" ".timeout 5000" "
 
 ```bash
 DB="$DIR/cases.db"
-./scripts/assess.py dispatch "$DB" stats
-./scripts/assess.py dispatch "$DB" fetch <type> <limit> <agent_name>
-./scripts/assess.py dispatch "$DB" done "id1,id2,id3"
-./scripts/assess.py dispatch "$DB" error "id1,id2,id3"
-./scripts/assess.py dispatch "$DB" reset-stale <minutes>
-echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | ./scripts/assess.py dispatch "$DB" requeue
-echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | ./scripts/assess.py dispatch "$DB" requeue
+aith assess dispatch "$DB" stats
+aith assess dispatch "$DB" fetch <type> <limit> <agent_name>
+aith assess dispatch "$DB" done "id1,id2,id3"
+aith assess dispatch "$DB" error "id1,id2,id3"
+aith assess dispatch "$DB" reset-stale <minutes>
+echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | aith assess dispatch "$DB" requeue
+echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | aith assess dispatch "$DB" requeue
 ```

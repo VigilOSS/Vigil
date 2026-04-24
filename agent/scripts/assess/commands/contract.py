@@ -1,4 +1,4 @@
-"""assess.py contract — print stable CLI contract details for helper commands."""
+"""aith assess contract — print stable CLI contract details for helper commands."""
 from __future__ import annotations
 
 import argparse
@@ -14,11 +14,11 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  assess.py contract record-finding\n"
-            "  assess.py contract verify-finding\n"
-            "  assess.py contract update-finding\n"
-            "  assess.py contract reset-finding\n"
-            "  assess.py contract record-intel tech-component"
+            "  aith assess contract record-finding\n"
+            "  aith assess contract verify-finding\n"
+            "  aith assess contract update-finding\n"
+            "  aith assess contract reset-finding\n"
+            "  aith assess contract record-intel tech-component"
         ),
     )
     p.add_argument("name", help=f"Contract name ({', '.join(contract_names())})")

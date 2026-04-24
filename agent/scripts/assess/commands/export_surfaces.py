@@ -1,4 +1,4 @@
-"""assess.py export-surfaces — generate surfaces.jsonl from backend state on demand."""
+"""aith assess export-surfaces — generate surfaces.jsonl from backend state on demand."""
 from __future__ import annotations
 
 import json

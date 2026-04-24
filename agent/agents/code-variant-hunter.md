@@ -113,7 +113,7 @@ Per-file variant check status:
 ## State Recording
 
 ```bash
-./scripts/assess.py record-finding code-variant-hunter <finding-json>
+aith assess record-finding code-variant-hunter <finding-json>
 ```
 
 ## Finding Prefix: CV

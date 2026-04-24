@@ -25,7 +25,7 @@ class _ActivitySignal:
     ``task.started``, and ``task.completed`` rows to infer phase progression.
     Pre-refactor those were synthesised from ``artifact.updated task_name=log.md``
     events emitted by the old ``assess.py log`` (which also appended to
-    ``log.md``). Now that ``log.md`` is gone and ``assess.py log`` POSTs to
+    ``log.md``). Now that ``log.md`` is gone and ``aith assess log`` POSTs to
     ``activity_entries`` without writing a parallel event row, we synthesise
     the same signals from activity rows here.
     """

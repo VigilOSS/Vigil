@@ -9,7 +9,7 @@ def main(argv: list[str] | None = None) -> None:
     from assess.lib.client import AssessError
 
     parser = argparse.ArgumentParser(
-        prog="assess.py",
+        prog="aith assess",
         description="AI Threat Hunting — assessment coordination CLI",
     )
     parser.add_argument(

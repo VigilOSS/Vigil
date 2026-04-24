@@ -91,8 +91,8 @@ the backend ledger:
 
 ```bash
 curl -sL "https://TARGET/openapi.json" -o /engagements/$ENGAGEMENT_KEY/scans/openapi.json
-./scripts/assess.py ingest-spec "$ENGAGEMENT_DIR/cases.db" "$ENGAGEMENT_DIR/scans/openapi.json"
-./scripts/assess.py dispatch "$ENGAGEMENT_DIR/cases.db" stats
+aith assess ingest-spec "$ENGAGEMENT_DIR/cases.db" "$ENGAGEMENT_DIR/scans/openapi.json"
+aith assess dispatch "$ENGAGEMENT_DIR/cases.db" stats
 ```
 
 This creates durable request/service coverage candidates and, when the local buffer is in use,

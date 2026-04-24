@@ -1,4 +1,4 @@
-"""assess.py record-surface — POST surface + emit event."""
+"""aith assess record-surface — POST surface + emit event."""
 from __future__ import annotations
 
 import os

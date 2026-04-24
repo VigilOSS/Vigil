@@ -1,4 +1,4 @@
-"""assess.py dispatch — SQLite work-buffer consumption engine.
+"""aith assess dispatch — SQLite work-buffer consumption engine.
 
 Replaces dispatcher.sh with parameterized SQL.
 """

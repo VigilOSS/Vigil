@@ -36,7 +36,7 @@ without sending traffic to the target.
 subfinder -d target.example -silent
 
 # With all sources (API keys are passed via docker --env-file from the
-# repo-root .env when start_kali_mcp_runtime.sh launched the container;
+# install-root .env when `aith runtime start` launched the container;
 # subfinder reads them straight from the process environment, no per-
 # engagement file is mounted)
 subfinder -d target.example -all -silent -o /engagements/$ENGAGEMENT_KEY/scans/subdomains.txt
@@ -51,8 +51,8 @@ subfinder -d target.example -all -json -o /engagements/$ENGAGEMENT_KEY/scans/sub
 subfinder -d target.example -all -silent -nW -o /engagements/$ENGAGEMENT_KEY/scans/subdomains_raw.txt
 ```
 
-**API keys** enhance results significantly. Set them in the repo-root `.env`
-(not the engagement directory) so `start_kali_mcp_runtime.sh` passes them via
+**API keys** enhance results significantly. Set them in the install-root `.env`
+(not the engagement directory) so `aith runtime start` passes them via
 `docker --env-file` into the runtime container — subfinder reads them from
 the process environment on every Kali MCP execution:
 ```
@@ -60,7 +60,7 @@ SUBFINDER_VIRUSTOTAL_API_KEY=...
 SUBFINDER_SECURITYTRAILS_API_KEY=...
 SUBFINDER_SHODAN_API_KEY=...
 ```
-Recreate the Kali runtime (`./scripts/start_kali_mcp_runtime.sh --recreate`)
+Restart the Kali runtime (`aith runtime restart`)
 after editing `.env` so the new values reach the container.
 
 ### 1b. Active DNS Brute-Force with puredns
@@ -194,7 +194,7 @@ can still be used as a transient batching buffer for follow-up testing:
 awk '{print $1}' "$ENGAGEMENT_DIR/scans/subdomains_live.txt" | sort -u | while IFS= read -r sub; do
   echo "GET https://$sub"
 done | \
-  ./scripts/assess.py ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum
+  aith assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum
 ```
 
 After ingestion, the operator triggers a reactive nuclei sweep against the newly-live subdomains — see `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode".

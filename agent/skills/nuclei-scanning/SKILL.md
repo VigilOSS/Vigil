@@ -37,14 +37,14 @@ priority_score on fresh work-buffer entries before specialists pull them. Trigge
 
 - After `recon-specialist` returns with an endpoint list (`endpoints.txt` or surfaces)
 - After `source-analyzer` harvests JS/HTML URLs (scans/js_urls.txt, extracted endpoint arrays)
-- After `surface-collector` ingests Katana / gau output (`assess.py ingest-endpoints` just ran)
+- After `surface-collector` ingests Katana / gau output (`aith assess ingest-endpoints` just ran)
 - After `subdomain-enumeration` produces live hosts (`subdomains_live.txt` entries land)
 - After wildcard expansion adds apex siblings that passed the httpx liveness check
 
-### Build the delta file (Kali MCP + assess.py)
+### Build the delta file (Kali MCP + aith assess)
 
 The delta is "live URLs not yet covered by a prior reactive nuclei run with the same template
-set." Build it on the host (coverage lookup is host-side `assess.py` work), then write the file
+set." Build it on the host (coverage lookup is host-side `aith assess` work), then write the file
 under `/engagements/$ENGAGEMENT_KEY/scans/` so Kali sees it at the same path.
 
 ```bash
@@ -54,7 +54,7 @@ KEY=$(basename "$DIR")
 RID=$(date -u +%Y%m%dT%H%M%SZ)
 
 # 1. Gather the current live-URL universe from backend state.
-./scripts/assess.py fetch summary > "$DIR/scans/_summary_$RID.json"
+aith assess fetch summary > "$DIR/scans/_summary_$RID.json"
 # Take services/hosts plus any freshly-ingested URLs you want covered. Example shape:
 jq -r '.. | .url? // empty' "$DIR/scans/_summary_$RID.json" | sort -u \
   > "$DIR/scans/_all_live_$RID.txt"
@@ -62,7 +62,7 @@ jq -r '.. | .url? // empty' "$DIR/scans/_summary_$RID.json" | sort -u \
 # katana output — so the reactive pass scans only the newly-added URLs.)
 
 # 2. Gather already-scanned URLs from prior reactive runs with the same template bucket.
-./scripts/assess.py list-command-runs --q nuclei --tool-bin nuclei --json > \
+aith assess list-command-runs --q nuclei --tool-bin nuclei --json > \
   "$DIR/scans/_nuclei_runs_$RID.json"
 # Every prior reactive run wrote its input list at /engagements/$KEY/scans/nuclei_reactive_<RID>.txt
 # and its output JSONL alongside. Extract URLs already covered — use the JSONL artifacts as the
@@ -71,13 +71,13 @@ find "$DIR/scans" -name 'nuclei_reactive_*.jsonl' -print0 | \
   xargs -0 -r jq -r '.["matched-at"] // .host // empty' 2>/dev/null | \
   sort -u > "$DIR/scans/_already_scanned_$RID.txt"
 
-# 3. Subtract already-scanned from all-live, then filter the result to scope via assess.py
+# 3. Subtract already-scanned from all-live, then filter the result to scope via aith assess
 #    filter-scope. filter-scope does exact-host and wildcard-aware matching against scope.json,
 #    so it correctly handles `*.example.com` entries that naive `grep -Ff` treats as literals.
 comm -23 \
   "$DIR/scans/_all_live_$RID.txt" \
   "$DIR/scans/_already_scanned_$RID.txt" | \
-  ./scripts/assess.py filter-scope - \
+  aith assess filter-scope - \
   > "$DIR/scans/nuclei_reactive_$RID.txt"
 ```
 
@@ -132,7 +132,7 @@ CVE/misconfig/exposure signal rather than fuzzing noise.
 
 ### Dedup across runs (Option A — no schema change)
 
-Use `assess.py list-command-runs --q nuclei` to compute the "already-scanned" set from prior
+Use `aith assess list-command-runs --q nuclei` to compute the "already-scanned" set from prior
 reactive runs, then subtract it from the current delta before invoking nuclei. The artifact
 filenames and JSONL outputs are durable engagement state — no new column on
 `assessment_command_runs` is needed because the inputs (delta file) and outputs (JSONL) live
@@ -140,7 +140,7 @@ under `/engagements/$ENGAGEMENT_KEY/scans/` and survive container recreate.
 
 ```bash
 # jq exclusion-set pattern (runs before nuclei invocation)
-./scripts/assess.py list-command-runs --q nuclei --tool-bin nuclei --json | \
+aith assess list-command-runs --q nuclei --tool-bin nuclei --json | \
   jq -r '.[].command
          | capture("(?<path>/engagements/[^ ]+/scans/nuclei_reactive_[^ ]+\\.txt)")?.path
          // empty' | \
@@ -165,21 +165,21 @@ Reactive nuclei hits enter the engagement as candidates, not auto-recorded findi
 revalidation catches template false positives (SSRF probes against patched endpoints,
 version-string collisions, etc.) before they reach the finding lifecycle.
 
-- **Critical / high hits** — draft a finding JSON (see `./scripts/assess.py contract
+- **Critical / high hits** — draft a finding JSON (see `aith assess contract
   record-finding` for the schema), re-validate the template's PoC manually via Kali MCP, then
-  record with `./scripts/assess.py record-finding vulnerability-analyst <finding-json-file>`
+  record with `aith assess record-finding vulnerability-analyst <finding-json-file>`
   only if the re-test reproduces the hit.
-- **Medium hits** — record as intel with `./scripts/assess.py record-intel note <json-file>`,
+- **Medium hits** — record as intel with `aith assess record-intel note <json-file>`,
   noting the template-id and matched URL. Medium hits often seed Phase 3 targeted testing
   rather than standalone findings.
 - **Tech fingerprints** (from `-as` template matches like `http/technologies/`) — record via
-  `./scripts/assess.py record-intel tech-component <json-file>` so classify-work can match them
+  `aith assess record-intel tech-component <json-file>` so classify-work can match them
   against CVE intel.
 
 ### Safety and scope boundary
 
 Reactive nuclei runs only against URLs present in the scope.json host list (enforced by the
-`assess.py filter-scope` step above, which handles wildcards correctly). Never sweep a host
+`aith assess filter-scope` step above, which handles wildcards correctly). Never sweep a host
 whose presence in the delta came from passive sources alone — an out-of-scope sweep breaks
 the authorization envelope even if the finding would be accurate.
 
@@ -199,12 +199,12 @@ DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
 KEY=$(basename "$DIR")
 RID=$(date -u +%Y%m%dT%H%M%SZ)
 
-# 1. Universe: every in-scope live URL the engagement has observed. assess.py filter-scope
+# 1. Universe: every in-scope live URL the engagement has observed. aith assess filter-scope
 #    handles wildcard entries in scope.json correctly; the raw grep -Ff pattern misses
 #    `*.example.com` expansions and must not be reintroduced.
-./scripts/assess.py fetch summary > "$DIR/scans/_summary_audit_$RID.json"
+aith assess fetch summary > "$DIR/scans/_summary_audit_$RID.json"
 jq -r '.. | .url? // empty' "$DIR/scans/_summary_audit_$RID.json" | sort -u \
-  | ./scripts/assess.py filter-scope - \
+  | aith assess filter-scope - \
   > "$DIR/scans/_in_scope_live_audit_$RID.txt"
 
 # 2. Already-covered: every URL that appeared in a prior reactive run's input list.
@@ -221,7 +221,7 @@ comm -23 \
 GAP_COUNT=$(wc -l < "$DIR/scans/nuclei_gap_$RID.txt")
 if [ "$GAP_COUNT" -eq 0 ]; then
   COVERED_COUNT=$(wc -l < "$DIR/scans/_in_scope_live_audit_$RID.txt")
-  ./scripts/assess.py log operator \
+  aith assess log operator \
     "Phase 3a nuclei coverage audit" \
     "check-scope-coverage --require-stage consumption" \
     "Reactive sweeps covered all ${COVERED_COUNT} in-scope live URLs; no rerun needed." \

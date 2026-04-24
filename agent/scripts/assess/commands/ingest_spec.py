@@ -1,4 +1,4 @@
-"""assess.py ingest-spec — parse OpenAPI 3.x / Swagger 2.0 specs and generate coverage records."""
+"""aith assess ingest-spec — parse OpenAPI 3.x / Swagger 2.0 specs and generate coverage records."""
 from __future__ import annotations
 
 import json
