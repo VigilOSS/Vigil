@@ -53,10 +53,18 @@ After pulling new changes from the repository, re-run the CLI installer to push 
 
 ```bash
 # from the repo checkout
-aith install
+aith update
 ```
 
-The installer upgrades in place — engagements, the orchestrator database, and `.env` are never moved or deleted. Code, prompts, skills, and scripts are replaced with the latest versions from the repo.
+`aith update` is an alias for the idempotent installer. It upgrades in place — engagements, the orchestrator database, and `.env` are never moved or deleted. Code, prompts, skills, and scripts are replaced with the latest versions from the repo.
+
+Check local readiness and live service state:
+
+```bash
+aith doctor
+aith status
+aith logs orchestrator --lines 80
+```
 
 ### 1. Kali MCP runtime
 
@@ -73,6 +81,7 @@ Attach Claude Code or Codex over stdio after the runtime is up:
 
 ```bash
 aith mcp install both
+aith mcp status
 ```
 
 ### 2. Orchestrator UI
@@ -103,6 +112,14 @@ Both the backend and `aith engagement create` honor the same precedence so snaps
 Backup cadence tuning (optional):
 
 - `AI_THREAT_HUNTING_BACKUP_DISABLED=1` — turn off the scheduled backup entirely (used by the test suite)
+
+Manual backup operations:
+
+```bash
+aith backup create
+aith backup list
+aith backup restore <backup-name-or-path>
+```
 
 Then create an engagement inside the chosen install:
 
@@ -198,8 +215,8 @@ clang --version
 afl-fuzz -V
 ```
 
-`aith doctor` reports missing host-side code fuzzing prerequisites. Fuzzing is
-conditional and normal code analysis can still proceed when those tools are absent.
+`aith doctor` covers the core operator CLI/runtime prerequisites. Fuzzing is
+conditional; check the Homebrew tools directly when planning a fuzz campaign.
 
 Homebrew's AFL++ package may provide `afl-clang-fast` or `afl-cc` instead of
 `afl-clang-lto` on macOS; either compiler wrapper is acceptable for the workflow
@@ -253,6 +270,15 @@ The MCP entrypoint is the wrapper in [docker/kali-mcp-runtime/mcp-server-wrapper
 
 If auth is expired or missing, the workflow warns and continues anonymously. The human can refresh `auth.json` directly or let mitmproxy capture a fresh login and update it.
 
+CLI helpers operate on engagement `auth.json`:
+
+```bash
+aith auth status --latest
+aith auth show --latest
+aith auth import --latest --source cookies-and-headers.json
+aith auth clear --latest
+```
+
 ## Optional Tool Activation
 
 These capabilities are intentionally present but not always started automatically.
@@ -265,7 +291,7 @@ For ad hoc shell work outside the engagement launcher, export `ENGAGEMENT_DIR` e
 
 1. Start the proxy against the active engagement: `aith mitmproxy start /path/to/engagement`
 2. The CLI builds the Docker image if needed, bind-mounts the engagement at `/engagement`, persists the mitmproxy CA in a Docker volume, and verifies the local proxy port.
-3. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow, then confirm that `auth.json` was refreshed and continue the engagement with authenticated recollection and testing.
+3. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow, then confirm that `auth.json` was refreshed and continue the engagement with authenticated recollection and testing. Use `aith logs mitmproxy` for capture logs.
 
 If you need HTTPS interception, install the mitmproxy CA certificate in the browser or device before logging in.
 
@@ -286,6 +312,18 @@ Universal ctags produces richer tag data (signatures, kinds, line numbers) and s
 ## Callback, Listener & Tunnel Handling
 
 Tunnels (frp), listeners (pwncat-vl), and OOB callback servers (interactsh) are **OPERATOR-CONTROLLED** shared infrastructure. Agents provide commands but never start them.
+
+Configure OOB once, then let `aith oob start` create or verify the shared frp/interactsh sessions:
+
+```bash
+aith config set oob.frp_host researcher.example
+aith config set oob.frp_port 7000
+aith config set oob.domain researcher.example
+aith config set oob.frp_token <token>
+aith oob start
+aith oob client start example-agent --latest --agent vulnerability-analyst
+aith oob test
+```
 
 - **Tunnel setup, OOB callbacks, interactsh, frpc config:** `agent/references/offensive-tactics/frp-tunneling.md`
 - **Shell listeners, pwncat-vl, reverse shell payloads:** `agent/references/offensive-tactics/shell-handling.md`

@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -122,6 +123,8 @@ def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
             return DockerResult(0, "", "")
         if argv[:3] == ["docker", "ps", "-a"]:
             return DockerResult(0, "", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
         if argv[:2] == ["docker", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
         return DockerResult(0, "", "")
@@ -154,6 +157,8 @@ def test_runtime_start_retries_without_host_gateway_when_docker_rejects_flag(tmp
             return DockerResult(0, "", "")
         if argv[:3] == ["docker", "run", "-d"] and "--add-host=host.docker.internal:host-gateway" in argv:
             return DockerResult(125, "", "invalid host-gateway")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
         if argv[:2] == ["docker", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
         return DockerResult(0, "", "")
@@ -285,3 +290,314 @@ def test_mcp_install_registers_codex_and_claude_servers(monkeypatch: pytest.Monk
     assert ["claude", "mcp", "add", "-s", "user", "kali", "--", "docker", "exec", "-i", "security-research", "mcp-server"] in calls
     assert ["codex", "mcp", "remove", "kali"] in calls
     assert ["codex", "mcp", "add", "kali", "--", "docker", "exec", "-i", "security-research", "mcp-server"] in calls
+
+
+def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(["--root", str(install_root), "engagement", "create", "http://localhost:8080", "--no-prompt"])
+
+    created = next((install_root / "agent" / "engagements").iterdir())
+    scope = json.loads((created / "scope.json").read_text(encoding="utf-8"))
+    manifest = json.loads((created / "engagement.json").read_text(encoding="utf-8"))
+    assert scope["engagement_type"] == "web"
+    assert scope["hostname"] == "localhost"
+    assert manifest["target"] == "http://localhost:8080"
+
+
+def test_latest_engagement_uses_created_at_not_directory_sort(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.engagements import resolve_engagement_path
+
+    root = tmp_path / "install" / "agent" / "engagements"
+    older = root / "2026-04-24-120000-z-last"
+    newer = root / "2026-04-24-120000-a-first"
+    for path, created_at in (
+        (older, "2026-04-24T12:00:00Z"),
+        (newer, "2026-04-24T12:00:01Z"),
+    ):
+        path.mkdir(parents=True)
+        (path / "scope.json").write_text('{"status":"in_progress","current_phase":"recon"}', encoding="utf-8")
+        (path / "engagement.json").write_text(json.dumps({"key": path.name, "target": path.name, "created_at": created_at}), encoding="utf-8")
+
+    assert resolve_engagement_path(tmp_path / "install", latest=True) == newer.resolve()
+
+
+def test_runtime_start_rejects_running_container_with_wrong_mount(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:4] == ["docker", "inspect", "-f", "{{.Image}}"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:4] == ["docker", "image", "inspect", "-f"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, "/wrong/data -> /data\n/wrong/engagements -> /engagements\n", "")
+        if argv[:3] == ["docker", "exec", "security-research"]:
+            return DockerResult(0, "", "")
+        return DockerResult(0, "", "")
+
+    with pytest.raises(SystemExit, match="mount drift"):
+        start_runtime(RuntimeOptions(install_root=install_root), runner=runner)
+
+
+def test_doctor_reports_missing_binary_without_crashing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli import main as main_module
+    from ai_threat_hunting_cli import status as status_module
+    from ai_threat_hunting_cli.docker import DockerResult
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    def fake_which(command: str) -> str | None:
+        return None if command == "uv" else f"/usr/bin/{command}"
+
+    def fake_docker(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "", "")
+        return DockerResult(0, "ok", "")
+
+    monkeypatch.setattr(status_module.shutil, "which", fake_which)
+    monkeypatch.setattr(status_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(status_module, "collect_mcp_status", lambda: {"codex": {"configured": False, "detail": ""}, "claude": {"configured": False, "detail": ""}})
+    monkeypatch.setattr(main_module, "docker_run_command", fake_docker)
+
+    main_module.main(["--root", str(tmp_path), "doctor"])
+
+    assert "MISSING\tuv" in capsys.readouterr().out
+
+
+def test_doctor_skips_docker_checks_when_docker_cli_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ai_threat_hunting_cli import main as main_module
+    from ai_threat_hunting_cli import status as status_module
+    from ai_threat_hunting_cli.docker import DockerResult
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    def fake_which(command: str) -> str | None:
+        return None if command == "docker" else f"/usr/bin/{command}"
+
+    def fail_docker(argv: list[str], **_: object) -> DockerResult:
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr(status_module.shutil, "which", fake_which)
+    monkeypatch.setattr(status_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(status_module, "collect_mcp_status", lambda: {"codex": {"configured": False, "detail": ""}, "claude": {"configured": False, "detail": ""}})
+    monkeypatch.setattr(main_module, "docker_run_command", fail_docker)
+
+    main_module.main(["--root", str(tmp_path), "doctor"])
+
+    output = capsys.readouterr().out
+    assert "MISSING\tdocker" in output
+    assert "SKIPPED\tdocker-daemon" in output
+
+
+def test_status_json_reports_runtime_mount_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli import main as main_module
+    from ai_threat_hunting_cli import status as status_module
+    from ai_threat_hunting_cli.docker import DockerResult
+
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, "/wrong/data -> /data\n/wrong/engagements -> /engagements\n", "")
+        return DockerResult(0, "", "")
+
+    monkeypatch.setattr(main_module, "docker_run_command", runner)
+    monkeypatch.setattr(status_module, "collect_mcp_status", lambda: {"codex": {"configured": False, "detail": ""}, "claude": {"configured": False, "detail": ""}})
+
+    main_module.main(["--root", str(install_root), "status", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["runtime"]["state"] == "running"
+    assert payload["runtime"]["mounts_ok"] is False
+
+
+def test_config_set_get_and_unset_uses_config_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("AI_THREAT_HUNTING_CONFIG", str(config_path))
+
+    main_module.main(["config", "set", "oob.domain", "oob.example.test"])
+    main_module.main(["config", "get", "oob.domain"])
+    assert "oob.example.test" in capsys.readouterr().out
+
+    main_module.main(["config", "unset", "oob.domain"])
+    main_module.main(["config", "list"])
+    assert "oob.domain" not in capsys.readouterr().out
+
+
+def test_logs_routes_to_centralized_targets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    log_file = install_root / ".runtime-data" / "logs" / "orchestrator.log"
+    log_file.parent.mkdir(parents=True)
+    log_file.write_text("hello\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(main_module.subprocess, "run", fake_run)
+
+    main_module.main(["--root", str(install_root), "logs", "runtime", "--lines", "5"])
+    main_module.main(["--root", str(install_root), "logs", "orchestrator", "--lines", "5"])
+
+    assert ["docker", "logs", "--tail", "5", "security-research"] in calls
+    assert ["tail", "-n", "5", str(log_file)] in calls
+
+
+def test_auth_status_and_clear_operate_on_engagement_auth(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (engagement / "auth.json").write_text(
+        json.dumps({"mode": "manual", "state": "present", "expires_at": expires_at, "cookies": {"sid": "x"}, "headers": {}}),
+        encoding="utf-8",
+    )
+
+    main_module.main(["--root", str(install_root), "auth", "status", "eng-1"])
+    assert "present" in capsys.readouterr().out
+
+    main_module.main(["--root", str(install_root), "auth", "clear", "eng-1"])
+    auth = json.loads((engagement / "auth.json").read_text(encoding="utf-8"))
+    assert auth["state"] == "missing"
+    assert auth["cookies"] == {}
+
+
+def test_auth_latest_selector_overrides_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    root = install_root / "agent" / "engagements"
+    older = root / "2026-04-24-120000-older"
+    newer = root / "2026-04-24-120001-newer"
+    for path, created_at in (
+        (older, "2026-04-24T12:00:00Z"),
+        (newer, "2026-04-24T12:00:01Z"),
+    ):
+        path.mkdir(parents=True)
+        (path / "scope.json").write_text('{"status":"in_progress","current_phase":"recon"}', encoding="utf-8")
+        (path / "engagement.json").write_text(json.dumps({"key": path.name, "target": path.name, "created_at": created_at}), encoding="utf-8")
+        (path / "auth.json").write_text(
+            json.dumps({"mode": "manual", "state": "present", "cookies": {"sid": path.name}, "headers": {}}),
+            encoding="utf-8",
+        )
+
+    monkeypatch.chdir(older)
+
+    main_module.main(["--root", str(install_root), "auth", "clear", "--latest"])
+
+    older_auth = json.loads((older / "auth.json").read_text(encoding="utf-8"))
+    newer_auth = json.loads((newer / "auth.json").read_text(encoding="utf-8"))
+    assert older_auth["state"] == "present"
+    assert older_auth["cookies"] == {"sid": older.name}
+    assert newer_auth["state"] == "missing"
+    assert newer_auth["cookies"] == {}
+
+
+def test_backup_create_and_list_uses_sqlite_backup(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    data_dir = install_root / "orchestrator" / "backend" / "data"
+    data_dir.mkdir(parents=True)
+    import sqlite3
+
+    with sqlite3.connect(data_dir / "orchestrator.sqlite3") as connection:
+        connection.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        connection.execute("INSERT INTO t DEFAULT VALUES")
+
+    main_module.main(["--root", str(install_root), "backup", "create"])
+    created_output = capsys.readouterr().out
+    assert "orchestrator." in created_output
+
+    main_module.main(["--root", str(install_root), "backup", "list"])
+    assert "orchestrator." in capsys.readouterr().out
+
+
+def test_backup_restore_removes_stale_sqlite_wal_sidecars(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.backup import restore_backup
+
+    install_root = tmp_path / "install"
+    data_dir = install_root / "orchestrator" / "backend" / "data"
+    data_dir.mkdir(parents=True)
+    backup = tmp_path / "selected.sqlite3"
+
+    import sqlite3
+
+    with sqlite3.connect(backup) as connection:
+        connection.execute("CREATE TABLE restored (id INTEGER PRIMARY KEY)")
+
+    live = data_dir / "orchestrator.sqlite3"
+    live.write_text("old", encoding="utf-8")
+    live.with_name(live.name + "-wal").write_text("stale wal", encoding="utf-8")
+    live.with_name(live.name + "-shm").write_text("stale shm", encoding="utf-8")
+
+    restored = restore_backup(install_root, backup)
+
+    assert restored == live
+    assert not live.with_name(live.name + "-wal").exists()
+    assert not live.with_name(live.name + "-shm").exists()
+    with sqlite3.connect(restored) as connection:
+        assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'restored'").fetchone() == ("restored",)
+
+
+def test_oob_start_renders_config_and_starts_idempotent_sessions(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.oob import OobOptions, start_oob
+
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:3] == ["docker", "exec", "security-research"] and "tmux has-session -t oob-server" in argv[-1] and "tmux new-session" not in argv[-1]:
+            return DockerResult(1, "", "")
+        if argv[:3] == ["docker", "exec", "security-research"] and "tmux has-session -t frpc" in argv[-1] and "tmux new-session" not in argv[-1]:
+            return DockerResult(1, "", "")
+        return DockerResult(0, "", "")
+
+    start_oob(
+        OobOptions(
+            install_root=tmp_path,
+            frp_host="cal.example.test",
+            frp_port=7000,
+            frp_token="secret",
+            oob_domain="oob.example.test",
+        ),
+        runner=runner,
+    )
+
+    rendered = "\n".join(" ".join(command) for command in commands)
+    assert "cal.example.test" in rendered
+    assert "oob.example.test" in rendered
+    assert "tmux new-session -d -s oob-server" in rendered
+    assert "tmux new-session -d -s frpc" in rendered

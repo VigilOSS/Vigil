@@ -44,6 +44,8 @@ docker cp security-research-proxy:/root/.mitmproxy/mitmproxy-ca-cert.pem ~/Deskt
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Desktop/mitmproxy-ca-cert.pem
 ```
 
+`aith mitmproxy cert` prints the same commands for the active Docker-managed proxy.
+
 Restart the browser after trusting.
 
 ### CA Key Persistence
@@ -67,7 +69,7 @@ aith mitmproxy start
 6. Disable the proxy in FoxyProxy when done
 
 If auto-capture misses the session (addon error, non-standard login flow):
-- Check proxy logs: `docker logs security-research-proxy 2>&1 | tail -30`
+- Check proxy logs: `aith logs mitmproxy --lines 30`
 - Fall back to manual cookie extraction from browser DevTools
 
 ## Troubleshooting
@@ -76,7 +78,7 @@ If auto-capture misses the session (addon error, non-standard login flow):
 |---------|-----|
 | `http://mitm.it` says "traffic not passing through mitmproxy" | FoxyProxy is set to HTTPS mode -- change to HTTP |
 | Certificate errors after proxy restart | Check if the `mitmproxy-ca` volume exists: `docker volume ls \| grep mitmproxy`. If missing, the CA was regenerated -- re-install the cert |
-| Proxy container exits immediately | Check logs: `docker logs security-research-proxy 2>&1 \| tail -20`. Common: port 8080 already in use |
+| Proxy container exits immediately | Check logs: `aith logs mitmproxy --lines 20`. Common: port 8080 already in use |
 | `auth.json` not updated after login | Check for addon errors in logs. The `_detect_login` function looks for `set-cookie` headers and token fields in response bodies |
 | Browser still shows cert errors after trusting | Quit browser fully and reopen. macOS may also need: System Settings > Network > clear DNS cache |
 
@@ -84,13 +86,13 @@ If auto-capture misses the session (addon error, non-standard login flow):
 
 ```bash
 # Status
-docker ps --filter name=security-research-proxy
+aith mitmproxy status
 
 # Logs
-docker logs -f security-research-proxy
+aith logs mitmproxy --follow
 
 # Stop
-docker stop security-research-proxy
+aith mitmproxy stop
 
 # Restart (reuses same CA cert from volume)
 aith mitmproxy start

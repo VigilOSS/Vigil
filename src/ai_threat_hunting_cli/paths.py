@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .config import get_config_value
+
 DEFAULT_INSTALL_ROOT = Path.home() / "security-research"
 CONFIG_DIR = Path.home() / ".config" / "security-research"
 DEFAULT_SOURCE_REPO = "https://github.com/vigil-oss/security-research.git"
@@ -28,6 +30,9 @@ def resolve_install_root(value: str | Path | None = None) -> Path:
     env_value = os.environ.get("AI_THREAT_HUNTING_INSTALL_DIR") or os.environ.get("AI_THREAT_HUNTING_DIR")
     if env_value:
         return Path(env_value).expanduser().resolve()
+    config_value = get_config_value("install.root")
+    if config_value:
+        return Path(config_value).expanduser().resolve()
     return DEFAULT_INSTALL_ROOT.expanduser().resolve()
 
 
@@ -38,6 +43,9 @@ def resolve_source_root(value: str | Path | None = None, *, install_root: Path |
     env_value = os.environ.get("AI_THREAT_HUNTING_SOURCE_DIR")
     if env_value:
         candidates.append(Path(env_value).expanduser())
+    config_value = get_config_value("source.dir")
+    if config_value:
+        candidates.append(Path(config_value).expanduser())
     discovered = find_repo_root()
     if discovered is not None:
         candidates.append(discovered)
@@ -68,7 +76,7 @@ def _ensure_cached_source() -> Path | None:
     if not shutil_which("git"):
         return None
     source_dir = CONFIG_DIR / "source"
-    repo_url = os.environ.get("AI_THREAT_HUNTING_SOURCE_REPO", DEFAULT_SOURCE_REPO)
+    repo_url = os.environ.get("AI_THREAT_HUNTING_SOURCE_REPO") or get_config_value("source.repo", DEFAULT_SOURCE_REPO)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if source_dir.exists():
         subprocess.run(["git", "-C", str(source_dir), "pull", "--ff-only"], text=True, capture_output=True, check=False)
