@@ -41,6 +41,17 @@ def _load_proxy_addon_module():
     return _load_script_module("test_proxy_addon_module", "agent/scripts/proxy_addon.py")
 
 
+def test_kali_runtime_dockerfiles_package_audit_enum_module() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    required_copy = "COPY docker/kali-mcp-runtime/audit_enums.py /opt/mcp-tools/audit_enums.py"
+    for dockerfile in (
+        repo_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
+        repo_root / "agent" / "docker" / "runtime-lightweight" / "Dockerfile",
+    ):
+        contents = dockerfile.read_text(encoding="utf-8")
+        assert required_copy in contents
+
+
 def test_patched_kali_client_preserves_audit_context_for_async_tools(monkeypatch) -> None:
     module = _load_script_module(
         "test_patched_kali_client_module",
