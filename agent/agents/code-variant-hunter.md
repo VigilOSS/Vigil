@@ -89,14 +89,14 @@ New finding JSON payloads, each with a link to the original:
   "canonical_location": "file:lib/ftp.c:892",
   "details": {
     "cwe_id": "CWE-122",
-    "variant_of": "FINDING-CH-001",
+    "variant_of": "CH-001",
     "original_pattern": "memcpy with attacker-controlled size from URL component without bounds check",
     "impact": "Remote attackers can trigger heap corruption in the FTP path parser with an overlong path",
-    "evidence": "Same pattern as FINDING-CH-001 but in FTP path parsing...",
+    "evidence": "Same pattern as CH-001 but in FTP path parsing...",
     "taint_path": "...",
-    "remediation": "Apply same fix as FINDING-CH-001: add bounds check before memcpy"
+    "remediation": "Apply same fix as CH-001: add bounds check before memcpy"
   },
-  "links": [{"link_kind": "variant_of", "target_kind": "finding", "target_ref": "FINDING-CH-001"}]
+  "links": [{"link_kind": "variant_of", "target_kind": "finding", "target_ref": "CH-001"}]
 }
 ```
 

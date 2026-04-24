@@ -219,6 +219,28 @@ Load the relevant skill before starting validation or exploitation of a candidat
 
 ---
 
+## Mobile Security Skills
+
+Load these skills for authorized Android/iOS app, device-lab, and mobile fuzzing work.
+
+- `agent/skills/android-app-security/SKILL.md`
+  **Use when:** Testing Android APK/AAB artifacts, mobile APIs, local storage, Keystore use, TLS/pinning, exported components, deep links, WebView bridges, native libraries, or runtime instrumentation.
+  **Paired references:** `references/mobile/android-app-security.md`, `references/mobile/mobile-lab-setup.md`, `references/mobile/android-platform-device-lab.md`, `references/mobile/mobile-fuzzing.md`
+
+- `agent/skills/ios-app-security/SKILL.md`
+  **Use when:** Testing iOS IPA/Xcode/TestFlight builds, mobile APIs, Keychain, local storage, ATS/TLS, URL schemes, universal links, pasteboard, WebView bridges, native code, or runtime instrumentation.
+  **Paired references:** `references/mobile/ios-app-security.md`, `references/mobile/mobile-lab-setup.md`, `references/mobile/ios-platform-device-lab.md`, `references/mobile/mobile-fuzzing.md`
+
+- `agent/skills/mobile-lab-setup/SKILL.md`
+  **Use when:** Deciding whether mobile testing needs emulators, simulators, owned physical devices, rooted/jailbroken devices, Mac ARM host setup, Docker, proxies, device farms, or CI automation.
+  **Paired references:** `references/mobile/mobile-lab-setup.md`, `references/mobile/android-platform-device-lab.md`, `references/mobile/ios-platform-device-lab.md`
+
+- `agent/skills/mobile-fuzzing/SKILL.md`
+  **Use when:** Fuzzing mobile app APIs, imported files, parsers, deep links, intents, URL schemes, WebView inputs, native libraries, Android Binder/AIDL, iOS XPC/Mach, or mobile crash triage.
+  **Paired references:** `references/mobile/mobile-fuzzing.md`, `references/code-vuln-patterns/fuzz-harness-patterns.md`, `references/mobile/android-app-security.md`, `references/mobile/ios-app-security.md`
+
+---
+
 ## Code Analysis Skills
 
 Load these skills when performing white-box source code analysis (operator-core-code.md mode).

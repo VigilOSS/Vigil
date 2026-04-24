@@ -935,7 +935,7 @@ def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, 
     )
     (engagement_dir / "sessions" / "index.json").write_text(
         json.dumps(
-            [{"session_id": "session-a", "status": "open", "assigned_targets": ["FINDING-EX-001"]}]
+            [{"session_id": "session-a", "status": "open", "assigned_targets": ["EX-001"]}]
         ),
         encoding="utf-8",
     )
@@ -951,7 +951,7 @@ def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, 
     )
     monkeypatch.setattr(module, "session_dir_path", lambda eng_dir, session_id: str(session_dir))
     monkeypatch.setattr(module, "finding_lock_path", lambda eng_dir: str(engagement_dir / ".findings.lock"))
-    monkeypatch.setattr(module, "next_finding_id", lambda base_url, engagement_key, source_name: "FINDING-EX-001")
+    monkeypatch.setattr(module, "next_finding_id", lambda base_url, engagement_key, source_name: "EX-001")
 
     captured: list[tuple[str, dict[str, object]]] = []
 
@@ -976,7 +976,7 @@ def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, 
     assert payload["workflow_status"] == "active"
     assert "status" not in payload
     session_index = json.loads((engagement_dir / "sessions" / "index.json").read_text(encoding="utf-8"))
-    assert session_index[0]["assigned_targets"] == ["FINDING-EX-001"]
+    assert session_index[0]["assigned_targets"] == ["EX-001"]
     assert "assigned_findings" not in session_index[0]
 
 
@@ -1004,7 +1004,7 @@ def test_merge_session_validates_session_index_before_backend_posts(monkeypatch,
     )
     (engagement_dir / "sessions" / "index.json").write_text(
         json.dumps(
-            [{"session_id": "session-a", "status": "open", "assigned_findings": ["FINDING-EX-001"]}]
+            [{"session_id": "session-a", "status": "open", "assigned_findings": ["EX-001"]}]
         ),
         encoding="utf-8",
     )
@@ -1169,7 +1169,7 @@ def test_session_index_rejects_legacy_assigned_findings_key(tmp_path: Path) -> N
     sessions_dir.mkdir(parents=True)
     (sessions_dir / "index.json").write_text(
         json.dumps(
-            [{"session_id": "session-a", "status": "open", "assigned_findings": ["FINDING-EX-001"]}]
+            [{"session_id": "session-a", "status": "open", "assigned_findings": ["EX-001"]}]
         ),
         encoding="utf-8",
     )
@@ -1189,7 +1189,7 @@ def test_save_session_index_rejects_legacy_assigned_findings_key(tmp_path: Path)
     with pytest.raises(SystemExit, match="assigned_findings is no longer supported"):
         module.save_session_index(
             str(engagement_dir),
-            [{"session_id": "session-a", "status": "open", "assigned_findings": ["FINDING-EX-001"]}],
+            [{"session_id": "session-a", "status": "open", "assigned_findings": ["EX-001"]}],
         )
 
 
@@ -1223,7 +1223,7 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
         "load_exploit_candidates",
         lambda cfg: [
             {
-                "slug": "FINDING-ACTIVE-001",
+                "slug": "ACTIVE-001",
                 "severity": "high",
                 "workflow_status": "active",
                 "verification_state": "verified",
@@ -1233,7 +1233,7 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
                 "canonical_location": "file:src/parser.py:10",
             },
             {
-                "slug": "FINDING-CHAIN-001",
+                "slug": "CHAIN-001",
                 "severity": "info",
                 "workflow_status": "active",
                 "verification_state": "verified",
@@ -1249,8 +1249,8 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
 
     output = capsys.readouterr().out
     assert "candidate_rule: verified findings only" in output
-    assert "FINDING-ACTIVE-001 | high | active | confirmed | verified_high | Live issue" in output
-    assert "FINDING-CHAIN-001 | info | active | downgraded | verified_chain_required | Chain-only primitive" in output
+    assert "ACTIVE-001 | high | active | confirmed | verified_high | Live issue" in output
+    assert "CHAIN-001 | info | active | downgraded | verified_chain_required | Chain-only primitive" in output
 
 
 def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path) -> None:
@@ -1266,7 +1266,7 @@ def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path)
                 "current_phase": "exploit",
                 "exploit_policy": "selected",
                 "exploit_review_state": "approved",
-                "approved_targets": ["FINDING-ACTIVE-001"],
+                "approved_targets": ["ACTIVE-001"],
             }
         ),
         encoding="utf-8",
@@ -1283,7 +1283,7 @@ def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path)
         ),
     )
     monkeypatch.setattr(module, "ensure_session_index", lambda eng_dir: None)
-    monkeypatch.setattr(module, "resolve_approved_target_slugs", lambda cfg, scope: ["FINDING-ACTIVE-001"])
+    monkeypatch.setattr(module, "resolve_approved_target_slugs", lambda cfg, scope: ["ACTIVE-001"])
 
     class FakeClient:
         def __init__(self, base_url: str, engagement_key: str) -> None:
@@ -1294,7 +1294,7 @@ def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path)
             assert endpoint == "findings"
             return [
                 {
-                    "slug": "FINDING-ACTIVE-001",
+                    "slug": "ACTIVE-001",
                     "severity": "high",
                     "workflow_status": "active",
                     "title": "Live issue",
@@ -1310,7 +1310,7 @@ def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path)
         SimpleNamespace(
             engagement_dir=engagement_dir,
             session_id="session-a",
-            slugs=["FINDING-ACTIVE-001"],
+            slugs=["ACTIVE-001"],
         )
     )
 
@@ -1319,9 +1319,9 @@ def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path)
         (engagement_dir / "sessions" / "session-a" / "assignment.json").read_text(encoding="utf-8")
     )
     session_index = json.loads((engagement_dir / "sessions" / "index.json").read_text(encoding="utf-8"))
-    assert "FINDING-ACTIVE-001 | high | active | Live issue" in prompt
-    assert assignment["assigned_targets"] == ["FINDING-ACTIVE-001"]
-    assert session_index[0]["assigned_targets"] == ["FINDING-ACTIVE-001"]
+    assert "ACTIVE-001 | high | active | Live issue" in prompt
+    assert assignment["assigned_targets"] == ["ACTIVE-001"]
+    assert session_index[0]["assigned_targets"] == ["ACTIVE-001"]
 
 
 def test_launch_session_rejects_existing_session_without_truncating_proposals(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1341,7 +1341,7 @@ def test_launch_session_rejects_existing_session_without_truncating_proposals(mo
                 "current_phase": "exploit",
                 "exploit_policy": "selected",
                 "exploit_review_state": "approved",
-                "approved_targets": ["FINDING-ACTIVE-001"],
+                "approved_targets": ["ACTIVE-001"],
             }
         ),
         encoding="utf-8",
@@ -1360,14 +1360,14 @@ def test_launch_session_rejects_existing_session_without_truncating_proposals(mo
             engagement_dir=str(engagement_dir),
         ),
     )
-    monkeypatch.setattr(module, "resolve_approved_target_slugs", lambda cfg, scope: ["FINDING-ACTIVE-001"])
+    monkeypatch.setattr(module, "resolve_approved_target_slugs", lambda cfg, scope: ["ACTIVE-001"])
 
     with pytest.raises(SystemExit) as excinfo:
         module.run(
             SimpleNamespace(
                 engagement_dir=engagement_dir,
                 session_id="session-a",
-                slugs=["FINDING-ACTIVE-001"],
+                slugs=["ACTIVE-001"],
             )
         )
 
@@ -1404,7 +1404,7 @@ def test_check_report_readiness_surfaces_backend_blockers(monkeypatch, tmp_path:
                 "blockers": [
                     {
                         "kind": "verification",
-                        "slug": "FINDING-VA-001",
+                        "slug": "VA-001",
                         "detail": "Finding remains unreviewed.",
                     }
                 ],
@@ -1421,4 +1421,4 @@ def test_check_report_readiness_surfaces_backend_blockers(monkeypatch, tmp_path:
     assert excinfo.value.code == 1
     err = capsys.readouterr().err
     assert "Final report blockers remain:" in err
-    assert "verification | FINDING-VA-001: Finding remains unreviewed." in err
+    assert "verification | VA-001: Finding remains unreviewed." in err

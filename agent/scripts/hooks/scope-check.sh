@@ -1,5 +1,5 @@
 #!/bin/bash
-# scope-check.sh — Claude Code PreToolUse hook
+# scope-check.sh — Claude Code / Codex PreToolUse hook
 # Reads hook JSON from stdin and blocks host-side target-facing commands.
 # In-scope target work must go through the Kali MCP session rather than Bash.
 # Hook format: {"tool_name":"Bash","tool_input":{"command":"..."}}
@@ -22,6 +22,8 @@ TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 # Extract command
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
 [ -z "$COMMAND" ] && exit 0
+HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
+[ -z "$HOOK_CWD" ] && HOOK_CWD="$(pwd)"
 
 # Block common target-facing host-side execution paths even if the target is indirect
 # via environment variables, scope.json, or helper scripts.
@@ -52,7 +54,7 @@ case "$COMMAND" in
 esac
 
 # Find active engagement directory
-ENG_DIR=$(resolve_engagement_dir "$(pwd)" || true)
+ENG_DIR=$(resolve_engagement_dir "$HOOK_CWD" || true)
 HOST_LIST=()
 while IFS= read -r host; do
   [ -n "$host" ] && HOST_LIST+=("$host")

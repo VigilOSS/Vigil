@@ -67,7 +67,7 @@ A bug bounty submission creates a second copy of the evidence on the platform's 
 
 Bug bounty submissions are standalone deliverables — nothing inside them should reference this engagement's internal state.
 
-- **No finding slugs** (`FINDING-VA-003`, `FINDING-NNN`, any prefix) in the submission body.
+- **No finding slugs** (`VA-003`, `NNN`, any prefix) in the submission body.
 - **No engagement keys, engagement directory paths, `$DIR/`, `$ENGAGEMENT_KEY/`, or backend URLs.**
 - **No cross-references to other findings in the same engagement** — each submission stands alone. If two findings share a root cause, file two submissions; if one finding genuinely depends on another, describe the dependency in plain English, not via a finding ID.
 - **No operator/tool metadata breadcrumbs** — tool run IDs, MCP command IDs, activity log references, `assess.py` invocations.

@@ -173,6 +173,20 @@ multi-function chains, combinatorial arithmetic, state machine bugs, and incompl
 | `code-vuln-patterns/ai-ml-security.md` | Prompt injection, MCP tool poisoning, RAG poisoning, unsafe tool execution, cross-user context leakage | Python, JS, Java |
 | `code-vuln-patterns/fuzz-harness-patterns.md` | libFuzzer/AFL++ harness templates, sanitizer flag reference, seed corpus construction, harness antipatterns, crash triage checklist | C/C++ |
 
+## mobile/ - Android, iOS, Device Labs, And Mobile Fuzzing
+
+Authorized mobile security references used by `android-app-security`, `ios-app-security`,
+`mobile-lab-setup`, and `mobile-fuzzing`.
+
+| File | Focus |
+|------|-------|
+| `mobile/android-app-security.md` | APK/AAB assessment, MASVS mapping, Android storage/crypto/network/IPC/WebView/native testing, API-level notes |
+| `mobile/android-platform-device-lab.md` | Pixel/reference-device setup, bootloader/AVB/root caveats, Cuttlefish, Binder/AIDL, SELinux, HAL/vendor boundaries |
+| `mobile/ios-app-security.md` | IPA/Xcode/TestFlight assessment, Keychain, local storage, ATS/TLS, links, pasteboard, WebView, runtime instrumentation |
+| `mobile/ios-platform-device-lab.md` | iOS secure boot, SEP, Data Protection, sandboxing, XPC/Mach, dyld/XNU, observability, jailbreak, SRD boundaries |
+| `mobile/mobile-lab-setup.md` | Mac ARM, emulators, simulators, owned devices, Docker, proxies, Frida, device farms, reset/data hygiene |
+| `mobile/mobile-fuzzing.md` | App/API, file-format, IPC, WebView, native, Binder/AIDL, XPC/Mach fuzzing, corpus design, crash triage |
+
 ## tools/ — CLI Tool Cheatsheets
 
 Quick-reference per tool, organized by usage phase.

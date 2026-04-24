@@ -46,7 +46,7 @@ def _seed_finding_row(engagement_id: int) -> None:
             """,
             (
                 engagement_id,
-                "FINDING-VA-001",
+                "VA-001",
                 "Seed finding that must survive filesystem drift",
                 "high",
                 "draft",

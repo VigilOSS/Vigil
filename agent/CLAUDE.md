@@ -383,13 +383,13 @@ Agents use PREFIXED IDs:
 
 | Agent | Prefix | Example |
 |-------|--------|---------|
-| exploit-developer | EX | FINDING-EX-001 |
-| vulnerability-analyst | VA | FINDING-VA-001 |
-| source-analyzer | SA | FINDING-SA-001 |
-| recon-specialist | RE | FINDING-RE-001 |
-| fuzzer | FZ | FINDING-FZ-001 |
-| osint-analyst | OS | FINDING-OS-001 |
-| surface-collector | SC | FINDING-SC-001 |
+| exploit-developer | EX | EX-001 |
+| vulnerability-analyst | VA | VA-001 |
+| source-analyzer | SA | SA-001 |
+| recon-specialist | RE | RE-001 |
+| fuzzer | FZ | FZ-001 |
+| osint-analyst | OS | OS-001 |
+| surface-collector | SC | SC-001 |
 
 Prefix mnemonics: EX=exploit, VA=vuln-analyst, SA=source-analyzer, RE=recon, FZ=fuzzer, OS=osint, SC=surface-collector. The prefix is the agent mnemonic assigned by `assess.py record-finding`, not the initials of the full agent name.
 
@@ -400,7 +400,7 @@ This allocates or reuses the canonical slug under a lock and writes backend stat
 If you need the canonical field list or examples, run `./scripts/assess.py contract record-finding` instead of guessing payload fields from memory.
 Use the lifecycle helpers for later state changes instead of raw `post` or `patch`: `verify-finding` / `kill-finding` for verification outcomes, `reset-finding` to reopen a previously verified or false-positive finding, and `update-finding` for non-verification metadata or workflow updates.
 
-report-writer uses the `report-findings` backend endpoint in explicit draft/final mode, which assigns sequential `FINDING-001~N` report IDs automatically. Each report finding includes both the `report_id` and the original `slug` for cross-referencing.
+report-writer uses the `report-findings` backend endpoint in explicit draft/final mode, which assigns sequential `001~N` report IDs automatically. Each report finding includes both the `report_id` and the original `slug` for cross-referencing.
 
 OWASP Quick Ref: A01=Access Control, A02=Crypto, A03=Injection, A04=Insecure Design, A05=Misconfig, A06=Vulnerable Components, A07=Auth Failures, A08=Data Integrity, A09=Logging Failures, A10=SSRF.
 

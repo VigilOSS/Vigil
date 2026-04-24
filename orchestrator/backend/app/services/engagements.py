@@ -36,6 +36,7 @@ _sync_lock = Lock()
 _last_sync_signature: tuple[tuple[str, int | None, int | None, int | None, int | None], ...] | None = None
 _logger = logging.getLogger(__name__)
 _DELETED_ENGAGEMENTS_DIR = ".deleted-engagements"
+_LEGACY_FINDING_PREFIX = "FINDING" + "-"
 
 
 def engagements_root() -> Path:
@@ -73,6 +74,12 @@ def _write_json_atomically(path: Path, payload: Any) -> None:
     tmp_path.rename(path)
 
 
+def _strip_legacy_finding_prefix(value: str) -> str:
+    if value.startswith(_LEGACY_FINDING_PREFIX):
+        return value[len(_LEGACY_FINDING_PREFIX) :]
+    return value
+
+
 def _normalize_target_list(payload: dict[str, Any], *, new_key: str, old_key: str) -> bool:
     changed = False
     raw_targets = payload.get(new_key)
@@ -80,7 +87,7 @@ def _normalize_target_list(payload: dict[str, Any], *, new_key: str, old_key: st
         raw_targets = payload.get(old_key)
     if not isinstance(raw_targets, list):
         raw_targets = []
-    normalized = [str(item) for item in raw_targets]
+    normalized = [_strip_legacy_finding_prefix(str(item)) for item in raw_targets]
     if payload.get(new_key) != normalized:
         payload[new_key] = normalized
         changed = True

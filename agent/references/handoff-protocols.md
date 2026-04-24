@@ -133,5 +133,5 @@ report, mark findings `reported`, and complete the engagement after `QA PASS`.
 ## Wildcard Mode Specifics
 
 - BACKEND-ONLY FINDING WRITE: every finding lands in the backend via `assess.py record-finding`. No local file sync required.
-- Parent prefix: `## [sub.domain.com / FINDING-XX-NNN] Title`
+- Parent prefix: `## [sub.domain.com / XX-NNN] Title`
 - Set ENGAGEMENT_DIR to specific child directory before each operation
