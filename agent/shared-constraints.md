@@ -180,13 +180,13 @@ script are considered lost data.
 
 | Agent | Prefix | Example |
 |-------|--------|---------|
-| exploit-developer | EX | FINDING-EX-001 |
-| vulnerability-analyst | VA | FINDING-VA-001 |
-| source-analyzer | SA | FINDING-SA-001 |
-| recon-specialist | RE | FINDING-RE-001 |
-| fuzzer | FZ | FINDING-FZ-001 |
-| osint-analyst | OS | FINDING-OS-001 |
-| surface-collector | SC | FINDING-SC-001 |
+| exploit-developer | EX | EX-001 |
+| vulnerability-analyst | VA | VA-001 |
+| source-analyzer | SA | SA-001 |
+| recon-specialist | RE | RE-001 |
+| fuzzer | FZ | FZ-001 |
+| osint-analyst | OS | OS-001 |
+| surface-collector | SC | SC-001 |
 
 **Title formula:** `[Bug Class] in [endpoint] allows [attacker role] to [impact] [victim/scope]`
 Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous attacker to read any user's PII."

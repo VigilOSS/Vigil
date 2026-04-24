@@ -46,6 +46,7 @@ Keep it light:
 
 - `agent/scripts/render-operator-prompts.sh` - prompt renderer. Why: generates the committed operator-facing wrappers from `operator-core.md` plus hardcoded roster templates. `CLAUDE.md` and `AGENTS.md` share one template and are byte-identical outputs.
 - `agent/AGENTS.md` and `agent/CLAUDE.md` - generated operator wrappers. Why: committed outputs, not source-of-truth.
+- `agent/.codex/config.toml` - Codex project hook config. Why: wires Codex `PreToolUse`/`PostToolUse` events to the shared hook scripts.
 - `agent/.codex/agents/` and `agent/.claude/agents/` - generated agent wrappers. Why: thin client-specific entrypoints that should stay derived from the source prompts.
 
 ### Runtime and CLI
@@ -62,7 +63,7 @@ Keep it light:
 - `agent/docker/runtime-full/Dockerfile` - primary runtime image. Why: supported target-facing tool surface.
 - `agent/docker/runtime-lightweight/Dockerfile` - lighter local iteration image. Why: non-primary runtime for faster local validation.
 - `agent/docker/docker-compose.yml` - local runtime composition. Why: mitmproxy/metasploit/runtime images can be started together from here.
-- `agent/scripts/hooks/` - host guardrails. Why: blocks unsafe host-side target traffic and records tool activity.
+- `agent/scripts/hooks/scope-check.sh` and `agent/scripts/hooks/post-tool-log.sh` - Claude/Codex host hook scripts. Why: `scope-check.sh` blocks unsafe host-side target traffic before Bash runs, and `post-tool-log.sh` records selected tool activity through `assess.py log` into backend `activity_entries`.
 - `agent/engagements/` - engagement artifact root. Why: container for run state; map the directory role, not per-engagement contents.
 
 ### Prompt-to-backend coupling
@@ -97,6 +98,11 @@ When adding a new agent or changing the agent roster:
 
 When adding a new code analysis phase or agent:
 - Dispatch context in `operator-core-code.md` must separate backend data (fetched via `assess.py`) from filesystem artifacts (under `tools/analysis-state/`). Agents read filesystem artifacts directly; the operator fetches and summarizes backend state.
+
+When adding or changing a tool that should affect scope-coverage gates:
+- Start in `agent/scripts/assess/commands/check_scope_coverage.py` `_TOOL_COVERAGE_SPECS`. That registry is the single source of truth for which `tool_bin` values count as enum vs collection and whether a tool accepts positional host targets.
+- If the tool uses a non-standard CLI shape, update the neighboring target-parsing flag tables in the same file (`_COMMAND_TARGET_VALUE_FLAGS`, `_COMMAND_TARGET_FILE_FLAGS`, `_NON_TARGET_VALUE_FLAGS`) and extend `orchestrator/backend/tests/test_check_scope_coverage.py`.
+- If the tool is typically invoked through a new shell or prefix wrapper, update both `agent/scripts/assess/commands/check_scope_coverage.py` and `orchestrator/backend/app/services/state_manager.py`; the agent-side coverage parser and backend `tool_bin` derivation run in separate layers and intentionally duplicate wrapper-skipping knowledge.
 
 ## orchestrator/backend
 

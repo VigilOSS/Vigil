@@ -22,7 +22,7 @@ def register(subparsers) -> None:
             "  assess.py patch coverage-items/42 --inline '{\"status\":\"covered\"}'"
         ),
     )
-    p.add_argument("endpoint", help="e.g. coverage-items/42 or findings/FINDING-VA-001")
+    p.add_argument("endpoint", help="e.g. coverage-items/42 or findings/VA-001")
     p.add_argument("payload", nargs="?", help="Path to JSON payload file or inline JSON object")
     p.add_argument("--inline", dest="inline_payload", help="Raw JSON payload text")
     p.set_defaults(func=run)

@@ -404,7 +404,7 @@ def get_report_findings(engagement_key: str, mode: Literal["draft", "final"] = "
     Sorted by severity (critical first), excludes merged and false-positive
     findings, and extracts CVSS, remediation, CWE, and steps-to-reproduce from
     the details blob.
-    Each finding includes a ``report_id`` (e.g. ``FINDING-001``) for sequential
+    Each finding includes a ``report_id`` (e.g. ``001``) for sequential
     report numbering and a ``slug`` field so the original backend ID remains
     available for cross-referencing.
     """

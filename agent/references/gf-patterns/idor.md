@@ -30,7 +30,6 @@ None — idor is keyed entirely off parameter names. Path-based object reference
 ## Weight and priority interpretation
 
 - Baseline priority score: 35
-- When combined with a nuclei match on the same URL: +10 bonus
 - Terminal reasons that suppress this bucket: `inert_type`
 
 ## Example URLs that match

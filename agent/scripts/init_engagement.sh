@@ -396,6 +396,15 @@ EOF
   fi
 }
 
+write_codex_hook_config() {
+  local eng_dir="${1:?engagement dir required}"
+
+  mkdir -p "$eng_dir/.codex"
+  if [[ -f "$ROOT_DIR/.codex/config.toml" ]]; then
+    cp "$ROOT_DIR/.codex/config.toml" "$eng_dir/.codex/config.toml"
+  fi
+}
+
 write_engagement_launchers() {
   local eng_dir="${1:?engagement dir required}"
   local client_kind="${2:?client kind required}"
@@ -415,6 +424,7 @@ export ENGAGEMENT_DIR
 ENGAGEMENT_KEY="$(basename "$ENGAGEMENT_DIR")"
 export ENGAGEMENT_KEY
 AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
+export AI_THREAT_HUNTING_AGENT_ROOT="$AGENT_ROOT"
 INSTALL_ROOT="$(cd "$AGENT_ROOT/.." && pwd)"
 
 resolve_env_var_from_file() {
@@ -465,6 +475,7 @@ export ENGAGEMENT_DIR
 ENGAGEMENT_KEY="$(basename "$ENGAGEMENT_DIR")"
 export ENGAGEMENT_KEY
 AGENT_ROOT="$(cd "$ENGAGEMENT_DIR/../.." && pwd)"
+export AI_THREAT_HUNTING_AGENT_ROOT="$AGENT_ROOT"
 INSTALL_ROOT="$(cd "$AGENT_ROOT/.." && pwd)"
 
 resolve_env_var_from_file() {
@@ -900,6 +911,9 @@ sqlite3 "$DIR/cases.db" < "$SCRIPT_DIR/schema.sql" >/dev/null
 
 CLIENT_KIND="$(install_client_kind)"
 write_engagement_prompt_wrappers "$DIR" "$CLIENT_KIND"
+if [[ "$CLIENT_KIND" == "codex" || "$CLIENT_KIND" == "both" ]]; then
+  write_codex_hook_config "$DIR"
+fi
 write_engagement_launchers "$DIR" "$CLIENT_KIND" "$SKIP_PERMISSIONS"
 
 printf '%s\n' "$DIR"

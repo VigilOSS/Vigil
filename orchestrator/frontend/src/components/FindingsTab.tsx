@@ -1443,7 +1443,7 @@ function Drawer({
   const historyCount = transitions.length;
   // Intel count must match exactly what IntelPane will render:
   // references + (provenance ? 1 : 0). The pane also drops empty
-  // provenance objects, so mirror that here (fixes FINDING-VA-004,
+  // provenance objects, so mirror that here (fixes VA-004,
   // which showed "Intel 1" for a finding with an empty provenance
   // object and no refs).
   const hasProvenance = !!(

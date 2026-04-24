@@ -182,7 +182,7 @@ Finding JSON must include:
 
 ## Finding Prefix: CF
 
-All findings from fuzz campaigns use the CF prefix: `FINDING-CF-001`, `FINDING-CF-002`, etc.
+All findings from fuzz campaigns use the CF prefix: `CF-001`, `CF-002`, etc.
 
 ## Handoffs
 

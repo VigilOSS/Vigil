@@ -2300,7 +2300,7 @@ def list_report_findings(engagement_id: int, *, mode: str = "draft") -> list[dic
     for idx, row in enumerate(rows, start=1):
         record = dict(row)
         details = _json_object(record.get("details_json", "{}"))
-        record["report_id"] = f"FINDING-{idx:03d}"
+        record["report_id"] = f"{idx:03d}"
         record["cvss_vector"] = details.get("cvss_vector", "")
         record["cvss_score"] = details.get("cvss_score")
         record["remediation"] = details.get("remediation", "")
@@ -3210,11 +3210,32 @@ _SINGLE_ARG_WRAPPER_OPTIONS = {
     "timeout": {"-k", "--kill-after", "-s", "--signal"},
 }
 _TIMEOUT_DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+_SHELL_COMMAND_SEPARATORS = {"&&", "||", ";", "|", "|&", "&"}
+_SHELL_PREAMBLE_BUILTINS = {
+    ".",
+    "alias",
+    "cd",
+    "export",
+    "local",
+    "popd",
+    "pushd",
+    "readonly",
+    "set",
+    "shopt",
+    "source",
+    "typeset",
+    "ulimit",
+    "umask",
+    "unalias",
+    "unset",
+}
 
 
 def _shell_tokens(command: str) -> list[str]:
     try:
-        return shlex.split(command)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        return list(lexer)
     except ValueError:
         return command.split()
 
@@ -3258,7 +3279,7 @@ def _derive_tool_bin_from_tokens(tokens: list[str], *, depth: int = 0) -> str:
         bare = Path(token).name
         if bare in _SHELL_TOOL_WRAPPERS:
             for idx, arg in enumerate(remaining):
-                if arg == "-c" or (arg.startswith("-") and "c" in arg[1:]):
+                if _is_shell_command_string_flag(arg):
                     if idx + 1 < len(remaining):
                         return _derive_tool_bin_from_tokens(
                             _shell_tokens(remaining[idx + 1]),
@@ -3269,8 +3290,31 @@ def _derive_tool_bin_from_tokens(tokens: list[str], *, depth: int = 0) -> str:
         if bare in _PREFIX_TOOL_WRAPPERS:
             remaining = _strip_wrapper_options(bare, remaining)
             continue
+        if bare in _SHELL_PREAMBLE_BUILTINS:
+            post_preamble = _skip_shell_preamble_tokens(remaining)
+            if post_preamble is not None:
+                remaining = post_preamble
+                continue
         return bare.split(";", 1)[0].split("|", 1)[0].strip() or bare
     return ""
+
+
+def _is_shell_command_string_flag(arg: str) -> bool:
+    if not arg.startswith("-"):
+        return False
+    if arg == "-c":
+        return True
+    if not arg.startswith("-") or arg.startswith("--"):
+        return False
+    short_flags = arg[1:]
+    return bool(short_flags) and short_flags.endswith("c") and set(short_flags) <= {"l", "i", "s", "r", "c"}
+
+
+def _skip_shell_preamble_tokens(tokens: list[str]) -> list[str] | None:
+    for idx, token in enumerate(tokens):
+        if token in _SHELL_COMMAND_SEPARATORS:
+            return tokens[idx + 1 :]
+    return None
 
 
 def _derive_tool_bin(command: str, argv: list[str] | None) -> str:

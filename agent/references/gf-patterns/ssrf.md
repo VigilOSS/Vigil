@@ -30,7 +30,6 @@ link, src, dest`
 ## Weight and priority interpretation
 
 - Baseline priority score: 45 (second only to `rce`)
-- When combined with a nuclei match on the same URL: +10 bonus
 - Terminal reasons that suppress this bucket: `inert_type` (image/video/font/archive are skipped at ingest)
 
 ## Example URLs that match

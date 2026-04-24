@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import sqlite3
 import sys
@@ -63,24 +64,22 @@ from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 
 
-# tool_bin labels that mark each stage of activity. We keep these lowercase
-# and match against the lowercased argv[0] the backend stores because tool
-# invocations inside Kali MCP use the canonical binary names.
-_ENUM_TOOLS: frozenset[str] = frozenset({
-    "subfinder",
-    "puredns",
-    "dnsx",
-    "ffuf",
-    "httpx",
-    "amass",
-    "assetfinder",
-})
-_COLLECTION_TOOLS: frozenset[str] = frozenset({
-    "katana",
-    "gau",
-    "hakrawler",
-    "waybackurls",
-})
+# Single registry for scope-coverage tool semantics. Adding a new enum or
+# collection tool should start here; only tools with unusual CLI shapes need
+# extra flag-table changes below.
+_TOOL_COVERAGE_SPECS: dict[str, tuple[frozenset[str], bool]] = {
+    "subfinder": (frozenset({"enum"}), False),
+    "puredns": (frozenset({"enum"}), False),
+    "dnsx": (frozenset({"enum"}), False),
+    "ffuf": (frozenset({"enum"}), False),
+    "httpx": (frozenset({"enum"}), False),
+    "amass": (frozenset({"enum"}), False),
+    "assetfinder": (frozenset({"enum"}), True),
+    "katana": (frozenset({"collection"}), False),
+    "gau": (frozenset({"collection"}), True),
+    "hakrawler": (frozenset({"collection"}), False),
+    "waybackurls": (frozenset({"collection"}), True),
+}
 _REACTIVE_NUCLEI_TOOL = "nuclei"
 _COMMAND_TARGET_FILE_FLAGS: frozenset[str] = frozenset({
     "-l",
@@ -93,6 +92,60 @@ _COMMAND_TARGET_FILE_FLAGS: frozenset[str] = frozenset({
     "-target-list",
     "--target-list",
 })
+_COMMAND_TARGET_VALUE_FLAGS: frozenset[str] = frozenset({
+    "-d",
+    "--domain",
+    "-host",
+    "--host",
+    "--hostname",
+    "-target",
+    "--target",
+    "-u",
+    "--url",
+})
+_NON_TARGET_VALUE_FLAGS: frozenset[str] = frozenset({
+    "-H",
+    "--header",
+    "-c",
+    "--config",
+    "--cookie",
+    "--o",
+    "-o",
+    "--output",
+    "-p",
+    "--port",
+    "--proxy",
+    "-w",
+    "--wordlist",
+})
+_PREFIX_TOOL_WRAPPERS: frozenset[str] = frozenset({
+    "command",
+    "env",
+    "gtimeout",
+    "ionice",
+    "nice",
+    "nohup",
+    "stdbuf",
+    "sudo",
+    "timeout",
+})
+_SHELL_TOOL_WRAPPERS: frozenset[str] = frozenset({
+    "bash",
+    "dash",
+    "ksh",
+    "sh",
+    "zsh",
+})
+_SINGLE_ARG_WRAPPER_OPTIONS: dict[str, frozenset[str]] = {
+    "env": frozenset({"-C", "--chdir", "-S", "--split-string", "-u", "--unset"}),
+    "gtimeout": frozenset({"-k", "--kill-after", "-s", "--signal"}),
+    "ionice": frozenset({"-c", "--class", "-n", "--classdata"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "stdbuf": frozenset({"-e", "-i", "-o"}),
+    "sudo": frozenset({"-C", "-g", "-h", "-p", "-r", "-T", "-t", "-u"}),
+    "timeout": frozenset({"-k", "--kill-after", "-s", "--signal"}),
+}
+_TIMEOUT_DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
 _MAX_TARGET_FILE_BYTES = 2_000_000
 
 # Services count as "live" when the backend state is anything except
@@ -101,6 +154,7 @@ _MAX_TARGET_FILE_BYTES = 2_000_000
 # out explicitly), which keeps the audit optimistic during backend
 # schema evolution.
 _NON_LIVE_SERVICE_STATES: frozenset[str] = frozenset({"down", "filtered", "unreachable"})
+_COMMAND_RUN_PAGE_SIZE = 1000
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -167,7 +221,7 @@ def run(args: argparse.Namespace) -> None:
             print(f"check-scope-coverage: backend services fetch failed: {exc}", file=sys.stderr)
             sys.exit(1)
         try:
-            command_runs = client.get("command-runs?limit=1000")
+            command_runs = _fetch_all_command_runs(client)
         except AssessError as exc:
             print(f"check-scope-coverage: backend command-runs fetch failed: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -184,7 +238,11 @@ def run(args: argparse.Namespace) -> None:
     summary_dict = summary if isinstance(summary, dict) else {}
 
     db_path = Path(cfg.engagement_dir) / "cases.db"
-    work_by_host = _load_work_items_by_host(db_path)
+    try:
+        work_by_host = _load_work_items_by_host(db_path)
+    except sqlite3.Error as exc:
+        print(f"check-scope-coverage: unable to read work buffer: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     report_entries: list[dict[str, Any]] = []
     for entry in entries:
@@ -239,7 +297,7 @@ def _classify_entry(raw: str) -> dict[str, Any] | None:
         return None
 
     if stripped.startswith("*.") and len(stripped) > 2:
-        host = stripped[2:]
+        host = _normalize_scope_host(stripped[2:])
         if not host:
             return None
         return {
@@ -253,7 +311,7 @@ def _classify_entry(raw: str) -> dict[str, Any] | None:
             parts = urlsplit(stripped)
         except ValueError:
             return None
-        host = (parts.hostname or "").lower()
+        host = _normalize_scope_host(parts.hostname or "")
         if not host:
             return None
         return {
@@ -262,11 +320,33 @@ def _classify_entry(raw: str) -> dict[str, Any] | None:
             "host": host,
         }
 
+    host = _normalize_scope_host(stripped)
+    if not host:
+        return None
     return {
         "scope_entry": stripped,
         "entry_kind": "bare_host",
-        "host": stripped.lower(),
+        "host": host,
     }
+
+
+def _normalize_scope_host(raw: str) -> str:
+    value = raw.strip()
+    if not value:
+        return ""
+    if "://" in value:
+        try:
+            return (urlsplit(value).hostname or "").rstrip(".").lower()
+        except ValueError:
+            return ""
+    try:
+        parsed = urlsplit("http://" + value)
+        host = parsed.hostname or ""
+    except ValueError:
+        host = value
+    if not host:
+        host = value.split("/", 1)[0]
+    return host.rstrip(".").lower()
 
 
 def _endpoint_host(endpoint: str) -> str:
@@ -317,15 +397,6 @@ def _command_run_mentions_host(
     `nuclei -l /engagements/<key>/scans/delta.txt`, where the command text
     contains only a mounted artifact path rather than the actual host names.
     """
-    entry_host = entry["host"]
-    command = (row.get("command") or "").lower()
-    if command:
-        if entry["entry_kind"] == "wildcard":
-            if ("." + entry_host) in command or entry_host in command:
-                return True
-        elif entry_host in command:
-            return True
-
     for host in _command_run_target_hosts(row, engagement_dir=engagement_dir):
         if _entry_matches_host(entry, host):
             return True
@@ -333,36 +404,168 @@ def _command_run_mentions_host(
 
 
 def _command_run_target_hosts(row: dict[str, Any], *, engagement_dir: Path | None) -> set[str]:
-    """Extract best-effort target hosts from command text, argv, and target files."""
-    tokens = _command_tokens(row)
     hosts: set[str] = set()
+    token_sets: list[list[str]] = []
+
+    argv = row.get("argv")
+    if isinstance(argv, list) and argv:
+        token_sets.append([str(item) for item in argv])
+
+    command = str(row.get("command") or "").strip()
+    if command:
+        try:
+            command_tokens = shlex.split(command)
+        except ValueError:
+            command_tokens = command.split()
+        if command_tokens:
+            token_sets.append(command_tokens)
+
+    for tokens in token_sets:
+        hosts.update(_extract_target_hosts_from_tokens(tokens, engagement_dir=engagement_dir))
+    return hosts
+
+
+def _extract_target_hosts_from_tokens(
+    tokens: list[str],
+    *,
+    engagement_dir: Path | None,
+    depth: int = 0,
+) -> set[str]:
+    if depth > 4:
+        return set()
+
+    remaining = list(tokens)
+    while remaining:
+        token = remaining.pop(0).strip()
+        if not token:
+            continue
+        if _is_env_assignment(token):
+            continue
+        bare = Path(token).name
+        if bare in _SHELL_TOOL_WRAPPERS:
+            nested = _nested_shell_command_tokens(remaining)
+            if nested:
+                return _extract_target_hosts_from_tokens(
+                    nested,
+                    engagement_dir=engagement_dir,
+                    depth=depth + 1,
+                )
+            return set()
+        if bare in _PREFIX_TOOL_WRAPPERS:
+            remaining = _strip_wrapper_options(bare, remaining)
+            continue
+        return _target_hosts_for_tool(bare.lower(), remaining, engagement_dir=engagement_dir)
+    return set()
+
+
+def _is_env_assignment(token: str) -> bool:
+    if "=" not in token:
+        return False
+    name, _value = token.split("=", 1)
+    return bool(name) and name.replace("_", "").isalnum()
+
+
+def _nested_shell_command_tokens(tokens: list[str]) -> list[str]:
+    for idx, arg in enumerate(tokens):
+        if _is_shell_command_string_flag(arg) and idx + 1 < len(tokens):
+            nested = tokens[idx + 1]
+            try:
+                return shlex.split(nested)
+            except ValueError:
+                return nested.split()
+    return []
+
+
+def _is_shell_command_string_flag(arg: str) -> bool:
+    if not arg.startswith("-"):
+        return False
+    if arg == "-c":
+        return True
+    if arg.startswith("--"):
+        return False
+    short_flags = arg[1:]
+    return bool(short_flags) and short_flags.endswith("c") and set(short_flags) <= {"l", "i", "s", "r", "c"}
+
+
+def _strip_wrapper_options(wrapper: str, tokens: list[str]) -> list[str]:
+    remaining = list(tokens)
+    options_with_arg = _SINGLE_ARG_WRAPPER_OPTIONS.get(wrapper, frozenset())
+    while remaining:
+        token = remaining[0]
+        if wrapper == "env" and _is_env_assignment(token):
+            remaining.pop(0)
+            continue
+        if not token.startswith("-") or token == "-":
+            break
+        option = remaining.pop(0)
+        option_name = option.split("=", 1)[0]
+        if option_name in options_with_arg and "=" not in option and remaining:
+            remaining.pop(0)
+    if wrapper in {"timeout", "gtimeout"} and remaining and _TIMEOUT_DURATION_RE.fullmatch(remaining[0]):
+        remaining.pop(0)
+    return remaining
+
+
+def _target_hosts_for_tool(tool: str, tokens: list[str], *, engagement_dir: Path | None) -> set[str]:
+    hosts: set[str] = set()
+
+    for file_token in _target_file_tokens(tokens):
+        path = _resolve_command_target_file(file_token, engagement_dir) if engagement_dir is not None else None
+        if path is None:
+            continue
+        hosts.update(_hosts_from_target_file(path))
+
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        option_name = token.split("=", 1)[0]
+        if option_name in _COMMAND_TARGET_VALUE_FLAGS:
+            value = token.split("=", 1)[1] if "=" in token else (tokens[idx + 1] if idx + 1 < len(tokens) else "")
+            host = _host_from_token(value)
+            if host:
+                hosts.add(host)
+            idx += 1 if "=" in token else 2
+            continue
+        idx += 1
+
     for token in tokens:
+        if "://" not in token:
+            continue
         host = _host_from_token(token)
         if host:
             hosts.add(host)
 
-    if engagement_dir is None:
-        return hosts
-
-    for file_token in _target_file_tokens(tokens):
-        path = _resolve_command_target_file(file_token, engagement_dir)
-        if path is None:
-            continue
-        hosts.update(_hosts_from_target_file(path))
+    positional = _first_positional_target_token(tool, tokens)
+    if positional:
+        host = _host_from_token(positional)
+        if host:
+            hosts.add(host)
     return hosts
 
 
-def _command_tokens(row: dict[str, Any]) -> list[str]:
-    argv = row.get("argv")
-    if isinstance(argv, list) and argv:
-        return [str(item) for item in argv]
-    command = str(row.get("command") or "")
-    if not command:
-        return []
-    try:
-        return shlex.split(command)
-    except ValueError:
-        return command.split()
+def _first_positional_target_token(tool: str, tokens: list[str]) -> str:
+    tool_spec = _tool_coverage_spec(tool)
+    if tool_spec is None or not tool_spec[1]:
+        return ""
+    skip_next = False
+    for token in tokens:
+        option_name = token.split("=", 1)[0]
+        if skip_next:
+            skip_next = False
+            continue
+        if option_name in _COMMAND_TARGET_VALUE_FLAGS | _COMMAND_TARGET_FILE_FLAGS | _NON_TARGET_VALUE_FLAGS:
+            if "=" not in token:
+                skip_next = True
+            continue
+        if token.startswith("-"):
+            continue
+        if _host_from_token(token):
+            return token
+    return ""
+
+
+def _tool_coverage_spec(tool: str) -> tuple[frozenset[str], bool] | None:
+    return _TOOL_COVERAGE_SPECS.get(tool)
 
 
 def _target_file_tokens(tokens: list[str]) -> list[str]:
@@ -504,9 +707,10 @@ def _build_entry_report(
         label = bin_name or tool_name
         if not label:
             continue
-        if label in _ENUM_TOOLS:
+        tool_spec = _tool_coverage_spec(label)
+        if tool_spec is not None and "enum" in tool_spec[0]:
             enum_tools_seen.add(label)
-        if label in _COLLECTION_TOOLS:
+        if tool_spec is not None and "collection" in tool_spec[0]:
             collection_tools_seen.add(label)
         if label == _REACTIVE_NUCLEI_TOOL:
             reactive_nuclei_runs += 1
@@ -538,7 +742,7 @@ def _build_entry_report(
 
     observation_count = _extract_observation_count(entry, summary, total_services)
 
-    metadata = scope_metadata.get(entry["host"], {})
+    metadata = scope_metadata.get(_scope_metadata_lookup_key(entry), {})
     entry_status = str(metadata.get("status") or "").lower()
 
     gaps: list[str] = []
@@ -654,6 +858,19 @@ def _extract_observation_count(
     return round(total * total_services / total_services_all)
 
 
+def _fetch_all_command_runs(client: AssessmentClient) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        page = client.get(f"command-runs?limit={_COMMAND_RUN_PAGE_SIZE}&offset={offset}")
+        if not isinstance(page, list):
+            raise AssessError("backend command-runs fetch returned non-list payload")
+        rows.extend(page)
+        if len(page) < _COMMAND_RUN_PAGE_SIZE:
+            return rows
+        offset += _COMMAND_RUN_PAGE_SIZE
+
+
 # ---------------------------------------------------------------------------
 # scope.json metadata helpers
 # ---------------------------------------------------------------------------
@@ -676,14 +893,34 @@ def _extract_scope_metadata(scope_data: dict[str, Any]) -> dict[str, dict[str, A
     if isinstance(raw_map, dict):
         for host, info in raw_map.items():
             if isinstance(host, str) and isinstance(info, dict):
-                metadata[host.lower()] = info
+                normalized_key = _normalize_scope_metadata_key(host)
+                if normalized_key:
+                    metadata[normalized_key] = dict(info)
 
     raw_deferred = scope_data.get("deferred_hosts")
     if isinstance(raw_deferred, list):
         for host in raw_deferred:
             if isinstance(host, str):
-                metadata.setdefault(host.lower(), {})["status"] = "deferred"
+                normalized_key = _normalize_scope_metadata_key(host)
+                if not normalized_key:
+                    continue
+                bucket = metadata.setdefault(normalized_key, {})
+                if "status" not in bucket:
+                    bucket["status"] = "deferred"
     return metadata
+
+
+def _normalize_scope_metadata_key(raw: str) -> str:
+    entry = _classify_entry(raw)
+    if entry is None:
+        return ""
+    return _scope_metadata_lookup_key(entry)
+
+
+def _scope_metadata_lookup_key(entry: dict[str, Any]) -> str:
+    if entry["entry_kind"] == "wildcard":
+        return f"wildcard:{entry['host']}"
+    return f"host:{entry['host']}"
 
 
 # ---------------------------------------------------------------------------
@@ -705,31 +942,28 @@ def _load_work_items_by_host(db_path: Path) -> dict[str, dict[str, int]]:
 
     rows: list[tuple[str, str, int]] = []
     rows_with_reason: list[tuple[str, str, int]] = []
+    conn = sqlite3.connect(str(db_path), timeout=5.0)
     try:
-        conn = sqlite3.connect(str(db_path), timeout=5.0)
-        try:
-            conn.execute("PRAGMA busy_timeout=5000")
-            cursor = conn.execute(
-                """
-                SELECT url, status, COUNT(*) AS total
-                FROM work_items
-                GROUP BY url, status
-                """
-            )
-            rows = [(str(r[0] or ""), str(r[1] or ""), int(r[2] or 0)) for r in cursor.fetchall()]
-            cursor = conn.execute(
-                """
-                SELECT url, COUNT(*) AS total
-                FROM work_items
-                WHERE status = 'pending' AND (terminal_reason IS NULL OR terminal_reason = '')
-                GROUP BY url
-                """
-            )
-            rows_with_reason = [(str(r[0] or ""), "pending_without_terminal_reason", int(r[1] or 0)) for r in cursor.fetchall()]
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return {}
+        conn.execute("PRAGMA busy_timeout=5000")
+        cursor = conn.execute(
+            """
+            SELECT url, status, COUNT(*) AS total
+            FROM work_items
+            GROUP BY url, status
+            """
+        )
+        rows = [(str(r[0] or ""), str(r[1] or ""), int(r[2] or 0)) for r in cursor.fetchall()]
+        cursor = conn.execute(
+            """
+            SELECT url, COUNT(*) AS total
+            FROM work_items
+            WHERE status = 'pending' AND (terminal_reason IS NULL OR terminal_reason = '')
+            GROUP BY url
+            """
+        )
+        rows_with_reason = [(str(r[0] or ""), "pending_without_terminal_reason", int(r[1] or 0)) for r in cursor.fetchall()]
+    finally:
+        conn.close()
 
     agg: dict[str, dict[str, int]] = {}
     for url, status, count in rows + rows_with_reason:
