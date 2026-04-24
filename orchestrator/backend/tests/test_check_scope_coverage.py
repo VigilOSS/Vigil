@@ -1,11 +1,18 @@
 """Tests for `aith assess check-scope-coverage`.
 
-The CLI reads scope.json, calls the backend for services/command-runs/summary,
-and reads the local cases.db work_items table. We drive it in-process via a
+The CLI reads scope.json, calls the backend for services and surfaces, and
+reads the local cases.db work_items table. We drive it in-process via a
 monkeypatched ``AssessmentClient`` and a real SQLite cases.db so the tests
 stay hermetic and don't spin up FastAPI. That mirrors the pattern used in
 `test_agent_script_regressions.py::test_check_report_readiness_surfaces_backend_blockers`
 so readers can locate prior art without searching.
+
+The new implementation no longer parses command-run shell/argv. Coverage is
+read directly from durable state — `GET /services`, `GET /surfaces`, and the
+local cases.db `work_items` rollup. These tests exercise that contract and
+will scream if the module ever tries to fetch `command-runs` or `summary`
+again (``FakeClient.get`` raises on any endpoint other than the two allowed
+ones).
 """
 from __future__ import annotations
 
@@ -16,7 +23,6 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import parse_qs
 
 import pytest
 
@@ -106,19 +112,25 @@ def _write_scope(
 
 
 class FakeClient:
-    """In-process stand-in for AssessmentClient that serves fixture data."""
+    """In-process stand-in for AssessmentClient that serves fixture data.
+
+    Only ``services`` and ``surfaces`` are valid endpoints. Anything else
+    — including the removed ``command-runs`` and ``summary`` endpoints —
+    raises ``AssertionError``. That is intentional: the new implementation
+    must not call those endpoints, and a regression that re-adds the call
+    should fail the test suite loudly rather than silently receive an
+    empty list.
+    """
 
     def __init__(
         self,
         *,
         services: list[dict[str, Any]] | None = None,
-        command_runs: list[dict[str, Any]] | dict[str, Any] | None = None,
-        summary: dict[str, Any] | None = None,
+        surfaces: list[dict[str, Any]] | None = None,
         endpoint_handler=None,
     ) -> None:
         self._services = services or []
-        self._command_runs = command_runs or []
-        self._summary = summary or {}
+        self._surfaces = surfaces or []
         self._endpoint_handler = endpoint_handler
         self.calls: list[str] = []
 
@@ -130,29 +142,30 @@ class FakeClient:
                 return handled
         if endpoint == "services":
             return self._services
-        if endpoint.startswith("command-runs"):
-            if isinstance(self._command_runs, dict):
-                return self._command_runs[endpoint]
-            return self._command_runs
-        if endpoint == "summary":
-            return self._summary
+        if endpoint == "surfaces":
+            return self._surfaces
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
     def close(self) -> None:
         return None
 
 
-def _patch_client(monkeypatch, module, *, services=None, command_runs=None, summary=None, endpoint_handler=None) -> list[FakeClient]:
+def _patch_client(
+    monkeypatch,
+    module,
+    *,
+    services=None,
+    surfaces=None,
+    endpoint_handler=None,
+) -> list[FakeClient]:
     fake_services = services or []
-    fake_runs = command_runs or []
-    fake_summary = summary or {}
+    fake_surfaces = surfaces or []
     created: list[FakeClient] = []
 
     def _factory(base_url: str, engagement_key: str) -> FakeClient:
         client = FakeClient(
             services=fake_services,
-            command_runs=fake_runs,
-            summary=fake_summary,
+            surfaces=fake_surfaces,
             endpoint_handler=endpoint_handler,
         )
         created.append(client)
@@ -180,8 +193,7 @@ def _run(
     engagement_dir: Path,
     *,
     services=None,
-    command_runs=None,
-    summary=None,
+    surfaces=None,
     endpoint_handler=None,
     require_stage: str | None = None,
     as_json: bool = True,
@@ -193,8 +205,7 @@ def _run(
         monkeypatch,
         module,
         services=services,
-        command_runs=command_runs,
-        summary=summary,
+        surfaces=surfaces,
         endpoint_handler=endpoint_handler,
     )
     module.run(
@@ -209,12 +220,12 @@ def _run(
 
 
 # ---------------------------------------------------------------------------
-# Required test cases from the plan
+# Core coverage tests
 # ---------------------------------------------------------------------------
 
 
 def test_apex_host_full_coverage(monkeypatch, tmp_path: Path, capsys) -> None:
-    """Bare host with services, observations, and all work done → ready=true."""
+    """Bare host with services, a surface, and all work done → ready=true."""
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
@@ -226,15 +237,12 @@ def test_apex_host_full_coverage(monkeypatch, tmp_path: Path, capsys) -> None:
         {"endpoint": "target.example", "state": "up"},
         {"endpoint": "https://target.example/api", "state": "up"},
     ]
-    runs = [
-        # Surface-collection activity — katana ran against target.example
-        {"command": "katana -u https://target.example -jc", "tool_bin": "katana", "tool_name": "katana"},
-        # Nuclei reactive sweep
-        {"command": "nuclei -u https://target.example", "tool_bin": "nuclei", "tool_name": "nuclei"},
+    surfaces = [
+        {"target_descriptor": "https://target.example/api/one"},
+        {"target_descriptor": "https://target.example/api/two"},
     ]
-    summary = {"request_observation_count": 1000, "service_count": 2}
 
-    _run(monkeypatch, eng, services=services, command_runs=runs, summary=summary, require_stage="consumption")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
 
     out = capsys.readouterr().out
     report = json.loads(out)
@@ -245,82 +253,56 @@ def test_apex_host_full_coverage(monkeypatch, tmp_path: Path, capsys) -> None:
     assert entry["scope_entry"] == "target.example"
     assert entry["entry_kind"] == "bare_host"
     assert entry["enum_attempted"] is True
-    assert entry["enum_tools"] == ["bare_host"]
+    assert "bare_host" in entry["enum_evidence"]
     assert entry["collection_attempted"] is True
-    assert "katana" in entry["collection_tools"]
+    assert "work_items" in entry["collection_evidence"]
+    assert "surfaces" in entry["collection_evidence"]
     assert entry["live_hosts"] == 1
-    assert entry["reactive_nuclei_runs"] == 1
+    assert entry["surfaces_count"] == 2
     assert entry["work_queued"]["pending"] == 0
     assert entry["work_queued"]["done"] == 2
     assert entry["gaps"] == []
 
 
-def test_nuclei_target_list_counts_as_reactive_coverage(monkeypatch, tmp_path: Path, capsys) -> None:
-    """File-driven nuclei runs map back to scope entries via /engagements target lists."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
-    _write_scope(eng, hosts=["target.example"])
-    _make_cases_db(eng)
-    target_file = eng / "scans" / "nuclei_delta.txt"
-    target_file.parent.mkdir()
-    target_file.write_text("https://target.example/login\n", encoding="utf-8")
-
-    services = [{"endpoint": "target.example", "state": "up"}]
-    runs = [
-        {
-            "command": "nuclei -l /engagements/eng/scans/nuclei_delta.txt -jsonl",
-            "tool_bin": "nuclei",
-            "tool_name": "command",
-        },
-    ]
-
-    _run(monkeypatch, eng, services=services, command_runs=runs)
-    report = json.loads(capsys.readouterr().out)
-
-    entry = report["entries"][0]
-    assert entry["reactive_nuclei_runs"] == 1
-
-
 def test_wildcard_zero_live_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
-    """Wildcard with enum attempted but zero live hosts is informational, not a gate failure."""
+    """Wildcard with enum attempted via a surface but zero live hosts is informational."""
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
     _make_cases_db(eng)
 
-    # Subfinder ran but nothing resolved (empty services list for wildcard).
+    # One surface recorded under a subdomain but the service list is empty —
+    # nothing resolved to a live host.
     services: list[dict[str, Any]] = []
-    runs = [
-        {"command": "subfinder -d target.example -silent", "tool_bin": "subfinder", "tool_name": "subfinder"},
-    ]
-    summary = {"request_observation_count": 0, "service_count": 0}
+    surfaces = [{"target_descriptor": "https://beta.target.example/"}]
 
-    # --require-stage enum must pass because enum ATTEMPTED is the gate.
-    _run(monkeypatch, eng, services=services, command_runs=runs, summary=summary, require_stage="enum")
+    # --require-stage enum must pass because enum evidence exists (the surface).
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum")
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True
     assert report["overall_gaps"] == []
     entry = report["entries"][0]
     assert entry["entry_kind"] == "wildcard"
     assert entry["enum_attempted"] is True
-    assert "subfinder" in entry["enum_tools"]
+    assert "surfaces" in entry["enum_evidence"]
     assert entry["live_hosts"] == 0
-    # Informational gap only.
+    # Informational gap only — the gate still passes.
     assert "no-live-hosts" in entry["gaps"]
 
 
 def test_wildcard_partial_collection(monkeypatch, tmp_path: Path, capsys) -> None:
-    """Wildcard with live hosts but only 2/5 subdomains crawled by katana.
+    """Wildcard with live hosts plus surfaces/work_items for a subset of subdomains.
 
-    Collection is attempted (katana ran at all), so `--require-stage collection`
-    passes. Verbose mode still surfaces the partial coverage — which live hosts
-    got crawled vs which didn't — because downstream specialists need that
-    detail even when the gate clears.
+    Collection is attempted (surfaces/work_items exist under the wildcard), so
+    `--require-stage collection` passes.
     """
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
-    _make_cases_db(eng)
+    db = _make_cases_db(eng)
+    # Work items under two of the five live subdomains.
+    _insert_work_item(db, queue_key="w:1", url="https://api.target.example/v1", url_path="/v1", status="pending")
+    _insert_work_item(db, queue_key="w:2", url="https://admin.target.example/login", url_path="/login", status="pending")
 
     services = [
         {"endpoint": "api.target.example", "state": "up"},
@@ -329,21 +311,20 @@ def test_wildcard_partial_collection(monkeypatch, tmp_path: Path, capsys) -> Non
         {"endpoint": "stage.target.example", "state": "up"},
         {"endpoint": "www.target.example", "state": "up"},
     ]
-    runs = [
-        {"command": "subfinder -d target.example", "tool_bin": "subfinder", "tool_name": "subfinder"},
-        {"command": "katana -u https://api.target.example", "tool_bin": "katana", "tool_name": "katana"},
-        {"command": "gau admin.target.example", "tool_bin": "gau", "tool_name": "gau"},
+    surfaces = [
+        {"target_descriptor": "https://api.target.example/v1"},
+        {"target_descriptor": "https://admin.target.example/login"},
     ]
-    summary = {"request_observation_count": 300, "service_count": 5}
 
-    _run(monkeypatch, eng, services=services, command_runs=runs, summary=summary, require_stage="collection")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="collection")
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True
     entry = report["entries"][0]
     assert entry["collection_attempted"] is True
-    assert set(entry["collection_tools"]) >= {"katana", "gau"}
+    assert set(entry["collection_evidence"]) >= {"surfaces", "work_items"}
     assert entry["live_hosts"] == 5
     assert len(entry["live_host_samples"]) == 5
+    assert entry["surfaces_count"] == 2
 
 
 def test_host_explicitly_deferred(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -381,15 +362,12 @@ def test_host_explicitly_deferred(monkeypatch, tmp_path: Path, capsys) -> None:
         {"endpoint": "skip.target.example", "state": "up"},
         {"endpoint": "target.example", "state": "up"},
     ]
-    runs = [
-        # Enum + collection both attempted per-host so the earlier gates pass.
-        {"command": "subfinder -d target.example", "tool_bin": "subfinder", "tool_name": "subfinder"},
-        {"command": "katana -u https://target.example", "tool_bin": "katana", "tool_name": "katana"},
-        {"command": "katana -u https://skip.target.example", "tool_bin": "katana", "tool_name": "katana"},
+    surfaces = [
+        {"target_descriptor": "https://target.example/a"},
+        {"target_descriptor": "https://skip.target.example/x"},
     ]
-    summary = {"request_observation_count": 10, "service_count": 2}
 
-    _run(monkeypatch, eng, services=services, command_runs=runs, summary=summary, require_stage="consumption")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
     by_entry = {e["scope_entry"]: e for e in report["entries"]}
@@ -400,7 +378,7 @@ def test_host_explicitly_deferred(monkeypatch, tmp_path: Path, capsys) -> None:
 
 
 def test_out_of_scope_host_excluded(monkeypatch, tmp_path: Path, capsys) -> None:
-    """Services/work-items for out-of-scope hosts must not inflate any entry's counts."""
+    """Services/surfaces/work-items for out-of-scope hosts must not inflate any entry's counts."""
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
@@ -417,51 +395,47 @@ def test_out_of_scope_host_excluded(monkeypatch, tmp_path: Path, capsys) -> None
         {"endpoint": "evil.example", "state": "up"},  # out of scope
         {"endpoint": "sub.target.example", "state": "up"},  # NOT a wildcard scope -> should be excluded
     ]
-    runs = [
-        {"command": "katana -u https://target.example", "tool_bin": "katana", "tool_name": "katana"},
-        # This run targets an out-of-scope host; the command string substring
-        # check must not fire for target.example.
-        {"command": "katana -u https://evil.example", "tool_bin": "katana", "tool_name": "katana"},
+    surfaces = [
+        {"target_descriptor": "https://target.example/ok"},
+        {"target_descriptor": "https://evil.example/zzz"},  # out of scope
+        {"target_descriptor": "https://sub.target.example/"},  # out of scope vs bare-host entry
     ]
-    summary = {"request_observation_count": 10, "service_count": 3}
 
-    _run(monkeypatch, eng, services=services, command_runs=runs, summary=summary)
+    _run(monkeypatch, eng, services=services, surfaces=surfaces)
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
     assert entry["total_services"] == 1
     assert entry["live_hosts"] == 1
     assert entry["live_host_samples"] == ["target.example"]
+    assert entry["surfaces_count"] == 1
     # Work counts: one done for target.example, nothing for evil.example/target.co.uk.
     assert entry["work_queued"]["done"] == 1
     assert entry["work_queued"]["pending"] == 0
 
 
 def test_require_stage_enum_fails_when_missing(monkeypatch, tmp_path: Path, capsys) -> None:
-    """A wildcard scope with no subfinder/puredns activity must fail the enum gate."""
+    """A wildcard scope with no services, surfaces, or work items must fail the enum gate."""
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
     _make_cases_db(eng)
 
-    services: list[dict[str, Any]] = []
-    # Only an unrelated run; no enum tools fire for target.example.
-    runs = [
-        {"command": "nmap -sV 10.0.0.1", "tool_bin": "nmap", "tool_name": "nmap_scan"},
-    ]
-    summary = {"request_observation_count": 0, "service_count": 0}
-
+    # Nothing — no services, no surfaces, no work_items under *.target.example.
     with pytest.raises(SystemExit) as excinfo:
         _run(
             monkeypatch,
             eng,
-            services=services,
-            command_runs=runs,
-            summary=summary,
+            services=[],
+            surfaces=[],
             require_stage="enum",
         )
     assert excinfo.value.code == 1
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is False
+    entry = report["entries"][0]
+    assert entry["enum_attempted"] is False
+    assert entry["enum_evidence"] == []
+    assert "no-enum" in entry["gaps"]
     assert any("no-enum" in msg for msg in report["overall_gaps"])
 
 
@@ -481,12 +455,9 @@ def test_require_stage_consumption_passes_when_all_done_or_skipped(monkeypatch, 
     )
 
     services = [{"endpoint": "target.example", "state": "up"}]
-    runs = [
-        {"command": "katana -u https://target.example", "tool_bin": "katana", "tool_name": "katana"},
-    ]
-    summary = {"request_observation_count": 42, "service_count": 1}
+    surfaces = [{"target_descriptor": "https://target.example/a"}]
 
-    _run(monkeypatch, eng, services=services, command_runs=runs, summary=summary, require_stage="consumption")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
     assert report["overall_gaps"] == []
@@ -503,20 +474,31 @@ def test_collection_gate_ignores_superdomain_substring_false_positive(monkeypatc
     _write_scope(eng, hosts=["target.example"])
     _make_cases_db(eng)
 
+    # Service keeps enum gate satisfied for target.example itself so the test is
+    # specifically about collection evidence.
     services = [{"endpoint": "target.example", "state": "up"}]
-    runs = [
-        {"command": "katana -u https://target.example.evil.org", "tool_bin": "katana", "tool_name": "katana"},
-        {"command": "gau https://nottarget.example", "tool_bin": "gau", "tool_name": "gau"},
+    # Surfaces are all for unrelated hosts that merely contain the string
+    # "target.example" — they must NOT count toward collection coverage.
+    surfaces = [
+        {"target_descriptor": "https://target.example.evil.org/"},
+        {"target_descriptor": "https://nottarget.example/path"},
     ]
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="collection")
+        _run(
+            monkeypatch,
+            eng,
+            services=services,
+            surfaces=surfaces,
+            require_stage="collection",
+        )
     assert excinfo.value.code == 1
 
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
     assert entry["collection_attempted"] is False
-    assert entry["collection_tools"] == []
+    assert entry["collection_evidence"] == []
+    assert entry["surfaces_count"] == 0
     assert "no-collection" in entry["gaps"]
 
 
@@ -535,57 +517,13 @@ def test_old_cases_db_schema_fails_closed_instead_of_claiming_readiness(monkeypa
         conn.close()
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=[], command_runs=[], summary={})
+        _run(monkeypatch, eng, services=[], surfaces=[])
     assert excinfo.value.code == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "unable to read work buffer" in captured.err
     assert "terminal_reason" in captured.err
-
-
-def test_command_run_fetch_paginates_past_first_page(monkeypatch, tmp_path: Path, capsys) -> None:
-    """Coverage must consider command runs beyond the first 1000 rows."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
-    _write_scope(eng, hosts=["target.example"])
-    _make_cases_db(eng)
-
-    first_page = [
-        {"command": f"katana -u https://unrelated-{idx}.example", "tool_bin": "katana", "tool_name": "katana"}
-        for idx in range(1000)
-    ]
-    second_page = [
-        {"command": "katana -u https://target.example", "tool_bin": "katana", "tool_name": "katana"},
-    ]
-
-    def endpoint_handler(endpoint: str) -> Any:
-        if not endpoint.startswith("command-runs?"):
-            return None
-        query = endpoint.split("?", 1)[1]
-        params = parse_qs(query)
-        offset = int(params["offset"][0])
-        if offset == 0:
-            return first_page
-        if offset == 1000:
-            return second_page
-        raise AssertionError(f"Unexpected command-runs offset: {offset}")
-
-    client = _run(
-        monkeypatch,
-        eng,
-        services=[{"endpoint": "target.example", "state": "up"}],
-        summary={"request_observation_count": 1, "service_count": 1},
-        endpoint_handler=endpoint_handler,
-        require_stage="collection",
-    )
-
-    report = json.loads(capsys.readouterr().out)
-    entry = report["entries"][0]
-    assert entry["collection_attempted"] is True
-    assert "katana" in entry["collection_tools"]
-    assert client is not None
-    assert "command-runs?limit=1000&offset=1000" in client.calls
 
 
 def test_deferred_url_metadata_normalizes_trailing_dot(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -601,9 +539,9 @@ def test_deferred_url_metadata_normalizes_trailing_dot(monkeypatch, tmp_path: Pa
     _insert_work_item(db, queue_key="u:1", url="https://api.target.example/work", url_path="/work", status="pending")
 
     services = [{"endpoint": "https://api.target.example/health", "state": "up"}]
-    runs = [{"command": "katana -u https://api.target.example", "tool_bin": "katana", "tool_name": "katana"}]
+    surfaces = [{"target_descriptor": "https://api.target.example/work"}]
 
-    _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="consumption")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
     assert entry["host"] == "api.target.example"
@@ -624,9 +562,9 @@ def test_url_scope_entry_accepts_host_keyed_deferral(monkeypatch, tmp_path: Path
     _insert_work_item(db, queue_key="u:2", url="https://api.target.example/work", url_path="/work", status="pending")
 
     services = [{"endpoint": "https://api.target.example/health", "state": "up"}]
-    runs = [{"command": "katana -u https://api.target.example", "tool_bin": "katana", "tool_name": "katana"}]
+    surfaces = [{"target_descriptor": "https://api.target.example/work"}]
 
-    _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="consumption")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
     assert entry["host"] == "api.target.example"
@@ -643,10 +581,10 @@ def test_bare_scope_host_with_port_matches_host_keyed_services_and_work(monkeypa
     _insert_work_item(db, queue_key="hp:1", url="https://api.target.example/work", url_path="/work", status="pending")
 
     services = [{"endpoint": "https://api.target.example:8443/health", "state": "up"}]
-    runs = [{"command": "katana -u https://api.target.example:8443", "tool_bin": "katana", "tool_name": "katana"}]
+    surfaces = [{"target_descriptor": "https://api.target.example:8443/work"}]
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="consumption")
+        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
     assert excinfo.value.code == 1
 
     report = json.loads(capsys.readouterr().out)
@@ -670,14 +608,15 @@ def test_host_metadata_status_beats_deferred_hosts(monkeypatch, tmp_path: Path, 
     db = _make_cases_db(eng)
     _insert_work_item(db, queue_key="p:1", url="https://target.example/work", url_path="/work", status="pending")
 
-    runs = [{"command": "katana -u https://target.example", "tool_bin": "katana", "tool_name": "katana"}]
+    services = [{"endpoint": "target.example", "state": "up"}]
+    surfaces = [{"target_descriptor": "https://target.example/work"}]
 
     with pytest.raises(SystemExit) as excinfo:
         _run(
             monkeypatch,
             eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            command_runs=runs,
+            services=services,
+            surfaces=surfaces,
             require_stage="consumption",
         )
     assert excinfo.value.code == 1
@@ -703,12 +642,11 @@ def test_wildcard_scope_normalizes_trailing_dot_for_metadata_and_matching(monkey
         {"endpoint": "api.target.example", "state": "up"},
         {"endpoint": "www.target.example", "state": "up"},
     ]
-    runs = [
-        {"command": "subfinder -d target.example", "tool_bin": "subfinder", "tool_name": "subfinder"},
-        {"command": "katana -u https://api.target.example", "tool_bin": "katana", "tool_name": "katana"},
+    surfaces = [
+        {"target_descriptor": "https://api.target.example/"},
     ]
 
-    _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="collection")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="collection")
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
     assert entry["host"] == "target.example"
@@ -733,14 +671,13 @@ def test_wildcard_and_bare_entries_keep_distinct_metadata_status(monkeypatch, tm
         {"endpoint": "target.example", "state": "up"},
         {"endpoint": "api.target.example", "state": "up"},
     ]
-    runs = [
-        {"command": "subfinder -d target.example", "tool_bin": "subfinder", "tool_name": "subfinder"},
-        {"command": "katana -u https://target.example", "tool_bin": "katana", "tool_name": "katana"},
-        {"command": "katana -u https://api.target.example", "tool_bin": "katana", "tool_name": "katana"},
+    surfaces = [
+        {"target_descriptor": "https://target.example/work"},
+        {"target_descriptor": "https://api.target.example/"},
     ]
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="consumption")
+        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
     assert excinfo.value.code == 1
 
     report = json.loads(capsys.readouterr().out)
@@ -751,43 +688,75 @@ def test_wildcard_and_bare_entries_keep_distinct_metadata_status(monkeypatch, tm
     assert by_scope["*.target.example"]["gaps"] == []
 
 
-def test_non_target_host_like_filename_does_not_count_as_collection(monkeypatch, tmp_path: Path, capsys) -> None:
-    """Host-like output filenames must not count as collection for the scoped host."""
+# ---------------------------------------------------------------------------
+# New tests for the surface/work_item-based enum and collection gates
+# ---------------------------------------------------------------------------
+
+
+def test_surface_under_wildcard_satisfies_enum_without_services(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A recorded surface under a wildcard satisfies the enum gate even with no live services."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["*.target.example"])
+    _make_cases_db(eng)
+
+    services: list[dict[str, Any]] = []
+    surfaces = [{"target_descriptor": "https://api.target.example/login"}]
+
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum")
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is True
+    entry = report["entries"][0]
+    assert entry["enum_attempted"] is True
+    assert entry["enum_evidence"] == ["surfaces"]
+    assert entry["live_hosts"] == 0
+    assert "no-live-hosts" in entry["gaps"]
+
+
+def test_work_item_under_wildcard_satisfies_enum_without_services(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A work_item under a wildcard subdomain satisfies the enum gate even with no live services or surfaces."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["*.target.example"])
+    db = _make_cases_db(eng)
+    _insert_work_item(db, queue_key="we:1", url="https://api.target.example/x", url_path="/x", status="pending")
+
+    services: list[dict[str, Any]] = []
+    surfaces: list[dict[str, Any]] = []
+
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum")
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is True
+    entry = report["entries"][0]
+    assert entry["enum_attempted"] is True
+    assert entry["enum_evidence"] == ["work_items"]
+    assert entry["live_hosts"] == 0
+    assert "no-live-hosts" in entry["gaps"]
+
+
+def test_collection_gate_fails_when_no_surfaces_or_work_items(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A bare host with a live service but no surfaces/work_items fails the collection gate."""
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
     _make_cases_db(eng)
 
     services = [{"endpoint": "target.example", "state": "up"}]
-    runs = [
-        {"command": "gau admin.target.example -o target.example", "tool_bin": "gau", "tool_name": "gau"},
-        {"command": "katana -o target.example -list urls.txt", "tool_bin": "katana", "tool_name": "katana"},
-    ]
+    surfaces: list[dict[str, Any]] = []
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="collection")
+        _run(
+            monkeypatch,
+            eng,
+            services=services,
+            surfaces=surfaces,
+            require_stage="collection",
+        )
     assert excinfo.value.code == 1
 
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
+    assert entry["enum_attempted"] is True
     assert entry["collection_attempted"] is False
+    assert entry["collection_evidence"] == []
     assert "no-collection" in entry["gaps"]
-
-
-def test_positional_target_tools_skip_long_output_alias_before_real_host(monkeypatch, tmp_path: Path, capsys) -> None:
-    """`gau --o file host` should use the host, not the output filename, as the positional target."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
-    _write_scope(eng, hosts=["api.example.com"])
-    _make_cases_db(eng)
-
-    services = [{"endpoint": "api.example.com", "state": "up"}]
-    runs = [
-        {"command": "gau --o target.example.txt api.example.com", "tool_bin": "gau", "tool_name": "gau"},
-    ]
-
-    _run(monkeypatch, eng, services=services, command_runs=runs, require_stage="collection")
-    report = json.loads(capsys.readouterr().out)
-    entry = report["entries"][0]
-    assert entry["collection_attempted"] is True
-    assert entry["collection_tools"] == ["gau"]

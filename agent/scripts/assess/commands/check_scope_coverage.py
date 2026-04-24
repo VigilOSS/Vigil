@@ -3,39 +3,36 @@
 This is a higher-level sibling of `check-coverage`: where that command audits
 the backend's `assessment_surfaces` table for surface-level resolution,
 `check-scope-coverage` walks every entry in `scope.json` (bare hosts,
-wildcards, or http URLs) and reports the coverage state across the
-enumeration, collection, and consumption phases.
+wildcards, or http URLs) and reports coverage state across the enumeration,
+collection, and consumption phases.
 
-The audit is rolled up from three data sources:
+Unlike earlier revisions, this command does not re-parse raw command-run argv
+to infer which enumeration/collection tool ran. Instead, coverage is read
+directly from durable state the recon/collection specialists already produce:
 
-- Backend `GET /engagements/{key}/assessment/services` — how many live
-  endpoints each entry resolves to (used to ground wildcard expansion counts
-  and flag apex-only deployments).
-- Backend `GET /engagements/{key}/assessment/command-runs` filtered by
-  `tool_bin` — detects whether `subfinder`/`puredns`/`dnsx`/`ffuf`/`httpx`
-  ran (enum activity), whether `katana`/`gau`/`hakrawler` ran (collection
-  activity), and how many `nuclei` sweeps targeted the entry. File-driven
-  runs such as `nuclei -l /engagements/<key>/scans/targets.txt` are resolved
-  back to the host engagement directory when the referenced target list is
-  still present.
+- Backend `GET /engagements/{key}/assessment/services` — the live endpoints
+  each scope entry resolves to. Wildcards require at least one live service
+  under them; apex-only deployments satisfy that trivially.
+- Backend `GET /engagements/{key}/assessment/surfaces` — recorded surface
+  candidates keyed by host. Any surface under a scope entry's host proves
+  collection produced something.
 - Local `$DIR/cases.db` `work_items` grouped by status (pending / processing
-  / done / skipped / error). Scoping is a coarse URL `LIKE '%<host>%'` match
-  because the backend carries the canonical surface/service FK but the
-  work buffer is local and ingest records aren't guaranteed to carry a
-  service_id for every URL source. A consumption-stage gap marks entries
-  that still have pending work with no `terminal_reason` set.
+  / done / skipped / error). Rows under a scope entry's host prove URL-level
+  collection happened, and the pending/terminal_reason split drives the
+  consumption gate.
 
-Scope-entry → service match heuristics (documented here so operators can
-reproduce classifications by eye):
+The gate asks "did enumeration and collection produce evidence under this
+scope entry?" not "did a specific tool binary run?". That shift is intentional:
+the tool-binary question used to be answered by shell-parsing every stored
+command run, which was fragile against wrappers, shell prefixes, and
+file-driven target lists. The state we check instead is what downstream phases
+actually consume, so a pass here means later phases have real data to work
+with.
 
-- ``bare_host`` (``target.example`` or ``https://api.target.example/v1``) matches
-  services whose ``endpoint`` host segment equals the entry host exactly.
-- ``wildcard`` (``*.target.example``) matches services whose endpoint host
-  ends with ``.target.example`` OR equals ``target.example`` — both the apex and
-  subdomains count so the wildcard entry owns the full wildcard surface.
-- URL entries are normalized with `urllib.parse.urlsplit` and collapse to
-  the host; the path is ignored intentionally because we're auditing host
-  coverage, not path coverage.
+Scope-entry → host match heuristics:
+
+- ``bare_host`` and ``url`` entries match hosts equal to the entry host.
+- ``wildcard`` entries match the apex and any subdomain under it.
 
 Exit codes:
 
@@ -52,8 +49,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
-import shlex
 import sqlite3
 import sys
 from pathlib import Path
@@ -62,99 +57,18 @@ from urllib.parse import urlsplit
 
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.scope import (
+    classify_scope_entry,
+    entry_matches_host,
+)
 
-
-# Single registry for scope-coverage tool semantics. Adding a new enum or
-# collection tool should start here; only tools with unusual CLI shapes need
-# extra flag-table changes below.
-_TOOL_COVERAGE_SPECS: dict[str, tuple[frozenset[str], bool]] = {
-    "subfinder": (frozenset({"enum"}), False),
-    "puredns": (frozenset({"enum"}), False),
-    "dnsx": (frozenset({"enum"}), False),
-    "ffuf": (frozenset({"enum"}), False),
-    "httpx": (frozenset({"enum"}), False),
-    "amass": (frozenset({"enum"}), False),
-    "assetfinder": (frozenset({"enum"}), True),
-    "katana": (frozenset({"collection"}), False),
-    "gau": (frozenset({"collection"}), True),
-    "hakrawler": (frozenset({"collection"}), False),
-    "waybackurls": (frozenset({"collection"}), True),
-}
-_REACTIVE_NUCLEI_TOOL = "nuclei"
-_COMMAND_TARGET_FILE_FLAGS: frozenset[str] = frozenset({
-    "-l",
-    "-list",
-    "--list",
-    "-input",
-    "--input",
-    "-targets",
-    "--targets",
-    "-target-list",
-    "--target-list",
-})
-_COMMAND_TARGET_VALUE_FLAGS: frozenset[str] = frozenset({
-    "-d",
-    "--domain",
-    "-host",
-    "--host",
-    "--hostname",
-    "-target",
-    "--target",
-    "-u",
-    "--url",
-})
-_NON_TARGET_VALUE_FLAGS: frozenset[str] = frozenset({
-    "-H",
-    "--header",
-    "-c",
-    "--config",
-    "--cookie",
-    "--o",
-    "-o",
-    "--output",
-    "-p",
-    "--port",
-    "--proxy",
-    "-w",
-    "--wordlist",
-})
-_PREFIX_TOOL_WRAPPERS: frozenset[str] = frozenset({
-    "command",
-    "env",
-    "gtimeout",
-    "ionice",
-    "nice",
-    "nohup",
-    "stdbuf",
-    "sudo",
-    "timeout",
-})
-_SHELL_TOOL_WRAPPERS: frozenset[str] = frozenset({
-    "bash",
-    "dash",
-    "ksh",
-    "sh",
-    "zsh",
-})
-_SINGLE_ARG_WRAPPER_OPTIONS: dict[str, frozenset[str]] = {
-    "env": frozenset({"-C", "--chdir", "-S", "--split-string", "-u", "--unset"}),
-    "gtimeout": frozenset({"-k", "--kill-after", "-s", "--signal"}),
-    "ionice": frozenset({"-c", "--class", "-n", "--classdata"}),
-    "nice": frozenset({"-n", "--adjustment"}),
-    "stdbuf": frozenset({"-e", "-i", "-o"}),
-    "sudo": frozenset({"-C", "-g", "-h", "-p", "-r", "-T", "-t", "-u"}),
-    "timeout": frozenset({"-k", "--kill-after", "-s", "--signal"}),
-}
-_TIMEOUT_DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
-_MAX_TARGET_FILE_BYTES = 2_000_000
 
 # Services count as "live" when the backend state is anything except
-# `down`/`filtered`. We prefer an allow list over a block list so new
-# backend state values default to counting as live (they'd have to opt
-# out explicitly), which keeps the audit optimistic during backend
-# schema evolution.
+# `down`/`filtered`/`unreachable`. We prefer an allow list over a block list
+# so new backend state values default to counting as live (they'd have to opt
+# out explicitly), which keeps the audit optimistic during backend schema
+# evolution.
 _NON_LIVE_SERVICE_STATES: frozenset[str] = frozenset({"down", "filtered", "unreachable"})
-_COMMAND_RUN_PAGE_SIZE = 1000
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -169,10 +83,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "Gate the exit code on a stage. 'enum' requires every scope entry "
-            "to have attempted enumeration (bare hosts satisfy this trivially). "
-            "'collection' additionally requires katana/gau activity per entry. "
-            "'consumption' additionally requires pending==0 or every remaining "
-            "pending item to carry terminal_reason."
+            "to have enumeration evidence (bare hosts satisfy this trivially; "
+            "wildcards require at least one live service, surface, or work "
+            "item under them). 'collection' additionally requires at least "
+            "one surface or work item per entry. 'consumption' additionally "
+            "requires pending==0 or every remaining pending item to carry "
+            "terminal_reason."
         ),
     )
     p.add_argument(
@@ -208,7 +124,7 @@ def run(args: argparse.Namespace) -> None:
         print("check-scope-coverage: scope.json `hosts` must be a list", file=sys.stderr)
         sys.exit(2)
 
-    entries = [_classify_entry(h) for h in raw_hosts if isinstance(h, str) and h.strip()]
+    entries = [classify_scope_entry(h) for h in raw_hosts if isinstance(h, str) and h.strip()]
     entries = [e for e in entries if e is not None]
 
     scope_metadata = _extract_scope_metadata(scope_data)
@@ -221,21 +137,15 @@ def run(args: argparse.Namespace) -> None:
             print(f"check-scope-coverage: backend services fetch failed: {exc}", file=sys.stderr)
             sys.exit(1)
         try:
-            command_runs = _fetch_all_command_runs(client)
+            surfaces = client.get("surfaces")
         except AssessError as exc:
-            print(f"check-scope-coverage: backend command-runs fetch failed: {exc}", file=sys.stderr)
-            sys.exit(1)
-        try:
-            summary = client.get("summary")
-        except AssessError as exc:
-            print(f"check-scope-coverage: backend summary fetch failed: {exc}", file=sys.stderr)
+            print(f"check-scope-coverage: backend surfaces fetch failed: {exc}", file=sys.stderr)
             sys.exit(1)
     finally:
         client.close()
 
     services_list = services if isinstance(services, list) else []
-    command_runs_list = command_runs if isinstance(command_runs, list) else []
-    summary_dict = summary if isinstance(summary, dict) else {}
+    surfaces_list = surfaces if isinstance(surfaces, list) else []
 
     db_path = Path(cfg.engagement_dir) / "cases.db"
     try:
@@ -250,9 +160,7 @@ def run(args: argparse.Namespace) -> None:
             _build_entry_report(
                 entry=entry,
                 services=services_list,
-                command_runs=command_runs_list,
-                engagement_dir=Path(cfg.engagement_dir),
-                summary=summary_dict,
+                surfaces=surfaces_list,
                 work_by_host=work_by_host,
                 scope_metadata=scope_metadata,
                 required_stage=args.require_stage,
@@ -280,386 +188,29 @@ def run(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Entry classification and matching
+# Host extraction helpers
 # ---------------------------------------------------------------------------
 
 
-def _classify_entry(raw: str) -> dict[str, Any] | None:
-    """Return a dict with `scope_entry`, `entry_kind`, and `host` fields.
-
-    URL entries collapse to their host (scheme + path ignored) so they share
-    the matcher with bare hosts. We reject empty strings and any string that
-    doesn't resolve to a non-empty host so downstream matching doesn't crash
-    on malformed scope rows.
-    """
-    stripped = raw.strip()
-    if not stripped:
-        return None
-
-    if stripped.startswith("*.") and len(stripped) > 2:
-        host = _normalize_scope_host(stripped[2:])
-        if not host:
-            return None
-        return {
-            "scope_entry": stripped,
-            "entry_kind": "wildcard",
-            "host": host.lower(),
-        }
-
-    if "://" in stripped:
-        try:
-            parts = urlsplit(stripped)
-        except ValueError:
-            return None
-        host = _normalize_scope_host(parts.hostname or "")
-        if not host:
-            return None
-        return {
-            "scope_entry": stripped,
-            "entry_kind": "url",
-            "host": host,
-        }
-
-    host = _normalize_scope_host(stripped)
-    if not host:
-        return None
-    return {
-        "scope_entry": stripped,
-        "entry_kind": "bare_host",
-        "host": host,
-    }
-
-
-def _normalize_scope_host(raw: str) -> str:
-    value = raw.strip()
-    if not value:
-        return ""
-    if "://" in value:
-        try:
-            return (urlsplit(value).hostname or "").rstrip(".").lower()
-        except ValueError:
-            return ""
-    try:
-        parsed = urlsplit("http://" + value)
-        host = parsed.hostname or ""
-    except ValueError:
-        host = value
-    if not host:
-        host = value.split("/", 1)[0]
-    return host.rstrip(".").lower()
-
-
 def _endpoint_host(endpoint: str) -> str:
-    """Return the lowercased host portion of a service endpoint.
+    """Return the lowercased host portion of a service endpoint or surface
+    target descriptor.
 
-    Services store `endpoint` as either a bare host (`target.example`), a
-    host:port (`target.example:443`), or a full URL (`https://target.example/api`).
-    We unify all three to a lowercased host string for matching.
+    Services store `endpoint` as either a bare host, a host:port, or a full
+    URL. Surfaces store `target_descriptor` in the same shapes plus the
+    occasional space-separated "<host> <path>" form. We unify them all to a
+    lowercased host string for matching.
     """
     raw = (endpoint or "").strip().lower()
     if not raw:
         return ""
-    if "://" in raw:
+    first = raw.split()[0]
+    if "://" in first:
         try:
-            return (urlsplit(raw).hostname or "").lower()
+            return (urlsplit(first).hostname or "").rstrip(".")
         except ValueError:
             return ""
-    # host[:port] form
-    host = raw.split(":", 1)[0]
-    return host
-
-
-def _entry_matches_host(entry: dict[str, Any], host: str) -> bool:
-    """Return True when `host` falls under the scope entry.
-
-    Bare/URL entries require an exact host equality; wildcards accept the
-    apex and any subdomain. The matcher is case-insensitive because DNS is.
-    """
-    if not host:
-        return False
-    entry_host = entry["host"]
-    if entry["entry_kind"] == "wildcard":
-        return host == entry_host or host.endswith("." + entry_host)
-    return host == entry_host
-
-
-def _command_run_mentions_host(
-    row: dict[str, Any],
-    entry: dict[str, Any],
-    *,
-    engagement_dir: Path | None = None,
-) -> bool:
-    """Return True when a command-run row references this scope entry.
-
-    We search the command string (argv) and, when a command references a
-    target-list file under `/engagements/<key>/...`, read that file from the
-    host engagement directory. This catches MCP/Kali patterns such as
-    `nuclei -l /engagements/<key>/scans/delta.txt`, where the command text
-    contains only a mounted artifact path rather than the actual host names.
-    """
-    for host in _command_run_target_hosts(row, engagement_dir=engagement_dir):
-        if _entry_matches_host(entry, host):
-            return True
-    return False
-
-
-def _command_run_target_hosts(row: dict[str, Any], *, engagement_dir: Path | None) -> set[str]:
-    hosts: set[str] = set()
-    token_sets: list[list[str]] = []
-
-    argv = row.get("argv")
-    if isinstance(argv, list) and argv:
-        token_sets.append([str(item) for item in argv])
-
-    command = str(row.get("command") or "").strip()
-    if command:
-        try:
-            command_tokens = shlex.split(command)
-        except ValueError:
-            command_tokens = command.split()
-        if command_tokens:
-            token_sets.append(command_tokens)
-
-    for tokens in token_sets:
-        hosts.update(_extract_target_hosts_from_tokens(tokens, engagement_dir=engagement_dir))
-    return hosts
-
-
-def _extract_target_hosts_from_tokens(
-    tokens: list[str],
-    *,
-    engagement_dir: Path | None,
-    depth: int = 0,
-) -> set[str]:
-    if depth > 4:
-        return set()
-
-    remaining = list(tokens)
-    while remaining:
-        token = remaining.pop(0).strip()
-        if not token:
-            continue
-        if _is_env_assignment(token):
-            continue
-        bare = Path(token).name
-        if bare in _SHELL_TOOL_WRAPPERS:
-            nested = _nested_shell_command_tokens(remaining)
-            if nested:
-                return _extract_target_hosts_from_tokens(
-                    nested,
-                    engagement_dir=engagement_dir,
-                    depth=depth + 1,
-                )
-            return set()
-        if bare in _PREFIX_TOOL_WRAPPERS:
-            remaining = _strip_wrapper_options(bare, remaining)
-            continue
-        return _target_hosts_for_tool(bare.lower(), remaining, engagement_dir=engagement_dir)
-    return set()
-
-
-def _is_env_assignment(token: str) -> bool:
-    if "=" not in token:
-        return False
-    name, _value = token.split("=", 1)
-    return bool(name) and name.replace("_", "").isalnum()
-
-
-def _nested_shell_command_tokens(tokens: list[str]) -> list[str]:
-    for idx, arg in enumerate(tokens):
-        if _is_shell_command_string_flag(arg) and idx + 1 < len(tokens):
-            nested = tokens[idx + 1]
-            try:
-                return shlex.split(nested)
-            except ValueError:
-                return nested.split()
-    return []
-
-
-def _is_shell_command_string_flag(arg: str) -> bool:
-    if not arg.startswith("-"):
-        return False
-    if arg == "-c":
-        return True
-    if arg.startswith("--"):
-        return False
-    short_flags = arg[1:]
-    return bool(short_flags) and short_flags.endswith("c") and set(short_flags) <= {"l", "i", "s", "r", "c"}
-
-
-def _strip_wrapper_options(wrapper: str, tokens: list[str]) -> list[str]:
-    remaining = list(tokens)
-    options_with_arg = _SINGLE_ARG_WRAPPER_OPTIONS.get(wrapper, frozenset())
-    while remaining:
-        token = remaining[0]
-        if wrapper == "env" and _is_env_assignment(token):
-            remaining.pop(0)
-            continue
-        if not token.startswith("-") or token == "-":
-            break
-        option = remaining.pop(0)
-        option_name = option.split("=", 1)[0]
-        if option_name in options_with_arg and "=" not in option and remaining:
-            remaining.pop(0)
-    if wrapper in {"timeout", "gtimeout"} and remaining and _TIMEOUT_DURATION_RE.fullmatch(remaining[0]):
-        remaining.pop(0)
-    return remaining
-
-
-def _target_hosts_for_tool(tool: str, tokens: list[str], *, engagement_dir: Path | None) -> set[str]:
-    hosts: set[str] = set()
-
-    for file_token in _target_file_tokens(tokens):
-        path = _resolve_command_target_file(file_token, engagement_dir) if engagement_dir is not None else None
-        if path is None:
-            continue
-        hosts.update(_hosts_from_target_file(path))
-
-    idx = 0
-    while idx < len(tokens):
-        token = tokens[idx]
-        option_name = token.split("=", 1)[0]
-        if option_name in _COMMAND_TARGET_VALUE_FLAGS:
-            value = token.split("=", 1)[1] if "=" in token else (tokens[idx + 1] if idx + 1 < len(tokens) else "")
-            host = _host_from_token(value)
-            if host:
-                hosts.add(host)
-            idx += 1 if "=" in token else 2
-            continue
-        idx += 1
-
-    for token in tokens:
-        if "://" not in token:
-            continue
-        host = _host_from_token(token)
-        if host:
-            hosts.add(host)
-
-    positional = _first_positional_target_token(tool, tokens)
-    if positional:
-        host = _host_from_token(positional)
-        if host:
-            hosts.add(host)
-    return hosts
-
-
-def _first_positional_target_token(tool: str, tokens: list[str]) -> str:
-    tool_spec = _tool_coverage_spec(tool)
-    if tool_spec is None or not tool_spec[1]:
-        return ""
-    skip_next = False
-    for token in tokens:
-        option_name = token.split("=", 1)[0]
-        if skip_next:
-            skip_next = False
-            continue
-        if option_name in _COMMAND_TARGET_VALUE_FLAGS | _COMMAND_TARGET_FILE_FLAGS | _NON_TARGET_VALUE_FLAGS:
-            if "=" not in token:
-                skip_next = True
-            continue
-        if token.startswith("-"):
-            continue
-        if _host_from_token(token):
-            return token
-    return ""
-
-
-def _tool_coverage_spec(tool: str) -> tuple[frozenset[str], bool] | None:
-    return _TOOL_COVERAGE_SPECS.get(tool)
-
-
-def _target_file_tokens(tokens: list[str]) -> list[str]:
-    targets: list[str] = []
-    for idx, token in enumerate(tokens):
-        if token in _COMMAND_TARGET_FILE_FLAGS and idx + 1 < len(tokens):
-            targets.append(tokens[idx + 1])
-            continue
-        for flag in _COMMAND_TARGET_FILE_FLAGS:
-            if token.startswith(flag + "="):
-                targets.append(token.split("=", 1)[1])
-                break
-    return targets
-
-
-def _resolve_command_target_file(raw: str, engagement_dir: Path) -> Path | None:
-    value = raw.strip().strip("'\"")
-    if not value:
-        return None
-
-    if value.startswith("/engagements/"):
-        parts = Path(value).parts
-        # /engagements/<engagement_key>/relative/path maps to the current
-        # host engagement directory regardless of the fixture/key name.
-        if len(parts) < 4:
-            return None
-        candidate = engagement_dir.joinpath(*parts[3:])
-    else:
-        path = Path(value).expanduser()
-        candidate = path if path.is_absolute() else engagement_dir / path
-
-    try:
-        resolved = candidate.resolve()
-        resolved.relative_to(engagement_dir.resolve())
-    except (OSError, ValueError):
-        return None
-    if not resolved.is_file():
-        return None
-    try:
-        if resolved.stat().st_size > _MAX_TARGET_FILE_BYTES:
-            return None
-    except OSError:
-        return None
-    return resolved
-
-
-def _hosts_from_target_file(path: Path) -> set[str]:
-    hosts: set[str] = set()
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                value = line.strip()
-                if not value or value.startswith("#"):
-                    continue
-                token = value.split()[0]
-                host = _host_from_token(token)
-                if host:
-                    hosts.add(host)
-    except OSError:
-        return hosts
-    return hosts
-
-
-def _host_from_token(raw: str) -> str:
-    token = raw.strip().strip("'\"<>()[],;")
-    if not token or token.startswith("-"):
-        return ""
-    if "://" in token:
-        try:
-            host = urlsplit(token).hostname or ""
-        except ValueError:
-            return ""
-    elif "/" in token and "." in token:
-        try:
-            host = urlsplit("http://" + token).hostname or ""
-        except ValueError:
-            return ""
-    else:
-        host = token.split(":", 1)[0]
-    host = host.rstrip(".").lower()
-    if not _looks_like_host(host):
-        return ""
-    return host
-
-
-def _looks_like_host(host: str) -> bool:
-    if not host:
-        return False
-    if host == "localhost":
-        return True
-    if "." in host:
-        return True
-    parts = host.split(".")
-    return len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
+    return first.split(":", 1)[0].rstrip(".")
 
 
 # ---------------------------------------------------------------------------
@@ -671,9 +222,7 @@ def _build_entry_report(
     *,
     entry: dict[str, Any],
     services: list[dict[str, Any]],
-    command_runs: list[dict[str, Any]],
-    engagement_dir: Path,
-    summary: dict[str, Any],
+    surfaces: list[dict[str, Any]],
     work_by_host: dict[str, dict[str, int]],
     scope_metadata: dict[str, dict[str, Any]],
     required_stage: str | None,
@@ -684,7 +233,7 @@ def _build_entry_report(
 
     for svc in services:
         endpoint_host = _endpoint_host(str(svc.get("endpoint") or ""))
-        if not _entry_matches_host(entry, endpoint_host):
+        if not entry_matches_host(entry, endpoint_host):
             continue
         total_services += 1
         state = str(svc.get("state") or "").lower()
@@ -695,42 +244,22 @@ def _build_entry_report(
             if len(live_host_samples) < 10:
                 live_host_samples.append(endpoint_host)
 
-    enum_tools_seen: set[str] = set()
-    collection_tools_seen: set[str] = set()
-    reactive_nuclei_runs = 0
-
-    for row in command_runs:
-        if not _command_run_mentions_host(row, entry, engagement_dir=engagement_dir):
+    surface_hosts: set[str] = set()
+    surfaces_count = 0
+    for surface in surfaces:
+        descriptor = str(surface.get("target_descriptor") or "")
+        host = _endpoint_host(descriptor)
+        if not entry_matches_host(entry, host):
             continue
-        bin_name = str(row.get("tool_bin") or "").lower()
-        tool_name = str(row.get("tool_name") or "").lower()
-        label = bin_name or tool_name
-        if not label:
-            continue
-        tool_spec = _tool_coverage_spec(label)
-        if tool_spec is not None and "enum" in tool_spec[0]:
-            enum_tools_seen.add(label)
-        if tool_spec is not None and "collection" in tool_spec[0]:
-            collection_tools_seen.add(label)
-        if label == _REACTIVE_NUCLEI_TOOL:
-            reactive_nuclei_runs += 1
+        surfaces_count += 1
+        if host:
+            surface_hosts.add(host)
 
-    enum_attempted = bool(enum_tools_seen)
-    enum_tool_list = sorted(enum_tools_seen)
-    # Bare hosts (including URLs) have nothing to enumerate — mark them as
-    # trivially enumerated so `--require-stage enum` doesn't flag a fully
-    # apex-only scope. Wildcards still require a real enum tool.
-    if entry["entry_kind"] in ("bare_host", "url") and not enum_attempted:
-        enum_attempted = True
-        enum_tool_list = ["bare_host"]
-
-    collection_attempted = bool(collection_tools_seen)
-    collection_tool_list = sorted(collection_tools_seen)
-
-    host_work = work_by_host.get(entry["host"], {}) if entry["entry_kind"] != "wildcard" else _aggregate_wildcard_work(
-        entry, work_by_host
+    host_work = (
+        _aggregate_wildcard_work(entry, work_by_host)
+        if entry["entry_kind"] == "wildcard"
+        else work_by_host.get(entry["host"], {})
     )
-
     work_queued = {
         "pending": int(host_work.get("pending", 0)),
         "processing": int(host_work.get("processing", 0)),
@@ -739,15 +268,39 @@ def _build_entry_report(
         "error": int(host_work.get("error", 0)),
         "pending_without_terminal_reason": int(host_work.get("pending_without_terminal_reason", 0)),
     }
+    work_total = sum(
+        work_queued[key] for key in ("pending", "processing", "done", "skipped", "error")
+    )
 
-    observation_count = _extract_observation_count(entry, summary, total_services)
+    # Enum evidence: what does the downstream state actually show under this
+    # scope entry? "We expanded and something is there" is what enumeration
+    # was supposed to produce; checking that is more honest than "did a tool
+    # whose name we recognize run against it".
+    enum_evidence: list[str] = []
+    if entry["entry_kind"] in ("bare_host", "url"):
+        enum_evidence.append("bare_host")
+    if live_hosts_set:
+        enum_evidence.append("services")
+    if surface_hosts:
+        enum_evidence.append("surfaces")
+    if work_total > 0:
+        enum_evidence.append("work_items")
+    enum_attempted = bool(enum_evidence)
+
+    collection_evidence: list[str] = []
+    if surfaces_count > 0:
+        collection_evidence.append("surfaces")
+    if work_total > 0:
+        collection_evidence.append("work_items")
+    collection_attempted = bool(collection_evidence)
 
     metadata = scope_metadata.get(_scope_metadata_lookup_key(entry), {})
     entry_status = str(metadata.get("status") or "").lower()
 
     gaps: list[str] = []
-    # Informational gap: enum ran but produced zero live hosts. Not a
-    # --require-stage enum failure because enum ATTEMPTED is the gate.
+    # Informational: wildcard produced no live hosts even though *something*
+    # (a surface or work item) gave us enum evidence. Useful signal for the
+    # operator to review scope relevance; not a --require-stage enum failure.
     if entry["entry_kind"] == "wildcard" and enum_attempted and not live_hosts_set:
         gaps.append("no-live-hosts")
     if required_stage is None:
@@ -773,15 +326,14 @@ def _build_entry_report(
         "entry_kind": entry["entry_kind"],
         "host": entry["host"],
         "enum_attempted": enum_attempted,
-        "enum_tools": enum_tool_list,
+        "enum_evidence": enum_evidence,
         "total_services": total_services,
         "live_hosts": len(live_hosts_set),
         "live_host_samples": live_host_samples,
+        "surfaces_count": surfaces_count,
         "collection_attempted": collection_attempted,
-        "collection_tools": collection_tool_list,
-        "observations": observation_count,
+        "collection_evidence": collection_evidence,
         "work_queued": work_queued,
-        "reactive_nuclei_runs": reactive_nuclei_runs,
         "status": entry_status or None,
         "gaps": gaps,
     }
@@ -799,7 +351,7 @@ def _aggregate_wildcard_work(
     """
     aggregate: dict[str, int] = {}
     for host, counts in work_by_host.items():
-        if not _entry_matches_host(entry, host):
+        if not entry_matches_host(entry, host):
             continue
         for key, val in counts.items():
             aggregate[key] = aggregate.get(key, 0) + int(val)
@@ -822,53 +374,6 @@ def _consumption_satisfied(work_queued: dict[str, int], entry_status: str) -> bo
     if int(work_queued.get("pending_without_terminal_reason", 0)) == 0:
         return True
     return False
-
-
-def _extract_observation_count(
-    entry: dict[str, Any],
-    summary: dict[str, Any],
-    total_services: int,
-) -> int:
-    """Best-effort request-observation count scoped to this entry.
-
-    The `summary` endpoint exposes engagement-wide totals, not per-host
-    breakdowns. When the total is small or when the entry owns every
-    service, the engagement-wide count is a reasonable proxy; otherwise we
-    fall back to 0 and let operators inspect the raw list via
-    `aith assess fetch request-observations` if they need precision.
-    """
-    raw = summary.get("request_observation_count")
-    try:
-        total = int(raw) if raw is not None else 0
-    except (TypeError, ValueError):
-        total = 0
-    if total <= 0:
-        return 0
-    total_services_all = 0
-    try:
-        total_services_all = int(summary.get("service_count") or 0)
-    except (TypeError, ValueError):
-        total_services_all = 0
-    if total_services_all <= 0 or total_services <= 0:
-        return total if total_services_all <= 0 and total_services <= 0 else 0
-    # Pro-rate observations by the entry's share of total services. This is
-    # deliberately rough — operators who need exact per-host counts should
-    # use the raw fetch. The backend doesn't yet surface a per-host
-    # request-observation rollup, so we avoid pretending otherwise.
-    return round(total * total_services / total_services_all)
-
-
-def _fetch_all_command_runs(client: AssessmentClient) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    offset = 0
-    while True:
-        page = client.get(f"command-runs?limit={_COMMAND_RUN_PAGE_SIZE}&offset={offset}")
-        if not isinstance(page, list):
-            raise AssessError("backend command-runs fetch returned non-list payload")
-        rows.extend(page)
-        if len(page) < _COMMAND_RUN_PAGE_SIZE:
-            return rows
-        offset += _COMMAND_RUN_PAGE_SIZE
 
 
 # ---------------------------------------------------------------------------
@@ -911,7 +416,7 @@ def _extract_scope_metadata(scope_data: dict[str, Any]) -> dict[str, dict[str, A
 
 
 def _normalize_scope_metadata_key(raw: str) -> str:
-    entry = _classify_entry(raw)
+    entry = classify_scope_entry(raw)
     if entry is None:
         return ""
     return _scope_metadata_lookup_key(entry)
@@ -1011,6 +516,7 @@ def _render_text(report: dict[str, Any], *, verbose: bool) -> None:
             samples = ", ".join(entry["live_host_samples"][:3]) if entry["live_host_samples"] else "-"
             print(
                 f"  - {entry['scope_entry']} [{entry['entry_kind']}] live={live} "
+                f"surfaces={entry['surfaces_count']} "
                 f"enum={'y' if entry['enum_attempted'] else 'n'} "
                 f"collect={'y' if entry['collection_attempted'] else 'n'} "
                 f"pending={entry['work_queued']['pending']} samples={samples}"
@@ -1022,19 +528,16 @@ def _render_text(report: dict[str, Any], *, verbose: bool) -> None:
             f"  - {entry['scope_entry']} [{entry['entry_kind']}] host={entry['host']}"
         )
         print(
-            f"      enum: attempted={entry['enum_attempted']} tools={entry['enum_tools']}"
+            f"      enum: attempted={entry['enum_attempted']} evidence={entry['enum_evidence']}"
         )
         print(
             f"      live_hosts={entry['live_hosts']} total_services={entry['total_services']} samples={entry['live_host_samples']}"
         )
         print(
-            f"      collection: attempted={entry['collection_attempted']} tools={entry['collection_tools']}"
+            f"      collection: attempted={entry['collection_attempted']} evidence={entry['collection_evidence']} surfaces={entry['surfaces_count']}"
         )
         print(
             f"      work_queued={entry['work_queued']}"
-        )
-        print(
-            f"      observations={entry['observations']} reactive_nuclei_runs={entry['reactive_nuclei_runs']}"
         )
         if entry.get("status"):
             print(f"      status={entry['status']}")
