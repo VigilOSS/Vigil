@@ -127,6 +127,18 @@ def _normalize_coverage_status(value: str) -> str:
     return status_value
 
 
+def _coalesce_coverage_status(existing: str, incoming: str, *, explicit_override: bool = False) -> str:
+    existing_normalized = _normalize_coverage_status(existing)
+    incoming_normalized = _normalize_coverage_status(incoming)
+    if explicit_override:
+        return incoming_normalized
+    if incoming_normalized in {"pending", "queued"} and existing_normalized not in {"pending", "queued"}:
+        return existing_normalized
+    if existing_normalized == "queued" and incoming_normalized == "pending":
+        return existing_normalized
+    return incoming_normalized
+
+
 def _coalesce_workflow_status(existing: str, incoming: str, *, explicit_workflow_override: bool = False) -> str:
     existing_normalized = _normalize_workflow_status(existing)
     incoming_normalized = _normalize_workflow_status(incoming)
@@ -504,7 +516,12 @@ def _upsert_service(
             port = COALESCE(excluded.port, assessment_services.port),
             service = COALESCE(NULLIF(excluded.service, ''), assessment_services.service),
             state = excluded.state,
-            coverage_status = excluded.coverage_status,
+            coverage_status = CASE
+                WHEN excluded.coverage_status = 'pending'
+                    AND assessment_services.coverage_status IN ('covered', 'partial', 'blocked')
+                THEN assessment_services.coverage_status
+                ELSE excluded.coverage_status
+            END,
             banner = COALESCE(NULLIF(excluded.banner, ''), assessment_services.banner),
             notes = CASE
                 WHEN excluded.notes = '' THEN assessment_services.notes
@@ -655,8 +672,18 @@ def _upsert_coverage_item(
     attack_family: str,
     status_value: str,
     notes: str,
+    preserve_existing_status: bool = False,
 ) -> dict[str, Any]:
     normalized_status = _normalize_coverage_status(status_value)
+    cursor = connection.execute(
+        """
+        INSERT OR IGNORE INTO assessment_coverage_items (
+            engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, status, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, normalized_status, notes),
+    )
     row = connection.execute(
         """
         SELECT *
@@ -665,28 +692,20 @@ def _upsert_coverage_item(
         """,
         (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family),
     ).fetchone()
-    if row is None:
-        cursor = connection.execute(
-            """
-            INSERT INTO assessment_coverage_items (
-                engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, status, notes
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, normalized_status, notes),
+    assert row is not None
+    if cursor.rowcount == 0:
+        resolved_status = (
+            _coalesce_coverage_status(row["status"], normalized_status)
+            if preserve_existing_status
+            else normalized_status
         )
-        row = connection.execute(
-            "SELECT * FROM assessment_coverage_items WHERE id = ?",
-            (cursor.lastrowid,),
-        ).fetchone()
-    else:
         connection.execute(
             """
             UPDATE assessment_coverage_items
             SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (normalized_status, _append_notes(row["notes"], notes), row["id"]),
+            (resolved_status, _append_notes(row["notes"], notes), row["id"]),
         )
         row = connection.execute("SELECT * FROM assessment_coverage_items WHERE id = ?", (row["id"],)).fetchone()
     assert row is not None
@@ -1168,6 +1187,7 @@ def ingest_request_observation(
                     attack_family=key[4],
                     status_value=str(candidate.get("status", "pending")),
                     notes=str(candidate.get("notes", "")),
+                    preserve_existing_status=True,
                 )
             )
         return {
@@ -1359,18 +1379,27 @@ def _semantic_finding_match(
         if row is not None:
             return dict(row)
     row = connection.execute(
-        """
-        SELECT *
-        FROM assessment_findings
-        WHERE engagement_id = ?
-          AND status NOT IN ('merged', 'false_positive')
-          AND title = ?
-          AND canonical_location = ?
-          AND auth_context = ?
-        ORDER BY id ASC
-        LIMIT 1
-        """,
-        (engagement_id, title, canonical_location, auth_context),
+        (
+            """
+            SELECT *
+            FROM assessment_findings
+            WHERE engagement_id = ?
+              AND status != 'merged'
+              AND title = ?
+              AND canonical_location = ?
+              AND auth_context = ?
+            """
+            + (" AND defect_family = ?" if defect_family else "")
+            + """
+            ORDER BY CASE WHEN status = 'false_positive' THEN 0 ELSE 1 END, id ASC
+            LIMIT 1
+            """
+        ),
+        (
+            (engagement_id, title, canonical_location, auth_context, defect_family)
+            if defect_family
+            else (engagement_id, title, canonical_location, auth_context)
+        ),
     ).fetchone()
     return dict(row) if row is not None else None
 

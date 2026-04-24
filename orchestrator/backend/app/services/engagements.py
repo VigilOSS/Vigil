@@ -195,11 +195,16 @@ def _safe_mtime_ns(path: Path) -> int | None:
         return None
 
 
-def _engagements_signature() -> tuple[tuple[str, int | None, int | None, int | None, int | None], ...]:
+def _engagements_signature() -> tuple[
+    tuple[str, int | None, int | None, int | None, tuple[tuple[str, int | None], ...], int | None],
+    ...
+]:
     root = engagements_root()
     root.mkdir(parents=True, exist_ok=True)
 
-    signature: list[tuple[str, int | None, int | None, int | None, int | None]] = []
+    signature: list[
+        tuple[str, int | None, int | None, int | None, tuple[tuple[str, int | None], ...], int | None]
+    ] = []
     for engagement_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         if engagement_dir.name == _DELETED_ENGAGEMENTS_DIR:
             continue
@@ -208,12 +213,21 @@ def _engagements_signature() -> tuple[tuple[str, int | None, int | None, int | N
         marker_mtime_ns = _safe_mtime_ns(_deleted_engagement_marker_path(engagement_dir.name))
         if scope_mtime_ns is None and marker_mtime_ns is None:
             continue
+        sessions_root = engagement_dir / "sessions"
+        assignment_signature = tuple(
+            (
+                session_dir.name,
+                _safe_mtime_ns(session_dir / "assignment.json"),
+            )
+            for session_dir in sorted(path for path in sessions_root.iterdir() if path.is_dir())
+        ) if sessions_root.exists() else tuple()
         signature.append(
             (
                 engagement_dir.name,
                 scope_mtime_ns,
                 _safe_mtime_ns(engagement_dir / "engagement.json"),
                 _safe_mtime_ns(engagement_dir / "sessions" / "index.json"),
+                assignment_signature,
                 marker_mtime_ns,
             )
         )

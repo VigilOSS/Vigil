@@ -216,20 +216,16 @@ def list_engagements(install_root: Path) -> list[EngagementRow]:
     return sorted(rows, key=lambda row: (row.created_at or "", row.key))
 
 
-def resolve_engagement_path(install_root: Path, key: str | None = None, *, select: bool = False, latest: bool = False) -> Path:
+def resolve_engagement_path(install_root: Path, key: str | None = None, *, select: bool = False) -> Path:
     rows = list_engagements(install_root)
     if key:
         for row in rows:
             if row.key == key:
                 return row.path
         raise SystemExit(f"Engagement not found: {key}")
-    if latest:
-        if not rows:
-            raise SystemExit("No engagements found")
-        return rows[-1].path
     if select:
         return _select_engagement(rows).path
-    raise SystemExit("Specify an engagement key, --latest, or --select")
+    raise SystemExit("Specify an engagement key or --select")
 
 
 def current_engagement_path() -> Path | None:

@@ -36,7 +36,7 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
     return {
         "install_root": str(install_root),
         "install_exists": install_root.exists(),
-        "latest_engagement": rows[-1].key if rows else None,
+        "engagement_count": len(rows),
         "orchestrator": {
             "state": orchestrator_status(install_root),
             "base_url": resolve_orchestrator_base_url(install_root),
@@ -137,7 +137,7 @@ def _mcp_client_status(client: str, argv: list[str]) -> dict[str, object]:
     except FileNotFoundError:
         return {"configured": False, "detail": f"{client} CLI not found"}
     text = f"{result.stdout}\n{result.stderr}"
-    configured = "kali" in text and "security-research" in text and "mcp-server" in text
+    configured = "kali" in text and "aith" in text and "runtime" in text and "mcp-server" in text
     return {"configured": configured, "detail": "configured" if configured else "kali server not registered"}
 
 

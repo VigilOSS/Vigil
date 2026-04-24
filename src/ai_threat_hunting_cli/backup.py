@@ -36,11 +36,14 @@ def create_backup(install_root: Path, *, timestamp: str | None = None) -> Path:
     root = backups_dir(install_root)
     root.mkdir(parents=True, exist_ok=True)
     stamp = timestamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    target = root / f"{BACKUP_PREFIX}{stamp}{BACKUP_SUFFIX}"
-    partial = target.with_name(target.name + ".partial")
-    with sqlite3.connect(str(source)) as src, sqlite3.connect(str(partial)) as dst:
-        src.backup(dst)
-    partial.rename(target)
+    target, partial = _reserve_backup_paths(root, stamp)
+    try:
+        with sqlite3.connect(str(source)) as src, sqlite3.connect(str(partial)) as dst:
+            src.backup(dst)
+        partial.rename(target)
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
     return target
 
 
@@ -98,3 +101,26 @@ def restore_backup(install_root: Path, backup: Path) -> Path:
 
 def _sqlite_sidecars(path: Path) -> tuple[Path, Path]:
     return (path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm"))
+
+
+def _reserve_backup_paths(root: Path, stamp: str) -> tuple[Path, Path]:
+    collision_index = 0
+    while True:
+        target = _backup_target(root, stamp, collision_index)
+        partial = target.with_name(target.name + ".partial")
+        try:
+            with partial.open("xb"):
+                pass
+        except FileExistsError:
+            collision_index += 1
+            continue
+        if target.exists():
+            partial.unlink(missing_ok=True)
+            collision_index += 1
+            continue
+        return target, partial
+
+
+def _backup_target(root: Path, stamp: str, collision_index: int) -> Path:
+    suffix = "" if collision_index == 0 else f"_{collision_index:04d}"
+    return root / f"{BACKUP_PREFIX}{stamp}{suffix}{BACKUP_SUFFIX}"

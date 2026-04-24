@@ -43,7 +43,7 @@ aith install ~/security-research
 
 Each install contains both Claude Code and Codex workflow files. The install root holds the shared prompt source tree, generated client wrappers, runtime assets, and orchestrator state while each client keeps its own entrypoint.
 
-The shared Kali MCP runtime is not per-engagement. Start it once and then attach Claude Code and Codex to the same `docker exec -i security-research mcp-server` endpoint. Within a single install, multiple engagements may exist under `agent/engagements/`.
+The shared Kali MCP runtime is not per-engagement. Start it once and then attach Claude Code and Codex through `aith mcp install both`, which registers the shared `aith runtime mcp-server` endpoint. Within a single install, multiple engagements may exist under `agent/engagements/`.
 
 Use one lead operator per engagement at a time unless you are deliberately coordinating a dual-client run through backend state. Both clients share the same durable orchestrator state, but filesystem artifacts under an engagement directory are still ordinary files.
 
@@ -82,6 +82,12 @@ Attach Claude Code or Codex over stdio after the runtime is up:
 ```bash
 aith mcp install both
 aith mcp status
+```
+
+For non-interactive runtime maintenance commands, use `shell-exec` so quoting and exit codes stay under the CLI:
+
+```bash
+aith runtime shell-exec "tmux list-sessions"
 ```
 
 ### 2. Orchestrator UI
@@ -145,7 +151,8 @@ After `aith engagement create` finishes, it prints the full path to the new enga
 Example:
 
 ```bash
-aith engagement start --latest --client codex
+aith engagement list --json
+aith engagement start <engagement-key> --client codex
 ```
 
 To add an interactive shell helper that changes into a selected engagement with `fzf` when available:
@@ -154,6 +161,8 @@ To add an interactive shell helper that changes into a selected engagement with 
 aith engagement cd-init zsh >> ~/.zshrc
 athcd
 ```
+
+`athcd` is for humans at a terminal. It works because shell functions can change the parent shell's directory; a standalone `aith cd` process cannot. The helper calls `aith engagement path --select`, which uses `fzf` when installed and falls back to a numbered TTY prompt. Non-interactive agents should run `aith engagement list --json` and pass the explicit engagement key to the next command.
 
 During the engagement, expect short operator updates, numbered next-step choices when a decision matters, and a manual approval checkpoint before exploit work continues when `exploit_policy` is `pause` or `selected`.
 
@@ -224,7 +233,8 @@ as long as `afl-fuzz` and `afl-tmin` are present.
 
 4. Start the client from the printed engagement directory:
 ```bash
-aith engagement start --latest --client claude   # or --client codex
+aith engagement list --json
+aith engagement start <engagement-key> --client claude   # or --client codex
 ```
 
 5. Tell the operator to use the code analysis workflow:
@@ -273,10 +283,11 @@ If auth is expired or missing, the workflow warns and continues anonymously. The
 CLI helpers operate on engagement `auth.json`:
 
 ```bash
-aith auth status --latest
-aith auth show --latest
-aith auth import --latest --source cookies-and-headers.json
-aith auth clear --latest
+aith engagement list --json
+aith auth status <engagement-key>
+aith auth show <engagement-key>
+aith auth import <engagement-key> --source cookies-and-headers.json
+aith auth clear <engagement-key>
 ```
 
 ## Optional Tool Activation
@@ -289,7 +300,7 @@ MITM remains optional. Use it when the engagement needs login capture, authentic
 
 For ad hoc shell work outside the engagement launcher, export `ENGAGEMENT_DIR` explicitly to the target engagement directory. When starting Codex or Claude, prefer the matching engagement-local launcher so the correct engagement context is exported automatically.
 
-1. Start the proxy against the active engagement: `aith mitmproxy start /path/to/engagement`
+1. List engagements and start the proxy explicitly: `aith engagement list --json` then `aith mitmproxy start <engagement-key>`
 2. The CLI builds the Docker image if needed, bind-mounts the engagement at `/engagement`, persists the mitmproxy CA in a Docker volume, and verifies the local proxy port.
 3. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow, then confirm that `auth.json` was refreshed and continue the engagement with authenticated recollection and testing. Use `aith logs mitmproxy` for capture logs.
 
@@ -321,7 +332,8 @@ aith config set oob.frp_port 7000
 aith config set oob.domain researcher.example
 aith config set oob.frp_token <token>
 aith oob start
-aith oob client start example-agent --latest --agent vulnerability-analyst
+aith engagement list --json
+aith oob client start example-agent --engagement <engagement-key> --agent vulnerability-analyst
 aith oob test
 ```
 
@@ -402,5 +414,5 @@ Runtime:
 
 ```bash
 docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .
-docker exec -i security-research mcp-server
+aith runtime mcp-server
 ```
