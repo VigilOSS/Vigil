@@ -39,7 +39,7 @@ Use lab workflows only for apps, devices, accounts, networks, and APIs under wri
 - Use physical Android for bootloader state, firmware, Play Integrity, StrongBox, biometrics, NFC, Bluetooth, UWB, camera, sensors, OEM services, anti-emulator checks, and Pixel-specific behavior.
 - Use iOS Simulator for source-built debug builds and UI automation; use physical iPhone/iPad for TestFlight/App Store, Keychain, APNs, biometrics, Secure Enclave-adjacent behavior, modem/SIM, and performance realism.
 - Use jailbreakable iOS hardware, Apple Security Research Device, or approved virtual iOS when testing requires broad filesystem, process, or kernel-level visibility.
-- Use Docker for repeatable toolchains, MobSF, jadx, apktool, mitmproxy, Appium services, report pipelines, and Linux fuzzing; do not expect Docker Desktop on macOS to replace USB-connected devices or iOS virtualization.
+- Use Docker for repeatable toolchains, MobSF, jadx, apktool, mitmproxy, Appium services, report pipelines, and Linux fuzzing. Docker Desktop on macOS runs Linux containers inside a VM — USB passthrough and iOS virtualization require native host access or a Linux KVM host.
 
 ## Output Checklist
 
@@ -47,7 +47,7 @@ Use lab workflows only for apps, devices, accounts, networks, and APIs under wri
 - [ ] Device matrix states emulator, simulator, stock device, rooted/jailbroken device, and cloud-device coverage.
 - [ ] Host architecture, Docker constraints, USB/proxy path, and reset strategy are documented.
 - [ ] Test accounts, certificates, captures, and logs use synthetic data.
-- [ ] Recovery-to-stock path exists before flashing, rooting, jailbreaking, or installing profiles.
+- [ ] Recovery-to-stock path is documented and tested before flashing, rooting, jailbreaking, or installing profiles.
 
 ## Extended Resources
 

@@ -186,6 +186,9 @@ Authorized mobile security references used by `android-app-security`, `ios-app-s
 | `mobile/ios-platform-device-lab.md` | iOS secure boot, SEP, Data Protection, sandboxing, XPC/Mach, dyld/XNU, observability, jailbreak, SRD boundaries |
 | `mobile/mobile-lab-setup.md` | Mac ARM, emulators, simulators, owned devices, Docker, proxies, Frida, device farms, reset/data hygiene |
 | `mobile/mobile-fuzzing.md` | App/API, file-format, IPC, WebView, native, Binder/AIDL, XPC/Mach fuzzing, corpus design, crash triage |
+| `mobile/masvs-privacy-testing.md` | MASVS-PRIVACY: identifier audit (IDFA/GAID/IMEI/MAC), ATT compliance, Privacy Sandbox, data deletion verification, privacy label vs behavior, analytics/telemetry over-collection |
+| `mobile/ai-ml-on-device-security.md` | On-device AI/ML: Core ML/TFLite/ONNX model extraction, inference data leakage, content filter bypass, prompt injection in mobile LLMs, federated learning |
+| `mobile/sdk-supply-chain-security.md` | SDK supply chain: BOM enumeration, CVE checking, malicious SDK detection (SpinOK/Goldoson), data exfiltration audit, permission scope analysis |
 
 ## tools/ — CLI Tool Cheatsheets
 
