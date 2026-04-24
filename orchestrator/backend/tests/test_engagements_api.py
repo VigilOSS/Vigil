@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -95,6 +96,56 @@ def test_maybe_sync_engagements_skips_repeated_resync_without_filesystem_changes
     assert call_count == 1
 
     write_engagement(isolate_settings["engagements_dir"], key="2026-03-30-120500-example")
+    engagement_service.maybe_sync_engagements()
+
+    assert call_count == 2
+
+
+def test_maybe_sync_engagements_resyncs_when_assignment_json_changes(isolate_settings, monkeypatch):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+    session_dir = engagement_dir / "sessions" / "session-a"
+    assignment_path = session_dir / "assignment.json"
+    assignment_path.write_text(
+        json.dumps(
+            {
+                "session_id": "session-a",
+                "status": "active",
+                "assigned_targets": ["VA-001"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    db_module.init_db()
+
+    monkeypatch.setattr(engagement_service, "_last_sync_signature", None)
+    call_count = 0
+    original_sync = engagement_service.sync_engagements
+
+    def counted_sync() -> None:
+        nonlocal call_count
+        call_count += 1
+        original_sync()
+
+    monkeypatch.setattr(engagement_service, "sync_engagements", counted_sync)
+
+    engagement_service.maybe_sync_engagements()
+    engagement_service.maybe_sync_engagements()
+
+    assert call_count == 1
+
+    assignment_path.write_text(
+        json.dumps(
+            {
+                "session_id": "session-a",
+                "status": "active",
+                "assigned_targets": ["VA-001", "VA-002"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    stat = assignment_path.stat()
+    os.utime(assignment_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
     engagement_service.maybe_sync_engagements()
 
     assert call_count == 2
@@ -691,6 +742,54 @@ def test_coverage_patch_normalizes_tested_to_covered_and_refreshes_service_statu
     assert summary.json()["service_coverage_gaps"] == []
 
 
+def test_repeat_request_observation_preserves_stronger_coverage_status(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    first = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/request-observations",
+        json={
+            "url": "https://example.com/search?q=test",
+            "query_schema": {"q": {"type": "string"}},
+            "discovery_source": "recon",
+        },
+    )
+    assert first.status_code == 201
+
+    coverage_items = client.get("/engagements/2026-03-30-120000-example/assessment/coverage-items")
+    assert coverage_items.status_code == 200
+    payload = coverage_items.json()
+    query_item = next(item for item in payload if item["input_slot"] == "query")
+    service_item = next(item for item in payload if item["input_slot"] == "service")
+
+    for item in (query_item, service_item):
+        patch = client.patch(
+            f"/engagements/2026-03-30-120000-example/assessment/coverage-items/{item['id']}",
+            json={"status": "covered", "notes": "Operator validated this coverage item."},
+        )
+        assert patch.status_code == 200
+        assert patch.json()["status"] == "covered"
+
+    second = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/request-observations",
+        json={
+            "url": "https://example.com/search?q=test",
+            "query_schema": {"q": {"type": "string"}},
+            "discovery_source": "recon",
+        },
+    )
+    assert second.status_code == 201
+
+    refreshed_items = client.get("/engagements/2026-03-30-120000-example/assessment/coverage-items")
+    assert refreshed_items.status_code == 200
+    refreshed_by_slot = {item["input_slot"]: item for item in refreshed_items.json()}
+    assert refreshed_by_slot["query"]["status"] == "covered"
+    assert refreshed_by_slot["service"]["status"] == "covered"
+
+    services = client.get("/engagements/2026-03-30-120000-example/assessment/services")
+    assert services.status_code == 200
+    assert services.json()[0]["coverage_status"] == "covered"
+
+
 def test_findings_verify_updates_existing_finding_and_records_transition(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
@@ -1139,6 +1238,106 @@ def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client
     payload = findings.json()
     assert len(payload) == 2
     assert {item["workflow_status"] for item in payload} == {"false_positive", "active"}
+
+
+def test_root_cause_free_false_positive_findings_stay_semantically_sticky(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    original = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "CH-025",
+            "title": "Shared parser size bug",
+            "severity": "medium",
+            "workflow_status": "false_positive",
+            "verification_state": "verified",
+            "verification_disposition": "false_positive",
+            "defect_family": "integer-overflow",
+            "root_cause_key": "",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.c:150",
+            "summary": "Suppressed parser hypothesis without a root cause key.",
+            "evidence_ref": "tools/analysis-state/original.json",
+            "notes": "Verifier killed the original hypothesis.",
+            "source_name": "code-vuln-verifier",
+            "details": {
+                "kill_check": 2,
+                "kill_reason": "bounded before arithmetic.",
+                "evidence": "size guard blocks the path.",
+            },
+            "provenance": {"verified_by": "code-vuln-verifier"},
+            "links": [],
+        },
+    )
+    assert original.status_code == 201
+
+    rediscovered = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "title": "Shared parser size bug",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "integer-overflow",
+            "root_cause_key": "",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.c:150",
+            "summary": "Rediscovered without a root cause key.",
+            "evidence_ref": "tools/analysis-state/rediscovered.json",
+            "notes": "Later analysis pass re-raised the same parser concern.",
+            "source_name": "code-vuln-hunter",
+            "details": {"impact": "Potential heap corruption"},
+            "provenance": {"agent_name": "code-vuln-hunter"},
+            "links": [],
+        },
+    )
+    assert rediscovered.status_code == 201
+    assert rediscovered.json()["finding"]["slug"] == "CH-025"
+    assert rediscovered.json()["finding"]["workflow_status"] == "false_positive"
+    assert rediscovered.json()["finding"]["verification_disposition"] == "false_positive"
+
+
+def test_coverage_items_expression_unique_index_blocks_nullable_duplicates(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    ingest = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/request-observations",
+        json={
+            "url": "https://example.com/search?q=test",
+            "query_schema": {"q": {"type": "string"}},
+            "discovery_source": "recon",
+        },
+    )
+    assert ingest.status_code == 201
+    service_id = ingest.json()["service"]["id"]
+
+    with db_module.get_connection() as connection:
+        engagement_id = int(
+            connection.execute(
+                "SELECT id FROM engagements WHERE key = ?",
+                ("2026-03-30-120000-example",),
+            ).fetchone()["id"]
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO assessment_coverage_items (
+                    engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, status, notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    engagement_id,
+                    None,
+                    service_id,
+                    "anonymous",
+                    "service",
+                    "service-validation",
+                    "pending",
+                    "duplicate logical coverage row",
+                ),
+            )
 
 
 def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):

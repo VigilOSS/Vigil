@@ -92,8 +92,9 @@ aith logs oob --lines 80
 Start one named client per agent/task that needs correlated callback logs:
 
 ```bash
-aith oob client start vuln-ssrf-api --latest --agent vulnerability-analyst
-aith oob client logs vuln-ssrf-api --follow
+aith engagement list --json
+aith oob client start vuln-ssrf-api --engagement <engagement-key> --agent vulnerability-analyst
+aith oob client logs vuln-ssrf-api --lines 80
 ```
 
 The client prints a unique callback URL such as `<id>.oob.example.com`. Use the full unique URL
@@ -143,7 +144,7 @@ echo "oob.example.com" > "$DIR/.oob_url"
 Agents should:
 
 1. Read `$DIR/.oob_url`.
-2. Ask the operator for a named `aith oob client start ...` session when they need correlated hits.
+2. Ask the operator to list engagements and start a named client with an explicit key: `aith engagement list --json` then `aith oob client start <name> --engagement <engagement-key> --agent <agent-name>`.
 3. Use the unique client callback URL in payloads.
 4. Check `/data/oob/clients/<name>.log` through Kali MCP or ask the operator for `aith oob client logs`.
 
