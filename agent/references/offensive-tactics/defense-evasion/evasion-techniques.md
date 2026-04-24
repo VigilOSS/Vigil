@@ -10,10 +10,7 @@ CreateProcessA(NULL, "notepad", NULL, NULL, FALSE, EXTENDED_STARTUPINFO_PRESENT,
 ```
 
 ## Timestomping (T1070.006)
-```
-# Meterpreter session (not a standalone exe):
-meterpreter> timestomp nc.exe -c "Monday 7/25/2005 5:15:55 AM"
-# PowerShell alternative (no Meterpreter needed):
+```powershell
 (Get-Item nc.exe).CreationTime = "07/25/2005 05:15:55"
 (Get-Item nc.exe).LastWriteTime = "07/25/2005 05:15:55"
 ```

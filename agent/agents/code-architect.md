@@ -248,9 +248,9 @@ REQUIRED. Declare every self-check item you could NOT complete. If none, state "
 
 After producing output, the operator records via:
 ```bash
-./scripts/assess.py code-classify <classifications-json>
-./scripts/assess.py code-record-threat-model <repo-id> <threat-model-json>
-./scripts/assess.py code-record-modules <repo-id> <modules-json>
+aith assess code-classify <classifications-json>
+aith assess code-record-threat-model <repo-id> <threat-model-json>
+aith assess code-record-modules <repo-id> <modules-json>
 ```
 
 ## Finding Prefix: CA

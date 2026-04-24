@@ -20,7 +20,6 @@ class Settings:
     install_dir: Path = Path(os.environ.get("AI_THREAT_HUNTING_INSTALL_DIR", str(REPO_ROOT)))
     frontend_dist_dir: Path = REPO_ROOT / "orchestrator" / "frontend" / "dist"
     agent_source_dir: Path = REPO_ROOT / "agent"
-    install_script_path: Path = REPO_ROOT / "install.sh"
     orchestrator_public_url: str = os.environ.get("AI_THREAT_HUNTING_PUBLIC_URL", os.environ.get("ORCHESTRATOR_PUBLIC_URL", "http://127.0.0.1:18000"))
     auto_refresh_seconds: int = int(os.environ.get("AI_THREAT_HUNTING_DISCOVERY_REFRESH_SECONDS", "5"))
 

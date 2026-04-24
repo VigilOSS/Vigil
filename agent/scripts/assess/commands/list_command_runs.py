@@ -1,4 +1,4 @@
-"""assess.py list-command-runs — search the backend command-run audit log.
+"""aith assess list-command-runs — search the backend command-run audit log.
 
 Use before re-running a Kali MCP command to check whether an equivalent
 command already ran in the current engagement. Filter by agent, phase,

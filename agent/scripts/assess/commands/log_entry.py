@@ -1,10 +1,10 @@
-"""assess.py log — append an activity entry to the backend.
+"""aith assess log — append an activity entry to the backend.
 
 Replaces the old ``log.md`` append path. POSTs to
 ``/engagements/{key}/activity-entries`` and emits an ``activity.recorded``
 event. CLI shape is preserved for back-compat with existing agents:
 
-    assess.py log <agent> <title> <action> <result>
+    aith assess log <agent> <title> <action> <result>
 
 An optional positional ``eng_dir`` is still accepted in the first slot —
 older callers used that calling convention before ``--engagement-dir``
@@ -28,7 +28,7 @@ def register(subparsers) -> None:
         help="POST an activity log entry to the backend (replaces log.md append)",
     )
     # The eng_dir positional is optional for back-compat with the old 5-arg
-    # calling convention `assess.py log <eng_dir> <agent> <title> <action> <result>`.
+    # calling convention `aith assess log <eng_dir> <agent> <title> <action> <result>`.
     p.add_argument("eng_dir", nargs="?", default=None, help="Engagement dir (optional if resolvable)")
     p.add_argument("agent")
     p.add_argument("title")
@@ -39,9 +39,9 @@ def register(subparsers) -> None:
         default=argparse.SUPPRESS,
         choices=["operator", "agent", "hook", "system"],
         help=(
-            "Actor kind — defaults to 'agent' since assess.py log is "
+            "Actor kind — defaults to 'agent' since aith assess log is "
             "specialist-driven. Also accepted before the subcommand as "
-            "`assess.py --actor-kind operator log ...`."
+            "`aith assess --actor-kind operator log ...`."
         ),
     )
     p.set_defaults(func=run)
@@ -88,7 +88,7 @@ def run(args) -> None:
             # activity.py is async-friendly but the CLI must never lose the
             # operator's log entry. Print the error and exit non-zero so
             # callers can retry; do NOT silently drop.
-            print(f"assess.py log: failed to record activity entry: {exc}", file=sys.stderr)
+            print(f"aith assess log: failed to record activity entry: {exc}", file=sys.stderr)
             sys.exit(1)
     finally:
         client.close()

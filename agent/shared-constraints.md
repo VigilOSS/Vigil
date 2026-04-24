@@ -112,7 +112,7 @@ Before issuing a probing, scanning, fuzzing, or credential-testing command,
 search for prior work on this surface:
 
 ```bash
-./scripts/assess.py list-command-runs --q <keyword>
+aith assess list-command-runs --q <keyword>
 ```
 
 Default to an unscoped search so you see every agent's and every phase's
@@ -133,7 +133,7 @@ flag, different target scope, different credentials — is new coverage and
 belongs in the engagement. Don't ask for permission to probe a variant.
 
 When a prior run genuinely covers your current question, cite its id in your
-output — but first fetch the preview with `./scripts/assess.py get-command-run <id>`
+output — but first fetch the preview with `aith assess get-command-run <id>`
 and confirm the stored evidence actually answers that question. A row with
 `success=true` only means `return_code=0`, not that the output is on-point.
 Open the preview to rule out soft-failure pages, WAF intercepts, and
@@ -172,9 +172,9 @@ Only improvise after confirming the reference set is genuinely insufficient.
 
 ## 4. Finding IDs and Recording
 
-**MANDATORY: Every finding MUST be recorded via `assess.py record-finding`.** Never hand-allocate
+**MANDATORY: Every finding MUST be recorded via `aith assess record-finding`.** Never hand-allocate
 finding IDs. Never write findings only to markdown. Never skip the recording step. If you
-produce a finding in any output section, you MUST also call `assess.py record-finding` before your
+produce a finding in any output section, you MUST also call `aith assess record-finding` before your
 task is complete. Findings that exist only in your output text and were not recorded via the
 script are considered lost data.
 
@@ -203,16 +203,16 @@ Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous
 
 If your CVSS score does not fall within the matching severity range, adjust one or the other before recording.
 
-**Deduplication:** Before recording, query existing findings via `assess.py fetch findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
+**Deduplication:** Before recording, query existing findings via `aith assess fetch findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
 
 Record every finding with:
 ```
-./scripts/assess.py record-finding <agent-name> <finding-json-file>
+aith assess record-finding <agent-name> <finding-json-file>
 ```
 
 The JSON payload must match `schemas/finding-record.schema.json`.
 Do not produce markdown findings — convert to JSON before recording.
-If you need the canonical field list or examples, run `./scripts/assess.py contract record-finding`.
+If you need the canonical field list or examples, run `aith assess contract record-finding`.
 Do not invent lifecycle fields from memory — `record-finding` fills the initial finding lifecycle defaults.
 
 **CVSS and remediation** go in `details` as structured fields:
@@ -249,9 +249,9 @@ proved the finding. The field allows up to 20 KB. If the operator or another age
 reproduce the finding later, the notes field alone should be sufficient without re-discovering
 the request format, session tokens, or tool parameters.
 
-**Failure to use `assess.py record-finding` is the single most common subagent defect.** If you
+**Failure to use `aith assess record-finding` is the single most common subagent defect.** If you
 produce `#### Findings` output, each finding payload in that section must have been recorded
-via `assess.py record-finding` during your session. Do not defer recording to the operator.
+via `aith assess record-finding` during your session. Do not defer recording to the operator.
 
 ---
 
@@ -259,7 +259,7 @@ via `assess.py record-finding` during your session. Do not defer recording to th
 
 When your output includes `#### Surface Candidates`, these must be synced by the operator:
 ```
-./scripts/assess.py record-surface <type> <target> <source> [--rationale TEXT] [--status STATUS]
+aith assess record-surface <type> <target> <source> [--rationale TEXT] [--status STATUS]
 ```
 
 Use only the supported `record-surface` types: `account_recovery`, `api_documentation`,
@@ -277,7 +277,7 @@ Return structured output using these section headers when relevant to your role:
 
 Use `#### Decision` and `#### Action` for validation output (vulnerability-analyst).
 
-Every `#### Findings` block must contain finding payloads ready for `assess.py record-finding`,
+Every `#### Findings` block must contain finding payloads ready for `aith assess record-finding`,
 not prose descriptions.
 
 ---
@@ -321,24 +321,24 @@ API security: `agent/references/api-security/`
 
 ## 9. Script Path Convention
 
-All assessment operations use `./scripts/assess.py <subcommand>` resolved from the agent workspace
+All assessment operations use `aith assess <subcommand>` resolved from the agent workspace
 root after `cd agent`. JSON payloads are always in files, never inline shell arguments.
 
-Do not hardcode absolute paths. Set `ENGAGEMENT_DIR` before calling assess.py, or pass `--engagement-dir`.
+Do not hardcode absolute paths. Set `ENGAGEMENT_DIR` before calling aith assess, or pass `--engagement-dir`.
 
 ---
 
 ## 10. Chain, Credential, and Coverage State
 
-Record state immediately using `assess.py` with JSON files:
+Record state immediately using `aith assess` with JSON files:
 
-- **Attack chains:** `./scripts/assess.py record-chain <agent-name> <chain-json-file>`
-- **Credentials:** `./scripts/assess.py post credentials <credential-json-file>`
-- **Credential tests:** `./scripts/assess.py post credential-tests <json-file>`
-- **Access records:** `./scripts/assess.py post access-records <json-file>`
-- **Coverage updates:** `./scripts/assess.py patch coverage-items/<id> <json-file>`
-- **Blocked techniques:** `./scripts/assess.py post blocked-techniques <json-file>`
-- **Probe runs:** `./scripts/assess.py post probe-runs <json-file>`
+- **Attack chains:** `aith assess record-chain <agent-name> <chain-json-file>`
+- **Credentials:** `aith assess post credentials <credential-json-file>`
+- **Credential tests:** `aith assess post credential-tests <json-file>`
+- **Access records:** `aith assess post access-records <json-file>`
+- **Coverage updates:** `aith assess patch coverage-items/<id> <json-file>`
+- **Blocked techniques:** `aith assess post blocked-techniques <json-file>`
+- **Probe runs:** `aith assess post probe-runs <json-file>`
 
 Write payloads to `/tmp/<type>-<slug>.json` before calling.
 Never pass JSON as an inline shell argument.

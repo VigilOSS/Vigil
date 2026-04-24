@@ -25,11 +25,11 @@ Before producing any output, confirm:
 - [ ] Structural index manifest readable at `tools/analysis-state/structural-index-manifest.json`
 - [ ] Threat model readable at `tools/analysis-state/threat-model.json`
 - [ ] Call graph readable at `tools/analysis-state/call-graph.json`
-- [ ] Memory-safety findings fetched via `./scripts/assess.py fetch findings` (or summary provided by operator)
-- [ ] File classifications fetched via `./scripts/assess.py fetch "code/files?repo_id=<id>&limit=5000"` (or summary provided)
+- [ ] Memory-safety findings fetched via `aith assess fetch findings` (or summary provided by operator)
+- [ ] File classifications fetched via `aith assess fetch "code/files?repo_id=<id>&limit=5000"` (or summary provided)
 - [ ] Existing fuzzer inventory checked via `rg 'LLVMFuzzerTestOneInput' --type c` and `ls oss-fuzz/` in source repo
 - [ ] Build system identified (Makefile, CMake, etc.) and compiler toolchain confirmed (`which clang`)
-- [ ] Prior fuzz campaigns checked as a coverage map — `./scripts/assess.py list-command-runs --q <harness-or-target>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what's already been fuzzed on this target so your next campaign picks a variant that hasn't been run — different harness, different seed corpus, different dictionary, different sanitizer (ASan vs MSan vs UBSan), different time budget, different mutation strategy. The only campaign to skip is an identical binary+corpus+flags combination already run to completion; any variant is new coverage. If you cite a prior run instead of re-running, fetch its preview with `./scripts/assess.py get-command-run <id>` first — `success=true` only means `return_code=0`, and a campaign that exited cleanly under its time budget with no crashes is not the same as one that exhausted the search space. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+- [ ] Prior fuzz campaigns checked as a coverage map — `aith assess list-command-runs --q <harness-or-target>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what's already been fuzzed on this target so your next campaign picks a variant that hasn't been run — different harness, different seed corpus, different dictionary, different sanitizer (ASan vs MSan vs UBSan), different time budget, different mutation strategy. The only campaign to skip is an identical binary+corpus+flags combination already run to completion; any variant is new coverage. If you cite a prior run instead of re-running, fetch its preview with `aith assess get-command-run <id>` first — `success=true` only means `return_code=0`, and a campaign that exited cleanly under its time budget with no crashes is not the same as one that exhausted the search space. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If structural index, threat model, or call graph are missing on the filesystem, stop and
 request the operator re-run Phase 0-1 steps before proceeding. If findings are missing from
@@ -87,14 +87,14 @@ record as a finding.
 
 You receive from the operator:
 
-**Backend state (via `assess.py`):**
-- Phase 2+3 findings: `./scripts/assess.py fetch findings` — filter for memory-safety
+**Backend state (via `aith assess`):**
+- Phase 2+3 findings: `aith assess fetch findings` — filter for memory-safety
   `defect_family` values (`buffer-overflow`, `integer-overflow`, `use-after-free`,
   `uninitialized-memory`). Check `verification_state` to distinguish confirmed from unreviewed.
-- File classifications: `./scripts/assess.py fetch "code/files?repo_id=<id>&limit=5000"` —
+- File classifications: `aith assess fetch "code/files?repo_id=<id>&limit=5000"` —
   provides `file_id`, `file_path`, `classification`, `slot_types`, `role`, `language` per file.
   Use this to identify critical/high C/C++ files with memory-safety-relevant slot types.
-- Code coverage: `./scripts/assess.py code-coverage` — confirms Phase 3 gate passed.
+- Code coverage: `aith assess code-coverage` — confirms Phase 3 gate passed.
 
 **Filesystem artifacts (under `tools/analysis-state/`):**
 - Structural index manifest: `tools/analysis-state/structural-index-manifest.json` — `path_to_index`
@@ -165,7 +165,7 @@ Aggregate stats:
 
 True findings are recorded via:
 ```bash
-./scripts/assess.py record-finding code-fuzz-engineer <finding-json>
+aith assess record-finding code-fuzz-engineer <finding-json>
 ```
 
 Finding JSON must include:

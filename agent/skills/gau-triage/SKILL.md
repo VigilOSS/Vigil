@@ -9,8 +9,8 @@ origin: AI Threat Hunting
 > **Kali MCP audit header:** use `X-Technique: DISCOVERY` (gau harvests historical URLs from public archives; triage runs classify them without attacking the live target).
 
 Operator-dispatched deeper pass over a gau (or any large URL) corpus **after** mechanical
-ingestion in Phase 2. Produces a cluster manifest the operator feeds into `assess.py
-classify-work` and `assess.py dispatch defer-cluster`, plus stored response bodies and
+ingestion in Phase 2. Produces a cluster manifest the operator feeds into `aith assess
+classify-work` and `aith assess dispatch defer-cluster`, plus stored response bodies and
 secret-scan results. This skill does not replace `surface-collection` — it extends it by
 adding the depth that surface-collector cannot afford inline at high URL counts.
 
@@ -32,8 +32,8 @@ All run inside the shared Kali MCP runtime:
 - `jsleak` — optional complementary regex-based JS secret scanner. If not in the Kali image, trufflehog-only coverage is acceptable and the install hint belongs in `agent/docker/runtime-full/Dockerfile` as a follow-up (out of scope for this skill)
 - `jq` — output formatting and manifest assembly
 
-Host side: `./scripts/assess.py record-surface`, `./scripts/assess.py record-finding`,
-`./scripts/assess.py classify-work`, `./scripts/assess.py dispatch defer-cluster`.
+Host side: `aith assess record-surface`, `aith assess record-finding`,
+`aith assess classify-work`, `aith assess dispatch defer-cluster`.
 
 ## Storage Rule
 
@@ -103,14 +103,14 @@ for analyst context but are not direct `gf` runs.
 
 For each loaded bucket, capture: the URL count, 3-5 sample URLs, and the proposed
 `cluster_key = gf:<bucket>` that will be attached to matching work items when the operator
-runs `assess.py classify-work`. URLs that do not match any gf bucket fall back to
+runs `aith assess classify-work`. URLs that do not match any gf bucket fall back to
 `path:/<first-two-segments>` clusters.
 
 If `gf` patterns are missing, the Dockerfile install of Gf-Patterns is broken — stop and reseed `~/.gf/` from `github.com/1ndianl33t/Gf-Patterns`.
 
 ### Step 4 — Emit cluster manifest for the operator handoff
 
-Write a structured manifest the operator can feed into `assess.py classify-work` and `assess.py dispatch defer-cluster`. The operator contract: after gau-triage returns, the operator runs `assess.py classify-work $DB` (which derives `cluster_key` and `priority_score` from URL structure using the same bucket weights documented in the reference library) and then `assess.py dispatch $DB defer-cluster <key> --reason "..."` for any cluster the manifest flagged as defer-worthy.
+Write a structured manifest the operator can feed into `aith assess classify-work` and `aith assess dispatch defer-cluster`. The operator contract: after gau-triage returns, the operator runs `aith assess classify-work $DB` (which derives `cluster_key` and `priority_score` from URL structure using the same bucket weights documented in the reference library) and then `aith assess dispatch $DB defer-cluster <key> --reason "..."` for any cluster the manifest flagged as defer-worthy.
 
 Assemble the manifest with `jq` rather than Python heredocs:
 
@@ -198,8 +198,8 @@ For each reproducible high-confidence trufflehog or jsleak hit where the secret 
 
 ```bash
 # Host side. $DIR is the repo-side twin of /engagements/$KEY — same bytes on disk.
-./scripts/assess.py contract record-finding   # inspect required fields
-./scripts/assess.py record-finding surface-collector "$DIR/scans/gau-triage/$RID/findings/<slug>.json"
+aith assess contract record-finding   # inspect required fields
+aith assess record-finding surface-collector "$DIR/scans/gau-triage/$RID/findings/<slug>.json"
 ```
 
 ## Operator Handoff
@@ -209,13 +209,13 @@ After gau-triage returns the manifest, the operator runs:
 ```bash
 # Derive cluster_key/priority_score for all pending work_items using the same bucket weights
 # documented in agent/references/gf-patterns/*.md.
-./scripts/assess.py classify-work "$DB"
+aith assess classify-work "$DB"
 
 # For each cluster the manifest flagged in proposed_defers, defer it so downstream dispatch skips it.
-./scripts/assess.py dispatch "$DB" defer-cluster "<cluster_key>" --reason "<manifest reason>"
+aith assess dispatch "$DB" defer-cluster "<cluster_key>" --reason "<manifest reason>"
 
 # Inspect the resulting cluster set ahead of Phase 3 dispatch.
-./scripts/assess.py list-clusters "$DB"
+aith assess list-clusters "$DB"
 ```
 
 ## Output Contract

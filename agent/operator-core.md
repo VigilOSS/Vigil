@@ -9,13 +9,13 @@ Always-active rules:
 - `agent/rules/reporting.md`
 
 Path convention:
-- When a shared prompt references `./scripts/...`, resolve it from the agent workspace root after `cd agent`
+- Use `aith assess ...` for assessment operations from any directory. If a prompt still references `./scripts/...`, resolve it from the agent workspace root after `cd agent`.
 
 ## Core Loop
 
 After engagement initialization completes, repeat until all attack paths exhausted or user signals stop:
 
-1. **ASSESS STATE** — Read scope.json. Query backend state via `assess.py list-findings` (findings), `assess.py list-intel` (intel summary), and `assess.py fetch activity-entries` (narrative activity log — formerly `log.md`). Local `findings.md` is not maintained during the engagement — use `assess.py export-findings` to generate it on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
+1. **ASSESS STATE** — Read scope.json. Query backend state via `aith assess list-findings` (findings), `aith assess list-intel` (intel summary), and `aith assess fetch activity-entries` (narrative activity log — formerly `log.md`). Local `findings.md` is not maintained during the engagement — use `aith assess export-findings` to generate it on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
 2. **DECIDE NEXT ACTION** — Prioritize by current phase first. In Phase 1-2, prioritize breadth of surface coverage. In Phase 3, prioritize risk class: object references, auth boundaries, and privileged writes before low-risk surfaces. Keep exploitation behind Verify: only findings that survived review as `confirmed` or `downgraded`, or findings explicitly marked `details.chain_required=true`, enter exploit review. Skip ahead only when an obviously actionable path is already in hand.
 3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.4` with `high` reasoning, and Claude operator and substantial Claude workers should use `Opus 4.6`. Only drop to `gpt-5.4` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
@@ -30,9 +30,9 @@ After engagement initialization completes, repeat until all attack paths exhaust
 6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Route all in-scope target work through the Kali MCP command-execution tool — host Bash, `docker run`, `docker exec`, and ad hoc wrappers bypass the runtime's network isolation. If Kali MCP has a runtime or reachability gap, pause target-facing work and debug the runtime from the host — host-side probes against scoped targets break the isolation boundary.
 7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis, testing, validation, and exploitation work. The operator's job is orchestration: phase control, specialist selection, state review, and backend state management — analysis and testing belong to specialist agents because they carry the skill context and methodology depth that the operator prompt lacks.
    **Operator-executed exceptions** (via Kali MCP, not host-side): quick credential validation (single login test to confirm working/not-working). This is a mechanical pipeline step, not analysis.
-8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `./scripts/assess.py record-finding` to write findings to the backend. The backend is the sole store.
-   **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. Record them via `./scripts/assess.py record-intel cve <cve-json-file>` (intel_cves table), NOT `record-finding`. Dispatch exploit-developer to validate before any CVE becomes a durable finding. This reconciles "record immediately" with "no theoretical findings."
-9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, record them via `./scripts/assess.py record-surface` so the backend stays current. The backend is the sole store — there is no local surfaces file to verify.
+8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `aith assess record-finding` to write findings to the backend. The backend is the sole store.
+   **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. Record them via `aith assess record-intel cve <cve-json-file>` (intel_cves table), NOT `record-finding`. Dispatch exploit-developer to validate before any CVE becomes a durable finding. This reconciles "record immediately" with "no theoretical findings."
+9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, record them via `aith assess record-surface` so the backend stays current. The backend is the sole store — there is no local surfaces file to verify.
    If surface recording fails with a connection error, verify the orchestrator backend is running and that `ORCHESTRATOR_BASE_URL` and the engagement key are set correctly (check `engagement.json` and `.orchestrator.env` in the engagement directory).
 10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
 11. **LOOP** — Back to step 1 to discover and exploit more findings
@@ -52,19 +52,19 @@ After engagement initialization completes, repeat until all attack paths exhaust
 Before initializing any engagement, ensure the shared Kali MCP runtime is running:
 
 ```bash
-./scripts/start_kali_mcp_runtime.sh
+aith runtime start
 ```
 
 This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install.
 
-**Image drift — recreate the runtime after every rebuild.** `start_kali_mcp_runtime.sh` compares the running container's image ID against the configured image tag and refuses to start when they diverge. Whenever you rebuild the runtime image (a Dockerfile change, a pinned-version bump, the first engagement after `install.sh` upgraded the image), rerun `./scripts/start_kali_mcp_runtime.sh --recreate` so the container picks up the new image. The same `--recreate` also applies the `/engagements` bind mount on first upgrade — existing artifacts under `$ROOT_DIR/engagements/` become directly visible at `/engagements/<engagement_key>/` inside Kali. No engagement data moves; only the container is replaced.
+**Image drift - recreate the runtime after every rebuild.** `aith runtime start` compares the running container's image ID against the configured image tag and refuses to continue when they diverge. Whenever you rebuild the runtime image or upgrade the installed image, run `aith runtime restart` so the container picks up the new image and current `/engagements` bind mount. No engagement data moves; only the container is replaced.
 
 ## Kali MCP Artifact Paths
 
 Engagement artifacts live at one physical location on disk but have two names depending on where the command runs — reach for the right name so scans end up where downstream tools look for them.
 
-- **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR`. Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local file work, `assess.py` calls, and any script running on the host.
-- **Kali side** — `/engagements/$ENGAGEMENT_KEY` is the same directory via the bind mount in `start_kali_mcp_runtime.sh`. Launchers also export `ENGAGEMENT_KEY` (the basename of `$DIR`) so Kali MCP commands can resolve it.
+- **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR`. Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local file work, `aith assess` calls, and any script running on the host.
+- **Kali side** — `/engagements/$ENGAGEMENT_KEY` is the same directory via the bind mount managed by `aith runtime start`. Launchers also export `ENGAGEMENT_KEY` (the basename of `$DIR`) so Kali MCP commands can resolve it.
 - **Skills running commands inside Kali MCP MUST use `/engagements/$ENGAGEMENT_KEY/...`** — the host path `$DIR` is not valid inside the container, and writing to `/tmp` or `/data` for engagement-scoped artifacts loses them outside the shared-infra conventions.
 
 ## Listener & Callback Management
@@ -72,7 +72,7 @@ Engagement artifacts live at one physical location on disk but have two names de
 Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are operator-controlled — only the operator binds ports and exposes external surface. Agents emit `# MANUAL:` playbook steps; the operator executes them and records the result.
 
 - **Operator** provisions per `agent/references/offensive-tactics/shell-handling.md` (reverse shells) and `agent/references/offensive-tactics/frp-tunneling.md` (tunnels, interactsh OOB), then writes `$DIR/.listener_url` and/or `$DIR/.oob_url`.
-- **Agents** read `$DIR/.listener_url` and `$DIR/.oob_url` from dispatch context (never write). If OOB is unavailable, fall back to time-based detection and note it in output. If a listener cannot be provisioned, record a blocked technique via `./scripts/assess.py post blocked-techniques <json-file>`.
+- **Agents** read `$DIR/.listener_url` and `$DIR/.oob_url` from dispatch context (never write). If OOB is unavailable, fall back to time-based detection and note it in output. If a listener cannot be provisioned, record a blocked technique via `aith assess post blocked-techniques <json-file>`.
 - **Hit-checking and log paths** (`/data/oob-client.log`, `/data/oob-server.log`, `/data/shell-*.log`, `/data/frpc.log`) are documented in `frp-tunneling.md` and `shell-handling.md`.
 
 ## Reactive Nuclei on URL Discovery
@@ -113,7 +113,7 @@ Every dispatch must include:
 - **Which skill to load** (from `agent/SKILL.md` using "Use when:" criteria)
 - **Prior findings relevant to this dispatch:**
   - For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, and the specific hypothesis to test
-  - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `assess.py fetch` — pass all B candidates (chain-target endpoints) through, since pre-filtering hides chain opportunities
+  - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `aith assess fetch` — pass all B candidates (chain-target endpoints) through, since pre-filtering hides chain opportunities
   - For `report-writer`: no finding context needed — the agent queries `report-findings?mode=final` for final reports or `report-findings?mode=draft` for interim reports
 
 ### Pre-Dispatch Checklist
@@ -126,11 +126,11 @@ Before every dispatch, verify:
 - [ ] Skill to load identified from `agent/SKILL.md`
 - [ ] Matching skill's paired references identified from `agent/references/INDEX.md`
 - [ ] Prior relevant findings or existing finding slugs included (so the agent can reference them instead of creating duplicates)
-- [ ] Activity log checked for duplicate dispatch — `./scripts/assess.py fetch activity-entries` (DEDUP rule)
-- [ ] Command history checked — `./scripts/assess.py list-command-runs --q <keyword>` reviewed for prior runs that already cover the objective. Default to an unscoped search so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, open its preview with `./scripts/assess.py get-command-run <id>` — `success=true` only means return_code=0, not that the output answers the current question
+- [ ] Activity log checked for duplicate dispatch — `aith assess fetch activity-entries` (DEDUP rule)
+- [ ] Command history checked — `aith assess list-command-runs --q <keyword>` reviewed for prior runs that already cover the objective. Default to an unscoped search so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, open its preview with `aith assess get-command-run <id>` — `success=true` only means return_code=0, not that the output answers the current question
 - [ ] Parallelism decision made (independent → parallel, dependent → sequential)
 
-DEDUP: Check the activity log (`assess.py fetch activity-entries`) before dispatch — re-dispatching the same agent for the same objective wastes a full context window and risks duplicate findings.
+DEDUP: Check the activity log (`aith assess fetch activity-entries`) before dispatch — re-dispatching the same agent for the same objective wastes a full context window and risks duplicate findings.
 PARALLEL: Independent tasks → parallel. Dependent → sequential.
 
 ### Dispatch Completion Gate
@@ -170,57 +170,57 @@ DB="$DIR/cases.db"
 
 1. **Phase 1 — Reconnaissance**
 
-   **1a. Wildcard subdomain enumeration (when scope.json `hosts` contains `*.domain` entries)** — dispatch `recon-specialist` with `agent/skills/subdomain-enumeration/SKILL.md` loaded BEFORE the parallel recon+source pass. Subdomain expansion must land before downstream steps because 1b's endpoint inventory and 1c's reactive nuclei sweep both consume live hosts as input; running them first against the apex alone misses the wildcard surface entirely. Output: live subdomains ingested via `./scripts/assess.py ingest-endpoints "$DB" subdomain-enum` so they flow into the work buffer alongside apex hosts.
+   **1a. Wildcard subdomain enumeration (when scope.json `hosts` contains `*.domain` entries)** — dispatch `recon-specialist` with `agent/skills/subdomain-enumeration/SKILL.md` loaded BEFORE the parallel recon+source pass. Subdomain expansion must land before downstream steps because 1b's endpoint inventory and 1c's reactive nuclei sweep both consume live hosts as input; running them first against the apex alone misses the wildcard surface entirely. Output: live subdomains ingested via `aith assess ingest-endpoints "$DB" subdomain-enum` so they flow into the work buffer alongside apex hosts.
    Skip 1a when scope.json contains only bare hosts — there is nothing to expand, so dispatching enum wastes a context window.
 
    **1b. Parallel recon + source analysis** — dispatch `recon-specialist` + `source-analyzer` in parallel because their work is independent and sequential dispatch doubles wall time for no coverage gain. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 — leaving non-web triage on the operator loses the skill's methodology depth.
 
    **1c. Reactive nuclei sweep against Phase 1 URL delta** — before leaving Phase 1, fire a reactive nuclei sweep via Kali MCP against the URL delta produced by 1a and 1b (methodology + dedup in `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Running it in-phase — instead of holding every URL until Phase 3 — turns template hits into `record-intel` / `record-finding` writes *before* Phase 3 specialists dispatch, so specialists inherit the signal as intel and findings. The dedup pattern (`list-command-runs` + jq) ensures this pass and the Phase-2 reactive pass below do not re-scan the same host+template combo.
 
-   **Phase 1 exit gate.** Before leaving Phase 1, run `./scripts/assess.py check-scope-coverage --require-stage enum`. If any scoped entry is missing enumeration activity, dispatch the missing work before advancing — entering Phase 2 without enum means downstream surface-collection misses whole branches of the attack surface. File-driven runs (`subfinder -dL ...`, `httpx -l /engagements/$ENGAGEMENT_KEY/scans/targets.txt`, etc.) count toward scope coverage because `check-scope-coverage` reads the referenced target lists out of the engagement directory — so keep those files under `/engagements/$ENGAGEMENT_KEY/` for the lifetime of the engagement instead of `/tmp`.
+   **Phase 1 exit gate.** Before leaving Phase 1, run `aith assess check-scope-coverage --require-stage enum`. If any scoped entry is missing enumeration activity, dispatch the missing work before advancing — entering Phase 2 without enum means downstream surface-collection misses whole branches of the attack surface. File-driven runs (`subfinder -dL ...`, `httpx -l /engagements/$ENGAGEMENT_KEY/scans/targets.txt`, etc.) count toward scope coverage because `check-scope-coverage` reads the referenced target lists out of the engagement directory — so keep those files under `/engagements/$ENGAGEMENT_KEY/` for the lifetime of the engagement instead of `/tmp`.
 2. **COLLECT** → dispatch surface-collector with `agent/skills/surface-collection/SKILL.md`.
    Provide: targets from scope.json, Phase 1 endpoint artifacts (paths to `endpoints.txt` and any source-analyzer output in `scans/`), auth.json state, and `$DIR/cases.db` path.
    On return:
-   - Intelligence from `#### Intelligence` sections must be recorded via `./scripts/assess.py record-intel <type> <json-file>` — one call per structured row (tech-component, person, email, domain, dns-record, org-fact, note, etc.). Run `./scripts/assess.py contract record-intel <type>` first if you are unsure of the field list — intel schemas are strict and reject guessed aliases (e.g. `source` vs `source_name`). Verify the counts with `./scripts/assess.py list-intel` (summary view).
+   - Intelligence from `#### Intelligence` sections must be recorded via `aith assess record-intel <type> <json-file>` — one call per structured row (tech-component, person, email, domain, dns-record, org-fact, note, etc.). Run `aith assess contract record-intel <type>` first if you are unsure of the field list — intel schemas are strict and reject guessed aliases (e.g. `source` vs `source_name`). Verify the counts with `aith assess list-intel` (summary view).
    - Review `#### Priority Attack Surfaces` for Phase 3 dispatch ordering — surface-collector's triage signals override the default type-based dispatch order when risk-informed prioritization is available
-   - Inspect work-buffer stats: `./scripts/assess.py dispatch "$DIR/cases.db" stats`
-   - Inspect coverage gaps: `./scripts/assess.py fetch summary`
+   - Inspect work-buffer stats: `aith assess dispatch "$DIR/cases.db" stats`
+   - Inspect coverage gaps: `aith assess fetch summary`
    - Fire a reactive nuclei sweep against the Katana/gau URLs just ingested (see "Reactive Nuclei on URL Discovery" above and `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Surface-collector-ingested URLs are the largest URL injection of the engagement, so running the reactive sweep here maximizes the CVE/misconfig/exposure signal feeding classify-work before Phase 3 dispatch.
-   - **Classify the work buffer** — run `./scripts/assess.py classify-work "$DIR/cases.db"` once ingestion and the reactive nuclei sweep have settled. This populates `priority_score`, `priority_reason`, and `cluster_key` on pending work items using the deterministic gf-style bucketing in `classify_work.py`; without this step the Phase 3 priority-mode dispatch has nothing to sort by. Re-run after any later ingestion wave.
-   - **Review clusters, defer low-signal ones** — `./scripts/assess.py list-clusters "$DIR/cases.db"` prints cluster counts, max/avg priority, and representative URLs. Any cluster that is clearly not worth specialist attention (e.g., 10k static-asset URLs, out-of-scope-adjacent paths, already-covered admin endpoints) gets deferred with `./scripts/assess.py dispatch "$DIR/cases.db" defer-cluster <cluster_key> --reason "…"` before Phase 3 begins — leaving low-signal clusters pending pollutes the priority queue and forces specialists to re-triage what the operator already judged.
-   Surface-collector records surfaces via `assess.py record-surface` and findings via `assess.py record-finding` before returning.
-   **Phase 2 exit gate.** Run `./scripts/assess.py check-scope-coverage --require-stage collection`. Every scoped entry must have collection activity attached; if not, redispatch surface-collector against the missing entries before advancing. Skipping this gate lets scope-entries drift into Phase 3 with zero work in the buffer.
+   - **Classify the work buffer** — run `aith assess classify-work "$DIR/cases.db"` once ingestion and the reactive nuclei sweep have settled. This populates `priority_score`, `priority_reason`, and `cluster_key` on pending work items using the deterministic gf-style bucketing in `classify_work.py`; without this step the Phase 3 priority-mode dispatch has nothing to sort by. Re-run after any later ingestion wave.
+   - **Review clusters, defer low-signal ones** — `aith assess list-clusters "$DIR/cases.db"` prints cluster counts, max/avg priority, and representative URLs. Any cluster that is clearly not worth specialist attention (e.g., 10k static-asset URLs, out-of-scope-adjacent paths, already-covered admin endpoints) gets deferred with `aith assess dispatch "$DIR/cases.db" defer-cluster <cluster_key> --reason "…"` before Phase 3 begins — leaving low-signal clusters pending pollutes the priority queue and forces specialists to re-triage what the operator already judged.
+   Surface-collector records surfaces via `aith assess record-surface` and findings via `aith assess record-finding` before returning.
+   **Phase 2 exit gate.** Run `aith assess check-scope-coverage --require-stage collection`. Every scoped entry must have collection activity attached; if not, redispatch surface-collector against the missing entries before advancing. Skipping this gate lets scope-entries drift into Phase 3 with zero work in the buffer.
    Update scope.json phase to `consume-test` when ingestion is complete.
 3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
    a. **Nuclei coverage audit** (once, before the work-buffer loop) — audit what Phase 1/2 reactive sweeps already covered and run nuclei only against gaps. Do not blindly re-sweep: if every in-scope live host already received the reactive template set, this step prints a coverage summary and advances.
-      1. Build the coverage set: `./scripts/assess.py list-command-runs --q nuclei --tool-bin nuclei` → jq-extract each prior run's input-list path and template tag(s).
+      1. Build the coverage set: `aith assess list-command-runs --q nuclei --tool-bin nuclei` → jq-extract each prior run's input-list path and template tag(s).
       2. Compute gaps: live targets ∖ covered hosts (and/or template sets the reactive passes did not exercise).
       3. If gaps exist, run nuclei via Kali MCP against the gap list only:
          `nuclei -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap.txt -t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/ -severity medium,high,critical -as -stream -jsonl -rate-limit 150 -c 25 -bs 25 -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap_$RID.jsonl`
-      4. If no gaps, record `./scripts/assess.py log operator "Phase 3a coverage audit" "check-scope-coverage --require-stage consumption" "Reactive sweeps covered all in-scope hosts, no rerun needed." --actor-kind operator`.
+      4. If no gaps, record `aith assess log operator "Phase 3a coverage audit" "check-scope-coverage --require-stage consumption" "Reactive sweeps covered all in-scope hosts, no rerun needed." --actor-kind operator`.
       See `agent/skills/nuclei-scanning/SKILL.md` "Coverage Audit Mode" for the detailed procedure. Triage policy is unchanged: critical/high hits → work-buffer priority entries or findings (after manual validation); medium → intelligence.
-   b. Reset stale work items: `./scripts/assess.py dispatch "$DB" reset-stale 10`
-   c. Check stats: `./scripts/assess.py dispatch "$DB" stats`
+   b. Reset stale work items: `aith assess dispatch "$DB" reset-stale 10`
+   c. Check stats: `aith assess dispatch "$DB" stats`
    d. Fetch and route — dispatch mode depends on pending-item volume:
       - **Pending < 2000 → type-based dispatch.** Independent types run in parallel:
         - `api`, `api-spec`, `form`, `upload`, `graphql`, `websocket` → vulnerability-analyst (load matching vuln-class skill from `agent/SKILL.md`)
         - `page`, `javascript`, `stylesheet`, `data` → source-analyzer (load `source-analysis` skill)
-        `./scripts/assess.py dispatch "$DB" fetch <type> 10 <agent-name>`
+        `aith assess dispatch "$DB" fetch <type> 10 <agent-name>`
       - **Pending ≥ 2000 → priority-first dispatch.** Type-based fetch orders only by id within a type, so at 2000+ pending items specialists churn through low-signal work before reaching the high-signal clusters `classify-work` already scored. Switch to priority mode. `fetch-by-priority` is route-aware: it only ever claims rows whose type maps to a specialist route, and rejects free-form agent names so stray labels can't silently mix work types.
-        - `./scripts/assess.py dispatch "$DB" fetch-by-priority 10 auto` — claim the highest-signal routable rows globally and stamp each with its canonical owner (`vulnerability-analyst` for api/api-spec/form/upload/graphql/websocket, `source-analyzer` for page/javascript/stylesheet/data). Use this when dispatching both specialists in parallel off one queue.
-        - `./scripts/assess.py dispatch "$DB" fetch-by-priority 10 vulnerability-analyst` (or `source-analyzer`, or any `vulnerability-analyst-N` / `source-analyzer-N` instance label) — claim only the types that specialist can handle. Use this when you want parallel instances of one role without handing any of them work outside its route.
-        Rows come back sorted by `priority_score DESC, cluster_key, id`. Run `assess.py list-clusters "$DB"` between batches to decide whether new clusters warrant `defer-cluster` before they reach specialists — cluster keys carry a prefix (`gf:` for vuln-class buckets like `gf:ssrf` / `gf:debug_logic`, `path:` for the two-segment fallback); see `agent/skills/case-dispatching/SKILL.md` for the full weight table.
+        - `aith assess dispatch "$DB" fetch-by-priority 10 auto` — claim the highest-signal routable rows globally and stamp each with its canonical owner (`vulnerability-analyst` for api/api-spec/form/upload/graphql/websocket, `source-analyzer` for page/javascript/stylesheet/data). Use this when dispatching both specialists in parallel off one queue.
+        - `aith assess dispatch "$DB" fetch-by-priority 10 vulnerability-analyst` (or `source-analyzer`, or any `vulnerability-analyst-N` / `source-analyzer-N` instance label) — claim only the types that specialist can handle. Use this when you want parallel instances of one role without handing any of them work outside its route.
+        Rows come back sorted by `priority_score DESC, cluster_key, id`. Run `aith assess list-clusters "$DB"` between batches to decide whether new clusters warrant `defer-cluster` before they reach specialists — cluster keys carry a prefix (`gf:` for vuln-class buckets like `gf:ssrf` / `gf:debug_logic`, `path:` for the two-segment fallback); see `agent/skills/case-dispatching/SKILL.md` for the full weight table.
       Pass the raw fetched JSON rows into the dispatch context. They carry canonical ids such as `request_variant_id`, `service_id`, and sometimes `coverage_item_id`, which subagents need for durable probe and coverage writes.
       If `$DIR/.oob_url` exists, include the callback URL in dispatch context for agents doing blind testing.
       If `$DIR/.listener_url` exists, include the tunnel address for agents that need a callback target.
-   e. On subagent return: `./scripts/assess.py dispatch "$DB" done "id1,id2,..."`
-      Mark a batch done only after the subagent has written durable state for any findings, significant probe runs, and coverage updates its work satisfied. Verify the relevant coverage item moved out of `pending`, `queued`, or `deferred`. If the agent skipped durable recording, send it back to write the state instead of silently duplicating it from the operator. Record surfaces via `assess.py record-surface`. Re-ingest new endpoints via `assess.py ingest-endpoints`.
+   e. On subagent return: `aith assess dispatch "$DB" done "id1,id2,..."`
+      Mark a batch done only after the subagent has written durable state for any findings, significant probe runs, and coverage updates its work satisfied. Verify the relevant coverage item moved out of `pending`, `queued`, or `deferred`. If the agent skipped durable recording, send it back to write the state instead of silently duplicating it from the operator. Record surfaces via `aith assess record-surface`. Re-ingest new endpoints via `aith assess ingest-endpoints`.
    f. If vulnerability-analyst signals FUZZER_NEEDED for a parameter or directory, dispatch fuzzer with `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md` and a bounded objective (target URL, parameter name, max payloads).
    g. Repeat b-f until pending=0 for all consumable types.
-   h. Before leaving: `./scripts/assess.py check-coverage`. If it fails, resolve each remaining surface as `covered`, `deferred`, or `not_applicable`. High-risk surfaces (`account_recovery`, `dynamic_render`, `object_reference`, `privileged_write`) must be resolved as `covered` or `not_applicable` before leaving this phase — deferring high-risk surfaces means they become invisible to the report.
-      `check-coverage` is surface-level; use `./scripts/assess.py check-scope-coverage --require-stage consumption` as the broader scope-entry-level gate when you need a pre-report readiness check that a whole scope host is fully consumed or explicitly deferred, not just individual surfaces.
+   h. Before leaving: `aith assess check-coverage`. If it fails, resolve each remaining surface as `covered`, `deferred`, or `not_applicable`. High-risk surfaces (`account_recovery`, `dynamic_render`, `object_reference`, `privileged_write`) must be resolved as `covered` or `not_applicable` before leaving this phase — deferring high-risk surfaces means they become invisible to the report.
+      `check-coverage` is surface-level; use `aith assess check-scope-coverage --require-stage consumption` as the broader scope-entry-level gate when you need a pre-report readiness check that a whole scope host is fully consumed or explicitly deferred, not just individual surfaces.
 4. **VERIFY FINDINGS** → adversarial review of Phase 3 findings before investing in exploitation. This catches false positives, severity inflation, and weak evidence early — fixing a finding after exploitation wastes far more tokens than catching it here.
-   a. Fetch all active findings: `./scripts/assess.py fetch findings`
+   a. Fetch all active findings: `aith assess fetch findings`
    b. Triage the review scope:
       - **Must review**: all HIGH and CRITICAL findings — these drive exploitation and dominate the report
       - **Sample review**: 30-50% of MEDIUM findings, selected by diversity of `defect_family` (cover each vuln class rather than clustering on one)
@@ -231,26 +231,26 @@ DB="$DIR/cases.db"
       - Explicit instruction: "You are reviewing findings produced by other agents. Your job is adversarial — challenge the evidence, reproduce the PoC, and verify the claimed severity. Confirm, downgrade, or kill each finding with specific counter-evidence."
       - The matching vuln-class skill from `agent/SKILL.md` for the findings under review
    d. For each reviewed finding, the reviewer produces a disposition:
-      - **Confirmed** — evidence reproduced, severity accurate → `./scripts/assess.py verify-finding <slug> --disposition confirmed --reason "..."`
-      - **Downgraded** — real issue but severity overstated → `./scripts/assess.py verify-finding <slug> --disposition downgraded --reason "..." --new-severity <lower>`
-      - **Killed** — false positive, unreproducible, or stacked preconditions → `./scripts/assess.py kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-5>`
+      - **Confirmed** — evidence reproduced, severity accurate → `aith assess verify-finding <slug> --disposition confirmed --reason "..."`
+      - **Downgraded** — real issue but severity overstated → `aith assess verify-finding <slug> --disposition downgraded --reason "..." --new-severity <lower>`
+      - **Killed** — false positive, unreproducible, or stacked preconditions → `aith assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-5>`
    e. **Dedup pass**: check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker into the stronger:
-      `./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"`
-   f. **Chain-only primitives stay in the normal finding table**: when a finding is real only as part of a proved or expected escalation path, update it with `./scripts/assess.py update-finding <slug> ...` so `details.chain_required`, `details.chain_rationale`, and `details.required_followup` are populated. Do not invent a chain-specific workflow status.
+      `aith assess merge-finding <source-slug> <target-slug> "<reason>"`
+   f. **Chain-only primitives stay in the normal finding table**: when a finding is real only as part of a proved or expected escalation path, update it with `aith assess update-finding <slug> ...` so `details.chain_required`, `details.chain_rationale`, and `details.required_followup` are populated. Do not invent a chain-specific workflow status.
    g. **Exit gate**: all HIGH/CRITICAL findings have a verification disposition. If the reviewer kills >50% of findings, review whether Phase 3 agents are producing speculative findings — tighten dispatch context for future engagements.
    Update scope.json phase to `exploit` when verification completes.
 5. **EXPLOIT** →
-   a. Dispatch osint-analyst with `agent/skills/osint-recon/SKILL.md` — intelligence gathering is always permitted regardless of `exploit_policy`. Feed the tech stack, domains, and people data via `assess.py list-intel tech-component`, `assess.py list-intel domain`, and `assess.py list-intel person` (or `assess.py fetch intel` for the summary).
-   b. Respect `exploit_policy` from `scope.json` for exploit-developer dispatch. Use `./scripts/assess.py review-exploits` to inspect the current backend candidate set and `./scripts/assess.py check-exploit-gate` before launching work:
+   a. Dispatch osint-analyst with `agent/skills/osint-recon/SKILL.md` — intelligence gathering is always permitted regardless of `exploit_policy`. Feed the tech stack, domains, and people data via `aith assess list-intel tech-component`, `aith assess list-intel domain`, and `aith assess list-intel person` (or `aith assess fetch intel` for the summary).
+   b. Respect `exploit_policy` from `scope.json` for exploit-developer dispatch. Use `aith assess review-exploits` to inspect the current backend candidate set and `aith assess check-exploit-gate` before launching work:
       - `pause`: present backend exploit candidates to the human and ask which are approved for exploitation.
       - `selected`: exploit only the approved target slugs recorded in scope metadata and still allowed by the backend exploit-candidate gate.
       - `full_send`: dispatch all current backend exploit candidates immediately. Human approval is skipped, backend readiness is not.
-   c. Exploit-developer owns durable exploit-state recording. If it proves a chain, credential, access record, or credential test, it should write the JSON payloads under `$DIR/tools/exploit-state/` and record them before task completion with the repo scripts.
-   d. On return, verify canonical exploit state via `assess.py fetch attack-chains`, `credentials`, `access-records`, and `credential-tests`. Do not create duplicate operator-side rows unless you are explicitly merging a proposal-based exploit session with `assess.py merge-session`.
-   e. After osint-analyst returns: read the recorded CVE intel via `./scripts/assess.py list-intel cve`. **Do not promote CVE matches to findings yet.** If HIGH-value CVEs with public PoCs were identified, dispatch exploit-developer to validate each against the live target — backported patches, missing binaries, and disabled modules routinely invalidate version-only matches. Only record a CVE-based finding via `record-finding` after exploit-developer confirms exploitability or proves partial signal.
+   c. Exploit-developer owns durable exploit-state recording. If it proves a chain, credential, access record, or credential test, it should write the JSON payloads under `$DIR/tools/exploit-state/` and record them before task completion with `aith assess` helpers.
+   d. On return, verify canonical exploit state via `aith assess fetch attack-chains`, `credentials`, `access-records`, and `credential-tests`. Do not create duplicate operator-side rows unless you are explicitly merging a proposal-based exploit session with `aith assess merge-session`.
+   e. After osint-analyst returns: read the recorded CVE intel via `aith assess list-intel cve`. **Do not promote CVE matches to findings yet.** If HIGH-value CVEs with public PoCs were identified, dispatch exploit-developer to validate each against the live target — backported patches, missing binaries, and disabled modules routinely invalidate version-only matches. Only record a CVE-based finding via `record-finding` after exploit-developer confirms exploitability or proves partial signal.
 6. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
 7. **REPORT** → keep reporting inside the existing `report` phase; use a draft → QA → publish gate so the report is reviewed before lifecycle state changes.
-   a. **Draft:** for a final report, run `./scripts/assess.py check-report-readiness` first and resolve blockers before dispatch. Dispatch `report-writer` in draft-generation mode. Report-writer queries the backend directly for `report-findings?mode=final` on final reports or `report-findings?mode=draft` on interim reports, plus `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — let it self-serve rather than manually assembling findings context, since manual assembly risks stale or incomplete data. Draft-generation mode writes `report.md`, runs the 12-step self-review in `agent/skills/report-generation/SKILL.md`, fixes any local report issues it finds, and returns the completed checklist. It does not emit `report.generated` or mark findings `reported`.
+   a. **Draft:** for a final report, run `aith assess check-report-readiness` first and resolve blockers before dispatch. Dispatch `report-writer` in draft-generation mode. Report-writer queries the backend directly for `report-findings?mode=final` on final reports or `report-findings?mode=draft` on interim reports, plus `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — let it self-serve rather than manually assembling findings context, since manual assembly risks stale or incomplete data. Draft-generation mode writes `report.md`, runs the 12-step self-review in `agent/skills/report-generation/SKILL.md`, fixes any local report issues it finds, and returns the completed checklist. It does not emit `report.generated` or mark findings `reported`.
    b. **QA and fix:** dispatch a fresh `report-writer` in review-and-fix mode with `$DIR/report.md` plus the same backend context. The QA writer checks every item in the 12-step post-generation checklist against the rendered report and backend `report-findings` output, fixes report-local issues directly, and returns `QA PASS` only when every checklist item passes. If a failure requires new evidence or backend finding changes, it returns `QA BLOCKED` with exact finding slugs and required operator action.
    c. **Publish:** only after `QA PASS`, emit the `report.generated` event, update included findings to `reported`, and update scope.json phase to `complete`. Publication before QA passes creates false workflow state, so keep `reported` transitions behind this gate.
 
@@ -265,7 +265,7 @@ jq '.current_phase = "<next>"' \
 When ANY agent discovers credentials, the operator coordinates these steps:
 
 1. **Operator tests credentials via Kali MCP** — a quick login check is mechanical pipeline work, not analysis. Run a single login request (curl POST, HTTP basic auth, etc.) via the Kali MCP command-execution tool to confirm working or not-working.
-   - If login **fails** → record the result via `./scripts/assess.py log operator "Login test failed" "<command>" "<response>"` (writes an activity entry to the backend), continue anonymously. Do not dispatch a specialist for a failed login.
+   - If login **fails** → record the result via `aith assess log operator "Login test failed" "<command>" "<response>"` (writes an activity entry to the backend), continue anonymously. Do not dispatch a specialist for a failed login.
    - If login **succeeds** → continue to step 2.
 2. **Operator writes to auth.json** — populate cookies, headers, or token fields from the successful login response. Set `state` to `available` and `use_for_requests` to `true`. This is local file work.
 3. **Operator re-dispatches surface-collector** — dispatch surface-collector with updated auth.json to re-run the collection pipeline (Katana + gau + ingestion) with authenticated context. Surface-collector handles auth-aware crawling and ingests authenticated-only endpoints into the work buffer. This is the POST-AUTH RE-COLLECTION step.
@@ -288,13 +288,13 @@ and timings to the orchestrator backend automatically. Treat that recording as
 shared engagement state: specialists check it before probing (their
 `shared-constraints.md §2b` covers the per-probe coverage check); the operator
 reads it to shape dispatches so each one covers a variant that hasn't been
-tried yet (`./scripts/assess.py list-command-runs`).
+tried yet (`aith assess list-command-runs`).
 
 - Use MCP tool discovery to inspect the currently available Kali tools instead of assuming a fixed tool inventory in the prompt.
 - When you need arbitrary shell execution inside the Kali runtime, use the Kali MCP command-execution tool.
 - Treat host Bash as out-of-bounds for in-scope target work even if the same binary exists locally.
 - Host-side commands are limited to coordination, local file work, backend interaction, and non-target support tasks such as `jq`, `sqlite3`, `python3`, `grep`/`rg`, `sed`, `awk`, `base64`, and `openssl`.
-- For backend state writes, use repo scripts such as `assess.py record-surface` and `assess.py record-finding` rather than sourcing library helpers directly.
+- For backend state writes, use `aith assess` helpers such as `record-surface` and `record-finding` rather than sourcing library helpers directly.
 - If a required target-facing tool is missing from the active Kali MCP session, say so explicitly and stop to resolve the runtime gap rather than falling back to host or Docker-side execution paths.
 - Host-side runtime diagnosis may inspect local files, container metadata, mounts, and environment, but may not send scoped HTTP, DNS, or raw TCP probes from the host.
 
@@ -313,7 +313,7 @@ variant that hasn't been tried — not to duplicate what the agents already
 have in hand.
 
 ```bash
-./scripts/assess.py list-command-runs --q <keyword>
+aith assess list-command-runs --q <keyword>
 ```
 
 When planning the next dispatch:
@@ -328,7 +328,7 @@ When planning the next dispatch:
   payload family, tool, flag, target scope, credentials, auth context) is new
   coverage — dispatch it without hesitation.
 - **Before citing a prior run**, fetch its preview with
-  `./scripts/assess.py get-command-run <id>` and confirm the stored evidence
+  `aith assess get-command-run <id>` and confirm the stored evidence
   actually answers the current question. `success=true` only means
   `return_code=0` — soft-failure pages, WAF intercepts, and rate-limited stubs
   all exit cleanly.
@@ -351,13 +351,13 @@ Agents use PREFIXED IDs:
 | osint-analyst | OS | OS-001 |
 | surface-collector | SC | SC-001 |
 
-Prefix mnemonics: EX=exploit, VA=vuln-analyst, SA=source-analyzer, RE=recon, FZ=fuzzer, OS=osint, SC=surface-collector. The prefix is the agent mnemonic assigned by `assess.py record-finding`, not the initials of the full agent name.
+Prefix mnemonics: EX=exploit, VA=vuln-analyst, SA=source-analyzer, RE=recon, FZ=fuzzer, OS=osint, SC=surface-collector. The prefix is the agent mnemonic assigned by `aith assess record-finding`, not the initials of the full agent name.
 
-Finding IDs are allocated by `assess.py record-finding` under a lock to prevent collisions — hand-allocating IDs risks duplicates and breaks the slug registry. Create a structured JSON finding payload matching `schemas/finding-record.schema.json`, then record it via:
-`./scripts/assess.py record-finding <agent-name> <finding-json-file>`
+Finding IDs are allocated by `aith assess record-finding` under a lock to prevent collisions — hand-allocating IDs risks duplicates and breaks the slug registry. Create a structured JSON finding payload matching `schemas/finding-record.schema.json`, then record it via:
+`aith assess record-finding <agent-name> <finding-json-file>`
 
 This allocates or reuses the canonical slug under a lock and writes backend state. The backend is the sole store — there is no local markdown sync. If an agent only produced markdown, stop and convert it to the required JSON shape.
-If you need the canonical field list or examples, run `./scripts/assess.py contract record-finding` instead of guessing payload fields from memory.
+If you need the canonical field list or examples, run `aith assess contract record-finding` instead of guessing payload fields from memory.
 Use the lifecycle helpers for later state changes instead of raw `post` or `patch`: `verify-finding` / `kill-finding` for verification outcomes, `reset-finding` to reopen a previously verified or false-positive finding, and `update-finding` for non-verification metadata or workflow updates.
 
 report-writer uses the `report-findings` backend endpoint in explicit draft/final mode, which assigns sequential `001~N` report IDs automatically. Each report finding includes both the `report_id` and the original `slug` for cross-referencing.
@@ -369,12 +369,12 @@ OWASP Quick Ref: A01=Access Control, A02=Crypto, A03=Injection, A04=Insecure Des
 After receiving agent output with `#### Intelligence` section, translate each row into a structured JSON payload matching the relevant `schemas/intel-*.schema.json` and record it:
 
 ```
-./scripts/assess.py record-intel <type> <json-file>
+aith assess record-intel <type> <json-file>
 ```
 
 Valid `<type>` values: `tech-component`, `person`, `email`, `domain`, `cve`, `dns-record`, `social-profile`, `breach-record`, `org-fact`, `note`.
 
-Before authoring the JSON, run `./scripts/assess.py contract record-intel <type>` to print the allowed fields, required fields, and a per-type example. Intel schemas are strict (`additionalProperties=false`), so guessed aliases like `source` fail validation when the schema says `source_name`. Reach for the contract instead of field-guessing.
+Before authoring the JSON, run `aith assess contract record-intel <type>` to print the allowed fields, required fields, and a per-type example. Intel schemas are strict (`additionalProperties=false`), so guessed aliases like `source` fail validation when the schema says `source_name`. Reach for the contract instead of field-guessing.
 
 The backend deduplicates engagement-scoped (per the `UNIQUE(engagement_id, <natural key>)` constraint on each `intel_*` table):
 - Tech stack on Component (+ Version)
@@ -382,7 +382,7 @@ The backend deduplicates engagement-scoped (per the `UNIQUE(engagement_id, <natu
 - Emails on Address
 - Domains on Identity + Kind
 - CVEs on `cve_id`
-- Credentials on `assessment_credentials` (use `./scripts/assess.py post credentials`, not `record-intel` — credentials live in the assessment domain)
+- Credentials on `assessment_credentials` (use `aith assess post credentials`, not `record-intel` — credentials live in the assessment domain)
 
 Prose intel that doesn't fit a structured row goes to `record-intel note` — it's FTS-indexed and still engagement-scoped.
 
@@ -395,7 +395,7 @@ Prose intel that doesn't fit a structured row goes to `record-intel note` — it
 | Custom scripts/exploits | tools/ |
 | Background PIDs | pids/ |
 
-Root: scope.json, report.md, auth.json, and the transient worker buffer only. Activity log and intel now live in the orchestrator backend — query via `assess.py fetch activity-entries` and `assess.py list-intel`.
+Root: scope.json, report.md, auth.json, and the transient worker buffer only. Activity log and intel now live in the orchestrator backend — query via `aith assess fetch activity-entries` and `aith assess list-intel`.
 
 ## Skills and References
 

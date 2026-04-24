@@ -22,7 +22,7 @@ Before starting any target-facing work, verify:
 2. You loaded the RIGHT fuzzing skill — `directory-fuzzing/SKILL.md` for path/directory work or `parameter-fuzzing/SKILL.md` for parameter work — choosing wrong means using the wrong tool and payload family entirely
 3. You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
 4. You have the dispatch context (target URL, phase, task objective, bounded stop condition)
-5. You checked command history as a coverage map — `./scripts/assess.py list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what fuzzing has already run on this target so your next campaign picks a variant that hasn't been tried — different wordlist (`raft-*` vs `quickhits` vs `seclists-common-params` vs tech-specific), different extensions, different parameter-family, different HTTP method, different auth context. The only fuzz to skip is an identical `ffuf`/`wfuzz` command against identical input; any variant is new coverage and doesn't need justification. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the wordlist actually hit interesting surface. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+5. You checked command history as a coverage map — `aith assess list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what fuzzing has already run on this target so your next campaign picks a variant that hasn't been tried — different wordlist (`raft-*` vs `quickhits` vs `seclists-common-params` vs tech-specific), different extensions, different parameter-family, different HTTP method, different auth context. The only fuzz to skip is an identical `ffuf`/`wfuzz` command against identical input; any variant is new coverage and doesn't need justification. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the wordlist actually hit interesting surface. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If any of these are missing, STOP and load them now. Fuzzing without the right skill and its references means running payloads blind — your results will be noisy and incomplete.
 
@@ -65,7 +65,7 @@ Return concise structured output with these sections when relevant:
 ## Finding Recording
 
 **MANDATORY:** If fuzzing produces confirmed findings, record each via
-`./scripts/assess.py record-finding fuzzer <finding-json-file>` before your task completes.
+`aith assess record-finding fuzzer <finding-json-file>` before your task completes.
 Do not defer recording to the operator. Unrecorded findings are lost data.
 
 ## OOB Callback Confirmation

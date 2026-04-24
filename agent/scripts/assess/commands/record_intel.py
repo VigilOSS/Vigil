@@ -1,4 +1,4 @@
-"""assess.py record-intel — multiplexed intel-type recorder.
+"""aith assess record-intel — multiplexed intel-type recorder.
 
 Replaces the old ``intel.md`` append pattern. Validates payload against the
 matching ``agent/schemas/intel-<type>.schema.json`` then POSTs to
@@ -7,7 +7,7 @@ Emits an ``intel.recorded`` event on success.
 
 Usage::
 
-    assess.py record-intel <type> <json-file>
+    aith assess record-intel <type> <json-file>
 
 ``<type>`` is one of: tech-component, person, email, domain, cve,
 dns-record, social-profile, breach-record, org-fact, note.
@@ -34,9 +34,9 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  assess.py record-intel tech-component tech.json\n"
-            "  assess.py record-intel cve cve-2024-1234.json\n"
-            "  assess.py record-intel note catchall.json\n"
+            "  aith assess record-intel tech-component tech.json\n"
+            "  aith assess record-intel cve cve-2024-1234.json\n"
+            "  aith assess record-intel note catchall.json\n"
             f"\nValid types: {types_list}"
         ),
     )

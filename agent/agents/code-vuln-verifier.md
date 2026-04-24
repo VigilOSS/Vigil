@@ -109,19 +109,19 @@ so the backend clears the prior verification state and the finding returns to ac
 
 ```bash
 # Persist confirm/downgrade/dispute decisions through the verification endpoint
-./scripts/assess.py verify-finding <slug> <verification-json>
+aith assess verify-finding <slug> <verification-json>
 
 # Persist kills with the dedicated helper (enforces kill_reason + kill_check fields)
-./scripts/assess.py kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
+aith assess kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 
 # Reopen a previously verified or false-positive finding when retest disproves the prior verdict
-./scripts/assess.py reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
+aith assess reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
 
 # Record attack chains
-./scripts/assess.py record-chain code-vuln-verifier <chain-json>
+aith assess record-chain code-vuln-verifier <chain-json>
 
 # Only use record-finding when the verifier discovers a net-new spot-check bug
-./scripts/assess.py record-finding code-vuln-verifier <new-finding-json>
+aith assess record-finding code-vuln-verifier <new-finding-json>
 ```
 
 ## Finding Prefix: VF

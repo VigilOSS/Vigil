@@ -18,26 +18,26 @@ Use the helper script or `curl` — never query the SQLite database file directl
 
 ```bash
 # Final report gate and final-mode findings
-./scripts/assess.py check-report-readiness
-./scripts/assess.py fetch "report-findings?mode=final"
+aith assess check-report-readiness
+aith assess fetch "report-findings?mode=final"
 
 # Interim report findings when the operator explicitly wants a draft before final readiness passes
-./scripts/assess.py fetch "report-findings?mode=draft"
+aith assess fetch "report-findings?mode=draft"
 
 # Attack chains with narrative and severity
-./scripts/assess.py fetch attack-chains
+aith assess fetch attack-chains
 
 # Credentials discovered during exploitation
-./scripts/assess.py fetch credentials
+aith assess fetch credentials
 
 # Access records and footholds confirmed via credential validation
-./scripts/assess.py fetch access-records
+aith assess fetch access-records
 
 # Surfaces for coverage summary
-./scripts/assess.py fetch surfaces
+aith assess fetch surfaces
 
 # Assessment-level counts
-./scripts/assess.py fetch summary
+aith assess fetch summary
 ```
 
 The `report-findings` endpoint returns each finding with:
@@ -195,7 +195,7 @@ Tool output in `<details>` blocks, generated scripts, scope verification table, 
 
 Before generating the report body, run these checks against the backend data. If any check fails, **stop and flag the issue to the operator** — do not silently fix or ignore it.
 
-1. **Readiness gate:** for final reports, run `./scripts/assess.py check-report-readiness`. If it fails, stop and flag the blockers to the operator.
+1. **Readiness gate:** for final reports, run `aith assess check-report-readiness`. If it fails, stop and flag the blockers to the operator.
 2. **Duplicate check:** scan findings for pairs sharing the same root cause + endpoint. Flag: "VA-003 and EX-001 appear to describe the same root cause on /api/users — resolve before report."
 3. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
 4. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
@@ -255,7 +255,7 @@ Run these publication steps only after the operator confirms the report QA gate 
 
 1. **Emit a runtime event** so the orchestrator and UI know the report exists:
    ```bash
-   ./scripts/assess.py emit-event \
+   aith assess emit-event \
        "report.generated" \
        "report" \
        "report.md" \
@@ -266,7 +266,7 @@ Run these publication steps only after the operator confirms the report QA gate 
    ```bash
    # For each finding slug included in the report, use the finding-specific helper so the
    # workflow transition stays explicit at the command line:
-   ./scripts/assess.py update-finding VA-003 \
+   aith assess update-finding VA-003 \
      --status reported \
      --notes "Included in report.md" \
      --reason "Included in the generated report deliverable." \

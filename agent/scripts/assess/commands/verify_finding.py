@@ -1,4 +1,4 @@
-"""assess.py verify-finding — dedicated verifier flow for canonical findings."""
+"""aith assess verify-finding — dedicated verifier flow for canonical findings."""
 from __future__ import annotations
 
 import argparse
@@ -49,7 +49,7 @@ def run(args) -> None:
     if raw_payload is not None and raw_payload in _KNOWN_DISPOSITIONS:
         print(
             f"'{raw_payload}' looks like a disposition, not a payload file.\n"
-            f"Use: assess.py verify-finding {args.finding_slug} --disposition {raw_payload} --reason \"...\"",
+            f"Use: aith assess verify-finding {args.finding_slug} --disposition {raw_payload} --reason \"...\"",
             file=sys.stderr,
         )
         sys.exit(1)

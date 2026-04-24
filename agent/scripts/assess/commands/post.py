@@ -1,4 +1,4 @@
-"""assess.py post — generic POST for low-frequency endpoints."""
+"""aith assess post — generic POST for low-frequency endpoints."""
 from __future__ import annotations
 
 import argparse
@@ -18,8 +18,8 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  assess.py post credentials payload.json\n"
-            "  assess.py post blocked-techniques payload.json"
+            "  aith assess post credentials payload.json\n"
+            "  aith assess post blocked-techniques payload.json"
         ),
     )
     p.add_argument("endpoint", help="e.g. credentials, credential-tests, access-records, blocked-techniques, probe-runs")

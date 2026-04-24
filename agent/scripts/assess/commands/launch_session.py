@@ -1,4 +1,4 @@
-"""assess.py launch-session — create exploit session dir + prompt."""
+"""aith assess launch-session — create exploit session dir + prompt."""
 from __future__ import annotations
 
 import sys
@@ -100,7 +100,7 @@ def run(args) -> None:
         "- Use Kali MCP tools for target-facing work.",
         "- Do not edit the root report.md or scope.json.",
         "- Place artifacts in ./artifacts and notes in ./notes.",
-        "- Record proposals with ./scripts/assess.py record-proposal <session-dir> <proposal-json-file>.",
+        "- Record proposals with aith assess record-proposal <session-dir> <proposal-json-file>.",
         "- Use proposal type finding_record to update or add findings.",
         "- Use proposal type probe_run to submit exploit/validation evidence for merge review.",
         "",

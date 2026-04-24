@@ -109,7 +109,7 @@ def test_phase_two_methodology_guidance_is_present_in_skills_and_references():
     api04 = (
         repo_root / "agent" / "references" / "api-security" / "API04-resource-consumption.md"
     ).read_text(encoding="utf-8")
-    install_script = (repo_root / "install.sh").read_text(encoding="utf-8")
+    cli_main = (repo_root / "src" / "ai_threat_hunting_cli" / "main.py").read_text(encoding="utf-8")
 
     assert "read between the lines" in engagement_methodology.lower()
     assert "prove it in stages" in engagement_methodology.lower()
@@ -117,7 +117,7 @@ def test_phase_two_methodology_guidance_is_present_in_skills_and_references():
     assert "canonical destination" in osint_recon.lower()
     assert "optional final phase" in athena_skill.lower()
     assert "ctf scope" not in api04.lower()
-    assert "authorized realistic lab" in install_script.lower()
+    assert "aith" in cli_main.lower()
 
 
 def test_specialist_agent_sources_exist_for_public_roster():
@@ -280,7 +280,7 @@ def test_exploit_developer_prompt_uses_backend_exploit_candidates_for_context():
 
     assert '.status | IN("confirmed","exploited","draft")' not in exploit_prompt
     assert '.workflow_status | IN("active","exploited","draft")' not in exploit_prompt
-    assert "./scripts/assess.py fetch exploit-candidates" in exploit_prompt
+    assert "aith assess fetch exploit-candidates" in exploit_prompt
     assert "candidate_reason" in exploit_prompt
     assert "verified findings at nearby endpoints" in exploit_prompt
 
@@ -314,7 +314,7 @@ def test_operator_prompt_outputs_reference_helper_contracts_for_findings():
     claude_prompt = (repo_root / "agent" / "CLAUDE.md").read_text(encoding="utf-8")
 
     for text in (operator_core, agents_prompt, claude_prompt):
-        assert "assess.py contract record-finding" in text
+        assert "aith assess contract record-finding" in text
         assert "reset-finding" in text
 
 
@@ -537,7 +537,7 @@ def test_priority_dispatch_wired_into_prompts():
     # classify-work must be called after Phase 2 ingestion and inside the priority-mode
     # branch of the consumption loop.
     assert "classify-work" in operator_core, (
-        "operator-core.md must call `assess.py classify-work` after Phase 2 ingestion "
+        "operator-core.md must call `aith assess classify-work` after Phase 2 ingestion "
         "so Phase 3 priority-mode dispatch has scored rows to sort"
     )
     assert "classify-work" in case_dispatching, (

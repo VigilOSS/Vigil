@@ -1,4 +1,4 @@
-"""assess.py check-scope-coverage — per-scope-entry coverage audit.
+"""aith assess check-scope-coverage — per-scope-entry coverage audit.
 
 This is a higher-level sibling of `check-coverage`: where that command audits
 the backend's `assessment_surfaces` table for surface-level resolution,
@@ -835,7 +835,7 @@ def _extract_observation_count(
     breakdowns. When the total is small or when the entry owns every
     service, the engagement-wide count is a reasonable proxy; otherwise we
     fall back to 0 and let operators inspect the raw list via
-    `assess.py fetch request-observations` if they need precision.
+    `aith assess fetch request-observations` if they need precision.
     """
     raw = summary.get("request_observation_count")
     try:

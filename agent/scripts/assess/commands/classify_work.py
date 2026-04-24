@@ -1,4 +1,4 @@
-"""assess.py classify-work — deterministic gf-style classification for work_items.
+"""aith assess classify-work — deterministic gf-style classification for work_items.
 
 Operators run this after ingest to populate `priority_score`, `priority_reason`,
 `cluster_key`, and `terminal_reason` on pending rows. The resulting signals feed
