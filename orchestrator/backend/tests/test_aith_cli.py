@@ -213,6 +213,45 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagement(tmp_path: Path) -> 
     assert "ORCHESTRATOR_BASE_URL=http://host.docker.internal:18000" in run_command
 
 
+def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import mitmproxy as mitmproxy_module
+    from ai_threat_hunting_cli.docker import DockerResult
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+    (engagement / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000\n",
+        encoding="utf-8",
+    )
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "-q"]:
+            return DockerResult(0, "", "")
+        return DockerResult(0, "", "")
+
+    ready_sequence = iter([False, False, True])
+    attempts: list[tuple[str, int]] = []
+
+    def fake_port_open(host: str, port: int) -> bool:
+        attempts.append((host, port))
+        return next(ready_sequence)
+
+    monkeypatch.setattr(mitmproxy_module, "_PORT_WAIT_ATTEMPTS", 3, raising=False)
+    monkeypatch.setattr(mitmproxy_module, "_PORT_WAIT_DELAY_SECONDS", 0, raising=False)
+    monkeypatch.setattr(mitmproxy_module, "_port_open", fake_port_open)
+
+    mitmproxy_module.start_proxy(
+        mitmproxy_module.MitmproxyOptions(install_root=install_root, engagement_dir=engagement, port=9090),
+        runner=runner,
+    )
+
+    assert attempts == [("127.0.0.1", 9090)] * 3
+
+
 def test_mitmproxy_start_without_arg_uses_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import main as main_module
 
@@ -938,6 +977,33 @@ def test_up_skips_oob_when_existing_sessions_are_active(tmp_path: Path, monkeypa
     up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=lambda *args, **kwargs: None)
 
     assert calls == ["runtime", "orchestrator"]
+
+
+def test_up_starts_oob_when_only_client_sessions_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import up as up_module
+
+    calls: list[str] = []
+
+    monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
+    monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
+    monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
+    monkeypatch.setattr(
+        up_module,
+        "oob_status",
+        lambda runner=None: {"state": "partial", "server": False, "frpc": False, "clients": ["demo"]},
+    )
+    monkeypatch.setattr(
+        up_module,
+        "_oob_options",
+        lambda install_root: up_module.OobOptions(install_root=install_root, frp_token="secret"),
+    )
+    monkeypatch.setattr(up_module, "start_oob", lambda *args, **kwargs: calls.append("oob"))
+
+    up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=lambda *args, **kwargs: None)
+
+    assert calls == ["runtime", "orchestrator", "oob"]
 
 
 def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
