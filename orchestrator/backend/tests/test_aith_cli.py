@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,13 @@ def _copy_agent_fixture(agent_root: Path, install_root: Path) -> Path:
         shutil.copy2(agent_root / name, target_agent / name)
     (target_agent / "engagements").mkdir()
     return target_agent
+
+
+def _write_marker_database(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE marker (value TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO marker (value) VALUES (?)", (value,))
 
 
 def test_engagement_create_web_writes_scope_launchers_and_list_entry(tmp_path: Path) -> None:
@@ -63,6 +71,49 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(tmp_path: P
     rows = list_engagements(install_root)
     assert [row.key for row in rows] == [created.key]
     assert rows[0].target == "https://app.example.com"
+
+
+def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
+
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+    custom_data = tmp_path / "backend-data"
+    default_data = install_root / "orchestrator" / "backend" / "data"
+    _write_marker_database(custom_data / "orchestrator.sqlite3", "custom")
+    _write_marker_database(default_data / "orchestrator.sqlite3", "default")
+    monkeypatch.delenv("AI_THREAT_HUNTING_DATA_DIR", raising=False)
+    monkeypatch.setenv("REDTEAM_ORCHESTRATOR_DATA_DIR", str(custom_data))
+
+    create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="web",
+            target="https://app.example.com",
+        )
+    )
+
+    custom_snapshots = sorted(custom_data.glob("orchestrator.sqlite3.bak.*"))
+    assert len(custom_snapshots) == 1
+    assert not list(default_data.glob("orchestrator.sqlite3.bak.*"))
+    with sqlite3.connect(custom_snapshots[0]) as connection:
+        assert connection.execute("SELECT value FROM marker").fetchone() == ("custom",)
+
+
+def test_resolve_source_root_prefers_cached_source_before_install_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+
+    install_root = tmp_path / "install"
+    cached_source = tmp_path / "cached-source"
+    for root in (install_root, cached_source):
+        (root / "agent").mkdir(parents=True)
+        (root / "orchestrator").mkdir()
+    monkeypatch.delenv("AI_THREAT_HUNTING_SOURCE_DIR", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda *args: None)
+    monkeypatch.setattr(paths_module, "find_repo_root", lambda start=None: None)
+    monkeypatch.setattr(paths_module, "_ensure_cached_source", lambda: cached_source)
+
+    assert paths_module.resolve_source_root(install_root=install_root) == cached_source.resolve()
 
 
 def test_install_preserves_local_state_and_replaces_managed_files(tmp_path: Path) -> None:
@@ -833,6 +884,46 @@ def test_backup_create_and_list_uses_sqlite_backup(tmp_path: Path, capsys: pytes
 
     main_module.main(["--root", str(install_root), "backup", "list"])
     assert "orchestrator." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    ["AI_THREAT_HUNTING_DATA_DIR", "REDTEAM_ORCHESTRATOR_DATA_DIR"],
+)
+def test_backup_helpers_use_backend_data_dir_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_name: str) -> None:
+    from ai_threat_hunting_cli.backup import create_backup, list_backups, live_database, restore_backup
+
+    install_root = tmp_path / "install"
+    default_data = install_root / "orchestrator" / "backend" / "data"
+    custom_data = tmp_path / "backend-data"
+    legacy_data = tmp_path / "legacy-data"
+    if env_name == "AI_THREAT_HUNTING_DATA_DIR":
+        monkeypatch.setenv("REDTEAM_ORCHESTRATOR_DATA_DIR", str(legacy_data))
+    else:
+        monkeypatch.delenv("AI_THREAT_HUNTING_DATA_DIR", raising=False)
+    monkeypatch.setenv(env_name, str(custom_data))
+    _write_marker_database(default_data / "orchestrator.sqlite3", "default")
+    _write_marker_database(custom_data / "orchestrator.sqlite3", "custom")
+    _write_marker_database(legacy_data / "orchestrator.sqlite3", "legacy")
+
+    backup = create_backup(install_root, timestamp="20260425T010000Z")
+
+    assert live_database(install_root) == custom_data / "orchestrator.sqlite3"
+    assert backup.parent == custom_data / "backups"
+    assert [item.path for item in list_backups(install_root)] == [backup.resolve()]
+    with sqlite3.connect(custom_data / "orchestrator.sqlite3") as connection:
+        connection.execute("DELETE FROM marker")
+        connection.execute("INSERT INTO marker (value) VALUES ('changed')")
+
+    restored = restore_backup(install_root, backup)
+
+    assert restored == custom_data / "orchestrator.sqlite3"
+    with sqlite3.connect(restored) as connection:
+        assert connection.execute("SELECT value FROM marker").fetchone() == ("custom",)
+    with sqlite3.connect(default_data / "orchestrator.sqlite3") as connection:
+        assert connection.execute("SELECT value FROM marker").fetchone() == ("default",)
+    with sqlite3.connect(legacy_data / "orchestrator.sqlite3") as connection:
+        assert connection.execute("SELECT value FROM marker").fetchone() == ("legacy",)
 
 
 def test_backup_create_uses_suffix_when_timestamp_collides(tmp_path: Path) -> None:
