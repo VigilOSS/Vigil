@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any
 
+from .intel_types import INTEL_TYPES
 from .schema_validation import load_schema
 
 
@@ -23,12 +24,43 @@ class CommandContract:
 
 
 _CONTRACTS: dict[str, CommandContract] = {
+    "record-intel": CommandContract(
+        name="record-intel",
+        summary="Record structured intelligence through the helper-owned intel schemas.",
+        schema_name="type-specific intel schema",
+        preferred_invocations=(
+            "aith assess record-intel <type> <intel-json-file>",
+            "aith assess contract record-intel <type>",
+        ),
+        author_supplied_fields=(
+            "type-specific required fields",
+            "source_name",
+            "evidence_ref or provenance when available",
+        ),
+        notes=(
+            "Use a type-specific contract before authoring JSON. Intel schemas are strict (`additionalProperties=false`), so guessed aliases such as `source` fail validation when the contract says `source_name`.",
+            "Valid intel types: " + ", ".join(sorted(INTEL_TYPES)),
+        ),
+        common_mistakes=(
+            ("source", "use source_name"),
+            ("agent", "use source_name or provenance.agent_name"),
+        ),
+        examples=(
+            {
+                "component": "nginx",
+                "version": "1.24.0",
+                "source_name": "osint-analyst",
+                "confidence": "medium",
+                "evidence_ref": "scans/whatweb.txt:12",
+            },
+        ),
+    ),
     "record-finding": CommandContract(
         name="record-finding",
         summary="Create or upsert a finding through helper-normalized lifecycle defaults.",
         schema_name="finding-record.schema.json",
         preferred_invocations=(
-            "assess.py record-finding <agent-name> <finding-json-file>",
+            "aith assess record-finding <agent-name> <finding-json-file>",
         ),
         author_supplied_fields=(
             "title",
@@ -138,9 +170,9 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Apply a verification transition to an existing finding through the audit ledger.",
         schema_name="backend FindingVerifyRequest",
         preferred_invocations=(
-            "assess.py verify-finding <slug> <verification-json>",
-            'assess.py verify-finding <slug> --disposition downgraded --reason "..." --new-severity low',
-            'assess.py verify-finding <slug> --disposition false_positive --reason "..." --kill-reason "..." --kill-check 2',
+            "aith assess verify-finding <slug> <verification-json>",
+            'aith assess verify-finding <slug> --disposition downgraded --reason "..." --new-severity low',
+            'aith assess verify-finding <slug> --disposition false_positive --reason "..." --kill-reason "..." --kill-check 2',
         ),
         author_supplied_fields=(
             "disposition",
@@ -171,7 +203,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Persist a false_positive verification with the required kill metadata.",
         schema_name="backend FindingVerifyRequest (false_positive)",
         preferred_invocations=(
-            'assess.py kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-5>',
+            'aith assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-5>',
         ),
         author_supplied_fields=(
             "reason_text",
@@ -201,9 +233,9 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Patch non-verification finding fields on an existing slug.",
         schema_name="backend FindingPatchRequest",
         preferred_invocations=(
-            "assess.py update-finding <slug> <patch-json-file>",
-            'assess.py update-finding <slug> --status reported --reason "Published in report"',
-            'assess.py update-finding <slug> --inline \'{"workflow_status":"draft","reason_text":"Needs more evidence"}\'',
+            "aith assess update-finding <slug> <patch-json-file>",
+            'aith assess update-finding <slug> --status reported --reason "Published in report"',
+            'aith assess update-finding <slug> --inline \'{"workflow_status":"draft","reason_text":"Needs more evidence"}\'',
         ),
         author_supplied_fields=(
             "at least one patch field",
@@ -234,8 +266,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Reopen a previously verified or false-positive finding for re-triage.",
         schema_name="backend FindingPatchRequest (reopen)",
         preferred_invocations=(
-            'assess.py reset-finding <slug> --reason "..." --status draft',
-            'assess.py reset-finding <slug> --reason "Retest disproved the kill" --status active',
+            'aith assess reset-finding <slug> --reason "..." --status draft',
+            'aith assess reset-finding <slug> --reason "Retest disproved the kill" --status active',
         ),
         author_supplied_fields=(
             "reason_text",
@@ -291,10 +323,15 @@ _RAW_ENDPOINT_RULES = (
 
 
 def contract_names() -> list[str]:
-    return sorted(_CONTRACTS)
+    names = list(_CONTRACTS)
+    names.extend(f"record-intel {intel_type}" for intel_type in sorted(INTEL_TYPES))
+    return sorted(names)
 
 
 def get_contract(name: str) -> CommandContract | None:
+    if name.startswith("record-intel "):
+        _, _, intel_type = name.partition(" ")
+        return _record_intel_contract(intel_type)
     return _CONTRACTS.get(name)
 
 
@@ -339,6 +376,16 @@ def render_contract(name: str) -> str:
         )
         lines.extend(f"  - {entry}" for entry in schema_properties)
 
+    schema_required = _schema_required_names(contract.schema_name)
+    if schema_required:
+        lines.extend(
+            [
+                "",
+                "Required top-level fields:",
+            ]
+        )
+        lines.extend(f"  - {entry}" for entry in schema_required)
+
     if contract.common_mistakes:
         lines.extend(
             [
@@ -382,7 +429,7 @@ def render_contract_epilog(name: str) -> str:
         [
             "",
             "See also:",
-            f"  assess.py contract {contract.name}",
+            f"  aith assess contract {contract.name}",
         ]
     )
     return "\n".join(lines)
@@ -416,16 +463,16 @@ def raw_endpoint_error(method: str, endpoint: str, payload: Any | None = None) -
             kill_contract = get_contract("kill-finding")
             assert kill_contract is not None
             lines.append(f"  - {kill_contract.preferred_invocations[0]}")
-            lines.append("  - assess.py contract verify-finding")
+            lines.append("  - aith assess contract verify-finding")
         else:
             lines.append(f"  - {contract.preferred_invocations[0]}")
             if normalized_method == "PATCH" and contract_name == "update-finding":
                 reset_contract = get_contract("reset-finding")
                 assert reset_contract is not None
                 lines.append(f"  - {reset_contract.preferred_invocations[0]}")
-            lines.append(f"  - assess.py contract {contract.name}")
+            lines.append(f"  - aith assess contract {contract.name}")
             if normalized_method == "PATCH" and contract_name == "update-finding":
-                lines.append("  - assess.py contract reset-finding")
+                lines.append("  - aith assess contract reset-finding")
         return "\n".join(lines)
     return None
 
@@ -455,6 +502,109 @@ def _schema_property_names(schema_name: str) -> list[str]:
     if not isinstance(properties, dict):
         return []
     return sorted(str(name) for name in properties)
+
+
+def _schema_required_names(schema_name: str) -> list[str]:
+    if not schema_name.endswith(".schema.json"):
+        return []
+    schema = load_schema(schema_name)
+    required = schema.get("required", [])
+    if not isinstance(required, list):
+        return []
+    return sorted(str(name) for name in required)
+
+
+def _record_intel_contract(intel_type: str) -> CommandContract | None:
+    if intel_type not in INTEL_TYPES:
+        return None
+    schema_name, endpoint_segment = INTEL_TYPES[intel_type]
+    required = tuple(_schema_required_names(schema_name))
+    schema = load_schema(schema_name)
+    properties = schema.get("properties", {})
+    author_fields = list(required or ("type-specific fields",))
+    for optional in ("source_name", "confidence", "evidence_ref", "provenance", "notes"):
+        if isinstance(properties, dict) and optional in properties and optional not in author_fields:
+            author_fields.append(optional)
+
+    example = _intel_example_payload(intel_type)
+    return CommandContract(
+        name=f"record-intel {intel_type}",
+        summary=f"Record one `{intel_type}` intel row via the record-intel helper.",
+        schema_name=schema_name,
+        preferred_invocations=(
+            f"aith assess record-intel {intel_type} {intel_type}.json",
+        ),
+        author_supplied_fields=tuple(author_fields),
+        notes=(
+            f"Posts to /intel/{endpoint_segment}; use the helper rather than raw post so local schema validation catches payload drift first.",
+            "Intel schemas are strict. If a field is not listed under Allowed top-level fields, the CLI will reject it before contacting the backend.",
+        ),
+        common_mistakes=(
+            ("source", "use source_name"),
+            ("agent_name", "use source_name, or provenance.agent_name when provenance detail is useful"),
+        ),
+        examples=(example,) if example else (),
+    )
+
+
+def _intel_example_payload(intel_type: str) -> dict[str, Any]:
+    examples: dict[str, dict[str, Any]] = {
+        "tech-component": {
+            "component": "Salesforce",
+            "version": "",
+            "source_name": "source-analyzer",
+            "confidence": "confirmed",
+            "evidence_ref": "scans/httpx-tech.txt:7",
+        },
+        "person": {
+            "name": "Jane Doe",
+            "role": "Engineering",
+            "source_name": "osint-analyst",
+        },
+        "email": {
+            "address": "security@example.com",
+            "source_name": "osint-analyst",
+        },
+        "domain": {
+            "identity": "api.example.com",
+            "kind": "subdomain",
+            "source_name": "subdomain-enumeration",
+        },
+        "cve": {
+            "cve_id": "CVE-2024-1234",
+            "affected_component": "example-app",
+            "source_name": "osint-analyst",
+        },
+        "dns-record": {
+            "name": "api.example.com",
+            "record_type": "A",
+            "value": "192.0.2.10",
+            "source_name": "subdomain-enumeration",
+        },
+        "social-profile": {
+            "subject_kind": "org",
+            "platform": "linkedin",
+            "handle": "example",
+            "url": "https://www.linkedin.com/company/example/",
+            "source_name": "osint-analyst",
+        },
+        "breach-record": {
+            "subject": "user@example.com",
+            "breach_name": "Example breach",
+            "source_name": "osint-analyst",
+        },
+        "org-fact": {
+            "fact_key": "helpdesk-provider",
+            "fact_value": "ExampleDesk",
+            "source_name": "osint-analyst",
+        },
+        "note": {
+            "title": "Login page leaks stack trace",
+            "body_markdown": "Verbose error references internal package names.",
+            "source_name": "vulnerability-analyst",
+        },
+    }
+    return examples.get(intel_type, {})
 
 
 def _looks_like_verification_payload(payload: Any | None) -> bool:

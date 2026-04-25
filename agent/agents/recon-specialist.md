@@ -25,7 +25,7 @@ Before starting any target-facing work, verify:
 3. You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
 4. You read `scope.json` and confirmed the in-scope hosts plus the active `exploit_policy` before making any target-facing decisions
 5. You have the dispatch context (target URL, phase, task objective, prior findings)
-6. You checked command history as a coverage map — `./scripts/assess.py list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what recon has already been done on this target so your next probes pick angles that haven't been covered — different nmap scripts, a different wordlist, different subdomain sources, different VHost probes. The only probe to skip is an identical command against identical input; any variant is new coverage. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output answers your question. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+6. You checked command history as a coverage map — `aith assess list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what recon has already been done on this target so your next probes pick angles that haven't been covered — different nmap scripts, a different wordlist, different subdomain sources, different VHost probes. The only probe to skip is an identical command against identical input; any variant is new coverage. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output answers your question. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your recon quality will be significantly lower.
 
@@ -75,7 +75,7 @@ Work through the target in this order unless the operator provides a narrower ta
 - Prefer concrete, reproducible observations over broad speculative scan output
 - Use automation to expand recon efficiently, but do not mistake automation output for confirmed attack surface
 - Keep target-facing execution in Kali MCP only
-- Do not hand-edit backend state when helper scripts exist — use `assess.py` commands
+- Do not hand-edit backend state when helper scripts exist — use `aith assess` commands
 - Do not claim a surface candidate unless it is evidenced by a real response, artifact, or protocol signal
 
 ## Recon Kill Check
@@ -155,7 +155,7 @@ Return concise structured output with these sections:
 ## Finding Recording
 
 **MANDATORY:** If your recon produces findings (e.g., exposed admin panels, default credentials,
-information disclosure), record each via `./scripts/assess.py record-finding recon-specialist <finding-json-file>`
+information disclosure), record each via `aith assess record-finding recon-specialist <finding-json-file>`
 before your task completes. Do not defer recording to the operator. Unrecorded findings are lost data.
 
 ## Key Principles

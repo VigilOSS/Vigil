@@ -89,6 +89,8 @@ class CodeModulesBulkCreateRequest(BaseModel):
 
 
 class QueueItemRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     file_id: int
     priority: int = Field(default=50, ge=0, le=100)
     batch_theme: str = Field(default="", max_length=256)
@@ -97,6 +99,8 @@ class QueueItemRecord(BaseModel):
 
 
 class QueueItemsBulkCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     items: list[QueueItemRecord]
 
 
@@ -145,11 +149,29 @@ class AnalysisResultRecord(BaseModel):
     cross_file_triggers: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class RequeueItemRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    file_id: Any | None = None
+    file_path: str = Field(default="", max_length=4096)
+    repo_id: Any | None = None
+    priority: int = Field(default=50, ge=0, le=100)
+    batch_theme: str = Field(default="", max_length=256)
+    slot_types: list[CodeSlotType] = Field(default_factory=list)
+    guidance_hypotheses: list[str] = Field(default_factory=list)
+    reason: str = Field(default="", max_length=20000)
+    trigger_context: dict[str, Any] = Field(default_factory=dict)
+
+
 class RequeueRequest(BaseModel):
-    items: list[dict[str, Any]]
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[RequeueItemRecord]
 
 
 class StructuralMetadataItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     file_id: int
     total_functions: int = Field(ge=0)
     total_entry_points: int = Field(ge=0)
@@ -403,7 +425,10 @@ async def reset_stale_queue_items(engagement_key: str, request: QueueResetStaleR
 @router.post("/analysis-queue/requeue", status_code=status.HTTP_201_CREATED)
 async def requeue_triggered_files(engagement_key: str, request: RequeueRequest) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.requeue_triggered_files(engagement.id, items=request.items)
+    record = code_analysis.requeue_triggered_files(
+        engagement.id,
+        items=[item.model_dump() for item in request.items],
+    )
     await _broadcast(engagement.key, "queue_requeue", record)
     return record
 

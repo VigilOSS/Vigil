@@ -1,4 +1,4 @@
-"""assess.py list-findings — filtered finding listing."""
+"""aith assess list-findings — filtered finding listing."""
 from __future__ import annotations
 
 import argparse
@@ -15,9 +15,9 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  assess.py list-findings --severity high --status active\n"
-            "  assess.py list-findings --verification-disposition false_positive --json\n"
-            "  assess.py list-findings --search parser --source-name vulnerability-analyst"
+            "  aith assess list-findings --severity high --status active\n"
+            "  aith assess list-findings --verification-disposition false_positive --json\n"
+            "  aith assess list-findings --search parser --source-name vulnerability-analyst"
         ),
     )
     p.add_argument("--severity")

@@ -317,12 +317,12 @@ When PII or sensitive data is detected, report as:
 
 ## Integration with Backend Intel Tables
 
-Detected PII feeds into the backend intel tables via `./scripts/assess.py record-intel <type> <json-file>`:
+Detected PII feeds into the backend intel tables via `aith assess record-intel <type> <json-file>`:
 - Email addresses → `record-intel email` (intel_emails)
 - People names + roles → `record-intel person` (intel_people)
 - Internal IPs / domains → `record-intel domain` (intel_domains, use the right `kind`: `subdomain`/`ip`/`asn`/...)
-- Credentials → `./scripts/assess.py post credentials <credential-json-file>` (assessment_credentials — NOT record-intel; credentials live in the assessment domain with their own schema)
-- Bulk PII exposure → durable finding via `assess.py record-finding`
+- Credentials → `aith assess post credentials <credential-json-file>` (assessment_credentials — NOT record-intel; credentials live in the assessment domain with their own schema)
+- Bulk PII exposure → durable finding via `aith assess record-finding`
 
 ## Cryptographic Weakness Checks
 

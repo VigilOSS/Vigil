@@ -119,7 +119,7 @@ Standard structure for SEC project findings. All sections are H2 headings.
 ### Summary Format
 
 ```
-FINDING-XXX: <concise vulnerability title describing the defect and impact>
+XXX: <concise vulnerability title describing the defect and impact>
 ```
 
 ### Full Payload Example
@@ -129,7 +129,7 @@ FINDING-XXX: <concise vulnerability title describing the defect and impact>
   "fields": {
     "project": {"key": "SEC"},
     "issuetype": {"id": "10013"},
-    "summary": "FINDING-001: Missing Authorization in /api/v1/records/getbyid Allows Unauthenticated Attacker to Retrieve Sensitive Documents for Any User",
+    "summary": "001: Missing Authorization in /api/v1/records/getbyid Allows Unauthenticated Attacker to Retrieve Sensitive Documents for Any User",
     "description": {
       "type": "doc",
       "version": 1,
@@ -187,11 +187,11 @@ FINDING-XXX: <concise vulnerability title describing the defect and impact>
           ]},
           {"type": "tableRow", "content": [
             {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Report ID"}]}]},
-            {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "FINDING-001"}]}]}
+            {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "001"}]}]}
           ]},
           {"type": "tableRow", "content": [
             {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Backend Slug"}]}]},
-            {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "FINDING-VA-001"}]}]}
+            {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "VA-001"}]}]}
           ]},
           {"type": "tableRow", "content": [
             {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "OWASP"}]}]},

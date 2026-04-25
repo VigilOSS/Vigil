@@ -83,11 +83,11 @@ arjun -u "https://TARGET/endpoint" -w custom_params.txt
 ### 9. ParamSpider (Historical Parameter Mining)
 ```bash
 # Mine parameters from web archives for the target domain
-paramspider -d TARGET_DOMAIN -o /engagement/scans/paramspider_output.txt
+paramspider -d TARGET_DOMAIN -o /engagements/$ENGAGEMENT_KEY/scans/paramspider_output.txt
 
 # Feed discovered parameterized URLs into ffuf or manual testing
-cat /engagement/scans/paramspider_output.txt | \
-  grep "?" | sort -u > /engagement/scans/params_to_test.txt
+cat /engagements/$ENGAGEMENT_KEY/scans/paramspider_output.txt | \
+  grep "?" | sort -u > /engagements/$ENGAGEMENT_KEY/scans/params_to_test.txt
 ```
 ParamSpider pulls historically-known parameters from Wayback Machine and other archives.
 Use it to discover parameters that active fuzzing would miss.

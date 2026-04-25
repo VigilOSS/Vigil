@@ -369,16 +369,81 @@ def test_tool_bin_is_derived_and_filterable(client, isolate_settings):
             tool_name="execute_command",
         ),
     ).status_code == 201
+    assert _post(
+        client,
+        _base_payload(
+            command="bash -lc 'nuclei -l /engagements/example/scans/targets.txt'",
+            argv=["bash", "-lc", "nuclei -l /engagements/example/scans/targets.txt"],
+            tool_name="execute_command",
+        ),
+    ).status_code == 201
+    assert _post(
+        client,
+        _base_payload(
+            command="timeout 120 httpx -l targets.txt -json",
+            argv=None,
+            tool_name="execute_command",
+        ),
+    ).status_code == 201
 
     rows = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs").json()
     bins = {r["tool_bin"] for r in rows}
     assert "curl" in bins
     assert "sqlmap" in bins  # env-assignment prefix stripped
+    assert "nuclei" in bins  # shell wrapper stripped
+    assert "httpx" in bins  # timeout wrapper stripped
     curl_only = client.get(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?tool_bin=curl"
     ).json()
     assert len(curl_only) == 1
     assert curl_only[0]["command"].startswith("curl")
+    nuclei_only = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?tool_bin=nuclei"
+    ).json()
+    assert len(nuclei_only) == 1
+    assert "nuclei -l" in nuclei_only[0]["command"]
+
+
+def test_shell_wrapper_command_string_detection_ignores_non_command_flags(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert _post(
+        client,
+        _base_payload(
+            command="bash --norc -lc 'nuclei -l /engagements/example/scans/targets.txt'",
+            argv=["bash", "--norc", "-lc", "nuclei -l /engagements/example/scans/targets.txt"],
+            tool_name="execute_command",
+        ),
+    ).status_code == 201
+    assert _post(
+        client,
+        _base_payload(
+            command="bash --rcfile /tmp/rc.sh script.sh",
+            argv=["bash", "--rcfile", "/tmp/rc.sh", "script.sh"],
+            tool_name="execute_command",
+        ),
+    ).status_code == 201
+
+    rows = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs").json()
+    by_command = {row["command"]: row["tool_bin"] for row in rows}
+    assert by_command["bash --norc -lc 'nuclei -l /engagements/example/scans/targets.txt'"] == "nuclei"
+    assert by_command["bash --rcfile /tmp/rc.sh script.sh"] == "bash"
+
+
+def test_shell_wrapper_command_string_skips_setup_builtins_before_scanner(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert _post(
+        client,
+        _base_payload(
+            command="bash -lc 'cd /engagements/example && export MODE=fast; nuclei -l targets.txt'",
+            argv=["bash", "-lc", "cd /engagements/example && export MODE=fast; nuclei -l targets.txt"],
+            tool_name="execute_command",
+        ),
+    ).status_code == 201
+
+    rows = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?tool_bin=nuclei").json()
+    assert len(rows) == 1
+    assert rows[0]["tool_bin"] == "nuclei"
+    assert "cd /engagements/example" in rows[0]["command"]
 
 
 def test_audit_source_stored_and_filterable(client, isolate_settings):

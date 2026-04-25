@@ -1,5 +1,5 @@
 #!/bin/bash
-# scope-check.sh — Claude Code PreToolUse hook
+# scope-check.sh — Claude Code / Codex PreToolUse hook
 # Reads hook JSON from stdin and blocks host-side target-facing commands.
 # In-scope target work must go through the Kali MCP session rather than Bash.
 # Hook format: {"tool_name":"Bash","tool_input":{"command":"..."}}
@@ -22,16 +22,18 @@ TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 # Extract command
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
 [ -z "$COMMAND" ] && exit 0
+HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
+[ -z "$HOOK_CWD" ] && HOOK_CWD="$(pwd)"
 
 # Block common target-facing host-side execution paths even if the target is indirect
 # via environment variables, scope.json, or helper scripts.
-if printf '%s\n' "$COMMAND" | grep -Eq '(^|[[:space:];|&(])((/usr/bin/)?curl|nmap|ffuf|wfuzz|gobuster|dirb|sqlmap|whatweb|hydra|katana|arjun|subfinder|httpx|nc|netcat|msfconsole|msfrpcd)([[:space:]]|$)'; then
+if printf '%s\n' "$COMMAND" | grep -Eq '(^|[[:space:];|&(])((/usr/bin/)?curl|nmap|ffuf|wfuzz|gobuster|dirb|sqlmap|whatweb|hydra|katana|arjun|subfinder|httpx|nc|netcat)([[:space:]]|$)'; then
   echo "BLOCKED: Host-side target-facing tool execution is not allowed. Use the attached Kali MCP tools for in-scope work." >&2
   exit 2
 fi
 
 case "$COMMAND" in
-  *run_tool*|*rtcurl*|*container.sh*|*katana_ingest.sh*|*check_metasploit_runtime.sh*)
+  *run_tool*|*rtcurl*|*container.sh*|*katana_ingest.sh*)
     echo "BLOCKED: Deprecated host-side execution helper detected. Use the attached Kali MCP tools for in-scope work." >&2
     exit 2
     ;;
@@ -47,12 +49,12 @@ esac
 
 # Also skip by first non-variable command in compound statements
 case "$COMMAND" in
-  *dispatcher.sh*|*assess.py*|*schema.sql*) exit 0 ;;
+  *dispatcher.sh*|*assess.py*|*"aith assess"*|*schema.sql*) exit 0 ;;
   *"cat "*|*"mkdir "*|*"jq "*|*"sqlite3 "*|*"grep "*|*"sed "*) exit 0 ;;
 esac
 
 # Find active engagement directory
-ENG_DIR=$(resolve_engagement_dir "$(pwd)" || true)
+ENG_DIR=$(resolve_engagement_dir "$HOOK_CWD" || true)
 HOST_LIST=()
 while IFS= read -r host; do
   [ -n "$host" ] && HOST_LIST+=("$host")

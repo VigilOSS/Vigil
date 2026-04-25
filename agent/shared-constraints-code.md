@@ -48,12 +48,12 @@ and runs land in `assessment_command_runs`. Treat that history as a coverage
 map — a record of what harnesses/corpora/sanitizer configs have already been
 run so your next campaign picks a variant that hasn't been tried. Search with
 an unscoped query first so you see every agent's and every phase's prior work
-— `./scripts/assess.py list-command-runs --q <keyword>` — and narrow with
+— `aith assess list-command-runs --q <keyword>` — and narrow with
 `--agent-name` or `--phase` only if the broad result is overwhelming.
 The only campaign to skip is the identical binary + corpus + flags combination
 already run to completion; any variant (new sanitizer, new dictionary, new
 seed corpus, harness change) is new coverage. Before citing a prior run,
-fetch its preview with `./scripts/assess.py get-command-run <id>` —
+fetch its preview with `aith assess get-command-run <id>` —
 `success=true` only means `return_code=0`, and a campaign that exited cleanly
 under its time budget but produced no crashes is not the same as one that
 exhausted the search space. Full coverage-vs-duplicate decision table:
@@ -91,17 +91,17 @@ reading the file, and continuing your analysis. You have full filesystem access 
 ## 4. Findings Use the Existing Backend
 
 Code analysis findings record in the **same** `assessment_findings` table as web findings.
-Use `./scripts/assess.py record-finding <agent-name> <finding-json-file>` to record.
+Use `aith assess record-finding <agent-name> <finding-json-file>` to record.
 
 **Code finding prefixes:**
 
 | Agent | Prefix | Example |
 |---|---|---|
-| `code-architect` | `CA` | `FINDING-CA-001` |
-| `code-vuln-hunter` | `CH` | `FINDING-CH-001` |
-| `code-variant-hunter` | `CV` | `FINDING-CV-001` |
-| `code-vuln-verifier` | `VF` | `FINDING-VF-001` (spot-check only — verifier updates existing findings, not new ones) |
-| `code-fuzz-engineer` | `CF` | `FINDING-CF-001` |
+| `code-architect` | `CA` | `CA-001` |
+| `code-vuln-hunter` | `CH` | `CH-001` |
+| `code-variant-hunter` | `CV` | `CV-001` |
+| `code-vuln-verifier` | `VF` | `VF-001` (spot-check only — verifier updates existing findings, not new ones) |
+| `code-fuzz-engineer` | `CF` | `CF-001` |
 
 **Title formula:** `[Bug Class] in [file:line or component] allows [attacker role] to [impact]`
 
@@ -130,7 +130,7 @@ finding table.
 - `details.references` is an array of CVE links, advisory URLs, or CWE documentation links
 - `details.poc_code` holds a PoC exploit script; for web findings use `details.poc_request` / `details.poc_response` for structured HTTP pairs
 
-**Deduplication:** Before recording, query existing findings via `./scripts/assess.py fetch findings`.
+**Deduplication:** Before recording, query existing findings via `aith assess fetch findings`.
 If the same root cause at the same canonical location already exists, update or merge that finding
 instead of creating a duplicate. Variant instances in different files or materially different sink
 sites are new findings; repeated commentary on the same `file:path:line` is not.
@@ -168,7 +168,7 @@ Coverage must be explicit, but write-up depth can be proportional:
 - Obviously mechanical helpers can use concise `clean` dispositions once you have verified they
   do not hide sinks, trust-boundary assumptions, or material error behavior.
 
-Record dispositions via `./scripts/assess.py code-record-analysis`.
+Record dispositions via `aith assess code-record-analysis`.
 `finding` dispositions record durable finding state through `record-finding`; `suspicious`,
 `clean`, and `needs-context` still record through `code-record-analysis` so backend coverage knows
 which functions were reviewed and why the queue can advance or re-dispatch.
@@ -223,7 +223,7 @@ Only improvise after confirming the reference set is genuinely insufficient for 
 
 ## 9. Script Path Convention
 
-All assessment operations use `./scripts/assess.py <subcommand>` resolved from the agent workspace
+All assessment operations use `aith assess <subcommand>` resolved from the agent workspace
 root after `cd agent`. JSON payloads belong in files, not inline shell arguments, because payload
 files are auditable and avoid shell escaping damage.
 
@@ -235,7 +235,7 @@ Do not hardcode absolute paths. Set `ENGAGEMENT_DIR` before calling assess helpe
 ## 10. Recording Format
 
 Use the standard finding JSON schema. If you need the canonical field list or examples, run
-`./scripts/assess.py contract record-finding`. Do not invent lifecycle fields from memory —
+`aith assess contract record-finding`. Do not invent lifecycle fields from memory —
 `record-finding` fills the initial lifecycle defaults (`workflow_status=active`,
 `verification_state=unreviewed`, `verification_disposition=none`) when omitted.
 For later finding lifecycle changes, use the dedicated helpers instead of raw `post` or `patch`:

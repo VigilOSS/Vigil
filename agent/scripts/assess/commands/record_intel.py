@@ -1,4 +1,4 @@
-"""assess.py record-intel — multiplexed intel-type recorder.
+"""aith assess record-intel — multiplexed intel-type recorder.
 
 Replaces the old ``intel.md`` append pattern. Validates payload against the
 matching ``agent/schemas/intel-<type>.schema.json`` then POSTs to
@@ -7,7 +7,7 @@ Emits an ``intel.recorded`` event on success.
 
 Usage::
 
-    assess.py record-intel <type> <json-file>
+    aith assess record-intel <type> <json-file>
 
 ``<type>`` is one of: tech-component, person, email, domain, cve,
 dns-record, social-profile, breach-record, org-fact, note.
@@ -22,23 +22,8 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.intel_types import INTEL_TYPES
 from assess.lib.schema_validation import collect_validation_errors, load_schema
-
-
-# Mapping: CLI type → (schema file, endpoint-plural segment).
-# Endpoint-plural is appended to ``/engagements/{key}/intel/``.
-INTEL_TYPES: dict[str, tuple[str, str]] = {
-    "tech-component": ("intel-tech-component.schema.json", "tech-components"),
-    "person": ("intel-person.schema.json", "people"),
-    "email": ("intel-email.schema.json", "emails"),
-    "domain": ("intel-domain.schema.json", "domains"),
-    "cve": ("intel-cve.schema.json", "cves"),
-    "dns-record": ("intel-dns-record.schema.json", "dns-records"),
-    "social-profile": ("intel-social-profile.schema.json", "social-profiles"),
-    "breach-record": ("intel-breach-record.schema.json", "breach-records"),
-    "org-fact": ("intel-org-fact.schema.json", "org-facts"),
-    "note": ("intel-note.schema.json", "notes"),
-}
 
 
 def register(subparsers) -> None:
@@ -49,9 +34,9 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  assess.py record-intel tech-component tech.json\n"
-            "  assess.py record-intel cve cve-2024-1234.json\n"
-            "  assess.py record-intel note catchall.json\n"
+            "  aith assess record-intel tech-component tech.json\n"
+            "  aith assess record-intel cve cve-2024-1234.json\n"
+            "  aith assess record-intel note catchall.json\n"
             f"\nValid types: {types_list}"
         ),
     )

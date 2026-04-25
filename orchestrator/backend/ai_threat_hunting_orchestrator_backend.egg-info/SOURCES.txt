@@ -24,7 +24,7 @@ pyproject.toml
 ./tests/test_code_analysis_api.py
 ./tests/test_code_assess_cli.py
 ./tests/test_engagements_api.py
-./tests/test_init_engagement.py
+./tests/test_engagement_bootstrap.py
 ./tests/test_prompt_wording.py
 ./tests/test_scaffold.py
 ./tests/test_scope_check.py
@@ -59,7 +59,7 @@ tests/test_agent_script_regressions.py
 tests/test_code_analysis_api.py
 tests/test_code_assess_cli.py
 tests/test_engagements_api.py
-tests/test_init_engagement.py
+tests/test_engagement_bootstrap.py
 tests/test_prompt_wording.py
 tests/test_scaffold.py
 tests/test_scope_check.py

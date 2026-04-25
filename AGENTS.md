@@ -70,7 +70,7 @@ so edits land in the right place and do not create drift.
   CLI, not in only one role prompt.
 - `agent/rules/*.md` are always-active behavioral rules. They shape methodology and writing style;
   they are not the place to define endpoint ownership or payload schemas.
-- `agent/scripts/assess.py` and its helper subcommands are the agent-facing contract surface for
+- `aith assess` and the underlying `agent/scripts/assess.py` helper subcommands are the agent-facing contract surface for
   durable state. If a helper owns a lifecycle transition, prompts should point to that helper
   instead of teaching raw endpoint payloads from memory.
 
@@ -83,7 +83,7 @@ so edits land in the right place and do not create drift.
 - Put role-specific reasoning guidance in `agent/agents/*.md`, because that is where identity,
   examples, and handoff semantics live.
 - Put payload-shape and lifecycle truth in CLI helpers when possible. Prompts should reference
-  helper commands such as `assess.py contract`, `record-finding`, `verify-finding`, `kill-finding`,
+  helper commands such as `aith assess contract`, `record-finding`, `verify-finding`, `kill-finding`,
   `reset-finding`, and `update-finding` rather than duplicating raw schema details.
 - Treat generated artifacts as drift detectors, not authoring targets. If you edit a generated
   prompt directly, the next render will overwrite it.
@@ -97,7 +97,7 @@ editing so the change stays coherent across layers:
 2. `agent/operator-core-code.md` if code analysis is involved
 3. Relevant `agent/agents/*.md` role prompts
 4. `agent/shared-constraints.md` or `agent/shared-constraints-code.md`
-5. The owning `assess.py` helper command and its tests
+5. The owning `aith assess` helper command and its tests
 6. Generated operator wrappers after rerendering
 
 If a change affects prompt generation, rerender and run `tests/test_prompt_wording.py`.
@@ -176,8 +176,8 @@ When a constraint is load-bearing (safety, correctness, or quality depends on it
 ```
 
 Examples from this prompt set:
-- "Use `assess.py record-surface` for all surface writes — calling the library directly bypasses backend sync"
-- "Finding IDs are allocated by `assess.py record-finding` under a lock — hand-allocating risks collisions"
+- "Use `aith assess record-surface` for all surface writes — calling the library directly bypasses backend sync"
+- "Finding IDs are allocated by `aith assess record-finding` under a lock — hand-allocating risks collisions"
 - "Route all in-scope target work through Kali MCP — host-side probes bypass the runtime's network isolation"
 
 ## Role clarity in agent prompts

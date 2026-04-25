@@ -102,9 +102,16 @@ CREATE TABLE IF NOT EXISTS work_items (
     -- Dedup signature: hash of sorted query/body param KEYS
     params_key_sig TEXT,
 
+    -- Signal-first dispatch metadata (classify-work writes these)
+    priority_score INTEGER NOT NULL DEFAULT 0,
+    priority_reason TEXT,
+    cluster_key TEXT,
+    terminal_reason TEXT,
+
     UNIQUE(queue_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_work_items_consume ON work_items(status, type);
 CREATE INDEX IF NOT EXISTS idx_work_items_source ON work_items(source);
 CREATE INDEX IF NOT EXISTS idx_work_items_created ON work_items(created_at);
+CREATE INDEX IF NOT EXISTS idx_work_items_priority ON work_items(status, priority_score DESC, cluster_key);

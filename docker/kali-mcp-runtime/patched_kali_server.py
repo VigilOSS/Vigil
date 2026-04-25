@@ -44,7 +44,7 @@ AUDIT_REQUIRED = os.environ.get("KALI_MCP_AUDIT_REQUIRED", "1") != "0"
 # POST to nothing and returns ECONNREFUSED. Docker Desktop exposes the
 # host via ``host.docker.internal`` (automatically resolved on macOS and
 # Windows; Linux needs ``--add-host=host.docker.internal:host-gateway``,
-# which ``start_kali_mcp_runtime.sh`` sets on recreate). Also normalize
+# which ``aith runtime start`` sets on recreate). Also normalize
 # any loopback values the operator passed through env to the same host
 # alias so a stale ``.env`` with ``127.0.0.1:18000`` still works.
 # Empty string and missing are both "no value" — without the strip/``or``
@@ -148,6 +148,34 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _command_env_from_audit_context() -> dict[str, str]:
+    """Build subprocess env for target-facing commands.
+
+    The runtime container is shared across engagements, so container-level
+    ``ENGAGEMENT_KEY`` cannot be correct for every request. The MCP client
+    already sends the engagement key on each tool call for audit attribution;
+    expose that same per-call value to the shell so snippets can write to the
+    mounted engagement tree with ``/engagements/$ENGAGEMENT_KEY/...``.
+    """
+    env = os.environ.copy()
+    g = _flask_g()
+    if g is None:
+        return env
+
+    engagement_key = _safe_engagement_key(getattr(g, "audit_engagement_key", "") or "")
+    if engagement_key:
+        env["ENGAGEMENT_KEY"] = engagement_key
+        env["ENGAGEMENT_DIR"] = f"/engagements/{engagement_key}"
+    return env
+
+
+def _safe_engagement_key(raw: str) -> str:
+    key = str(raw).strip()
+    if not key or key in {".", ".."} or "/" in key or "\\" in key:
+        return ""
+    return key
+
+
 class PatchedCommandExecutor(upstream.CommandExecutor):
     def execute(self) -> Dict[str, Any]:
         upstream.logger.info("Executing command: %s", self.command)
@@ -169,6 +197,7 @@ class PatchedCommandExecutor(upstream.CommandExecutor):
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
+                env=_command_env_from_audit_context(),
             )
 
             self.stdout_thread = upstream.threading.Thread(target=self._read_stdout, daemon=True)

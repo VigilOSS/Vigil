@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -8,6 +9,10 @@ import pytest
 
 from app import db as db_module
 from app.services import engagements as engagement_service
+
+
+def legacy_finding_slug(suffix: str = "VA-001") -> str:
+    return f"{'FINDING'}-{suffix}"
 
 
 def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-example") -> Path:
@@ -34,7 +39,7 @@ def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-exampl
                 "out_of_scope_hosts": [],
                 "exploit_policy": "selected",
                 "exploit_review_state": "approved",
-                "approved_targets": ["FINDING-VA-001"],
+                "approved_targets": ["VA-001"],
                 "status": "in_progress",
                 "current_phase": "exploit",
             }
@@ -49,7 +54,7 @@ def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-exampl
                     "session_id": "session-a",
                     "status": "active",
                     "merge_state": "pending",
-                    "assigned_targets": ["FINDING-VA-001"],
+                    "assigned_targets": ["VA-001"],
                 }
             ]
         ),
@@ -91,6 +96,56 @@ def test_maybe_sync_engagements_skips_repeated_resync_without_filesystem_changes
     assert call_count == 1
 
     write_engagement(isolate_settings["engagements_dir"], key="2026-03-30-120500-example")
+    engagement_service.maybe_sync_engagements()
+
+    assert call_count == 2
+
+
+def test_maybe_sync_engagements_resyncs_when_assignment_json_changes(isolate_settings, monkeypatch):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+    session_dir = engagement_dir / "sessions" / "session-a"
+    assignment_path = session_dir / "assignment.json"
+    assignment_path.write_text(
+        json.dumps(
+            {
+                "session_id": "session-a",
+                "status": "active",
+                "assigned_targets": ["VA-001"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    db_module.init_db()
+
+    monkeypatch.setattr(engagement_service, "_last_sync_signature", None)
+    call_count = 0
+    original_sync = engagement_service.sync_engagements
+
+    def counted_sync() -> None:
+        nonlocal call_count
+        call_count += 1
+        original_sync()
+
+    monkeypatch.setattr(engagement_service, "sync_engagements", counted_sync)
+
+    engagement_service.maybe_sync_engagements()
+    engagement_service.maybe_sync_engagements()
+
+    assert call_count == 1
+
+    assignment_path.write_text(
+        json.dumps(
+            {
+                "session_id": "session-a",
+                "status": "active",
+                "assigned_targets": ["VA-001", "VA-002"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    stat = assignment_path.stat()
+    os.utime(assignment_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
     engagement_service.maybe_sync_engagements()
 
     assert call_count == 2
@@ -152,6 +207,172 @@ def test_init_db_renames_legacy_assigned_findings_column(isolate_settings):
     assert "assigned_findings_json" not in columns
 
 
+def test_init_db_migrates_legacy_finding_slug_references(isolate_settings):
+    db_module.init_db()
+    db_path = db_module.database_path()
+    legacy = legacy_finding_slug()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        engagement_id = connection.execute(
+            """
+            INSERT INTO engagements (key, target, status, engagement_root)
+            VALUES ('eng', 'https://example.com', 'in_progress', '/tmp/eng')
+            """
+        ).lastrowid
+        finding_id = connection.execute(
+            """
+            INSERT INTO assessment_findings (engagement_id, slug, title)
+            VALUES (?, ?, 'Legacy slug')
+            """,
+            (engagement_id, legacy),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO engagement_sessions (engagement_id, session_id, session_path, assigned_targets_json)
+            VALUES (?, 'session-a', '/tmp/eng/sessions/session-a', ?)
+            """,
+            (engagement_id, json.dumps([legacy])),
+        )
+        connection.execute(
+            """
+            INSERT INTO assessment_finding_links (engagement_id, finding_id, link_kind, target_kind, target_ref)
+            VALUES (?, ?, 'variant_of', 'finding', ?)
+            """,
+            (engagement_id, finding_id, legacy),
+        )
+        connection.execute(
+            """
+            INSERT INTO assessment_attack_chains (engagement_id, chain_key, title)
+            VALUES (?, 'chain-a', 'Chain A')
+            """,
+            (engagement_id,),
+        )
+        chain_id = connection.execute("SELECT id FROM assessment_attack_chains WHERE chain_key = 'chain-a'").fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO assessment_attack_chain_links (engagement_id, chain_id, relation, entity_kind, entity_ref)
+            VALUES (?, ?, 'step', 'finding', ?)
+            """,
+            (engagement_id, chain_id, legacy),
+        )
+        connection.execute(
+            """
+            INSERT INTO code_analysis_results (engagement_id, file_id, finding_slug)
+            VALUES (?, 1, ?)
+            """,
+            (engagement_id, legacy),
+        )
+        connection.commit()
+
+    db_module.init_db()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        assert connection.execute("SELECT slug FROM assessment_findings").fetchone()[0] == "VA-001"
+        assert json.loads(connection.execute("SELECT assigned_targets_json FROM engagement_sessions").fetchone()[0]) == ["VA-001"]
+        assert connection.execute("SELECT target_ref FROM assessment_finding_links").fetchone()[0] == "VA-001"
+        assert connection.execute("SELECT entity_ref FROM assessment_attack_chain_links").fetchone()[0] == "VA-001"
+        assert connection.execute("SELECT finding_slug FROM code_analysis_results").fetchone()[0] == "VA-001"
+
+
+def test_init_db_migrates_legacy_finding_slug_collision_without_startup_crash(isolate_settings):
+    db_module.init_db()
+    db_path = db_module.database_path()
+    legacy = legacy_finding_slug()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        engagement_id = connection.execute(
+            """
+            INSERT INTO engagements (key, target, status, engagement_root)
+            VALUES ('eng', 'https://example.com', 'in_progress', '/tmp/eng')
+            """
+        ).lastrowid
+        legacy_id = connection.execute(
+            """
+            INSERT INTO assessment_findings (engagement_id, slug, title)
+            VALUES (?, ?, 'Legacy slug')
+            """,
+            (engagement_id, legacy),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO assessment_findings (engagement_id, slug, title)
+            VALUES (?, 'VA-001', 'Already migrated slug')
+            """,
+            (engagement_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO code_analysis_results (engagement_id, file_id, finding_slug)
+            VALUES (?, 1, ?)
+            """,
+            (engagement_id, legacy),
+        )
+        connection.commit()
+
+    db_module.init_db()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        rows = connection.execute(
+            "SELECT id, slug FROM assessment_findings ORDER BY id ASC"
+        ).fetchall()
+        migrated_legacy_slug = rows[0][1]
+        assert migrated_legacy_slug.startswith("VA-001-legacy-")
+        assert rows[1][1] == "VA-001"
+        assert legacy not in {row[1] for row in rows}
+        assert connection.execute(
+            "SELECT finding_slug FROM code_analysis_results WHERE engagement_id = ?",
+            (engagement_id,),
+        ).fetchone()[0] == migrated_legacy_slug
+        assert str(legacy_id) in migrated_legacy_slug
+
+
+def test_init_db_migrates_legacy_finding_slugs_in_finding_json(isolate_settings):
+    db_module.init_db()
+    db_path = db_module.database_path()
+    legacy = legacy_finding_slug("CH-001")
+
+    with sqlite3.connect(str(db_path)) as connection:
+        engagement_id = connection.execute(
+            """
+            INSERT INTO engagements (key, target, status, engagement_root)
+            VALUES ('eng', 'https://example.com', 'in_progress', '/tmp/eng')
+            """
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO assessment_findings (
+                engagement_id, slug, title, details_json, provenance_json
+            )
+            VALUES (?, 'CV-001', 'Variant slug', ?, ?)
+            """,
+            (
+                engagement_id,
+                json.dumps({"variant_of": legacy, "related": [legacy]}),
+                json.dumps(
+                    {
+                        "source_slug": legacy,
+                        "review": {"target_slug": legacy},
+                        "evidence": f"Same root cause as {legacy}.",
+                    }
+                ),
+            ),
+        )
+        connection.commit()
+
+    db_module.init_db()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        details_json, provenance_json = connection.execute(
+            "SELECT details_json, provenance_json FROM assessment_findings"
+        ).fetchone()
+    assert json.loads(details_json) == {"variant_of": "CH-001", "related": ["CH-001"]}
+    assert json.loads(provenance_json) == {
+        "source_slug": "CH-001",
+        "review": {"target_slug": "CH-001"},
+        "evidence": "Same root cause as CH-001.",
+    }
+
+
 def test_engagement_artifacts_and_sessions_are_scoped_by_engagement_key(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
@@ -164,11 +385,12 @@ def test_engagement_artifacts_and_sessions_are_scoped_by_engagement_key(client, 
     assert sessions.status_code == 200
     payload = sessions.json()
     assert payload[0]["session_id"] == "session-a"
-    assert payload[0]["assigned_targets"] == ["FINDING-VA-001"]
+    assert payload[0]["assigned_targets"] == ["VA-001"]
 
 
 def test_engagement_sync_migrates_legacy_target_keys_on_disk(client, isolate_settings):
     engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+    legacy = legacy_finding_slug()
     (engagement_dir / "scope.json").write_text(
         json.dumps(
             {
@@ -179,7 +401,7 @@ def test_engagement_sync_migrates_legacy_target_keys_on_disk(client, isolate_set
                 "out_of_scope_hosts": [],
                 "exploit_policy": "selected",
                 "exploit_review_state": "approved",
-                "approved_findings": ["FINDING-VA-001"],
+                "approved_findings": [legacy],
                 "status": "in_progress",
                 "current_phase": "exploit",
             }
@@ -194,7 +416,7 @@ def test_engagement_sync_migrates_legacy_target_keys_on_disk(client, isolate_set
                     "session_id": "session-a",
                     "status": "active",
                     "merge_state": "pending",
-                    "assigned_findings": ["FINDING-VA-001"],
+                    "assigned_findings": [legacy],
                 }
             ]
         ),
@@ -205,7 +427,7 @@ def test_engagement_sync_migrates_legacy_target_keys_on_disk(client, isolate_set
             {
                 "session_id": "session-a",
                 "status": "active",
-                "assigned_findings": ["FINDING-VA-001"],
+                "assigned_findings": [legacy],
             }
         ),
         encoding="utf-8",
@@ -219,11 +441,11 @@ def test_engagement_sync_migrates_legacy_target_keys_on_disk(client, isolate_set
     scope_payload = json.loads((engagement_dir / "scope.json").read_text(encoding="utf-8"))
     index_payload = json.loads((engagement_dir / "sessions" / "index.json").read_text(encoding="utf-8"))
     assignment_payload = json.loads((session_dir / "assignment.json").read_text(encoding="utf-8"))
-    assert scope_payload["approved_targets"] == ["FINDING-VA-001"]
+    assert scope_payload["approved_targets"] == ["VA-001"]
     assert "approved_findings" not in scope_payload
-    assert index_payload[0]["assigned_targets"] == ["FINDING-VA-001"]
+    assert index_payload[0]["assigned_targets"] == ["VA-001"]
     assert "assigned_findings" not in index_payload[0]
-    assert assignment_payload["assigned_targets"] == ["FINDING-VA-001"]
+    assert assignment_payload["assigned_targets"] == ["VA-001"]
     assert "assigned_findings" not in assignment_payload
 
 
@@ -324,7 +546,7 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     create_finding = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-VA-001",
+            "slug": "VA-001",
             "title": "IDOR in orders",
             "severity": "high",
             "workflow_status": "active",
@@ -358,11 +580,11 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
         },
     )
     assert create_finding.status_code == 201
-    assert create_finding.json()["finding"]["slug"] == "FINDING-VA-001"
+    assert create_finding.json()["finding"]["slug"] == "VA-001"
 
     findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
     assert findings.status_code == 200
-    assert findings.json()[0]["slug"] == "FINDING-VA-001"
+    assert findings.json()[0]["slug"] == "VA-001"
 
     summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
     assert summary.status_code == 200
@@ -373,7 +595,7 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
 
     exploit_candidates = client.get("/engagements/2026-03-30-120000-example/assessment/exploit-candidates")
     assert exploit_candidates.status_code == 200
-    assert [row["slug"] for row in exploit_candidates.json()] == ["FINDING-VA-001"]
+    assert [row["slug"] for row in exploit_candidates.json()] == ["VA-001"]
 
     coverage_readiness = client.get("/engagements/2026-03-30-120000-example/assessment/coverage-readiness")
     assert coverage_readiness.status_code == 200
@@ -389,7 +611,7 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
         "/engagements/2026-03-30-120000-example/assessment/report-findings?mode=final"
     )
     assert final_report.status_code == 200
-    assert [row["slug"] for row in final_report.json()] == ["FINDING-VA-001"]
+    assert [row["slug"] for row in final_report.json()] == ["VA-001"]
 
 
 def test_events_synthesizes_legacy_log_artifact_timeline(client, isolate_settings):
@@ -445,7 +667,7 @@ def test_final_report_mode_returns_conflict_when_readiness_fails(client, isolate
     create_finding = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-VA-009",
+            "slug": "VA-009",
             "title": "Unreviewed IDOR in orders",
             "severity": "high",
             "workflow_status": "active",
@@ -520,13 +742,61 @@ def test_coverage_patch_normalizes_tested_to_covered_and_refreshes_service_statu
     assert summary.json()["service_coverage_gaps"] == []
 
 
+def test_repeat_request_observation_preserves_stronger_coverage_status(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    first = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/request-observations",
+        json={
+            "url": "https://example.com/search?q=test",
+            "query_schema": {"q": {"type": "string"}},
+            "discovery_source": "recon",
+        },
+    )
+    assert first.status_code == 201
+
+    coverage_items = client.get("/engagements/2026-03-30-120000-example/assessment/coverage-items")
+    assert coverage_items.status_code == 200
+    payload = coverage_items.json()
+    query_item = next(item for item in payload if item["input_slot"] == "query")
+    service_item = next(item for item in payload if item["input_slot"] == "service")
+
+    for item in (query_item, service_item):
+        patch = client.patch(
+            f"/engagements/2026-03-30-120000-example/assessment/coverage-items/{item['id']}",
+            json={"status": "covered", "notes": "Operator validated this coverage item."},
+        )
+        assert patch.status_code == 200
+        assert patch.json()["status"] == "covered"
+
+    second = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/request-observations",
+        json={
+            "url": "https://example.com/search?q=test",
+            "query_schema": {"q": {"type": "string"}},
+            "discovery_source": "recon",
+        },
+    )
+    assert second.status_code == 201
+
+    refreshed_items = client.get("/engagements/2026-03-30-120000-example/assessment/coverage-items")
+    assert refreshed_items.status_code == 200
+    refreshed_by_slot = {item["input_slot"]: item for item in refreshed_items.json()}
+    assert refreshed_by_slot["query"]["status"] == "covered"
+    assert refreshed_by_slot["service"]["status"] == "covered"
+
+    services = client.get("/engagements/2026-03-30-120000-example/assessment/services")
+    assert services.status_code == 200
+    assert services.json()[0]["coverage_status"] == "covered"
+
+
 def test_findings_verify_updates_existing_finding_and_records_transition(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-VA-001",
+            "slug": "VA-001",
             "title": "IDOR in orders",
             "severity": "medium",
             "workflow_status": "draft",
@@ -551,7 +821,7 @@ def test_findings_verify_updates_existing_finding_and_records_transition(client,
     assert created.status_code == 201
 
     verified = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-VA-001/verify",
+        "/engagements/2026-03-30-120000-example/assessment/findings/VA-001/verify",
         json={
             "disposition": "confirmed",
             "reason_code": "reproduced",
@@ -566,7 +836,7 @@ def test_findings_verify_updates_existing_finding_and_records_transition(client,
     )
     assert verified.status_code == 200
     payload = verified.json()
-    assert payload["finding"]["slug"] == "FINDING-VA-001"
+    assert payload["finding"]["slug"] == "VA-001"
     assert payload["finding"]["workflow_status"] == "draft"
     assert payload["finding"]["verification_state"] == "verified"
     assert payload["finding"]["verification_disposition"] == "confirmed"
@@ -574,14 +844,14 @@ def test_findings_verify_updates_existing_finding_and_records_transition(client,
     assert payload["transition"]["action"] == "verified_confirmed"
 
     transitions = client.get(
-        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-VA-001/transitions"
+        "/engagements/2026-03-30-120000-example/assessment/findings/VA-001/transitions"
     )
     assert transitions.status_code == 200
     assert [item["action"] for item in transitions.json()] == ["verified_confirmed", "created"]
 
     findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
     assert findings.status_code == 200
-    finding = next(item for item in findings.json() if item["slug"] == "FINDING-VA-001")
+    finding = next(item for item in findings.json() if item["slug"] == "VA-001")
     assert "Verified with adjacent object identifiers." in finding["notes"]
     assert finding["workflow_status"] == "draft"
     assert finding["verification_state"] == "verified"
@@ -618,7 +888,7 @@ def test_findings_patch_can_revive_false_positive_and_lower_severity(client, iso
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-009",
+            "slug": "CH-009",
             "title": "Parser length overflow",
             "severity": "high",
             "workflow_status": "false_positive",
@@ -645,7 +915,7 @@ def test_findings_patch_can_revive_false_positive_and_lower_severity(client, iso
     assert created.status_code == 201
 
     revived = client.patch(
-        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-009",
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-009",
         json={
             "workflow_status": "active",
             "severity": "low",
@@ -669,7 +939,7 @@ def test_findings_patch_rejects_direct_verification_bypass(client, isolate_setti
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-010",
+            "slug": "CH-010",
             "title": "Direct patch bypass",
             "severity": "medium",
             "workflow_status": "active",
@@ -694,7 +964,7 @@ def test_findings_patch_rejects_direct_verification_bypass(client, isolate_setti
     assert created.status_code == 201
 
     patched = client.patch(
-        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-010",
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-010",
         json={
             "workflow_status": "false_positive",
             "reason_text": "Bypass verifier checks",
@@ -710,7 +980,7 @@ def test_findings_patch_allows_explicit_workflow_rollback(client, isolate_settin
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-010A",
+            "slug": "CH-010A",
             "title": "Workflow rollback candidate",
             "severity": "medium",
             "workflow_status": "active",
@@ -732,7 +1002,7 @@ def test_findings_patch_allows_explicit_workflow_rollback(client, isolate_settin
     assert created.status_code == 201
 
     patched = client.patch(
-        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-010A",
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-010A",
         json={
             "workflow_status": "draft",
             "reason_code": "needs-retriage",
@@ -749,7 +1019,7 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-010B",
+            "slug": "CH-010B",
             "title": "Patch/merge race candidate",
             "severity": "high",
             "workflow_status": "active",
@@ -783,7 +1053,7 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
                 SET status = 'merged',
                     merged_into_finding_id = id,
                     updated_at = '2099-01-01 00:00:00'
-                WHERE slug = 'FINDING-CH-010B'
+                WHERE slug = 'CH-010B'
                 """
             )
             connection.commit()
@@ -792,7 +1062,7 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
     monkeypatch.setattr(state_manager, "create_finding", race)
 
     patched = client.patch(
-        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-010B",
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-010B",
         json={"notes": "Late patch should not overwrite a merged finding."},
     )
 
@@ -806,7 +1076,7 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-001",
+            "slug": "CH-001",
             "title": "Header length overflow in parser",
             "severity": "high",
             "workflow_status": "active",
@@ -831,7 +1101,7 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
     assert created.status_code == 201
 
     killed = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-001/verify",
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-001/verify",
         json={
             "disposition": "false_positive",
             "reason_code": "check-2-guard",
@@ -888,7 +1158,7 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
         },
     )
     assert rediscovered.status_code == 201
-    assert rediscovered.json()["finding"]["slug"] == "FINDING-CH-001"
+    assert rediscovered.json()["finding"]["slug"] == "CH-001"
     assert rediscovered.json()["finding"]["workflow_status"] == "false_positive"
     assert rediscovered.json()["finding"]["verification_disposition"] == "false_positive"
 
@@ -908,7 +1178,7 @@ def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client
     original = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-020",
+            "slug": "CH-020",
             "title": "Shared parser bug title",
             "severity": "medium",
             "workflow_status": "false_positive",
@@ -959,7 +1229,7 @@ def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client
         },
     )
     assert distinct.status_code == 201
-    assert distinct.json()["finding"]["slug"] != "FINDING-CH-020"
+    assert distinct.json()["finding"]["slug"] != "CH-020"
     assert distinct.json()["finding"]["workflow_status"] == "active"
     assert distinct.json()["finding"]["verification_disposition"] == "confirmed"
 
@@ -970,13 +1240,113 @@ def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client
     assert {item["workflow_status"] for item in payload} == {"false_positive", "active"}
 
 
+def test_root_cause_free_false_positive_findings_stay_semantically_sticky(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    original = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "CH-025",
+            "title": "Shared parser size bug",
+            "severity": "medium",
+            "workflow_status": "false_positive",
+            "verification_state": "verified",
+            "verification_disposition": "false_positive",
+            "defect_family": "integer-overflow",
+            "root_cause_key": "",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.c:150",
+            "summary": "Suppressed parser hypothesis without a root cause key.",
+            "evidence_ref": "tools/analysis-state/original.json",
+            "notes": "Verifier killed the original hypothesis.",
+            "source_name": "code-vuln-verifier",
+            "details": {
+                "kill_check": 2,
+                "kill_reason": "bounded before arithmetic.",
+                "evidence": "size guard blocks the path.",
+            },
+            "provenance": {"verified_by": "code-vuln-verifier"},
+            "links": [],
+        },
+    )
+    assert original.status_code == 201
+
+    rediscovered = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "title": "Shared parser size bug",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "integer-overflow",
+            "root_cause_key": "",
+            "auth_context": "anonymous",
+            "canonical_location": "file:src/parser.c:150",
+            "summary": "Rediscovered without a root cause key.",
+            "evidence_ref": "tools/analysis-state/rediscovered.json",
+            "notes": "Later analysis pass re-raised the same parser concern.",
+            "source_name": "code-vuln-hunter",
+            "details": {"impact": "Potential heap corruption"},
+            "provenance": {"agent_name": "code-vuln-hunter"},
+            "links": [],
+        },
+    )
+    assert rediscovered.status_code == 201
+    assert rediscovered.json()["finding"]["slug"] == "CH-025"
+    assert rediscovered.json()["finding"]["workflow_status"] == "false_positive"
+    assert rediscovered.json()["finding"]["verification_disposition"] == "false_positive"
+
+
+def test_coverage_items_expression_unique_index_blocks_nullable_duplicates(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    ingest = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/request-observations",
+        json={
+            "url": "https://example.com/search?q=test",
+            "query_schema": {"q": {"type": "string"}},
+            "discovery_source": "recon",
+        },
+    )
+    assert ingest.status_code == 201
+    service_id = ingest.json()["service"]["id"]
+
+    with db_module.get_connection() as connection:
+        engagement_id = int(
+            connection.execute(
+                "SELECT id FROM engagements WHERE key = ?",
+                ("2026-03-30-120000-example",),
+            ).fetchone()["id"]
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO assessment_coverage_items (
+                    engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, status, notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    engagement_id,
+                    None,
+                    service_id,
+                    "anonymous",
+                    "service",
+                    "service-validation",
+                    "pending",
+                    "duplicate logical coverage row",
+                ),
+            )
+
+
 def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
     source = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-030",
+            "slug": "CH-030",
             "title": "Live parser issue",
             "severity": "high",
             "workflow_status": "active",
@@ -1000,7 +1370,7 @@ def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):
     target = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-031",
+            "slug": "CH-031",
             "title": "Suppressed parser issue",
             "severity": "medium",
             "workflow_status": "false_positive",
@@ -1029,8 +1399,8 @@ def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):
     merge = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/merge",
         json={
-            "source_slug": "FINDING-CH-030",
-            "target_slug": "FINDING-CH-031",
+            "source_slug": "CH-030",
+            "target_slug": "CH-031",
             "reason": "Attempted merge into suppressed target.",
             "source_name": "operator",
         },
@@ -1045,7 +1415,7 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
     source = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-032",
+            "slug": "CH-032",
             "title": "Suppressed parser duplicate",
             "severity": "medium",
             "workflow_status": "false_positive",
@@ -1074,7 +1444,7 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
     target = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-033",
+            "slug": "CH-033",
             "title": "Live parser issue",
             "severity": "high",
             "workflow_status": "active",
@@ -1098,8 +1468,8 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
     merge = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/merge",
         json={
-            "source_slug": "FINDING-CH-032",
-            "target_slug": "FINDING-CH-033",
+            "source_slug": "CH-032",
+            "target_slug": "CH-033",
             "reason": "Suppressed duplicate should merge into the live target without downgrading it.",
             "source_name": "operator",
         },
@@ -1116,12 +1486,12 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
     findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
     assert findings.status_code == 200
     by_slug = {item["slug"]: item for item in findings.json()}
-    assert by_slug["FINDING-CH-033"]["workflow_status"] == "active"
-    assert by_slug["FINDING-CH-033"]["verification_state"] == "verified"
-    assert by_slug["FINDING-CH-033"]["verification_disposition"] == "confirmed"
-    assert by_slug["FINDING-CH-032"]["workflow_status"] == "merged"
-    assert by_slug["FINDING-CH-032"]["verification_state"] == "unreviewed"
-    assert by_slug["FINDING-CH-032"]["verification_disposition"] == "none"
+    assert by_slug["CH-033"]["workflow_status"] == "active"
+    assert by_slug["CH-033"]["verification_state"] == "verified"
+    assert by_slug["CH-033"]["verification_disposition"] == "confirmed"
+    assert by_slug["CH-032"]["workflow_status"] == "merged"
+    assert by_slug["CH-032"]["verification_state"] == "unreviewed"
+    assert by_slug["CH-032"]["verification_disposition"] == "none"
 
 
 def test_findings_verify_downgrade_records_previous_severity_transition(client, isolate_settings):
@@ -1130,7 +1500,7 @@ def test_findings_verify_downgrade_records_previous_severity_transition(client, 
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-040",
+            "slug": "CH-040",
             "title": "Privilege escalation via export endpoint",
             "severity": "critical",
             "workflow_status": "active",
@@ -1155,14 +1525,14 @@ def test_findings_verify_downgrade_records_previous_severity_transition(client, 
     assert created.status_code == 201
 
     verified = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-040/verify",
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-040/verify",
         json={
             "disposition": "downgraded",
             "new_severity": "high",
             "reason_code": "limited-scope",
             "reason_text": "The export bug is real but constrained to project-scoped data.",
-            "artifact_ref": "tools/analysis-state/code-verification/FINDING-CH-040.json",
-            "evidence_ref": "tools/analysis-state/code-verification/FINDING-CH-040.json",
+            "artifact_ref": "tools/analysis-state/code-verification/CH-040.json",
+            "evidence_ref": "tools/analysis-state/code-verification/CH-040.json",
             "notes": "Severity reduced after tracing authorization boundaries.",
             "source_name": "code-vuln-verifier",
             "details": {
@@ -1181,7 +1551,7 @@ def test_findings_verify_downgrade_records_previous_severity_transition(client, 
     assert payload["transition"]["action"] == "verified_downgraded"
 
     transitions = client.get(
-        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-040/transitions"
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-040/transitions"
     )
     assert transitions.status_code == 200
     latest = transitions.json()[0]
@@ -1196,7 +1566,7 @@ def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-041",
+            "slug": "CH-041",
             "title": "Ambiguous parser state confusion",
             "severity": "medium",
             "workflow_status": "active",
@@ -1221,12 +1591,12 @@ def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
     assert created.status_code == 201
 
     disputed = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-041/verify",
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-041/verify",
         json={
             "disposition": "disputed",
             "reason_code": "conflicting-evidence",
             "reason_text": "Reachability differs between the static trace and runtime evidence.",
-            "artifact_ref": "tools/analysis-state/code-verification/FINDING-CH-041.json",
+            "artifact_ref": "tools/analysis-state/code-verification/CH-041.json",
             "notes": "Escalated for operator review.",
             "source_name": "code-vuln-verifier",
             "details": {
@@ -1245,7 +1615,7 @@ def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
 
     report_findings = client.get("/engagements/2026-03-30-120000-example/assessment/report-findings")
     assert report_findings.status_code == 200
-    assert all(item["slug"] != "FINDING-CH-041" for item in report_findings.json())
+    assert all(item["slug"] != "CH-041" for item in report_findings.json())
 
 
 def test_findings_verify_rejects_records_merged_after_validation(client, isolate_settings, monkeypatch):
@@ -1254,7 +1624,7 @@ def test_findings_verify_rejects_records_merged_after_validation(client, isolate
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-042",
+            "slug": "CH-042",
             "title": "Verify/merge race candidate",
             "severity": "high",
             "workflow_status": "active",
@@ -1288,7 +1658,7 @@ def test_findings_verify_rejects_records_merged_after_validation(client, isolate
                 SET status = 'merged',
                     merged_into_finding_id = id,
                     updated_at = '2099-01-01 00:00:00'
-                WHERE slug = 'FINDING-CH-042'
+                WHERE slug = 'CH-042'
                 """
             )
             connection.commit()
@@ -1297,13 +1667,13 @@ def test_findings_verify_rejects_records_merged_after_validation(client, isolate
     monkeypatch.setattr(state_manager, "patch_finding", race)
 
     verify = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-042/verify",
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-042/verify",
         json={
             "disposition": "confirmed",
             "reason_code": "validated",
             "reason_text": "Late verify should not overwrite a merged finding.",
-            "artifact_ref": "tools/analysis-state/code-verification/FINDING-CH-042.json",
-            "evidence_ref": "tools/analysis-state/code-verification/FINDING-CH-042.json",
+            "artifact_ref": "tools/analysis-state/code-verification/CH-042.json",
+            "evidence_ref": "tools/analysis-state/code-verification/CH-042.json",
             "notes": "Verification raced with a merge.",
             "source_name": "code-vuln-verifier",
             "details": {
@@ -1324,7 +1694,7 @@ def test_findings_verify_rejects_merged_records(client, isolate_settings):
     source = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-050",
+            "slug": "CH-050",
             "title": "Merged source",
             "severity": "medium",
             "workflow_status": "active",
@@ -1348,7 +1718,7 @@ def test_findings_verify_rejects_merged_records(client, isolate_settings):
     target = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-051",
+            "slug": "CH-051",
             "title": "Merge target",
             "severity": "medium",
             "workflow_status": "active",
@@ -1372,8 +1742,8 @@ def test_findings_verify_rejects_merged_records(client, isolate_settings):
     merge = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/merge",
         json={
-            "source_slug": "FINDING-CH-050",
-            "target_slug": "FINDING-CH-051",
+            "source_slug": "CH-050",
+            "target_slug": "CH-051",
             "reason": "Merged duplicate.",
             "source_name": "operator",
         },
@@ -1381,7 +1751,7 @@ def test_findings_verify_rejects_merged_records(client, isolate_settings):
     assert merge.status_code == 200
 
     verify = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings/FINDING-CH-050/verify",
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-050/verify",
         json={
             "disposition": "confirmed",
             "reason_text": "Should not revive merged finding.",
@@ -1399,7 +1769,7 @@ def test_merge_findings_rejects_target_changed_after_snapshot(client, isolate_se
     source = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-052",
+            "slug": "CH-052",
             "title": "First duplicate",
             "severity": "medium",
             "workflow_status": "active",
@@ -1423,7 +1793,7 @@ def test_merge_findings_rejects_target_changed_after_snapshot(client, isolate_se
     target = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "FINDING-CH-053",
+            "slug": "CH-053",
             "title": "Second duplicate",
             "severity": "medium",
             "workflow_status": "active",
@@ -1452,7 +1822,7 @@ def test_merge_findings_rejects_target_changed_after_snapshot(client, isolate_se
 
     def race(existing: str, incoming: str) -> str:
         nonlocal injected
-        if not injected and incoming.startswith("Merged FINDING-CH-052"):
+        if not injected and incoming.startswith("Merged CH-052"):
             injected = True
             with sqlite3.connect(str(db_path)) as connection:
                 connection.execute(
@@ -1460,7 +1830,7 @@ def test_merge_findings_rejects_target_changed_after_snapshot(client, isolate_se
                     UPDATE assessment_findings
                     SET notes = notes || '\nConcurrent merge writer',
                         updated_at = '2099-01-01 00:00:00'
-                    WHERE slug = 'FINDING-CH-053'
+                    WHERE slug = 'CH-053'
                     """
                 )
                 connection.commit()
@@ -1471,8 +1841,8 @@ def test_merge_findings_rejects_target_changed_after_snapshot(client, isolate_se
     merge = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/merge",
         json={
-            "source_slug": "FINDING-CH-052",
-            "target_slug": "FINDING-CH-053",
+            "source_slug": "CH-052",
+            "target_slug": "CH-053",
             "reason": "Stale merge should not overwrite a concurrently updated target.",
             "source_name": "operator",
         },
