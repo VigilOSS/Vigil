@@ -5,11 +5,8 @@ Intercept browser traffic to capture authenticated sessions (cookies, tokens, he
 ## Quick Start
 
 ```bash
-# From inside an engagement directory, or with ENGAGEMENT_DIR set:
-./scripts/start_mitmproxy.sh
-
-# Or explicitly:
-ENGAGEMENT_DIR=/path/to/engagement ./scripts/start_mitmproxy.sh
+aith engagement list --json
+aith mitmproxy start <engagement-key>
 ```
 
 ## Browser Proxy Setup (FoxyProxy)
@@ -44,6 +41,8 @@ docker cp security-research-proxy:/root/.mitmproxy/mitmproxy-ca-cert.pem ~/Deskt
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Desktop/mitmproxy-ca-cert.pem
 ```
 
+`aith mitmproxy cert` prints the same commands for the active Docker-managed proxy.
+
 Restart the browser after trusting.
 
 ### CA Key Persistence
@@ -53,13 +52,14 @@ The launcher stores CA keys in a named Docker volume (`mitmproxy-ca`). Container
 If you need to regenerate the CA (e.g., compromise, rotation):
 ```bash
 docker volume rm mitmproxy-ca
-./scripts/start_mitmproxy.sh
+aith engagement list --json
+aith mitmproxy start <engagement-key>
 # Re-install the new cert using Option A or B above
 ```
 
 ## Login Capture Workflow
 
-1. Start the proxy: `./scripts/start_mitmproxy.sh`
+1. List engagements and start the proxy explicitly: `aith engagement list --json` then `aith mitmproxy start <engagement-key>`
 2. Configure browser proxy (see above)
 3. Navigate to the target login page and authenticate
 4. Browse a few authenticated pages (admin, settings, API endpoints)
@@ -67,7 +67,7 @@ docker volume rm mitmproxy-ca
 6. Disable the proxy in FoxyProxy when done
 
 If auto-capture misses the session (addon error, non-standard login flow):
-- Check proxy logs: `docker logs security-research-proxy 2>&1 | tail -30`
+- Check proxy logs: `aith logs mitmproxy --lines 30`
 - Fall back to manual cookie extraction from browser DevTools
 
 ## Troubleshooting
@@ -76,7 +76,7 @@ If auto-capture misses the session (addon error, non-standard login flow):
 |---------|-----|
 | `http://mitm.it` says "traffic not passing through mitmproxy" | FoxyProxy is set to HTTPS mode -- change to HTTP |
 | Certificate errors after proxy restart | Check if the `mitmproxy-ca` volume exists: `docker volume ls \| grep mitmproxy`. If missing, the CA was regenerated -- re-install the cert |
-| Proxy container exits immediately | Check logs: `docker logs security-research-proxy 2>&1 \| tail -20`. Common: port 8080 already in use |
+| Proxy container exits immediately | Check logs: `aith logs mitmproxy --lines 20`. Common: port 8080 already in use |
 | `auth.json` not updated after login | Check for addon errors in logs. The `_detect_login` function looks for `set-cookie` headers and token fields in response bodies |
 | Browser still shows cert errors after trusting | Quit browser fully and reopen. macOS may also need: System Settings > Network > clear DNS cache |
 
@@ -84,19 +84,19 @@ If auto-capture misses the session (addon error, non-standard login flow):
 
 ```bash
 # Status
-docker ps --filter name=security-research-proxy
+aith mitmproxy status
 
 # Logs
-docker logs -f security-research-proxy
+aith logs mitmproxy --lines 80
 
 # Stop
-docker stop security-research-proxy
+aith mitmproxy stop
 
 # Restart (reuses same CA cert from volume)
-./scripts/start_mitmproxy.sh
+aith mitmproxy start <engagement-key>
 
 # Custom port
-MITMPROXY_PORT=9090 ./scripts/start_mitmproxy.sh
+aith mitmproxy start <engagement-key> --port 9090
 ```
 
 ## How It Works

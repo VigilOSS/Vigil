@@ -59,7 +59,7 @@ Slack, Stripe, and hundreds of other services to check validity. That traffic:
 
 **Default posture in this repo**: `--no-verification`. Opt into `--results=verified` only
 when the engagement's `exploit_policy` and scope explicitly cover external validation
-traffic, and record the decision via `./scripts/assess.py log operator "trufflehog verification opt-in" "<command>" "<scope/policy justification>"` (activity_entries).
+traffic, and record the decision via `aith assess log operator "trufflehog verification opt-in" "<command>" "<scope/policy justification>"` (activity_entries).
 
 ## Output shape (JSON mode)
 

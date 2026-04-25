@@ -13,7 +13,7 @@ After every dispatch that returns an agentId, append to the registry:
     "role": "exploit-developer",
     "agent_id": "a424a88b02054913d",
     "task": "RCE chain: phpMyAdmin → template injection → webshell",
-    "finding_slugs": ["FINDING-EX-001", "FINDING-EX-002"],
+    "finding_slugs": ["EX-001", "EX-002"],
     "skill_loaded": "agent/skills/command-injection/SKILL.md",
     "scope_host": "target.example",
     "dispatched_at": "2026-03-30T15:30:00Z",
@@ -23,7 +23,7 @@ After every dispatch that returns an agentId, append to the registry:
     "role": "exploit-developer",
     "agent_id": "b535bb9c13165a24e",
     "task": "IDOR escalation on user API",
-    "finding_slugs": ["FINDING-VA-003"],
+    "finding_slugs": ["VA-003"],
     "skill_loaded": "agent/skills/idor-testing/SKILL.md",
     "scope_host": "target.example",
     "dispatched_at": "2026-03-30T16:45:00Z",
@@ -37,7 +37,7 @@ After every dispatch that returns an agentId, append to the registry:
 - **Audit trail** — records what was tried, by whom, against which target and
   finding cluster. Read back during report-writing and log-investigation phases.
 - **DEDUP input** — the pre-dispatch checklist checks the registry and the
-  backend activity log (`assess.py fetch activity-entries`) to avoid
+  backend activity log (`aith assess fetch activity-entries`) to avoid
   re-dispatching the same role for the same objective.
 - **Handoff source** — when continuing a multi-step task, the registry entry for
   the prior dispatch identifies which output transcript the new dispatch prompt
@@ -56,7 +56,7 @@ relevant output and durable state:
    Narrative continuity (what was tried and why it matters) lives in the prompt,
    because the new agent rebuilds its mental model from what the dispatch carries.
 3. **Durable-state pointers** — finding slugs, file paths under `$DIR/`, credential
-   ids. The new agent resolves these with `assess.py fetch` instead of relying on
+   ids. The new agent resolves these with `aith assess fetch` instead of relying on
    stale inline copies, which keeps the prompt small and the state canonical.
 4. **Specific next step** — the exact action the prior agent would have taken
    next ("replay captured token at `/api/vault` and read the victim's items"), not
@@ -72,8 +72,8 @@ attack forward.
 Capture transient state during the prior dispatch so it survives the handoff:
 
 - **Backend state first.** Findings, credentials, access records, credential-tests,
-  attack-chains, surfaces, and probes go in via `./scripts/assess.py` helpers.
-  The next agent queries the backend directly (`assess.py fetch ...`) rather than
+  attack-chains, surfaces, and probes go in via `aith assess` helpers.
+  The next agent queries the backend directly (`aith assess fetch ...`) rather than
   being handed this inline.
 - **Engagement files for transient state.** Session cookies, captured JWTs, CSRF
   tokens, upload paths, and working PoC scripts go under `$DIR/tools/`,
@@ -81,6 +81,6 @@ Capture transient state during the prior dispatch so it survives the handoff:
   by path.
 - **Backend activity log for the narrative.** A condensed per-dispatch summary
   (what was tried, what worked, what the next step is) goes to the
-  `activity_entries` table via `./scripts/assess.py log <agent> <title>
-  <action> <result>`. Query with `./scripts/assess.py fetch activity-entries`
+  `activity_entries` table via `aith assess log <agent> <title>
+  <action> <result>`. Query with `aith assess fetch activity-entries`
   — the log is engagement-scoped and FTS-searchable.

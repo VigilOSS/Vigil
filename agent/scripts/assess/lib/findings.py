@@ -21,7 +21,8 @@ _AGENT_PREFIX_MAP = {
     "code-fuzz-engineer": "CF",
 }
 
-_FINDING_ID_RE = re.compile(r"FINDING-([A-Z]{2})-(\d{3})")
+_LEGACY_FINDING_PREFIX = "FINDING" + "-"
+_FINDING_ID_RE = re.compile(rf"^(?:{_LEGACY_FINDING_PREFIX})?([A-Z]{{2}})-(\d{{3}})$")
 
 
 def finding_prefix_for_agent(agent_name: str) -> str:
@@ -48,10 +49,10 @@ def next_finding_id(base_url: str, engagement_key: str, agent_name: str) -> str:
     max_id = 0
     for finding in findings:
         slug = finding.get("slug", "")
-        match = _FINDING_ID_RE.search(slug)
+        match = _FINDING_ID_RE.fullmatch(slug)
         if match and match.group(1) == prefix:
             num = int(match.group(2))
             if num > max_id:
                 max_id = num
 
-    return f"FINDING-{prefix}-{max_id + 1:03d}"
+    return f"{prefix}-{max_id + 1:03d}"

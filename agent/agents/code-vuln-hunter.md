@@ -417,7 +417,7 @@ Record every self-service lookup in `audit_metadata.cross_ref_usage`.
 ### `#### Findings`
 
 Structured finding JSON payloads matching `schemas/finding-record.schema.json`.
-If you need the canonical field list or examples, run `./scripts/assess.py contract record-finding`.
+If you need the canonical field list or examples, run `aith assess contract record-finding`.
 Do not invent lifecycle fields from memory — `record-finding` fills the initial finding lifecycle
 defaults when omitted.
 
@@ -519,8 +519,8 @@ When analysis is genuinely blocked on missing code (after self-service failed):
 ## State Recording
 
 ```bash
-./scripts/assess.py record-finding code-vuln-hunter <finding-json>
-./scripts/assess.py code-record-analysis <analysis-json>
+aith assess record-finding code-vuln-hunter <finding-json>
+aith assess code-record-analysis <analysis-json>
 ```
 
 Every `analysis-json` payload must include `audit_metadata`:

@@ -60,7 +60,7 @@ Attack techniques organized by kill chain phase. Used by: operator, exploit-deve
 | File | Techniques |
 |------|-----------|
 | `offensive-tactics/shell-handling.md` | pwncat-vl listeners, tmux session management, reverse shell payloads, log tailing for LLM visibility |
-| `offensive-tactics/frp-tunneling.md` | frp SSH tunnel setup (HTTP + TCP modes), interactsh OOB callback servers, tunnel logging, standard engagement tunnels (reverse shell, OOB DNS/HTTPS/HTTP) |
+| `offensive-tactics/frp-tunneling.md` | `aith oob` frp/interactsh setup, per-agent OOB clients, tunnel logging, reverse shell and OOB DNS/HTTP callback conventions |
 
 ### offensive-tactics/persistence/
 
@@ -173,6 +173,23 @@ multi-function chains, combinatorial arithmetic, state machine bugs, and incompl
 | `code-vuln-patterns/ai-ml-security.md` | Prompt injection, MCP tool poisoning, RAG poisoning, unsafe tool execution, cross-user context leakage | Python, JS, Java |
 | `code-vuln-patterns/fuzz-harness-patterns.md` | libFuzzer/AFL++ harness templates, sanitizer flag reference, seed corpus construction, harness antipatterns, crash triage checklist | C/C++ |
 
+## mobile/ - Android, iOS, Device Labs, And Mobile Fuzzing
+
+Authorized mobile security references used by `android-app-security`, `ios-app-security`,
+`mobile-lab-setup`, and `mobile-fuzzing`.
+
+| File | Focus |
+|------|-------|
+| `mobile/android-app-security.md` | APK/AAB assessment, MASVS mapping, Android storage/crypto/network/IPC/WebView/native testing, API-level notes |
+| `mobile/android-platform-device-lab.md` | Pixel/reference-device setup, bootloader/AVB/root caveats, Cuttlefish, Binder/AIDL, SELinux, HAL/vendor boundaries |
+| `mobile/ios-app-security.md` | IPA/Xcode/TestFlight assessment, Keychain, local storage, ATS/TLS, links, pasteboard, WebView, runtime instrumentation |
+| `mobile/ios-platform-device-lab.md` | iOS secure boot, SEP, Data Protection, sandboxing, XPC/Mach, dyld/XNU, observability, jailbreak, SRD boundaries |
+| `mobile/mobile-lab-setup.md` | Mac ARM, emulators, simulators, owned devices, Docker, proxies, Frida, device farms, reset/data hygiene |
+| `mobile/mobile-fuzzing.md` | App/API, file-format, IPC, WebView, native, Binder/AIDL, XPC/Mach fuzzing, corpus design, crash triage |
+| `mobile/masvs-privacy-testing.md` | MASVS-PRIVACY: identifier audit (IDFA/GAID/IMEI/MAC), ATT compliance, Privacy Sandbox, data deletion verification, privacy label vs behavior, analytics/telemetry over-collection |
+| `mobile/ai-ml-on-device-security.md` | On-device AI/ML: Core ML/TFLite/ONNX model extraction, inference data leakage, content filter bypass, prompt injection in mobile LLMs, federated learning |
+| `mobile/sdk-supply-chain-security.md` | SDK supply chain: BOM enumeration, CVE checking, malicious SDK detection (SpinOK/Goldoson), data exfiltration audit, permission scope analysis |
+
 ## tools/ — CLI Tool Cheatsheets
 
 Quick-reference per tool, organized by usage phase.
@@ -230,6 +247,32 @@ Quick-reference per tool, organized by usage phase.
 | `tools/cracking/john.md` | Offline password hash cracking (CPU) |
 | `tools/cracking/hashcat.md` | Offline password hash cracking (GPU) |
 
+## gf-patterns/ — GF Pattern Library
+
+Per-bucket reference files for the gf URL classifier, keyed to the buckets that
+`agent/scripts/assess/commands/classify_work.py` recognizes. Used by: surface-collector,
+gau-triage, operator.
+
+Each file documents what the bucket classifies, the parameter keys and path fragments that
+match, the baseline `priority_score` weight, representative examples, and false-positive
+surface to keep operator calibration honest. Skills cite these files with a "Load because X"
+reason before invoking a bucket.
+
+| File | Bucket | Baseline weight | What it classifies |
+|------|--------|-----------------|--------------------|
+| `gf-patterns/rce.md` | `rce` | 50 | Command-exec parameters (`cmd`, `exec`) and `/exec/`, `/cmd/`, `/shell/` paths |
+| `gf-patterns/ssrf.md` | `ssrf` | 45 | URL-fetch parameters (`url`, `callback`, `feed`) and `/proxy/`, `/fetch/` paths |
+| `gf-patterns/sqli.md` | `sqli` | 40 | Query/identifier parameters (`id`, `q`, `sort`, `filter`) |
+| `gf-patterns/lfi.md` | `lfi` | 40 | File-handling parameters (`file`, `path`, `template`, `include`) |
+| `gf-patterns/idor.md` | `idor` | 35 | Object-reference parameters (`id`, `user`, `account`, `order`) |
+| `gf-patterns/debug_logic.md` | `debug_logic` | 30 | Privileged paths (`/admin`, `/actuator`, `/.git`, `/.env`) |
+| `gf-patterns/redirect.md` | `redirect` | 25 | Return-URL parameters (`next`, `redirect_uri`, `return`) |
+| `gf-patterns/ssti.md` | `ssti` | 25 | Template-resolver parameters (`template`, `theme`, `view`) |
+| `gf-patterns/xss.md` | `xss` | 20 | Reflected-input parameters (`q`, `message`, `comment`) |
+| `gf-patterns/interestingparams.md` | `interestingparams` | 15 | Credential parameters (`api_key`, `token`, `password`) |
+| `gf-patterns/interestingsubs.md` | conceptual | n/a | Subdomain conventions (`staging.`, `internal.`) — surfaces via subdomain-enumeration, not a direct classify-work bucket |
+| `gf-patterns/interestingEXT.md` | conceptual | n/a | Backup/config extensions (`.bak`, `.env`, `.sql`) — surfaces via `path:` cluster fallback plus trufflehog body scan |
+
 ## runtime-guides/ — Shared Runtime References
 
 Shared operator/runtime references. Used by: operator, Claude, Codex.
@@ -238,7 +281,7 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 |------|---------|
 | `runtime-guides/engagement-methodology.md` | Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase |
 | `runtime-guides/subagent-registry.md` | `agent-registry.json` schema and its role as the engagement audit trail; how to hand off state between dispatches by carrying prior output and durable-state pointers forward in the new dispatch prompt |
-| `runtime-guides/command-history-auditing.md` | How to read `assess.py list-command-runs` as a coverage map — use it to pick variants that haven't been probed, not to gate-keep reruns; includes field-interpretation guide for retention/suppression |
+| `runtime-guides/command-history-auditing.md` | How to read `aith assess list-command-runs` as a coverage map — use it to pick variants that haven't been probed, not to gate-keep reruns; includes field-interpretation guide for retention/suppression |
 | `handoff-protocols.md` | Agent-to-agent handoff rules and expected downstream actions |
 | `subdomain-enumeration.md` | Subdomain enumeration (when `*.domain` in hosts), prioritization, and sliding-window execution rules |
 

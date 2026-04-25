@@ -1,4 +1,4 @@
-"""assess.py emit-event — fire-and-forget POST to /events."""
+"""aith assess emit-event — fire-and-forget POST to /events."""
 from __future__ import annotations
 
 import os

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sqlite3
 import uuid
 from functools import lru_cache
@@ -124,6 +125,18 @@ def _normalize_coverage_status(value: str) -> str:
     if status_value not in COVERAGE_STATUSES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid coverage status: {value}")
     return status_value
+
+
+def _coalesce_coverage_status(existing: str, incoming: str, *, explicit_override: bool = False) -> str:
+    existing_normalized = _normalize_coverage_status(existing)
+    incoming_normalized = _normalize_coverage_status(incoming)
+    if explicit_override:
+        return incoming_normalized
+    if incoming_normalized in {"pending", "queued"} and existing_normalized not in {"pending", "queued"}:
+        return existing_normalized
+    if existing_normalized == "queued" and incoming_normalized == "pending":
+        return existing_normalized
+    return incoming_normalized
 
 
 def _coalesce_workflow_status(existing: str, incoming: str, *, explicit_workflow_override: bool = False) -> str:
@@ -503,7 +516,12 @@ def _upsert_service(
             port = COALESCE(excluded.port, assessment_services.port),
             service = COALESCE(NULLIF(excluded.service, ''), assessment_services.service),
             state = excluded.state,
-            coverage_status = excluded.coverage_status,
+            coverage_status = CASE
+                WHEN excluded.coverage_status = 'pending'
+                    AND assessment_services.coverage_status IN ('covered', 'partial', 'blocked')
+                THEN assessment_services.coverage_status
+                ELSE excluded.coverage_status
+            END,
             banner = COALESCE(NULLIF(excluded.banner, ''), assessment_services.banner),
             notes = CASE
                 WHEN excluded.notes = '' THEN assessment_services.notes
@@ -654,8 +672,18 @@ def _upsert_coverage_item(
     attack_family: str,
     status_value: str,
     notes: str,
+    preserve_existing_status: bool = False,
 ) -> dict[str, Any]:
     normalized_status = _normalize_coverage_status(status_value)
+    cursor = connection.execute(
+        """
+        INSERT OR IGNORE INTO assessment_coverage_items (
+            engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, status, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, normalized_status, notes),
+    )
     row = connection.execute(
         """
         SELECT *
@@ -664,28 +692,20 @@ def _upsert_coverage_item(
         """,
         (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family),
     ).fetchone()
-    if row is None:
-        cursor = connection.execute(
-            """
-            INSERT INTO assessment_coverage_items (
-                engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, status, notes
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, normalized_status, notes),
+    assert row is not None
+    if cursor.rowcount == 0:
+        resolved_status = (
+            _coalesce_coverage_status(row["status"], normalized_status)
+            if preserve_existing_status
+            else normalized_status
         )
-        row = connection.execute(
-            "SELECT * FROM assessment_coverage_items WHERE id = ?",
-            (cursor.lastrowid,),
-        ).fetchone()
-    else:
         connection.execute(
             """
             UPDATE assessment_coverage_items
             SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (normalized_status, _append_notes(row["notes"], notes), row["id"]),
+            (resolved_status, _append_notes(row["notes"], notes), row["id"]),
         )
         row = connection.execute("SELECT * FROM assessment_coverage_items WHERE id = ?", (row["id"],)).fetchone()
     assert row is not None
@@ -1167,6 +1187,7 @@ def ingest_request_observation(
                     attack_family=key[4],
                     status_value=str(candidate.get("status", "pending")),
                     notes=str(candidate.get("notes", "")),
+                    preserve_existing_status=True,
                 )
             )
         return {
@@ -1358,18 +1379,27 @@ def _semantic_finding_match(
         if row is not None:
             return dict(row)
     row = connection.execute(
-        """
-        SELECT *
-        FROM assessment_findings
-        WHERE engagement_id = ?
-          AND status NOT IN ('merged', 'false_positive')
-          AND title = ?
-          AND canonical_location = ?
-          AND auth_context = ?
-        ORDER BY id ASC
-        LIMIT 1
-        """,
-        (engagement_id, title, canonical_location, auth_context),
+        (
+            """
+            SELECT *
+            FROM assessment_findings
+            WHERE engagement_id = ?
+              AND status != 'merged'
+              AND title = ?
+              AND canonical_location = ?
+              AND auth_context = ?
+            """
+            + (" AND defect_family = ?" if defect_family else "")
+            + """
+            ORDER BY CASE WHEN status = 'false_positive' THEN 0 ELSE 1 END, id ASC
+            LIMIT 1
+            """
+        ),
+        (
+            (engagement_id, title, canonical_location, auth_context, defect_family)
+            if defect_family
+            else (engagement_id, title, canonical_location, auth_context)
+        ),
     ).fetchone()
     return dict(row) if row is not None else None
 
@@ -2299,7 +2329,7 @@ def list_report_findings(engagement_id: int, *, mode: str = "draft") -> list[dic
     for idx, row in enumerate(rows, start=1):
         record = dict(row)
         details = _json_object(record.get("details_json", "{}"))
-        record["report_id"] = f"FINDING-{idx:03d}"
+        record["report_id"] = f"{idx:03d}"
         record["cvss_vector"] = details.get("cvss_vector", "")
         record["cvss_score"] = details.get("cvss_score")
         record["remediation"] = details.get("remediation", "")
@@ -3187,27 +3217,149 @@ def _normalize_run_uuid(value: str) -> str:
     return run_uuid
 
 
+_SHELL_TOOL_WRAPPERS = {"bash", "dash", "ksh", "sh", "zsh"}
+_PREFIX_TOOL_WRAPPERS = {
+    "command",
+    "env",
+    "gtimeout",
+    "ionice",
+    "nice",
+    "nohup",
+    "stdbuf",
+    "sudo",
+    "timeout",
+}
+_SINGLE_ARG_WRAPPER_OPTIONS = {
+    "env": {"-C", "--chdir", "-S", "--split-string", "-u", "--unset"},
+    "gtimeout": {"-k", "--kill-after", "-s", "--signal"},
+    "ionice": {"-c", "--class", "-n", "--classdata"},
+    "nice": {"-n", "--adjustment"},
+    "stdbuf": {"-e", "-i", "-o"},
+    "sudo": {"-C", "-g", "-h", "-p", "-r", "-T", "-t", "-u"},
+    "timeout": {"-k", "--kill-after", "-s", "--signal"},
+}
+_TIMEOUT_DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+_SHELL_COMMAND_SEPARATORS = {"&&", "||", ";", "|", "|&", "&"}
+_SHELL_PREAMBLE_BUILTINS = {
+    ".",
+    "alias",
+    "cd",
+    "export",
+    "local",
+    "popd",
+    "pushd",
+    "readonly",
+    "set",
+    "shopt",
+    "source",
+    "typeset",
+    "ulimit",
+    "umask",
+    "unalias",
+    "unset",
+}
+
+
+def _shell_tokens(command: str) -> list[str]:
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        return list(lexer)
+    except ValueError:
+        return command.split()
+
+
+def _is_env_assignment(token: str) -> bool:
+    if "=" not in token:
+        return False
+    name, _value = token.split("=", 1)
+    return bool(name) and name.replace("_", "").isalnum()
+
+
+def _strip_wrapper_options(wrapper: str, tokens: list[str]) -> list[str]:
+    remaining = list(tokens)
+    options_with_arg = _SINGLE_ARG_WRAPPER_OPTIONS.get(wrapper, set())
+    while remaining:
+        token = remaining[0]
+        if wrapper == "env" and _is_env_assignment(token):
+            remaining.pop(0)
+            continue
+        if not token.startswith("-") or token == "-":
+            break
+        option = remaining.pop(0)
+        option_name = option.split("=", 1)[0]
+        if option_name in options_with_arg and "=" not in option and remaining:
+            remaining.pop(0)
+    if wrapper in {"timeout", "gtimeout"} and remaining and _TIMEOUT_DURATION_RE.fullmatch(remaining[0]):
+        remaining.pop(0)
+    return remaining
+
+
+def _derive_tool_bin_from_tokens(tokens: list[str], *, depth: int = 0) -> str:
+    if depth > 4:
+        return ""
+    remaining = list(tokens)
+    while remaining:
+        token = remaining.pop(0).strip()
+        if not token:
+            continue
+        if _is_env_assignment(token):
+            continue
+        bare = Path(token).name
+        if bare in _SHELL_TOOL_WRAPPERS:
+            for idx, arg in enumerate(remaining):
+                if _is_shell_command_string_flag(arg):
+                    if idx + 1 < len(remaining):
+                        return _derive_tool_bin_from_tokens(
+                            _shell_tokens(remaining[idx + 1]),
+                            depth=depth + 1,
+                        )
+                    break
+            return bare
+        if bare in _PREFIX_TOOL_WRAPPERS:
+            remaining = _strip_wrapper_options(bare, remaining)
+            continue
+        if bare in _SHELL_PREAMBLE_BUILTINS:
+            post_preamble = _skip_shell_preamble_tokens(remaining)
+            if post_preamble is not None:
+                remaining = post_preamble
+                continue
+        return bare.split(";", 1)[0].split("|", 1)[0].strip() or bare
+    return ""
+
+
+def _is_shell_command_string_flag(arg: str) -> bool:
+    if not arg.startswith("-"):
+        return False
+    if arg == "-c":
+        return True
+    if not arg.startswith("-") or arg.startswith("--"):
+        return False
+    short_flags = arg[1:]
+    return bool(short_flags) and short_flags.endswith("c") and set(short_flags) <= {"l", "i", "s", "r", "c"}
+
+
+def _skip_shell_preamble_tokens(tokens: list[str]) -> list[str] | None:
+    for idx, token in enumerate(tokens):
+        if token in _SHELL_COMMAND_SEPARATORS:
+            return tokens[idx + 1 :]
+    return None
+
+
 def _derive_tool_bin(command: str, argv: list[str] | None) -> str:
     """Return the first executable token of the command. The route-derived
     ``tool_name`` collapses every /api/command call to ``command``; tool_bin
     is the discriminator (cat vs curl vs sqlmap) that operator filtering
     actually needs."""
     if argv:
-        first = (argv[0] or "").strip()
-        if first:
-            return Path(first).name
+        derived = _derive_tool_bin_from_tokens([str(token) for token in argv])
+        if derived:
+            return derived
     text = (command or "").strip()
     if not text:
         return ""
-    # Strip leading env assignments (``FOO=bar BAR=baz cmd ...``) and pick
-    # the first bare token. Not a full shell parse, but correct for the
-    # 95% case in practice.
-    for token in text.split():
-        if "=" in token and token.split("=", 1)[0].replace("_", "").isalnum():
-            continue
-        bare = Path(token).name.split(";")[0].split("|")[0].strip()
-        return bare or token
-    return text.split()[0]
+    derived = _derive_tool_bin_from_tokens(_shell_tokens(text))
+    return derived or text.split()[0]
 
 
 def _resolve_artifact_dir(engagement, override: str | None) -> str | None:

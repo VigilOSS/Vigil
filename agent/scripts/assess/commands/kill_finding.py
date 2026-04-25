@@ -1,4 +1,4 @@
-"""assess.py kill-finding — false-positive verification helper."""
+"""aith assess kill-finding — false-positive verification helper."""
 from __future__ import annotations
 
 import argparse

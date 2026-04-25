@@ -5,7 +5,7 @@ Every 15 minutes a WAL-coherent snapshot is written to
 snapshots are retained (15 hours of continuous coverage at default cadence).
 
 This complements the per-engagement snapshot taken by
-``init_engagement.sh``: the script protects against accidents during setup,
+``aith engagement create``: that command protects against accidents during setup,
 while the scheduled task protects against everything in between — operator
 mistakes against a live DB, filesystem renames of engagement dirs that used
 to trigger the sync cascade-delete, and general OS-level corruption.

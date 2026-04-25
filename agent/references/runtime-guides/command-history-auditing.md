@@ -19,7 +19,7 @@ something that hasn't.
    usually the most valuable coverage signal:
 
    ```bash
-   ./scripts/assess.py list-command-runs --q <keyword>
+   aith assess list-command-runs --q <keyword>
    ```
 
    Narrow with `--agent-name` or `--phase` only if the broad result is
@@ -48,20 +48,31 @@ something that hasn't.
 
 ```bash
 # Broad search for prior work on an objective
-./scripts/assess.py list-command-runs --q "nmap 10.0.0.1"
+aith assess list-command-runs --q "nmap 10.0.0.1"
 
 # Scoped to a specific agent and phase
-./scripts/assess.py list-command-runs \
+aith assess list-command-runs \
     --agent-name recon-specialist --phase recon
 
-# Only successful runs with a specific tool
-./scripts/assess.py list-command-runs --tool-name nmap_scan --success
+# Only successful runs with a specific MCP tool route
+aith assess list-command-runs --tool-name nmap_scan --success
+
+# Filter by the underlying binary, even when it ran inside the generic
+# execute_command wrapper. The backend derives tool_bin from the command
+# string (peeling off timeout/sudo/env/sh -c wrappers), so --tool-bin catches
+# generic-wrapper rows that --tool-name would miss.
+aith assess list-command-runs --q nuclei --tool-bin nuclei
+aith assess list-command-runs --tool-bin sqlmap
+aith assess list-command-runs --tool-bin httpx --success
+
+# Table rendering shows `tool_bin(tool_name)` whenever the two differ — e.g.
+# `nuclei(command)` means nuclei was invoked through the execute_command wrapper.
 
 # Runs that timed out (prior coverage likely incomplete)
-./scripts/assess.py list-command-runs --timed-out
+aith assess list-command-runs --timed-out
 
 # Fetch one run with previews and artifact refs
-./scripts/assess.py get-command-run 142
+aith assess get-command-run 142
 ```
 
 ## Coverage-vs-duplicate decision table
@@ -88,7 +99,7 @@ thumb: ~1 KiB per row in JSON, ~80 bytes per row in the CLI table.
 When you've identified the one run worth inspecting, drill in:
 
 ```bash
-./scripts/assess.py get-command-run <id>
+aith assess get-command-run <id>
 ```
 
 That returns the full preview (up to 64 KiB) and any artifact refs.

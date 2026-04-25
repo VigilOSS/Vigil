@@ -1,4 +1,4 @@
-"""assess.py code-coverage — display code analysis coverage and gate status."""
+"""aith assess code-coverage — display code analysis coverage and gate status."""
 from __future__ import annotations
 
 import json

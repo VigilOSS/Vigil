@@ -44,6 +44,15 @@ def _json_decode(value: Any, default: Any) -> Any:
     return default
 
 
+def _reject_unknown_fields(payload: dict[str, Any], allowed_fields: set[str], *, entity_name: str) -> None:
+    unknown_fields = sorted(key for key in payload if key not in allowed_fields)
+    if unknown_fields:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{entity_name} does not accept fields: {', '.join(unknown_fields)}",
+        )
+
+
 def _coerce_int(value: Any, *, field_name: str) -> int:
     if isinstance(value, bool):
         raise HTTPException(
@@ -465,6 +474,7 @@ def update_code_repo(
     engagement = _engagement_or_404(engagement_id)
     if not kwargs:
         return get_code_repo(engagement_id, repo_id)
+    _reject_unknown_fields(kwargs, _CODE_REPO_ALLOWED_FIELDS, entity_name="repo patch")
 
     json_object_fields = {"lsp_config_json"}
     set_clauses = []
@@ -648,6 +658,25 @@ def _require_slot_types_for_classification(classification: str, slot_types: list
         )
 
 
+def _normalize_guidance_hypotheses(value: Any, *, field_name: str) -> list[str]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must be a list of strings",
+        )
+    normalized: list[str] = []
+    for idx, raw_value in enumerate(value):
+        if not isinstance(raw_value, str):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{field_name}[{idx}] must be a string",
+            )
+        normalized.append(raw_value)
+    return normalized
+
+
 def bulk_classify_code_files(
     engagement_id: int,
     classifications: list[dict[str, Any]],
@@ -750,6 +779,7 @@ def update_code_file(
     engagement = _engagement_or_404(engagement_id)
     if not kwargs:
         return get_code_file(engagement_id, file_id)
+    _reject_unknown_fields(kwargs, _CODE_FILE_ALLOWED_FIELDS, entity_name="file patch")
 
     set_clauses = []
     params: list[Any] = []
@@ -875,6 +905,7 @@ def bulk_update_structural_metadata(
 
     with get_connection() as connection:
         for item in updates:
+            _reject_unknown_fields(item, structural_fields | {"file_id"}, entity_name="bulk structural metadata update")
             file_id = item.get("file_id")
             if file_id is None:
                 skipped += 1
@@ -1065,15 +1096,21 @@ def bulk_create_queue_items(
             slot_types_json = _json_list_text(
                 _normalize_slot_types(item.get("slot_types"), field_name="slot_types")
             )
-            guidance_hypotheses_json = _json_list_text(item.get("guidance_hypotheses"))
+            guidance_hypotheses_json = _json_list_text(
+                _normalize_guidance_hypotheses(
+                    item.get("guidance_hypotheses"),
+                    field_name="guidance_hypotheses",
+                )
+            )
+            cross_file_triggers_json = _json_list_text(item.get("cross_file_triggers") or [])
 
             cursor = connection.execute(
                 """
                 INSERT INTO code_analysis_queue (
                     engagement_id, file_id, priority,
-                    batch_theme, slot_types_json, guidance_hypotheses_json
+                    batch_theme, slot_types_json, guidance_hypotheses_json, cross_file_triggers_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     engagement.id,
@@ -1082,6 +1119,7 @@ def bulk_create_queue_items(
                     batch_theme,
                     slot_types_json,
                     guidance_hypotheses_json,
+                    cross_file_triggers_json,
                 ),
             )
             if cursor.rowcount > 0:
@@ -1165,6 +1203,7 @@ def fetch_queue_items(
             item["batch_theme"] = item.get("batch_theme", "")
             item["slot_types"] = _json_decode(item.get("slot_types_json"), [])
             item["guidance_hypotheses"] = _json_decode(item.get("guidance_hypotheses_json"), [])
+            item["cross_file_triggers"] = _json_decode(item.get("cross_file_triggers_json"), [])
             item["file"] = _hydrate_code_file(file_rows[int(row["file_id"])])
             item["repo"] = _hydrate_code_repo(repo_rows[int(file_rows[int(row["file_id"])]["repo_id"])])
             item["applicable_vuln_classes"] = _applicable_families_for_file(
@@ -2237,19 +2276,20 @@ def requeue_triggered_files(
             if raw_file_id is not None:
                 validated_file_id = _coerce_int(raw_file_id, field_name="file_id")
                 row = connection.execute(
-                    "SELECT id FROM code_files WHERE engagement_id = ? AND id = ?",
+                    "SELECT id, file_path FROM code_files WHERE engagement_id = ? AND id = ?",
                     (engagement.id, validated_file_id),
                 ).fetchone()
                 if row is None:
                     not_found.append(str(raw_file_id))
                     continue
                 file_id = int(row["id"])
+                raw_file_path = str(row["file_path"])
             elif raw_file_path:
                 rows = connection.execute(
                     (
-                        "SELECT id FROM code_files WHERE engagement_id = ? AND file_path = ?"
+                        "SELECT id, file_path FROM code_files WHERE engagement_id = ? AND file_path = ?"
                         if validated_repo_id is None
-                        else "SELECT id FROM code_files WHERE engagement_id = ? AND repo_id = ? AND file_path = ?"
+                        else "SELECT id, file_path FROM code_files WHERE engagement_id = ? AND repo_id = ? AND file_path = ?"
                     ),
                     (engagement.id, raw_file_path)
                     if validated_repo_id is None
@@ -2272,6 +2312,8 @@ def requeue_triggered_files(
                     "batch_theme": "cross-file-trigger",
                     "slot_types": [],
                     "guidance_hypotheses": [],
+                    "cross_file_triggers": [],
+                    "file_path": raw_file_path,
                 },
             )
             priority = _coerce_int(item.get("priority", 50), field_name="priority")
@@ -2298,28 +2340,39 @@ def requeue_triggered_files(
                     bucket["slot_types"].append(slot_name)
                     existing_slots.add(slot_name)
 
-            guidance = list(item.get("guidance_hypotheses") or [])
+            guidance = _normalize_guidance_hypotheses(
+                item.get("guidance_hypotheses"),
+                field_name="guidance_hypotheses",
+            )
             reason = item.get("reason", "")
             trigger_ctx = item.get("trigger_context")
-            if reason or trigger_ctx:
-                hint: dict[str, Any] = {"source": "cross_file_trigger"}
-                if reason:
-                    hint["reason"] = reason
-                if isinstance(trigger_ctx, dict):
-                    hint.update(trigger_ctx)
-                guidance.append(hint)
-
             bucket_guidance = bucket["guidance_hypotheses"]
-            existing_guidance = {
-                json.dumps(entry, sort_keys=True, default=str)
-                for entry in bucket_guidance
-            }
             for entry in guidance:
-                signature = json.dumps(entry, sort_keys=True, default=str)
-                if signature in existing_guidance:
-                    continue
-                bucket_guidance.append(entry)
-                existing_guidance.add(signature)
+                if entry not in bucket_guidance:
+                    bucket_guidance.append(entry)
+
+            if reason or trigger_ctx:
+                trigger_payload: dict[str, Any] = {
+                    "file_path": str(bucket.get("file_path") or raw_file_path),
+                    "source": "cross_file_trigger",
+                }
+                if reason:
+                    trigger_payload["reason"] = str(reason)
+                if isinstance(trigger_ctx, dict):
+                    trigger_payload.update(trigger_ctx)
+                trigger_payload = {
+                    key: value
+                    for key, value in trigger_payload.items()
+                    if value not in (None, "", [], {})
+                }
+                bucket_triggers = bucket["cross_file_triggers"]
+                signature = json.dumps(trigger_payload, sort_keys=True, default=str)
+                existing_triggers = {
+                    json.dumps(entry, sort_keys=True, default=str)
+                    for entry in bucket_triggers
+                }
+                if signature not in existing_triggers:
+                    bucket_triggers.append(trigger_payload)
 
         for file_id, item in aggregated.items():
             current_status = _trigger_status_for_file(connection, engagement.id, file_id)
@@ -2336,9 +2389,9 @@ def requeue_triggered_files(
                 """
                 INSERT INTO code_analysis_queue (
                     engagement_id, file_id, priority,
-                    batch_theme, slot_types_json, guidance_hypotheses_json
+                    batch_theme, slot_types_json, guidance_hypotheses_json, cross_file_triggers_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     engagement.id,
@@ -2347,6 +2400,7 @@ def requeue_triggered_files(
                     str(item["batch_theme"]),
                     _json_list_text(item["slot_types"]),
                     _json_list_text(item["guidance_hypotheses"]),
+                    _json_list_text(item["cross_file_triggers"]),
                 ),
             )
             if cursor.rowcount > 0:

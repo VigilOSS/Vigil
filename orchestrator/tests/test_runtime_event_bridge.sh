@@ -37,7 +37,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.endswith("/assessment/findings"):
             response = {
                 "finding": {
-                    "slug": payload.get("slug", "FINDING-VA-001"),
+                    "slug": payload.get("slug", "VA-001"),
                     "title": payload["title"],
                     "severity": payload.get("severity", "medium"),
                     "status": payload.get("status", "confirmed"),

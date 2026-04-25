@@ -9,7 +9,7 @@ def main(argv: list[str] | None = None) -> None:
     from assess.lib.client import AssessError
 
     parser = argparse.ArgumentParser(
-        prog="assess.py",
+        prog="aith assess",
         description="AI Threat Hunting — assessment coordination CLI",
     )
     parser.add_argument(
@@ -17,6 +17,13 @@ def main(argv: list[str] | None = None) -> None:
         dest="engagement_dir",
         default=None,
         help="Engagement directory (default: $ENGAGEMENT_DIR or cwd if it contains scope.json)",
+    )
+    parser.add_argument(
+        "--actor-kind",
+        dest="actor_kind",
+        default=None,
+        choices=["operator", "agent", "hook", "system"],
+        help="Actor kind for commands that write activity entries (currently log)",
     )
 
     sub = parser.add_subparsers(dest="command")
@@ -27,6 +34,8 @@ def main(argv: list[str] | None = None) -> None:
         check_coverage,
         check_exploit_gate,
         check_report_readiness,
+        check_scope_coverage,
+        classify_work,
         contract,
         code_classify,
         code_coverage,
@@ -42,11 +51,13 @@ def main(argv: list[str] | None = None) -> None:
         export_findings,
         export_surfaces,
         fetch,
+        filter_scope,
         get_command_run,
         ingest_endpoints,
         ingest_spec,
         kill_finding,
         launch_session,
+        list_clusters,
         list_command_runs,
         list_findings,
         list_intel,
@@ -68,6 +79,7 @@ def main(argv: list[str] | None = None) -> None:
 
     for mod in (
         fetch,
+        filter_scope,
         list_command_runs,
         get_command_run,
         list_findings,
@@ -88,7 +100,10 @@ def main(argv: list[str] | None = None) -> None:
         dispatch,
         ingest_endpoints,
         ingest_spec,
+        classify_work,
+        list_clusters,
         check_coverage,
+        check_scope_coverage,
         check_report_readiness,
         review_exploits,
         check_exploit_gate,

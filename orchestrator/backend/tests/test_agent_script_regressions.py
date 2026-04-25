@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -38,6 +39,27 @@ def _load_proxy_addon_module():
     )
     sys.modules["mitmproxy"] = mitmproxy_module
     return _load_script_module("test_proxy_addon_module", "agent/scripts/proxy_addon.py")
+
+
+def test_kali_runtime_dockerfiles_package_audit_enum_module() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    required_copy = "COPY docker/kali-mcp-runtime/audit_enums.py /opt/mcp-tools/audit_enums.py"
+    for dockerfile in (
+        repo_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
+        repo_root / "agent" / "docker" / "runtime-lightweight" / "Dockerfile",
+    ):
+        contents = dockerfile.read_text(encoding="utf-8")
+        assert required_copy in contents
+
+
+def test_kali_runtime_dockerfiles_package_ping_for_mcp_smoke_tests() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    for dockerfile in (
+        repo_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
+        repo_root / "agent" / "docker" / "runtime-lightweight" / "Dockerfile",
+    ):
+        contents = dockerfile.read_text(encoding="utf-8")
+        assert "iputils-ping=3:20250605-1+b1" in contents
 
 
 def test_patched_kali_client_preserves_audit_context_for_async_tools(monkeypatch) -> None:
@@ -96,6 +118,58 @@ def test_patched_kali_client_preserves_audit_context_for_async_tools(monkeypatch
         },
     ]
     assert module._AUDIT_CONTEXT.get() == {}
+
+
+def test_patched_kali_client_injects_audit_headers_for_requests_session(monkeypatch) -> None:
+    module = _load_script_module(
+        "test_patched_kali_client_requests_session_module",
+        "docker/kali-mcp-runtime/patched_kali_client.py",
+    )
+
+    observed_headers: list[dict[str, str]] = []
+
+    def fake_request(self, method, url, **kwargs):  # noqa: ANN001, ANN202
+        observed_headers.append(dict(kwargs.get("headers") or {}))
+        return SimpleNamespace(status_code=200, text="ok")
+
+    class FakeSession:
+        request = fake_request
+
+    requests_module = ModuleType("requests")
+    requests_module.sessions = SimpleNamespace(Session=FakeSession)
+    requests_module.Session = FakeSession
+    requests_module.request = lambda method, url, **kwargs: FakeSession().request(method, url, **kwargs)
+    requests_module.get = lambda url, **kwargs: FakeSession().request("GET", url, **kwargs)
+    requests_module.post = lambda url, **kwargs: FakeSession().request("POST", url, **kwargs)
+    monkeypatch.setitem(sys.modules, "requests", requests_module)
+
+    module._patch_requests_functions()
+    token = module._set_audit_context(
+        "eng-1",
+        "recon-agent",
+        "recon",
+        technique="RECON",
+        intent="fingerprint target",
+        probe_kind="fingerprint",
+        destructive=False,
+    )
+    try:
+        response = requests_module.Session().request("GET", "http://127.0.0.1:5000/api/test")
+    finally:
+        module._clear_audit_context(token)
+
+    assert response.status_code == 200
+    assert observed_headers == [
+        {
+            "X-Engagement-Key": "eng-1",
+            "X-Agent-Name": "recon-agent",
+            "X-Phase": "recon",
+            "X-Technique": "RECON",
+            "X-Intent": "fingerprint target",
+            "X-Probe-Kind": "fingerprint",
+            "X-Destructive": "0",
+        }
+    ]
 
 
 def test_patched_kali_client_isolates_concurrent_async_audit_contexts(monkeypatch) -> None:
@@ -175,6 +249,68 @@ def test_patched_kali_client_isolates_concurrent_async_audit_contexts(monkeypatc
     assert module._AUDIT_CONTEXT.get() == {}
 
 
+def test_patched_kali_client_exposes_command_metadata_params(monkeypatch) -> None:
+    module = _load_script_module(
+        "test_patched_kali_client_metadata_module",
+        "docker/kali-mcp-runtime/patched_kali_client.py",
+    )
+
+    class FakeFastMCP:
+        def tool(self, *args, **kwargs):
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+    mcp_module = ModuleType("mcp")
+    server_module = ModuleType("mcp.server")
+    fastmcp_module = ModuleType("mcp.server.fastmcp")
+    fastmcp_module.FastMCP = FakeFastMCP
+    monkeypatch.setitem(sys.modules, "mcp", mcp_module)
+    monkeypatch.setitem(sys.modules, "mcp.server", server_module)
+    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp_module)
+
+    module._wrap_fastmcp_tool_decorator()
+    observed_headers: list[dict[str, str]] = []
+
+    async def upstream_tool() -> str:
+        observed_headers.append(module._current_audit_headers())
+        return "ok"
+
+    wrapped = FakeFastMCP().tool(name="execute_command")(upstream_tool)
+    signature = module.inspect.signature(wrapped)
+
+    for name in ("technique", "probe_kind", "intent", "destructive"):
+        assert name in signature.parameters
+        assert signature.parameters[name].kind == module.inspect.Parameter.KEYWORD_ONLY
+        assert signature.parameters[name].default is None
+
+    result = asyncio.run(
+        wrapped(
+            engagement_key="eng-1",
+            agent_name="recon-agent",
+            phase="recon",
+            technique="RECON",
+            probe_kind="fingerprint",
+            intent="confirm live host",
+            destructive=False,
+        )
+    )
+
+    assert result == "ok"
+    assert observed_headers == [
+        {
+            "X-Engagement-Key": "eng-1",
+            "X-Agent-Name": "recon-agent",
+            "X-Phase": "recon",
+            "X-Technique": "RECON",
+            "X-Probe-Kind": "fingerprint",
+            "X-Intent": "confirm live host",
+            "X-Destructive": "0",
+        }
+    ]
+
+
 def test_patched_kali_server_bounds_queued_audit_streams(monkeypatch, tmp_path: Path) -> None:
     upstream_path = tmp_path / "fake_kali_server.py"
     upstream_path.write_text(
@@ -236,6 +372,84 @@ def test_patched_kali_server_bounds_queued_audit_streams(monkeypatch, tmp_path: 
     assert payload["stderr_sha256"] == hashlib.sha256(b"123456789").hexdigest()
     assert "stdout truncated before audit enqueue from 13 bytes to 8 bytes" in payload["notes"]
     assert "stderr truncated before audit enqueue from 9 bytes to 8 bytes" in payload["notes"]
+
+
+def test_patched_kali_server_injects_engagement_env_into_commands(monkeypatch, tmp_path: Path) -> None:
+    upstream_path = tmp_path / "fake_kali_server.py"
+    upstream_path.write_text(
+        "\n".join(
+            [
+                "import logging",
+                "import os",
+                "import threading",
+                "API_PORT = 5000",
+                "DEBUG_MODE = False",
+                "logger = logging.getLogger('fake_kali_server')",
+                "class CommandExecutor:",
+                "    pass",
+                "def execute_command(command):",
+                "    return {}",
+                "def parse_args():",
+                "    return type('Args', (), {'debug': False, 'port': API_PORT, 'ip': '127.0.0.1'})()",
+                "class App:",
+                "    def before_request(self, fn): return fn",
+                "    def after_request(self, fn): return fn",
+                "    def run(self, *args, **kwargs): pass",
+                "app = App()",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KALI_MCP_SERVER_PATH", str(upstream_path))
+    module = _load_script_module(
+        "test_patched_kali_server_env_module",
+        "docker/kali-mcp-runtime/patched_kali_server.py",
+    )
+
+    captured_env: dict[str, str] = {}
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):  # noqa: ANN001, ANN204
+            captured_env.update(kwargs["env"])
+            self.returncode = 0
+
+        def wait(self, timeout=None):  # noqa: ANN001, ANN202
+            return 0
+
+        def terminate(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+    monkeypatch.setattr(module.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(
+        module,
+        "_flask_g",
+        lambda: SimpleNamespace(
+            audit_engagement_key="eng-123",
+            audit_artifact_dir="/engagements/eng-123/scans/command-runs",
+            command_runs=[],
+        ),
+    )
+    monkeypatch.setattr(module.PatchedCommandExecutor, "_read_stdout", lambda self: None, raising=False)
+    monkeypatch.setattr(module.PatchedCommandExecutor, "_read_stderr", lambda self: None, raising=False)
+
+    executor = module.PatchedCommandExecutor.__new__(module.PatchedCommandExecutor)
+    executor.command = "printf '%s' \"$ENGAGEMENT_KEY\""
+    executor.timeout = 1
+    executor.stdout_data = ""
+    executor.stderr_data = ""
+    executor.timed_out = False
+    executor.return_code = None
+
+    result = executor.execute()
+
+    assert result["success"] is True
+    assert captured_env["ENGAGEMENT_KEY"] == "eng-123"
+    assert captured_env["ENGAGEMENT_DIR"] == "/engagements/eng-123"
+    assert module._safe_engagement_key("../other") == ""
 
 
 def test_list_intel_search_uses_canonical_entity_type(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -367,6 +581,66 @@ def test_proxy_addon_loads_legacy_scope_keys(tmp_path: Path) -> None:
     assert collector._is_in_scope("api.example.com") is True
     assert collector._is_in_scope("legacy.example.net") is True
     assert collector._is_in_scope("out-of-scope.test") is False
+
+
+def test_filter_scope_keeps_only_exactly_scoped_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_script_module(
+        "test_filter_scope_module",
+        "agent/scripts/assess/commands/filter_scope.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text(
+        json.dumps(
+            {
+                "hosts": [
+                    "*.example.com",
+                    "https://app.other.test/base",
+                    "api.example.net",
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    input_file = tmp_path / "urls.txt"
+    input_file.write_text(
+        "\n".join(
+            [
+                "https://api.example.com/a",
+                "https://example.com/apex",
+                "https://evil-example.com/no",
+                "https://app.other.test/v1",
+                "api.example.net:8443",
+                "https://api.example.net.evil.test",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir=None: SimpleNamespace(
+            engagement_dir=str(engagement_dir),
+            engagement_key="eng",
+            base_url="http://example.test",
+        ),
+    )
+    module.run(
+        SimpleNamespace(
+            engagement_dir=engagement_dir,
+            input_file=str(input_file),
+            output=None,
+        )
+    )
+
+    assert capsys.readouterr().out.splitlines() == [
+        "https://api.example.com/a",
+        "https://example.com/apex",
+        "https://app.other.test/v1",
+        "api.example.net:8443",
+    ]
 
 
 def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) -> None:
@@ -682,7 +956,7 @@ def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, 
     )
     (engagement_dir / "sessions" / "index.json").write_text(
         json.dumps(
-            [{"session_id": "session-a", "status": "open", "assigned_targets": ["FINDING-EX-001"]}]
+            [{"session_id": "session-a", "status": "open", "assigned_targets": ["EX-001"]}]
         ),
         encoding="utf-8",
     )
@@ -698,7 +972,7 @@ def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, 
     )
     monkeypatch.setattr(module, "session_dir_path", lambda eng_dir, session_id: str(session_dir))
     monkeypatch.setattr(module, "finding_lock_path", lambda eng_dir: str(engagement_dir / ".findings.lock"))
-    monkeypatch.setattr(module, "next_finding_id", lambda base_url, engagement_key, source_name: "FINDING-EX-001")
+    monkeypatch.setattr(module, "next_finding_id", lambda base_url, engagement_key, source_name: "EX-001")
 
     captured: list[tuple[str, dict[str, object]]] = []
 
@@ -723,7 +997,7 @@ def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, 
     assert payload["workflow_status"] == "active"
     assert "status" not in payload
     session_index = json.loads((engagement_dir / "sessions" / "index.json").read_text(encoding="utf-8"))
-    assert session_index[0]["assigned_targets"] == ["FINDING-EX-001"]
+    assert session_index[0]["assigned_targets"] == ["EX-001"]
     assert "assigned_findings" not in session_index[0]
 
 
@@ -751,7 +1025,7 @@ def test_merge_session_validates_session_index_before_backend_posts(monkeypatch,
     )
     (engagement_dir / "sessions" / "index.json").write_text(
         json.dumps(
-            [{"session_id": "session-a", "status": "open", "assigned_findings": ["FINDING-EX-001"]}]
+            [{"session_id": "session-a", "status": "open", "assigned_findings": ["EX-001"]}]
         ),
         encoding="utf-8",
     )
@@ -816,6 +1090,63 @@ def test_list_command_runs_failed_excludes_timeouts_by_default() -> None:
     assert "timed_out=false" in query
 
 
+def test_list_command_runs_table_displays_tool_bin_for_execute_command() -> None:
+    module = _load_script_module(
+        "test_list_command_runs_render_module",
+        "agent/scripts/assess/commands/list_command_runs.py",
+    )
+
+    rendered = module._render_table(
+        [
+            {
+                "id": 1,
+                "created_at": "2026-04-22T00:00:00Z",
+                "phase": "recon",
+                "agent_name": "recon-specialist",
+                "tool_name": "command",
+                "tool_bin": "nuclei",
+                "technique": "RECON",
+                "probe_kind": "fingerprint",
+                "destructive": False,
+                "return_code": 0,
+                "timed_out": False,
+                "intent": "reactive sweep",
+                "command": "nuclei -l /engagements/eng/scans/targets.txt",
+            }
+        ]
+    )
+
+    assert "nuclei(command)" in rendered
+    assert "\tcommand\t" not in rendered
+
+
+def test_log_actor_kind_parses_before_or_after_subcommand() -> None:
+    module = _load_script_module(
+        "test_log_entry_actor_kind_module",
+        "agent/scripts/assess/commands/log_entry.py",
+    )
+
+    parser = argparse.ArgumentParser(prog="aith assess")
+    parser.add_argument(
+        "--actor-kind",
+        dest="actor_kind",
+        default=None,
+        choices=["operator", "agent", "hook", "system"],
+    )
+    subparsers = parser.add_subparsers(dest="command")
+    module.register(subparsers)
+
+    before = parser.parse_args(
+        ["--actor-kind", "operator", "log", "agent", "title", "action", "result"]
+    )
+    after = parser.parse_args(
+        ["log", "agent", "title", "action", "result", "--actor-kind", "operator"]
+    )
+
+    assert before.actor_kind == "operator"
+    assert after.actor_kind == "operator"
+
+
 def test_list_command_runs_failed_with_timed_out_preserves_timeout_filter() -> None:
     module = _load_script_module(
         "test_list_command_runs_timeout_module",
@@ -859,7 +1190,7 @@ def test_session_index_rejects_legacy_assigned_findings_key(tmp_path: Path) -> N
     sessions_dir.mkdir(parents=True)
     (sessions_dir / "index.json").write_text(
         json.dumps(
-            [{"session_id": "session-a", "status": "open", "assigned_findings": ["FINDING-EX-001"]}]
+            [{"session_id": "session-a", "status": "open", "assigned_findings": ["EX-001"]}]
         ),
         encoding="utf-8",
     )
@@ -879,7 +1210,7 @@ def test_save_session_index_rejects_legacy_assigned_findings_key(tmp_path: Path)
     with pytest.raises(SystemExit, match="assigned_findings is no longer supported"):
         module.save_session_index(
             str(engagement_dir),
-            [{"session_id": "session-a", "status": "open", "assigned_findings": ["FINDING-EX-001"]}],
+            [{"session_id": "session-a", "status": "open", "assigned_findings": ["EX-001"]}],
         )
 
 
@@ -913,7 +1244,7 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
         "load_exploit_candidates",
         lambda cfg: [
             {
-                "slug": "FINDING-ACTIVE-001",
+                "slug": "ACTIVE-001",
                 "severity": "high",
                 "workflow_status": "active",
                 "verification_state": "verified",
@@ -923,7 +1254,7 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
                 "canonical_location": "file:src/parser.py:10",
             },
             {
-                "slug": "FINDING-CHAIN-001",
+                "slug": "CHAIN-001",
                 "severity": "info",
                 "workflow_status": "active",
                 "verification_state": "verified",
@@ -939,8 +1270,8 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
 
     output = capsys.readouterr().out
     assert "candidate_rule: verified findings only" in output
-    assert "FINDING-ACTIVE-001 | high | active | confirmed | verified_high | Live issue" in output
-    assert "FINDING-CHAIN-001 | info | active | downgraded | verified_chain_required | Chain-only primitive" in output
+    assert "ACTIVE-001 | high | active | confirmed | verified_high | Live issue" in output
+    assert "CHAIN-001 | info | active | downgraded | verified_chain_required | Chain-only primitive" in output
 
 
 def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path) -> None:
@@ -956,7 +1287,7 @@ def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path)
                 "current_phase": "exploit",
                 "exploit_policy": "selected",
                 "exploit_review_state": "approved",
-                "approved_targets": ["FINDING-ACTIVE-001"],
+                "approved_targets": ["ACTIVE-001"],
             }
         ),
         encoding="utf-8",
@@ -973,7 +1304,7 @@ def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path)
         ),
     )
     monkeypatch.setattr(module, "ensure_session_index", lambda eng_dir: None)
-    monkeypatch.setattr(module, "resolve_approved_target_slugs", lambda cfg, scope: ["FINDING-ACTIVE-001"])
+    monkeypatch.setattr(module, "resolve_approved_target_slugs", lambda cfg, scope: ["ACTIVE-001"])
 
     class FakeClient:
         def __init__(self, base_url: str, engagement_key: str) -> None:
@@ -984,7 +1315,7 @@ def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path)
             assert endpoint == "findings"
             return [
                 {
-                    "slug": "FINDING-ACTIVE-001",
+                    "slug": "ACTIVE-001",
                     "severity": "high",
                     "workflow_status": "active",
                     "title": "Live issue",
@@ -1000,7 +1331,7 @@ def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path)
         SimpleNamespace(
             engagement_dir=engagement_dir,
             session_id="session-a",
-            slugs=["FINDING-ACTIVE-001"],
+            slugs=["ACTIVE-001"],
         )
     )
 
@@ -1009,9 +1340,9 @@ def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path)
         (engagement_dir / "sessions" / "session-a" / "assignment.json").read_text(encoding="utf-8")
     )
     session_index = json.loads((engagement_dir / "sessions" / "index.json").read_text(encoding="utf-8"))
-    assert "FINDING-ACTIVE-001 | high | active | Live issue" in prompt
-    assert assignment["assigned_targets"] == ["FINDING-ACTIVE-001"]
-    assert session_index[0]["assigned_targets"] == ["FINDING-ACTIVE-001"]
+    assert "ACTIVE-001 | high | active | Live issue" in prompt
+    assert assignment["assigned_targets"] == ["ACTIVE-001"]
+    assert session_index[0]["assigned_targets"] == ["ACTIVE-001"]
 
 
 def test_launch_session_rejects_existing_session_without_truncating_proposals(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1031,7 +1362,7 @@ def test_launch_session_rejects_existing_session_without_truncating_proposals(mo
                 "current_phase": "exploit",
                 "exploit_policy": "selected",
                 "exploit_review_state": "approved",
-                "approved_targets": ["FINDING-ACTIVE-001"],
+                "approved_targets": ["ACTIVE-001"],
             }
         ),
         encoding="utf-8",
@@ -1050,14 +1381,14 @@ def test_launch_session_rejects_existing_session_without_truncating_proposals(mo
             engagement_dir=str(engagement_dir),
         ),
     )
-    monkeypatch.setattr(module, "resolve_approved_target_slugs", lambda cfg, scope: ["FINDING-ACTIVE-001"])
+    monkeypatch.setattr(module, "resolve_approved_target_slugs", lambda cfg, scope: ["ACTIVE-001"])
 
     with pytest.raises(SystemExit) as excinfo:
         module.run(
             SimpleNamespace(
                 engagement_dir=engagement_dir,
                 session_id="session-a",
-                slugs=["FINDING-ACTIVE-001"],
+                slugs=["ACTIVE-001"],
             )
         )
 
@@ -1094,7 +1425,7 @@ def test_check_report_readiness_surfaces_backend_blockers(monkeypatch, tmp_path:
                 "blockers": [
                     {
                         "kind": "verification",
-                        "slug": "FINDING-VA-001",
+                        "slug": "VA-001",
                         "detail": "Finding remains unreviewed.",
                     }
                 ],
@@ -1111,4 +1442,4 @@ def test_check_report_readiness_surfaces_backend_blockers(monkeypatch, tmp_path:
     assert excinfo.value.code == 1
     err = capsys.readouterr().err
     assert "Final report blockers remain:" in err
-    assert "verification | FINDING-VA-001: Finding remains unreviewed." in err
+    assert "verification | VA-001: Finding remains unreviewed." in err

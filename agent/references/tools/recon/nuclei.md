@@ -6,7 +6,7 @@ For live engagement targets, prefer `nuclei` through the Kali MCP command-execut
 ## Basic Scanning
 
 **Single target:** `nuclei -u https://target`
-**Multiple targets:** `nuclei -l /engagement/scans/targets.txt`
+**Multiple targets:** `nuclei -l /engagements/$ENGAGEMENT_KEY/scans/targets.txt`
 **By severity:** `nuclei -u https://target -severity critical,high`
 **By tag:** `nuclei -u https://target -tags cve,rce,misconfig`
 **Exclude tags:** `nuclei -u https://target -exclude-tags dos,fuzz`
