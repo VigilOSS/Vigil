@@ -1,6 +1,7 @@
 """Scope parsing — replaces lib/scope.sh for Python callers."""
 from __future__ import annotations
 
+import ipaddress
 import json
 from pathlib import Path
 from typing import Any
@@ -115,29 +116,74 @@ def classify_scope_entry(raw: str) -> dict[str, str] | None:
 
 def host_from_token(raw: str) -> str:
     """Extract a lowercased host from a URL, host:port, or line token."""
-    token = raw.strip().strip("'\"<>()[],;")
+    token = raw.strip()
     if not token or token.startswith("-"):
         return ""
-    first = token.split()[0]
+    first = token.split()[0].strip("'\"<>()").rstrip(",;")
+    if not first:
+        return ""
     if "://" in first:
         try:
             host = urlsplit(first).hostname or ""
         except ValueError:
             return ""
-    elif "/" in first and "." in first:
+    elif first.startswith("["):
+        host = _host_from_bracketed_authority(first)
+    elif "/" in first and ("." in first or ":" in first):
         try:
             host = urlsplit("http://" + first).hostname or ""
         except ValueError:
             return ""
     else:
-        host = first.split(":", 1)[0]
-    host = host.rstrip(".").lower()
+        host = _host_from_authority(first)
+    return _validated_host(host)
+
+
+def _host_from_authority(raw: str) -> str:
+    authority = raw.strip().strip("'\"<>()").rstrip(",;").rstrip(".").lower()
+    if not authority:
+        return ""
+    if authority.startswith("["):
+        return _host_from_bracketed_authority(authority)
+    if _ip_literal(authority):
+        return authority
+    if authority.count(":") >= 2:
+        host, _, port = authority.rpartition(":")
+        if port.isdigit() and _ip_literal(host):
+            return host
+        return authority
+    return authority.split(":", 1)[0]
+
+
+def _host_from_bracketed_authority(raw: str) -> str:
+    closing = raw.find("]")
+    if closing <= 1:
+        return ""
+    return raw[1:closing]
+
+
+def _validated_host(raw: str) -> str:
+    host = raw.strip().strip("[]").rstrip(".").lower()
+    if not host:
+        return ""
+    ip_literal = _ip_literal(host)
+    if ip_literal:
+        return ip_literal
     return host if looks_like_host(host) else ""
+
+
+def _ip_literal(host: str) -> str:
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        return ""
 
 
 def looks_like_host(host: str) -> bool:
     if not host:
         return False
+    if _ip_literal(host):
+        return True
     if host == "localhost":
         return True
     if "." in host:

@@ -595,6 +595,76 @@ def test_bare_scope_host_with_port_matches_host_keyed_services_and_work(monkeypa
     assert "pending-work-remains" in entry["gaps"]
 
 
+def test_scope_parser_accepts_bare_and_bracketed_ipv6_literals() -> None:
+    """IPv6 literals in scope.json must participate in scope matching."""
+    scope_module = _load_script_module(
+        "test_scope_ipv6_module",
+        "agent/scripts/assess/lib/scope.py",
+    )
+
+    assert scope_module.classify_scope_entry("2001:db8::1") == {
+        "scope_entry": "2001:db8::1",
+        "entry_kind": "bare_host",
+        "host": "2001:db8::1",
+    }
+    assert scope_module.classify_scope_entry("[2001:db8::2]") == {
+        "scope_entry": "[2001:db8::2]",
+        "entry_kind": "bare_host",
+        "host": "2001:db8::2",
+    }
+    assert scope_module.classify_scope_entry("https://[2001:db8::3]/health") == {
+        "scope_entry": "https://[2001:db8::3]/health",
+        "entry_kind": "url",
+        "host": "2001:db8::3",
+    }
+    assert scope_module.host_from_token("https://[2001:db8::4]:8443/path") == "2001:db8::4"
+
+
+def test_ipv6_scope_hosts_match_services_surfaces_and_work(monkeypatch, tmp_path: Path, capsys) -> None:
+    """IPv6 scope rows should match backend services, surfaces, and queued work."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["2001:db8::1", "[2001:db8::2]"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db,
+        queue_key="ip6:1",
+        url="https://[2001:db8::1]/work",
+        url_path="/work",
+        status="done",
+    )
+    _insert_work_item(
+        db,
+        queue_key="ip6:2",
+        url="https://[2001:db8::2]/work",
+        url_path="/work",
+        status="done",
+    )
+
+    services = [
+        {"endpoint": "2001:db8::1:443", "state": "up"},
+        {"endpoint": "[2001:db8::2]:8443", "state": "up"},
+    ]
+    surfaces = [
+        {"target_descriptor": "https://[2001:db8::1]/work"},
+        {"target_descriptor": "https://[2001:db8::2]:8443/work"},
+    ]
+
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="collection")
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is True, report
+
+    by_scope = {entry["scope_entry"]: entry for entry in report["entries"]}
+    assert by_scope["2001:db8::1"]["host"] == "2001:db8::1"
+    assert by_scope["2001:db8::1"]["live_hosts"] == 1
+    assert by_scope["2001:db8::1"]["surfaces_count"] == 1
+    assert by_scope["2001:db8::1"]["work_queued"]["done"] == 1
+    assert by_scope["[2001:db8::2]"]["host"] == "2001:db8::2"
+    assert by_scope["[2001:db8::2]"]["live_hosts"] == 1
+    assert by_scope["[2001:db8::2]"]["surfaces_count"] == 1
+    assert by_scope["[2001:db8::2]"]["work_queued"]["done"] == 1
+
+
 def test_host_metadata_status_beats_deferred_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
     """An explicit host_metadata status must not be overwritten by deferred_hosts fallback."""
     eng = tmp_path / "engagement"

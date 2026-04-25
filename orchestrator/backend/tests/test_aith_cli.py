@@ -233,6 +233,58 @@ def test_mitmproxy_start_without_arg_uses_current_engagement(tmp_path: Path, mon
     assert captured["engagement_dir"] == engagement
 
 
+def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+
+    install_root = tmp_path / "install"
+    frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
+    frontend_dist.mkdir(parents=True)
+    (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    captured: dict[str, object] = {}
+
+    def fake_execvpe(file: str, argv: list[str], env: dict[str, str]) -> None:
+        captured["file"] = file
+        captured["argv"] = argv
+        captured["cwd"] = Path.cwd()
+        captured["env"] = env
+        raise RuntimeError("exec blocked")
+
+    monkeypatch.setattr(orchestrator_module.os, "execvpe", fake_execvpe)
+
+    with pytest.raises(RuntimeError, match="exec blocked"):
+        orchestrator_module.start_orchestrator(
+            orchestrator_module.OrchestratorOptions(install_root=install_root, foreground=True)
+        )
+
+    assert captured["file"] == "uv"
+    assert captured["cwd"] == install_root.resolve()
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert argv[:4] == ["uv", "run", "--directory", "orchestrator/backend"]
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["AI_THREAT_HUNTING_INSTALL_DIR"] == str(install_root.resolve())
+
+
+def test_orchestrator_health_wait_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+
+    attempts: list[str] = []
+
+    def fail_urlopen(url: str, timeout: int):
+        attempts.append(url)
+        raise OSError("down")
+
+    monkeypatch.setattr(orchestrator_module.urllib.request, "urlopen", fail_urlopen)
+    monkeypatch.setattr(orchestrator_module.time, "sleep", lambda _: None)
+
+    assert orchestrator_module._wait_for_health("127.0.0.1", 18000) is False
+    assert attempts == ["http://127.0.0.1:18000/healthz"] * 30
+
+
 def test_main_assess_passthrough_only_applies_to_top_level_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import main as main_module
 
