@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .paths import resolve_orchestrator_data_dir
+
 BACKUP_PREFIX = "orchestrator."
 BACKUP_SUFFIX = ".sqlite3"
 
@@ -18,7 +20,7 @@ class BackupInfo:
 
 
 def data_dir(install_root: Path) -> Path:
-    return install_root.expanduser().resolve() / "orchestrator" / "backend" / "data"
+    return resolve_orchestrator_data_dir(install_root)
 
 
 def live_database(install_root: Path) -> Path:
