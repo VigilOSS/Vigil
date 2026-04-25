@@ -1,7 +1,9 @@
 """mitmproxy addon — intercepts HTTP traffic and queues transient work items into SQLite.
 
-Load with:
-    mitmdump -p 8080 -s scripts/proxy_addon.py --set engagement_dir=engagements/<date>/
+Managed launch:
+    aith mitmproxy start /path/to/engagement
+
+The CLI runs this addon inside the security-research-proxy Docker container.
 """
 
 import json

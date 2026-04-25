@@ -21,17 +21,17 @@ origin: AI Threat Hunting
 
 ### 1. Quick Initial Scan
 ```bash
-nmap -Pn -sV -sC -T4 TARGET -oA /engagement/scans/nmap_initial
+nmap -Pn -sV -sC -T4 TARGET -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_initial
 # -Pn: skip host discovery (required when ICMP is blocked by firewall)
 ```
 
 ### 2. Full TCP Scan
 ```bash
-nmap -sV -sC -T4 -p- TARGET -oN /engagement/scans/nmap_full_tcp.txt
+nmap -sV -sC -T4 -p- TARGET -oN /engagements/$ENGAGEMENT_KEY/scans/nmap_full_tcp.txt
 # Speed optimization: discover ports first, then deep scan
-nmap -sS -T4 -p- --min-rate 1000 TARGET -oG /engagement/scans/ports_only.txt
-PORTS=$(grep -oE '[0-9]+/open' /engagement/scans/ports_only.txt | cut -d/ -f1 | tr '\n' ',' | sed 's/,$//')
-nmap -sV -sC -p "$PORTS" TARGET -oN /engagement/scans/nmap_targeted.txt
+nmap -sS -T4 -p- --min-rate 1000 TARGET -oG /engagements/$ENGAGEMENT_KEY/scans/ports_only.txt
+PORTS=$(grep -oE '[0-9]+/open' /engagements/$ENGAGEMENT_KEY/scans/ports_only.txt | cut -d/ -f1 | tr '\n' ',' | sed 's/,$//')
+nmap -sV -sC -p "$PORTS" TARGET -oN /engagements/$ENGAGEMENT_KEY/scans/nmap_targeted.txt
 ```
 
 ### 3. Service Detection
@@ -52,7 +52,7 @@ nmap --script=ssh-auth-methods -p 22 TARGET
 
 ### 5. UDP Scan
 ```bash
-nmap -sU --top-ports 50 -T4 TARGET -oN /engagement/scans/nmap_udp.txt
+nmap -sU --top-ports 50 -T4 TARGET -oN /engagements/$ENGAGEMENT_KEY/scans/nmap_udp.txt
 nmap -sU -p 53,67,68,69,123,161,162,500,514,1900 TARGET
 ```
 
@@ -66,8 +66,8 @@ nmap --source-port 53 -sV -p PORT TARGET      # Source port trick
 
 ### 7. Output Parsing
 ```bash
-grep -oE '[0-9]+/open/tcp//[^ ]+' /engagement/scans/nmap_initial.gnmap
-grep "open" /engagement/scans/nmap_targeted.txt | grep -v "filtered"
+grep -oE '[0-9]+/open/tcp//[^ ]+' /engagements/$ENGAGEMENT_KEY/scans/nmap_initial.gnmap
+grep "open" /engagements/$ENGAGEMENT_KEY/scans/nmap_targeted.txt | grep -v "filtered"
 ```
 
 ## Common Port Reference

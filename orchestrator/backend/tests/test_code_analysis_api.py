@@ -330,6 +330,20 @@ def test_queue_fetch_returns_file_direct_work_items(client, isolate_settings):
     assert file_after_fetch.json()["analysis_status"] in ("queued", "in_progress")
 
 
+def test_repo_patch_rejects_unknown_fields(client, isolate_settings):
+    engagement_key = "2026-04-16-code-repo-patch-unknown"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="repo-patch-unknown")
+
+    response = client.patch(
+        f"/engagements/{engagement_key}/assessment/code/repos/{repo['id']}",
+        json={"unsupported_field": "value"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "repo patch does not accept fields: unsupported_field"
+
+
 def test_queue_fetch_uses_backend_applicable_classes_with_role_and_language_overrides(client, isolate_settings):
     engagement_key = "2026-04-09-code-queue-applicable-vulns"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
@@ -1006,6 +1020,61 @@ def test_requeue_triggered_files_rejects_non_numeric_ids(client, isolate_setting
     assert "repo_id must be an integer" in invalid_repo_id.json()["detail"]
 
 
+def test_requeue_triggered_files_keeps_guidance_strings_separate_from_trigger_context(client, isolate_settings):
+    engagement_key = "2026-04-16-code-requeue-guidance-shape"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="requeue-guidance-shape")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
+    _classify_file(client, engagement_key, int(helper_file["id"]), "high", 80)
+
+    requeue = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/requeue",
+        json={
+            "items": [
+                {
+                    "file_path": "src/helpers.py",
+                    "priority": 90,
+                    "guidance_hypotheses": ["Trace helper input normalization"],
+                    "reason": "helper normalizes attacker-controlled input",
+                    "trigger_context": {"vuln_class": "web-app-injection"},
+                }
+            ]
+        },
+    )
+    assert requeue.status_code == 201
+    assert requeue.json()["inserted"] == 1
+
+    fetched = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "follow-up-hunter"},
+    )
+    assert fetched.status_code == 200
+    item = fetched.json()[0]
+    assert item["guidance_hypotheses"] == ["Trace helper input normalization"]
+    assert item["cross_file_triggers"] == [
+        {
+            "file_path": "src/helpers.py",
+            "reason": "helper normalizes attacker-controlled input",
+            "source": "cross_file_trigger",
+            "vuln_class": "web-app-injection",
+        }
+    ]
+
+    invalid_guidance = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/requeue",
+        json={
+            "items": [
+                {
+                    "file_path": "src/helpers.py",
+                    "guidance_hypotheses": [{"text": "not a string"}],
+                }
+            ]
+        },
+    )
+    assert invalid_guidance.status_code == 422
+
+
 def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(client, isolate_settings):
     engagement_key = "2026-04-04-code-coverage-finding-scope"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
@@ -1053,7 +1122,7 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
     finding_a = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "FINDING-CODE-A-001",
+            "slug": "CODE-A-001",
             "title": "Parser trust boundary bypass",
             "severity": "high",
             "workflow_status": "active",
@@ -1083,7 +1152,7 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
     finding_b = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "FINDING-CODE-B-001",
+            "slug": "CODE-B-001",
             "title": "Helper sink exposure",
             "severity": "critical",
             "workflow_status": "active",
@@ -1185,7 +1254,7 @@ def test_coverage_summary_excludes_false_positive_variants(client, isolate_setti
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "FINDING-CODE-VARIANT-001",
+            "slug": "CODE-VARIANT-001",
             "title": "Parser variant",
             "severity": "high",
             "workflow_status": "active",
@@ -1217,12 +1286,12 @@ def test_coverage_summary_excludes_false_positive_variants(client, isolate_setti
     assert baseline.json()["findings_summary"]["variant_count"] == 1
 
     verify = client.post(
-        f"/engagements/{engagement_key}/assessment/findings/FINDING-CODE-VARIANT-001/verify",
+        f"/engagements/{engagement_key}/assessment/findings/CODE-VARIANT-001/verify",
         json={
             "disposition": "false_positive",
             "reason_code": "guarded-path",
             "reason_text": "Guard closes the variant in production.",
-            "artifact_ref": "tools/analysis-state/code-verification/FINDING-CODE-VARIANT-001.json",
+            "artifact_ref": "tools/analysis-state/code-verification/CODE-VARIANT-001.json",
             "source_name": "code-vuln-verifier",
             "details": {
                 "kill_check": 4,
@@ -1251,7 +1320,7 @@ def test_coverage_summary_excludes_non_code_variants(client, isolate_settings):
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "FINDING-WEB-VARIANT-001",
+            "slug": "WEB-VARIANT-001",
             "title": "HTTP variant",
             "severity": "high",
             "workflow_status": "active",
@@ -1329,7 +1398,7 @@ def test_repo_scoped_coverage_excludes_ambiguous_shared_file_paths(client, isola
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "FINDING-SHARED-PATH-001",
+            "slug": "SHARED-PATH-001",
             "title": "Shared path finding",
             "severity": "high",
             "workflow_status": "active",
@@ -1515,6 +1584,22 @@ def test_file_patch_rejects_module_ids_from_other_repos(client, isolate_settings
     assert "same repo" in patched.json()["detail"]
 
 
+def test_file_patch_rejects_unknown_fields(client, isolate_settings):
+    engagement_key = "2026-04-16-code-file-patch-unknown"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="file-patch-unknown")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    response = client.patch(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}",
+        json={"unsupported_field": "value"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "file patch does not accept fields: unsupported_field"
+
+
 def test_file_patch_rejects_non_integer_structural_metadata(client, isolate_settings):
     engagement_key = "2026-04-15-code-file-patch-structural-invalid"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
@@ -1579,6 +1664,33 @@ def test_bulk_structural_metadata_requires_all_totals(client, isolate_settings):
     assert "total_entry_points" in response.text
     assert "total_sinks" in response.text
     assert "total_exports" in response.text
+
+
+def test_bulk_structural_metadata_rejects_unknown_fields(client, isolate_settings):
+    engagement_key = "2026-04-16-code-bulk-structural-unknown"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="bulk-structural-unknown")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/files/bulk-structural-metadata",
+        json={
+            "updates": [
+                {
+                    "file_id": parser_file["id"],
+                    "total_functions": 3,
+                    "total_entry_points": 1,
+                    "total_sinks": 2,
+                    "total_exports": 0,
+                    "unexpected_total": 99,
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+    assert "unexpected_total" in response.text
 
 
 def test_code_analysis_endpoints_reject_foreign_engagement_ids(client, isolate_settings):
@@ -2148,7 +2260,7 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "FINDING-CH-777",
+            "slug": "CH-777",
             "title": "Suppressed parser finding",
             "severity": "medium",
             "workflow_status": "false_positive",
@@ -2184,7 +2296,7 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
             "evidence": "Attacker-controlled data reaches arithmetic.",
             "disposition": "finding",
             "confidence": "high",
-            "finding_slug": "FINDING-CH-777",
+            "finding_slug": "CH-777",
             "cwe_id": "CWE-190",
             "slot_type": "NETWORK-INPUT",
             "notes": "Original hunt output.",

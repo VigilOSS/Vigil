@@ -37,11 +37,11 @@ No Kali MCP needed — this is entirely host-side source code and build work.
 
 Consume Phase 1-3 artifacts and rank functions for fuzzing value.
 
-**Inputs (backend — query via `assess.py`):**
-- Findings: `./scripts/assess.py fetch findings` — filter for `defect_family` in
+**Inputs (backend — query via `aith assess`):**
+- Findings: `aith assess fetch findings` — filter for `defect_family` in
   `buffer-overflow`, `integer-overflow`, `use-after-free`, `uninitialized-memory`.
   Check `verification_state` for Phase 3 confirmation status.
-- File classifications: `./scripts/assess.py fetch "code/files?repo_id=<id>&limit=5000"` —
+- File classifications: `aith assess fetch "code/files?repo_id=<id>&limit=5000"` —
   `classification`, `slot_types`, `role`, `language` per file. Target critical/high C/C++ files
   with `NETWORK-INPUT`, `FILE-CONTENT`, `PROTOCOL-FIELD`, or `SERIALIZED-DATA` slot types.
 
@@ -132,7 +132,7 @@ Before writing harness code, inspect each target for specific patterns that fuzz
 }
 ```
 
-If the audit finds a bug that is directly reportable without fuzzing (e.g., provably reachable integer overflow), record it immediately via `assess.py record-finding` and continue — the harness will validate and extend the finding.
+If the audit finds a bug that is directly reportable without fuzzing (e.g., provably reachable integer overflow), record it immediately via `aith assess record-finding` and continue — the harness will validate and extend the finding.
 
 ### Stage 3: Harness Construction
 
@@ -484,7 +484,7 @@ tools/fuzz-state/
 
 True findings from Stage 6 are recorded via:
 ```bash
-./scripts/assess.py record-finding code-fuzz-engineer <finding-json>
+aith assess record-finding code-fuzz-engineer <finding-json>
 ```
 
 Finding prefix: `CF` (code-fuzz). Location format: `file:<path>:<line>`.

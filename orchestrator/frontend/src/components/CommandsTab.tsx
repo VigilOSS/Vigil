@@ -61,7 +61,6 @@ const TOOL_COLORS: Record<string, string> = {
   nikto: "#be185d",
   hydra: "#6b0d0d",
   john: "#6b0d0d",
-  metasploit: "#991b1b",
   wpscan: "#2f7f52",
   enum4linux: "#a16207",
   dig: "#4b5563",

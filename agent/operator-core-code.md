@@ -32,7 +32,7 @@ Path convention:
 After code analysis engagement initialization completes, repeat until all critical/high files
 analyzed or user signals stop:
 
-1. **ASSESS STATE** -- Read `code-scope.json` (or `scope.json` with `source_repos`). Check code coverage stats via `./scripts/assess.py code-coverage`. Check CWE effort matrix via `./scripts/assess.py code-coverage --cwe-matrix` when in Phase 2B. Backend state is canonical; use `--require-gate-pass` only for the final Phase 3 gate.
+1. **ASSESS STATE** -- Read `code-scope.json` (or `scope.json` with `source_repos`). Check code coverage stats via `aith assess code-coverage`. Check CWE effort matrix via `aith assess code-coverage --cwe-matrix` when in Phase 2B. Backend state is canonical; use `--require-gate-pass` only for the final Phase 3 gate.
 2. **DECIDE NEXT ACTION** -- Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified, call graph complete, structural index generated). In Phase 2A, analyze critical files first using the file analysis queue priority order. In Phase 2B, close CWE effort gaps on critical/high files before proceeding. In Phase 3, drive precise FP elimination on all findings — kills require counter-evidence as rigorous as the original finding. Coverage gaps drive decisions.
 3. **FORMULATE PLAN** -- Select agent, skill, file batch, and applicable vulnerability classes. Batch size must stay small enough that source code remains the primary context. Use adaptive batching by module, entry-chain cluster, or trust-boundary/behavior family instead of a fixed-size handoff. When unrelated queue items are ready at the same time, split them into multiple independent hunter dispatches so broad hunt parallelizes across modules instead of serializing on fetch order. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
 4. **PRESENT OR PROCEED** -- Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.
@@ -42,12 +42,12 @@ analyzed or user signals stop:
    - **Phase 2 (Hunt):** `code-vuln-hunter` -> `agent/skills/code-vulnerability-analysis/SKILL.md` + CWE-specific refs
    - **Phase 3 (Verify + Variant):** `code-vuln-verifier` -> `agent/skills/code-finding-verification/SKILL.md` AND `code-variant-hunter` -> `agent/skills/code-variant-analysis/SKILL.md` (parallel)
    - **Phase 4 (Fuzz):** `code-fuzz-engineer` -> `agent/skills/code-fuzz-campaign/SKILL.md` + memory-safety CWE refs (conditional, C/C++ only)
-6. **HOST BASH FOR SOURCE READING** -- Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work -- Kali MCP is not needed for reading source files. When code analysis does reach for Kali MCP (for example, a fuzz campaign or binary-triage pass that runs a tool through the runtime), the same audit-and-reuse rules from `operator-core.md` apply: calls carry `engagement_key`/`agent_name`/`phase` and runs land in `assessment_command_runs`. Default to an unscoped search — `./scripts/assess.py list-command-runs --q <keyword>` — so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, fetch its preview with `./scripts/assess.py get-command-run <id>` — `success=true` only means `return_code=0`, so open the preview to confirm the stored evidence actually answers the current question. See `agent/references/runtime-guides/command-history-auditing.md`. Kali MCP calls made from code-analysis workflows (fuzz campaigns, binary triage) should also set the four optional audit-metadata headers — `X-Technique`, `X-Intent`, `X-Probe-Kind`, `X-Destructive` — so the command row is filterable alongside web engagement calls; see the `Command Metadata` sub-section in `agent/shared-constraints.md` for the value tables and the companion ban on echo-as-commentary breadcrumbs.
+6. **HOST BASH FOR SOURCE READING** -- Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work -- Kali MCP is not needed for reading source files. When code analysis does reach for Kali MCP (for example, a fuzz campaign or binary-triage pass that runs a tool through the runtime), the same audit-and-reuse rules from `operator-core.md` apply: calls carry `engagement_key`/`agent_name`/`phase` and runs land in `assessment_command_runs`. Default to an unscoped search — `aith assess list-command-runs --q <keyword>` — so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, fetch its preview with `aith assess get-command-run <id>` — `success=true` only means `return_code=0`, so open the preview to confirm the stored evidence actually answers the current question. See `agent/references/runtime-guides/command-history-auditing.md`. Kali MCP calls made from code-analysis workflows (fuzz campaigns, binary triage) should also set the four optional audit-metadata headers — `X-Technique`, `X-Intent`, `X-Probe-Kind`, `X-Destructive` — so the command row is filterable alongside web engagement calls; see the `Command Metadata` sub-section in `agent/shared-constraints.md` for the value tables and the companion ban on echo-as-commentary breadcrumbs.
 7. **DISPATCH** -- Dispatch to the appropriate subagent for all analysis work. The operator's job is orchestration: fetching metadata, providing paths, recording outputs, gating quality, and managing the analysis queue. Subagents read source files directly and produce structured outputs. Source reading, file-level analysis, and vulnerability judgment belong to subagents -- the operator provides paths, structural index, and metadata, not content.
 8. **PATH-FIRST HANDOFFS** -- Pass repo-relative file paths and artifact paths instead of pasting large JSON blobs or long source excerpts, because specialist agents can read the artifacts directly and operator tokens are better spent on scope control and quality gates.
-9. **RECORD FINDINGS IMMEDIATELY** -- Code findings use the same `./scripts/assess.py record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
+9. **RECORD FINDINGS IMMEDIATELY** -- Code findings use the same `aith assess record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
 10. **RECORD SURFACES** -- `record-surface` uses the shared engagement surface taxonomy, not ad hoc code-only labels. Only use supported types: `account_recovery`, `api_documentation`, `auth_entry`, `dynamic_render`, `file_handling`, `object_reference`, `privileged_write`, `workflow_token`. If none apply, do not invent a new surface type.
-11. **TRACK COVERAGE** -- After each batch, run `./scripts/assess.py code-coverage`. During Phase 2B, use `./scripts/assess.py code-coverage --cwe-matrix` to check per-file CWE effort scores against thresholds. Before entering Phase 3 verification, verify the coverage gate passes with `./scripts/assess.py code-coverage --require-gate-pass` (all critical files analyzed, no unresolved needs-context, no unprocessed triggers, CWE effort thresholds met).
+11. **TRACK COVERAGE** -- After each batch, run `aith assess code-coverage`. During Phase 2B, use `aith assess code-coverage --cwe-matrix` to check per-file CWE effort scores against thresholds. Before entering Phase 3 verification, verify the coverage gate passes with `aith assess code-coverage --require-gate-pass` (all critical files analyzed, no unresolved needs-context, no unprocessed triggers, CWE effort thresholds met).
 12. **LOOP** -- Back to step 1.
 
 ## Phase Flow
@@ -62,16 +62,16 @@ git clone <repo-url> $DIR/source/<repo-name>
 # Or: cp -r /path/to/source $DIR/source/<repo-name>
 
 # 2. Ingest into backend
-./scripts/assess.py code-ingest "$DIR/source/<repo-name>" --name <repo-name> --language <primary-lang>
+aith assess code-ingest "$DIR/source/<repo-name>" --name <repo-name> --language <primary-lang>
 
 # 3. Generate structural index
-./scripts/assess.py code-index "$DIR/source/<repo-name>"
+aith assess code-index "$DIR/source/<repo-name>"
 
 # 4. Sync structural metadata to backend
-./scripts/assess.py code-index-sync
+aith assess code-index-sync
 
 # 5. Verify ingestion and index
-./scripts/assess.py code-coverage
+aith assess code-coverage
 ```
 
 The `code-ingest` command:
@@ -83,7 +83,7 @@ The `code-ingest` command:
 - Marks generated/vendored/test/doc files as `skip` candidates
 - POSTs all files to backend code-files endpoint — the backend assigns each file an integer
   `file_id` (primary key). Retrieve the mapping via
-  `./scripts/assess.py fetch "code/files?repo_id=<repo-id>&limit=5000"`;
+  `aith assess fetch "code/files?repo_id=<repo-id>&limit=5000"`;
   queue fetch responses also include the full file object with `file_id`.
 - Creates code_repos record with repo metadata
 - Generates ctags symbol index (if ctags is available)
@@ -111,10 +111,10 @@ Exit: All files inventoried. ctags symbol index generated if ctags is available.
 Dispatch `code-architect` with `agent/skills/code-architecture-mapping/SKILL.md`.
 
 Provide:
-- Repo root path plus a file-list artifact or fetched JSON from `./scripts/assess.py fetch "code/files?repo_id=<repo-id>&limit=5000"` -- do not paste thousands of rows inline
+- Repo root path plus a file-list artifact or fetched JSON from `aith assess fetch "code/files?repo_id=<repo-id>&limit=5000"` -- do not paste thousands of rows inline
 - Project documentation paths (README, SECURITY.md, build files) so the architect can read the source material directly
 - Git churn data as a short summary or artifact path from `code_repos.git_churn_json`
-- Structural index manifest path (from `tools/analysis-state/structural-index-manifest.json`) -- if it is missing, run `./scripts/assess.py code-index` before dispatching. The manifest gives the architect pre-computed function counts, entry points, and sink statistics per file
+- Structural index manifest path (from `tools/analysis-state/structural-index-manifest.json`) -- if it is missing, run `aith assess code-index` before dispatching. The manifest gives the architect pre-computed function counts, entry points, and sink statistics per file
 
 Phase 1 produces six deliverables. The call graph and attack hypotheses provide navigational guidance for hunters. The file analysis queue ensures every critical/high file is analyzed regardless of hypothesis coverage.
 
@@ -157,11 +157,11 @@ Phase 1 produces six deliverables. The call graph and attack hypotheses provide 
 On return:
 ```bash
 # Record classifications
-./scripts/assess.py code-classify <classifications-json>
+aith assess code-classify <classifications-json>
 # Record threat model
-./scripts/assess.py code-record-threat-model <repo-id> <threat-model-json>
+aith assess code-record-threat-model <repo-id> <threat-model-json>
 # Record modules
-./scripts/assess.py code-record-modules <repo-id> <modules-json>
+aith assess code-record-modules <repo-id> <modules-json>
 # Ensure analysis-state exists for Phase 2 handoff artifacts
 mkdir -p "$DIR/tools/analysis-state"
 # Store call graph in analysis-state/
@@ -171,7 +171,7 @@ cp <hypotheses-json> "$DIR/tools/analysis-state/attack-hypotheses.json"
 # Store file analysis queue in analysis-state/
 cp <file-analysis-queue-json> "$DIR/tools/analysis-state/file-analysis-queue.json"
 # Check progress
-./scripts/assess.py code-coverage
+aith assess code-coverage
 ```
 
 **Before transitioning:** Review code-architect's `#### Coverage Gaps` output. Critical gaps to
@@ -220,10 +220,10 @@ Adaptive batching is part of the method, not a convenience:
 **Queue setup:**
 ```bash
 # Load file analysis queue into the dispatch engine
-./scripts/assess.py code-dispatch queue "$DIR/tools/analysis-state/file-analysis-queue.json"
+aith assess code-dispatch queue "$DIR/tools/analysis-state/file-analysis-queue.json"
 
 # Check queue state
-./scripts/assess.py code-dispatch stats
+aith assess code-dispatch stats
 ```
 
 Broad-hunt queue items are file-level only. Do not add `context_id` to the queue artifact. Each
@@ -237,13 +237,13 @@ normalization; it is not part of the backend queue schema.
 **Fetch loop:**
 ```bash
 # Reset stale items from any interrupted work
-./scripts/assess.py code-dispatch reset-stale 10
+aith assess code-dispatch reset-stale 10
 
 # Check stats
-./scripts/assess.py code-dispatch stats
+aith assess code-dispatch stats
 
 # Fetch batch for analysis -- returns file-based items grouped by batch_theme
-./scripts/assess.py code-dispatch fetch 10 code-vuln-hunter
+aith assess code-dispatch fetch 10 code-vuln-hunter
 ```
 
 The fetch size is a queue convenience, not a required prompt batch size. Split fetched items into
@@ -291,7 +291,7 @@ using the available subagent budget.
   predictions.
 - **Structural index** -- pass the manifest path plus the relevant per-file index paths from
   `tools/analysis-state/structural-index/`. If the manifest is missing, stop and run
-  `./scripts/assess.py code-index` before dispatching. Inline only the minimal function
+  `aith assess code-index` before dispatching. Inline only the minimal function
   excerpt needed for prioritization. The function map is the primary completeness anchor:
   every listed function must receive a disposition. Sinks, exports, and import targets are
   advisory metadata that helps the hunter navigate -- they do not limit what the hunter looks
@@ -351,19 +351,19 @@ All references are under `agent/references/code-vuln-patterns/`. Include the ful
 **On return:**
 ```bash
 # Record analysis results (with cwe_coverage and cross_file_triggers)
-./scripts/assess.py code-record-analysis <analysis-json>
+aith assess code-record-analysis <analysis-json>
 
 # Preview the exact completion payload before committing queue history when unsure
-./scripts/assess.py code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
+aith assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
 
 # Mark one file done with structured cwe_coverage after the payload is correct
-./scripts/assess.py code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"]
+aith assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"]
 
 # Record any findings
-./scripts/assess.py record-finding code-vuln-hunter <finding-json>
+aith assess record-finding code-vuln-hunter <finding-json>
 
 # Process cross-file triggers (if analysis returned any)
-./scripts/assess.py code-dispatch requeue-triggers <triggers-json>
+aith assess code-dispatch requeue-triggers <triggers-json>
 ```
 
 Use `code-dispatch done` with one of `clean`, `finding`, or `suspicious`, because the queue
@@ -378,7 +378,7 @@ history is only useful if every completion records a valid disposition and a com
 3. If the gap is genuinely unresolvable from the filesystem (external library source needed,
    binary dependency, macro-generated code), re-queue the item with additional context about the
    external dependency.
-4. Re-queue the item with `./scripts/assess.py code-dispatch needs-context ...` -- do not use
+4. Re-queue the item with `aith assess code-dispatch needs-context ...` -- do not use
    `code-dispatch done needs_context`, because incomplete work must carry explicit expansion
    metadata instead of looking complete in the queue history.
 
@@ -394,7 +394,7 @@ state: the phase does not pass until each trigger is queued or already completed
 - [ ] All critical/high files from the file analysis queue analyzed at least once
 - [ ] No unresolved `needs-context` items on critical/high files
 - [ ] All cross-file triggers processed (target files queued or already completed)
-- [ ] Coverage stats checked: `./scripts/assess.py code-coverage`
+- [ ] Coverage stats checked: `aith assess code-coverage`
 
 #### Phase 2B -- CWE Coverage Review
 
@@ -404,7 +404,7 @@ to find and close those gaps systematically.
 
 **Step 1: Generate effort matrix:**
 ```bash
-./scripts/assess.py code-coverage --cwe-matrix
+aith assess code-coverage --cwe-matrix
 ```
 
 This displays:
@@ -421,10 +421,10 @@ proceed directly to Phase 3.
 **Step 2: Process any remaining cross-file triggers:**
 ```bash
 # Check for pending triggers and queue blockers
-./scripts/assess.py code-coverage
+aith assess code-coverage
 
 # Reset stale items
-./scripts/assess.py code-dispatch reset-stale 10
+aith assess code-dispatch reset-stale 10
 ```
 
 Process triggers before re-dispatch -- a trigger may add a file that covers a gap class,
@@ -459,21 +459,21 @@ directed vulnerability classes, and aims to raise effort scores to the target th
 **On return from CWE-directed re-dispatch:**
 ```bash
 # Preview first when the updated effort matrix is large or hand-edited
-./scripts/assess.py code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
+aith assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
 
 # Mark done with updated cwe_coverage (backend uses max-effort merge)
-./scripts/assess.py code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"]
+aith assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"]
 
 # Record any new findings
-./scripts/assess.py record-finding code-vuln-hunter <finding-json>
+aith assess record-finding code-vuln-hunter <finding-json>
 
 # Process any new cross-file triggers
-./scripts/assess.py code-dispatch requeue-triggers <triggers-json>
+aith assess code-dispatch requeue-triggers <triggers-json>
 ```
 
 **Step 5: Re-check effort matrix:**
 ```bash
-./scripts/assess.py code-coverage --cwe-matrix
+aith assess code-coverage --cwe-matrix
 ```
 
 If gaps remain on critical files:
@@ -523,7 +523,7 @@ findings, while the variant hunter scans for new instances of confirmed patterns
 
 **Coverage gate** -- must pass before proceeding:
 ```bash
-./scripts/assess.py code-coverage --require-gate-pass
+aith assess code-coverage --require-gate-pass
 # Must show: all critical files analyzed, all high files analyzed, no needs-context, no pending triggers
 ```
 
@@ -606,7 +606,7 @@ contradicts a Phase 2 finding (e.g., discovers a guard the original hunter misse
 #### Handling spot-check findings
 
 If the verifier's clean-file spot-check discovers a missed vulnerability:
-1. Record the finding via `./scripts/assess.py record-finding code-vuln-verifier <finding-json>`
+1. Record the finding via `aith assess record-finding code-vuln-verifier <finding-json>`
 2. Dispatch the file back to Phase 2B with a CWE directive targeting the missed class
 3. After re-analysis completes, re-check the effort matrix for the affected file
 
@@ -614,27 +614,27 @@ If the verifier's clean-file spot-check discovers a missed vulnerability:
 
 ```bash
 # Record verification results (updates existing findings)
-./scripts/assess.py verify-finding <slug> <verification-json>
+aith assess verify-finding <slug> <verification-json>
 # Or use the dedicated false-positive helper when you already have the kill rationale
-./scripts/assess.py kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
+aith assess kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 # Reopen a previously verified or false-positive finding when new evidence requires re-triage
-./scripts/assess.py reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
+aith assess reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
 # Record variant findings (new findings)
-./scripts/assess.py record-finding code-variant-hunter <variant-finding-json>
+aith assess record-finding code-variant-hunter <variant-finding-json>
 ```
 
 **Pre-report deduplication:**
 Before dispatching report-writer, check for duplicate findings (same `canonical_location` and
 similar `defect_family` across hunter and variant-hunter prefixes):
 ```bash
-./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"
+aith assess merge-finding <source-slug> <target-slug> "<reason>"
 ```
 
 **Pre-report deduplication (cross-phase):**
 Before dispatching report-writer, also check for duplicate findings between Phase 3 and Phase 4
 (fuzz findings that confirm static findings):
 ```bash
-./scripts/assess.py merge-finding <source-slug> <target-slug> "<reason>"
+aith assess merge-finding <source-slug> <target-slug> "<reason>"
 ```
 
 **Phase 3 exit:**
@@ -664,17 +664,17 @@ Skip it when ALL of the following are true:
 **Phase 4 entry gate:**
 ```bash
 # Verify Phase 3 complete
-./scripts/assess.py code-coverage --require-gate-pass
+aith assess code-coverage --require-gate-pass
 
 # Check for memory-safety findings OR high structural risk in C/C++ code.
 # Filter findings for defect_family in: buffer-overflow, integer-overflow,
 # use-after-free, uninitialized-memory.
-./scripts/assess.py fetch findings
+aith assess fetch findings
 
 # Check for critical/high C/C++ files — fuzzing for memory-safety needs C/C++ targets.
 # Even without confirmed memory-safety findings, high-risk C/C++ parsers with low
 # existing fuzz coverage warrant a campaign.
-./scripts/assess.py fetch "code/files?repo_id=<id>&limit=5000"
+aith assess fetch "code/files?repo_id=<id>&limit=5000"
 # If no C/C++ files at critical/high classification, skip Phase 4.
 
 # Verify build toolchain
@@ -688,11 +688,11 @@ Dispatch `code-fuzz-engineer` with `agent/skills/code-fuzz-campaign/SKILL.md`.
 Provide:
 
 **Backend state (operator fetches and summarizes):**
-- Memory-safety findings: `./scripts/assess.py fetch findings` — extract findings with
+- Memory-safety findings: `aith assess fetch findings` — extract findings with
   `defect_family` in `buffer-overflow`, `integer-overflow`, `use-after-free`,
   `uninitialized-memory`. Include slugs, canonical locations, severity, and
   `verification_state` (confirmed/unreviewed). Pass as a concise summary, not raw JSON dump.
-- File classifications: `./scripts/assess.py fetch "code/files?repo_id=<id>&limit=5000"` —
+- File classifications: `aith assess fetch "code/files?repo_id=<id>&limit=5000"` —
   identify critical/high C/C++ files with relevant slot types. The fuzz engineer uses these to
   cross-reference targets against structural index data.
 
@@ -724,7 +724,7 @@ ls tools/fuzz-state/harnesses/*/harness.c
 ls tools/fuzz-state/campaigns/*.json
 
 # Record any findings from quick validation runs or pre-fuzz audit
-./scripts/assess.py record-finding code-fuzz-engineer <finding-json>
+aith assess record-finding code-fuzz-engineer <finding-json>
 ```
 
 #### Phase 4B: Campaign Execution
@@ -775,7 +775,7 @@ minimize -> reproduce -> trace -> validate -> classify
 **On return from crash triage:**
 ```bash
 # Record true findings
-./scripts/assess.py record-finding code-fuzz-engineer <finding-json>
+aith assess record-finding code-fuzz-engineer <finding-json>
 
 # Triage reports written to tools/fuzz-state/reports/
 ls tools/fuzz-state/reports/*-triage.json
@@ -793,7 +793,7 @@ jq '.current_phase = "complete"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv
 ```
 
 **Report dispatch:**
-For a final report, run `./scripts/assess.py check-report-readiness` before dispatching
+For a final report, run `aith assess check-report-readiness` before dispatching
 `report-writer`. Report-writer queries `report-findings?mode=final` for final output and
 `report-findings?mode=draft` for interim output; both include code and web findings from the
 shared backend. Fuzz findings (CF-xxx) include crash inputs and ASAN reports as evidence.
@@ -816,11 +816,11 @@ the rendered report, and publication plus `reported` lifecycle transitions wait 
 
 | Agent | Prefix | Example |
 |-------|--------|---------|
-| code-architect | CA | FINDING-CA-001 |
-| code-vuln-hunter | CH | FINDING-CH-001 |
-| code-variant-hunter | CV | FINDING-CV-001 |
+| code-architect | CA | CA-001 |
+| code-vuln-hunter | CH | CH-001 |
+| code-variant-hunter | CV | CV-001 |
 | code-vuln-verifier | VF | (updates only, no new findings -- except spot-check) |
-| code-fuzz-engineer | CF | FINDING-CF-001 |
+| code-fuzz-engineer | CF | CF-001 |
 
 ## Dispatch Context Template
 
@@ -842,9 +842,9 @@ Every code analysis dispatch must include:
   system configuration, list of critical clean files for spot-check
 - **For Phase 3 variant**: confirmed findings with abstract patterns, candidate file list,
   CWE pattern refs, threat model summary
-- **For Phase 4 (Fuzz)**: memory-safety finding summaries from `assess.py fetch findings`
+- **For Phase 4 (Fuzz)**: memory-safety finding summaries from `aith assess fetch findings`
   (slugs, locations, severity, verification_state — not raw JSON dump), critical/high C/C++ file
-  list from `assess.py fetch "code/files?..."`, filesystem artifact paths (structural index
+  list from `aith assess fetch "code/files?..."`, filesystem artifact paths (structural index
   manifest, threat model, call graph — fuzz engineer reads these directly), source repo root,
   build system type, compiler availability, existing fuzzer inventory paths, CWE pattern refs
   (buffer-overflow, integer-overflow, use-after-free, uninitialized-memory, fuzz-harness-patterns)
@@ -882,13 +882,13 @@ PARALLEL: Independent file batches -> parallel (Phase 2 hunting). Independent ag
 On start or when resuming inside a code analysis engagement:
 ```bash
 cat "$DIR/scope.json"                              # Current phase
-./scripts/assess.py code-coverage                  # File classification + analysis coverage
-./scripts/assess.py code-dispatch stats             # Queue state (pending/processing/done/needs-context)
-./scripts/assess.py fetch findings                  # Existing findings
+aith assess code-coverage                  # File classification + analysis coverage
+aith assess code-dispatch stats             # Queue state (pending/processing/done/needs-context)
+aith assess fetch findings                  # Existing findings
 ```
 
 Resume from the current phase. If `code-dispatch stats` shows `processing` items, they were
-interrupted -- reset stale items with `./scripts/assess.py code-dispatch reset-stale 10` and
+interrupted -- reset stale items with `aith assess code-dispatch reset-stale 10` and
 re-dispatch. If `needs-context` items exist, provide additional context and re-queue them.
 
 Phase-specific resume actions:
@@ -921,8 +921,8 @@ Code Analysis: [x] Ingest  [x] Classify+Map  [>] Hunt  [ ] Verify+Variant  [ ] F
 ### Running Alongside Web Testing
 When source code is obtained mid-engagement (exposed .git, source maps, backup download):
 1. Download/reconstruct source to `$DIR/source/<name>/`
-2. Run `./scripts/assess.py code-ingest "$DIR/source/<name>"`
-3. Run `./scripts/assess.py code-index "$DIR/source/<name>"` to materialize the required structural index (the script bootstraps bundled tree-sitter packages through `uv` on first run)
+2. Run `aith assess code-ingest "$DIR/source/<name>"`
+3. Run `aith assess code-index "$DIR/source/<name>"` to materialize the required structural index (the script bootstraps bundled tree-sitter packages through `uv` on first run)
 4. Code analysis phases run in parallel with ongoing web testing
 5. Findings land in the same `assessment_findings` table
 
@@ -942,7 +942,7 @@ degrades, and the engagement produces the exact failure modes seen in prior runs
 - Fetch file lists, classifications, queue stats, and coverage from the backend
 - Provide repo paths, structural index paths, call graph excerpts, threat model summaries,
   applicable vulnerability classes, and effort thresholds to subagents
-- Record subagent outputs via `assess.py` after they pass quality gates
+- Record subagent outputs via `aith assess` after they pass quality gates
 - Gate phase transitions on mandatory checklists -- reject and re-dispatch when gates fail
 - Manage the analysis queue (fetch, dispatch, done, reset-stale, requeue-triggers)
 - Review coverage gaps and CWE effort matrix to decide whether to re-dispatch or accept

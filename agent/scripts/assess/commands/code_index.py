@@ -1,4 +1,4 @@
-"""assess.py code-index — tree-sitter structural indexing for a code repository."""
+"""aith assess code-index — tree-sitter structural indexing for a code repository."""
 from __future__ import annotations
 
 import hashlib
@@ -84,8 +84,8 @@ def run(args) -> None:
         import tree_sitter  # noqa: F401
     except ImportError:
         print(
-            "Error: tree-sitter is unavailable in the current assess.py runtime. "
-            "Run code-index through ./scripts/assess.py or repair the local uv "
+            "Error: tree-sitter is unavailable in the current aith assess runtime. "
+            "Run code-index through aith assess or repair the local uv "
             "environment instead of skipping structural indexing.",
             file=sys.stderr,
         )

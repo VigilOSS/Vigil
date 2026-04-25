@@ -36,6 +36,7 @@ _sync_lock = Lock()
 _last_sync_signature: tuple[tuple[str, int | None, int | None, int | None, int | None], ...] | None = None
 _logger = logging.getLogger(__name__)
 _DELETED_ENGAGEMENTS_DIR = ".deleted-engagements"
+_LEGACY_FINDING_PREFIX = "FINDING" + "-"
 
 
 def engagements_root() -> Path:
@@ -73,6 +74,12 @@ def _write_json_atomically(path: Path, payload: Any) -> None:
     tmp_path.rename(path)
 
 
+def _strip_legacy_finding_prefix(value: str) -> str:
+    if value.startswith(_LEGACY_FINDING_PREFIX):
+        return value[len(_LEGACY_FINDING_PREFIX) :]
+    return value
+
+
 def _normalize_target_list(payload: dict[str, Any], *, new_key: str, old_key: str) -> bool:
     changed = False
     raw_targets = payload.get(new_key)
@@ -80,7 +87,7 @@ def _normalize_target_list(payload: dict[str, Any], *, new_key: str, old_key: st
         raw_targets = payload.get(old_key)
     if not isinstance(raw_targets, list):
         raw_targets = []
-    normalized = [str(item) for item in raw_targets]
+    normalized = [_strip_legacy_finding_prefix(str(item)) for item in raw_targets]
     if payload.get(new_key) != normalized:
         payload[new_key] = normalized
         changed = True
@@ -188,11 +195,16 @@ def _safe_mtime_ns(path: Path) -> int | None:
         return None
 
 
-def _engagements_signature() -> tuple[tuple[str, int | None, int | None, int | None, int | None], ...]:
+def _engagements_signature() -> tuple[
+    tuple[str, int | None, int | None, int | None, tuple[tuple[str, int | None], ...], int | None],
+    ...
+]:
     root = engagements_root()
     root.mkdir(parents=True, exist_ok=True)
 
-    signature: list[tuple[str, int | None, int | None, int | None, int | None]] = []
+    signature: list[
+        tuple[str, int | None, int | None, int | None, tuple[tuple[str, int | None], ...], int | None]
+    ] = []
     for engagement_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         if engagement_dir.name == _DELETED_ENGAGEMENTS_DIR:
             continue
@@ -201,12 +213,21 @@ def _engagements_signature() -> tuple[tuple[str, int | None, int | None, int | N
         marker_mtime_ns = _safe_mtime_ns(_deleted_engagement_marker_path(engagement_dir.name))
         if scope_mtime_ns is None and marker_mtime_ns is None:
             continue
+        sessions_root = engagement_dir / "sessions"
+        assignment_signature = tuple(
+            (
+                session_dir.name,
+                _safe_mtime_ns(session_dir / "assignment.json"),
+            )
+            for session_dir in sorted(path for path in sessions_root.iterdir() if path.is_dir())
+        ) if sessions_root.exists() else tuple()
         signature.append(
             (
                 engagement_dir.name,
                 scope_mtime_ns,
                 _safe_mtime_ns(engagement_dir / "engagement.json"),
                 _safe_mtime_ns(engagement_dir / "sessions" / "index.json"),
+                assignment_signature,
                 marker_mtime_ns,
             )
         )

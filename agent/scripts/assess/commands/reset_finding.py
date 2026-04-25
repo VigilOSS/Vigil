@@ -1,4 +1,4 @@
-"""assess.py reset-finding — reopen a finding for re-triage."""
+"""aith assess reset-finding — reopen a finding for re-triage."""
 from __future__ import annotations
 
 import argparse

@@ -289,7 +289,7 @@ Prerequisites: [what attacker needs: network access, specific request sequence, 
 Data Flow: [how A's output feeds B's input — specific variables and functions]
 ```
 
-Record chains via `./scripts/assess.py record-chain code-vuln-verifier <chain-json>`
+Record chains via `aith assess record-chain code-vuln-verifier <chain-json>`
 
 ## FP Context
 
@@ -338,9 +338,9 @@ Examples:
 When you persist a false positive in structured finding state, include:
 - `details.kill_check` — integer 1-5 for the failed verification check
 - `details.kill_reason` — concise verifier rationale suitable for later query/reporting
-- Use `./scripts/assess.py kill-finding <slug> ...` when you already have the kill rationale in hand, because it enforces the required false-positive fields before the request leaves the CLI
-- Use `./scripts/assess.py verify-finding <slug> <verification-json>` for confirm/downgrade/dispute flows or when the verification payload already exists on disk, because the verification transition belongs in the audit ledger rather than a generic finding patch
-- Use `./scripts/assess.py reset-finding <slug> ...` when new evidence disproves an earlier verified or false-positive verdict, because reopening is its own lifecycle transition and should clear the prior verification state instead of patching fields by hand
+- Use `aith assess kill-finding <slug> ...` when you already have the kill rationale in hand, because it enforces the required false-positive fields before the request leaves the CLI
+- Use `aith assess verify-finding <slug> <verification-json>` for confirm/downgrade/dispute flows or when the verification payload already exists on disk, because the verification transition belongs in the audit ledger rather than a generic finding patch
+- Use `aith assess reset-finding <slug> ...` when new evidence disproves an earlier verified or false-positive verdict, because reopening is its own lifecycle transition and should clear the prior verification state instead of patching fields by hand
 
 ## Output Format
 

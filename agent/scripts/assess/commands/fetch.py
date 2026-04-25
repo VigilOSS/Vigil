@@ -1,4 +1,4 @@
-"""assess.py fetch — GET assessment endpoint and print JSON.
+"""aith assess fetch — GET assessment endpoint and print JSON.
 
 Special-case: ``fetch intel`` hits ``/engagements/{key}/intel/summary`` (the
 engagement-scoped intel summary lives outside ``/assessment/``). ``fetch

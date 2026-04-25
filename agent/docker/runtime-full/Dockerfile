@@ -1,7 +1,37 @@
-ARG BASE_IMAGE=kalilinux/kali-rolling
+ARG BASE_IMAGE=kalilinux/kali-rolling@sha256:dddc31e0f4bc57b4b91e9027762544506bf91c7cdd7ff52104daaa4449b4c726
 ARG PRELOADED_TOOLS=0
 FROM ${BASE_IMAGE}
 ARG PRELOADED_TOOLS=0
+
+ARG APT_BASE_PACKAGES="ca-certificates=20260223 curl=8.19.0-3 jq=1.8.1-4+b1 sqlite3=3.46.1-9+b1 git=1:2.53.0-1 ripgrep=15.1.0-1 bind9-dnsutils=1:9.20.22-1 iputils-ping=3:20250605-1+b1 whois=5.6.6 openssl=3.6.1-3 netcat-openbsd=1.234-2 procps=2:4.0.4-9+b1 lsof=4.99.4+dfsg-2+b1 python3=3.13.9-3 python3-pip=26.0.1+dfsg-1 python3-aiohttp=3.13.3-3 sudo=1.9.17p2-5 tini=0.19.0-6+b2 wget=1.25.0-2+b1 rlwrap=0.47.1-0.1+b1 unzip=6.0-29+b1 mcp-kali-server=0.0~git20260317.00154c0-0kali1"
+ARG APT_TOOL_PACKAGES="kali-linux-default=2026.2.0 subfinder=2.13.0-0kali1 sublist3r=1.1-5 testssl.sh=3.2.2+dfsg-1 golang-go=2:1.26~1 chromium=147.0.7727.55-1 chromium-driver=147.0.7727.55-1 whatweb=0.6.3-1kali1 ffuf=2.1.0-1+b11 gobuster=3.8.2-1 wfuzz=3.1.0-6 dirb=2.22+dfsg-7+b1 sqlmap=1.10.4-1 hydra=9.6-3+b1 john=1.9.0-Jumbo-1+git20211102-0kali10 hashcat=7.1.2+ds1-4 ruby-full=1:3.3 proxychains4=4.17-3+b1 openssh-client=1:10.2p1-6 socat=1.8.1.1-1 tcpdump=4.99.6-2 tmux=3.6a-2+b1"
+ARG PIP_VERSION=26.0.1
+ARG MITMPROXY_VERSION=12.2.2
+ARG EVIL_WINRM_VERSION=3.9
+ARG RESPONDER_REF=fb29fe25db9135a9487c961783254b56a20f58ac
+ARG IMPACKET_VERSION=0.13.0
+ARG MITM6_VERSION=0.3.0
+ARG DPAPICK3_VERSION=0.7.1
+ARG AIOQUIC_VERSION=1.2.0
+ARG FLASK_VERSION=3.1.2
+ARG URO_VERSION=1.0.2
+ARG CHISEL_VERSION=1.11.4
+ARG LIGOLO_VERSION=0.8.2
+ARG NUCLEI_VERSION=v3.7.1
+ARG KATANA_VERSION=v1.5.0
+ARG HTTPX_VERSION=v1.9.0
+ARG DNSX_VERSION=v1.2.3
+ARG GAU_VERSION=v2.2.4
+ARG DALFOX_VERSION=v2.12.0
+ARG PUREDNS_VERSION=v2.1.1
+ARG GF_VERSION=v0.0.0-20200618134122-dcd4c361f9f5
+ARG GF_PATTERNS_REF=f686f06ae647726578920084c894100d702496cc
+ARG FEROXBUSTER_VERSION=2.13.1
+ARG TRUFFLEHOG_VERSION=3.94.3
+ARG FRP_VERSION=0.61.1
+ARG INTERACTSH_VERSION=v1.3.1
+ARG PWNCAT_VL_VERSION=0.6.2
+ARG SECLISTS_REF=8af68f02ed621c5e0f3d7e24659f9f5bf5384c08
 
 ENV PATH="/opt/Responder:${PATH}"
 ENV KALI_MCP_CLIENT_PATH=/usr/share/mcp-kali-server/client.py
@@ -10,13 +40,12 @@ RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update -y; \
     if [ "$PRELOADED_TOOLS" != "1" ]; then \
-      apt full-upgrade -y; \
-      apt-get install -y kali-linux-default wget rlwrap; \
-      base_packages='ca-certificates curl jq sqlite3 git ripgrep dnsutils whois openssl netcat-openbsd procps lsof python3 python3-pip python3-aiohttp sudo tini wget rlwrap unzip mcp-kali-server'; \
+      base_packages="$APT_BASE_PACKAGES"; \
     else \
       base_packages=''; \
-      for pkg in ca-certificates curl jq sqlite3 git ripgrep dnsutils whois openssl netcat-openbsd procps lsof python3 python3-pip python3-aiohttp sudo tini wget rlwrap unzip mcp-kali-server; do \
-        dpkg -s "$pkg" >/dev/null 2>&1 || base_packages="$base_packages $pkg"; \
+      for pkg in $APT_BASE_PACKAGES; do \
+        package_name="${pkg%%=*}"; \
+        dpkg -s "$package_name" >/dev/null 2>&1 || base_packages="$base_packages $pkg"; \
       done; \
     fi; \
     if [ -n "$(printf '%s' "$base_packages" | tr -d ' ')" ]; then \
@@ -25,29 +54,8 @@ RUN set -eux; \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN DEBIAN_FRONTEND=noninteractive apt-get update -y && \
-    if [ "$PRELOADED_TOOLS" != "1" ]; then apt-get install -y \
-    subfinder \
-    sublist3r \
-    testssl.sh \
-    golang-go \
-    chromium \
-    chromium-driver \
-    whatweb \
-    ffuf \
-    gobuster \
-    wfuzz \
-    dirb \
-    sqlmap \
-    hydra \
-    john \
-    hashcat \
-    ruby-full \
-    proxychains-ng \
-    openssh-client \
-    socat \
-    tcpdump \
-    tmux \
-    ; fi && apt-get clean && rm -rf /var/lib/apt/lists/*
+    if [ "$PRELOADED_TOOLS" != "1" ]; then apt-get install -y $APT_TOOL_PACKAGES; fi && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       arch="$(dpkg --print-architecture)" && \
@@ -57,42 +65,54 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
         *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
       esac && \
       python3 -m venv /opt/mitmproxy-venv && \
-      /opt/mitmproxy-venv/bin/pip install --no-cache-dir --upgrade pip && \
-      /opt/mitmproxy-venv/bin/pip install --no-cache-dir mitmproxy && \
+      /opt/mitmproxy-venv/bin/pip install --no-cache-dir "pip==${PIP_VERSION}" && \
+      /opt/mitmproxy-venv/bin/pip install --no-cache-dir "mitmproxy==${MITMPROXY_VERSION}" && \
       ln -sf /opt/mitmproxy-venv/bin/mitmdump /usr/local/bin/mitmdump && \
       ln -sf /opt/mitmproxy-venv/bin/mitmproxy /usr/local/bin/mitmproxy && \
-      gem install evil-winrm --no-document && \
-      git clone --depth 1 https://github.com/lgandx/Responder.git /opt/Responder && \
-      python3 -m pip install --no-cache-dir --break-system-packages impacket==0.13.0 mitm6 dpapick3 aioquic flask uro && \
-      curl -fsSL "https://github.com/jpillora/chisel/releases/download/v1.11.4/chisel_1.11.4_linux_${release_arch}.gz" | gunzip > /usr/local/bin/chisel && chmod +x /usr/local/bin/chisel && \
+      gem install evil-winrm -v "${EVIL_WINRM_VERSION}" --no-document && \
+      git init /opt/Responder && \
+      git -C /opt/Responder remote add origin https://github.com/lgandx/Responder.git && \
+      git -C /opt/Responder fetch --depth 1 origin "${RESPONDER_REF}" && \
+      git -C /opt/Responder checkout --detach FETCH_HEAD && \
+      python3 -m pip install --no-cache-dir --break-system-packages \
+        "impacket==${IMPACKET_VERSION}" \
+        "mitm6==${MITM6_VERSION}" \
+        "dpapick3==${DPAPICK3_VERSION}" \
+        "aioquic==${AIOQUIC_VERSION}" \
+        "flask==${FLASK_VERSION}" \
+        "uro==${URO_VERSION}" && \
+      curl -fsSL "https://github.com/jpillora/chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_${release_arch}.gz" | gunzip > /usr/local/bin/chisel && chmod +x /usr/local/bin/chisel && \
       mkdir -p /tmp/ligolo && \
-      curl -fsSL "https://github.com/nicocha30/ligolo-ng/releases/download/v0.8.2/ligolo-ng_proxy_0.8.2_linux_${release_arch}.tar.gz" | tar xzf - -C /tmp/ligolo && \
+      curl -fsSL "https://github.com/nicocha30/ligolo-ng/releases/download/v${LIGOLO_VERSION}/ligolo-ng_proxy_${LIGOLO_VERSION}_linux_${release_arch}.tar.gz" | tar xzf - -C /tmp/ligolo && \
       find /tmp/ligolo -type f -perm /111 -exec mv {} /usr/local/bin/ligolo-proxy \; && \
       chmod +x /usr/local/bin/ligolo-proxy && \
       rm -rf /tmp/ligolo && \
-      GOPATH=/root/go go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest && \
+      GOPATH=/root/go go install "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@${NUCLEI_VERSION}" && \
       cp /root/go/bin/nuclei /usr/local/bin/nuclei && \
-      GO111MODULE=on GOPATH=/root/go go install github.com/projectdiscovery/katana/cmd/katana@latest && \
+      GO111MODULE=on GOPATH=/root/go go install "github.com/projectdiscovery/katana/cmd/katana@${KATANA_VERSION}" && \
       cp /root/go/bin/katana /usr/local/bin/katana && \
-      GOPATH=/root/go go install github.com/projectdiscovery/httpx/cmd/httpx@latest && \
+      GOPATH=/root/go go install "github.com/projectdiscovery/httpx/cmd/httpx@${HTTPX_VERSION}" && \
       cp /root/go/bin/httpx /usr/local/bin/httpx && \
-      GOPATH=/root/go go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest && \
+      GOPATH=/root/go go install "github.com/projectdiscovery/dnsx/cmd/dnsx@${DNSX_VERSION}" && \
       cp /root/go/bin/dnsx /usr/local/bin/dnsx && \
-      GOPATH=/root/go go install github.com/lc/gau/v2/cmd/gau@latest && \
+      GOPATH=/root/go go install "github.com/lc/gau/v2/cmd/gau@${GAU_VERSION}" && \
       cp /root/go/bin/gau /usr/local/bin/gau && \
-      GOPATH=/root/go go install github.com/hahwul/dalfox/v2@latest && \
+      GOPATH=/root/go go install "github.com/hahwul/dalfox/v2@${DALFOX_VERSION}" && \
       cp /root/go/bin/dalfox /usr/local/bin/dalfox && \
-      GOPATH=/root/go go install github.com/d3mondev/puredns/v2@latest && \
+      GOPATH=/root/go go install "github.com/d3mondev/puredns/v2@${PUREDNS_VERSION}" && \
       cp /root/go/bin/puredns /usr/local/bin/puredns && \
-      GOPATH=/root/go go install github.com/tomnomnom/gf@latest && \
+      GOPATH=/root/go go install "github.com/tomnomnom/gf@${GF_VERSION}" && \
       cp /root/go/bin/gf /usr/local/bin/gf && \
       mkdir -p /root/.gf && \
-      git clone --depth 1 https://github.com/1ndianl33t/Gf-Patterns /tmp/gf-patterns && \
+      git init /tmp/gf-patterns && \
+      git -C /tmp/gf-patterns remote add origin https://github.com/1ndianl33t/Gf-Patterns && \
+      git -C /tmp/gf-patterns fetch --depth 1 origin "${GF_PATTERNS_REF}" && \
+      git -C /tmp/gf-patterns checkout --detach FETCH_HEAD && \
       cp /tmp/gf-patterns/*.json /root/.gf/ && \
       rm -rf /tmp/gf-patterns && \
       rm -rf /root/go && \
       mkdir -p /tmp/ferox && \
-      curl -fsSL "https://github.com/epi052/feroxbuster/releases/latest/download/${ferox_arch}-linux-feroxbuster.zip" \
+      curl -fsSL "https://github.com/epi052/feroxbuster/releases/download/v${FEROXBUSTER_VERSION}/${ferox_arch}-linux-feroxbuster.zip" \
         -o /tmp/ferox/ferox.zip && unzip /tmp/ferox/ferox.zip -d /tmp/ferox && \
       mv /tmp/ferox/feroxbuster /usr/local/bin/feroxbuster && chmod +x /usr/local/bin/feroxbuster && \
       rm -rf /tmp/ferox; \
@@ -105,7 +125,6 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
         arm64) th_arch=arm64 ;; \
         *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
       esac && \
-      TRUFFLEHOG_VERSION=3.94.3 && \
       curl -fsSL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_${th_arch}.tar.gz" \
         | tar -xzf - -C /usr/local/bin trufflehog && \
       chmod +x /usr/local/bin/trufflehog; \
@@ -117,9 +136,11 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
     fi
 
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
-      wget -c https://github.com/danielmiessler/SecLists/archive/master.zip -O SecList.zip && \
-      unzip SecList.zip && rm -f SecList.zip && \
-      mv SecLists-master /usr/share/wordlists/SecLists; \
+      wget -c "https://github.com/danielmiessler/SecLists/archive/${SECLISTS_REF}.zip" -O SecList.zip && \
+      mkdir -p /tmp/seclists && \
+      unzip SecList.zip -d /tmp/seclists && rm -f SecList.zip && \
+      mv /tmp/seclists/SecLists-* /usr/share/wordlists/SecLists && \
+      rm -rf /tmp/seclists; \
     fi
 
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
@@ -129,21 +150,21 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
         arm64) frp_arch=arm64 ;; \
         *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
       esac && \
-      FRP_VERSION=0.61.1 && \
       curl -fsSL "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${frp_arch}.tar.gz" \
         | tar xzf - --strip-components=1 -C /usr/local/bin "frp_${FRP_VERSION}_linux_${frp_arch}/frpc" && \
       chmod +x /usr/local/bin/frpc && \
-      go install github.com/projectdiscovery/interactsh/cmd/interactsh-server@latest && \
+      go install "github.com/projectdiscovery/interactsh/cmd/interactsh-server@${INTERACTSH_VERSION}" && \
       cp /root/go/bin/interactsh-server /usr/local/bin/interactsh-server && \
-      go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest && \
+      go install "github.com/projectdiscovery/interactsh/cmd/interactsh-client@${INTERACTSH_VERSION}" && \
       cp /root/go/bin/interactsh-client /usr/local/bin/interactsh-client; \
     fi
 
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       python3 -m venv /opt/pwncat-venv && \
-      /opt/pwncat-venv/bin/pip install --no-cache-dir --upgrade pip && \
-      /opt/pwncat-venv/bin/pip install --no-cache-dir pwncat-vl && \
-      ln -sf /opt/pwncat-venv/bin/pwncat-cs /usr/local/bin/pwncat; \
+      /opt/pwncat-venv/bin/pip install --no-cache-dir "pip==${PIP_VERSION}" && \
+      /opt/pwncat-venv/bin/pip install --no-cache-dir "pwncat-vl==${PWNCAT_VL_VERSION}" && \
+      ln -sf /opt/pwncat-venv/bin/pwncat-vl /usr/local/bin/pwncat && \
+      ln -sf /opt/pwncat-venv/bin/pwncat-vl /usr/local/bin/pwncat-vl; \
     fi
 
 COPY docker/kali-mcp-runtime/mcp-server-wrapper.sh /usr/bin/mcp-server
@@ -154,12 +175,13 @@ RUN mkdir -p /data
 COPY docker/kali-mcp-runtime/patched_kali_server.py /opt/mcp-tools/patched_kali_server.py
 COPY docker/kali-mcp-runtime/patched_kali_client.py /opt/mcp-tools/patched_kali_client.py
 COPY docker/kali-mcp-runtime/kali_mcp_audit.py /opt/mcp-tools/kali_mcp_audit.py
+COPY docker/kali-mcp-runtime/audit_enums.py /opt/mcp-tools/audit_enums.py
 COPY docker/callback_listener.py /opt/mcp-tools/callback_listener.py
 COPY docker/start-callback.sh /usr/local/bin/start-callback
 RUN chmod +x /usr/local/bin/start-callback
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD command -v mcp-server >/dev/null && command -v katana >/dev/null && command -v trufflehog >/dev/null && command -v gf >/dev/null && test -f /opt/mcp-tools/patched_kali_server.py && test -f /opt/mcp-tools/patched_kali_client.py && test -f /opt/mcp-tools/kali_mcp_audit.py || exit 1
+  CMD command -v mcp-server >/dev/null && command -v katana >/dev/null && command -v trufflehog >/dev/null && command -v gf >/dev/null && test -f /opt/mcp-tools/patched_kali_server.py && test -f /opt/mcp-tools/patched_kali_client.py && test -f /opt/mcp-tools/kali_mcp_audit.py && test -f /opt/mcp-tools/audit_enums.py || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bash", "-lc", "mkdir -p /data && exec sleep infinity"]

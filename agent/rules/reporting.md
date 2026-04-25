@@ -106,6 +106,14 @@ Preferred alternatives:
 
 Preferred pattern: subject-verb-object. The endpoint does X. The attacker sends Y. The response contains Z.
 
+**Baseline-conduct disclaimers (external submissions):**
+- Scope assertions enumerating what was *not* touched
+- Request-volume or rate pledges (`10 calls at ~3 req/s`, `We limited testing to...`)
+- Future-conduct pledges (`Researcher will not contact customers`, `will not be used to...`)
+- "I respected the program rules" framing
+
+External submissions are about the finding, not the researcher. Program rules already require in-scope, rate-limited, non-impersonating testing — restating compliance implies you might have violated it. Write as if professional conduct is assumed.
+
 ## 12. Active voice by default
 
 Write in active voice. The subject acts.

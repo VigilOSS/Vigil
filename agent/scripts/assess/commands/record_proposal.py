@@ -1,4 +1,4 @@
-"""assess.py record-proposal — validate + append to proposals.jsonl."""
+"""aith assess record-proposal — validate + append to proposals.jsonl."""
 from __future__ import annotations
 
 import json

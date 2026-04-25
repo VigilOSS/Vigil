@@ -12,7 +12,7 @@ origin: AI Threat Hunting
 
 - Beginning of engagement when the `hosts` array in scope.json includes `*.domain` entries (e.g., `*.target.example`)
 - Need to discover additional attack surface beyond the primary domain
-- Recon phase — run in parallel with other recon tasks
+- **Phase 1a (first-class) when scope.json `hosts` contains `*.domain` entries** — dispatched BEFORE the parallel recon+source pass so live subdomains land in the endpoint inventory before downstream steps depend on them.
 - After finding references to subdomains in JS/HTML source code
 
 ## Tools
@@ -35,28 +35,33 @@ without sending traffic to the target.
 # Basic enumeration
 subfinder -d target.example -silent
 
-# With all sources (uses API keys from /engagement/.env if mounted)
-subfinder -d target.example -all -silent -o /engagement/scans/subdomains.txt
+# With all sources (API keys are passed via docker --env-file from the
+# install-root .env when `aith runtime start` launched the container;
+# subfinder reads them straight from the process environment, no per-
+# engagement file is mounted)
+subfinder -d target.example -all -silent -o /engagements/$ENGAGEMENT_KEY/scans/subdomains.txt
 
 # Multiple domains
-subfinder -dL /engagement/scans/domains.txt -silent -o /engagement/scans/subdomains.txt
+subfinder -dL /engagements/$ENGAGEMENT_KEY/scans/domains.txt -silent -o /engagements/$ENGAGEMENT_KEY/scans/subdomains.txt
 
 # JSON output for detailed source info
-subfinder -d target.example -all -json -o /engagement/scans/subdomains.json
+subfinder -d target.example -all -json -o /engagements/$ENGAGEMENT_KEY/scans/subdomains.json
 
 # Resolve IPs while enumerating
-subfinder -d target.example -all -silent -nW -o /engagement/scans/subdomains_raw.txt
+subfinder -d target.example -all -silent -nW -o /engagements/$ENGAGEMENT_KEY/scans/subdomains_raw.txt
 ```
 
-**API keys** enhance results significantly. Configure in `$ENGAGEMENT_DIR/.env`:
+**API keys** enhance results significantly. Set them in the install-root `.env`
+(not the engagement directory) so `aith runtime start` passes them via
+`docker --env-file` into the runtime container — subfinder reads them from
+the process environment on every Kali MCP execution:
 ```
 SUBFINDER_VIRUSTOTAL_API_KEY=...
 SUBFINDER_SECURITYTRAILS_API_KEY=...
 SUBFINDER_SHODAN_API_KEY=...
 ```
-When the Kali MCP runtime is started from a repo root that has `.env`, these
-variables are injected into the runtime container and are then read by
-`subfinder` when it is executed through Kali MCP.
+Restart the Kali runtime (`aith runtime restart`)
+after editing `.env` so the new values reach the container.
 
 ### 1b. Active DNS Brute-Force with puredns
 
@@ -65,11 +70,11 @@ Active brute-force with wildcard filtering (catches subdomains passive sources m
 ```bash
 # Brute-force with wildcard detection
 puredns bruteforce /seclists/Discovery/DNS/subdomains-top1million-5000.txt target.example \
-  -r /engagement/scans/resolvers.txt -w /engagement/scans/subdomains_brute.txt
+  -r /engagements/$ENGAGEMENT_KEY/scans/resolvers.txt -w /engagements/$ENGAGEMENT_KEY/scans/subdomains_brute.txt
 
 # Resolve a list of known subdomains (validate passive results)
-puredns resolve /engagement/scans/subdomains.txt \
-  -r /engagement/scans/resolvers.txt -w /engagement/scans/subdomains_resolved.txt
+puredns resolve /engagements/$ENGAGEMENT_KEY/scans/subdomains.txt \
+  -r /engagements/$ENGAGEMENT_KEY/scans/resolvers.txt -w /engagements/$ENGAGEMENT_KEY/scans/subdomains_resolved.txt
 ```
 
 ### 1c. Bulk DNS Resolution with dnsx
@@ -78,10 +83,10 @@ Fast resolution and record-type enumeration:
 
 ```bash
 # Resolve subdomains and get A records
-cat /engagement/scans/subdomains.txt | dnsx -silent -a -resp -o /engagement/scans/dns_resolved.txt
+cat /engagements/$ENGAGEMENT_KEY/scans/subdomains.txt | dnsx -silent -a -resp -o /engagements/$ENGAGEMENT_KEY/scans/dns_resolved.txt
 
 # Get CNAME records (useful for subdomain takeover detection)
-cat /engagement/scans/subdomains.txt | dnsx -silent -cname -resp -o /engagement/scans/dns_cnames.txt
+cat /engagements/$ENGAGEMENT_KEY/scans/subdomains.txt | dnsx -silent -cname -resp -o /engagements/$ENGAGEMENT_KEY/scans/dns_cnames.txt
 ```
 
 ### 2. DNS Brute-Force with ffuf
@@ -96,13 +101,13 @@ curl -s -o /dev/null -w "%{size_download}" -H "Host: nonexistent-xyz.target.exam
 ffuf -u http://TARGET_IP -H "Host: FUZZ.target.example" \
   -w /seclists/Discovery/DNS/subdomains-top1million-5000.txt \
   -fs <baseline_size> -t 50 \
-  -o /engagement/scans/vhost_fuzz.json -of json
+  -o /engagements/$ENGAGEMENT_KEY/scans/vhost_fuzz.json -of json
 
 # Larger wordlist if initial results are sparse
 ffuf -u http://TARGET_IP -H "Host: FUZZ.target.example" \
   -w /seclists/Discovery/DNS/subdomains-top1million-20000.txt \
   -fs <baseline_size> -t 50 \
-  -o /engagement/scans/vhost_fuzz_20k.json -of json
+  -o /engagements/$ENGAGEMENT_KEY/scans/vhost_fuzz_20k.json -of json
 ```
 
 ### 3. Filter, Verify & Fingerprint Subdomains
@@ -112,8 +117,8 @@ pass ALL stages enter the engagement pipeline.
 
 ```bash
 # Stage 1: HTTP probing with httpx (replaces manual curl loop — faster and richer)
-cat /engagement/scans/subdomains.txt | httpx -silent -status-code -title -tech-detect \
-  -server -content-length -follow-redirects -o /engagement/scans/subdomains_live.txt
+cat /engagements/$ENGAGEMENT_KEY/scans/subdomains.txt | httpx -silent -status-code -title -tech-detect \
+  -server -content-length -follow-redirects -o /engagements/$ENGAGEMENT_KEY/scans/subdomains_live.txt
 
 # httpx outputs: URL STATUS_CODE [TITLE] [SERVER] [TECH]
 # Filter for responsive hosts only (httpx drops non-responsive by default)
@@ -175,8 +180,8 @@ If new subdomains are found, enumerate their subdomains too:
 
 ```bash
 # Feed discovered subdomains back for deeper enumeration
-subfinder -dL /engagement/scans/subdomains.txt -all -silent \
-  -o /engagement/scans/subdomains_recursive.txt
+subfinder -dL /engagements/$ENGAGEMENT_KEY/scans/subdomains.txt -all -silent \
+  -o /engagements/$ENGAGEMENT_KEY/scans/subdomains_recursive.txt
 ```
 
 ### 5. Feed Results into Pipeline
@@ -189,8 +194,10 @@ can still be used as a transient batching buffer for follow-up testing:
 awk '{print $1}' "$ENGAGEMENT_DIR/scans/subdomains_live.txt" | sort -u | while IFS= read -r sub; do
   echo "GET https://$sub"
 done | \
-  ./scripts/assess.py ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum
+  aith assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum
 ```
+
+After ingestion, the operator triggers a reactive nuclei sweep against the newly-live subdomains — see `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode".
 
 ## What to Record
 

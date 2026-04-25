@@ -25,7 +25,7 @@ Before starting any target-facing work, verify:
 3. You read the skill's `## Extended Resources` section and loaded the listed references
 4. You have the dispatch context: targets from scope.json, Phase 1 endpoint artifacts, auth.json state
 5. You have `$DIR/cases.db` path and the engagement directory set
-6. You checked command history as a coverage map — `./scripts/assess.py list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what surface collection has already run on this target so your next pass picks angles that haven't been tried — different crawl depth, different source (Katana vs gau vs waybackurls vs hakrawler), different extension filter, different auth context. The only crawl to skip is an identical command against identical input; any variant (new auth, wider scope, deeper depth) is new coverage. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output is complete. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+6. You checked command history as a coverage map — `aith assess list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what surface collection has already run on this target so your next pass picks angles that haven't been tried — different crawl depth, different source (Katana vs gau vs waybackurls vs hakrawler), different extension filter, different auth context. The only crawl to skip is an identical command against identical input; any variant (new auth, wider scope, deeper depth) is new coverage. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output is complete. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If any of these are missing, STOP and load them now. Working without the skill means running
 tools without a triage methodology — you will produce a flat URL dump instead of prioritized
@@ -55,11 +55,11 @@ of arbitrary type order.
 - Run Katana live crawl via Kali MCP against all in-scope targets
 - Run gau historical URL enrichment via Kali MCP against all in-scope domains
 - Deduplicate raw URL output before ingestion (`sort -u` and param-structure dedup)
-- Ingest all collected URLs into the work buffer via `assess.py ingest-endpoints`
-- Ingest OpenAPI/Swagger specs via `assess.py ingest-spec` when Phase 1 discovered them
+- Ingest all collected URLs into the work buffer via `aith assess ingest-endpoints`
+- Ingest OpenAPI/Swagger specs via `aith assess ingest-spec` when Phase 1 discovered them
 - Extract attack intelligence from URL corpus (leaked params, admin paths, version spread, backup files)
-- Record durable surfaces via `assess.py record-surface` for high-signal discoveries
-- Record findings via `assess.py record-finding` when triage surfaces decisive evidence (e.g., exposed secrets in URLs)
+- Record durable surfaces via `aith assess record-surface` for high-signal discoveries
+- Record findings via `aith assess record-finding` when triage surfaces decisive evidence (e.g., exposed secrets in URLs)
 - Produce a priority manifest that the operator uses to order Phase 3 dispatches
 
 ## Collection Sequence
@@ -70,7 +70,7 @@ Work through targets in this order unless the operator narrows the scope:
 2. **Live crawl** — Katana via Kali MCP with auth headers if `auth.json` is active
 3. **Historical enrichment** — gau via Kali MCP for Wayback, OTX, Common Crawl, URLScan
 4. **Spec ingestion** — OpenAPI/Swagger specs discovered in Phase 1
-5. **Dedup and ingest** — all sources through `assess.py ingest-endpoints` with source tagging
+5. **Dedup and ingest** — all sources through `aith assess ingest-endpoints` with source tagging
 6. **Intelligent triage** — analyze the full URL corpus for attack signals
 7. **Record surfaces and findings** — high-signal discoveries recorded before returning
 8. **Stats and priority manifest** — work-buffer summary with ranked attack surface clusters
@@ -131,9 +131,9 @@ When `auth.json` has `use_for_requests` set to `true` and `state` set to `availa
 
 - Keep all URL crawling and historical enrichment in Kali MCP — host-side crawling bypasses runtime isolation
 - Deduplicate before ingestion to avoid inflating work-buffer counts
-- Use `assess.py ingest-endpoints` for all work-buffer writes — direct DB inserts bypass backend sync
-- Use `assess.py record-surface` for all surface writes — calling helpers directly bypasses backend sync
-- Use `assess.py record-finding` for any decisive findings — unrecorded findings are lost data
+- Use `aith assess ingest-endpoints` for all work-buffer writes — direct DB inserts bypass backend sync
+- Use `aith assess record-surface` for all surface writes — calling helpers directly bypasses backend sync
+- Use `aith assess record-finding` for any decisive findings — unrecorded findings are lost data
 - Report tool failures clearly in Coverage Gaps — the operator needs to know which sources failed
 
 ## Pre-Output Coverage Self-Check
@@ -156,9 +156,9 @@ Before producing output, verify against this checklist:
 - [ ] Priority manifest produced with ranked attack surface clusters
 
 ### Recording
-- [ ] All URLs ingested into work buffer via `assess.py ingest-endpoints`
-- [ ] High-signal surfaces recorded via `assess.py record-surface`
-- [ ] Decisive findings recorded via `assess.py record-finding`
+- [ ] All URLs ingested into work buffer via `aith assess ingest-endpoints`
+- [ ] High-signal surfaces recorded via `aith assess record-surface`
+- [ ] Decisive findings recorded via `aith assess record-finding`
 
 ### Coverage Gap Declaration Rule
 For any collection source you could NOT complete, declare it in `#### Coverage Gaps` with:
@@ -171,11 +171,11 @@ For any collection source you could NOT complete, declare it in `#### Coverage G
 Return structured output with these sections:
 
 - `#### Summary` — targets collected, total URLs by source, dedup stats
-- `#### Stats` — work-buffer breakdown by type (from `assess.py dispatch stats`)
+- `#### Stats` — work-buffer breakdown by type (from `aith assess dispatch stats`)
 - `#### Priority Attack Surfaces` — ranked clusters with attack signals and recommended Phase 3 ordering
-- `#### Surface Candidates` — already recorded via `assess.py record-surface` before returning
+- `#### Surface Candidates` — already recorded via `aith assess record-surface` before returning
 - `#### Coverage Gaps` — REQUIRED. Declare what sources failed and why. If none, state "No coverage gaps — all sources completed."
-- `#### Findings` — already recorded via `assess.py record-finding` before returning
+- `#### Findings` — already recorded via `aith assess record-finding` before returning
 - `#### Intelligence` — leaked params, version spread, admin paths, interesting historical URLs
 - `#### Recommended Phase 3 Ordering` — which work-buffer types and clusters to dispatch first, based on triage signals
 

@@ -408,7 +408,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "evidence": "In parseurl() at line 342, schemelen is derived from user-supplied URL without validation. memcpy(buf, scheme, schemelen) copies attacker-controlled bytes into fixed-size heap buffer.",
                         "disposition": "finding",
                         "confidence": "high",
-                        "finding_slug": "FINDING-CH-001",
+                        "finding_slug": "CH-001",
                         "cwe_id": "CWE-122",
                         "slot_type": "URL-COMPONENT",
                         "notes": "Guard at line 305 uses signed int comparison allowing negative bypass.",

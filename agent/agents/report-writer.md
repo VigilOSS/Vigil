@@ -35,15 +35,15 @@ The full query set, field descriptions, and generation procedure are in
 Minimum backend pull set:
 
 ```bash
-./scripts/assess.py check-report-readiness        # final reports only
-./scripts/assess.py fetch "report-findings?mode=final"
+aith assess check-report-readiness        # final reports only
+aith assess fetch "report-findings?mode=final"
 # or for interim work:
-./scripts/assess.py fetch "report-findings?mode=draft"
-./scripts/assess.py fetch attack-chains
-./scripts/assess.py fetch surfaces
-./scripts/assess.py fetch credentials
-./scripts/assess.py fetch access-records
-./scripts/assess.py fetch summary
+aith assess fetch "report-findings?mode=draft"
+aith assess fetch attack-chains
+aith assess fetch surfaces
+aith assess fetch credentials
+aith assess fetch access-records
+aith assess fetch summary
 ```
 If `check-report-readiness` exits non-zero, report the blockers to the operator and stop — do not proceed with report generation.
 
@@ -163,7 +163,7 @@ Write the full report to `$ENGAGEMENT_DIR/report.md` with these sections:
 
 - `## Executive Summary` — severity counts, posture narrative, top recommendation
 - `## Methodology` — approach, phases, tools, limitations
-- `## Findings` — each finding self-contained with FINDING-NNN ID, slug cross-reference, CVSS, evidence, remediation
+- `## Findings` — each finding self-contained with NNN ID, slug cross-reference, CVSS, evidence, remediation
 - `## Attack Path Narrative` — chain scenarios with finding cross-references
 - `## Coverage Summary` — metrics from the assessment summary endpoint
 - `## Finding Cross-Reference` — table mapping report IDs to backend slugs

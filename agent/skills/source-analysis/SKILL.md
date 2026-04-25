@@ -17,6 +17,8 @@ origin: AI Threat Hunting
 
 - `LinkFinder` — automated endpoint extraction from JavaScript files
 - `SecretFinder` — scan JS files for API keys, tokens, and secrets
+- `trufflehog` — scan saved JS/source-map artifacts through Kali MCP (host-side installs
+  aren't required; the Kali runtime image ships trufflehog)
 - `curl`, `grep`/`sed`/`awk`, `jq` — manual extraction and verification
 
 ## Division of Labor
@@ -52,21 +54,23 @@ curl -sL <js-url> | grep -oE '["'"'"'](/[a-zA-Z0-9_/\-\.]+)["'"'"']' | sort -u
 python3 linkfinder.py -i https://TARGET/static/js/app.js -o cli
 
 # Batch all JS files discovered in step 1
-for js_url in $(cat /engagement/scans/js_files.txt); do
+for js_url in $(cat /engagements/$ENGAGEMENT_KEY/scans/js_files.txt); do
   python3 linkfinder.py -i "$js_url" -o cli
-done | sort -u > /engagement/scans/js_endpoints.txt
+done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_endpoints.txt
 
 # SecretFinder — scan for API keys, tokens, credentials in JS
 python3 SecretFinder.py -i https://TARGET/static/js/app.js -o cli
 
 # Batch scan
-for js_url in $(cat /engagement/scans/js_files.txt); do
+for js_url in $(cat /engagements/$ENGAGEMENT_KEY/scans/js_files.txt); do
   python3 SecretFinder.py -i "$js_url" -o cli
-done | sort -u > /engagement/scans/js_secrets.txt
+done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_secrets.txt
 ```
 
 Use LinkFinder and SecretFinder as the primary extraction pass. Fall back to manual grep
 for edge cases they miss (inline scripts, dynamically loaded chunks, non-standard patterns).
+When scanning saved artifacts for secrets, invoke `trufflehog filesystem` via Kali MCP against
+`/engagements/$ENGAGEMENT_KEY/...` paths so the runtime-owned install is used consistently.
 
 - API calls: fetch(), axios, XHR, $.ajax patterns
 - SPA routes: React `path="/..."`, Vue `{ path: }`, Angular `{ path: }`
@@ -86,9 +90,9 @@ The local queue can still be populated as a transient batching aid, but the oper
 the backend ledger:
 
 ```bash
-curl -sL "https://TARGET/openapi.json" -o /engagement/scans/openapi.json
-./scripts/assess.py ingest-spec "$ENGAGEMENT_DIR/cases.db" "$ENGAGEMENT_DIR/scans/openapi.json"
-./scripts/assess.py dispatch "$ENGAGEMENT_DIR/cases.db" stats
+curl -sL "https://TARGET/openapi.json" -o /engagements/$ENGAGEMENT_KEY/scans/openapi.json
+aith assess ingest-spec "$ENGAGEMENT_DIR/cases.db" "$ENGAGEMENT_DIR/scans/openapi.json"
+aith assess dispatch "$ENGAGEMENT_DIR/cases.db" stats
 ```
 
 This creates durable request/service coverage candidates and, when the local buffer is in use,

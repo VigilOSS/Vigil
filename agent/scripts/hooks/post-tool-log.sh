@@ -1,16 +1,17 @@
 #!/bin/bash
-# post-tool-log.sh — Claude Code PostToolUse hook
+# post-tool-log.sh — Claude Code / Codex PostToolUse hook
 # Reads hook JSON from stdin, extracts tool info + agent context, POSTs to the
 # orchestrator's /engagements/{key}/activity-entries endpoint.
 #
 # The backend is now authoritative for the narrative activity log (formerly
 # log.md). This script constructs a JSON payload and delegates the HTTP call
-# to `assess.py log`, which centralizes URL resolution, retry, and auth.
+# to `aith assess log`, which centralizes URL resolution, retry, and auth.
 #
 # Hook JSON fields used:
 #   tool_name        — Bash, Write, Edit, Agent, etc.
 #   tool_input       — command (Bash), file_path (Write/Edit), prompt+subagent_type (Agent)
-#   tool_response    — stdout/stderr (Bash), success (Write/Edit)
+#   tool_response    — stdout/stderr object (Claude Bash) or stable response
+#                      string/object (Codex Bash/apply_patch/MCP)
 #   agent_type       — which subagent is running (only present in subagent context)
 #   hook_event_name  — PostToolUse
 
@@ -29,10 +30,12 @@ ASSESS_PY="$SCRIPT_DIR/../assess.py"
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 [ -z "$TOOL_NAME" ] && exit 0
 
-AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "operator"' 2>/dev/null || echo "operator")
+AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // .agent_name // "operator"' 2>/dev/null || echo "operator")
+HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
+[ -z "$HOOK_CWD" ] && HOOK_CWD="$(pwd)"
 
 # Find active engagement directory
-ENG_DIR=$(resolve_engagement_dir "$(pwd)" || true)
+ENG_DIR=$(resolve_engagement_dir "$HOOK_CWD" || true)
 [ -z "$ENG_DIR" ] && exit 0
 
 # Check scope.json status — only log in-progress engagements.
@@ -45,9 +48,46 @@ STATUS=$(jq -r '.status // "unknown"' "$ENG_DIR/scope.json" 2>/dev/null || echo 
 # loud hooks from flooding the activity_entries table when a command triggers
 # multiple PostToolUse events.
 DEDUP_FILE="$ENG_DIR/.last_hook_log"
+TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null || true)
+
+if [ -n "$TOOL_USE_ID" ]; then
+  SEEN_FILE="$ENG_DIR/.hook_seen_tool_uses"
+  if [ -f "$SEEN_FILE" ] && grep -Fxq "$TOOL_USE_ID" "$SEEN_FILE" 2>/dev/null; then
+    exit 0
+  fi
+  printf '%s\n' "$TOOL_USE_ID" >> "$SEEN_FILE" 2>/dev/null || true
+fi
+
+tool_response_text() {
+  echo "$INPUT" | jq -r '
+    .tool_response as $r
+    | if ($r | type) == "object" then
+        ($r.stdout // $r.output // $r.result // $r.message // ($r | tostring))
+      elif $r == null then
+        ""
+      else
+        ($r | tostring)
+      end
+  ' 2>/dev/null || true
+}
+
+tool_response_exit_code() {
+  echo "$INPUT" | jq -r '
+    .tool_response as $r
+    | if ($r | type) == "object" then
+        ($r.exitCode // $r.exit_code // $r.return_code // empty)
+      else
+        empty
+      end
+  ' 2>/dev/null || true
+}
+
+json_preview() {
+  jq -c . 2>/dev/null | head -c "${1:-300}" || true
+}
 
 # post_activity_entry <actor_kind> <title> <action> <result>
-# Delegates to assess.py log so URL resolution, retry, and schema shaping all
+# Delegates to aith assess log so URL resolution, retry, and schema shaping all
 # live in one place. The hook is best-effort: failure is logged to stderr but
 # does not block the agent's next step.
 post_activity_entry() {
@@ -89,9 +129,10 @@ case "$TOOL_NAME" in
     fi
     printf '%s\n%s\n' "$CMD_KEY" "$(date +%s)" > "$DEDUP_FILE"
 
-    # Extract output summary (first 300 chars of stdout)
-    OUTPUT_SUMMARY=$(echo "$INPUT" | jq -r '.tool_response.stdout // empty' 2>/dev/null | head -c 300 || true)
-    EXIT_CODE=$(echo "$INPUT" | jq -r '.tool_response.exitCode // empty' 2>/dev/null || true)
+    # Extract output summary (first 300 chars). Claude sends a response object;
+    # Codex sends a stable response string for Bash/unified exec.
+    OUTPUT_SUMMARY=$(tool_response_text | head -c 300 || true)
+    EXIT_CODE=$(tool_response_exit_code)
 
     SHORT_CMD=$(echo "$COMMAND" | head -c 200)
 
@@ -137,6 +178,24 @@ case "$TOOL_NAME" in
         post_activity_entry "hook" "$TOOL_NAME" "file=${SHORT_PATH}" ""
         ;;
     esac
+    ;;
+
+  apply_patch)
+    FILES=$(echo "$INPUT" \
+      | jq -r '.tool_input.command // empty' 2>/dev/null \
+      | sed -nE 's/^\*\*\* (Add|Update|Delete) File: //p' \
+      | sort -u \
+      | awk 'BEGIN { sep = "" } { printf "%s%s", sep, $0; sep = ", " } END { if (sep != "") print "" }' \
+      2>/dev/null || true)
+    [ -z "$FILES" ] && FILES="unknown files"
+    RESULT=$(tool_response_text | head -c 300 || true)
+    post_activity_entry "hook" "apply_patch" "files=${FILES}" "$RESULT"
+    ;;
+
+  mcp__*)
+    ARG_PREVIEW=$(echo "$INPUT" | jq '.tool_input // {}' 2>/dev/null | json_preview 300)
+    RESULT=$(tool_response_text | head -c 300 || true)
+    post_activity_entry "hook" "$TOOL_NAME" "mcp args=${ARG_PREVIEW}" "$RESULT"
     ;;
 
   *)

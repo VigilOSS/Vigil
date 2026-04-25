@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import gc
+import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -21,10 +23,317 @@ class DatabaseFingerprint:
 
 
 _startup_database_fingerprint: DatabaseFingerprint | None = None
+_LEGACY_FINDING_PREFIX = "FINDING" + "-"
+_LEGACY_FINDING_REF_RE = re.compile(rf"\b{_LEGACY_FINDING_PREFIX}([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d{{3}}[A-Z]?)\b")
+_COVERAGE_STATUS_RANK = {
+    "pending": 0,
+    "queued": 1,
+    "deferred": 2,
+    "covered": 3,
+    "not_applicable": 3,
+    "blocked": 4,
+}
 
 
 def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
     return {row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _append_notes(existing: str, incoming: str) -> str:
+    if not incoming:
+        return existing
+    if not existing:
+        return incoming
+    return existing + "\n" + incoming
+
+
+def _merge_coverage_status(statuses: list[str]) -> str:
+    best_status = "pending"
+    best_rank = _COVERAGE_STATUS_RANK[best_status]
+    for status_value in statuses:
+        normalized = str(status_value or "pending").strip().lower()
+        rank = _COVERAGE_STATUS_RANK.get(normalized, 0)
+        if rank > best_rank:
+            best_status = normalized
+            best_rank = rank
+    return best_status
+
+
+def _refresh_service_coverage_status(connection: sqlite3.Connection, engagement_id: int, service_id: int) -> None:
+    rows = connection.execute(
+        "SELECT status FROM assessment_coverage_items WHERE engagement_id = ? AND service_id = ?",
+        (engagement_id, service_id),
+    ).fetchall()
+    if not rows:
+        return
+    statuses = [str(row[0] or "pending").strip().lower() for row in rows]
+    if all(status_value in {"covered", "not_applicable"} for status_value in statuses):
+        coverage_status = "covered"
+    elif any(status_value == "blocked" for status_value in statuses):
+        coverage_status = "blocked"
+    elif any(status_value in {"covered", "not_applicable", "deferred"} for status_value in statuses):
+        coverage_status = "partial"
+    else:
+        coverage_status = "pending"
+    connection.execute(
+        """
+        UPDATE assessment_services
+        SET coverage_status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND engagement_id = ?
+        """,
+        (coverage_status, service_id, engagement_id),
+    )
+
+
+def _dedupe_coverage_items(connection: sqlite3.Connection) -> None:
+    duplicate_groups = connection.execute(
+        """
+        SELECT
+            engagement_id,
+            request_variant_id,
+            service_id,
+            auth_context,
+            input_slot,
+            attack_family
+        FROM assessment_coverage_items
+        GROUP BY
+            engagement_id,
+            COALESCE(request_variant_id, -1),
+            COALESCE(service_id, -1),
+            auth_context,
+            input_slot,
+            attack_family
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+    affected_services: set[tuple[int, int]] = set()
+    for (
+        engagement_id,
+        request_variant_id,
+        service_id,
+        auth_context,
+        input_slot,
+        attack_family,
+    ) in duplicate_groups:
+        rows = connection.execute(
+            """
+            SELECT id, status, notes
+            FROM assessment_coverage_items
+            WHERE engagement_id = ?
+              AND request_variant_id IS ?
+              AND service_id IS ?
+              AND auth_context = ?
+              AND input_slot = ?
+              AND attack_family = ?
+            ORDER BY id ASC
+            """,
+            (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family),
+        ).fetchall()
+        if len(rows) < 2:
+            continue
+        keeper_id = int(rows[0][0])
+        merged_status = _merge_coverage_status([str(row[1] or "pending") for row in rows])
+        merged_notes = ""
+        for row in rows:
+            merged_notes = _append_notes(merged_notes, str(row[2] or ""))
+        connection.execute(
+            """
+            UPDATE assessment_coverage_items
+            SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (merged_status, merged_notes, keeper_id),
+        )
+        for row in rows[1:]:
+            duplicate_id = int(row[0])
+            connection.execute(
+                "UPDATE assessment_probe_runs SET coverage_item_id = ? WHERE coverage_item_id = ?",
+                (keeper_id, duplicate_id),
+            )
+            connection.execute("DELETE FROM assessment_coverage_items WHERE id = ?", (duplicate_id,))
+        if service_id is not None:
+            affected_services.add((int(engagement_id), int(service_id)))
+    for engagement_id, service_id in affected_services:
+        _refresh_service_coverage_status(connection, engagement_id, service_id)
+
+
+def _strip_legacy_finding_prefix(value: str) -> str:
+    if value.startswith(_LEGACY_FINDING_PREFIX):
+        return value[len(_LEGACY_FINDING_PREFIX) :]
+    return value
+
+
+def _normalize_legacy_finding_refs(value: str, slug_map: dict[tuple[int, str], str], engagement_id: int | None) -> str:
+    def replace(match: re.Match[str]) -> str:
+        old_slug = match.group(0)
+        if engagement_id is not None:
+            mapped_slug = slug_map.get((engagement_id, old_slug))
+            if mapped_slug is not None:
+                return mapped_slug
+        return match.group(1)
+
+    return _LEGACY_FINDING_REF_RE.sub(replace, value)
+
+
+def _strip_legacy_finding_prefixes(value, slug_map: dict[tuple[int, str], str] | None = None, engagement_id: int | None = None):
+    if isinstance(value, str):
+        normalized = _normalize_legacy_finding_refs(value, slug_map or {}, engagement_id)
+        return normalized, normalized != value
+    if isinstance(value, list):
+        changed = False
+        normalized_items = []
+        for item in value:
+            normalized_item, item_changed = _strip_legacy_finding_prefixes(item, slug_map, engagement_id)
+            normalized_items.append(normalized_item)
+            changed = changed or item_changed
+        return normalized_items, changed
+    if isinstance(value, dict):
+        changed = False
+        normalized_dict = {}
+        for key, item in value.items():
+            normalized_item, item_changed = _strip_legacy_finding_prefixes(item, slug_map, engagement_id)
+            normalized_dict[key] = normalized_item
+            changed = changed or item_changed
+        return normalized_dict, changed
+    return value, False
+
+
+def _next_legacy_collision_slug(connection: sqlite3.Connection, engagement_id: int, preferred_slug: str, row_id: int) -> str:
+    candidate = f"{preferred_slug}-legacy-{row_id}"
+    suffix = 2
+    while connection.execute(
+        "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+        (engagement_id, candidate),
+    ).fetchone():
+        candidate = f"{preferred_slug}-legacy-{row_id}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _migrate_legacy_finding_slugs(connection: sqlite3.Connection) -> dict[tuple[int, str], str]:
+    if not {"id", "engagement_id", "slug"}.issubset(_table_columns(connection, "assessment_findings")):
+        return {}
+
+    slug_map: dict[tuple[int, str], str] = {}
+    rows = connection.execute(
+        """
+        SELECT id, engagement_id, slug
+        FROM assessment_findings
+        WHERE slug LIKE ?
+        ORDER BY engagement_id ASC, id ASC
+        """,
+        (f"{_LEGACY_FINDING_PREFIX}%",),
+    ).fetchall()
+    for row_id, engagement_id, old_slug in rows:
+        if not isinstance(old_slug, str):
+            continue
+        normalized = _strip_legacy_finding_prefix(old_slug)
+        collision = connection.execute(
+            """
+            SELECT 1
+            FROM assessment_findings
+            WHERE engagement_id = ?
+              AND slug = ?
+              AND id != ?
+            """,
+            (engagement_id, normalized, row_id),
+        ).fetchone()
+        if collision is not None:
+            normalized = _next_legacy_collision_slug(connection, int(engagement_id), normalized, int(row_id))
+        if normalized != old_slug:
+            connection.execute(
+                "UPDATE assessment_findings SET slug = ? WHERE id = ?",
+                (normalized, row_id),
+            )
+            slug_map[(int(engagement_id), old_slug)] = normalized
+    return slug_map
+
+
+def _migrate_legacy_finding_prefix_in_text_column(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    slug_map: dict[tuple[int, str], str],
+) -> None:
+    columns = _table_columns(connection, table_name)
+    if column_name not in columns:
+        return
+    select_columns = "id, engagement_id, " + column_name if "engagement_id" in columns else "id, " + column_name
+    rows = connection.execute(
+        f"SELECT {select_columns} FROM {table_name} WHERE {column_name} LIKE ?",
+        (f"{_LEGACY_FINDING_PREFIX}%",),
+    ).fetchall()
+    for row in rows:
+        row_id = row[0]
+        if "engagement_id" in columns:
+            engagement_id = int(row[1])
+            value = row[2]
+        else:
+            engagement_id = None
+            value = row[1]
+        if not isinstance(value, str):
+            continue
+        normalized = slug_map.get((engagement_id, value), _strip_legacy_finding_prefix(value)) if engagement_id is not None else _strip_legacy_finding_prefix(value)
+        if normalized != value:
+            connection.execute(
+                f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",
+                (normalized, row_id),
+            )
+
+
+def _migrate_legacy_finding_prefix_in_json_column(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    slug_map: dict[tuple[int, str], str],
+) -> None:
+    columns = _table_columns(connection, table_name)
+    if column_name not in columns:
+        return
+    select_columns = "id, engagement_id, " + column_name if "engagement_id" in columns else "id, " + column_name
+    rows = connection.execute(
+        f"SELECT {select_columns} FROM {table_name} WHERE {column_name} LIKE ?",
+        (f"%{_LEGACY_FINDING_PREFIX}%",),
+    ).fetchall()
+    for row in rows:
+        row_id = row[0]
+        if "engagement_id" in columns:
+            engagement_id = int(row[1])
+            value = row[2]
+        else:
+            engagement_id = None
+            value = row[1]
+        if not isinstance(value, str):
+            continue
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            continue
+        normalized, changed = _strip_legacy_finding_prefixes(payload, slug_map, engagement_id)
+        if changed:
+            connection.execute(
+                f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",
+                (json.dumps(normalized, ensure_ascii=True), row_id),
+            )
+
+
+def _migrate_legacy_finding_slug_references(connection: sqlite3.Connection) -> None:
+    slug_map = _migrate_legacy_finding_slugs(connection)
+    for table_name, column_name in (
+        ("assessment_finding_links", "target_ref"),
+        ("assessment_attack_chain_links", "entity_ref"),
+        ("code_analysis_results", "finding_slug"),
+        ("intel_notes", "linked_finding_slug"),
+    ):
+        _migrate_legacy_finding_prefix_in_text_column(connection, table_name, column_name, slug_map)
+
+    for table_name, column_name in (
+        ("assessment_findings", "details_json"),
+        ("assessment_findings", "provenance_json"),
+        ("engagement_sessions", "assigned_targets_json"),
+        ("assessment_finding_transitions", "metadata_json"),
+    ):
+        _migrate_legacy_finding_prefix_in_json_column(connection, table_name, column_name, slug_map)
 
 
 class IncompatibleDatabaseError(RuntimeError):
@@ -406,6 +715,20 @@ def init_db() -> None:
                 FOREIGN KEY(request_variant_id) REFERENCES assessment_request_variants(id) ON DELETE CASCADE,
                 FOREIGN KEY(service_id) REFERENCES assessment_services(id) ON DELETE CASCADE,
                 FOREIGN KEY(coverage_item_id) REFERENCES assessment_coverage_items(id) ON DELETE SET NULL
+            )
+            """
+        )
+        _dedupe_coverage_items(connection)
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_assessment_coverage_items_natural
+            ON assessment_coverage_items(
+                engagement_id,
+                COALESCE(request_variant_id, -1),
+                COALESCE(service_id, -1),
+                auth_context,
+                input_slot,
+                attack_family
             )
             """
         )
@@ -1593,6 +1916,8 @@ def init_db() -> None:
                 "INSERT INTO activity_entries_fts(activity_entries_fts) VALUES ('rebuild')"
             )
         # ── End Intel Tables ──────────────────────────────────────
+
+        _migrate_legacy_finding_slug_references(connection)
 
         connection.commit()
 

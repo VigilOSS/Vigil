@@ -24,8 +24,8 @@ SysNtCreateFile endp
 - Bypass via ROP chains or JIT-based techniques
 
 ## AV Template Bypass
-- Metasploit: use custom templates to change binary signature
-- Modify 1-2 bytes in shellcode launcher to break static signatures
+- Use custom payload templates to change binary signature
+- Modify 1-2 bytes in a shellcode launcher to break static signatures
 
 ## Software Packing (T1027.002)
 ```cmd
