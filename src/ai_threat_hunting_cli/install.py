@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+import platform
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import docker
+
+
+def _rmtree(path: Path) -> None:
+    """shutil.rmtree with a single retry on macOS for Spotlight/Finder races."""
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        if platform.system() == "Darwin":
+            time.sleep(0.5)
+            shutil.rmtree(path)
+        else:
+            raise
 
 ROOT_MANAGED_NAMES = {
     "README.md",
@@ -49,6 +63,13 @@ class InstallOptions:
     verify_docker_image: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class InstallResult:
+    install_root: Path
+    is_upgrade: bool
+    image_built: bool
+
+
 def _is_excluded(path: Path) -> bool:
     name = path.name
     if name in EXCLUDED_NAMES:
@@ -76,7 +97,7 @@ def _sync_dir(src: Path, dest: Path, *, preserve_rel_paths: set[Path]) -> None:
             continue
         if child.name not in {item.name for item in src.iterdir()} or not _is_excluded(child):
             if child.is_dir():
-                shutil.rmtree(child)
+                _rmtree(child)
             else:
                 child.unlink(missing_ok=True)
 
@@ -99,11 +120,16 @@ def _sync_dir(src: Path, dest: Path, *, preserve_rel_paths: set[Path]) -> None:
             shutil.copy2(child, target)
 
 
-def install_from_source(options: InstallOptions, *, runner: docker.Runner = docker.run_command) -> Path:
+def install_from_source(options: InstallOptions, *, runner: docker.Runner = docker.run_command) -> InstallResult:
     source_root = options.source_root.resolve()
     install_root = options.install_root.expanduser().resolve()
     if options.dry_run:
-        return install_root
+        return InstallResult(install_root=install_root, is_upgrade=False, image_built=False)
+
+    is_upgrade = any(
+        (install_root / name).exists()
+        for name in ("agent", "orchestrator", ".claude", ".codex")
+    )
 
     install_root.mkdir(parents=True, exist_ok=True)
     if source_root == install_root:
@@ -117,7 +143,7 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
                 continue
             if child.name in ROOT_MANAGED_NAMES and not (source_root / child.name).exists():
                 if child.is_dir():
-                    shutil.rmtree(child)
+                    _rmtree(child)
                 else:
                     child.unlink(missing_ok=True)
 
@@ -138,12 +164,14 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
         _copy_client_entrypoints(source_root, install_root)
         _ensure_install_dirs(install_root)
 
+    image_built = False
     if options.verify_docker_image:
         image = "security-research:latest"
         if options.force_image or not docker.image_exists(image, runner=runner):
             argv = ["docker", "build", "-t", image, "-f", str(install_root / "agent" / "docker" / "runtime-full" / "Dockerfile"), str(install_root)]
             docker.require_success(runner(argv), argv)
-    return install_root
+            image_built = True
+    return InstallResult(install_root=install_root, is_upgrade=is_upgrade, image_built=image_built)
 
 
 def _ensure_install_dirs(install_root: Path) -> None:
@@ -163,5 +191,5 @@ def _copy_client_entrypoints(source_root: Path, install_root: Path) -> None:
         dest = install_root / dirname
         if src.exists():
             if dest.exists():
-                shutil.rmtree(dest)
+                _rmtree(dest)
             shutil.copytree(src, dest)

@@ -103,7 +103,7 @@ def _validate_image_current(options: RuntimeOptions, *, runner: docker.Runner) -
 
 
 def _validate_tools(container_name: str, *, runner: docker.Runner) -> None:
-    required_tools = ["mcp-server", "katana", "gau", "nuclei", "httpx", "trufflehog", "gf", "uro"]
+    required_tools = ["mcp-server", "ping", "katana", "gau", "nuclei", "httpx", "trufflehog", "gf", "uro"]
     for tool in required_tools:
         result = runner(["docker", "exec", container_name, "sh", "-lc", f"command -v '{tool}' >/dev/null"])
         if result.returncode != 0:
