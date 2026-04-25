@@ -52,6 +52,16 @@ def test_kali_runtime_dockerfiles_package_audit_enum_module() -> None:
         assert required_copy in contents
 
 
+def test_kali_runtime_dockerfiles_package_ping_for_mcp_smoke_tests() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    for dockerfile in (
+        repo_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
+        repo_root / "agent" / "docker" / "runtime-lightweight" / "Dockerfile",
+    ):
+        contents = dockerfile.read_text(encoding="utf-8")
+        assert "iputils-ping=3:20250605-1+b1" in contents
+
+
 def test_patched_kali_client_preserves_audit_context_for_async_tools(monkeypatch) -> None:
     module = _load_script_module(
         "test_patched_kali_client_module",

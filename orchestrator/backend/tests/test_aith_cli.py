@@ -310,6 +310,24 @@ def test_mcp_status_recognizes_aith_runtime_registration(monkeypatch: pytest.Mon
     assert status["claude"]["configured"] is True
 
 
+def test_mcp_status_recognizes_legacy_docker_exec_registration(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import status as status_module
+
+    def fake_which(command: str) -> str | None:
+        return f"/usr/bin/{command}"
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, "kali\tdocker exec -i security-research mcp-server codex\n", "")
+
+    monkeypatch.setattr(status_module.shutil, "which", fake_which)
+    monkeypatch.setattr(status_module.subprocess, "run", fake_run)
+
+    status = status_module.collect_mcp_status()
+
+    assert status["codex"]["configured"] is True
+    assert status["claude"]["configured"] is True
+
+
 def test_runtime_shell_exec_passes_symbol_heavy_command_as_single_shell_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import main as main_module
 
