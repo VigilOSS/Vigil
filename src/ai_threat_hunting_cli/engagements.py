@@ -142,7 +142,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
             "status": "in_progress",
             "current_phase": "ingest",
         }
-        manifest = {"key": key, "name": name, "repos": repos, "created_at": created_at}
+        manifest = {"key": key, "name": name, "target": name, "repos": repos, "created_at": created_at}
     elif options.engagement_type == "web":
         scope = {
             "engagement_type": "web",
