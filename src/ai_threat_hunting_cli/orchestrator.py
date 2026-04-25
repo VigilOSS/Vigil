@@ -26,14 +26,12 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
     runtime_dir.joinpath("pids").mkdir(parents=True, exist_ok=True)
     runtime_dir.joinpath("logs").mkdir(parents=True, exist_ok=True)
 
+    if _frontend_build_needed(install_root, force=options.build):
+        _build_frontend(install_root)
+
     if _pid_running(pid_file):
         print(f"orchestrator already running: pid {pid_file.read_text(encoding='utf-8').strip()}")
         return
-
-    frontend_dist = install_root / "orchestrator" / "frontend" / "dist" / "index.html"
-    if options.build or not frontend_dist.exists():
-        subprocess.run(["npm", "install"], cwd=install_root / "orchestrator" / "frontend", check=True)
-        subprocess.run(["npm", "run", "build"], cwd=install_root / "orchestrator" / "frontend", check=True)
 
     env = {
         **os.environ,
@@ -52,11 +50,13 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
         str(options.port),
     ]
     if options.foreground:
+        os.chdir(install_root)
         os.execvpe("uv", argv, env)
     with log_file.open("ab") as log:
         process = subprocess.Popen(argv, cwd=install_root, env=env, stdout=log, stderr=subprocess.STDOUT)
     pid_file.write_text(f"{process.pid}\n", encoding="utf-8")
     if not _wait_for_health(options.host, options.port, process=process):
+        _terminate_process(process)
         pid_file.unlink(missing_ok=True)
         raise SystemExit(f"Orchestrator did not become healthy on http://{options.host}:{options.port}/healthz")
 
@@ -80,6 +80,62 @@ def stop_orchestrator(install_root: Path) -> None:
 def orchestrator_status(install_root: Path) -> str:
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
     return "running" if _pid_running(pid_file) else "stopped"
+
+
+def _build_frontend(install_root: Path) -> None:
+    frontend_dir = install_root / "orchestrator" / "frontend"
+    subprocess.run(["npm", "install"], cwd=frontend_dir, check=True)
+    subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True)
+
+
+def _frontend_build_needed(install_root: Path, *, force: bool = False) -> bool:
+    if force:
+        return True
+    frontend_dir = install_root / "orchestrator" / "frontend"
+    frontend_dist = frontend_dir / "dist" / "index.html"
+    if not frontend_dist.exists():
+        return True
+    latest_input = _latest_frontend_input_mtime(frontend_dir)
+    return latest_input is not None and latest_input > frontend_dist.stat().st_mtime
+
+
+def _latest_frontend_input_mtime(frontend_dir: Path) -> float | None:
+    candidates = [
+        frontend_dir / "package.json",
+        frontend_dir / "package-lock.json",
+        frontend_dir / "index.html",
+        frontend_dir / "vite.config.ts",
+        frontend_dir / "vite.config.js",
+        frontend_dir / "tsconfig.json",
+        frontend_dir / "tsconfig.app.json",
+        frontend_dir / "tsconfig.node.json",
+    ]
+    latest: float | None = None
+    for path in candidates:
+        if path.is_file():
+            latest = max(latest or 0, path.stat().st_mtime)
+    src_dir = frontend_dir / "src"
+    if src_dir.is_dir():
+        for path in src_dir.rglob("*"):
+            if path.is_file():
+                latest = max(latest or 0, path.stat().st_mtime)
+    return latest
+
+
+def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    process.kill()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _pid_running(pid_file: Path) -> bool:

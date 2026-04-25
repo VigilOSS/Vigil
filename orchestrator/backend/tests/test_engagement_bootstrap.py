@@ -100,6 +100,7 @@ def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path) -> Non
     assert auth["mode"] == "none"
     assert auth["state"] == "none"
     assert manifest["name"] == "my-cool-project"
+    assert manifest["target"] == "my-cool-project"
     assert (created.path / "source").is_dir()
     assert (created.path / "start_claude.sh").exists()
     assert not (created.path / "start_codex.sh").exists()

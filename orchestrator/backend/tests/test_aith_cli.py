@@ -233,6 +233,127 @@ def test_mitmproxy_start_without_arg_uses_current_engagement(tmp_path: Path, mon
     assert captured["engagement_dir"] == engagement
 
 
+def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+
+    install_root = tmp_path / "install"
+    frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
+    frontend_dist.mkdir(parents=True)
+    (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    captured: dict[str, object] = {}
+
+    def fake_execvpe(file: str, argv: list[str], env: dict[str, str]) -> None:
+        captured["file"] = file
+        captured["argv"] = argv
+        captured["cwd"] = Path.cwd()
+        captured["env"] = env
+        raise RuntimeError("exec blocked")
+
+    monkeypatch.setattr(orchestrator_module.os, "execvpe", fake_execvpe)
+
+    with pytest.raises(RuntimeError, match="exec blocked"):
+        orchestrator_module.start_orchestrator(
+            orchestrator_module.OrchestratorOptions(install_root=install_root, foreground=True)
+        )
+
+    assert captured["file"] == "uv"
+    assert captured["cwd"] == install_root.resolve()
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert argv[:4] == ["uv", "run", "--directory", "orchestrator/backend"]
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["AI_THREAT_HUNTING_INSTALL_DIR"] == str(install_root.resolve())
+
+
+def test_orchestrator_start_builds_frontend_even_when_backend_already_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+
+    install_root = tmp_path / "install"
+    frontend_dir = install_root / "orchestrator" / "frontend"
+    (frontend_dir / "src").mkdir(parents=True)
+    (frontend_dir / "package.json").write_text("{}", encoding="utf-8")
+    (frontend_dir / "src" / "main.tsx").write_text("console.log('ok')\n", encoding="utf-8")
+    pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
+    pid_file.parent.mkdir(parents=True)
+    pid_file.write_text("123\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(orchestrator_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(orchestrator_module, "_pid_running", lambda path: True)
+
+    orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
+
+    assert calls == [["npm", "install"], ["npm", "run", "build"]]
+
+
+def test_orchestrator_health_wait_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+
+    attempts: list[str] = []
+
+    def fail_urlopen(url: str, timeout: int):
+        attempts.append(url)
+        raise OSError("down")
+
+    monkeypatch.setattr(orchestrator_module.urllib.request, "urlopen", fail_urlopen)
+    monkeypatch.setattr(orchestrator_module.time, "sleep", lambda _: None)
+
+    assert orchestrator_module._wait_for_health("127.0.0.1", 18000) is False
+    assert attempts == ["http://127.0.0.1:18000/healthz"] * 30
+
+
+def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+
+    install_root = tmp_path / "install"
+    frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
+    frontend_dist.mkdir(parents=True)
+    (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
+    pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
+
+    class FakeProcess:
+        pid = 4321
+
+        def __init__(self) -> None:
+            self.terminated = False
+            self.killed = False
+
+        def poll(self) -> int | None:
+            return None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+        def kill(self) -> None:
+            self.killed = True
+
+    fake_process = FakeProcess()
+
+    def fake_popen(*_: object, **__: object) -> FakeProcess:
+        return fake_process
+
+    monkeypatch.setattr(orchestrator_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orchestrator_module, "_wait_for_health", lambda *_, **__: False)
+
+    with pytest.raises(SystemExit, match="did not become healthy"):
+        orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
+
+    assert fake_process.terminated is True
+    assert fake_process.killed is False
+    assert not pid_file.exists()
+
+
 def test_main_assess_passthrough_only_applies_to_top_level_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import main as main_module
 
@@ -765,3 +886,87 @@ def test_oob_start_renders_config_and_starts_idempotent_sessions(tmp_path: Path)
     assert "oob.example.test" in rendered
     assert "tmux new-session -d -s oob-server" in rendered
     assert "tmux new-session -d -s frpc" in rendered
+
+
+def test_oob_client_start_uses_session_file_for_domain_resume(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.oob import OobOptions, start_oob_client
+
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:3] == ["docker", "exec", "security-research"] and "tmux has-session -t oob-client-demo" in argv[-1] and "tmux new-session" not in argv[-1]:
+            return DockerResult(1, "", "")
+        return DockerResult(0, "", "")
+
+    start_oob_client(
+        OobOptions(
+            install_root=tmp_path,
+            frp_token="secret",
+            oob_domain="oob.example.test",
+        ),
+        "demo",
+        runner=runner,
+    )
+
+    rendered = "\n".join(" ".join(command) for command in commands)
+    assert "-session-file /data/oob/clients/demo.session" in rendered
+    assert "interactsh-client -server oob.example.test" in rendered
+
+
+def test_up_skips_oob_when_existing_sessions_are_active(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import up as up_module
+
+    calls: list[str] = []
+
+    monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
+    monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
+    monkeypatch.setattr(up_module, "start_proxy", lambda *args, **kwargs: calls.append("mitmproxy"))
+    monkeypatch.setattr(
+        up_module,
+        "oob_status",
+        lambda runner=None: {"state": "partial", "server": False, "frpc": True, "clients": ["demo"]},
+    )
+    monkeypatch.setattr(up_module, "start_oob", lambda *args, **kwargs: calls.append("oob"))
+    monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
+
+    up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=lambda *args, **kwargs: None)
+
+    assert calls == ["runtime", "orchestrator"]
+
+
+def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import up as up_module
+
+    calls: list[str] = []
+
+    monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: name == "security-research")
+    monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
+    monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
+    monkeypatch.setattr(
+        up_module,
+        "oob_status",
+        lambda runner=None: {"state": "stopped", "server": False, "frpc": False, "clients": []},
+    )
+    monkeypatch.setattr(
+        up_module,
+        "_oob_options",
+        lambda install_root: up_module.OobOptions(install_root=install_root, frp_token=""),
+    )
+
+    def fake_prompt() -> str:
+        calls.append("frp-prompt")
+        return ""
+
+    monkeypatch.setattr(up_module, "_prompt_frp_token", fake_prompt)
+
+    up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=lambda *args, **kwargs: None)
+
+    assert calls[:3] == ["runtime", "orchestrator", "frp-prompt"]

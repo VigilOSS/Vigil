@@ -84,7 +84,12 @@ def start_oob_client(
     metadata = {"name": client_name, "engagement": engagement, "agent": agent, "server": options.oob_domain}
     _write_runtime_file(options.container_name, f"{OOB_ROOT}/clients/{client_name}.json", json.dumps(metadata, indent=2) + "\n", runner=runner)
     log_path = f"{OOB_ROOT}/clients/{client_name}.log"
-    command = f"interactsh-client -server {shlex.quote(options.oob_domain)} -v -poll-interval 5 2>&1 | tee {shlex.quote(log_path)}"
+    session_file = f"{OOB_ROOT}/clients/{client_name}.session"
+    command = (
+        f"interactsh-client -server {shlex.quote(options.oob_domain)} "
+        f"-session-file {shlex.quote(session_file)} -v -poll-interval 5 "
+        f"2>&1 | tee {shlex.quote(log_path)}"
+    )
     _ensure_tmux_session(options.container_name, session, command, runner=runner)
 
 

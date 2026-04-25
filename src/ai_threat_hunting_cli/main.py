@@ -46,6 +46,7 @@ from .orchestrator import OrchestratorOptions, orchestrator_status, start_orches
 from .paths import resolve_install_root, resolve_source_root
 from .runtime import RuntimeOptions, build_runtime, runtime_status, start_runtime, stop_runtime
 from .status import collect_doctor_checks, collect_mcp_status, collect_status, print_doctor, print_status
+from .up import UpOptions, run_up
 
 
 def _print_post_install(result: InstallResult) -> None:
@@ -96,6 +97,13 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("doctor")
     status_p = sub.add_parser("status")
     status_p.add_argument("--json", action="store_true")
+    up_p = sub.add_parser("up", help="Build stale images and start the local runtime stack")
+    up_p.add_argument("--engagement")
+    up_p.add_argument("--select", action="store_true")
+    up_p.add_argument("--no-build", action="store_true")
+    up_p.add_argument("--runtime-restart-timeout", type=int, default=10)
+    up_p.add_argument("--yes-restart-runtime", action="store_true")
+    up_p.add_argument("--no-restart-runtime", action="store_true")
     logs_p = sub.add_parser("logs")
     logs_p.add_argument("target", choices=["orchestrator", "runtime", "mitmproxy", "oob", "all"])
     logs_p.add_argument("--follow", action="store_true")
@@ -264,6 +272,23 @@ def main(argv: list[str] | None = None) -> None:
         print_doctor(collect_doctor_checks(install_root, runner=docker_run_command))
     elif args.command == "status":
         print_status(collect_status(install_root, runner=docker_run_command), json_output=args.json)
+    elif args.command == "up":
+        if args.yes_restart_runtime and args.no_restart_runtime:
+            raise SystemExit("Specify only one of --yes-restart-runtime or --no-restart-runtime.")
+        if args.engagement and args.select:
+            raise SystemExit("Specify either --engagement or --select, not both.")
+        run_up(
+            UpOptions(
+                install_root=install_root,
+                engagement=args.engagement,
+                select=args.select,
+                no_build=args.no_build,
+                runtime_restart_timeout=args.runtime_restart_timeout,
+                yes_restart_runtime=args.yes_restart_runtime,
+                no_restart_runtime=args.no_restart_runtime,
+            ),
+            runner=docker_run_command,
+        )
     elif args.command == "logs":
         _logs(args, install_root)
     elif args.command == "config":
