@@ -25,7 +25,7 @@ from .engagements import (
     resolve_engagement_path,
     start_engagement,
 )
-from .install import InstallOptions, install_from_source
+from .install import InstallOptions, InstallResult, install_from_source
 from .mitmproxy import MitmproxyOptions, start_proxy, stop_proxy
 from .oob import (
     DEFAULT_FRP_HOST,
@@ -46,6 +46,29 @@ from .orchestrator import OrchestratorOptions, orchestrator_status, start_orches
 from .paths import resolve_install_root, resolve_source_root
 from .runtime import RuntimeOptions, build_runtime, runtime_status, start_runtime, stop_runtime
 from .status import collect_doctor_checks, collect_mcp_status, collect_status, print_doctor, print_status
+
+
+def _print_post_install(result: InstallResult) -> None:
+    root = result.install_root
+    print()
+    if result.is_upgrade:
+        print("Upgrade complete. Services using the previous install should be restarted:")
+        print(f"  - Kali runtime:   aith runtime restart")
+        print(f"  - Orchestrator:   aith orchestrator restart")
+        print(f"  - MCP server:     reconnect the kali MCP server in your client")
+        if result.image_built:
+            print(f"  - Docker image was rebuilt — running containers use the old image until restarted")
+        else:
+            print(f"  - Docker image:   run  aith runtime build  if agent scripts or Dockerfile changed")
+    else:
+        print("Install complete. Next steps:")
+        print(f"  1. Configure tokens and API keys in {root / '.env'}")
+        print(f"  2. aith runtime build          # build the Kali MCP runtime image")
+        print(f"  3. aith runtime start           # start the runtime container")
+        print(f"  4. aith mcp install both        # register the kali MCP server")
+        print(f"  5. aith orchestrator start       # start the orchestrator backend")
+        print(f"  6. aith engagement create <target>  # create your first engagement")
+    print()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -223,7 +246,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command in {"install", "update"}:
         source_root = resolve_source_root(args.source, install_root=install_root)
-        path = install_from_source(
+        result = install_from_source(
             InstallOptions(
                 source_root=source_root,
                 install_root=install_root,
@@ -233,8 +256,10 @@ def main(argv: list[str] | None = None) -> None:
             )
         )
         if not args.dry_run:
-            config_module.set_config_value("install.root", str(path))
-        print(path)
+            config_module.set_config_value("install.root", str(result.install_root))
+        print(result.install_root)
+        if not args.dry_run:
+            _print_post_install(result)
     elif args.command == "doctor":
         print_doctor(collect_doctor_checks(install_root, runner=docker_run_command))
     elif args.command == "status":

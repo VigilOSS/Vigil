@@ -137,8 +137,19 @@ def _mcp_client_status(client: str, argv: list[str]) -> dict[str, object]:
     except FileNotFoundError:
         return {"configured": False, "detail": f"{client} CLI not found"}
     text = f"{result.stdout}\n{result.stderr}"
-    configured = "kali" in text and "aith" in text and "runtime" in text and "mcp-server" in text
+    configured = _mcp_registration_present(text)
     return {"configured": configured, "detail": "configured" if configured else "kali server not registered"}
+
+
+def _mcp_registration_present(text: str) -> bool:
+    normalized = " ".join(text.lower().split())
+    if "kali" not in normalized or "mcp-server" not in normalized:
+        return False
+    return (
+        "aith runtime mcp-server" in normalized
+        or "docker exec -i security-research mcp-server" in normalized
+        or "docker exec security-research mcp-server" in normalized
+    )
 
 
 def _binary_check(command: str) -> Check:
