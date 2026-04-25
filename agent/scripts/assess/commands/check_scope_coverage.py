@@ -48,18 +48,19 @@ useful full-scope overview.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.scope import (
     classify_scope_entry,
     entry_matches_host,
+    host_from_token,
 )
 
 
@@ -206,11 +207,30 @@ def _endpoint_host(endpoint: str) -> str:
         return ""
     first = raw.split()[0]
     if "://" in first:
-        try:
-            return (urlsplit(first).hostname or "").rstrip(".")
-        except ValueError:
-            return ""
-    return first.split(":", 1)[0].rstrip(".")
+        return host_from_token(first)
+    ipv6_host = _ipv6_endpoint_host(first)
+    if ipv6_host:
+        return ipv6_host
+    return host_from_token(first)
+
+
+def _ipv6_endpoint_host(endpoint: str) -> str:
+    first = endpoint.strip().strip("'\"<>()").rstrip(",;").rstrip(".").lower()
+    if not first or first.count(":") < 2:
+        return ""
+    if first.startswith("["):
+        return host_from_token(first)
+    host, _, port = first.rpartition(":")
+    if port.isdigit() and _ip_literal(host):
+        return _ip_literal(host)
+    return _ip_literal(first)
+
+
+def _ip_literal(host: str) -> str:
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        return ""
 
 
 # ---------------------------------------------------------------------------

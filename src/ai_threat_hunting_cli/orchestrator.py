@@ -52,6 +52,7 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
         str(options.port),
     ]
     if options.foreground:
+        os.chdir(install_root)
         os.execvpe("uv", argv, env)
     with log_file.open("ab") as log:
         process = subprocess.Popen(argv, cwd=install_root, env=env, stdout=log, stderr=subprocess.STDOUT)
