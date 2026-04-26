@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Host Header Injection
 
-> **Kali MCP audit header:** use `X-Technique: OTHER` (Host-header injection spans cache poisoning, password-reset poisoning, and virtual-host confusion). Switch to `SSRF` when the Host header re-routes the server to an attacker-chosen backend.
+> **`aith assess kali` audit flags:** use `--technique OTHER` (Host-header injection spans cache poisoning, password-reset poisoning, and virtual-host confusion). Switch to `SSRF` when the Host header re-routes the server to an attacker-chosen backend.
 
 ## When to Activate
 

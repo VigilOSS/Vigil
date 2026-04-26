@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Insecure Deserialization Testing
 
-> **Kali MCP audit header:** use `X-Technique: RCE` (insecure deserialization is canonically an RCE primitive via gadget chains). Switch to `INFO-DISCLOSURE` for pure oracle or leak-only exploitation.
+> **`aith assess kali` audit flags:** use `--technique RCE` (insecure deserialization is canonically an RCE primitive via gadget chains). Switch to `INFO-DISCLOSURE` for pure oracle or leak-only exploitation.
 
 ## When to Activate
 

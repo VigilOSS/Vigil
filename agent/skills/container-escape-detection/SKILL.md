@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Container Escape Detection
 
-> **Kali MCP audit header:** use `X-Technique: RECON` for capability/cgroup/mount/socket/kernel enumeration; switch to `EXPLOIT-CHAIN` on an actual breakout attempt.
+> **`aith assess kali` audit flags:** use `--technique RECON` for capability/cgroup/mount/socket/kernel enumeration; switch to `EXPLOIT-CHAIN` on an actual breakout attempt.
 
 ## When to Activate
 

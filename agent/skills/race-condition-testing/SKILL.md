@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Race Condition / TOCTOU Testing
 
-> **Kali MCP audit header:** use `X-Technique: OTHER` (race/TOCTOU has no dedicated enum class; outcomes span double-spend, auth-bypass, and state corruption).
+> **`aith assess kali` audit flags:** use `--technique OTHER` (race/TOCTOU has no dedicated enum class; outcomes span double-spend, auth-bypass, and state corruption).
 
 ## When to Activate
 
@@ -24,10 +24,10 @@ origin: AI Threat Hunting
 - Burp Repeater (send group in parallel)
 - GNU parallel
 
-For current-engagement target requests, execute `curl` through the Kali MCP
-command-execution tool. Add explicit `Cookie:` or `Authorization:` headers
-only when intentionally testing alternate-user races or session override
-behavior.
+For current-engagement target requests, execute `curl` through `aith assess kali exec --` so
+the burst lands in the audit pipeline alongside the audit-flag set you pass. Add explicit
+`Cookie:` or `Authorization:` headers only when intentionally testing alternate-user races or
+session override behavior.
 
 ## Methodology
 

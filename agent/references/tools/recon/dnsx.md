@@ -1,7 +1,7 @@
 # dnsx
 
 **Purpose:** Fast multi-purpose DNS toolkit for bulk resolution and record enumeration
-For live engagement targets, run dnsx through the Kali MCP command-execution tool.
+For live engagement targets, run dnsx via `aith assess kali dnsx` (typed verb, audit-flag-aware).
 
 ## Record Resolution
 

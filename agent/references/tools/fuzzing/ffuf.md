@@ -1,7 +1,7 @@
 # ffuf
 
 **Purpose:** Web fuzzing (directories, parameters, vhosts)
-For live engagement targets, use `ffuf` through the Kali MCP command-execution tool.
+For live engagement targets, run `ffuf` via `aith assess kali ffuf` (typed verb, audit-flag-aware).
 
 ## Directory Fuzzing
 

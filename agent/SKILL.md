@@ -15,6 +15,10 @@ Read `agent/shared-constraints.md` first, then select from this index.
 
 ## Core Workflow Skills
 
+- `agent/skills/kali-exec/SKILL.md`
+  **Use when:** Always — every target-facing call uses `aith assess kali ...`. Foundational, paired with `shared-constraints.md`.
+  **Paired references:** `references/runtime-guides/kali-cli.md`, plus per-verb references listed inside the skill.
+
 - `agent/skills/web-recon/SKILL.md`
   **Use when:** Starting Phase 1; fingerprinting hosts, ports, tech stacks, headers, web services.
   **Paired references:** `references/tools/recon/nmap.md`, `references/tools/recon/whatweb.md`, `references/tools/recon/httpx.md`, `references/tools/recon/wafw00f.md`

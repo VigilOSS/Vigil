@@ -3385,6 +3385,52 @@ def _resolve_artifact_dir(engagement, override: str | None) -> str | None:
     return str(engagement_root / "scans" / "command-runs")
 
 
+_DEFAULT_DEDUP_WINDOW_SECONDS = 30
+
+
+def _dedup_window_seconds() -> int:
+    raw = os.environ.get("KALI_AUDIT_DEDUP_WINDOW_SECONDS", "")
+    if not raw:
+        return _DEFAULT_DEDUP_WINDOW_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_DEDUP_WINDOW_SECONDS
+    return max(value, 0)
+
+
+def _find_dedup_predecessor(
+    connection: sqlite3.Connection,
+    *,
+    engagement_id: int,
+    command: str,
+    argv_json: str,
+    window_seconds: int,
+) -> int | None:
+    if window_seconds <= 0:
+        return None
+    cutoff = (
+        f"datetime('now', '-{int(window_seconds)} seconds')"
+    )
+    row = connection.execute(
+        f"""
+        SELECT id FROM assessment_command_runs
+        WHERE engagement_id = ?
+          AND command = ?
+          AND argv_json = ?
+          AND status IN ('queued', 'running')
+          AND superseded_by_id IS NULL
+          AND datetime(created_at) >= {cutoff}
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (engagement_id, command, argv_json),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row[0])
+
+
 def record_command_run(
     engagement_id: int,
     *,
@@ -3413,8 +3459,26 @@ def record_command_run(
     intent: str | None = None,
     probe_kind: str | None = None,
     destructive: bool | int | None = None,
+    status: str = "running",
+    stdout_path: str | None = None,
+    stderr_path: str | None = None,
+    peak_rss_bytes: int | None = None,
+    cpu_user_seconds: float | None = None,
+    cpu_system_seconds: float | None = None,
+    working_dir: str | None = None,
+    scope_version: str | None = None,
+    auth_context: str | None = None,
+    strace_path: str | None = None,
+    timeout_seconds_requested: int | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+
+    if not (phase or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="phase is required and cannot be empty",
+        )
 
     run_uuid = _normalize_run_uuid(run_uuid or uuid.uuid4().hex)
     _ensure_command_run_uuid_available(run_uuid)
@@ -3498,13 +3562,47 @@ def record_command_run(
     else:
         destructive_value = 1 if bool(destructive) else 0
 
+    status_value = (status or "running").strip() or "running"
+    argv_json_value = json.dumps(list(argv) if argv else [], ensure_ascii=False)
+
     with get_connection() as connection:
+        # Dedup-at-write-time: if an in-flight row exists with the same
+        # (command, argv_json) for this engagement inside the configurable
+        # window, the CLI's default (force=False) returns the predecessor
+        # row without inserting — otherwise the new row stays stuck at
+        # status='running' because the CLI early-returns and never PATCHes
+        # finalize. With force=True we insert the row and link it via
+        # superseded_by_id so the operator's deliberate retry still records
+        # the supersession audit.
+        superseded_by_id: int | None = None
+        if not force:
+            superseded_by_id = _find_dedup_predecessor(
+                connection,
+                engagement_id=engagement.id,
+                command=command,
+                argv_json=argv_json_value,
+                window_seconds=_dedup_window_seconds(),
+            )
+            if superseded_by_id is not None:
+                _remove_written_command_run_artifacts(
+                    str(stdout_retention["artifact_ref"] or ""),
+                    str(stderr_retention["artifact_ref"] or ""),
+                )
+                predecessor_row = connection.execute(
+                    "SELECT * FROM assessment_command_runs WHERE id = ?",
+                    (superseded_by_id,),
+                ).fetchone()
+                assert predecessor_row is not None
+                serialized = _serialize_command_run(predecessor_row, include_output=True)
+                serialized["superseded_by_id"] = superseded_by_id
+                serialized["dedup_skipped"] = True
+                return serialized
         try:
             cursor = connection.execute(
                 """
                 INSERT INTO assessment_command_runs (
                     engagement_id, run_uuid, command, argv_json, tool_name, tool_bin, route,
-                    agent_name, phase, audit_source,
+                    agent_name, phase, audit_source, status,
                     return_code, timed_out, success,
                     started_at, completed_at, duration_ms,
                     command_hash, stdout_sha256, stderr_sha256,
@@ -3512,10 +3610,14 @@ def record_command_run(
                     stdout_suppression_reason, stderr_suppression_reason,
                     stdout_artifact_ref, stderr_artifact_ref,
                     stdout_bytes, stderr_bytes, notes,
-                    technique, intent, probe_kind, destructive
+                    technique, intent, probe_kind, destructive,
+                    stdout_path, stderr_path,
+                    peak_rss_bytes, cpu_user_seconds, cpu_system_seconds,
+                    working_dir, scope_version, auth_context,
+                    superseded_by_id, strace_path, timeout_seconds_requested
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?,
+                    ?, ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?,
@@ -3523,20 +3625,25 @@ def record_command_run(
                     ?, ?,
                     ?, ?,
                     ?, ?, ?,
-                    ?, ?, ?, ?
+                    ?, ?, ?, ?,
+                    ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?
                 )
                 """,
                 (
                     engagement.id,
                     run_uuid,
                     command,
-                    json.dumps(list(argv) if argv else [], ensure_ascii=False),
+                    argv_json_value,
                     tool_name,
                     tool_bin,
                     route,
                     agent_name,
                     phase,
                     audit_source or "header",
+                    status_value,
                     return_code,
                     1 if timed_out else 0,
                     1 if effective_success else 0,
@@ -3560,6 +3667,17 @@ def record_command_run(
                     intent_value,
                     probe_kind_value,
                     destructive_value,
+                    stdout_path,
+                    stderr_path,
+                    peak_rss_bytes,
+                    cpu_user_seconds,
+                    cpu_system_seconds,
+                    working_dir,
+                    scope_version,
+                    auth_context,
+                    superseded_by_id,
+                    strace_path,
+                    timeout_seconds_requested,
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -3576,6 +3694,314 @@ def record_command_run(
         ).fetchone()
         assert row is not None
         return _serialize_command_run(row, include_output=True)
+
+
+_FINALIZE_TERMINAL_STATUSES = {"completed", "failed", "timed_out", "killed", "lost"}
+_FINALIZE_ALLOWED_STATUSES = _FINALIZE_TERMINAL_STATUSES | {"running"}
+
+
+def finalize_command_run(
+    engagement_id: int,
+    *,
+    command_run_id: int,
+    status_value: str,
+    return_code: int | None = None,
+    ended_at: str,
+    duration_ms: int | None = None,
+    stdout_preview: str | None = None,
+    stderr_preview: str | None = None,
+    timed_out: bool = False,
+    partial_results: bool = False,
+    peak_rss_bytes: int | None = None,
+    cpu_user_seconds: float | None = None,
+    cpu_system_seconds: float | None = None,
+    strace_path: str | None = None,
+) -> dict[str, Any]:
+    """Apply a status update to a pre-exec command-run row.
+
+    Idempotency contract (B4): a row already in a terminal state must not be
+    overwritten — the second writer is signalled with HTTP 409 carrying the
+    existing row. A ``running``-to-``running`` PATCH is a refresh no-op that
+    surfaces ``noop=true`` so the caller can distinguish it from a fresh
+    write."""
+    engagement = _engagement_or_404(engagement_id)
+    if status_value not in _FINALIZE_ALLOWED_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"finalize status must be one of {sorted(_FINALIZE_ALLOWED_STATUSES)}",
+        )
+    with get_connection() as connection:
+        existing_row = connection.execute(
+            "SELECT * FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
+            (engagement.id, command_run_id),
+        ).fetchone()
+        if existing_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="command run not found",
+            )
+        existing_status = (existing_row["status"] or "").strip()
+        if existing_status in _FINALIZE_TERMINAL_STATUSES:
+            serialized = _serialize_command_run(existing_row, include_output=True)
+            serialized["noop"] = True
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        f"command run id={command_run_id} already finalized with "
+                        f"status='{existing_status}'; refusing to overwrite"
+                    ),
+                    "existing": serialized,
+                },
+            )
+        if status_value == "running" and existing_status == "running":
+            serialized = _serialize_command_run(existing_row, include_output=True)
+            serialized["noop"] = True
+            return serialized
+        success_flag = 1 if (status_value == "completed" and (return_code in (0, None) and not timed_out)) else 0
+        if return_code is not None and return_code != 0:
+            success_flag = 0
+        sets: list[str] = [
+            "status = ?",
+            "completed_at = ?",
+            "timed_out = ?",
+            "success = ?",
+        ]
+        values: list[Any] = [
+            status_value,
+            ended_at,
+            1 if timed_out else 0,
+            success_flag,
+        ]
+        if return_code is not None:
+            sets.append("return_code = ?")
+            values.append(int(return_code))
+        if duration_ms is not None:
+            sets.append("duration_ms = ?")
+            values.append(int(duration_ms))
+        if stdout_preview is not None:
+            sets.append("stdout_preview = ?")
+            values.append(stdout_preview)
+        if stderr_preview is not None:
+            sets.append("stderr_preview = ?")
+            values.append(stderr_preview)
+        if peak_rss_bytes is not None:
+            sets.append("peak_rss_bytes = ?")
+            values.append(int(peak_rss_bytes))
+        if cpu_user_seconds is not None:
+            sets.append("cpu_user_seconds = ?")
+            values.append(float(cpu_user_seconds))
+        if cpu_system_seconds is not None:
+            sets.append("cpu_system_seconds = ?")
+            values.append(float(cpu_system_seconds))
+        if strace_path is not None:
+            sets.append("strace_path = ?")
+            values.append(strace_path)
+        sets.append("partial_results = ?")
+        values.append(1 if partial_results else 0)
+        values.append(command_run_id)
+        connection.execute(
+            f"UPDATE assessment_command_runs SET {', '.join(sets)} WHERE id = ?",
+            tuple(values),
+        )
+        row = connection.execute(
+            "SELECT * FROM assessment_command_runs WHERE id = ?",
+            (command_run_id,),
+        ).fetchone()
+        assert row is not None
+        return _serialize_command_run(row, include_output=True)
+
+
+# ── Assessment job lifecycle ────────────────────────────────────────
+
+
+_JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost"}
+_JOB_VALID_STATUSES = {"queued", "running", *_JOB_TERMINAL_STATUSES}
+
+
+def _serialize_job(row) -> dict[str, Any]:
+    data = dict(row)
+    raw_meta = data.pop("audit_metadata_json", None) or ""
+    if raw_meta:
+        try:
+            data["audit_metadata"] = json.loads(raw_meta)
+        except json.JSONDecodeError:
+            data["audit_metadata"] = None
+    else:
+        data["audit_metadata"] = None
+    return data
+
+
+def record_job(
+    engagement_id: int,
+    *,
+    parent_command_run_id: int | None = None,
+    status_value: str = "queued",
+    started_at: str | None = None,
+    ended_at: str | None = None,
+    exit_code: int | None = None,
+    dtach_socket_path: str | None = None,
+    stdout_path: str | None = None,
+    stderr_path: str | None = None,
+    audit_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    if status_value not in _JOB_VALID_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"job status must be one of {sorted(_JOB_VALID_STATUSES)}",
+        )
+    metadata_json = json.dumps(audit_metadata, ensure_ascii=False) if audit_metadata is not None else None
+    with get_connection() as connection:
+        if parent_command_run_id is not None:
+            row = connection.execute(
+                "SELECT id FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
+                (engagement.id, int(parent_command_run_id)),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="parent_command_run_id does not reference an existing command run for this engagement",
+                )
+        cursor = connection.execute(
+            """
+            INSERT INTO assessment_jobs (
+                engagement_id, parent_command_run_id, status,
+                started_at, ended_at, exit_code,
+                dtach_socket_path, stdout_path, stderr_path,
+                audit_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                engagement.id,
+                parent_command_run_id,
+                status_value,
+                started_at,
+                ended_at,
+                exit_code,
+                dtach_socket_path,
+                stdout_path,
+                stderr_path,
+                metadata_json,
+            ),
+        )
+        out_row = connection.execute(
+            "SELECT * FROM assessment_jobs WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        assert out_row is not None
+        return _serialize_job(out_row)
+
+
+def update_job(
+    engagement_id: int,
+    *,
+    job_id: int,
+    status_value: str | None = None,
+    started_at: str | None = None,
+    ended_at: str | None = None,
+    exit_code: int | None = None,
+    dtach_socket_path: str | None = None,
+    stdout_path: str | None = None,
+    stderr_path: str | None = None,
+    audit_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    sets: list[str] = []
+    values: list[Any] = []
+    if status_value is not None:
+        if status_value not in _JOB_VALID_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"job status must be one of {sorted(_JOB_VALID_STATUSES)}",
+            )
+        sets.append("status = ?")
+        values.append(status_value)
+    if started_at is not None:
+        sets.append("started_at = ?")
+        values.append(started_at)
+    if ended_at is not None:
+        sets.append("ended_at = ?")
+        values.append(ended_at)
+    if exit_code is not None:
+        sets.append("exit_code = ?")
+        values.append(int(exit_code))
+    if dtach_socket_path is not None:
+        sets.append("dtach_socket_path = ?")
+        values.append(dtach_socket_path)
+    if stdout_path is not None:
+        sets.append("stdout_path = ?")
+        values.append(stdout_path)
+    if stderr_path is not None:
+        sets.append("stderr_path = ?")
+        values.append(stderr_path)
+    if audit_metadata is not None:
+        sets.append("audit_metadata_json = ?")
+        values.append(json.dumps(audit_metadata, ensure_ascii=False))
+    if not sets:
+        return get_job(engagement.id, job_id)
+    sets.append("updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT id FROM assessment_jobs WHERE engagement_id = ? AND id = ?",
+            (engagement.id, int(job_id)),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="job not found",
+            )
+        values.extend([engagement.id, int(job_id)])
+        connection.execute(
+            f"UPDATE assessment_jobs SET {', '.join(sets)} WHERE engagement_id = ? AND id = ?",
+            tuple(values),
+        )
+        row = connection.execute(
+            "SELECT * FROM assessment_jobs WHERE id = ?",
+            (int(job_id),),
+        ).fetchone()
+        assert row is not None
+        return _serialize_job(row)
+
+
+def list_jobs(
+    engagement_id: int,
+    *,
+    status_value: str = "",
+    parent_command_run_id: int | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    where = ["engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    if status_value:
+        where.append("status = ?")
+        params.append(status_value)
+    if parent_command_run_id is not None:
+        where.append("parent_command_run_id = ?")
+        params.append(int(parent_command_run_id))
+    params.extend([int(limit), int(offset)])
+    query = (
+        f"SELECT * FROM assessment_jobs "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+    )
+    with get_connection() as connection:
+        rows = connection.execute(query, tuple(params)).fetchall()
+    return [_serialize_job(row) for row in rows]
+
+
+def get_job(engagement_id: int, job_id: int) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM assessment_jobs WHERE engagement_id = ? AND id = ?",
+            (engagement.id, int(job_id)),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+    return _serialize_job(row)
 
 
 def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
@@ -3600,6 +4026,7 @@ def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
         data["destructive"] = None
     else:
         data["destructive"] = bool(destructive_raw)
+    data["partial_results"] = bool(data.get("partial_results"))
     if not include_output:
         # Listings default to lightweight rows so a sub-agent fetching 50
         # records does not load 50 × 64 KiB of preview text into context.

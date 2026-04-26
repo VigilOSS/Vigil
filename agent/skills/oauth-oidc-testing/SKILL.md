@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # OAuth / OpenID Connect Testing
 
-> **Kali MCP audit header:** use `X-Technique: AUTH` (OAuth/OIDC bugs — redirect_uri abuse, scope escalation, state/PKCE tampering, id_token acceptance — all collapse to the AUTH class). Switch to `JWT` when attacking the id_token's signature or claims specifically.
+> **`aith assess kali` audit flags:** use `--technique AUTH` (OAuth/OIDC bugs — redirect_uri abuse, scope escalation, state/PKCE tampering, id_token acceptance — all collapse to the AUTH class). Switch to `JWT` when attacking the id_token's signature or claims specifically.
 
 ## When to Activate
 

@@ -5,7 +5,7 @@ tokens, API keys, and credentials. v3 ships 800+ detectors and can optionally ve
 discovered secrets by making live API calls.
 
 **In this repo**: primary secret scanner for stored HTTP response bodies during gau-triage.
-Invoke via Kali MCP; never from host-side bash against in-scope artifacts.
+Invoke via `aith assess kali exec -- trufflehog ...` with the standard audit-flag set; never from host-side bash against in-scope artifacts.
 
 ## CLI syntax (v3)
 

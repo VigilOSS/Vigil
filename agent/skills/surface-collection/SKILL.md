@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Surface Collection
 
-> **Kali MCP audit header:** use `X-Technique: DISCOVERY` (Katana, gau, and wayback URL collection plus triage expand the attack-surface inventory without sending attack payloads).
+> **`aith assess kali` audit flags:** use `--technique DISCOVERY` (Katana, gau, and wayback URL collection plus triage expand the attack-surface inventory without sending attack payloads).
 
 Guides surface-collector through the Phase 2 URL collection pipeline: live crawling, historical
 enrichment, deduplication, intelligent triage, and work-buffer population. The goal is to turn
@@ -43,23 +43,31 @@ cat "$DIR/scans/source-endpoints.txt" | aith assess ingest-endpoints "$DB" sourc
 
 ### Step 2: Live Crawl via Katana
 
-Run Katana via Kali MCP to crawl live targets. Katana is installed in the runtime container —
-invoke it through the MCP command-execution tool.
+Run Katana via `aith assess kali katana` to crawl live targets. Katana is installed in the
+runtime container; the typed verb wraps it with audit recording.
 
 ```bash
-katana -u https://target.example -d 3 -jc -kf all -o /tmp/katana_output.txt
+aith assess kali katana \
+  -u https://target.example -d 3 -jc -jsl -c 10 -rl 20 \
+  -o /engagements/$ENGAGEMENT_KEY/scans/katana_output.txt \
+  --technique DISCOVERY --intent "live crawl of target.example" \
+  --probe-kind fingerprint --phase collect --timeout 1800
 ```
 
 **TLS handling:** Katana does not provide a TLS-verification-skip flag in the runtime this
 repo builds. If a target only responds behind an invalid or self-signed certificate, use
-`curl -k` for spot validation and continue with other collection sources instead of relying
-on Katana to bypass TLS checks.
+`aith assess kali exec -- curl -k` for spot validation and continue with other collection
+sources instead of relying on Katana to bypass TLS checks.
 
 **Auth-aware crawl:** If `auth.json` has `use_for_requests` set to `true` and `state` set
 to `available`, pass cookies/headers:
 
 ```bash
-katana -u URL -H "Cookie: ..." -H "Authorization: ..." -d 3 -jc -kf all -o /tmp/katana_auth_output.txt
+aith assess kali katana \
+  -u URL -H "Cookie: ..." -H "Authorization: ..." -d 3 -jc -jsl -c 10 -rl 20 \
+  -o /engagements/$ENGAGEMENT_KEY/scans/katana_auth_output.txt \
+  --technique DISCOVERY --intent "auth-aware crawl of URL" \
+  --probe-kind fingerprint --phase collect --timeout 1800
 ```
 
 **Multi-target:** Run Katana once per in-scope web target from `scope.json` hosts. Combine
@@ -67,23 +75,28 @@ output files or ingest each separately with the same source tag.
 
 Ingest:
 ```bash
-cat /tmp/katana_output.txt | aith assess ingest-endpoints "$DB" katana
+cat "$DIR/scans/katana_output.txt" | aith assess ingest-endpoints "$DB" katana
 ```
 
 ### Step 3: Historical URL Enrichment via gau
 
-Run gau via Kali MCP against each in-scope domain. gau queries Wayback Machine, AlienVault
-OTX, Common Crawl, and URLScan for historical URLs:
+Run gau via `aith assess kali gau` against each in-scope domain. gau queries Wayback Machine,
+AlienVault OTX, Common Crawl, and URLScan for historical URLs:
 
 ```bash
-gau TARGET_DOMAIN --threads 5 --blacklist png,jpg,gif,css,woff,svg --o /tmp/gau_output.txt
+aith assess kali gau TARGET_DOMAIN --subs --threads 5 \
+  --blacklist png,jpg,gif,css,woff,svg \
+  --providers wayback,otx,commoncrawl,urlscan \
+  -o /engagements/$ENGAGEMENT_KEY/scans/gau_output.txt \
+  --technique DISCOVERY --intent "historical URL harvest for TARGET_DOMAIN (passive)" \
+  --probe-kind fingerprint --phase collect --timeout 1800
 ```
 
 gau output contains duplicates — deduplicate before ingestion:
 
 ```bash
-sort -u /tmp/gau_output.txt > /tmp/gau_deduped.txt
-cat /tmp/gau_deduped.txt | aith assess ingest-endpoints "$DB" gau
+sort -u "$DIR/scans/gau_output.txt" > "$DIR/scans/gau_deduped.txt"
+cat "$DIR/scans/gau_deduped.txt" | aith assess ingest-endpoints "$DB" gau
 ```
 
 **Multi-domain:** Run gau for each domain in scope.json hosts. Use `--subs` when wildcard
@@ -185,7 +198,7 @@ with triage signals, recommended dispatch order, and suggested vuln-class skills
 
 ## Key Rules
 
-- Keep all URL crawling and enrichment in Kali MCP — host-side crawling bypasses runtime isolation
+- Keep all URL crawling and enrichment in `aith assess kali katana` / `aith assess kali gau` — host-side crawling bypasses the audit pipeline that downstream specialists rely on
 - Use `aith assess ingest-endpoints` for all work-buffer writes — direct DB inserts bypass backend sync
 - Use `aith assess record-surface` for all surface writes — bypassing loses backend sync
 - Use `aith assess record-finding` for any findings — unrecorded findings are lost data

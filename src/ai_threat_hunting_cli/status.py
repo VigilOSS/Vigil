@@ -16,7 +16,7 @@ from .engagements import list_engagements
 from .oob import oob_status
 from .orchestrator import orchestrator_status
 from .paths import resolve_orchestrator_base_url
-from .runtime import runtime_mounts_ok, runtime_status
+from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +46,7 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
             "state": runtime_state,
             "image_exists": docker.image_exists("security-research:latest", runner=runner),
             "mounts_ok": runtime_mounts_ok(install_root, runner=runner) if runtime_state == "running" else None,
+            "resources": runtime_resource_state(runner=runner),
         },
         "mitmproxy": {
             "state": "running" if mitm_running else "stopped",
@@ -53,7 +54,6 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
             "ca_volume": docker.volume_exists("mitmproxy-ca", runner=runner),
         },
         "oob": oob_status(runner=runner) | {"frp_token_configured": oob_token_configured},
-        "mcp": collect_mcp_status(),
         "backup": {
             "latest": str(backup.path) if backup else None,
             "modified_at": backup.modified_at if backup else None,
@@ -73,6 +73,21 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     backup = status["backup"]  # type: ignore[index]
     print(f"orchestrator\t{orchestrator['state']}\thealthy={orchestrator['healthy']}")  # type: ignore[index]
     print(f"runtime\t{runtime['state']}\tmounts_ok={runtime['mounts_ok']}")  # type: ignore[index]
+    resources = runtime.get("resources") if isinstance(runtime, dict) else None  # type: ignore[union-attr]
+    if isinstance(resources, dict):
+        configured = resources.get("configured") or {}
+        live = resources.get("live") or {}
+        configured_str = (
+            f"memory={configured.get('memory_gb', '?')}g cpus={configured.get('cpus', '?')} "
+            f"pids={configured.get('pids_limit', '?')} shm={configured.get('shm_size', '?')}"
+        )
+        live_str = ""
+        if isinstance(live, dict) and live:
+            live_str = (
+                f"\tlive=memory.max={live.get('memory_max', '?')} "
+                f"cpu.max={live.get('cpu_max', '?')} pids.max={live.get('pids_max', '?')}"
+            )
+        print(f"runtime-tier\t{configured_str}{live_str}")
     print(f"mitmproxy\t{mitmproxy['state']}\tca_volume={mitmproxy['ca_volume']}")  # type: ignore[index]
     print(f"oob\t{oob['state']}\tclients={len(oob['clients'])}")  # type: ignore[index]
     print(f"backup\t{backup['latest'] or '-'}")  # type: ignore[index]
@@ -97,7 +112,7 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
         checks.append(Check("mitmproxy-image", "OK" if docker.image_exists("security-research-proxy:latest", runner=runner) else "MISSING"))
         if runtime_status(runner=runner) == "running":
             checks.append(Check("runtime-mounts", "OK" if runtime_mounts_ok(install_root, runner=runner) else "FAIL"))
-            for tool in ("tmux", "frpc", "interactsh-server", "interactsh-client"):
+            for tool in ("dtach", "tmux", "frpc", "interactsh-server", "interactsh-client"):
                 result = runner(["docker", "exec", "security-research", "sh", "-lc", f"command -v {tool} >/dev/null"])
                 checks.append(Check(f"runtime-tool:{tool}", "OK" if result.returncode == 0 else "MISSING"))
     else:
@@ -110,9 +125,6 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
     backup = latest_backup(install_root)
     checks.append(Check("backup-latest", "OK" if backup else "MISSING", str(backup.path) if backup else ""))
     checks.append(Check("oob.frp_token", "OK" if os.environ.get("AI_THREAT_HUNTING_FRP_TOKEN") or get_config_value("oob.frp_token") else "MISSING"))
-    mcp = collect_mcp_status()
-    for client in ("codex", "claude"):
-        checks.append(Check(f"mcp:{client}", "OK" if mcp[client]["configured"] else "MISSING", mcp[client]["detail"]))
     return checks
 
 
@@ -120,36 +132,6 @@ def print_doctor(checks: list[Check]) -> None:
     for check in checks:
         suffix = f"\t{check.detail}" if check.detail else ""
         print(f"{check.status}\t{check.name}{suffix}")
-
-
-def collect_mcp_status() -> dict[str, dict[str, object]]:
-    return {
-        "codex": _mcp_client_status("codex", ["codex", "mcp", "list"]),
-        "claude": _mcp_client_status("claude", ["claude", "mcp", "list"]),
-    }
-
-
-def _mcp_client_status(client: str, argv: list[str]) -> dict[str, object]:
-    if shutil.which(argv[0]) is None:
-        return {"configured": False, "detail": f"{client} CLI not found"}
-    try:
-        result = subprocess.run(argv, text=True, capture_output=True, check=False)
-    except FileNotFoundError:
-        return {"configured": False, "detail": f"{client} CLI not found"}
-    text = f"{result.stdout}\n{result.stderr}"
-    configured = _mcp_registration_present(text)
-    return {"configured": configured, "detail": "configured" if configured else "kali server not registered"}
-
-
-def _mcp_registration_present(text: str) -> bool:
-    normalized = " ".join(text.lower().split())
-    if "kali" not in normalized or "mcp-server" not in normalized:
-        return False
-    return (
-        "aith runtime mcp-server" in normalized
-        or "docker exec -i security-research mcp-server" in normalized
-        or "docker exec security-research mcp-server" in normalized
-    )
 
 
 def _binary_check(command: str) -> Check:

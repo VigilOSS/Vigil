@@ -29,7 +29,9 @@ Host-side (source code work, not target-facing):
 - `nm` / `objdump` — symbol verification for harness linking
 - `llvm-cov` / `gcov` — coverage measurement
 
-No Kali MCP needed — this is entirely host-side source code and build work.
+No `aith assess kali` needed — this is entirely host-side source code and build work. When a
+campaign does run a fuzzer through the runtime container (e.g. against a network-facing target
+binary), use `aith assess kali exec --` so the run lands in the audit pipeline.
 
 ## Methodology
 

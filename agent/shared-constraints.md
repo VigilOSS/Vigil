@@ -25,53 +25,106 @@ Do not test hosts not listed in scope. Do not exceed the exploit policy without 
 
 ---
 
-## 2. Kali MCP Only for Target Work
+## 2. `aith assess kali` for All Target Work
 
 All target-facing work — HTTP probing, scanning, crawling, fuzzing, exploitation,
-OOB/DNS callbacks, and raw TCP — must go through the attached Kali MCP tools.
+OOB/DNS callbacks, and raw TCP — must go through `aith assess kali ...` subcommands.
+The CLI runs on the host, executes inside the runtime container, and records the
+audit row directly to the orchestrator backend. Use it because the CLI owns the
+audit pipeline — host-side probes against scoped targets break the runtime's
+network isolation and skip the audit row that operators and downstream specialists
+rely on as a coverage map.
 
-**Never** use host Bash, `docker run`, `docker exec`, or any ad hoc wrapper for in-scope work.
+Discovery (in order):
 
-If a required tool is missing from the active Kali MCP session, stop and report the gap.
-Do not fall back to host-side execution.
+1. Read `agent/skills/kali-exec/SKILL.md` for the verb menu, methodology profiles,
+   sync-vs-async decision, audit-flag mapping, and example invocations per verb.
+2. Use `aith assess kali --help` and `aith assess kali <verb> --help` for the live
+   flag set and defaults on a verb you're about to invoke.
+3. Use `aith assess contract kali <verb>` for the canonical schema, helper
+   defaults, common mistakes, and an example payload.
+
+Forbidden because they bypass the audit pipeline: host Bash that runs probes
+against scoped targets, `docker run` / `docker exec` against the runtime, and
+ad-hoc curl/nmap/sqlmap/etc. from the host. The host boundary is for
+orchestration, not target traffic.
+
+Long-running probes (nmap+scripts, sqlmap, nuclei sweep, dirb, gobuster, ffuf
+large wordlists) MUST use `aith assess kali job start ...` because synchronous
+calls have a wall-clock budget and will be killed cleanly on timeout. The job
+worker is SQLite-backed and dtach-supervised, so it survives across calling-shell
+exit; synchronous calls do not.
 
 Host-side commands are limited to coordination and non-target support only:
-`jq`, `sqlite3`, `python3`, `grep` / `rg`, `sed`, `awk`, `base64`, `openssl`.
+`jq`, `sqlite3`, `python3`, `grep` / `rg`, `sed`, `awk`, `base64`, `openssl`,
+plus `aith assess` helpers for backend state writes.
 
-**Do not `echo` as commentary, section headers, or breadcrumbs inside Kali MCP commands.**
-Stdout is captured to the audit log, not shown to the user, and commentary-echoes bloat
-the preview and pollute FTS search without adding retrievable signal. Use the `X-Intent`
-header for a one-line purpose annotation. `echo` is only legitimate when its output is the
-command's real purpose — writing to a file (`echo X > file`), piping into another tool, or
-generating a payload.
+If a required target-facing tool is missing from the runtime image, rebuild the
+image rather than falling back to host or Docker-side execution paths — the
+runtime image is the single source of truth for the tool surface.
+
+**Do not `echo` as commentary, section headers, or breadcrumbs inside
+`aith assess kali` commands.** Stdout is captured to the audit log, not shown to
+the user, and commentary-echoes bloat the preview and pollute FTS search without
+adding retrievable signal. Use `--intent` for a one-line purpose annotation.
+`echo` is only legitimate when its output is the command's real purpose — writing
+to a file (`echo X > file`), piping into another tool, or generating a payload.
 
 ### Command Metadata
 
-Every target-facing Kali MCP call supports four optional audit headers. Set them when they
-apply; the runtime stores them on the audit row where they become filterable in
-`list-command-runs` and the Commands tab.
+Every target-facing `aith assess kali` call carries audit metadata as CLI flags.
+The CLI fails closed when required flags are missing — the audit row stays
+truthful instead of degrading to a stale env-var default.
 
-- **`X-Technique`** — the vulnerability class this command tests. One of `SSRF`, `XSS`,
-  `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`, `RFI`, `OPEN-REDIRECT`,
-  `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`, `RATE-LIMIT`, `INFO-DISCLOSURE`,
-  `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `OTHER`. Derive
-  it from the skill you loaded: for skills whose name maps 1:1 to an enum value
-  (`ssrf-testing` → `SSRF`, `sqli-testing` → `SQLI`, `command-injection` → `CMDI`, etc.),
-  use that mapping. When the mapping isn't obvious (e.g. `aws-iam-privesc`,
-  `container-escape-detection`, `graphql-testing`), the skill file names the correct
-  value at the top.
-- **`X-Intent`** — a ≤200-char one-liner describing what this specific command is trying to
-  accomplish. Replaces the `echo "=== label ==="` pattern.
-- **`X-Probe-Kind`** — the kind of work this command represents:
+- **`--technique <enum>`** — the vulnerability class this command tests. One of
+  `SSRF`, `XSS`, `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`,
+  `RFI`, `OPEN-REDIRECT`, `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`,
+  `RATE-LIMIT`, `INFO-DISCLOSURE`, `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`,
+  `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `OTHER`. Derive it from the skill you
+  loaded: for skills whose name maps 1:1 to an enum value (`ssrf-testing` →
+  `SSRF`, `sqli-testing` → `SQLI`, `command-injection` → `CMDI`, etc.), use that
+  mapping. When the mapping isn't obvious (e.g. `aws-iam-privesc`,
+  `container-escape-detection`, `graphql-testing`), the skill file names the
+  correct value at the top.
+- **`--intent "<text>"`** — a ≤200-char one-liner describing what this specific
+  command is trying to accomplish. Replaces the `echo "=== label ==="` pattern.
+- **`--probe-kind <kind>`** — the kind of work this command represents:
   - `fingerprint` — learning the target (versions, headers, tech stack), no payload
   - `baseline` — vanilla control request against the target surface, for diff
   - `payload` — crafted attack payload testing a hypothesis
   - `exploit` — attacker-outcome proof (extract token, read a file, prove the impact)
   - `replay` — captured primitive used against a new surface (lateral)
   - `cleanup` — undoing target-side changes
-- **`X-Destructive`** — `1` when the command attempts a write, edit, or delete on the
-  target (POST/PUT/PATCH/DELETE, file upload, account creation, config change, shell exec
-  that modifies state). `0` for read-only probes. Used by cleanup-tracking workflows.
+- **`--destructive`** — pass when the command attempts a write, edit, or delete
+  on the target (POST/PUT/PATCH/DELETE, file upload, account creation, config
+  change, shell exec that modifies state). Off for read-only probes. Used by
+  cleanup-tracking workflows.
+- **`--timeout <seconds>`** — wall-clock budget. Required. Synchronous calls hit
+  the timeout cleanly; longer budgets must use `aith assess kali job start`.
+- **`--phase <enum>`** — REQUIRED on every call. Pass the phase the dispatch was
+  authorized for, NOT `scope.json.current_phase`. The reason is that
+  `scope.json.current_phase` is operator state and updates only on phase
+  transitions, but engagements regularly operate **between phases** —
+  mid-Phase-3 recon on a newly-discovered host, Phase-5 exploit-developer
+  running additional fingerprinting, source-analyzer mid-engagement looking up
+  version intel. The audit row must reflect what the dispatch was for, not what
+  the engagement happened to be in at the time. The CLI rejects calls without
+  `--phase` so agents cannot silently rely on a stale env-var default. Allowed
+  values: `recon`, `collect`, `consume-test`, `verify`, `exploit`, `report`,
+  `code-ingest`, `code-classify`, `code-hunt`, `code-verify`, plus the
+  half-phase tags `recon-pivot` (mid-engagement recon on newly-surfaced host)
+  and `exploit-recon` (additional fingerprinting during exploit phase).
+- **`--force`** — bypass the dedup-window check. The CLI hashes
+  `(command, argv_json)` and warns/blocks duplicates within
+  `KALI_CLI_DEDUP_WINDOW_SECONDS` (default 30s). Use only when re-running a
+  near-duplicate is intentional.
+- **`--strace`** — wrap in `strace -e trace=network,write,unlink`. Use for
+  `--probe-kind exploit` or `--destructive` so the audit row records network
+  egress and disk writes.
+
+`--engagement-key` and `--agent-name` are auto-derived from
+`${ENGAGEMENT_DIR}/engagement.json` and the dispatching role context — do not
+pass them manually unless correcting an inferred value.
 
 ---
 
@@ -86,9 +139,9 @@ When exploitation requires a listener, tunnel, or OOB callback:
 2. Reference `agent/references/offensive-tactics/shell-handling.md` for shell listener commands
 3. Reference `agent/references/offensive-tactics/frp-tunneling.md` for tunnel exposure and OOB callback setup
 4. Wait for operator confirmation before proceeding with steps that depend on the listener/tunnel
-5. After the operator confirms, verify connection by tailing log files via Kali MCP
+5. After the operator confirms, verify connection by tailing log files via `aith assess kali exec -- cat /data/<log-path>` so the read is recorded in the audit pipeline
 
-Agents CAN read log files via Kali MCP to check for activity:
+Agents CAN read log files via `aith assess kali exec` to check for activity (use `--probe-kind fingerprint --technique RECON` since reading a log file is observation, not a payload):
 - `/data/shell-*.log` — shell session I/O (verify shell connected)
 - `/data/oob/clients/<name>.log` — correlated interactsh callback hits (preferred for confirming blind vulns — filters unrelated traffic)
 - `/data/oob/server.log` — raw interactsh log (noisy; use only when client log is unavailable)
@@ -102,11 +155,11 @@ Agents CANNOT start, stop, or restart listener, tunnel, or OOB processes.
 
 ## 2b. Coverage Check Before Probing
 
-Every Kali MCP call records its command, argv, tool, agent, phase, exit code,
-timeout state, timings, and an output preview (or artifact ref) to the
-orchestrator backend. Treat that history as a **coverage map** — a record of
-what's already been probed so your next probe goes somewhere the engagement
-hasn't covered yet.
+Every `aith assess kali` call records its command, argv, tool, agent, phase,
+technique, intent, probe_kind, destructive flag, exit code, timeout state,
+timings, and an output preview (or artifact ref) to the orchestrator backend.
+Treat that history as a **coverage map** — a record of what's already been
+probed so your next probe goes somewhere the engagement hasn't covered yet.
 
 Before issuing a probing, scanning, fuzzing, or credential-testing command,
 search for prior work on this surface:
@@ -123,14 +176,18 @@ the most valuable coverage signal.
 Read the results as a coverage map, not a reuse gate. Red-team depth comes
 from variants — different SQLi techniques, different SSRF payload encodings,
 different XXE entity styles, different wordlists, different auth contexts.
-If `sqlmap` already ran against this endpoint with `--technique=U`, your
-next probe picks a different technique. If `ffuf` ran `raft-medium-directories`,
-try `quickhits` or a tech-specific wordlist.
+If `sqlmap` already ran against this endpoint with the audit row's
+`--technique SQLI` and a `--intent` mentioning UNION, your next probe picks a
+different SQLi class. If `ffuf` ran `raft-medium-directories`, try
+`quickhits` or a tech-specific wordlist.
 
 **The only probe you should skip is an identical command against identical
 input.** Any variant — different payload family, different tool, different
 flag, different target scope, different credentials — is new coverage and
-belongs in the engagement. Don't ask for permission to probe a variant.
+belongs in the engagement. Don't ask for permission to probe a variant. Pass
+the audit-flag set on every variant (`--technique`, `--intent`, `--probe-kind`,
+`--phase`, `--timeout`, plus `--destructive` when applicable) so the next
+specialist's coverage check sees it.
 
 When a prior run genuinely covers your current question, cite its id in your
 output — but first fetch the preview with `aith assess get-command-run <id>`

@@ -1,7 +1,7 @@
 # wafw00f
 
 **Purpose:** Web Application Firewall identification and fingerprinting
-For live engagement targets, run wafw00f through the Kali MCP command-execution tool.
+For live engagement targets, run wafw00f via `aith assess kali wafw00f` (typed verb, audit-flag-aware).
 
 ## Basic Usage
 

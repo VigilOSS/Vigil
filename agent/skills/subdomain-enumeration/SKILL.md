@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Subdomain Enumeration
 
-> **Kali MCP audit header:** use `X-Technique: RECON` when actively probing in-scope DNS infrastructure (DNS brute-force, wildcard tests, zone transfers). Switch to `OSINT` for passive external-source lookups (certificate transparency logs, public archives, OSINT APIs).
+> **`aith assess kali` audit flags:** use `--technique RECON` when actively probing in-scope DNS infrastructure (DNS brute-force, wildcard tests, zone transfers). Switch to `OSINT` for passive external-source lookups (certificate transparency logs, public archives, OSINT APIs).
 
 ## When to Activate
 
@@ -54,7 +54,7 @@ subfinder -d target.example -all -silent -nW -o /engagements/$ENGAGEMENT_KEY/sca
 **API keys** enhance results significantly. Set them in the install-root `.env`
 (not the engagement directory) so `aith runtime start` passes them via
 `docker --env-file` into the runtime container — subfinder reads them from
-the process environment on every Kali MCP execution:
+the process environment on every `aith assess kali subfinder` execution:
 ```
 SUBFINDER_VIRUSTOTAL_API_KEY=...
 SUBFINDER_SECURITYTRAILS_API_KEY=...

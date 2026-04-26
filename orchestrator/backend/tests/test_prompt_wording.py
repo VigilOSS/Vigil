@@ -73,22 +73,166 @@ def test_docs_and_skills_drop_run_tool_and_rtcurl_examples():
         assert "rtcurl" not in text, f"rtcurl reference remained in {path}"
 
 
-def test_operator_prompt_outputs_require_kali_mcp_for_target_facing_work():
+def test_operator_prompt_outputs_require_aith_assess_kali_for_target_facing_work():
+    # The 2026-04-26 runtime cutover replaced "Kali MCP" with `aith assess kali` across the
+    # prompt corpus. This test pins the new vocabulary in the operator source plus the two
+    # rendered wrappers, plus the three-layer discovery sentence (skill / --help / contract),
+    # and asserts a regression-style absence of the old "Kali MCP" / `mcp__kali__` strings so
+    # future renders that drift back to the old wording fail CI.
     repo_root = Path(__file__).resolve().parents[3]
-    files = [
+    operator_files = [
         repo_root / "agent" / "operator-core.md",
         repo_root / "agent" / "AGENTS.md",
         repo_root / "agent" / "CLAUDE.md",
-        repo_root / "README.md",
     ]
 
-    for path in files:
-        text = path.read_text(encoding="utf-8").lower()
-        assert "kali mcp" in text
+    for path in operator_files:
+        text = path.read_text(encoding="utf-8")
+        text_lower = text.lower()
+        # Positive pins — new vocabulary must be present.
+        assert "aith assess kali" in text_lower, f"{path}: missing 'aith assess kali' vocabulary"
+        assert "target-facing" in text_lower, f"{path}: missing 'target-facing' framing"
+        # Three-layer discovery: skill, --help, contract.
+        assert "agent/skills/kali-exec/skill.md" in text_lower, (
+            f"{path}: missing kali-exec skill discovery pointer"
+        )
+        assert "aith assess kali --help" in text_lower, (
+            f"{path}: missing live --help discovery pointer"
+        )
+        assert "aith assess contract kali" in text_lower, (
+            f"{path}: missing contract introspection pointer"
+        )
+        # Regression — the old wording must not reappear after re-rendering.
+        assert "kali mcp" not in text_lower, (
+            f"{path}: 'Kali MCP' wording drifted back into the prompt corpus"
+        )
+        assert "mcp__kali__" not in text, (
+            f"{path}: 'mcp__kali__*' tool name drifted back into the prompt corpus"
+        )
 
-    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8").lower()
-    assert "command-execution" in operator_core
-    assert "target-facing" in operator_core
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+
+    # Pin the renamed sections so future drift flips the test.
+    assert "## Kali Execution" in operator_core
+    assert "### Kali CLI Troubleshooting" in operator_core
+    assert "### Kali Command Audit — Shape Dispatches From Coverage" in operator_core
+
+
+def test_shared_constraints_pins_kali_cli_required_phase_and_half_phases():
+    # shared-constraints.md §2 is the always-loaded specialist contract layer. The
+    # `--phase` REQUIRED rule and the half-phase tag rationale are load-bearing —
+    # losing them lets agents silently fall back to a stale env-var phase or skip
+    # the audit-row classification, so pin them here.
+    repo_root = Path(__file__).resolve().parents[3]
+    shared = (repo_root / "agent" / "shared-constraints.md").read_text(encoding="utf-8")
+    shared_lower = shared.lower()
+
+    # New rule heading and core wording.
+    assert "## 2. `aith assess kali` for All Target Work" in shared
+    assert "aith assess kali" in shared_lower
+
+    # `--phase` is REQUIRED on every dispatch.
+    assert "**`--phase <enum>`**" in shared
+    assert "REQUIRED on every call" in shared
+
+    # Half-phase tag rationale and explicit allowed values.
+    assert "recon-pivot" in shared
+    assert "exploit-recon" in shared
+    assert "operate **between phases**" in shared
+    assert "newly-surfaced host" in shared
+    assert "additional fingerprinting during exploit phase" in shared
+
+    # Audit-flag set replaced X-* headers — pin the CLI-flag value tables exist.
+    for flag in ("--technique", "--intent", "--probe-kind", "--destructive", "--timeout"):
+        assert flag in shared, f"shared-constraints missing audit flag {flag}"
+
+    # Regression — the X-* header vocabulary must not reappear in this file.
+    for header in ("X-Technique", "X-Intent", "X-Probe-Kind", "X-Destructive"):
+        assert header not in shared, (
+            f"shared-constraints.md still references old MCP header {header}"
+        )
+    assert "kali mcp" not in shared_lower, (
+        "shared-constraints.md still references 'Kali MCP'"
+    )
+
+
+def test_skill_index_lists_kali_exec_foundational_skill():
+    repo_root = Path(__file__).resolve().parents[3]
+    skill_index = (repo_root / "agent" / "SKILL.md").read_text(encoding="utf-8")
+    assert "agent/skills/kali-exec/SKILL.md" in skill_index, (
+        "agent/SKILL.md must list kali-exec as a foundational skill"
+    )
+    # The index entry must say the skill is always-loaded paired with shared-constraints.
+    assert "Always — every target-facing call uses `aith assess kali ...`" in skill_index
+    assert "Foundational, paired with `shared-constraints.md`" in skill_index
+
+
+def test_kali_exec_skill_and_kali_cli_runtime_guide_exist():
+    repo_root = Path(__file__).resolve().parents[3]
+    kali_exec = (repo_root / "agent" / "skills" / "kali-exec" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    # Verb count + audit-flag mapping + half-phase tags are the load-bearing sections.
+    assert "## Verb menu" in kali_exec
+    assert "kali nmap-scan" in kali_exec
+    assert "kali job <start" in kali_exec
+    assert "## Audit-flag mapping" in kali_exec
+    assert "## Phase tags (including half-phase tags)" in kali_exec
+    assert "recon-pivot" in kali_exec
+    assert "exploit-recon" in kali_exec
+
+    kali_cli = (repo_root / "agent" / "references" / "runtime-guides" / "kali-cli.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Kali CLI Troubleshooting" in kali_cli
+    assert "aith assess kali --help" in kali_cli
+    # Old MCP troubleshooting file must not still exist.
+    old_mcp_file = repo_root / "agent" / "references" / "runtime-guides" / "kali-mcp-troubleshooting.md"
+    assert not old_mcp_file.exists(), (
+        "kali-mcp-troubleshooting.md should have been renamed to kali-cli.md"
+    )
+
+    # INDEX.md should list the new file and the new nikto.md row, and not the old MCP file.
+    index = (repo_root / "agent" / "references" / "INDEX.md").read_text(encoding="utf-8")
+    assert "runtime-guides/kali-cli.md" in index
+    assert "runtime-guides/kali-mcp-troubleshooting.md" not in index
+    assert "tools/recon/nikto.md" in index
+
+
+def test_no_kali_mcp_drift_in_prompt_corpus():
+    # Load-bearing regression: after the cutover, `Kali MCP` and `mcp__kali__*` must not
+    # appear anywhere in the prompt corpus we author (skills, agents, operator prompts,
+    # shared constraints, references, generated wrappers). Phase-2-owned helper scripts
+    # under `agent/scripts/assess/commands/` and per-engagement bootstrap files under
+    # `agent/engagements/` are excluded — they are not part of the prompt corpus.
+    repo_root = Path(__file__).resolve().parents[3]
+    paths: list[Path] = []
+    for sub in (
+        "skills",
+        "agents",
+        "rules",
+        "references",
+    ):
+        paths.extend(sorted((repo_root / "agent" / sub).rglob("*.md")))
+    for name in ("operator-core.md", "operator-core-code.md",
+                 "shared-constraints.md", "shared-constraints-code.md",
+                 "AGENTS.md", "CLAUDE.md", "SKILL.md"):
+        paths.append(repo_root / "agent" / name)
+    paths.extend(sorted((repo_root / "agent" / ".claude" / "agents").rglob("*.md")))
+    paths.extend(sorted((repo_root / "agent" / ".codex" / "agents").rglob("*.toml")))
+
+    offenders: list[str] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for needle in ("Kali MCP", "mcp__kali__"):
+            if needle in text:
+                offenders.append(f"{path}: contains {needle!r}")
+    assert not offenders, (
+        "Prompt corpus still references the retired Kali MCP vocabulary:\n"
+        + "\n".join(offenders)
+    )
 
 
 def test_phase_two_methodology_guidance_is_present_in_skills_and_references():
@@ -199,7 +343,7 @@ def test_code_variant_hunter_example_matches_record_finding_contract():
     assert '"impact": "Remote attackers can trigger heap corruption in the FTP path parser with an overlong path"' in hunter_prompt
 
 
-def test_kali_mcp_audit_and_reuse_wording_is_present():
+def test_kali_command_audit_and_reuse_wording_is_present():
     repo_root = Path(__file__).resolve().parents[3]
     operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
     operator_agents = (repo_root / "agent" / "AGENTS.md").read_text(encoding="utf-8")
@@ -210,12 +354,14 @@ def test_kali_mcp_audit_and_reuse_wording_is_present():
     # Operator source + rendered wrappers describe the audit channel and the
     # coverage-search CLI so an operator reading any of the three sees both,
     # under the current coverage-map framing (not the old reuse-gate framing).
+    # The 2026-04-26 cutover renamed the section heading from "Kali MCP Audit"
+    # to "Kali Command Audit".
     for text in (operator_core, operator_agents, operator_claude):
         assert "engagement_key" in text
         assert "agent_name" in text
         assert "phase" in text
         assert "list-command-runs" in text
-        assert "Kali MCP Audit — Shape Dispatches From Coverage" in text
+        assert "### Kali Command Audit — Shape Dispatches From Coverage" in text
         assert "variant that hasn't been tried" in text
 
     # Shared-constraints: both modes mention the reuse rule so specialists see

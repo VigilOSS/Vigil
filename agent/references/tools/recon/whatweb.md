@@ -1,7 +1,7 @@
 # whatweb
 
 **Purpose:** Web technology fingerprinting
-For live engagement targets, run WhatWeb through the Kali MCP command-execution tool with `whatweb`.
+For live engagement targets, run WhatWeb via `aith assess kali whatweb` (typed verb, audit-flag-aware).
 
 ## Basic Usage
 

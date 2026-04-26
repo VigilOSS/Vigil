@@ -799,3 +799,459 @@ def test_command_metadata_intent_is_trimmed_to_200_chars(client, isolate_setting
     assert created["intent"] is not None
     assert len(created["intent"]) == 200
     assert created["intent"] == "A" * 200
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Wave-1 cutover fields: status lifecycle, output spill paths, dedup,
+# resource snapshot, scope/auth context, finalize PATCH, phase requirement
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_create_accepts_new_lifecycle_fields(client, isolate_settings):
+    """Pre-exec POST accepts status=running plus the new audit-pipeline fields."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    response = _post(
+        client,
+        _base_payload(
+            status="running",
+            stdout_path="/engagements/example/scans/kali/run-1.out",
+            stderr_path="/engagements/example/scans/kali/run-1.err",
+            working_dir="/engagements/example",
+            scope_version="abcd1234beef5678",
+            auth_context="cookies",
+            timeout_seconds_requested=1800,
+        ),
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["status"] == "running"
+    assert created["stdout_path"] == "/engagements/example/scans/kali/run-1.out"
+    assert created["stderr_path"] == "/engagements/example/scans/kali/run-1.err"
+    assert created["working_dir"] == "/engagements/example"
+    assert created["scope_version"] == "abcd1234beef5678"
+    assert created["auth_context"] == "cookies"
+    assert created["timeout_seconds_requested"] == 1800
+
+
+def test_finalize_patch_transitions_status(client, isolate_settings):
+    """PATCH /command-runs/{id} moves a running row to a terminal state and
+    persists return_code, ended_at, and the resource snapshot fields."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(
+        client,
+        _base_payload(
+            status="running",
+            stdout_path="/engagements/example/scans/kali/run-2.out",
+            stderr_path="/engagements/example/scans/kali/run-2.err",
+        ),
+    ).json()
+    assert created["status"] == "running"
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+            "duration_ms": 5000,
+            "stdout_preview": "scan complete",
+            "timed_out": False,
+            "partial_results": False,
+            "peak_rss_bytes": 12_345_678,
+            "cpu_user_seconds": 1.25,
+            "cpu_system_seconds": 0.75,
+        },
+    )
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["status"] == "completed"
+    assert updated["return_code"] == 0
+    assert updated["duration_ms"] == 5000
+    assert updated["peak_rss_bytes"] == 12_345_678
+    assert updated["cpu_user_seconds"] == 1.25
+    assert updated["cpu_system_seconds"] == 0.75
+    assert updated["success"] is True
+
+
+def test_finalize_patch_round_trips_partial_results(client, isolate_settings):
+    """partial_results is now a real column on assessment_command_runs and is
+    persisted by finalize_command_run when the agent reports it."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(
+        client,
+        _base_payload(
+            command="long-scan --running",
+            argv=["long-scan", "--running"],
+            status="running",
+        ),
+    ).json()
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "timed_out",
+            "return_code": None,
+            "ended_at": "2026-04-17T12:00:05Z",
+            "duration_ms": 5000,
+            "stdout_preview": "partial output",
+            "timed_out": True,
+            "partial_results": True,
+        },
+    )
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["status"] == "timed_out"
+    assert updated["timed_out"] is True
+    assert updated["partial_results"] is True
+
+    listing = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?include_output=true"
+    ).json()
+    assert any(row["partial_results"] is True for row in listing)
+
+
+def test_finalize_patch_404_for_unknown_id(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/9999",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+        },
+    )
+    assert response.status_code == 404
+
+
+def test_finalize_patch_rejects_invalid_status(client, isolate_settings):
+    """The CommandRunFinalize Literal blocks any value outside the
+    {running, completed, failed, timed_out, killed, lost} set."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(client, _base_payload(status="running")).json()
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "queued",
+            "ended_at": "2026-04-17T12:00:05Z",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_finalize_patch_running_to_running_is_idempotent_noop(client, isolate_settings):
+    """B4 edge: a refresh PATCH that does not change lifecycle state must
+    return the existing row unchanged with noop=true so the operator can
+    re-PATCH metadata without flipping state."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(client, _base_payload(status="running")).json()
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "running",
+            "ended_at": "2026-04-17T12:00:05Z",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["noop"] is True
+    assert body["status"] == "running"
+    assert body["id"] == created["id"]
+
+
+def test_finalize_patch_terminal_to_terminal_returns_409(client, isolate_settings):
+    """B4: a row already in a terminal state cannot be finalized again. The
+    second PATCH returns 409 with the existing row in the response body and
+    leaves the original terminal state untouched. Without this, the worker's
+    completed PATCH races the operator's stop PATCH and the second writer
+    silently overwrites the first's status, return_code, and duration_ms."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(client, _base_payload(status="running")).json()
+    first = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+            "duration_ms": 5000,
+            "stdout_preview": "first finalize",
+        },
+    )
+    assert first.status_code == 200, first.text
+    first_body = first.json()
+    assert first_body["status"] == "completed"
+
+    second = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "killed",
+            "return_code": -9,
+            "ended_at": "2026-04-17T12:00:10Z",
+            "duration_ms": 9999,
+            "stdout_preview": "second finalize would clobber",
+        },
+    )
+    assert second.status_code == 409, second.text
+    detail = second.json()["detail"]
+    assert "already finalized" in detail["message"]
+    existing = detail["existing"]
+    assert existing["id"] == created["id"]
+    assert existing["status"] == "completed"
+    assert existing["return_code"] == 0
+    assert existing["duration_ms"] == 5000
+    assert existing["noop"] is True
+
+    refetched = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}"
+    ).json()
+    assert refetched["status"] == "completed"
+    assert refetched["return_code"] == 0
+    assert refetched["duration_ms"] == 5000
+
+
+def test_finalize_patch_running_to_terminal_succeeds(client, isolate_settings):
+    """B4 sanity: the normal happy path still works — a running row promotes
+    to a terminal state and the DB row reflects the PATCH payload."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(client, _base_payload(status="running")).json()
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+            "duration_ms": 1234,
+            "stdout_preview": "ok",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["return_code"] == 0
+    assert body["duration_ms"] == 1234
+    assert body.get("noop") is not True
+
+
+def test_dedup_window_returns_predecessor_without_inserting_new_row(client, isolate_settings):
+    """B3: Two identical (command, argv) POSTs inside the dedup window with
+    force=False: the second POST early-returns the predecessor row's id with
+    dedup_skipped=true and does NOT insert a new row. Without this, the new
+    row would be stuck at status='running' forever because the CLI early-returns
+    on the dedup path and never PATCHes finalize."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    payload = _base_payload(
+        command="nmap -p 22 10.0.0.1",
+        argv=["nmap", "-p", "22", "10.0.0.1"],
+        status="running",
+    )
+    first = _post(client, payload)
+    assert first.status_code == 201, first.text
+    first_row = first.json()
+    second = _post(client, payload)
+    assert second.status_code == 201, second.text
+    second_row = second.json()
+    assert second_row["id"] == first_row["id"]
+    assert second_row["superseded_by_id"] == first_row["id"]
+    assert second_row.get("dedup_skipped") is True
+
+    listing = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs"
+    ).json()
+    assert len(listing) == 1, "dedup-skipped POST must not insert an orphan row"
+
+
+def test_dedup_force_flag_inserts_linked_row(client, isolate_settings):
+    """force=True is the deliberate-retry escape hatch: the new row IS
+    inserted with superseded_by_id set so the supersession audit lands."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    payload = _base_payload(
+        command="nmap -p 22 10.0.0.1",
+        argv=["nmap", "-p", "22", "10.0.0.1"],
+        status="running",
+    )
+    first = _post(client, payload)
+    assert first.status_code == 201, first.text
+    first_row = first.json()
+    forced_payload = dict(payload, force=True)
+    response = _post(client, forced_payload)
+    assert response.status_code == 201, response.text
+    second_row = response.json()
+    assert second_row["superseded_by_id"] is None
+    assert second_row.get("dedup_skipped") is not True
+    assert second_row["id"] != first_row["id"]
+
+    listing = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs"
+    ).json()
+    assert len(listing) == 2
+
+
+def test_dedup_does_not_link_after_finalize(client, isolate_settings):
+    """A finalized predecessor must NOT link a fresh in-flight row — dedup
+    only applies to currently-running or queued rows."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    payload = _base_payload(
+        command="nmap -p 22 10.0.0.1",
+        argv=["nmap", "-p", "22", "10.0.0.1"],
+        status="running",
+    )
+    first = _post(client, payload).json()
+    finalize = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{first['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+        },
+    )
+    assert finalize.status_code == 200
+    second = _post(client, payload)
+    assert second.status_code == 201
+    assert second.json()["superseded_by_id"] is None
+
+
+def test_dedup_respects_env_window_zero(client, isolate_settings, monkeypatch):
+    """KALI_AUDIT_DEDUP_WINDOW_SECONDS=0 disables dedup entirely."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    monkeypatch.setenv("KALI_AUDIT_DEDUP_WINDOW_SECONDS", "0")
+    payload = _base_payload(
+        command="nmap -p 80 10.0.0.1",
+        argv=["nmap", "-p", "80", "10.0.0.1"],
+        status="running",
+    )
+    assert _post(client, payload).status_code == 201
+    second = _post(client, payload)
+    assert second.status_code == 201
+    assert second.json()["superseded_by_id"] is None
+
+
+def test_phase_required_returns_422_when_missing(client, isolate_settings):
+    """phase is required-from-input; omitting it returns 422."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    payload = _base_payload()
+    payload.pop("phase", None)
+    response = _post(client, payload)
+    assert response.status_code == 422
+    assert "phase" in response.text.lower()
+
+
+def test_phase_accepts_half_phase_tags(client, isolate_settings):
+    """recon-pivot and exploit-recon are valid phase values for mid-engagement
+    dispatches that cross between formal phase boundaries."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    for phase_value in ("recon-pivot", "exploit-recon"):
+        response = _post(
+            client,
+            _base_payload(phase=phase_value, command=f"echo {phase_value}", argv=["echo", phase_value]),
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["phase"] == phase_value
+
+
+def test_finalize_broadcasts_via_websocket(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(
+        client,
+        _base_payload(status="running", command="nmap -p 22 10.0.0.2", argv=["nmap", "-p", "22", "10.0.0.2"]),
+    ).json()
+    with client.websocket_connect(f"/ws/engagements/{ENGAGEMENT_KEY}") as websocket:
+        response = client.patch(
+            f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+            json={
+                "status": "completed",
+                "return_code": 0,
+                "ended_at": "2026-04-17T12:00:05Z",
+            },
+        )
+        assert response.status_code == 200
+        payload = websocket.receive_json()
+        assert payload["type"] == "assessment.updated"
+        assert payload["record_type"] == "command_run"
+        assert payload["payload"]["id"] == created["id"]
+        assert payload["payload"]["status"] == "completed"
+
+
+def test_pre_existing_rows_keep_status_completed_default_after_alter(client, isolate_settings):
+    """Run the ALTER-migration path: a row inserted before the status column
+    existed must come back as status='completed' once init_db has migrated
+    the schema. The DB DEFAULT for the column is 'completed' for legacy rows."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    db_path = db_module.database_path()
+    # Start with a clean simulated legacy DB.
+    db_path.unlink(missing_ok=True)
+    with sqlite3.connect(str(db_path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE engagements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL UNIQUE,
+                target TEXT NOT NULL,
+                status TEXT NOT NULL,
+                engagement_root TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO engagements (id, key, target, status, engagement_root)
+            VALUES (1, ?, 'https://example.com', 'in_progress', ?)
+            """,
+            (ENGAGEMENT_KEY, str(isolate_settings["engagements_dir"] / ENGAGEMENT_KEY)),
+        )
+        connection.execute(
+            """
+            CREATE TABLE assessment_command_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                run_uuid TEXT NOT NULL UNIQUE,
+                command TEXT NOT NULL,
+                argv_json TEXT NOT NULL DEFAULT '[]',
+                tool_name TEXT NOT NULL,
+                tool_bin TEXT NOT NULL DEFAULT '',
+                route TEXT NOT NULL DEFAULT '',
+                agent_name TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                audit_source TEXT NOT NULL DEFAULT 'header',
+                return_code INTEGER,
+                timed_out INTEGER NOT NULL DEFAULT 0,
+                success INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                command_hash TEXT NOT NULL,
+                stdout_sha256 TEXT NOT NULL DEFAULT '',
+                stderr_sha256 TEXT NOT NULL DEFAULT '',
+                stdout_preview TEXT NOT NULL DEFAULT '',
+                stderr_preview TEXT NOT NULL DEFAULT '',
+                output_retention_status TEXT NOT NULL DEFAULT 'retained',
+                stdout_suppression_reason TEXT NOT NULL DEFAULT '',
+                stderr_suppression_reason TEXT NOT NULL DEFAULT '',
+                stdout_artifact_ref TEXT NOT NULL DEFAULT '',
+                stderr_artifact_ref TEXT NOT NULL DEFAULT '',
+                stdout_bytes INTEGER NOT NULL DEFAULT 0,
+                stderr_bytes INTEGER NOT NULL DEFAULT 0,
+                indexed_for_embeddings_at TEXT,
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO assessment_command_runs (
+                id, engagement_id, run_uuid, command, argv_json, tool_name, route,
+                agent_name, phase, return_code, timed_out, success, started_at,
+                completed_at, duration_ms, command_hash, stdout_preview, notes
+            ) VALUES (
+                1, 1, 'legacy-status', 'legacy nmap', '[]', 'nmap_scan', '',
+                'legacy-agent', 'recon', 0, 0, 1, '2026-04-17T12:00:00Z',
+                '2026-04-17T12:00:01Z', 1000, 'hash', 'legacy', ''
+            )
+            """
+        )
+        connection.commit()
+
+    db_module.init_db()
+    rows = state_manager.list_command_runs(1)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "completed"

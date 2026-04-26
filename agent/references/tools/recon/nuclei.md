@@ -1,7 +1,7 @@
 # nuclei
 
 **Purpose:** Vulnerability scanning with community templates
-For live engagement targets, prefer `nuclei` through the Kali MCP command-execution tool.
+For live engagement targets, run `nuclei` via `aith assess kali nuclei` (typed verb, audit-flag-aware).
 
 ## Basic Scanning
 

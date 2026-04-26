@@ -27,9 +27,9 @@ After engagement initialization completes, repeat until all attack paths exhaust
    - **Phase 5 (Exploit):** `exploit-developer` → load the skill matching the confirmed finding class from `agent/SKILL.md` using the "Use when:" criteria; `osint-analyst` → `agent/skills/osint-recon/SKILL.md`
    - **Phase 7 (Report):** `report-writer` → `agent/skills/report-generation/SKILL.md`
    If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, agents, rules, skill index, skills, references, and scripts before claiming no suitable skill exists.
-6. **KALI MCP ONLY FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through the attached Kali MCP tools. Use MCP tool discovery to inspect the currently available Kali tools, then use the MCP command-execution variant when you need to run an arbitrary tool or shell command inside the Kali runtime. Route all in-scope target work through the Kali MCP command-execution tool — host Bash, `docker run`, `docker exec`, and ad hoc wrappers bypass the runtime's network isolation. If Kali MCP has a runtime or reachability gap, pause target-facing work and debug the runtime from the host — host-side probes against scoped targets break the isolation boundary.
+6. **USE `aith assess kali` FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through `aith assess kali ...` subcommands. The CLI runs on the host, execs into the runtime container, and writes the audit row directly to the orchestrator backend, so the audit pipeline stays truthful and downstream specialists can read coverage from `aith assess list-command-runs`. Discovery is layered: load `agent/skills/kali-exec/SKILL.md` for the verb menu and audit-flag mapping; run `aith assess kali --help` and `aith assess kali <verb> --help` for the live flag set; run `aith assess contract kali <verb>` for the canonical schema, helper defaults, common mistakes, and example payload. Host Bash, `docker run`, `docker exec`, and ad-hoc curl/nmap from the host bypass the audit pipeline and the runtime's network isolation. If `aith assess kali --help` errors or a verb fails unexpectedly, pause target-facing work and debug the runtime from the host using `agent/references/runtime-guides/kali-cli.md` — host-side probes against scoped targets break the isolation boundary.
 7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis, testing, validation, and exploitation work. The operator's job is orchestration: phase control, specialist selection, state review, and backend state management — analysis and testing belong to specialist agents because they carry the skill context and methodology depth that the operator prompt lacks.
-   **Operator-executed exceptions** (via Kali MCP, not host-side): quick credential validation (single login test to confirm working/not-working). This is a mechanical pipeline step, not analysis.
+   **Operator-executed exceptions** (via `aith assess kali`, not host-side): quick credential validation (single login test to confirm working/not-working). This is a mechanical pipeline step, not analysis.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `aith assess record-finding` to write findings to the backend. The backend is the sole store.
    **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. Record them via `aith assess record-intel cve <cve-json-file>` (intel_cves table), NOT `record-finding`. Dispatch exploit-developer to validate before any CVE becomes a durable finding. This reconciles "record immediately" with "no theoretical findings."
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, record them via `aith assess record-surface` so the backend stays current. The backend is the sole store — there is no local surfaces file to verify.
@@ -47,25 +47,28 @@ After engagement initialization completes, repeat until all attack paths exhaust
 - When full exploitation fails, validate partial signals in stages: sleep, DNS/OOB, env leakage, version leakage, file read, then RCE where appropriate.
 - Prefer realistic attack paths that transfer to real environments over puzzle-box sequences that require guessing hidden steps.
 
-## Shared Kali MCP Runtime
+## Shared Kali Runtime
 
-Before initializing any engagement, ensure the shared Kali MCP runtime is running:
+Before initializing any engagement, ensure the shared Kali runtime container is running:
 
 ```bash
 aith runtime start
+aith assess kali --help     # smoke-test discovery; should list 15 verbs
 ```
 
-This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install.
+This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install. `aith assess kali` execs into this single container regardless of which engagement is active — the engagement context is plumbed through `${ENGAGEMENT_DIR}` and the audit-flag set on each call.
 
-**Image drift - recreate the runtime after every rebuild.** `aith runtime start` compares the running container's image ID against the configured image tag and refuses to continue when they diverge. Whenever you rebuild the runtime image or upgrade the installed image, run `aith runtime restart` so the container picks up the new image and current `/engagements` bind mount. No engagement data moves; only the container is replaced.
+**Image drift — recreate the runtime after every rebuild.** `aith runtime start` compares the running container's image ID against the configured image tag and refuses to continue when they diverge. Whenever you rebuild the runtime image or upgrade the installed image, run `aith runtime restart` so the container picks up the new image and current `/engagements` bind mount. No engagement data moves; only the container is replaced.
 
-## Kali MCP Artifact Paths
+**Resource sizing.** `aith runtime resources` prints the configured tier (`Lab/CTF` / `Standard` / `Heavy` / `Comfortable`) and the live cgroup state inside the container. Configure the tier via `AITH_RUNTIME_MEMORY_GB`, `AITH_RUNTIME_CPUS`, `AITH_RUNTIME_PIDS_LIMIT`, and `AITH_RUNTIME_SHM_SIZE` env vars. The Standard tier (8 GB RAM, 4 CPUs, 512 pids) handles 2-3 parallel agents on a small bounty target; bump to Heavy for large enterprise scope.
+
+## Kali Artifact Paths
 
 Engagement artifacts live at one physical location on disk but have two names depending on where the command runs — reach for the right name so scans end up where downstream tools look for them.
 
 - **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR`. Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local file work, `aith assess` calls, and any script running on the host.
-- **Kali side** — `/engagements/$ENGAGEMENT_KEY` is the same directory via the bind mount managed by `aith runtime start`. Launchers also export `ENGAGEMENT_KEY` (the basename of `$DIR`) so Kali MCP commands can resolve it.
-- **Skills running commands inside Kali MCP MUST use `/engagements/$ENGAGEMENT_KEY/...`** — the host path `$DIR` is not valid inside the container, and writing to `/tmp` or `/data` for engagement-scoped artifacts loses them outside the shared-infra conventions.
+- **Kali side** — `/engagements/$ENGAGEMENT_KEY` is the same directory via the bind mount managed by `aith runtime start`. Launchers also export `ENGAGEMENT_KEY` (the basename of `$DIR`) so commands inside the runtime can resolve it.
+- **`aith assess kali ...` invocations MUST reference paths as `/engagements/$ENGAGEMENT_KEY/...`** in their command argv — the host path `$DIR` is not valid inside the container, and writing to `/tmp` or `/data` for engagement-scoped artifacts loses them outside the shared-infra conventions.
 
 ## Listener & Callback Management
 
@@ -73,11 +76,22 @@ Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are 
 
 - **Operator** provisions per `agent/references/offensive-tactics/shell-handling.md` (reverse shells) and `agent/references/offensive-tactics/frp-tunneling.md` (tunnels, interactsh OOB), then writes `$DIR/.listener_url` and/or `$DIR/.oob_url`.
 - **Agents** read `$DIR/.listener_url` and `$DIR/.oob_url` from dispatch context (never write). If OOB is unavailable, fall back to time-based detection and note it in output. If a listener cannot be provisioned, record a blocked technique via `aith assess post blocked-techniques <json-file>`.
-- **Hit-checking and log paths** (`/data/oob/clients/<name>.log`, `/data/oob/server.log`, `/data/shell-*.log`, `/data/oob/frpc.log`) are documented in `frp-tunneling.md` and `shell-handling.md`.
+- **Hit-checking and log paths** (`/data/oob/clients/<name>.log`, `/data/oob/server.log`, `/data/shell-*.log`, `/data/oob/frpc.log`) are documented in `frp-tunneling.md` and `shell-handling.md`. Read them via `aith assess kali exec -- cat /data/<log-path>` so the read is recorded in the audit pipeline.
 
 ## Reactive Nuclei on URL Discovery
 
-Nuclei runs in-phase against the URL deltas each phase produces — not as a single late pass. After any Phase 1-2 action yields new live URLs (recon-specialist endpoint output, source-analyzer URL extraction, surface-collector Katana/gau ingestion, subdomain-enumeration live-host confirmation, wildcard expansion), dispatch a reactive nuclei sweep via Kali MCP against that delta. Each phase still completes its own work before advancing — the sweep is additive, not a reason to skip ahead. Running it in-phase is what turns template hits into `record-intel` (tech, note, CVE) and `record-finding` candidates *before* Phase 3 dispatch, so specialists inherit the signal as intel and findings rather than rediscovering it from the buffer.
+Nuclei runs in-phase against the URL deltas each phase produces — not as a single late pass. After any Phase 1-2 action yields new live URLs (recon-specialist endpoint output, source-analyzer URL extraction, surface-collector Katana/gau ingestion, subdomain-enumeration live-host confirmation, wildcard expansion), dispatch a reactive nuclei sweep via `aith assess kali nuclei` against that delta. Each phase still completes its own work before advancing — the sweep is additive, not a reason to skip ahead. Running it in-phase is what turns template hits into `record-intel` (tech, note, CVE) and `record-finding` candidates *before* Phase 3 dispatch, so specialists inherit the signal as intel and findings rather than rediscovering it from the buffer.
+
+```bash
+aith assess kali nuclei \
+  -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_reactive_$RID.txt \
+  -t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/,http/technologies/,http/exposed-panels/ \
+  -severity medium,high,critical -as -stream -jsonl \
+  -rate-limit 150 -c 25 -bs 25 \
+  -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_reactive_$RID.jsonl \
+  --technique CVE-VALIDATION --intent "reactive sweep on URL delta" \
+  --probe-kind fingerprint --phase recon --timeout 1800
+```
 
 Methodology: see `agent/skills/nuclei-scanning/SKILL.md` — "Reactive Sweep Mode". The skill owns the delta computation, the exact `nuclei` invocation, the template selection rationale, and the `list-command-runs`-based dedup that prevents re-scanning host+template combos already covered by an earlier reactive pass. Do not duplicate that mechanics here.
 
@@ -175,7 +189,7 @@ DB="$DIR/cases.db"
 
    **1b. Parallel recon + source analysis** — dispatch `recon-specialist` + `source-analyzer` in parallel because their work is independent and sequential dispatch doubles wall time for no coverage gain. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 — leaving non-web triage on the operator loses the skill's methodology depth.
 
-   **1c. Reactive nuclei sweep against Phase 1 URL delta** — before leaving Phase 1, fire a reactive nuclei sweep via Kali MCP against the URL delta produced by 1a and 1b (methodology + dedup in `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Running it in-phase — instead of holding every URL until Phase 3 — turns template hits into `record-intel` / `record-finding` writes *before* Phase 3 specialists dispatch, so specialists inherit the signal as intel and findings. The dedup pattern (`list-command-runs` + jq) ensures this pass and the Phase-2 reactive pass below do not re-scan the same host+template combo.
+   **1c. Reactive nuclei sweep against Phase 1 URL delta** — before leaving Phase 1, fire a reactive nuclei sweep via `aith assess kali nuclei` against the URL delta produced by 1a and 1b (methodology + dedup in `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Running it in-phase — instead of holding every URL until Phase 3 — turns template hits into `record-intel` / `record-finding` writes *before* Phase 3 specialists dispatch, so specialists inherit the signal as intel and findings. The dedup pattern (`list-command-runs` + jq) ensures this pass and the Phase-2 reactive pass below do not re-scan the same host+template combo.
 
    **Phase 1 exit gate.** Before leaving Phase 1, run `aith assess check-scope-coverage --require-stage enum`. The gate checks whether each scope entry has downstream evidence — live services, recorded surfaces, or work-buffer rows under the entry's host. Bare hosts and URL entries pass trivially; wildcards fail when enumeration produced nothing real. If a wildcard fails, dispatch the missing enum work or mark the entry deferred in `scope.json` before advancing, because entering Phase 2 with empty scope branches leaves whole subtrees of the attack surface untested.
 2. **COLLECT** → dispatch surface-collector with `agent/skills/surface-collection/SKILL.md`.
@@ -195,8 +209,8 @@ DB="$DIR/cases.db"
    a. **Nuclei coverage audit** (once, before the work-buffer loop) — audit what Phase 1/2 reactive sweeps already covered and run nuclei only against gaps. Do not blindly re-sweep: if every in-scope live host already received the reactive template set, this step prints a coverage summary and advances.
       1. Build the coverage set: `aith assess list-command-runs --q nuclei --tool-bin nuclei` → jq-extract each prior run's input-list path and template tag(s).
       2. Compute gaps: live targets ∖ covered hosts (and/or template sets the reactive passes did not exercise).
-      3. If gaps exist, run nuclei via Kali MCP against the gap list only:
-         `nuclei -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap.txt -t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/ -severity medium,high,critical -as -stream -jsonl -rate-limit 150 -c 25 -bs 25 -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap_$RID.jsonl`
+      3. If gaps exist, run nuclei via `aith assess kali nuclei` against the gap list only:
+         `aith assess kali nuclei -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap.txt -t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/ -severity medium,high,critical -as -stream -jsonl -rate-limit 150 -c 25 -bs 25 -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap_$RID.jsonl --technique CVE-VALIDATION --intent "Phase 3a gap-only nuclei coverage audit" --probe-kind fingerprint --phase consume-test --timeout 1800`
       4. If no gaps, record `aith assess log operator "Phase 3a coverage audit" "check-scope-coverage --require-stage consumption" "Reactive sweeps covered all in-scope hosts, no rerun needed." --actor-kind operator`.
       See `agent/skills/nuclei-scanning/SKILL.md` "Coverage Audit Mode" for the detailed procedure. Triage policy is unchanged: critical/high hits → work-buffer priority entries or findings (after manual validation); medium → intelligence.
    b. Reset stale work items: `aith assess dispatch "$DB" reset-stale 10`
@@ -227,7 +241,7 @@ DB="$DIR/cases.db"
       - **Skip**: LOW and INFO findings — review cost exceeds downstream impact
    c. Dispatch `vulnerability-analyst` in review mode. The dispatch context must include:
       - The finding slugs, titles, and full payloads being reviewed
-      - Target access (the reviewer re-tests via Kali MCP, not just reads the evidence text)
+      - Target access (the reviewer re-tests via `aith assess kali ...`, not just reads the evidence text)
       - Explicit instruction: "You are reviewing findings produced by other agents. Your job is adversarial — challenge the evidence, reproduce the PoC, and verify the claimed severity. Confirm, downgrade, or kill each finding with specific counter-evidence."
       - The matching vuln-class skill from `agent/SKILL.md` for the findings under review
    d. For each reviewed finding, the reviewer produces a disposition:
@@ -264,7 +278,7 @@ jq '.current_phase = "<next>"' \
 
 When ANY agent discovers credentials, the operator coordinates these steps:
 
-1. **Operator tests credentials via Kali MCP** — a quick login check is mechanical pipeline work, not analysis. Run a single login request (curl POST, HTTP basic auth, etc.) via the Kali MCP command-execution tool to confirm working or not-working.
+1. **Operator tests credentials via `aith assess kali`** — a quick login check is mechanical pipeline work, not analysis. Run a single login request (curl POST, HTTP basic auth, etc.) via `aith assess kali exec -- curl ...` (or a typed verb where applicable) to confirm working or not-working. Pass `--technique AUTH --intent "credential validation" --probe-kind baseline --phase <current>` so the audit row records the test.
    - If login **fails** → record the result via `aith assess log operator "Login test failed" "<command>" "<response>"` (writes an activity entry to the backend), continue anonymously. Do not dispatch a specialist for a failed login.
    - If login **succeeds** → continue to step 2.
 2. **Operator writes to auth.json** — populate cookies, headers, or token fields from the successful login response. Set `state` to `available` and `use_for_requests` to `true`. This is local file work.
@@ -277,34 +291,36 @@ Auth handling rules:
 - If `auth.json` is missing material or marked expired, warn and continue anonymously rather than halting the engagement.
 - The human may update `auth.json` directly or use mitmproxy-assisted login capture to refresh it.
 
-## Kali MCP Execution
+## Kali Execution
 
-All target-facing work must go through the attached Kali MCP runtime. Every
-call carries three audit fields — `engagement_key` (from the engagement dir
-basename or `engagement.json`), `agent_name` (the dispatching role, e.g.
-`recon-specialist`), and `phase` (from `scope.json.current_phase`) — so the
-runtime can record the command, argv, stdout/stderr, exit code, timeout state,
-and timings to the orchestrator backend automatically. Treat that recording as
-shared engagement state: specialists check it before probing (their
-`shared-constraints.md §2b` covers the per-probe coverage check); the operator
-reads it to shape dispatches so each one covers a variant that hasn't been
-tried yet (`aith assess list-command-runs`).
+All target-facing work must go through `aith assess kali ...` subcommands. The CLI
+runs on the host, execs into the runtime container, and writes the audit row
+directly to the orchestrator backend. Every call carries the audit fields —
+`engagement_key` and `agent_name` are auto-derived from the engagement directory
+and the dispatching role context, plus `--phase` (REQUIRED on every call), the
+command, argv, stdout/stderr paths, exit code, timeout state, and timings.
+Treat the audit history as shared engagement state: specialists check it
+before probing (their `shared-constraints.md §2b` covers the per-probe
+coverage check); the operator reads it to shape dispatches so each one covers
+a variant that hasn't been tried yet (`aith assess list-command-runs`).
 
-- Use MCP tool discovery to inspect the currently available Kali tools instead of assuming a fixed tool inventory in the prompt.
-- When you need arbitrary shell execution inside the Kali runtime, use the Kali MCP command-execution tool.
-- Treat host Bash as out-of-bounds for in-scope target work even if the same binary exists locally.
+- Use `aith assess kali --help` and `aith assess kali <verb> --help` to inspect the live verb and flag set instead of assuming a fixed tool inventory in the prompt — argparse output is generated from the same source as the implementation.
+- Read `agent/skills/kali-exec/SKILL.md` for the verb menu, audit-flag mapping, sync-vs-async decision, half-phase tags, and example invocation profiles per verb.
+- Use `aith assess contract kali <verb>` for the canonical schema, helper-supplied defaults, common mistakes, and a JSON example payload.
+- When you need arbitrary shell execution inside the runtime, use `aith assess kali exec -- <command...>` with the same audit-metadata flags as a typed verb.
+- Treat host Bash as out-of-bounds for in-scope target work even if the same binary exists locally — host-side probes bypass the audit pipeline that specialists rely on as a coverage map.
 - Host-side commands are limited to coordination, local file work, backend interaction, and non-target support tasks such as `jq`, `sqlite3`, `python3`, `grep`/`rg`, `sed`, `awk`, `base64`, and `openssl`.
 - For backend state writes, use `aith assess` helpers such as `record-surface` and `record-finding` rather than sourcing library helpers directly.
-- If a required target-facing tool is missing from the active Kali MCP session, say so explicitly and stop to resolve the runtime gap rather than falling back to host or Docker-side execution paths.
+- If a required target-facing tool is missing from the runtime image, rebuild the image (the runtime image is the single source of truth for the tool surface) rather than falling back to host or Docker-side execution paths.
 - Host-side runtime diagnosis may inspect local files, container metadata, mounts, and environment, but may not send scoped HTTP, DNS, or raw TCP probes from the host.
 
-Each Kali MCP call also supports four optional audit-metadata headers — `X-Technique`, `X-Intent`, `X-Probe-Kind`, and `X-Destructive` — that classify the call so it becomes filterable in `list-command-runs` and the Commands tab. Do not inline the schema here; see the `Command Metadata` sub-section in `agent/shared-constraints.md` for the value tables and the accompanying ban on echo-as-commentary breadcrumbs inside Kali MCP commands.
+Audit metadata is passed as CLI flags on every call: `--technique <enum>`, `--intent "<text>"`, `--probe-kind <kind>`, `--phase <enum>` (REQUIRED), `--timeout <seconds>` (REQUIRED), plus `--destructive` / `--force` / `--strace` when applicable. Do not inline the value tables here; see the `Command Metadata` sub-section in `agent/shared-constraints.md` for the audit-flag value tables, the half-phase tag rationale, and the accompanying ban on echo-as-commentary breadcrumbs inside `aith assess kali` commands.
 
-### Kali MCP Troubleshooting
+### Kali CLI Troubleshooting
 
-If Kali MCP tools are missing or MCP tool discovery returns no tools, see `agent/references/runtime-guides/kali-mcp-troubleshooting.md`.
+If `aith assess kali --help` errors or a verb fails unexpectedly, see `agent/references/runtime-guides/kali-cli.md`.
 
-### Kali MCP Audit — Shape Dispatches From Coverage
+### Kali Command Audit — Shape Dispatches From Coverage
 
 Specialists check `list-command-runs` before each probe (agent-side rule in
 `shared-constraints.md §2b`). The operator's use is different: between
@@ -318,8 +334,9 @@ aith assess list-command-runs --q <keyword>
 
 When planning the next dispatch:
 
-- **Name the coverage in the dispatch context.** If `sqlmap --technique=U` has
-  run against this endpoint, tell the vulnerability-analyst explicitly to try
+- **Name the coverage in the dispatch context.** If `sqlmap` has run against
+  this endpoint with the audit row's `--technique SQLI` and a `--intent`
+  mentioning UNION, tell the vulnerability-analyst explicitly to try
   `BT`/`E`/`Q`/`S` instead of leaving them to re-derive it. If the fuzzer
   already burned `raft-medium-directories`, dispatch with a tech-specific
   wordlist. This makes variant-selection deterministic instead of guesswork.

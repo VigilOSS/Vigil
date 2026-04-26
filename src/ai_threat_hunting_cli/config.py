@@ -3,11 +3,60 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 CONFIG_ENV = "AI_THREAT_HUNTING_CONFIG"
 CONFIG_DIR = Path.home() / ".config" / "security-research"
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "config.json"
+
+DEFAULT_RUNTIME_MEMORY_GB = 8
+DEFAULT_RUNTIME_CPUS = 4
+DEFAULT_RUNTIME_PIDS_LIMIT = 512
+DEFAULT_RUNTIME_SHM_SIZE = "1g"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeResources:
+    memory_gb: int
+    cpus: float
+    pids_limit: int
+    shm_size: str
+
+
+def runtime_resources() -> RuntimeResources:
+    return RuntimeResources(
+        memory_gb=_int_env("AITH_RUNTIME_MEMORY_GB", DEFAULT_RUNTIME_MEMORY_GB),
+        cpus=_float_env("AITH_RUNTIME_CPUS", DEFAULT_RUNTIME_CPUS),
+        pids_limit=_int_env("AITH_RUNTIME_PIDS_LIMIT", DEFAULT_RUNTIME_PIDS_LIMIT),
+        shm_size=os.environ.get("AITH_RUNTIME_SHM_SIZE", DEFAULT_RUNTIME_SHM_SIZE).strip() or DEFAULT_RUNTIME_SHM_SIZE,
+    )
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError as exc:
+        raise SystemExit(f"{name} must be an integer (got {raw!r})") from exc
+    if value <= 0:
+        raise SystemExit(f"{name} must be a positive integer (got {value})")
+    return value
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return float(default)
+    try:
+        value = float(raw.strip())
+    except ValueError as exc:
+        raise SystemExit(f"{name} must be a number (got {raw!r})") from exc
+    if value <= 0:
+        raise SystemExit(f"{name} must be positive (got {value})")
+    return value
 
 
 def config_path() -> Path:

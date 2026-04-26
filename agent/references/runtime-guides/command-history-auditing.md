@@ -1,6 +1,6 @@
 # Command History — Coverage Check Before Probing
 
-Every Kali MCP call made during an engagement lands in the orchestrator
+Every `aith assess kali` call made during an engagement lands in the orchestrator
 backend's `assessment_command_runs` table with a searchable index. Treat
 this as a **coverage map** — a record of what's already been probed so your
 next probe can go somewhere the engagement hasn't covered yet.
