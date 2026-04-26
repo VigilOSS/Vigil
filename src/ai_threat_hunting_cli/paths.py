@@ -52,8 +52,6 @@ def resolve_source_root(value: str | Path | None = None, *, install_root: Path |
     cwd_discovered = find_repo_root(Path.cwd())
     if cwd_discovered is not None:
         candidates.append(cwd_discovered)
-    if install_root is not None:
-        candidates.append(install_root)
 
     for candidate in candidates:
         resolved = candidate.resolve()
@@ -63,6 +61,10 @@ def resolve_source_root(value: str | Path | None = None, *, install_root: Path |
     cached = _ensure_cached_source()
     if cached is not None:
         return cached
+    if install_root is not None:
+        resolved_install_root = install_root.expanduser().resolve()
+        if looks_like_repo_root(resolved_install_root):
+            return resolved_install_root
 
     raise SystemExit(
         "Cannot locate AI Threat Hunting source files. Run from a source checkout, "
@@ -97,6 +99,13 @@ def agent_root(install_root: Path) -> Path:
 
 def engagements_root(install_root: Path) -> Path:
     return agent_root(install_root) / "engagements"
+
+
+def resolve_orchestrator_data_dir(install_root: Path) -> Path:
+    env_value = os.environ.get("AI_THREAT_HUNTING_DATA_DIR") or os.environ.get("REDTEAM_ORCHESTRATOR_DATA_DIR")
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+    return install_root.expanduser().resolve() / "orchestrator" / "backend" / "data"
 
 
 def read_env_file(path: Path) -> dict[str, str]:
