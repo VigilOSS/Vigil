@@ -202,10 +202,12 @@ Quick-reference per tool, organized by usage phase.
 | `tools/recon/whatweb.md` | Web technology fingerprinting |
 | `tools/recon/httpx.md` | HTTP probing, tech detection, live host confirmation |
 | `tools/recon/nuclei.md` | Template-based vulnerability scanning (CVEs, misconfigs, exposures) |
+| `tools/recon/nikto.md` | Web vulnerability scanner — **conditional, fingerprint-gated** (legacy/odd-stack triggers; nuclei is the primary web-vuln pass) |
 | `tools/recon/wafw00f.md` | WAF identification and fingerprinting |
 | `tools/recon/curl.md` | HTTP request crafting and testing |
 | `tools/recon/puredns.md` | Active DNS brute-force with wildcard filtering |
 | `tools/recon/dnsx.md` | Bulk DNS resolution and record enumeration |
+| `tools/recon/subdomain-enumeration-tools.md` | Subdomain enumeration tier table (subfinder/bbot/cero/alterx/puredns/dnsx), API-key value-for-cost, puredns rate guidance, alterx permutation chain, cero CIDR-feed, bbot passive preset, when-not-to-bruteforce signals |
 | `tools/recon/gau.md` | Historical URL discovery (Wayback, OTX, Common Crawl, URLScan) |
 | `tools/recon/gf.md` | URL parameter-pattern classifier (xss, ssrf, redirect, idor, sqli, lfi, debug) with 1ndianl33t patterns |
 | `tools/recon/trufflehog.md` | Secret scanner (filesystem mode, 800+ detectors, v3 positional-path syntax, `--no-verification` default) |
@@ -282,6 +284,7 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 | `runtime-guides/engagement-methodology.md` | Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase |
 | `runtime-guides/subagent-registry.md` | `agent-registry.json` schema and its role as the engagement audit trail; how to hand off state between dispatches by carrying prior output and durable-state pointers forward in the new dispatch prompt |
 | `runtime-guides/command-history-auditing.md` | How to read `aith assess list-command-runs` as a coverage map — use it to pick variants that haven't been probed, not to gate-keep reruns; includes field-interpretation guide for retention/suppression |
+| `runtime-guides/kali-cli.md` | `aith assess kali` troubleshooting: discovery failures, dispatch-time guardrails (no broad pkill, per-agent binary copy, docker-exec parallelism cap), common errors (`audit POST 422 phase required`, dedup window, dtach missing), and the canonical smoke test |
 | `handoff-protocols.md` | Agent-to-agent handoff rules and expected downstream actions |
 | `subdomain-enumeration.md` | Subdomain enumeration (when `*.domain` in hosts), prioritization, and sliding-window execution rules |
 

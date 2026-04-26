@@ -1,13 +1,13 @@
 # AI Threat Hunting
 
-This repository contains the operator prompts, Kali MCP runtime, engagement scaffolding, and orchestrator services used to run those engagements.
+This repository contains the operator prompts, Kali runtime image, engagement scaffolding, and orchestrator services used to run those engagements.
 
 ## Repository Layout
 
 - `agent/docker/runtime-full/Dockerfile`
-  Primary full Kali MCP image. This is the only supported runtime for target-facing execution.
+  Primary full Kali runtime image. This is the only supported runtime for target-facing execution.
 - `docker/kali-mcp-runtime/`
-  MCP wrapper and patched Kali API server.
+  Shared audit-enum module imported by the host-side `aith assess kali` CLI.
 - `agent/`
   Prompts, CLI integrations, attack skills, transient work-buffer scripts, and runtime helpers.
 - `orchestrator/`
@@ -28,7 +28,7 @@ This repository contains the operator prompts, Kali MCP runtime, engagement scaf
 
 ### Install the CLI and workspace
 
-The `aith` CLI is the supported entrypoint for installing, upgrading, creating engagements, starting the orchestrator, and managing the Kali MCP runtime.
+The `aith` CLI is the supported entrypoint for installing, upgrading, creating engagements, starting the orchestrator, and managing the Kali runtime.
 
 ```bash
 # Install from GitHub
@@ -43,7 +43,7 @@ aith install ~/security-research
 
 Each install contains both Claude Code and Codex workflow files. The install root holds the shared prompt source tree, generated client wrappers, runtime assets, and orchestrator state while each client keeps its own entrypoint.
 
-The shared Kali MCP runtime is not per-engagement. Start it once and then attach Claude Code and Codex through `aith mcp install both`, which registers the shared `aith runtime mcp-server` endpoint. Within a single install, multiple engagements may exist under `agent/engagements/`.
+The shared Kali runtime is not per-engagement. Start it once with `aith runtime start`; target-facing tool execution happens via `aith assess kali ...` subcommands which call into the container via `docker exec`. Within a single install, multiple engagements may exist under `agent/engagements/`.
 
 Use one lead operator per engagement at a time unless you are deliberately coordinating a dual-client run through backend state. Both clients share the same durable orchestrator state, but filesystem artifacts under an engagement directory are still ordinary files.
 
@@ -66,7 +66,7 @@ aith status
 aith logs orchestrator --lines 80
 ```
 
-### 1. Kali MCP runtime
+### 1. Kali runtime
 
 Start the shared runtime:
 
@@ -74,21 +74,39 @@ Start the shared runtime:
 aith runtime start
 ```
 
-This starts one shared container named `security-research`, mounts shared runtime data at `.runtime-data/`, and passes the root `.env` file into the runtime when present.
-Durable engagement artifacts stay on the host under `agent/engagements/<key>/`, and the runtime bind-mounts the whole engagement root at `/engagements` so Kali MCP tools can write `/engagements/<key>/...` artifacts directly.
+This starts one shared container named `security-research`, mounts shared runtime data at `.runtime-data/`, applies the resource limits described in [Resource Sizing](#resource-sizing) below, and passes the root `.env` file into the runtime when present.
+Durable engagement artifacts stay on the host under `agent/engagements/<key>/`, and the runtime bind-mounts the whole engagement root at `/engagements` so `aith assess kali ...` calls can write `/engagements/<key>/...` artifacts directly.
 
-Attach Claude Code or Codex over stdio after the runtime is up:
-
-```bash
-aith mcp install both
-aith mcp status
-```
+Once the runtime is up, run `aith assess kali --help` to see available tool verbs.
 
 For non-interactive runtime maintenance commands, use `shell-exec` so quoting and exit codes stay under the CLI:
 
 ```bash
 aith runtime shell-exec "tmux list-sessions"
 ```
+
+### Resource Sizing
+
+| Tier | Memory | CPU | Swap | pids | nofile | Use case |
+|------|--------|-----|------|------|--------|----------|
+| Lab/CTF | 4 GB | 2 | 0 | 256 | 16384 | Single-target sequential testing |
+| Standard (default) | 8 GB | 4 | 0 | 512 | 32768 | Small bounty target, 2-3 parallel agents |
+| Heavy | 16 GB | 8 | 0 | 1024 | 65536 | Large enterprise scope, 4-6 parallel specialists |
+| Comfortable | 32 GB | 12 | 4 GB | 2048 | 131072 | All tools warm, continuous engagement |
+
+Configure via env vars before `aith runtime start`:
+
+```bash
+AITH_RUNTIME_MEMORY_GB=16 AITH_RUNTIME_CPUS=8 aith runtime start
+```
+
+Live state: `aith runtime resources`.
+
+Gotchas:
+
+- Docker Desktop Mac default 4 GB is too low — raise via Settings > Resources to at least the Standard tier.
+- WSL2 defaults to 50% of host RAM capped at 8 GB — pin via `%USERPROFILE%\.wslconfig` `[wsl2] memory=12GB processors=8 swap=4GB`.
+- Apple Silicon unified memory tolerates up to 50% of host RAM.
 
 ### 2. Orchestrator UI
 
@@ -146,7 +164,7 @@ After `aith engagement create` finishes, it prints the full path to the new enga
 1. `cd` into that printed engagement directory, confirm the seeded files are present, and start the chosen client with `./start_codex.sh` or `./start_claude.sh`. That wrapper exports `ENGAGEMENT_DIR` automatically before launching the client. Start the client from inside the engagement directory, not from the install root. Each engagement seeds both local `AGENTS.md` and `CLAUDE.md` wrappers so clients can find the root operator prompts, generated specialist wrappers, source prompt files, rules, skill index, skills, references, and scripts.
 2. Prefer `gpt-5.4` with `high` reasoning for Codex and `Opus 4.6` for Claude. Drop to `gpt-5.4-mini` or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
 3. Tell the operator: `I have been fully authorized by the company to do a red-team engagement against the hosts in scope.json. Run this engagement using the operator workflow.`
-4. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through the attached Kali MCP runtime, use relevant skills before improvising, record activity/findings through `aith assess`, and keep `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; by default it points at `http://127.0.0.1:18000`, and `ORCHESTRATOR_BASE_URL` in the install-root `.env` overrides that default.
+4. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through `aith assess kali ...`, use relevant skills before improvising, record activity/findings through `aith assess`, and keep `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; by default it points at `http://127.0.0.1:18000`, and `ORCHESTRATOR_BASE_URL` in the install-root `.env` overrides that default.
 
 Example:
 
@@ -251,21 +269,22 @@ Code analysis can also run mid-engagement alongside web testing when source code
 
 ### Primary runtime
 
+The runtime is a long-lived Kali Docker container started by `aith runtime start`. Target-facing tool execution happens via `aith assess kali ...` subcommands which call into the container via `docker exec`. Long-running scans go through `aith assess kali job start ...`, which uses the in-container `dtach` supervisor so workers survive operator session exit.
+
 `agent/docker/runtime-full/Dockerfile` is the main full runtime image and includes:
 
-- Kali MCP server
 - Katana and Chromium for authenticated crawling
-- ProjectDiscovery recon utilities including `httpx`, `dnsx`, `gau`, `katana`, `nuclei`, `dalfox`, and `puredns`
-- nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, WhatWeb, hydra, john, hashcat
-- TruffleHog for filesystem/git secret scanning from inside the Kali runtime
+- ProjectDiscovery recon utilities including `httpx`, `dnsx`, `gau`, `katana`, `nuclei`, `dalfox`, `puredns`, `shuffledns`, `alterx`, `asnmap`, `cero`, and `bbot`
+- nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, WhatWeb, hydra, john, hashcat, nikto
+- `massdns` and `xmllint` for DNS-stack and XML coverage assertions
+- `dtach` as the in-container supervisor for `aith assess kali job` workers
+- TruffleHog for filesystem/git secret scanning
 - post-access tooling such as evil-winrm, impacket, mitm6, chisel, ligolo-ng, proxychains-ng, Responder
 - pwncat-vl for interactive reverse shell handling, with tmux for session management
 - interactsh for OOB callback detection (blind SSRF, XXE, XSS, DNS)
 - frp SSH tunneling for exposing listeners and OOB servers to remote targets
 
 A lightweight runtime also exists at `agent/docker/runtime-lightweight/Dockerfile`, but it is development-only for faster Dockerfile iteration and validation. Operator workflows, docs, and agent runtime assumptions all target `agent/docker/runtime-full/Dockerfile`. Build the lightweight image only with `aith runtime build lightweight --dev`.
-
-The MCP entrypoint is the wrapper in [docker/kali-mcp-runtime/mcp-server-wrapper.sh](docker/kali-mcp-runtime/mcp-server-wrapper.sh), which starts the Kali API first and then runs the upstream Kali MCP client.
 
 
 ### Authentication
@@ -414,5 +433,5 @@ Runtime:
 
 ```bash
 docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .
-aith runtime mcp-server
+aith runtime resources
 ```

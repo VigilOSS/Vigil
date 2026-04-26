@@ -3,8 +3,8 @@ ARG PRELOADED_TOOLS=0
 FROM ${BASE_IMAGE}
 ARG PRELOADED_TOOLS=0
 
-ARG APT_BASE_PACKAGES="ca-certificates=20260223 curl=8.19.0-3 jq=1.8.1-4+b1 sqlite3=3.46.1-9+b1 git=1:2.53.0-1 ripgrep=15.1.0-1 bind9-dnsutils=1:9.20.22-1 iputils-ping=3:20250605-1+b1 whois=5.6.6 openssl=3.6.1-3 netcat-openbsd=1.234-2 procps=2:4.0.4-9+b1 lsof=4.99.4+dfsg-2+b1 python3=3.13.9-3 python3-pip=26.0.1+dfsg-1 python3-aiohttp=3.13.3-3 sudo=1.9.17p2-5 tini=0.19.0-6+b2 wget=1.25.0-2+b1 rlwrap=0.47.1-0.1+b1 unzip=6.0-29+b1 mcp-kali-server=0.0~git20260317.00154c0-0kali1"
-ARG APT_TOOL_PACKAGES="kali-linux-default=2026.2.0 subfinder=2.13.0-0kali1 sublist3r=1.1-5 testssl.sh=3.2.2+dfsg-1 golang-go=2:1.26~1 chromium=147.0.7727.55-1 chromium-driver=147.0.7727.55-1 whatweb=0.6.3-1kali1 ffuf=2.1.0-1+b11 gobuster=3.8.2-1 wfuzz=3.1.0-6 dirb=2.22+dfsg-7+b1 sqlmap=1.10.4-1 hydra=9.6-3+b1 john=1.9.0-Jumbo-1+git20211102-0kali10 hashcat=7.1.2+ds1-4 ruby-full=1:3.3 proxychains4=4.17-3+b1 openssh-client=1:10.2p1-6 socat=1.8.1.1-1 tcpdump=4.99.6-2 tmux=3.6a-2+b1"
+ARG APT_BASE_PACKAGES="ca-certificates=20260223 curl=8.19.0-3 jq=1.8.1-4+b1 sqlite3=3.46.1-9+b1 git=1:2.53.0-1 ripgrep=15.1.0-1+b1 bind9-dnsutils=1:9.20.22-1 iputils-ping=3:20250605-1+b1 whois=5.6.6 openssl=3.6.1-3 netcat-openbsd=1.234-2 procps=2:4.0.4-9+b2 lsof=4.99.4+dfsg-2+b1 python3=3.13.9-3 python3-pip=26.0.1+dfsg-1 python3-aiohttp=3.13.3-3 sudo=1.9.17p2-5 tini=0.19.0-6+b2 wget=1.25.0-2+b1 rlwrap=0.47.1-0.1+b1 unzip=6.0-29+b1 dtach=0.9-8+b1 libxml2-utils=2.15.2+dfsg-0.1 pipx=1.11.1-1"
+ARG APT_TOOL_PACKAGES="kali-linux-default=2026.2.0 subfinder=2.13.0-0kali1 sublist3r=1.1-5 testssl.sh=3.2.2+dfsg-1 golang-go=2:1.26~1 chromium=147.0.7727.101-1 chromium-driver=147.0.7727.101-1 whatweb=0.6.3-1kali1 ffuf=2.1.0-1+b11 gobuster=3.8.2-1 wfuzz=3.1.0-6 dirb=2.22+dfsg-7+b1 sqlmap=1.10.4-1 hydra=9.6-3+b1 john=1.9.0-Jumbo-1+git20211102-0kali10 hashcat=7.1.2+ds1-4 ruby-full=1:3.3 proxychains4=4.17-3+b1 openssh-client=1:10.2p1-6 socat=1.8.1.1-1 tcpdump=4.99.6-2 tmux=3.6a-2+b1 nikto=1:2.6.0-0kali3 massdns=1.1.0-0kali2"
 ARG PIP_VERSION=26.0.1
 ARG MITMPROXY_VERSION=12.2.2
 ARG EVIL_WINRM_VERSION=3.9
@@ -34,7 +34,6 @@ ARG PWNCAT_VL_VERSION=0.6.2
 ARG SECLISTS_REF=8af68f02ed621c5e0f3d7e24659f9f5bf5384c08
 
 ENV PATH="/opt/Responder:${PATH}"
-ENV KALI_MCP_CLIENT_PATH=/usr/share/mcp-kali-server/client.py
 
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
@@ -101,6 +100,14 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       cp /root/go/bin/dalfox /usr/local/bin/dalfox && \
       GOPATH=/root/go go install "github.com/d3mondev/puredns/v2@${PUREDNS_VERSION}" && \
       cp /root/go/bin/puredns /usr/local/bin/puredns && \
+      GOPATH=/root/go go install "github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest" && \
+      cp /root/go/bin/shuffledns /usr/local/bin/shuffledns && \
+      GOPATH=/root/go go install "github.com/projectdiscovery/alterx/cmd/alterx@latest" && \
+      cp /root/go/bin/alterx /usr/local/bin/alterx && \
+      GOPATH=/root/go go install "github.com/projectdiscovery/asnmap/cmd/asnmap@latest" && \
+      cp /root/go/bin/asnmap /usr/local/bin/asnmap && \
+      GOPATH=/root/go go install "github.com/glebarez/cero@latest" && \
+      cp /root/go/bin/cero /usr/local/bin/cero && \
       GOPATH=/root/go go install "github.com/tomnomnom/gf@${GF_VERSION}" && \
       cp /root/go/bin/gf /usr/local/bin/gf && \
       mkdir -p /root/.gf && \
@@ -167,21 +174,18 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       ln -sf /opt/pwncat-venv/bin/pwncat-vl /usr/local/bin/pwncat-vl; \
     fi
 
-COPY docker/kali-mcp-runtime/mcp-server-wrapper.sh /usr/bin/mcp-server
-RUN chmod +x /usr/bin/mcp-server
+RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
+      PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install bbot; \
+    fi
 
-RUN mkdir -p /opt/mcp-tools
-RUN mkdir -p /data
-COPY docker/kali-mcp-runtime/patched_kali_server.py /opt/mcp-tools/patched_kali_server.py
-COPY docker/kali-mcp-runtime/patched_kali_client.py /opt/mcp-tools/patched_kali_client.py
-COPY docker/kali-mcp-runtime/kali_mcp_audit.py /opt/mcp-tools/kali_mcp_audit.py
+RUN mkdir -p /opt/mcp-tools /data
 COPY docker/kali-mcp-runtime/audit_enums.py /opt/mcp-tools/audit_enums.py
 COPY docker/callback_listener.py /opt/mcp-tools/callback_listener.py
 COPY docker/start-callback.sh /usr/local/bin/start-callback
 RUN chmod +x /usr/local/bin/start-callback
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD command -v mcp-server >/dev/null && command -v katana >/dev/null && command -v trufflehog >/dev/null && command -v gf >/dev/null && test -f /opt/mcp-tools/patched_kali_server.py && test -f /opt/mcp-tools/patched_kali_client.py && test -f /opt/mcp-tools/kali_mcp_audit.py && test -f /opt/mcp-tools/audit_enums.py || exit 1
+  CMD command -v dtach >/dev/null && command -v katana >/dev/null && command -v trufflehog >/dev/null && command -v gf >/dev/null && command -v xmllint >/dev/null && test -f /opt/mcp-tools/audit_enums.py || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bash", "-lc", "mkdir -p /data && exec sleep infinity"]

@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # AWS IAM Privilege Escalation
 
-> **Kali MCP audit header:** use `X-Technique: AUTH` (cloud IAM privesc maps to the auth/authorization class in this taxonomy). Set `X-Destructive: 1` whenever the call mutates IAM state (`iam create-*`, `iam attach-*`, `iam put-*`, `iam set-default-policy-version`, or a `sts assume-role` that activates a broader session).
+> **`aith assess kali` audit flags:** use `--technique AUTH` (cloud IAM privesc maps to the auth/authorization class in this taxonomy). Set `--destructive` whenever the call mutates IAM state (`iam create-*`, `iam attach-*`, `iam put-*`, `iam set-default-policy-version`, or a `sts assume-role` that activates a broader session).
 
 ## When to Activate
 

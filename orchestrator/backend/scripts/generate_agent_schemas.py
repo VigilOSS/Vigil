@@ -25,6 +25,7 @@ from app.api.assessment import (  # noqa: E402
     AttackChainRecordRequest,
     CredentialRecordRequest,
     FindingRecordRequest,
+    JobRecord,
     ProbeRunRecordRequest,
 )
 from app.api.code_analysis import AnalysisResultRecord, CodeFileClassification  # noqa: E402
@@ -259,6 +260,49 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     "coverage_item_id": {"type": "integer", "minimum": 1},
                     "observed_http_status": {"type": "integer"},
                 }
+            },
+        ),
+        SchemaSpec(
+            filename="job.schema.json",
+            model=JobRecord,
+            title="Assessment Job Record",
+            description="Durable payload for assessment_jobs lifecycle records emitted by `aith assess kali job ...`.",
+            overlay={
+                "additionalProperties": False,
+                "properties": {
+                    "id": {"type": "integer", "minimum": 1},
+                    "engagement_id": {"type": "integer", "minimum": 1},
+                    "parent_command_run_id": {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "description": "ID of the assessment_command_runs row that initiated this dtach-supervised job.",
+                    },
+                    "status": {
+                        "enum": ["queued", "running", "completed", "failed", "killed", "lost"],
+                        "description": "Job lifecycle state. queued: row written, dtach not yet attached. running: dtach attached, worker live. completed/failed/killed/lost: terminal states.",
+                    },
+                    "started_at": {"description": "ISO8601 timestamp when the dtach worker first attached."},
+                    "ended_at": {"description": "ISO8601 timestamp when the dtach worker exited or was killed."},
+                    "exit_code": {
+                        "type": ["integer", "null"],
+                        "description": "Worker process exit code on terminal status.",
+                    },
+                    "dtach_socket_path": {
+                        "description": "Path to the dtach control socket, used by `aith assess kali job tail` to reattach.",
+                    },
+                    "stdout_path": {
+                        "description": "Path to the worker's stdout spill file under ${ENGAGEMENT_DIR}/scans/kali/.",
+                    },
+                    "stderr_path": {
+                        "description": "Path to the worker's stderr spill file under ${ENGAGEMENT_DIR}/scans/kali/.",
+                    },
+                    "audit_metadata": {
+                        "type": ["object", "null"],
+                        "description": "Audit metadata (technique, intent, probe_kind, destructive, phase, agent_name) captured at dispatch time.",
+                    },
+                    "created_at": {"description": "ISO8601 timestamp the job row was first written."},
+                    "updated_at": {"description": "ISO8601 timestamp of the most recent PATCH."},
+                },
             },
         ),
         SchemaSpec(

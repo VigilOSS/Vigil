@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # GAU Triage
 
-> **Kali MCP audit header:** use `X-Technique: DISCOVERY` (gau harvests historical URLs from public archives; triage runs classify them without attacking the live target).
+> **`aith assess kali` audit flags:** use `--technique DISCOVERY` (gau harvests historical URLs from public archives; triage runs classify them without attacking the live target).
 
 Operator-dispatched deeper pass over a gau (or any large URL) corpus **after** mechanical
 ingestion in Phase 2. Produces a cluster manifest the operator feeds into `aith assess
@@ -23,7 +23,7 @@ adding the depth that surface-collector cannot afford inline at high URL counts.
 
 ## Tools
 
-All run inside the shared Kali MCP runtime:
+All run inside the shared runtime container — invoke each via `aith assess kali ...` so the run lands in the audit pipeline. Use the typed verbs where they exist (`aith assess kali httpx`, `aith assess kali gau`); otherwise wrap in `aith assess kali exec --` with the standard audit-flag set:
 
 - `uro` — smart structural URL deduplication (collapses `/page/1`, `/page/2` → one representative)
 - `gf` — parameter-pattern classifier. Cite the matching bucket reference from `agent/references/gf-patterns/<bucket>.md` before loading it
@@ -43,7 +43,9 @@ Pick `RID` (run id) as a timestamped slug, e.g. `RID=$(date -u +%Y%m%dT%H%M%SZ)`
 
 ## Pipeline
 
-Set up variables inside the Kali MCP shell — `$ENGAGEMENT_KEY` is exported by the engagement launcher and visible inside the container:
+Set up variables inside the runtime shell (e.g. `aith assess kali exec -- bash -c '...'` or
+inside an interactive session opened with `aith runtime shell-exec`) — `$ENGAGEMENT_KEY` is
+exported by the engagement launcher and visible inside the container:
 
 ```bash
 KEY="${ENGAGEMENT_KEY:?exported by the engagement launcher}"
@@ -231,7 +233,7 @@ Return to the operator:
 
 ## Key Rules
 
-- All target-facing probes go through Kali MCP — host-side curl or wget against in-scope targets bypasses runtime isolation
+- All target-facing probes go through `aith assess kali ...` — host-side curl or wget against in-scope targets bypasses the audit pipeline that downstream specialists rely on
 - Cite `agent/references/gf-patterns/<bucket>.md` with a "Load because X" reason before running any gf bucket — blind per-bucket drains miss the signal calibration the reference library provides
 - Filter inert extensions (images, fonts, binaries) before httpx body download — scanning them wastes disk and yields no trufflehog signal
 - `trufflehog` is mandatory on every run; `jsleak` is optional and gated on runtime availability

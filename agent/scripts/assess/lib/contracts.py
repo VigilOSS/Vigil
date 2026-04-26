@@ -10,6 +10,55 @@ from .intel_types import INTEL_TYPES
 from .schema_validation import load_schema
 
 
+# Verbs registered under `aith assess kali ...`. Names are kept in sync with
+# the modules under `agent/scripts/assess/commands/kali_*.py`.
+KALI_VERBS: tuple[str, ...] = (
+    "nmap-scan",
+    "nuclei",
+    "httpx",
+    "wafw00f",
+    "ffuf",
+    "sqlmap",
+    "subfinder",
+    "puredns",
+    "dnsx",
+    "nikto",
+    "katana",
+    "gau",
+    "whatweb",
+    "cero",
+    "alterx",
+    "bbot",
+    "exec",
+    "job",
+)
+
+
+_KALI_COMMON_NOTES: tuple[str, ...] = (
+    "Every kali verb requires --technique, --intent, --probe-kind, --phase, and --timeout. The CLI rejects calls missing any of these before it ever reaches the backend.",
+    "--phase is REQUIRED — pass the phase the dispatch was authorized for, not scope.json.current_phase. Allowed: recon, collect, consume-test, verify, exploit, report, code-ingest, code-classify, code-hunt, code-verify, plus the half-phase tags recon-pivot and exploit-recon.",
+    "--destructive marks a write/edit/delete on the target (POST/PUT/PATCH/DELETE, file upload, account creation). Read-only probes leave it off.",
+    "--strace wraps the run in `strace -e trace=network,write,unlink` and pins the artifact path on the audit row. Use for high-stakes destructive runs.",
+    "--force bypasses the dedup window. Use only when re-running an identical command intentionally is the right call.",
+    "--extra-args \"<string>\" is an optional raw-passthrough on every typed verb. The string is shlex-split and appended to the underlying tool argv after the typed-flag-derived args. Use sparingly for long-tail flags the typed verb does not model — the audit row still records the full final argv. --destructive still applies when extra args toggle a destructive mode.",
+)
+
+
+_KALI_COMMON_MISTAKES: tuple[tuple[str, str], ...] = (
+    ("missing --phase", "always pass --phase explicitly; no env-var fallback exists"),
+    ("technique=recon", "uppercase the audit technique tag (RECON, SSRF, SQLI, ...)"),
+    ("intent>200 chars", "intent is trimmed to 200 chars; keep it as a one-line purpose"),
+    ("--via-mcp", "MCP path is removed in Wave 1 — `aith assess kali` is the only path"),
+)
+
+
+def _kali_invocation(verb: str) -> tuple[str, ...]:
+    return (
+        f"aith assess kali {verb} --technique <enum> --intent \"<one-liner>\" "
+        f"--probe-kind <kind> --phase <phase> --timeout 1800 [verb-flags]",
+    )
+
+
 @dataclass(frozen=True)
 class CommandContract:
     name: str
@@ -325,6 +374,8 @@ _RAW_ENDPOINT_RULES = (
 def contract_names() -> list[str]:
     names = list(_CONTRACTS)
     names.extend(f"record-intel {intel_type}" for intel_type in sorted(INTEL_TYPES))
+    names.append("kali")
+    names.extend(f"kali {verb}" for verb in KALI_VERBS)
     return sorted(names)
 
 
@@ -332,6 +383,11 @@ def get_contract(name: str) -> CommandContract | None:
     if name.startswith("record-intel "):
         _, _, intel_type = name.partition(" ")
         return _record_intel_contract(intel_type)
+    if name == "kali":
+        return _kali_root_contract()
+    if name.startswith("kali "):
+        _, _, verb = name.partition(" ")
+        return _kali_verb_contract(verb)
     return _CONTRACTS.get(name)
 
 
@@ -512,6 +568,148 @@ def _schema_required_names(schema_name: str) -> list[str]:
     if not isinstance(required, list):
         return []
     return sorted(str(name) for name in required)
+
+
+_KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
+    "nmap-scan": (
+        "Top-1000 ports is the default; use --ports full for `-p-`, or pass an explicit list (e.g. 22,80,443).",
+        "--scripts default,vuln triggers heavy NSE — set a high --timeout (1800+) or dispatch via `aith assess kali job start`.",
+    ),
+    "nuclei": (
+        "Pass either -u or -l. Severity filters and `-as` (automatic) shape the run.",
+        "Long sweeps belong in `aith assess kali job start nuclei ...`.",
+    ),
+    "sqlmap": (
+        "sqlmap's own `--technique` is exposed as `--sql-technique` so it doesn't collide with the audit `--technique` flag.",
+    ),
+    "cero": (
+        "TLS-handshake SAN scraper — connects to TCP/TLS on the listed ports and harvests certificate Subject Alternative Names. Complements CT-log enumeration when targets issue private certs.",
+        "Feed CIDR ranges (after asnmap CIDR mapping) for non-DNS subdomain discovery. Pass --only-cidrs when the input is exclusively CIDR.",
+        "Default ports are 443,8443; add 9443/8444/etc. via -p when the target advertises additional TLS endpoints.",
+        "Read-only TCP/TLS handshakes — leave --destructive off.",
+    ),
+    "alterx": (
+        "Subdomain permutation generator — takes known subdomains and emits permutation candidates for downstream resolution. Pair with `kali puredns resolve` so the permutation list is wildcard-filtered before DNS spend.",
+        "Default invocation uses alterx built-in patterns; pass -p '{{sub}}-{{word}}.{{suffix}}' (repeatable) only when the engagement justifies a custom pattern.",
+        "Output is a stream of candidate FQDNs; pipe to puredns or write to file via -o.",
+    ),
+    "bbot": (
+        "Multi-module recon scanner. Canonical passive subdomain invocation: `bbot -t <target> -p subdomain-enum -rf passive`. Add modules with -m or presets with -p; gate active modules behind --allow-deadly + --destructive.",
+        "--allow-deadly requires --destructive — bbot's deadly modules perform real attacks (fuzzing, brute-force, exploit). The CLI hard-fails if --allow-deadly is passed without --destructive so the audit row stays truthful.",
+        "Long passive sweeps (`-p subdomain-enum`) regularly run 15-30 minutes — set --timeout 1800 or wrap in `kali job start`.",
+    ),
+    "exec": (
+        "Use only when no typed verb fits. Tool-name attribution falls back to argv[0] for audit recording.",
+    ),
+    "job": (
+        "Long-running probes go through `aith assess kali job start ...`. The dtach session is parented by tini so it survives the calling shell.",
+        "Subcommands: start | status | tail | stop | list.",
+    ),
+}
+
+
+_KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
+    "nmap-scan": (
+        {
+            "command": "aith assess kali nmap-scan --target example.com --ports top-1000 --service-detection --technique RECON --intent 'Phase 1 baseline port + service' --probe-kind fingerprint --phase recon --timeout 1800",
+        },
+    ),
+    "nuclei": (
+        {
+            "command": "aith assess kali nuclei -l hosts.txt -t http/cves/ -severity high,critical -rate-limit 50 -c 25 -bs 25 -jsonl -o scans/nuclei.jsonl --technique RECON --intent 'reactive sweep on Phase-1 URL delta' --probe-kind fingerprint --phase recon --timeout 1800",
+        },
+    ),
+    "sqlmap": (
+        {
+            "command": "aith assess kali sqlmap -u 'https://target/?id=1' --batch --sql-technique BEUSTQ --level 3 --risk 2 --technique SQLI --intent 'verify SQLi on id parameter' --probe-kind payload --phase consume-test --timeout 1800",
+        },
+    ),
+    "cero": (
+        {
+            "command": "aith assess kali cero -d 198.51.100.0/24 -p 443,8443,9443 -c 100 -t 4 -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans.txt --technique OSINT --intent 'TLS SAN scraping for non-CT subs' --probe-kind fingerprint --phase recon --timeout 600",
+        },
+    ),
+    "alterx": (
+        {
+            "command": "aith assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt -limit 200000 -o /engagements/$ENGAGEMENT_KEY/scans/perms.txt --technique RECON --intent 'permutation candidate generation from passive subs' --probe-kind fingerprint --phase recon --timeout 600",
+        },
+    ),
+    "bbot": (
+        {
+            "command": "aith assess kali bbot -t example.com -p subdomain-enum -rf passive -o /engagements/$ENGAGEMENT_KEY/scans/bbot_subs --technique OSINT --intent 'deep passive subdomain enum' --probe-kind fingerprint --phase recon --timeout 1800",
+        },
+    ),
+    "job": (
+        {
+            "command": "aith assess kali job start --technique RECON --intent 'long nuclei sweep' --probe-kind fingerprint --phase recon -- nuclei -l targets.txt -t http/cves/",
+        },
+        {
+            "command": "aith assess kali job status 42",
+        },
+    ),
+}
+
+
+def _kali_root_contract() -> CommandContract:
+    return CommandContract(
+        name="kali",
+        summary="Run Kali tools inside the runtime container with audit recording.",
+        schema_name="(per-verb argparse + CommandRunRecordRequest backend model)",
+        preferred_invocations=(
+            "aith assess kali <verb> [flags]",
+            "aith assess kali --help",
+            "aith assess contract kali <verb>",
+        ),
+        author_supplied_fields=(
+            "--technique <enum>",
+            "--intent \"<one-line purpose>\"",
+            "--probe-kind {fingerprint|baseline|payload|exploit|replay|cleanup}",
+            "--phase <enum>",
+            "--timeout <seconds>",
+        ),
+        notes=_KALI_COMMON_NOTES + (
+            f"Verbs: {', '.join(KALI_VERBS)}.",
+        ),
+        common_mistakes=_KALI_COMMON_MISTAKES,
+        examples=(
+            {"command": "aith assess kali nmap-scan --target example.com --ports top-100 --technique RECON --intent 'fast top-100 sweep' --probe-kind fingerprint --phase recon --timeout 600"},
+        ),
+    )
+
+
+def _kali_verb_contract(verb: str) -> CommandContract | None:
+    if verb not in KALI_VERBS:
+        return None
+    notes = _KALI_COMMON_NOTES + _KALI_VERB_NOTES.get(verb, ())
+    examples = _KALI_VERB_EXAMPLES.get(verb, ())
+    invocation = _kali_invocation(verb)
+    author_fields: tuple[str, ...] = (
+        "--technique <enum>",
+        "--intent \"<one-line purpose>\"",
+        "--probe-kind <kind>",
+        "--phase <phase>",
+        "--timeout <seconds>",
+        "tool-specific flags (see `aith assess kali "
+        + verb
+        + " --help`)",
+    )
+    # `exec` and `job` are raw-passthrough wrappers; they do not expose the
+    # typed-verb `--extra-args` flag because every argument after the audit
+    # metadata is already raw passthrough.
+    if verb not in ("exec", "job"):
+        author_fields = author_fields + (
+            "--extra-args \"<raw flags>\" (optional, shlex-split passthrough for long-tail flags)",
+        )
+    return CommandContract(
+        name=f"kali {verb}",
+        summary=f"Run `{verb}` inside the runtime container with audit recording.",
+        schema_name="argparse + CommandRunRecordRequest backend model",
+        preferred_invocations=invocation,
+        author_supplied_fields=author_fields,
+        notes=notes,
+        common_mistakes=_KALI_COMMON_MISTAKES,
+        examples=examples,
+    )
 
 
 def _record_intel_contract(intel_type: str) -> CommandContract | None:

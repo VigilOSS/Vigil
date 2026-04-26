@@ -1,7 +1,7 @@
 # puredns
 
 **Purpose:** Fast domain resolver and DNS brute-forcer with accurate wildcard filtering
-For live engagement targets, run puredns through the Kali MCP command-execution tool.
+For live engagement targets, run puredns via `aith assess kali puredns` (typed verb, audit-flag-aware).
 
 **Brute-force subdomains:** `puredns bruteforce wordlist.txt target.example -r resolvers.txt -w results.txt`
 **Resolve a list:** `puredns resolve subdomains.txt -r resolvers.txt -w resolved.txt`

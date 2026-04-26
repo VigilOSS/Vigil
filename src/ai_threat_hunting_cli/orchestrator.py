@@ -88,6 +88,22 @@ def _build_frontend(install_root: Path) -> None:
     subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True)
 
 
+def build_frontend(install_root: Path, *, force: bool = False) -> None:
+    """Public entrypoint for `aith orchestrator build`.
+
+    Builds the install-side `orchestrator/frontend/dist/` even when the
+    backend was already started without it. Use this when a direct
+    `uv run uvicorn ...` launch bypassed `start_orchestrator`'s implicit
+    build step and `/` returns 503 with `frontend build not found`.
+    """
+    install_root = install_root.expanduser().resolve()
+    if not _frontend_build_needed(install_root, force=force):
+        print(f"frontend already built: {install_root / 'orchestrator' / 'frontend' / 'dist' / 'index.html'}")
+        return
+    _build_frontend(install_root)
+    print(f"frontend built: {install_root / 'orchestrator' / 'frontend' / 'dist'}")
+
+
 def _frontend_build_needed(install_root: Path, *, force: bool = False) -> bool:
     if force:
         return True

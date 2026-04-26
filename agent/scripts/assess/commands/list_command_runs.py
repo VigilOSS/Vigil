@@ -1,8 +1,8 @@
 """aith assess list-command-runs — search the backend command-run audit log.
 
-Use before re-running a Kali MCP command to check whether an equivalent
-command already ran in the current engagement. Filter by agent, phase,
-tool, success, timed-out, technique, probe_kind, destructive, or
+Use before re-running an `aith assess kali` command to check whether an
+equivalent command already ran in the current engagement. Filter by agent,
+phase, tool, success, timed-out, technique, probe_kind, destructive, or
 keyword (FTS5).
 """
 from __future__ import annotations
@@ -93,7 +93,7 @@ _check_audit_enum_drift()
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "list-command-runs",
-        help="List Kali MCP command-run audit records for this engagement",
+        help="List `aith assess kali` command-run audit records for this engagement",
     )
     p.add_argument("--q", default="", help="Keyword search (FTS5) over command, tool, previews, suppression reasons")
     p.add_argument("--agent-name", dest="agent_name", default="", help="Filter to a single dispatching agent")

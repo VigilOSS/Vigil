@@ -1,7 +1,7 @@
 # httpx
 
 **Purpose:** Fast multi-purpose HTTP toolkit — live host probing, tech detection, status codes, titles
-For live engagement targets, run httpx through the Kali MCP command-execution tool.
+For live engagement targets, run httpx via `aith assess kali httpx` (typed verb, audit-flag-aware).
 
 ## Probing
 

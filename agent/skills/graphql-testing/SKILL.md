@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # GraphQL Security Testing
 
-> **Kali MCP audit header:** use `X-Technique: RECON` for introspection and schema discovery; when sending attack payloads via resolvers, switch to the matching vuln class (`SQLI` / `AUTH` / `IDOR` / `INFO-DISCLOSURE`).
+> **`aith assess kali` audit flags:** use `--technique RECON` for introspection and schema discovery; when sending attack payloads via resolvers, switch to the matching vuln class (`SQLI` / `AUTH` / `IDOR` / `INFO-DISCLOSURE`).
 
 ## When to Activate
 

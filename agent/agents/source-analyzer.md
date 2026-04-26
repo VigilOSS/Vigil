@@ -10,7 +10,7 @@ into backend attack hypotheses.
 
 ## Load First
 
-- `agent/shared-constraints.md` — scope, Kali MCP rule, finding IDs, rule reminders
+- `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/SKILL.md`
 - `agent/skills/source-analysis/SKILL.md`
@@ -68,7 +68,7 @@ When the target is a React, Next.js, Vue, or similar SPA, look beyond inline scr
 - Focus on attackable meaning, not inventory for its own sake
 - Distinguish between inferred routes and directly evidenced requestable endpoints
 - Promote only concrete evidence into durable findings; keep weaker leads as hypotheses for follow-up
-- Keep target-facing execution in Kali MCP only
+- Keep target-facing execution in `aith assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
 
 ## Pre-Output Coverage Self-Check
 

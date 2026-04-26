@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Business Logic Testing
 
-> **Kali MCP audit header:** use `X-Technique: OTHER` (business-logic flaws are workflow abuse, not a vuln class in the technique taxonomy).
+> **`aith assess kali` audit flags:** use `--technique OTHER` (business-logic flaws are workflow abuse, not a vuln class in the technique taxonomy).
 
 ## When to Activate
 
@@ -22,10 +22,10 @@ origin: AI Threat Hunting
 - `ffuf` — fuzz parameter values for boundary conditions
 - Browser DevTools — observe workflow state and hidden parameters
 
-For live engagement target requests, execute `curl` through the Kali MCP
-command-execution tool. Add explicit `-b` or `-H "Authorization: ..."` only
-when intentionally testing alternate identities, broken session handling, or
-auth override behavior.
+For live engagement target requests, execute `curl` through `aith assess kali exec --` so the
+request lands in the audit pipeline alongside the audit-flag set you pass. Add explicit `-b` or
+`-H "Authorization: ..."` only when intentionally testing alternate identities, broken session
+handling, or auth override behavior.
 
 ## Methodology
 

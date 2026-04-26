@@ -25,7 +25,7 @@ Rate limiting implementation varies wildly: some track by IP (bypassed by header
 - `ffuf` (header and path fuzzing with rate limit evasion)
 - Turbo Intruder (Burp extension — purpose-built for race condition exploitation)
 
-For current-engagement target requests, execute through the Kali MCP command-execution tool.
+For current-engagement target requests, execute through `aith assess kali exec --` (or a typed verb where applicable) so the request lands in the audit pipeline alongside the audit-flag set.
 
 ---
 

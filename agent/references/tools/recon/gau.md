@@ -1,7 +1,7 @@
 # gau (Get All URLs)
 
 **Purpose:** Fetch known URLs from multiple archive sources (Wayback Machine, AlienVault OTX, Common Crawl, URLScan)
-For live engagement targets, run gau through the Kali MCP command-execution tool.
+For live engagement targets, run gau via `aith assess kali gau` (typed verb, audit-flag-aware).
 
 ## Basic Usage
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # scope-check.sh — Claude Code / Codex PreToolUse hook
 # Reads hook JSON from stdin and blocks host-side target-facing commands.
-# In-scope target work must go through the Kali MCP session rather than Bash.
+# In-scope target work must go through `aith assess kali ...` rather than host Bash.
 # Hook format: {"tool_name":"Bash","tool_input":{"command":"..."}}
 #
 # Exit codes: 0 = allow, 2 = block
@@ -28,13 +28,13 @@ HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
 # Block common target-facing host-side execution paths even if the target is indirect
 # via environment variables, scope.json, or helper scripts.
 if printf '%s\n' "$COMMAND" | grep -Eq '(^|[[:space:];|&(])((/usr/bin/)?curl|nmap|ffuf|wfuzz|gobuster|dirb|sqlmap|whatweb|hydra|katana|arjun|subfinder|httpx|nc|netcat)([[:space:]]|$)'; then
-  echo "BLOCKED: Host-side target-facing tool execution is not allowed. Use the attached Kali MCP tools for in-scope work." >&2
+  echo "BLOCKED: Host-side target-facing tool execution is not allowed. Use 'aith assess kali ...' for in-scope work." >&2
   exit 2
 fi
 
 case "$COMMAND" in
   *run_tool*|*rtcurl*|*container.sh*|*katana_ingest.sh*)
-    echo "BLOCKED: Deprecated host-side execution helper detected. Use the attached Kali MCP tools for in-scope work." >&2
+    echo "BLOCKED: Deprecated host-side execution helper detected. Use 'aith assess kali ...' for in-scope work." >&2
     exit 2
     ;;
 esac
@@ -90,7 +90,7 @@ for HOST in "${HOST_LIST[@]}"; do
     exit 2
   fi
   if host_in_scope "$HOST" "${SCOPE_LIST[@]}"; then
-    echo "BLOCKED: Host-side Bash command targets in-scope host '$HOST'. Use the attached Kali MCP tools instead. (agent: $AGENT_TYPE)" >&2
+    echo "BLOCKED: Host-side Bash command targets in-scope host '$HOST'. Use 'aith assess kali ...' instead. (agent: $AGENT_TYPE)" >&2
     exit 2
   fi
 

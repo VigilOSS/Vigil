@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -11,6 +12,27 @@ from ..services.engagements import get_engagement_or_404
 from ..ws import broadcaster
 
 router = APIRouter(prefix="/engagements/{engagement_key}/assessment", tags=["assessment"])
+
+_ALLOWED_PHASES: frozenset[str] = frozenset(
+    {
+        "recon",
+        "collect",
+        "consume-test",
+        "verify",
+        "exploit",
+        "report",
+        "code-ingest",
+        "code-classify",
+        "code-hunt",
+        "code-verify",
+        # Half-phase tags for mid-engagement work between formal phase
+        # transitions. The dispatching agent passes these explicitly when
+        # the snapshot in scope.json does not match what the dispatch was
+        # actually authorized for.
+        "recon-pivot",
+        "exploit-recon",
+    }
+)
 
 
 class RequestObservationIngestRequest(BaseModel):
@@ -63,6 +85,10 @@ class CommandRunRecordRequest(BaseModel):
     tool_name: str = Field(min_length=1, max_length=128)
     route: str = Field(default="", max_length=256)
     agent_name: str = Field(min_length=1, max_length=128)
+    # phase is required-from-input. Wave-1 cutover removes the env-var
+    # fallback that the patched MCP server used; the dispatching agent must
+    # pass --phase explicitly because scope.json.current_phase is operator
+    # state that does not reflect what the dispatch was authorized for.
     phase: str = Field(min_length=1, max_length=64)
     return_code: int | None = None
     timed_out: bool = False
@@ -89,6 +115,97 @@ class CommandRunRecordRequest(BaseModel):
     intent: str | None = Field(default=None, max_length=4096)
     probe_kind: str | None = Field(default=None, max_length=64)
     destructive: bool | None = None
+    # Wave-1 cutover fields. status defaults to running because the new CLI
+    # writes the row pre-exec; legacy MCP rows that did not transit this
+    # endpoint default to completed via the column-level DB DEFAULT.
+    status: Literal["queued", "running", "completed", "failed", "timed_out", "killed", "lost"] = "running"
+    stdout_path: str | None = Field(default=None, max_length=1024)
+    stderr_path: str | None = Field(default=None, max_length=1024)
+    peak_rss_bytes: int | None = Field(default=None, ge=0)
+    cpu_user_seconds: float | None = Field(default=None, ge=0)
+    cpu_system_seconds: float | None = Field(default=None, ge=0)
+    working_dir: str | None = Field(default=None, max_length=1024)
+    scope_version: str | None = Field(default=None, max_length=128)
+    auth_context: str | None = Field(default=None, max_length=128)
+    strace_path: str | None = Field(default=None, max_length=1024)
+    timeout_seconds_requested: int | None = Field(default=None, ge=0)
+    force: bool = False
+
+
+class CommandRunFinalize(BaseModel):
+    """PATCH payload for the new pre-exec/finalize lifecycle. Applied via
+    state_manager.finalize_command_run(id, ...) after the subprocess exits.
+
+    Accepting ``running`` here is a deliberate idempotency hatch: a no-op
+    refresh of an in-flight row is allowed (B4) so an operator can re-PATCH
+    metadata without flipping lifecycle state. The terminal-only check that
+    used to live at this layer now belongs to ``finalize_command_run`` so
+    duplicate terminal PATCHes can be detected and rejected with 409 instead
+    of silently overwriting the first finalize."""
+
+    status: Literal["running", "completed", "failed", "timed_out", "killed", "lost"]
+    return_code: int | None = None
+    ended_at: datetime
+    duration_ms: int | None = Field(default=None, ge=0)
+    stdout_preview: str | None = None
+    stderr_preview: str | None = None
+    timed_out: bool = False
+    partial_results: bool = False
+    peak_rss_bytes: int | None = Field(default=None, ge=0)
+    cpu_user_seconds: float | None = Field(default=None, ge=0)
+    cpu_system_seconds: float | None = Field(default=None, ge=0)
+    strace_path: str | None = Field(default=None, max_length=1024)
+
+
+class JobCreate(BaseModel):
+    """Request body for POST /jobs — opens an assessment_jobs row.
+
+    parent_command_run_id links the synchronous audit row that initiated the
+    dtach worker. status defaults to queued; the CLI bumps it to running
+    immediately after dtach attaches.
+    """
+
+    parent_command_run_id: int | None = Field(default=None, ge=1)
+    status: Literal["queued", "running", "completed", "failed", "killed", "lost"] = "queued"
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    exit_code: int | None = None
+    dtach_socket_path: str | None = Field(default=None, max_length=1024)
+    stdout_path: str | None = Field(default=None, max_length=1024)
+    stderr_path: str | None = Field(default=None, max_length=1024)
+    audit_metadata: dict[str, Any] | None = None
+
+
+class JobUpdate(BaseModel):
+    status: Literal["queued", "running", "completed", "failed", "killed", "lost"] | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    exit_code: int | None = None
+    dtach_socket_path: str | None = Field(default=None, max_length=1024)
+    stdout_path: str | None = Field(default=None, max_length=1024)
+    stderr_path: str | None = Field(default=None, max_length=1024)
+    audit_metadata: dict[str, Any] | None = None
+
+
+class JobRecord(BaseModel):
+    """Durable job payload contract. agent/schemas/job.schema.json mirrors
+    this shape so the CLI validator and the backend speak the same fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    engagement_id: int
+    parent_command_run_id: int | None = None
+    status: Literal["queued", "running", "completed", "failed", "killed", "lost"]
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    exit_code: int | None = None
+    dtach_socket_path: str | None = None
+    stdout_path: str | None = None
+    stderr_path: str | None = None
+    audit_metadata: dict[str, Any] | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class SurfaceRecordRequest(BaseModel):
@@ -496,6 +613,101 @@ async def create_command_run(engagement_key: str, request: CommandRunRecordReque
         ).hexdigest()
     record = state_manager.record_command_run(engagement.id, **payload)
     await _broadcast(engagement.key, "command_run", record)
+    return record
+
+
+@router.patch("/command-runs/{command_run_id}")
+async def patch_command_run(
+    engagement_key: str,
+    command_run_id: int,
+    request: CommandRunFinalize,
+) -> dict[str, Any]:
+    """Finalize a pre-exec command-run row written with status=running."""
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.finalize_command_run(
+        engagement.id,
+        command_run_id=int(command_run_id),
+        status_value=request.status,
+        return_code=request.return_code,
+        ended_at=request.ended_at.isoformat(),
+        duration_ms=request.duration_ms,
+        stdout_preview=request.stdout_preview,
+        stderr_preview=request.stderr_preview,
+        timed_out=request.timed_out,
+        partial_results=request.partial_results,
+        peak_rss_bytes=request.peak_rss_bytes,
+        cpu_user_seconds=request.cpu_user_seconds,
+        cpu_system_seconds=request.cpu_system_seconds,
+        strace_path=request.strace_path,
+    )
+    if not record.get("noop"):
+        await _broadcast(engagement.key, "command_run", record)
+    return record
+
+
+@router.post("/jobs", status_code=status.HTTP_201_CREATED)
+async def create_job(engagement_key: str, request: JobCreate) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.record_job(
+        engagement.id,
+        parent_command_run_id=request.parent_command_run_id,
+        status_value=request.status,
+        started_at=request.started_at.isoformat() if request.started_at else None,
+        ended_at=request.ended_at.isoformat() if request.ended_at else None,
+        exit_code=request.exit_code,
+        dtach_socket_path=request.dtach_socket_path,
+        stdout_path=request.stdout_path,
+        stderr_path=request.stderr_path,
+        audit_metadata=request.audit_metadata,
+    )
+    await _broadcast(engagement.key, "job", record)
+    return record
+
+
+@router.get("/jobs")
+def get_jobs(
+    engagement_key: str,
+    status_value: str | None = Query(default=None, alias="status"),
+    parent_command_run_id: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_jobs(
+        engagement.id,
+        status_value=status_value or "",
+        parent_command_run_id=parent_command_run_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/jobs/{job_id}")
+def get_job(engagement_key: str, job_id: int) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_job(engagement.id, int(job_id))
+
+
+@router.patch("/jobs/{job_id}")
+async def patch_job(
+    engagement_key: str,
+    job_id: int,
+    request: JobUpdate,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.update_job(
+        engagement.id,
+        job_id=int(job_id),
+        status_value=request.status,
+        started_at=request.started_at.isoformat() if request.started_at else None,
+        ended_at=request.ended_at.isoformat() if request.ended_at else None,
+        exit_code=request.exit_code,
+        dtach_socket_path=request.dtach_socket_path,
+        stdout_path=request.stdout_path,
+        stderr_path=request.stderr_path,
+        audit_metadata=request.audit_metadata,
+    )
+    await _broadcast(engagement.key, "job", record)
     return record
 
 

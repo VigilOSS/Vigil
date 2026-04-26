@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Nuclei Scanning
 
-> **Kali MCP audit header:** set `X-Technique` per the template-tag focus — `CVE-VALIDATION` for `-tags cve` runs, `DISCOVERY` for tech-detect and fingerprint templates, `INFO-DISCLOSURE` for exposure templates, and `OTHER` for mixed sweeps spanning many classes.
+> **`aith assess kali` audit flags:** set `--technique` per the template-tag focus — `CVE-VALIDATION` for `-tags cve` runs, `DISCOVERY` for tech-detect and fingerprint templates, `INFO-DISCLOSURE` for exposure templates, and `OTHER` for mixed sweeps spanning many classes.
 
 ## When to Activate
 
@@ -41,7 +41,7 @@ priority_score on fresh work-buffer entries before specialists pull them. Trigge
 - After `subdomain-enumeration` produces live hosts (`subdomains_live.txt` entries land)
 - After wildcard expansion adds apex siblings that passed the httpx liveness check
 
-### Build the delta file (Kali MCP + aith assess)
+### Build the delta file (host-side `aith assess`, runtime-side `aith assess kali`)
 
 The delta is "live URLs not yet covered by a prior reactive nuclei run with the same template
 set." Build it on the host (coverage lookup is host-side `aith assess` work), then write the file
@@ -86,16 +86,19 @@ new this pass AND attached to a scope.json host (including wildcard expansions).
 guard risks sweeping an out-of-scope host that was pulled in from a passive source, which would
 break the engagement's authorization envelope.
 
-### Invocation (Kali MCP, exact)
+### Invocation (`aith assess kali nuclei`, exact)
 
 ```bash
-nuclei -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_reactive_$RID.txt \
+aith assess kali nuclei \
+  -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_reactive_$RID.txt \
   -t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/,http/technologies/,http/exposed-panels/ \
   -severity medium,high,critical \
   -as -stream -jsonl \
   -rate-limit 150 -c 25 -bs 25 \
   -stats -si 30 \
-  -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_reactive_$RID.jsonl
+  -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_reactive_$RID.jsonl \
+  --technique CVE-VALIDATION --intent "reactive nuclei sweep on URL delta" \
+  --probe-kind fingerprint --phase recon --timeout 1800
 ```
 
 Flags explained — each flag earns its place because removing it breaks an assumption downstream:
@@ -166,7 +169,7 @@ revalidation catches template false positives (SSRF probes against patched endpo
 version-string collisions, etc.) before they reach the finding lifecycle.
 
 - **Critical / high hits** — draft a finding JSON (see `aith assess contract
-  record-finding` for the schema), re-validate the template's PoC manually via Kali MCP, then
+  record-finding` for the schema), re-validate the template's PoC manually via `aith assess kali exec` (or the matching typed verb), then
   record with `aith assess record-finding vulnerability-analyst <finding-json-file>`
   only if the re-test reproduces the hit.
 - **Medium hits** — record as intel with `aith assess record-intel note <json-file>`,
@@ -230,16 +233,19 @@ if [ "$GAP_COUNT" -eq 0 ]; then
 fi
 ```
 
-### Invocation (gaps only, Kali MCP)
+### Invocation (gaps only, `aith assess kali nuclei`)
 
 ```bash
-nuclei -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap_$RID.txt \
+aith assess kali nuclei \
+  -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap_$RID.txt \
   -t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/,http/technologies/,http/exposed-panels/ \
   -severity medium,high,critical \
   -as -stream -jsonl \
   -rate-limit 150 -c 25 -bs 25 \
   -stats -si 30 \
-  -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap_$RID.jsonl
+  -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap_$RID.jsonl \
+  --technique CVE-VALIDATION --intent "Phase 3a gap-only nuclei coverage audit" \
+  --probe-kind fingerprint --phase consume-test --timeout 1800
 ```
 
 Same template set and severity as reactive mode so Phase 3a coverage is directly comparable to

@@ -26,6 +26,16 @@ def register(subparsers) -> None:
             "intel (→ intel/summary), intel/tech-components, activity-entries"
         ),
     )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="No-op: fetch always returns JSON. Accepted for symmetry with list-* commands.",
+    )
+    p.add_argument(
+        "--compact",
+        action="store_true",
+        help="One-line JSON output (indent=None) for piping to jq/jsonl tooling.",
+    )
     p.set_defaults(func=run)
 
 
@@ -50,6 +60,7 @@ def run(args) -> None:
         if isinstance(result, str):
             print(result)
         else:
-            print(json.dumps(result, indent=2, ensure_ascii=False))
+            indent = None if args.compact else 2
+            print(json.dumps(result, indent=indent, ensure_ascii=False))
     finally:
         client.close()

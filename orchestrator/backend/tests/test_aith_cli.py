@@ -190,6 +190,38 @@ def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
     assert "ORCHESTRATOR_BASE_URL=http://host.docker.internal:18000" in run_command
 
 
+def test_runtime_start_grants_sys_ptrace_capability(tmp_path: Path) -> None:
+    """B2: --strace inside the container needs CAP_SYS_PTRACE; the docker-run argv
+    must request it explicitly so ptrace operations don't fail with EPERM."""
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "", "")
+        if argv[:3] == ["docker", "ps", "-a"]:
+            return DockerResult(0, "", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        return DockerResult(0, "", "")
+
+    start_runtime(RuntimeOptions(install_root=install_root, recreate=False), runner=runner, validate_tools=False)
+
+    run_command = next(command for command in commands if command[:3] == ["docker", "run", "-d"])
+    assert "--cap-add=SYS_PTRACE" in run_command
+    assert "--cap-add=NET_RAW" in run_command
+    assert "--cap-add=NET_ADMIN" in run_command
+
+
 def test_runtime_start_retries_without_host_gateway_when_docker_rejects_flag(tmp_path: Path) -> None:
     from ai_threat_hunting_cli.docker import DockerResult
     from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
@@ -444,6 +476,41 @@ def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Pat
     assert not pid_file.exists()
 
 
+def test_assess_kali_help_lists_every_typed_verb(capsys: pytest.CaptureFixture[str]) -> None:
+    """`aith assess kali --help` must enumerate the 13 typed verbs plus exec and job."""
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    # Reload assess modules so our injected sys.path takes effect.
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.cli import main as assess_main
+
+    with pytest.raises(SystemExit) as exc:
+        assess_main(["kali", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    for verb in (
+        "nmap-scan",
+        "nuclei",
+        "httpx",
+        "wafw00f",
+        "ffuf",
+        "sqlmap",
+        "subfinder",
+        "puredns",
+        "dnsx",
+        "nikto",
+        "katana",
+        "gau",
+        "whatweb",
+        "exec",
+        "job",
+    ):
+        assert verb in out, f"verb {verb} missing from kali --help"
+
+
 def test_main_assess_passthrough_only_applies_to_top_level_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import main as main_module
 
@@ -484,59 +551,109 @@ def test_main_assess_passthrough_execs_assess_script(tmp_path: Path, monkeypatch
     assert captured["argv"] == [str(install_root / "agent" / "scripts" / "assess.py"), "--help"]
 
 
-def test_mcp_install_registers_codex_and_claude_servers(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_aith_mcp_subcommand_prints_deprecation_and_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
     from ai_threat_hunting_cli import main as main_module
 
-    calls: list[list[str]] = []
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main(["mcp", "install", "both"])
 
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr(main_module.subprocess, "run", fake_run)
-
-    main_module.main(["mcp", "install", "both"])
-
-    assert ["claude", "mcp", "remove", "-s", "user", "kali"] in calls
-    assert ["claude", "mcp", "add", "-s", "user", "kali", "--", "aith", "runtime", "mcp-server"] in calls
-    assert ["codex", "mcp", "remove", "kali"] in calls
-    assert ["codex", "mcp", "add", "kali", "--", "aith", "runtime", "mcp-server"] in calls
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "removed in the 2026-04-26 cutover" in err
+    assert "aith assess kali" in err
 
 
-def test_mcp_status_recognizes_aith_runtime_registration(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import status as status_module
+def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
 
-    def fake_which(command: str) -> str | None:
-        return f"/usr/bin/{command}"
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "16")
+    monkeypatch.setenv("AITH_RUNTIME_CPUS", "8")
+    monkeypatch.setenv("AITH_RUNTIME_PIDS_LIMIT", "1024")
+    monkeypatch.setenv("AITH_RUNTIME_SHM_SIZE", "2g")
+    commands: list[list[str]] = []
 
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 0, "kali\taith runtime mcp-server\n", "")
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "", "")
+        if argv[:3] == ["docker", "ps", "-a"]:
+            return DockerResult(0, "", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        return DockerResult(0, "", "")
 
-    monkeypatch.setattr(status_module.shutil, "which", fake_which)
-    monkeypatch.setattr(status_module.subprocess, "run", fake_run)
+    start_runtime(RuntimeOptions(install_root=install_root, recreate=False), runner=runner, validate_tools=False)
 
-    status = status_module.collect_mcp_status()
+    run_command = next(command for command in commands if command[:3] == ["docker", "run", "-d"])
+    assert "--memory=16g" in run_command
+    assert "--memory-swap=16g" in run_command
+    assert "--memory-swappiness=0" in run_command
+    assert "--cpus=8" in run_command
+    assert "--pids-limit=1024" in run_command
+    assert "--shm-size=2g" in run_command
+    assert "--oom-score-adj=-500" in run_command
+    nofile_idx = run_command.index("nofile=32768:32768")
+    assert run_command[nofile_idx - 1] == "--ulimit"
+    nproc_idx = run_command.index("nproc=8192")
+    assert run_command[nproc_idx - 1] == "--ulimit"
 
-    assert status["codex"]["configured"] is True
-    assert status["claude"]["configured"] is True
+
+def test_aith_runtime_resources_renders_configured_and_live_state(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import aith_runtime_resources
+
+    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
+    monkeypatch.setenv("AITH_RUNTIME_CPUS", "4")
+    monkeypatch.setenv("AITH_RUNTIME_PIDS_LIMIT", "512")
+    monkeypatch.setenv("AITH_RUNTIME_SHM_SIZE", "1g")
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:3] == ["docker", "exec", "security-research"]:
+            return DockerResult(
+                0,
+                "/sys/fs/cgroup/memory.max=8589934592\n"
+                "/sys/fs/cgroup/cpu.max=400000 100000\n"
+                "/sys/fs/cgroup/pids.max=512\n",
+                "",
+            )
+        return DockerResult(0, "", "")
+
+    aith_runtime_resources(runner=runner)
+    output = capsys.readouterr().out
+    assert "configured\tmemory=8g" in output
+    assert "cpus=4" in output
+    assert "memory.max=8589934592" in output
+    assert "cpu.max=400000 100000" in output
+    assert "pids.max=512" in output
 
 
-def test_mcp_status_recognizes_legacy_docker_exec_registration(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import status as status_module
+def test_aith_runtime_resources_handles_stopped_container(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import aith_runtime_resources
 
-    def fake_which(command: str) -> str | None:
-        return f"/usr/bin/{command}"
+    monkeypatch.delenv("AITH_RUNTIME_MEMORY_GB", raising=False)
+    monkeypatch.delenv("AITH_RUNTIME_CPUS", raising=False)
+    monkeypatch.delenv("AITH_RUNTIME_PIDS_LIMIT", raising=False)
+    monkeypatch.delenv("AITH_RUNTIME_SHM_SIZE", raising=False)
 
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 0, "kali\tdocker exec -i security-research mcp-server codex\n", "")
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "", "")
+        return DockerResult(0, "", "")
 
-    monkeypatch.setattr(status_module.shutil, "which", fake_which)
-    monkeypatch.setattr(status_module.subprocess, "run", fake_run)
-
-    status = status_module.collect_mcp_status()
-
-    assert status["codex"]["configured"] is True
-    assert status["claude"]["configured"] is True
+    aith_runtime_resources(runner=runner)
+    output = capsys.readouterr().out
+    assert "running=False" in output
+    assert "live\tcontainer not running" in output
 
 
 def test_runtime_shell_exec_passes_symbol_heavy_command_as_single_shell_payload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -676,7 +793,6 @@ def test_doctor_reports_missing_binary_without_crashing(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(status_module.shutil, "which", fake_which)
     monkeypatch.setattr(status_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(status_module, "collect_mcp_status", lambda: {"codex": {"configured": False, "detail": ""}, "claude": {"configured": False, "detail": ""}})
     monkeypatch.setattr(main_module, "docker_run_command", fake_docker)
 
     main_module.main(["--root", str(tmp_path), "doctor"])
@@ -702,7 +818,6 @@ def test_doctor_skips_docker_checks_when_docker_cli_missing(
 
     monkeypatch.setattr(status_module.shutil, "which", fake_which)
     monkeypatch.setattr(status_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(status_module, "collect_mcp_status", lambda: {"codex": {"configured": False, "detail": ""}, "claude": {"configured": False, "detail": ""}})
     monkeypatch.setattr(main_module, "docker_run_command", fail_docker)
 
     main_module.main(["--root", str(tmp_path), "doctor"])
@@ -730,7 +845,6 @@ def test_status_json_reports_runtime_mount_mismatch(tmp_path: Path, monkeypatch:
         return DockerResult(0, "", "")
 
     monkeypatch.setattr(main_module, "docker_run_command", runner)
-    monkeypatch.setattr(status_module, "collect_mcp_status", lambda: {"codex": {"configured": False, "detail": ""}, "claude": {"configured": False, "detail": ""}})
 
     main_module.main(["--root", str(install_root), "status", "--json"])
 

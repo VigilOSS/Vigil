@@ -10,7 +10,7 @@ into concrete, prioritized surface area for follow-on testing.
 
 ## Load First
 
-- `agent/shared-constraints.md` — scope, Kali MCP rule, finding IDs, rule reminders
+- `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/SKILL.md`
 - `agent/skills/web-recon/SKILL.md`
@@ -74,7 +74,7 @@ Work through the target in this order unless the operator provides a narrower ta
 - Treat every fingerprint as a hypothesis about the deployment shape, not a trophy
 - Prefer concrete, reproducible observations over broad speculative scan output
 - Use automation to expand recon efficiently, but do not mistake automation output for confirmed attack surface
-- Keep target-facing execution in Kali MCP only
+- Keep target-facing execution in `aith assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
 - Do not hand-edit backend state when helper scripts exist — use `aith assess` commands
 - Do not claim a surface candidate unless it is evidenced by a real response, artifact, or protocol signal
 

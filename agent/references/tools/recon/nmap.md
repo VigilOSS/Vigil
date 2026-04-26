@@ -1,8 +1,8 @@
 # nmap
 
 **Purpose:** Port/service discovery and enumeration
-For live engagement targets, run Nmap through the Kali MCP command-execution tool with `nmap`.
-The Kali MCP also provides a dedicated `nmap_scan` tool — check MCP tool discovery.
+For live engagement targets, run Nmap via `aith assess kali nmap-scan` (typed verb, audit-flag-aware).
+Run `aith assess kali nmap-scan --help` for the live flag set, or `aith assess contract kali nmap-scan` for the canonical schema and example payload.
 
 ## Discovery Scans
 

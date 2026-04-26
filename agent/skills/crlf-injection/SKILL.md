@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # CRLF Injection Testing
 
-> **Kali MCP audit header:** use `X-Technique: OTHER` (CRLF/header-splitting has no dedicated enum class; outcomes span response splitting, cookie injection, and CRLF→XSS).
+> **`aith assess kali` audit flags:** use `--technique OTHER` (CRLF/header-splitting has no dedicated enum class; outcomes span response splitting, cookie injection, and CRLF→XSS).
 
 ## When to Activate
 

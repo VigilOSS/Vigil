@@ -51,7 +51,7 @@ def test_scope_check_blocks_in_scope_host_side_target_command(tmp_path: Path) ->
     result = _run_scope_check('python3 -c "print(1)" https://target.example/admin', engagement_dir)
 
     assert result.returncode == 2
-    assert "kali mcp" in result.stderr.lower()
+    assert "aith assess kali" in result.stderr.lower()
 
 
 def test_scope_check_blocks_removed_host_side_helper_path(tmp_path: Path) -> None:
@@ -65,7 +65,7 @@ def test_scope_check_blocks_removed_host_side_helper_path(tmp_path: Path) -> Non
     result = _run_scope_check("source scripts/lib/container.sh && run_tool nmap -sV target.example", engagement_dir)
 
     assert result.returncode == 2
-    assert "kali mcp" in result.stderr.lower()
+    assert "aith assess kali" in result.stderr.lower()
 
 
 def test_scope_check_blocks_when_scope_metadata_is_missing(tmp_path: Path) -> None:

@@ -42,10 +42,10 @@ from .oob import (
     stop_oob_client,
     test_oob,
 )
-from .orchestrator import OrchestratorOptions, orchestrator_status, start_orchestrator, stop_orchestrator
+from .orchestrator import OrchestratorOptions, build_frontend, orchestrator_status, start_orchestrator, stop_orchestrator
 from .paths import resolve_install_root, resolve_source_root
-from .runtime import RuntimeOptions, build_runtime, runtime_status, start_runtime, stop_runtime
-from .status import collect_doctor_checks, collect_mcp_status, collect_status, print_doctor, print_status
+from .runtime import RuntimeOptions, aith_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime
+from .status import collect_doctor_checks, collect_status, print_doctor, print_status
 from .up import UpOptions, run_up
 
 
@@ -56,7 +56,6 @@ def _print_post_install(result: InstallResult) -> None:
         print("Upgrade complete. Services using the previous install should be restarted:")
         print(f"  - Kali runtime:   aith runtime restart")
         print(f"  - Orchestrator:   aith orchestrator restart")
-        print(f"  - MCP server:     reconnect the kali MCP server in your client")
         if result.image_built:
             print(f"  - Docker image was rebuilt — running containers use the old image until restarted")
         else:
@@ -64,11 +63,11 @@ def _print_post_install(result: InstallResult) -> None:
     else:
         print("Install complete. Next steps:")
         print(f"  1. Configure tokens and API keys in {root / '.env'}")
-        print(f"  2. aith runtime build          # build the Kali MCP runtime image")
+        print(f"  2. aith runtime build           # build the Kali runtime image")
         print(f"  3. aith runtime start           # start the runtime container")
-        print(f"  4. aith mcp install both        # register the kali MCP server")
-        print(f"  5. aith orchestrator start       # start the orchestrator backend")
-        print(f"  6. aith engagement create <target>  # create your first engagement")
+        print(f"  4. aith orchestrator start      # start the orchestrator backend")
+        print(f"  5. aith engagement create <target>  # create your first engagement")
+        print(f"  6. aith assess kali --help      # discover target-facing CLI verbs")
     print()
 
 
@@ -166,6 +165,11 @@ def main(argv: list[str] | None = None) -> None:
     orch_sub.add_parser("restart")
     orch_sub.add_parser("status")
     orch_sub.add_parser("open")
+    orch_build = orch_sub.add_parser(
+        "build",
+        help="Build the install-side frontend dist (recovery for direct-uvicorn launches that bypass aith up).",
+    )
+    orch_build.add_argument("--force", action="store_true", help="Rebuild even if dist looks up-to-date.")
 
     runtime_p = sub.add_parser("runtime")
     runtime_sub = runtime_p.add_subparsers(dest="runtime_command", required=True)
@@ -180,7 +184,8 @@ def main(argv: list[str] | None = None) -> None:
     runtime_sub.add_parser("shell")
     runtime_shell_exec = runtime_sub.add_parser("shell-exec", help="Run a non-interactive shell command inside the Kali runtime")
     runtime_shell_exec.add_argument("shell_command", nargs=argparse.REMAINDER, metavar="COMMAND")
-    runtime_sub.add_parser("mcp-server")
+    runtime_resources_p = runtime_sub.add_parser("resources", help="Print configured runtime resource tier and live cgroup state")
+    runtime_resources_p.add_argument("--json", action="store_true")
 
     mitm_p = sub.add_parser("mitmproxy")
     mitm_sub = mitm_p.add_subparsers(dest="mitmproxy_command", required=True)
@@ -192,15 +197,10 @@ def main(argv: list[str] | None = None) -> None:
     mitm_sub.add_parser("status")
     mitm_sub.add_parser("cert")
 
-    mcp_p = sub.add_parser("mcp")
-    mcp_sub = mcp_p.add_subparsers(dest="mcp_command", required=True)
-    mcp_install = mcp_sub.add_parser("install")
-    mcp_install.add_argument("client", choices=["codex", "claude", "both"])
-    mcp_remove = mcp_sub.add_parser("remove")
-    mcp_remove.add_argument("client", choices=["codex", "claude", "both"])
-    mcp_repair = mcp_sub.add_parser("repair")
-    mcp_repair.add_argument("client", choices=["codex", "claude", "both"])
-    mcp_sub.add_parser("status")
+    # `aith mcp` retired in the 2026-04-26 cutover. Keep the parser so calls fail with a clear message
+    # instead of argparse's generic "unknown command" error; downstream handler prints the deprecation note.
+    mcp_p = sub.add_parser("mcp", help="(removed) Kali MCP support retired; use `aith assess kali ...`")
+    mcp_p.add_argument("mcp_args", nargs=argparse.REMAINDER)
 
     auth_p = sub.add_parser("auth")
     auth_sub = auth_p.add_subparsers(dest="auth_command", required=True)
@@ -512,6 +512,8 @@ def _orchestrator(args: argparse.Namespace, install_root: Path) -> None:
         print(orchestrator_status(install_root))
     elif args.orchestrator_command == "open":
         webbrowser.open("http://127.0.0.1:18000")
+    elif args.orchestrator_command == "build":
+        build_frontend(install_root, force=args.force)
 
 
 def _runtime(args: argparse.Namespace, install_root: Path) -> None:
@@ -530,8 +532,8 @@ def _runtime(args: argparse.Namespace, install_root: Path) -> None:
         os.execvp("docker", ["docker", "exec", "-it", "security-research", "bash"])
     elif args.runtime_command == "shell-exec":
         _runtime_shell_exec(args.shell_command)
-    elif args.runtime_command == "mcp-server":
-        os.execvp("docker", ["docker", "exec", "-i", "security-research", "mcp-server"])
+    elif args.runtime_command == "resources":
+        aith_runtime_resources(json_output=args.json)
 
 
 def _runtime_shell_exec(command_parts: list[str]) -> None:
@@ -571,51 +573,17 @@ def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
 
 
 def _mcp(args: argparse.Namespace) -> None:
-    if args.mcp_command == "status":
-        status = collect_mcp_status()
-        for client, payload in status.items():
-            state = "OK" if payload["configured"] else "MISSING"
-            print(f"{state}\t{client}\t{payload['detail']}")
-        return
-    if args.mcp_command == "remove":
-        _remove_mcp(args.client)
-        return
-    if args.mcp_command == "repair":
-        _remove_mcp(args.client)
-        _install_mcp(args.client)
-        return
-    if args.mcp_command == "install":
-        _install_mcp(args.client)
-
-
-def _install_mcp(client: str) -> None:
-    if client in {"claude", "both"}:
-        _replace_mcp_server(
-            "claude",
-            ["claude", "mcp", "remove", "-s", "user", "kali"],
-            ["claude", "mcp", "add", "-s", "user", "kali", "--", "aith", "runtime", "mcp-server"],
-        )
-    if client in {"codex", "both"}:
-        _replace_mcp_server(
-            "codex",
-            ["codex", "mcp", "remove", "kali"],
-            ["codex", "mcp", "add", "kali", "--", "aith", "runtime", "mcp-server"],
-        )
-
-
-def _remove_mcp(client: str) -> None:
-    if client in {"claude", "both"}:
-        _run_mcp_remove("claude", ["claude", "mcp", "remove", "-s", "user", "kali"])
-    if client in {"codex", "both"}:
-        _run_mcp_remove("codex", ["codex", "mcp", "remove", "kali"])
-
-
-def _run_mcp_remove(client: str, argv: list[str]) -> None:
-    try:
-        subprocess.run(argv, check=False)
-    except FileNotFoundError as exc:
-        raise SystemExit(f"{client} CLI not found on PATH") from exc
-    print(f"removed {client} MCP server: kali")
+    """Stub: Kali MCP support was removed in the 2026-04-26 cutover."""
+    print(
+        "aith mcp install/status/uninstall/remove/repair were removed in the 2026-04-26 cutover.",
+        file=sys.stderr,
+    )
+    print(
+        "Use `aith assess kali ...` for target-facing tool execution and `aith runtime status` "
+        "or `aith runtime resources` for runtime visibility.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 
 
 def _auth(args: argparse.Namespace, install_root: Path) -> None:
@@ -733,17 +701,6 @@ def _resolve_engagement_reference(install_root: Path, value: str) -> Path:
         if candidate.exists() or candidate.is_absolute() or "/" in value:
             return candidate
         raise exc
-
-
-def _replace_mcp_server(client: str, remove_argv: list[str], add_argv: list[str]) -> None:
-    try:
-        subprocess.run(remove_argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        result = subprocess.run(add_argv, check=False)
-    except FileNotFoundError as exc:
-        raise SystemExit(f"{client} CLI not found on PATH") from exc
-    if result.returncode != 0:
-        raise SystemExit(f"Failed to install Kali MCP server for {client}")
-    print(f"installed {client} MCP server: kali")
 
 
 def _prompt_choice(label: str, default: str, choices: list[str]) -> str:

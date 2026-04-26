@@ -385,6 +385,7 @@ _ENGAGEMENT_SCOPED_TABLES = {
     "assessment_tunnels",
     "assessment_blocked_techniques",
     "assessment_command_runs",
+    "assessment_jobs",
     "code_repos",
     "code_modules",
     "code_files",
@@ -993,7 +994,7 @@ def init_db() -> None:
             )
             """
         )
-        # assessment_command_runs is the source of truth for every Kali MCP
+        # assessment_command_runs is the source of truth for every Kali
         # command executed during an engagement. A shadow FTS5 virtual table
         # plus three sync triggers provide keyword search. A later change can
         # add assessment_command_run_chunks (cols: command_run_id, seq,
@@ -1013,6 +1014,7 @@ def init_db() -> None:
                 agent_name TEXT NOT NULL,
                 phase TEXT NOT NULL,
                 audit_source TEXT NOT NULL DEFAULT 'header',
+                status TEXT NOT NULL DEFAULT 'completed',
                 return_code INTEGER,
                 timed_out INTEGER NOT NULL DEFAULT 0,
                 success INTEGER NOT NULL DEFAULT 0,
@@ -1037,6 +1039,18 @@ def init_db() -> None:
                 intent TEXT,
                 probe_kind TEXT,
                 destructive INTEGER,
+                stdout_path TEXT,
+                stderr_path TEXT,
+                peak_rss_bytes INTEGER,
+                cpu_user_seconds REAL,
+                cpu_system_seconds REAL,
+                working_dir TEXT,
+                scope_version TEXT,
+                auth_context TEXT,
+                superseded_by_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
+                strace_path TEXT,
+                timeout_seconds_requested INTEGER,
+                partial_results INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
             )
@@ -1075,6 +1089,46 @@ def init_db() -> None:
             connection.execute(
                 "ALTER TABLE assessment_command_runs ADD COLUMN destructive INTEGER"
             )
+        # Wave-1 cutover migrations: pre-exec lifecycle, output spill paths,
+        # resource snapshot, scope/auth context, dedup linkage, optional
+        # strace pointer, and the agent-supplied timeout. All NULL/safe-default
+        # so legacy rows continue to validate.
+        if cmdrun_columns and "status" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"
+            )
+        if cmdrun_columns and "stdout_path" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN stdout_path TEXT")
+        if cmdrun_columns and "stderr_path" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN stderr_path TEXT")
+        if cmdrun_columns and "peak_rss_bytes" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN peak_rss_bytes INTEGER")
+        if cmdrun_columns and "cpu_user_seconds" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN cpu_user_seconds REAL")
+        if cmdrun_columns and "cpu_system_seconds" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN cpu_system_seconds REAL")
+        if cmdrun_columns and "working_dir" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN working_dir TEXT")
+        if cmdrun_columns and "scope_version" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN scope_version TEXT")
+        if cmdrun_columns and "auth_context" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN auth_context TEXT")
+        # SQLite cannot ALTER a column to add a REFERENCES constraint, but the
+        # FK is non-load-bearing — the application enforces the link, the
+        # constraint is an integrity belt. Legacy rows simply have a plain
+        # INTEGER column; new schema gets the REFERENCES via CREATE TABLE.
+        if cmdrun_columns and "superseded_by_id" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN superseded_by_id INTEGER")
+        if cmdrun_columns and "strace_path" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN strace_path TEXT")
+        if cmdrun_columns and "timeout_seconds_requested" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN timeout_seconds_requested INTEGER"
+            )
+        if cmdrun_columns and "partial_results" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN partial_results INTEGER NOT NULL DEFAULT 0"
+            )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_created "
             "ON assessment_command_runs(engagement_id, created_at DESC, id DESC)"
@@ -1111,6 +1165,12 @@ def init_db() -> None:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_acr_destructive "
             "ON assessment_command_runs(engagement_id, destructive)"
+        )
+        # status powers the in-flight Commands tab and the dedup-window
+        # check that ignores already-finalized rows.
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_acr_status "
+            "ON assessment_command_runs(engagement_id, status, created_at DESC)"
         )
         # If the FTS schema predates tool_bin, drop it so CREATE VIRTUAL
         # TABLE below rebuilds with the new column set. Old triggers are
@@ -1234,6 +1294,38 @@ def init_db() -> None:
             connection.execute(
                 "INSERT INTO assessment_command_runs_fts(assessment_command_runs_fts) VALUES ('rebuild')"
             )
+        # assessment_jobs tracks long-running dtach-supervised workers spawned
+        # by `aith assess kali job start`. parent_command_run_id links the
+        # synchronous audit row that initiated the job; SET NULL on cascade
+        # so cleaning up an orphaned command-run does not destroy the job
+        # record we still need for forensics.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                parent_command_run_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                started_at TEXT,
+                ended_at TEXT,
+                exit_code INTEGER,
+                dtach_socket_path TEXT,
+                stdout_path TEXT,
+                stderr_path TEXT,
+                audit_metadata_json TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_jobs_engagement "
+            "ON assessment_jobs(engagement_id, status, created_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_jobs_command_run "
+            "ON assessment_jobs(parent_command_run_id)"
+        )
         # ── Code Analysis Tables ──────────────────────────────────
         connection.execute(
             """

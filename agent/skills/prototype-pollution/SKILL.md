@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Prototype Pollution Testing
 
-> **Kali MCP audit header:** use `X-Technique: OTHER` (prototype pollution is a primitive with variable outcomes). Switch to `XSS` or `RCE` when the pollution produces that specifically.
+> **`aith assess kali` audit flags:** use `--technique OTHER` (prototype pollution is a primitive with variable outcomes). Switch to `XSS` or `RCE` when the pollution produces that specifically.
 
 ## When to Activate
 

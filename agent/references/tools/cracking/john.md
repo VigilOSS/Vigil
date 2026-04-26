@@ -1,7 +1,7 @@
 # john (John the Ripper)
 
 **Purpose:** Offline password hash cracking with format auto-detection and conversion utilities
-Run john through the Kali MCP command-execution tool.
+Run john via `aith assess kali exec -- john ...` with the standard audit-flag set.
 
 ## Basic Usage
 

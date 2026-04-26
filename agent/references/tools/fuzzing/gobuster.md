@@ -1,8 +1,8 @@
 # gobuster
 
 **Purpose:** Directory, DNS, and vhost brute-forcing
-For live engagement targets, run Gobuster through the Kali MCP command-execution tool with `gobuster`.
-The Kali MCP also provides a dedicated `gobuster_scan` tool — check MCP tool discovery.
+For live engagement targets, run Gobuster via `aith assess kali exec -- gobuster ...` with the standard audit-flag set.
+Long-running gobuster sweeps should use `aith assess kali job start --container-name security-research -- gobuster ...` so they survive across calling-shell exit.
 
 ## Directory Mode
 

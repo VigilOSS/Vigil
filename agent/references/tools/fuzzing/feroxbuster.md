@@ -1,7 +1,7 @@
 # feroxbuster
 
 **Purpose:** Fast, recursive content discovery (Rust-based replacement for gobuster/dirb)
-For live engagement targets, run feroxbuster through the Kali MCP command-execution tool.
+For live engagement targets, run feroxbuster via `aith assess kali exec -- feroxbuster ...` with the standard audit-flag set.
 
 ## Basic Usage
 
