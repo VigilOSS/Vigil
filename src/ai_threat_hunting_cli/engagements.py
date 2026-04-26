@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .paths import engagements_root, resolve_orchestrator_base_url
+from .paths import engagements_root, resolve_orchestrator_base_url, resolve_orchestrator_data_dir
 
 AUTH_MODES = {"none", "manual", "auth_json", "proxy_capture"}
 ENGAGEMENT_TYPES = {"web", "code", "both"}
@@ -340,7 +340,7 @@ def _init_cases_db(agent_root: Path, eng_dir: Path) -> None:
 
 
 def _snapshot_orchestrator_database(install_root: Path) -> None:
-    data_dir = Path(os.environ.get("AI_THREAT_HUNTING_DATA_DIR", install_root / "orchestrator" / "backend" / "data"))
+    data_dir = resolve_orchestrator_data_dir(install_root)
     db_path = data_dir / "orchestrator.sqlite3"
     if not db_path.exists():
         return
