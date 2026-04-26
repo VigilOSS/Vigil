@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import socket
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import docker
 from .paths import container_host_url, resolve_orchestrator_base_url
+
+_PORT_WAIT_ATTEMPTS = 30
+_PORT_WAIT_DELAY_SECONDS = 0.2
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +67,7 @@ def start_proxy(options: MitmproxyOptions, *, runner: docker.Runner = docker.run
         "block_global=false",
     ]
     docker.run_with_host_gateway_fallback(argv, runner=runner)
-    if verify_port and not _port_open("127.0.0.1", options.port):
+    if verify_port and not _wait_for_port("127.0.0.1", options.port):
         raise SystemExit(f"mitmproxy container started but port {options.port} is not reachable on 127.0.0.1")
 
 
@@ -78,3 +82,12 @@ def _port_open(host: str, port: int) -> bool:
             return True
     except OSError:
         return False
+
+
+def _wait_for_port(host: str, port: int) -> bool:
+    for attempt in range(_PORT_WAIT_ATTEMPTS):
+        if _port_open(host, port):
+            return True
+        if attempt < _PORT_WAIT_ATTEMPTS - 1:
+            time.sleep(_PORT_WAIT_DELAY_SECONDS)
+    return False
