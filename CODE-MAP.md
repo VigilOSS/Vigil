@@ -125,7 +125,7 @@ When adding new patchable code-analysis fields or structural metadata totals:
 - `orchestrator/backend/app/services/state_manager.py` - assessment domain logic. Why: normalization, dedupe/upsert behavior, exploit/coverage/report readiness projections, finding lifecycle projection, transition ledgering, and summary rollups are business rules, not CRUD.
 - `orchestrator/backend/app/services/code_analysis.py` - code-analysis domain logic. Why: queue claiming/completion, needs-context flow, result recording, triggers, structural-metadata batch updates, and coverage rules are workflow logic.
 - `orchestrator/backend/app/ws.py` - in-process websocket broadcaster. Why: fans API mutations out to the UI without external messaging infrastructure.
-- `orchestrator/backend/tests/` - backend contract tests. Why: pins engagement bootstrap, websocket behavior, prompt rendering, CLI/backend contracts, and code-analysis workflow rules.
+- `orchestrator/backend/tests/` - backend contract tests. Why: pins engagement bootstrap, websocket behavior, prompt rendering, CLI/backend contracts, runtime-image tooling contracts (`test_runtime_tooling_contract.py` static-checks the subdomain-enum binary set in `runtime-full/Dockerfile` and live-checks via `docker exec` under the `integration` mark), and code-analysis workflow rules.
 
 ## orchestrator/frontend
 

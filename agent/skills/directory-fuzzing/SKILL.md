@@ -58,6 +58,12 @@ feroxbuster -u https://TARGET -w /usr/share/wordlists/dirb/common.txt \
 ffuf -u https://TARGET/admin/FUZZ -w /usr/share/wordlists/dirb/common.txt -ac
 ```
 
+When dispatching parallel directory-fuzz sweeps, use the `aith assess kali job start`
+lifecycle (and stop them with `kali job stop <id>`) instead of background-and-pkill — broad
+`pkill -f ffuf`/`pkill -f feroxbuster` stomps on sibling agents' processes in the shared
+runtime. See `agent/references/runtime-guides/kali-cli.md` "Process cleanup discipline" for
+the full pattern.
+
 ### 6. Wordlist Escalation
 ```bash
 # L1: /usr/share/wordlists/dirb/common.txt (~4,600)
@@ -120,5 +126,6 @@ curl -sI https://TARGET/discovered_path  # Verify
 
 ## Extended Resources
 
+- `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table; the dir-fuzz column drives `-rate / -t / --rate-limit` per trait row.
 - `agent/references/tools/fuzzing/ffuf.md` — ffuf flags, filter/matcher options, wordlist selection
 - `agent/references/tools/fuzzing/feroxbuster.md` — feroxbuster recursive scanning, auto-tune, smart mode

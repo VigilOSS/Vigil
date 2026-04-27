@@ -185,6 +185,7 @@ DB="$DIR/cases.db"
 1. **Phase 1 — Reconnaissance**
 
    **1a. Wildcard subdomain enumeration (when scope.json `hosts` contains `*.domain` entries)** — dispatch `recon-specialist` with `agent/skills/subdomain-enumeration/SKILL.md` loaded BEFORE the parallel recon+source pass. Subdomain expansion must land before downstream steps because 1b's endpoint inventory and 1c's reactive nuclei sweep both consume live hosts as input; running them first against the apex alone misses the wildcard surface entirely. Output: live subdomains ingested via `aith assess ingest-endpoints "$DB" subdomain-enum` so they flow into the work buffer alongside apex hosts.
+   Before dispatching subdomain enumeration, run `aith assess kali exec -- which massdns puredns dnsx subfinder cero alterx asnmap bbot shuffledns` to confirm tooling. Missing binaries → fix the runtime, do not silently degrade — puredns silently fails when massdns is missing (zero output, no error, exit code 0), and a dnsx fallback against a typical bruteforce wordlist will spike container CPU before stabilizing. Recon-specialist dispatches scanning multiple hosts MUST use `nmap -iL hosts.txt`. The operator never asks a specialist to loop nmap per-host; consolidation is non-negotiable. If the specialist generates `for h in hosts; do aith assess kali nmap-scan --target $h ...`, the operator catches it in dispatch review and re-dispatches with the consolidated command.
    Skip 1a when scope.json contains only bare hosts — there is nothing to expand, so dispatching enum wastes a context window.
 
    **1b. Parallel recon + source analysis** — dispatch `recon-specialist` + `source-analyzer` in parallel because their work is independent and sequential dispatch doubles wall time for no coverage gain. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 — leaving non-web triage on the operator loses the skill's methodology depth.
@@ -273,6 +274,60 @@ After each phase update scope.json:
 jq '.current_phase = "<next>"' \
     "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
 ```
+
+## Recon Dispatch Resource Policy
+
+Every active recon dispatch passes through this policy before the operator hands the
+work to a specialist. The policy is the single source of truth for per-target rate
+calibration; specialists pull values from this table rather than guessing, and the
+operator catches dispatch-context drift before it reaches the runtime.
+
+### Resource-safety preflight rule
+
+Active recon dispatches must declare in dispatch context: candidate count, rate limit,
+thread count, retry count, timeout, output mode (line / JSON / `-omit-raw`), stop
+condition, and expected wall-clock. Specialists do not guess these — operators set them.
+
+### Per-target rate calibration table
+
+Vendor names appear here as **examples of trait matches**, not as the canonical category
+in the methodology body. The matching trait row is what drives the rate; pick the row
+on the trait, not on the brand.
+
+| Target trait | nmap profile | dir-fuzz rate | nuclei | DNS brute (puredns rl) | concurrent nmap procs |
+|---|---|---|---|---|---|
+| Cloud-fronted (any major CDN/edge — examples: Cloudflare, Akamai, Fastly, CloudFront) | `-T3 --max-rate 100` | 50–100 req/s | `--rate-limit 100-150 -bs 25 -c 25` | 2500 | 1 |
+| Origin / single-server (no CDN, no WAF) | `-T2 --max-rate 30` | 5–10 req/s | `--rate-limit 30 -bs 10 -c 10` | 1500 | 1 |
+| WAF-protected (any vendor WAF tier — Cloudflare WAF, Akamai App & API, F5 ASM, AWS WAF, Imperva) | `-T2 --max-rate 30` | 1–3 req/s | `--rate-limit 30 -bs 10 -c 10` | 1000 | 1 |
+| High-friction policy / regulated (`.gov`, `.mil`, finance, healthcare) | `-T2 --max-rate 50 --host-timeout 1500s` | ≤2 req/s | `--rate-limit 30 -bs 10 -c 10` | 800 | 1 |
+| Vendor SaaS (e.g., Salesforce, ServiceNow, StatusPage, Auth0, Okta) | `-T3 --max-rate 60` | 20 req/s | `--rate-limit 60 -bs 15 -c 15` | n/a (vendor-controlled DNS) | 1 |
+
+The "concurrent nmap procs" column is `1` everywhere — consolidation is the rule (see
+`agent/skills/port-scanning/SKILL.md` "Process consolidation"); the column exists so
+future tier additions can override it. Operator-side cap across all sibling dispatches:
+**2 concurrent nmap processes maximum** (one per specialist).
+
+### Picking a tier
+
+Run `wafw00f` first; if a CDN/WAF is detected, pick the matching trait row. If httpx
+fingerprint shows a known vendor SaaS host pattern, use the Vendor SaaS row. If neither,
+default to **Origin / single-server** (the most cautious non-vendor row). Never default
+to Cloud-fronted just because the apex looks bursty-friendly — wildcards and subdomains
+often sit on origin servers.
+
+### When to step down a tier
+
+Watch for: 429s, sudden response-time degradation, or a CAPTCHA challenge served on
+probes. Step down one tier (e.g., Cloud-fronted → WAF-protected) and rerun the
+calibration. Do not step UP a tier mid-engagement.
+
+### DNS bruteforce gating
+
+The DNS-brute column is the rate ceiling for puredns/shuffledns invocations. Cross-reference
+`agent/skills/subdomain-enumeration/SKILL.md` "Host-CPU note" — DNS bruteforce is the
+dominant host-CPU and host-network spike in the engagement runtime, and aggressive
+profiles have crashed Docker on standard laptop hardware. Even with the rates in this
+table, default to `polite-residential` and let the table pick the tier.
 
 ## Credential Auto-Use
 

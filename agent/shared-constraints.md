@@ -70,6 +70,41 @@ adding retrievable signal. Use `--intent` for a one-line purpose annotation.
 `echo` is only legitimate when its output is the command's real purpose — writing
 to a file (`echo X > file`), piping into another tool, or generating a payload.
 
+### Process cleanup — no broad `pkill`/`killall` by binary name
+
+Agents MUST NOT use `pkill`, `killall`, or `kill -9 -f <binary>` against
+shared-runtime processes. The Kali runtime is shared infrastructure across
+parallel specialists, so a broad signal by binary name kills sibling agents'
+work — losing potentially hours of recon. The audit pipeline already
+cascades SIGTERM→SIGKILL into the in-container PID on timeout, so manual
+cleanup is rarely needed; when it is, kill by tracked PID only.
+
+What to do instead — track the lifecycle of every process you spawn and stop
+only the one you started:
+
+- **Long-running probes — use the job lifecycle.** `aith assess kali job
+  start --intent "<text>" -- <verb> ...` returns a job id and writes an
+  audit row. Stop it cleanly with `aith assess kali job stop <id>`. The
+  job worker SIGTERMs the in-container PID it owns; sibling jobs stay
+  alive.
+- **Synchronous `aith assess kali exec` runs — use the run-uuid PID file.**
+  Every audit row carries a `run_uuid`. The runtime writes the
+  in-container PID to `/tmp/aith-pid-<run_uuid>` for the duration of the
+  run, so cleanup is `aith assess kali exec -- kill -TERM $(cat
+  /tmp/aith-pid-<run_uuid>)`. This signals only your run, not sibling
+  runs of the same binary.
+- **Last-resort hygiene for hours-long parallel runs — copy the binary
+  per agent.** `aith assess kali exec -- cp /usr/bin/nmap
+  /usr/local/bin/nmap-${AGENT_NAME}` so a later `pkill -f
+  nmap-${AGENT_NAME}` only matches your processes. Prefer the job
+  lifecycle; reach for this only when two specialists genuinely need
+  multi-hour parallel sweeps of the same heavy binary.
+- **Timeout-related cleanup is automatic.** `aith assess kali exec` and
+  every typed verb cascade SIGTERM→SIGKILL into the in-container PID via
+  `docker exec ... kill` when `--timeout` expires. Operators do not need
+  to kill anything manually for a timeout — the in-container tree is
+  already gone.
+
 ### Command Metadata
 
 Every target-facing `aith assess kali` call carries audit metadata as CLI flags.
@@ -199,6 +234,15 @@ worse than running a fresh probe.
 
 Full coverage-vs-duplicate decision table and output-field interpretation:
 `agent/references/runtime-guides/command-history-auditing.md`.
+
+---
+
+## 2c. Resource-safety preflight
+
+Active recon dispatches must declare candidate count, rate limit, thread count, retry,
+timeout, output mode, stop condition, and expected wall-clock in dispatch context. The
+Recon Dispatch Resource Policy in `agent/operator-core.md` is the calibration source of
+truth.
 
 ---
 

@@ -106,7 +106,7 @@ The half-phase tags exist because the audit row must reflect what the dispatch w
 
 ## Cross-reference: rate-limit calibration
 
-Per-target rate guidance (`.gov` / WAF-protected / Cloudflare-fronted / vendor-SaaS profiles) lives in `agent/operator-core.md` "Recon Dispatch Resource Policy" so the operator and every specialist see the same table. Do not duplicate the table here — the examples below pull values from that table, and the table is the single source of truth.
+Per-target rate guidance (cautious-tier, CDN-fronted, WAF-protected, vendor-SaaS, origin profiles) lives in `agent/operator-core.md` "Recon Dispatch Resource Policy" so the operator and every specialist see the same table. Do not duplicate the table here — the examples below pull values from that table, and the table is the single source of truth.
 
 ## Examples per verb
 
@@ -115,7 +115,7 @@ Examples show the audit-flag set explicit so you can copy-paste and edit. All pa
 ### `kali nmap-scan`
 
 ```bash
-# .gov / firewalled — cautious profile, top-1000 + service detection.
+# Cautious-tier profile (CDN-fronted / WAF-protected / regulated) — top-1000 + service detection.
 aith assess kali nmap-scan \
   --target www.example.gov \
   --ports top-1000 --service-detection \
@@ -155,13 +155,13 @@ aith assess kali nuclei \
   --technique CVE-VALIDATION --intent "reactive sweep on Phase-1 URL delta" \
   --probe-kind fingerprint --phase recon --timeout 1800
 
-# CDN-fronted target — cap rate and concurrency lower so Cloudflare doesn't 429.
+# CDN-fronted target — cap rate and concurrency lower so the edge doesn't 429.
 aith assess kali nuclei \
   -u https://www.example.com \
   -tags cve -severity critical,high -as -jsonl \
   -rate-limit 50 -c 10 -bs 10 \
   -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_cdn.jsonl \
-  --technique CVE-VALIDATION --intent "CVE templates against Cloudflare-fronted host" \
+  --technique CVE-VALIDATION --intent "CVE templates against CDN-fronted host" \
   --probe-kind fingerprint --phase recon --timeout 1800
 ```
 
