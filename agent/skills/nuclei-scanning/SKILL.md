@@ -123,6 +123,11 @@ Flags explained — each flag earns its place because removing it breaks an assu
 - `-stats -si 30` prints a 30-second stats tick so the operator sees progress without tailing the
   JSONL file — useful when the delta is large.
 
+When dispatching parallel nuclei sweeps, use the `aith assess kali job start` lifecycle (and
+stop them with `kali job stop <id>`) instead of background-and-pkill — broad `pkill -f nuclei`
+stomps on sibling agents' processes in the shared runtime. See
+`agent/references/runtime-guides/kali-cli.md` "Process cleanup discipline" for the full pattern.
+
 ### Template selection rationale
 
 During discovery, stick to `http/cves/`, `http/misconfiguration/`, `http/exposures/`, `http/default-logins/`, `http/technologies/`,
@@ -336,4 +341,5 @@ cat /tmp/nuclei.jsonl | jq '.info.name, .info.severity, .matched-at'
 
 ## Extended Resources
 
+- `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table; `--rate-limit / -bs / -c` defaults pulled from the trait row.
 - `agent/references/tools/recon/nuclei.md` — nuclei flags, template management, output formats

@@ -21,7 +21,7 @@ Read `agent/shared-constraints.md` first, then select from this index.
 
 - `agent/skills/web-recon/SKILL.md`
   **Use when:** Starting Phase 1; fingerprinting hosts, ports, tech stacks, headers, web services.
-  **Paired references:** `references/tools/recon/nmap.md`, `references/tools/recon/whatweb.md`, `references/tools/recon/httpx.md`, `references/tools/recon/wafw00f.md`
+  **Paired references:** `references/tools/recon/nmap.md`, `references/tools/recon/whatweb.md`, `references/tools/recon/httpx.md`, `references/tools/recon/wafw00f.md`, `references/tools/recon/nikto.md`, `references/tools/fuzzing/ffuf.md`
 
 - `agent/skills/source-analysis/SKILL.md`
   **Use when:** Analyzing HTML/JS/CSS for routes, secrets, API bases, SPA bundles, source maps.

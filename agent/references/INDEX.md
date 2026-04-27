@@ -205,9 +205,14 @@ Quick-reference per tool, organized by usage phase.
 | `tools/recon/nikto.md` | Web vulnerability scanner — **conditional, fingerprint-gated** (legacy/odd-stack triggers; nuclei is the primary web-vuln pass) |
 | `tools/recon/wafw00f.md` | WAF identification and fingerprinting |
 | `tools/recon/curl.md` | HTTP request crafting and testing |
-| `tools/recon/puredns.md` | Active DNS brute-force with wildcard filtering |
-| `tools/recon/dnsx.md` | Bulk DNS resolution and record enumeration |
+| `tools/recon/puredns.md` | Active DNS brute-force with wildcard filtering — massdns hard-dependency, tier-aware rate-limit profiles, `--wildcard-batch` / `--wildcard-tests` tuning |
+| `tools/recon/dnsx.md` | Bulk DNS resolution and record enumeration — NXDOMAIN/CPU spike pattern, two-step lean-then-enrich, `GOMAXPROCS=1 nice -n 10` profile |
 | `tools/recon/subdomain-enumeration-tools.md` | Subdomain enumeration tier table (subfinder/bbot/cero/alterx/puredns/dnsx), API-key value-for-cost, puredns rate guidance, alterx permutation chain, cero CIDR-feed, bbot passive preset, when-not-to-bruteforce signals |
+| `tools/recon/cero.md` | TLS SAN scraper (Phase 3); asnmap → cero CIDR-feed pattern |
+| `tools/recon/alterx.md` | Subdomain permutation generator (Phase 2); always `-enrich -estimate` first, chains into puredns resolve |
+| `tools/recon/asnmap.md` | ASN → CIDR mapping; feeds cero for TLS SAN sweeps |
+| `tools/recon/bbot.md` | Multi-module passive preset (Phase 0 deep); `subdomain-enum -rf passive`, `--allow-deadly` gated behind `--destructive` |
+| `tools/recon/shuffledns.md` | Lighter alternative to puredns; we generally prefer puredns for better wildcard handling |
 | `tools/recon/gau.md` | Historical URL discovery (Wayback, OTX, Common Crawl, URLScan) |
 | `tools/recon/gf.md` | URL parameter-pattern classifier (xss, ssrf, redirect, idor, sqli, lfi, debug) with 1ndianl33t patterns |
 | `tools/recon/trufflehog.md` | Secret scanner (filesystem mode, 800+ detectors, v3 positional-path syntax, `--no-verification` default) |

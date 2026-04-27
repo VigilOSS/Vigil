@@ -3,6 +3,8 @@
 **Purpose:** Vulnerability scanning with community templates
 For live engagement targets, run `nuclei` via `aith assess kali nuclei` (typed verb, audit-flag-aware).
 
+Per-target rate calibration: `agent/operator-core.md` "Recon Dispatch Resource Policy". Pull `--rate-limit / -bs / -c` from the matching trait row before running broad sweeps.
+
 ## Basic Scanning
 
 **Single target:** `nuclei -u https://target`

@@ -669,6 +669,185 @@ def test_scope_coverage_gates_present():
     )
 
 
+def test_no_broad_pkill_rule_present_in_shared_constraints():
+    """1A.4 — the no-broad-`pkill` rule lives in `agent/shared-constraints.md` so every
+    specialist loads it on first dispatch. The rule and the safe alternatives must stay
+    pinned, while the engagement-specific citation has been stripped (drift guard 1Z.19)."""
+    repo_root = Path(__file__).resolve().parents[3]
+    shared = (repo_root / "agent" / "shared-constraints.md").read_text(encoding="utf-8")
+
+    # Section heading for the new rule.
+    assert "### Process cleanup — no broad `pkill`/`killall` by binary name" in shared, (
+        "shared-constraints.md is missing the process-cleanup rule heading"
+    )
+    # Core prohibition wording.
+    assert "Agents MUST NOT use `pkill`, `killall`, or `kill -9 -f <binary>`" in shared, (
+        "shared-constraints.md is missing the no-broad-pkill prohibition sentence"
+    )
+    # Mechanism / lesson must survive even after the dated citation was stripped.
+    assert "kills sibling agents'" in shared, (
+        "shared-constraints.md is missing the sibling-kill consequence sentence"
+    )
+    assert "cascades SIGTERM→SIGKILL" in shared, (
+        "shared-constraints.md is missing the timeout-cascade rationale"
+    )
+    # The safe alternatives every specialist needs to know. The `kali job start` /
+    # `kali job stop` lifecycle wording is wrapped across lines in the canonical
+    # placement, so squash whitespace before the substring check.
+    shared_squashed = " ".join(shared.split())
+    assert "kali job start" in shared_squashed, (
+        "shared-constraints.md is missing the `kali job start` lifecycle alternative"
+    )
+    assert "kali job stop" in shared_squashed, (
+        "shared-constraints.md is missing the `kali job stop` cleanup alternative"
+    )
+    assert "/tmp/aith-pid-<run_uuid>" in shared, (
+        "shared-constraints.md is missing the run_uuid PID-file pattern for synchronous cleanup"
+    )
+    assert "cp /usr/bin/nmap" in shared, (
+        "shared-constraints.md is missing the per-agent binary copy last-resort recipe"
+    )
+    assert "Timeout-related cleanup is automatic" in shared, (
+        "shared-constraints.md is missing the timeout-cascade automatic-cleanup statement"
+    )
+
+    # The kali-cli runtime guide carries the exact-step recipes.
+    kali_cli = (repo_root / "agent" / "references" / "runtime-guides" / "kali-cli.md").read_text(
+        encoding="utf-8"
+    )
+    assert "## Process cleanup discipline" in kali_cli, (
+        "kali-cli.md is missing the `Process cleanup discipline` section header"
+    )
+    assert "kali job stop" in kali_cli, (
+        "kali-cli.md is missing the `kali job stop` recipe"
+    )
+    assert "/tmp/aith-pid-<run_uuid>" in kali_cli, (
+        "kali-cli.md is missing the run_uuid PID-file recipe"
+    )
+
+    # Skill files must carry the per-tool reminder so dispatched specialists see it on the
+    # parallel-scan / rate-limit step they're already reading.
+    for skill_path in (
+        "skills/web-recon/SKILL.md",
+        "skills/port-scanning/SKILL.md",
+        "skills/nuclei-scanning/SKILL.md",
+        "skills/directory-fuzzing/SKILL.md",
+        "skills/subdomain-enumeration/SKILL.md",
+    ):
+        text = (repo_root / "agent" / skill_path).read_text(encoding="utf-8")
+        assert "kali job start" in text, (
+            f"{skill_path} is missing the parallel-scan `kali job start` lifecycle reminder"
+        )
+        assert "kali-cli.md" in text and "Process cleanup discipline" in text, (
+            f"{skill_path} is missing the cross-reference to kali-cli.md `Process cleanup discipline`"
+        )
+
+
+def test_web_recon_mandatory_tool_ordering_is_pinned():
+    """1B.2 — the mandatory-tool order (`wafw00f → nmap → httpx → whatweb → nuclei → ffuf`)
+    must appear in both the recon-specialist agent prompt and the web-recon skill. The
+    dropped escape-hatch language ("only when the target clearly warrants it") must NOT
+    reappear — that escape hatch is exactly what allowed the SSA engagement to skip nmap."""
+    repo_root = Path(__file__).resolve().parents[3]
+
+    recon_specialist = (repo_root / "agent" / "agents" / "recon-specialist.md").read_text(
+        encoding="utf-8"
+    )
+    web_recon = (repo_root / "agent" / "skills" / "web-recon" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+    ordering = "wafw00f → nmap → httpx → whatweb → nuclei → ffuf"
+    assert ordering in recon_specialist, (
+        "recon-specialist.md is missing the mandatory tool ordering "
+        f"`{ordering}`"
+    )
+    assert ordering in web_recon, (
+        f"web-recon/SKILL.md is missing the mandatory tool ordering `{ordering}`"
+    )
+
+    # Port-scanning must be ALWAYS-load, not conditional. The escape-hatch sentence must
+    # not be present.
+    assert "ALWAYS load. Port + service enumeration is a mandatory recon step" in recon_specialist, (
+        "recon-specialist.md is missing the ALWAYS-load port-scanning statement"
+    )
+    assert "only when the target clearly warrants it" not in recon_specialist, (
+        "recon-specialist.md still carries the dropped escape-hatch wording "
+        "`only when the target clearly warrants it`"
+    )
+
+    # Pre-output self-check items must reference the mandatory tools by name so a future
+    # rewrite that softens the gate fails CI.
+    for needle in (
+        "**wafw00f** ran first",
+        "**nmap** port + service scan completed",
+        "**httpx** fingerprint pass",
+        "**whatweb** ran on each live web target",
+        "**nuclei** reactive sweep ran",
+        "**ffuf / feroxbuster** directory fuzz",
+        "**nikto** trigger evaluation completed",
+    ):
+        assert needle in recon_specialist, (
+            f"recon-specialist.md pre-output self-check is missing the `{needle}` item"
+        )
+
+
+def test_nmap_port_data_assertion_pinned():
+    """1B.3 — the per-host port-data presence assertion (text-output + xmllint XPath)
+    must appear in the port-scanning skill, the nmap reference, and the recon-specialist
+    self-check. A future rewrite that reverts to the weaker `</nmaprun>` / scan-report
+    line gate fails CI."""
+    repo_root = Path(__file__).resolve().parents[3]
+
+    port_scanning = (repo_root / "agent" / "skills" / "port-scanning" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    nmap_ref = (repo_root / "agent" / "references" / "tools" / "recon" / "nmap.md").read_text(
+        encoding="utf-8"
+    )
+    recon_specialist = (repo_root / "agent" / "agents" / "recon-specialist.md").read_text(
+        encoding="utf-8"
+    )
+
+    # The two-layer assertion is the load-bearing language.
+    for needle in (
+        'open_ports=$(grep -cE \'^[0-9]+/(tcp|udp).*open\' "$f")',
+        '--xpath \'//host[@status="up"]/ports\'',
+        "GAP: $hostname (scan started but timed out — port data empty)",
+    ):
+        assert needle in port_scanning, (
+            f"port-scanning/SKILL.md is missing assertion fragment `{needle}`"
+        )
+
+    # XML-closure trap must be documented in the nmap reference.
+    assert "XML closure means the nmap binary exited normally" in nmap_ref, (
+        "nmap.md is missing the XML-closure trap explanation"
+    )
+    assert "Use the port-data presence check, not XML closure or scan-report line." in nmap_ref, (
+        "nmap.md is missing the corrective `Use the port-data presence check ...` sentence"
+    )
+
+    # The recon-specialist pre-output self-check item must reference per-host nmap
+    # port-data presence (case-insensitive). It must also mention the port-scanning
+    # skill's two-layer assertion, since the assertion procedure lives in that skill.
+    assert "per-host nmap port-data presence" in recon_specialist.lower(), (
+        "recon-specialist.md self-check is missing the per-host nmap port-data presence "
+        "verification item"
+    )
+    assert "two-layer assertion" in recon_specialist.lower(), (
+        "recon-specialist.md self-check must reference the port-scanning skill's "
+        "`two-layer assertion` so the gate points at the canonical procedure"
+    )
+
+    # Upstream-filtering kill-evidence path stays pinned.
+    assert "upstream filtering" in port_scanning.lower(), (
+        "port-scanning/SKILL.md is missing the upstream-filtering kill-evidence path"
+    )
+    assert "-T2 --host-timeout 1500-1800s" in port_scanning, (
+        "port-scanning/SKILL.md is missing the slower retry profile"
+    )
+
+
 def test_priority_dispatch_wired_into_prompts():
     """`classify-work`, `list-clusters`, `dispatch defer-cluster`, and
     `dispatch fetch-by-priority` are the priority-mode CLIs. Without them referenced in
@@ -715,4 +894,124 @@ def test_priority_dispatch_wired_into_prompts():
     assert "2000" in operator_core, (
         "operator-core.md must state the 2000-pending threshold that switches between "
         "type-based and priority-based dispatch"
+    )
+
+
+def test_recon_dispatch_resource_policy_section_present():
+    """1Z.22 — the per-target rate calibration table lives in
+    `agent/operator-core.md` "Recon Dispatch Resource Policy" so every recon dispatch
+    pulls from one source. Losing the section or any of the five canonical trait rows
+    would let specialists fall back to vendor-specific guesses."""
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (
+        repo_root / "agent" / "operator-core.md"
+    ).read_text(encoding="utf-8")
+
+    assert "## Recon Dispatch Resource Policy" in operator_core, (
+        "operator-core.md is missing the `Recon Dispatch Resource Policy` top-level "
+        "section — the calibration table source of truth"
+    )
+    # All five canonical trait rows must appear (vendor names allowed in the matrix as
+    # examples of trait matches).
+    for row_marker in (
+        "Cloud-fronted",
+        "Origin / single-server",
+        "WAF-protected",
+        "High-friction policy / regulated",
+        "Vendor SaaS",
+    ):
+        assert row_marker in operator_core, (
+            f"operator-core.md `Recon Dispatch Resource Policy` table is missing the "
+            f"`{row_marker}` trait row"
+        )
+    # The rule and step-down logic must survive future edits.
+    assert "Resource-safety preflight" in operator_core, (
+        "operator-core.md is missing the `Resource-safety preflight` rule heading"
+    )
+    assert "Picking a tier" in operator_core, (
+        "operator-core.md is missing the `Picking a tier` selection rule"
+    )
+    assert "When to step down a tier" in operator_core, (
+        "operator-core.md is missing the `When to step down a tier` rule"
+    )
+    assert "DNS bruteforce gating" in operator_core, (
+        "operator-core.md is missing the DNS-bruteforce gating cross-reference"
+    )
+
+
+def test_kali_exec_resource_policy_cross_reference_resolves():
+    """1Z.22 — the kali-exec skill cross-references the Recon Dispatch Resource Policy.
+    Verify the section name appears verbatim in operator-core.md so the link resolves."""
+    repo_root = Path(__file__).resolve().parents[3]
+    kali_exec = (
+        repo_root / "agent" / "skills" / "kali-exec" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    operator_core = (
+        repo_root / "agent" / "operator-core.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Recon Dispatch Resource Policy" in kali_exec, (
+        "kali-exec/SKILL.md must reference `Recon Dispatch Resource Policy`"
+    )
+    assert "## Recon Dispatch Resource Policy" in operator_core, (
+        "operator-core.md must define the `Recon Dispatch Resource Policy` section "
+        "exactly so the kali-exec cross-reference resolves"
+    )
+
+
+def test_no_dot_gov_profile_body_text_in_recon_skills():
+    """1Z.18 — the `.gov profile` / `.gov rate` / `the .gov` body-text labels are stripped
+    from the recon-class skills. The matrix in operator-core.md keeps `.gov` as a row label
+    (it's a real target trait), but the methodology body uses trait language ("cautious-tier",
+    "CDN-fronted", "WAF-protected") instead of jurisdiction-specific labels."""
+    repo_root = Path(__file__).resolve().parents[3]
+    skill_paths = [
+        repo_root / "agent" / "skills" / "web-recon" / "SKILL.md",
+        repo_root / "agent" / "skills" / "port-scanning" / "SKILL.md",
+        repo_root / "agent" / "skills" / "kali-exec" / "SKILL.md",
+        repo_root / "agent" / "skills" / "subdomain-enumeration" / "SKILL.md",
+    ]
+    for path in skill_paths:
+        text = path.read_text(encoding="utf-8")
+        for forbidden in (".gov profile", ".gov rate", "the .gov"):
+            assert forbidden not in text, (
+                f"{path}: still references `{forbidden}` — the body should describe the "
+                f"trait (cautious-tier / CDN-fronted / WAF-protected), not the jurisdiction"
+            )
+
+
+def test_no_dated_engagement_citations_in_methodology():
+    """1Z.19 — engagement citations dated 2026-04-2X (e.g., "SSA VDP 2026-04-26",
+    "engagement 2026-04-26", "2026-04-24 SSA engagement") must not appear in methodology
+    files. The lesson is timeless; the provenance is not.
+
+    Allowed exceptions: `agent/skills/google-workspaces/SKILL.md` uses 2026-04-2X dates as
+    example date ranges in command-line examples, not as engagement provenance."""
+    repo_root = Path(__file__).resolve().parents[3]
+    pattern = re.compile(r"2026-04-2[0-9]")
+    paths: list[Path] = []
+    paths.extend(sorted((repo_root / "agent" / "skills").rglob("*.md")))
+    paths.extend(sorted((repo_root / "agent" / "references").rglob("*.md")))
+    paths.extend(sorted((repo_root / "agent" / "agents").rglob("*.md")))
+    for name in ("operator-core.md", "shared-constraints.md"):
+        candidate = repo_root / "agent" / name
+        if candidate.exists():
+            paths.append(candidate)
+
+    # google-workspaces skill uses these dates as command-line example date ranges, not
+    # as engagement provenance — exclude it from the drift check.
+    excluded = {repo_root / "agent" / "skills" / "google-workspaces" / "SKILL.md"}
+
+    offenders: list[str] = []
+    for path in paths:
+        if path in excluded:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if pattern.search(line):
+                offenders.append(f"{path}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "Dated engagement citations (2026-04-2X) remain in the methodology corpus. "
+        "Strip the provenance and keep the lesson in neutral, timeless prose.\n"
+        + "\n".join(offenders)
     )

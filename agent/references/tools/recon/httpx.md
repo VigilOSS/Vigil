@@ -3,6 +3,8 @@
 **Purpose:** Fast multi-purpose HTTP toolkit — live host probing, tech detection, status codes, titles
 For live engagement targets, run httpx via `aith assess kali httpx` (typed verb, audit-flag-aware).
 
+Per-target rate calibration (when probing in volume): `agent/operator-core.md` "Recon Dispatch Resource Policy". Pull `-rl` and `-timeout` values from the matching trait row before running large batches.
+
 ## Probing
 
 **Probe single URL:** `echo "https://target" | httpx -silent -status-code -title -tech-detect`

@@ -19,9 +19,91 @@ The CLI runs on the host and execs into the runtime container with `docker exec`
 
 These are CLI-side rules that prevent foot-guns when many agents share one runtime:
 
-- **No broad `pkill` by binary name.** Cleaning up "all the nmaps" via `pkill -f nmap` will kill another specialist's parallel scan. Agents only kill processes they spawned via tracked PIDs (the audit row carries `pid` for synchronous runs and `job_id` for async ones). The full process-cleanup discipline lives in `agent/scripts/assess/lib/kali.py`.
+- **No broad `pkill` by binary name.** Cleaning up "all the nmaps" via `pkill -f nmap` will kill another specialist's parallel scan. Agents only kill processes they spawned via tracked PIDs (the audit row carries `pid` for synchronous runs and `job_id` for async ones). The full process-cleanup discipline lives in `agent/scripts/assess/lib/kali.py`. Broad `pkill -f <binary>` against shared-runtime processes will kill any sibling agent's parallel scan — losing potentially hours of recon work. The audit pipeline already cascades SIGTERM→SIGKILL into the in-container PID on timeout, so manual cleanup is rarely needed; when it is, kill by tracked PID only. The exact-step recipes in "Process cleanup discipline" below are the safe alternatives.
 - **Per-agent binary copy pattern for very-long parallel runs.** When two specialists run multi-hour nmap sweeps in parallel and one finishes, naive cleanup can kill the other. The pattern is `cp /usr/bin/nmap /usr/local/bin/nmap-${AGENT_ID}` so each specialist invokes a uniquely-named binary; a later `pkill -f nmap-${AGENT_ID}` only kills that agent's processes. Use this only when the dispatch genuinely needs hours-long parallel execution; for shorter runs, the tracked-PID approach is enough.
 - **`docker exec` parallelism cap.** Concurrent `aith assess kali ...` calls are capped at 5 by an internal CLI semaphore. This is the documented mitigation for [moby#45595](https://github.com/moby/moby/issues/45595) — `docker exec` becomes unresponsive at high parallelism, and capping at 5 keeps the runtime responsive while still allowing the operator to dispatch multiple specialists. The cap is implemented in `agent/scripts/assess/lib/kali.py`.
+
+## Process cleanup discipline
+
+The Kali runtime is shared infrastructure. A process started by one specialist
+is reachable by every other specialist's `pkill`/`killall` — broad signals by
+binary name kill sibling agents' work and produce hours of redo. Reach for the
+lifecycle that owns the PID instead of broad signals.
+
+### Long-running probes — `kali job` lifecycle
+
+Use this for any probe whose wall clock would normally trigger `aith assess
+kali job start`: nmap full-port sweeps, sqlmap deep crawls, large nuclei
+sweeps, ffuf with deep wordlists, multi-host puredns runs.
+
+```bash
+# Start the job — record the returned job id.
+JOB_ID=$(aith assess kali job start \
+  --technique RECON --intent "phase 1 nmap full-tcp scan" \
+  --probe-kind fingerprint --phase recon --timeout 7200 \
+  -- nmap-scan --target www.example.gov --scan-type full-tcp \
+     --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_full \
+  | jq -r '.job_id')
+
+# Stop cleanly when you're done — only this job's in-container PID is signaled.
+aith assess kali job stop "$JOB_ID"
+```
+
+The job worker is dtach-supervised inside the runtime. `kali job stop`
+SIGTERMs the in-container PID it owns and updates the audit row;
+sibling specialists' jobs are not touched.
+
+### Synchronous `aith assess kali exec` — `run_uuid` PID file
+
+Synchronous `kali exec` runs and every typed verb write the in-container
+PID to `/tmp/aith-pid-<run_uuid>` for the duration of the run. The
+`run_uuid` is the audit row's id — pull it from `list-command-runs` if
+you need to signal a still-running synchronous call from another shell:
+
+```bash
+# Find the running call (look for status=running).
+aith assess list-command-runs --q ffuf --json | jq -r '.[]
+  | select(.status=="running") | .run_uuid'
+
+# Signal only that run.
+aith assess kali exec --technique RECON --intent "stop ffuf cleanly" \
+  --probe-kind cleanup --phase recon --timeout 30 -- \
+  kill -TERM "$(cat /tmp/aith-pid-<run_uuid>)"
+```
+
+This signals exactly one in-container PID — sibling agents' ffuf or
+nmap processes are unaffected.
+
+### Per-agent binary copy — last-resort hygiene
+
+When two specialists genuinely need multi-hour parallel sweeps of the
+same heavy binary and you are worried a future cleanup pattern might
+catch siblings, copy the binary to a per-agent path before the long
+runs start:
+
+```bash
+aith assess kali exec --technique RECON \
+  --intent "per-agent nmap copy for parallel-safe cleanup" \
+  --probe-kind cleanup --phase recon --timeout 30 -- \
+  cp /usr/bin/nmap /usr/local/bin/nmap-${AGENT_NAME}
+```
+
+Then invoke `nmap-${AGENT_NAME}` for the rest of the dispatch and, if a
+broad pkill ever becomes unavoidable, scope it to that name:
+`pkill -f nmap-${AGENT_NAME}`. Prefer the job lifecycle; this pattern
+costs disk and audit noise, so reach for it only when the parallel-run
+math demands it.
+
+### Timeout-related cleanup — automatic
+
+`aith assess kali exec` and every typed verb already cascade
+SIGTERM→SIGKILL into the in-container PID via `docker exec ... kill`
+when `--timeout` expires. The wall-clock budget is enforced from the
+host, but the kill lands inside the container and the in-container
+tool tree is already gone by the time the audit row finalizes. There
+is nothing left for an operator or specialist to clean up after a
+timeout — issuing a manual `pkill` after a timed-out run only risks
+catching a sibling agent's later parallel run of the same binary.
 
 ## Common errors
 
