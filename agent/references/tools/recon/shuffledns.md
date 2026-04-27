@@ -2,7 +2,7 @@
 
 **Purpose:** Lighter alternative to puredns for active DNS brute-force. Wraps massdns directly with a simpler resolver-pool/wildcard-filter pipeline. Useful as a fallback when puredns errors at startup, or for very small wordlists where puredns's wildcard-batch pre-pass is overkill.
 
-For live engagement targets, run shuffledns via `aith assess kali exec -- shuffledns ...` (no typed verb yet — the canonical Phase 1 brute is puredns, and shuffledns is the rare-case fallback).
+For live engagement targets, run shuffledns via `aith assess kali exec -- shuffledns ...` (no typed verb — the canonical Phase 1 brute is puredns, and shuffledns is the rare-case fallback). Because the typed-verb gate is bypassed, the rate-limit ceiling from `agent/operator-core.md` "Recon Dispatch Resource Policy" DNS-brute column MUST be set in the `--intent` audit string explicitly (e.g. `--intent "shuffledns @ polite-CDN-fronted-target rate-limit 800 (vendor-controlled DNS)"`); the audit row records the intent verbatim so downstream coverage audits can verify the rate-limit choice without re-parsing the argv.
 
 **Where it lives:** `/usr/local/bin/shuffledns` in `runtime-full` (`go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest` — see `agent/docker/runtime-full/Dockerfile`). Like puredns, it requires `/usr/bin/massdns` on `$PATH`.
 

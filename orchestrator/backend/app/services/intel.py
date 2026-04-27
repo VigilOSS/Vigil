@@ -19,7 +19,8 @@ which is why all writes go through the helpers in this module.
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable
+from contextlib import contextmanager
+from typing import Any, Iterable, Iterator
 from urllib.parse import urlparse
 
 from fastapi import HTTPException, status
@@ -27,6 +28,22 @@ from fastapi import HTTPException, status
 from ..db import get_connection
 from .events import _engagement_or_404
 from .search import fts_escape
+
+
+@contextmanager
+def _use_connection(existing: Any | None = None) -> Iterator[Any]:
+    """Yield ``existing`` when supplied; otherwise open a fresh connection.
+
+    Lets ``record_*`` helpers run inside a caller-managed transaction (the
+    ``supersede_intel`` flow) while keeping their default standalone behaviour
+    unchanged. Borrowed connections are not committed or closed here — that
+    is the caller's responsibility.
+    """
+    if existing is not None:
+        yield existing
+        return
+    with get_connection() as connection:
+        yield connection
 
 
 # ── Shared utilities ───────────────────────────────────────
@@ -56,8 +73,20 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
         data["provenance"] = _decode_json(data.pop("provenance_json") or "{}", {})
     if "metadata_json" in data:
         data["metadata"] = _decode_json(data.pop("metadata_json") or "{}", {})
+    if "details_json" in data:
+        data["details"] = _decode_json(data.pop("details_json") or "{}", {})
     if "tags_json" in data:
         data["tags"] = _decode_json(data.pop("tags_json") or "[]", [])
+    # Default ``canonical_id`` to the row's own id when ``superseded_by_id``
+    # is unset — list helpers overwrite this when they walk a longer chain.
+    # This keeps every returned dict carrying the field even on insert paths
+    # where no chain walk happened.
+    if "id" in data and "canonical_id" not in data:
+        if "superseded_by_id" in data and data.get("superseded_by_id"):
+            # Caller will walk; leave None so the omission is visible.
+            data["canonical_id"] = None
+        else:
+            data["canonical_id"] = int(data["id"])
     return data
 
 
@@ -162,6 +191,7 @@ def record_tech_component(
     last_seen_at: str = "",
     notes: str = "",
     provenance: dict[str, Any] | None = None,
+    _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     values: dict[str, Any] = {
@@ -178,7 +208,7 @@ def record_tech_component(
         values["first_seen_at"] = first_seen_at
     if last_seen_at:
         values["last_seen_at"] = last_seen_at
-    with get_connection() as connection:
+    with _use_connection(_conn) as connection:
         row = _generic_upsert(
             connection,
             table="intel_tech_components",
@@ -208,6 +238,7 @@ def record_person(
     source_name: str = "",
     notes: str = "",
     provenance: dict[str, Any] | None = None,
+    _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     values = {
@@ -219,7 +250,7 @@ def record_person(
         "notes": notes,
         "provenance_json": _json_text(provenance),
     }
-    with get_connection() as connection:
+    with _use_connection(_conn) as connection:
         row = _generic_upsert(
             connection,
             table="intel_people",
@@ -248,6 +279,7 @@ def record_email(
     source_name: str = "",
     notes: str = "",
     provenance: dict[str, Any] | None = None,
+    _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     values = {
@@ -258,7 +290,7 @@ def record_email(
         "notes": notes,
         "provenance_json": _json_text(provenance),
     }
-    with get_connection() as connection:
+    with _use_connection(_conn) as connection:
         row = _generic_upsert(
             connection,
             table="intel_emails",
@@ -288,6 +320,7 @@ def record_domain(
     live_status: str = "",
     notes: str = "",
     provenance: dict[str, Any] | None = None,
+    _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     values = {
@@ -299,7 +332,7 @@ def record_domain(
         "notes": notes,
         "provenance_json": _json_text(provenance),
     }
-    with get_connection() as connection:
+    with _use_connection(_conn) as connection:
         row = _generic_upsert(
             connection,
             table="intel_domains",
@@ -333,7 +366,9 @@ def record_cve(
     validation_status: str = "unverified",
     linked_finding_slug: str = "",
     notes: str = "",
+    details: dict[str, Any] | None = None,
     provenance: dict[str, Any] | None = None,
+    _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     values = {
@@ -348,9 +383,10 @@ def record_cve(
         "validation_status": validation_status,
         "linked_finding_slug": linked_finding_slug,
         "notes": notes,
+        "details_json": _json_text(details),
         "provenance_json": _json_text(provenance),
     }
-    with get_connection() as connection:
+    with _use_connection(_conn) as connection:
         row = _generic_upsert(
             connection,
             table="intel_cves",
@@ -392,6 +428,7 @@ def record_dns_record(
     source_name: str = "",
     notes: str = "",
     provenance: dict[str, Any] | None = None,
+    _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     values = {
@@ -404,7 +441,7 @@ def record_dns_record(
         "notes": notes,
         "provenance_json": _json_text(provenance),
     }
-    with get_connection() as connection:
+    with _use_connection(_conn) as connection:
         row = _generic_upsert(
             connection,
             table="intel_dns_records",
@@ -435,6 +472,7 @@ def record_social_profile(
     source_name: str = "",
     notes: str = "",
     provenance: dict[str, Any] | None = None,
+    _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     values = {
@@ -447,7 +485,7 @@ def record_social_profile(
         "notes": notes,
         "provenance_json": _json_text(provenance),
     }
-    with get_connection() as connection:
+    with _use_connection(_conn) as connection:
         row = _generic_upsert(
             connection,
             table="intel_social_profiles",
@@ -477,6 +515,7 @@ def record_breach_record(
     source_name: str = "",
     notes: str = "",
     provenance: dict[str, Any] | None = None,
+    _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     values = {
@@ -488,7 +527,7 @@ def record_breach_record(
         "notes": notes,
         "provenance_json": _json_text(provenance),
     }
-    with get_connection() as connection:
+    with _use_connection(_conn) as connection:
         row = _generic_upsert(
             connection,
             table="intel_breach_records",
@@ -516,6 +555,7 @@ def record_org_fact(
     source_name: str = "",
     notes: str = "",
     provenance: dict[str, Any] | None = None,
+    _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     values = {
@@ -525,7 +565,7 @@ def record_org_fact(
         "notes": notes,
         "provenance_json": _json_text(provenance),
     }
-    with get_connection() as connection:
+    with _use_connection(_conn) as connection:
         row = _generic_upsert(
             connection,
             table="intel_org_facts",
@@ -554,6 +594,7 @@ def record_note(
     tags: list[str] | None = None,
     source_name: str = "",
     provenance: dict[str, Any] | None = None,
+    _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     values = {
@@ -564,7 +605,7 @@ def record_note(
         "source_name": source_name,
         "provenance_json": _json_text(provenance),
     }
-    with get_connection() as connection:
+    with _use_connection(_conn) as connection:
         row = _generic_upsert(
             connection,
             table="intel_notes",
@@ -615,6 +656,10 @@ def _list_rows(
     canonical rows reach the report. Detection of the column is
     intentional — older databases that have not run the supersede
     migration still return correct results.
+
+    Each row is decorated with ``canonical_id`` (the leaf of the
+    ``superseded_by_id`` chain) so the frontend can chase to the live
+    replacement in one hop instead of recursing through the list.
     """
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
@@ -630,7 +675,18 @@ def _list_rows(
                 f"SELECT * FROM {table} WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC",
                 (engagement.id,),
             ).fetchall()
-    return [_row_to_dict(row) for row in rows]
+        decorated: list[dict[str, Any]] = []
+        has_supersede = "superseded_by_id" in columns
+        for row in rows:
+            data = _row_to_dict(row)
+            if has_supersede:
+                data["canonical_id"] = _resolve_canonical_id(
+                    connection, table, engagement.id, int(data["id"])
+                )
+            else:
+                data["canonical_id"] = int(data["id"])
+            decorated.append(data)
+    return decorated
 
 
 # ── Update + supersede ─────────────────────────────────────
@@ -709,6 +765,26 @@ _INTEL_FTS_ENTITY_TYPE: dict[str, str] = {
     "breach-record": "breach_record",
     "org-fact": "org_fact",
     "note": "note",
+}
+
+
+# Natural-key fields per intel type. ``supersede_intel`` validates these are
+# present in the new payload BEFORE invoking the corresponding ``record_*``
+# helper — the helpers declare these as keyword-only required positional
+# kwargs, so a missing key would otherwise raise ``TypeError`` (HTTP 500).
+# Mirrors the per-table ``UNIQUE(engagement_id, …)`` constraint declared in
+# ``db.py`` and the ``min_length`` Field markers in ``intel_schemas.py``.
+_INTEL_NATURAL_KEY_FIELDS: dict[str, tuple[str, ...]] = {
+    "tech-component": ("component",),
+    "person": ("name",),
+    "email": ("address",),
+    "domain": ("identity",),
+    "cve": ("cve_id",),
+    "dns-record": ("record_type", "name"),
+    "social-profile": ("subject_kind", "platform"),
+    "breach-record": ("subject", "breach_name"),
+    "org-fact": ("fact_key",),
+    "note": ("title",),
 }
 
 
@@ -857,6 +933,74 @@ def _post_process_intel_row(intel_type: str, row: dict[str, Any]) -> dict[str, A
     return out
 
 
+def _resolve_canonical_id(
+    connection, table: str, engagement_id: int, intel_id: int
+) -> int:
+    """Walk ``superseded_by_id`` from ``intel_id`` to the leaf row.
+
+    Returns ``intel_id`` itself when the row is current. Bounded loop —
+    cycles are rejected at supersede time, but defend in depth here so a
+    historical bad row can still be served. Engagement-scoped to keep a
+    pathological cross-engagement reference from leaking the leaf id of an
+    unrelated case.
+    """
+    seen: set[int] = {intel_id}
+    current = intel_id
+    # Cap iterations at the row count to make a hostile chain a noop, not a
+    # hang. Any real chain is at most a handful long.
+    for _ in range(1024):
+        row = connection.execute(
+            f"SELECT superseded_by_id FROM {table} WHERE engagement_id = ? AND id = ?",
+            (engagement_id, current),
+        ).fetchone()
+        if row is None:
+            return current
+        next_id = row[0]
+        if next_id is None:
+            return current
+        next_id = int(next_id)
+        if next_id in seen:
+            # Cycle — return where we are; supersede insertion guards against
+            # cycle creation, so this is an unreachable self-defence branch.
+            return current
+        seen.add(next_id)
+        current = next_id
+    return current
+
+
+def _supersede_chain_reaches(
+    connection, table: str, engagement_id: int, start_id: int, target_id: int
+) -> bool:
+    """Return True when walking ``superseded_by_id`` from ``start_id`` lands on ``target_id``.
+
+    Used to reject cycle creation: if the new replacement row already
+    transitively supersedes back to the row we are about to mark as
+    superseded, the link would close a loop.
+    """
+    if start_id == target_id:
+        return True
+    seen: set[int] = {start_id}
+    current = start_id
+    for _ in range(1024):
+        row = connection.execute(
+            f"SELECT superseded_by_id FROM {table} WHERE engagement_id = ? AND id = ?",
+            (engagement_id, current),
+        ).fetchone()
+        if row is None:
+            return False
+        next_id = row[0]
+        if next_id is None:
+            return False
+        next_id = int(next_id)
+        if next_id == target_id:
+            return True
+        if next_id in seen:
+            return False
+        seen.add(next_id)
+        current = next_id
+    return False
+
+
 def update_intel(
     engagement_id: int,
     intel_type: str,
@@ -908,7 +1052,10 @@ def update_intel(
             body=body,
             source_name=str(updated.get("source_name", "")),
         )
-    return _post_process_intel_row(intel_type, updated)
+        canonical_id = _resolve_canonical_id(connection, table, engagement.id, intel_id)
+    out = _post_process_intel_row(intel_type, updated)
+    out["canonical_id"] = canonical_id
+    return out
 
 
 def supersede_intel(
@@ -922,9 +1069,11 @@ def supersede_intel(
     """Insert a replacement intel row and mark the old row as superseded.
 
     The old row stays in the table for audit but gets ``superseded_by_id``
-    populated so report-writer can filter it out. Recording happens in a
-    single transaction: if the insert fails (UNIQUE constraint, schema drift),
-    the old row stays unflagged.
+    populated so report-writer can filter it out. The three writes (existence
+    check, replacement upsert, supersede UPDATE) all share a single connection
+    so a mid-flight failure rolls the whole supersede back together — a
+    half-applied state where the new row exists but the old row never gets
+    flagged is possible only if the connection itself dies.
     """
     engagement = _engagement_or_404(engagement_id)
     table = _resolve_intel_table(intel_type)
@@ -960,7 +1109,23 @@ def supersede_intel(
             detail="supersede payload contains no patchable fields",
         )
 
-    # First, verify the existing row is present.
+    # The record helpers declare natural-key fields as required keyword-only
+    # arguments — calling them without those keys raises TypeError (500). We
+    # surface a structured 400 instead so a malformed payload is recoverable.
+    natural_key = _INTEL_NATURAL_KEY_FIELDS[intel_type]
+    missing = [
+        field for field in natural_key
+        if field not in kwargs or kwargs[field] in (None, "")
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"supersede payload missing required field: "
+                f"{', '.join(missing)}"
+            ),
+        )
+
     with get_connection() as connection:
         existing = _fetch_intel_row(connection, table, engagement.id, intel_id)
         if existing is None:
@@ -969,22 +1134,34 @@ def supersede_intel(
                 detail=f"intel/{intel_type} id={intel_id} not found",
             )
 
-    new_row = record_fn(engagement.id, **kwargs)
-    new_id = int(new_row["id"])
+        new_row = record_fn(engagement.id, _conn=connection, **kwargs)
+        new_id = int(new_row["id"])
 
-    if new_id == intel_id:
-        # The natural key matched the existing row; this is an in-place
-        # upsert, not a supersede. Surface it as 409 so the operator can
-        # call update-intel instead.
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"supersede target (id={intel_id}) collided with the new payload's "
-                "natural key — use update-intel for in-place edits"
-            ),
-        )
+        if new_id == intel_id:
+            # The natural key matched the existing row; this is an in-place
+            # upsert, not a supersede. Surface it as 409 so the operator can
+            # call update-intel instead.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"supersede target (id={intel_id}) collided with the new payload's "
+                    "natural key — use update-intel for in-place edits"
+                ),
+            )
 
-    with get_connection() as connection:
+        # Cycle guard: if the new row already transitively supersedes back
+        # to ``intel_id`` (because the operator superseded A→B and is now
+        # trying to supersede B→A), the link would close a loop. Reject as
+        # 409 so the operator unwinds the chain instead.
+        if _supersede_chain_reaches(connection, table, engagement.id, new_id, intel_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"supersede would create a cycle: id={new_id} already "
+                    f"transitively supersedes id={intel_id}"
+                ),
+            )
+
         # Capture rationale on the old row's notes when supplied so the audit
         # trail includes why supersede was issued without changing the schema.
         if rationale:
@@ -1007,9 +1184,32 @@ def supersede_intel(
         updated_old = _fetch_intel_row(connection, table, engagement.id, intel_id)
         assert updated_old is not None
 
+        # The notes column may have changed (rationale append) — refresh the
+        # FTS shadow so the appended text becomes searchable. Without this
+        # refresh, the old row keeps its pre-supersede ``body`` blob and the
+        # rationale is invisible to ``intel_search``.
+        normalized_old = _post_process_intel_row(intel_type, updated_old)
+        old_key, old_body = _intel_search_body(intel_type, normalized_old)
+        _upsert_search_index(
+            connection,
+            engagement_id=engagement.id,
+            entity_type=_INTEL_FTS_ENTITY_TYPE[intel_type],
+            source_id=intel_id,
+            key=old_key,
+            body=old_body,
+            source_name=str(updated_old.get("source_name", "")),
+        )
+
+        canonical_id = _resolve_canonical_id(connection, table, engagement.id, intel_id)
+        new_canonical = _resolve_canonical_id(connection, table, engagement.id, new_id)
+
+    superseded_view = _post_process_intel_row(intel_type, updated_old)
+    superseded_view["canonical_id"] = canonical_id
+    current_view = dict(new_row)
+    current_view["canonical_id"] = new_canonical
     return {
-        "superseded": _post_process_intel_row(intel_type, updated_old),
-        "current": new_row,
+        "superseded": superseded_view,
+        "current": current_view,
     }
 
 
@@ -1142,6 +1342,11 @@ def _hydrate_search_record(
     out = _row_to_dict(row)
     if entity_type == "cve":
         out["poc_available"] = bool(out.get("poc_available"))
+    engagement_id = int(out.get("engagement_id") or 0)
+    if engagement_id:
+        out["canonical_id"] = _resolve_canonical_id(
+            connection, table, engagement_id, int(out["id"])
+        )
     return out
 
 

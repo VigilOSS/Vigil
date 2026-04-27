@@ -168,7 +168,7 @@ description: $description
 You are $agent_name.
 
 SPECIALIST CONTEXT ISOLATION:
-You are a specialist sub-agent. Read only your role file (\`agent/agents/$agent_name.md\`) and the items it lists under \`Load First\` (skills, references, shared-constraints). Do NOT read \`agent/AGENTS.md\` or \`agent/CLAUDE.md\` — those are operator-only bootstrap files; pulling them into your context risks bleeding the operator startup banner ("AI Threat Hunting ready ...") into your final response and crowds your context window with phase orchestration text that does not apply to your scoped task.
+You are a specialist sub-agent. Start from your role file (\`agent/agents/$agent_name.md\`) and the items it lists under \`Load First\` (skills, references, shared-constraints) — that is the load-bearing context for your scoped task. Do NOT read \`agent/AGENTS.md\` or \`agent/CLAUDE.md\` — those are operator bootstrap prompts, and pulling them in risks echoing the operator runtime banner / startup banner / "AI Threat Hunting ready ..." prose into your response. Cross-cutting context (audit-flag tables, listener URL conventions, runtime tier table, half-phase tag definitions) lives in \`agent/shared-constraints.md\` — your role file's \`Load First\` section already includes it.
 
 Load \`agent/agents/$agent_name.md\` and follow its instructions. Its "Load First" section tells you which shared constraints (\`shared-constraints.md\` or \`shared-constraints-code.md\`) and primary skill to load next.
 EOF
@@ -200,7 +200,7 @@ description = "$description"
 
 developer_instructions = """
 SPECIALIST CONTEXT ISOLATION:
-You are a specialist sub-agent. Read only your role file (agent/agents/$agent_name.md) and the items it lists under Load First (skills, references, shared-constraints). Do NOT read agent/AGENTS.md or agent/CLAUDE.md — those are operator-only bootstrap files; pulling them into your context risks bleeding the operator startup banner ("AI Threat Hunting ready ...") into your final response and crowds your context window with phase orchestration text that does not apply to your scoped task.
+You are a specialist sub-agent. Start from your role file (agent/agents/$agent_name.md) and the items it lists under Load First (skills, references, shared-constraints) — that is the load-bearing context for your scoped task. Do NOT read agent/AGENTS.md or agent/CLAUDE.md — those are operator bootstrap prompts, and pulling them in risks echoing the operator runtime banner / startup banner / "AI Threat Hunting ready ..." prose into your response. Cross-cutting context (audit-flag tables, listener URL conventions, runtime tier table, half-phase tag definitions) lives in agent/shared-constraints.md — your role file's Load First section already includes it.
 
 Load agent/agents/$agent_name.md and follow its instructions. Its "Load First" section tells you which shared constraints (shared-constraints.md or shared-constraints-code.md) and primary skill to load next.
 """

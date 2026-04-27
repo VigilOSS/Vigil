@@ -1335,27 +1335,46 @@ def update_surface(
     rationale: str | None = None,
     source_name: str | None = None,
     evidence_ref: str | None = None,
+    followup_condition: str | None = None,
 ) -> dict[str, Any]:
     """Patch an assessment_surfaces row by id.
 
     Operators reach this through ``aith assess resolve-surface`` to mark
-    discovered surfaces ``covered``, ``not_applicable``, or ``deferred``.
-    Unspecified fields stay untouched, but at least one mutable field must
-    be supplied so the call records something durable. ``rationale`` is
-    appended (mirrors the upsert behavior of ``_upsert_surface``) so the
-    audit trail accumulates context.
+    discovered surfaces ``covered``, ``not_applicable``, ``deferred``, or
+    ``partially-covered``. Unspecified fields stay untouched, but at least
+    one mutable field must be supplied so the call records something
+    durable. ``rationale`` is appended (mirrors the upsert behavior of
+    ``_upsert_surface``) so the audit trail accumulates context.
     """
     engagement = _engagement_or_404(engagement_id)
-    valid_statuses = {"covered", "not_applicable", "deferred", "discovered"}
+    valid_statuses = {"covered", "not_applicable", "deferred", "discovered", "partially-covered"}
     if status_value is not None and status_value not in valid_statuses:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"invalid surface status '{status_value}'; allowed: {sorted(valid_statuses)}",
         )
-    if all(value is None for value in (status_value, rationale, source_name, evidence_ref)):
+    # Empty strings for source_name / evidence_ref are not a valid clear
+    # signal: callers must pass null to leave the field untouched, or a
+    # real value to set it. The frontend and CLI strip empties before they
+    # reach this layer, so an empty here is a deliberate (but malformed)
+    # call.
+    if source_name is not None and source_name == "":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="update-surface requires at least one of status, rationale, source_name, evidence_ref",
+            detail="source_name cannot be empty; use null to leave unchanged",
+        )
+    if evidence_ref is not None and evidence_ref == "":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="evidence_ref cannot be empty; use null to leave unchanged",
+        )
+    if all(
+        value is None
+        for value in (status_value, rationale, source_name, evidence_ref, followup_condition)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="update-surface requires at least one of status, rationale, source_name, evidence_ref, followup_condition",
         )
 
     with get_connection() as connection:
@@ -1369,26 +1388,84 @@ def update_surface(
                 detail=f"surface id={surface_id} not found",
             )
 
+        current_status = str(existing["status"] or "")
+        # Lifecycle guard: regressions to ``discovered`` from a decided
+        # state (covered / not_applicable) erase audit context. Operators
+        # should mark the surface ``deferred`` to re-queue it instead. The
+        # same applies to ``partially-covered`` → ``discovered`` (audit
+        # context loss).
+        if (
+            status_value is not None
+            and status_value == "discovered"
+            and current_status in {"covered", "not_applicable", "partially-covered"}
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"cannot regress surface from '{current_status}' to "
+                    "'discovered'; use 'deferred' to re-queue"
+                ),
+            )
+
+        # When the operator changes status, rationale is mandatory: the
+        # audit trail must capture the WHY of every transition.
+        if (
+            status_value is not None
+            and status_value != current_status
+            and not (rationale and rationale.strip())
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="rationale required when changing surface status",
+            )
+
+        # ``partially-covered`` requires ``followup_condition`` so the
+        # audit trail names what the next coverage pass must satisfy.
+        if status_value == "partially-covered":
+            if not (followup_condition and followup_condition.strip()):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "followup_condition required when status='partially-covered'"
+                    ),
+                )
+
         assignments: list[str] = []
         params: list[Any] = []
         if status_value is not None:
             assignments.append("status = ?")
             params.append(status_value)
+            # Transitioning OUT of partially-covered into ``covered`` clears
+            # the followup_condition because the follow-up has completed.
+            if (
+                current_status == "partially-covered"
+                and status_value == "covered"
+                and followup_condition is None
+            ):
+                assignments.append("followup_condition = ?")
+                params.append("")
         if rationale is not None:
             existing_rationale = str(existing["rationale"] or "")
             new_rationale = rationale
-            if existing_rationale and rationale and existing_rationale != rationale:
+            if (
+                existing_rationale
+                and rationale
+                and rationale not in existing_rationale
+            ):
                 new_rationale = existing_rationale + "\n" + rationale
-            elif rationale == "":
+            elif rationale == "" or rationale in existing_rationale:
                 new_rationale = existing_rationale
             assignments.append("rationale = ?")
             params.append(new_rationale)
-        if source_name is not None and source_name != "":
+        if source_name is not None:
             assignments.append("source_name = ?")
             params.append(source_name)
-        if evidence_ref is not None and evidence_ref != "":
+        if evidence_ref is not None:
             assignments.append("evidence_ref = ?")
             params.append(evidence_ref)
+        if followup_condition is not None:
+            assignments.append("followup_condition = ?")
+            params.append(followup_condition)
 
         if not assignments:
             raise HTTPException(
@@ -4090,10 +4167,37 @@ def finalize_command_run(
         sets.append("partial_results = ?")
         values.append(1 if partial_results else 0)
         values.append(command_run_id)
-        connection.execute(
-            f"UPDATE assessment_command_runs SET {', '.join(sets)} WHERE id = ?",
+        # Guard against the read→update race when two finalize PATCHes arrive
+        # simultaneously: both can pass the SELECT-based terminal check above,
+        # but the UPDATE must only land when the row is still 'running'. The
+        # loser hits rowcount=0 and is funnelled into the same 409 path with
+        # the canonical row payload that the SELECT-based check uses.
+        cursor = connection.execute(
+            f"UPDATE assessment_command_runs SET {', '.join(sets)} WHERE id = ? AND status = 'running'",
             tuple(values),
         )
+        if cursor.rowcount == 0:
+            current_row = connection.execute(
+                "SELECT * FROM assessment_command_runs WHERE id = ?",
+                (command_run_id,),
+            ).fetchone()
+            if current_row is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="command run not found",
+                )
+            serialized = _serialize_command_run(current_row, include_output=True)
+            serialized["noop"] = True
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        f"command run id={command_run_id} already finalized with "
+                        f"status='{(current_row['status'] or '').strip()}'; refusing to overwrite"
+                    ),
+                    "existing": serialized,
+                },
+            )
         row = connection.execute(
             "SELECT * FROM assessment_command_runs WHERE id = ?",
             (command_run_id,),

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ── Request models ─────────────────────────────────────────
@@ -87,12 +87,38 @@ class CveRecordRequest(_IntelRequestBase):
     validation_status: Literal[
         "unverified",
         "version_match",
-        "ruled_out",
+        "poc_available_unverified",
+        "attempted_blocked",
         "exploited",
+        "ruled_out",
     ] = "unverified"
     linked_finding_slug: str = Field(default="", max_length=256)
     notes: str = Field(default="", max_length=4096)
+    details: dict[str, Any] = Field(default_factory=dict)
     provenance: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("details")
+    @classmethod
+    def _details_size(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # Light-weight upper bound on the details payload — keeps an
+        # accidental dump (e.g., a full PoC scrape) from filling the column.
+        block_reason = value.get("block_reason") if isinstance(value, dict) else None
+        if block_reason is not None:
+            if not isinstance(block_reason, str):
+                raise ValueError("details.block_reason must be a string")
+            if len(block_reason) > 500:
+                raise ValueError("details.block_reason exceeds 500 characters")
+        return value
+
+    @model_validator(mode="after")
+    def _enforce_attempted_blocked_requires_block_reason(self) -> "CveRecordRequest":
+        if self.validation_status == "attempted_blocked":
+            block_reason = (self.details or {}).get("block_reason")
+            if not isinstance(block_reason, str) or not block_reason.strip():
+                raise ValueError(
+                    "details.block_reason is required when validation_status='attempted_blocked'"
+                )
+        return self
 
 
 class DnsRecordRequest(_IntelRequestBase):
@@ -169,6 +195,10 @@ class _IntelResponseBase(BaseModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
     superseded_by_id: int | None = None
     superseded_at: str | None = None
+    # Leaf of the ``superseded_by_id`` chain. Equal to ``id`` when the row
+    # is the current canonical record; the backend walks the chain server-
+    # side so the frontend can render the latest entity in one hop.
+    canonical_id: int | None = None
     created_at: str
     updated_at: str
 

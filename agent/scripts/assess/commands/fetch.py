@@ -54,17 +54,43 @@ def _is_engagement_scoped(endpoint: str) -> bool:
     return head in _ENGAGEMENT_SCOPED_PREFIXES
 
 
-def _apply_jq(expression: str, json_text: str) -> str:
-    """Run ``jq <expression>`` against ``json_text`` and return jq's stdout."""
+_JQ_AVAILABLE: bool | None = None
+
+
+def _jq_is_installed() -> bool:
+    """Cache jq's presence so repeated --jq calls don't re-fork ``jq --version``."""
+    global _JQ_AVAILABLE
+    if _JQ_AVAILABLE is not None:
+        return _JQ_AVAILABLE
     if not shutil.which("jq"):
+        _JQ_AVAILABLE = False
+        return False
+    try:
+        completed = subprocess.run(
+            ["jq", "--version"], capture_output=True, text=True, check=False
+        )
+        _JQ_AVAILABLE = completed.returncode == 0
+    except OSError:
+        _JQ_AVAILABLE = False
+    return _JQ_AVAILABLE
+
+
+def _apply_jq(expression: str, json_text: str, *, compact: bool = False) -> str:
+    """Run ``jq <expression>`` against ``json_text`` and return jq's stdout."""
+    if not _jq_is_installed():
         print(
-            "fetch --jq: `jq` not found on $PATH; install jq or drop --jq",
+            "fetch --jq: `jq` not installed; install with "
+            "`brew install jq` (macOS) or `apt install jq` (Debian/Ubuntu)",
             file=sys.stderr,
         )
         sys.exit(1)
+    argv = ["jq"]
+    if compact:
+        argv.append("-c")
+    argv.append(expression)
     try:
         completed = subprocess.run(
-            ["jq", expression],
+            argv,
             input=json_text,
             capture_output=True,
             text=True,
@@ -98,7 +124,7 @@ def run(args) -> None:
 
     if isinstance(result, str):
         if args.jq:
-            print(_apply_jq(args.jq, result), end="")
+            print(_apply_jq(args.jq, result, compact=args.compact), end="")
         else:
             print(result)
         return
@@ -109,6 +135,6 @@ def run(args) -> None:
         # jq accepts both compact and pretty input; always feed the result
         # as serialised JSON so the expression sees a uniform shape.
         compact_input = json.dumps(result, ensure_ascii=False)
-        print(_apply_jq(args.jq, compact_input), end="")
+        print(_apply_jq(args.jq, compact_input, compact=args.compact), end="")
     else:
         print(json_text)

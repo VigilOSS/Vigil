@@ -11,10 +11,8 @@ from assess.lib.scope import (
     host_from_token,
     host_in_scope,
     host_is_vendor_saas,
-    host_matches_wildcard_only_apex,
     load_scope,
     scope_entries,
-    wildcard_only_entries_lacking_apex,
 )
 
 
@@ -81,17 +79,29 @@ def run(args: argparse.Namespace) -> None:
     scope = load_scope(cfg.engagement_dir)
     entries = scope_entries(scope)
 
-    lines = _read_lines(args.input_file)
-    warned_apexes: set[str] = set()
     warned_vendor_hosts: set[str] = set()
     decided_hosts = _vendor_saas_decided_hosts(cfg.engagement_dir)
-    kept: list[str] = []
-    for line in lines:
-        value = line.strip()
-        if not value or value.startswith("#"):
-            continue
-        host = host_from_token(value)
-        if host_in_scope(host, entries):
+
+    output_handle = None
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_handle = output_path.open("w", encoding="utf-8")
+
+    def _emit(line: str) -> None:
+        if output_handle is not None:
+            output_handle.write(line)
+        else:
+            sys.stdout.write(line)
+
+    try:
+        for line in _iter_lines(args.input_file):
+            value = line.strip()
+            if not value or value.startswith("#"):
+                continue
+            host = host_from_token(value)
+            if not host_in_scope(host, entries):
+                continue
             # Vendor-SaaS scope checkpoint: warn the first time an admitted
             # host's CNAME / rDNS shape matches a vendor SaaS suffix and the
             # operator has not yet recorded a scope_decision in the registry.
@@ -108,42 +118,18 @@ def run(args: argparse.Namespace) -> None:
                         f"Surface to operator before recon dispatch.",
                         file=sys.stderr,
                     )
-            kept.append(line)
-            continue
-        # Strict apex semantics: emit a one-line warning the first time we see
-        # an apex host that would have matched under the old wildcard-only
-        # semantics. The line is still excluded from output — the warning is
-        # advisory so the operator can add an explicit apex entry if needed.
-        normalized = host.rstrip(".").lower() if host else ""
-        if normalized and normalized not in warned_apexes and host_matches_wildcard_only_apex(host, scope):
-            warned_apexes.add(normalized)
-            wildcard_label = _wildcard_label_for(scope, normalized)
-            print(
-                f"WARN: {value} matches {wildcard_label} but bare apex is excluded by "
-                f"strict semantics. To include the apex, add '{normalized}' as an "
-                f"explicit scope entry.",
-                file=sys.stderr,
-            )
-
-    rendered = "".join(kept)
-    if args.output:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(rendered, encoding="utf-8")
-    else:
-        sys.stdout.write(rendered)
+            _emit(line)
+    finally:
+        if output_handle is not None:
+            output_handle.close()
 
 
-def _read_lines(input_file: str) -> list[str]:
+def _iter_lines(input_file: str):
+    """Yield input lines (with line terminators) without buffering the whole stream."""
     if input_file == "-":
-        return sys.stdin.readlines()
-    return Path(input_file).read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-
-
-def _wildcard_label_for(scope: dict, apex_host: str) -> str:
-    """Return the matching wildcard scope entry text for the warning, or a fallback."""
-    for raw in wildcard_only_entries_lacking_apex(scope):
-        stripped = raw.strip()
-        if stripped.startswith("*.") and stripped[2:].rstrip(".").lower() == apex_host:
-            return stripped
-    return f"*.{apex_host}"
+        for line in sys.stdin:
+            yield line
+        return
+    with Path(input_file).open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            yield line

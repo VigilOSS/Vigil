@@ -16,10 +16,12 @@ into concrete, prioritized surface area for follow-on testing.
 - `agent/rules/hunting.md`
 - `agent/SKILL.md`
 - `agent/skills/web-recon/SKILL.md`
-- `agent/skills/port-scanning/SKILL.md` — ALWAYS load. Port + service enumeration is a mandatory recon step (see Recon Sequence below); the per-batch port-data presence assertion lives in this skill.
-- `agent/skills/nuclei-scanning/SKILL.md` — ALWAYS load. The reactive sweep against the URL delta this dispatch produces is mandatory, not optional.
-- `agent/skills/directory-fuzzing/SKILL.md` — ALWAYS load. The L1 wordlist + tech-extension pass is mandatory per host.
+- `agent/skills/port-scanning/SKILL.md` — DEFAULT-load for full Phase 1 dispatches. Port + service enumeration is the standard recon step (see Recon Sequence below); the per-batch port-data presence assertion lives in this skill.
+- `agent/skills/nuclei-scanning/SKILL.md` — DEFAULT-load for full Phase 1 dispatches. The reactive sweep against the URL delta is the standard close-out.
+- `agent/skills/directory-fuzzing/SKILL.md` — DEFAULT-load for full Phase 1 dispatches. The L1 wordlist + tech-extension pass is the standard endpoint-discovery step.
 - `agent/skills/subdomain-enumeration/SKILL.md` — MANDATORY when scope.json `hosts` contains any `*.domain` wildcard entry (Phase 1a). The skill carries the tooling preflight, the resource-tier rate profiles, the staged Phase 0/1/2/3 composition, and the bound rules. Without it, brute force runs at default rates against CDN-fronted apex DNS, the wildcard ratio is never measured, and bound rules never fire — so the agent burns runtime CPU on diminishing returns and never stops. Skip when scope.json contains only bare hosts; wildcard expansion is owned by Phase 1a, not by every recon dispatch.
+
+**Load-First escape hatch (hypothesis-driven half-phase recon-pivot dispatches).** When the dispatch declares `dispatch_mode=hypothesis-driven` plus a narrow objective (e.g. "fingerprint api.foo.com only — recon-pivot half-phase"), any of the four DEFAULT-load skills (`web-recon`, `port-scanning`, `nuclei-scanning`, `directory-fuzzing`) may be marked `not-applicable` with a one-line rationale in `#### Coverage Gaps`. Full Phase-1a-bootstrap dispatches keep the four-skill default.
 
 ## Pre-Work Checkpoint
 
@@ -30,9 +32,9 @@ Before starting any target-facing work, verify:
 3. You read each skill's `## Extended Resources` section and loaded the listed payload/checklist references — including `agent/references/tools/recon/nmap.md`, `agent/references/tools/recon/wafw00f.md`, `agent/references/tools/recon/nikto.md`, and `agent/references/tools/fuzzing/ffuf.md`.
 4. You read `scope.json` and confirmed the in-scope hosts plus the active `exploit_policy` before making any target-facing decisions
 5. You have the dispatch context (target URL, phase, task objective, prior findings)
-6. You checked command history as a coverage map — `aith assess list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what recon has already been done on this target so your next probes pick angles that haven't been covered — different nmap scripts, a different wordlist, different subdomain sources, different VHost probes. The only probe to skip is an identical command against identical input; any variant is new coverage. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output answers your question. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+6. You checked command history as a coverage map — `aith assess list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Pick angles that haven't been covered — different nmap scripts, a different wordlist, different subdomain sources, different VHost probes. The only probe to skip is an identical command against identical input; any variant is new coverage. Before citing a prior run, fetch its preview with `get-command-run <id>` — `success=true` only means `return_code=0`. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
-If any of these are missing, STOP and load them now. Working without the skills and references means working without methodology — your recon quality will be significantly lower, and downstream specialists cannot test what your pass missed.
+If any item is missing, STOP and load it. Without the skills and references your recon quality drops and downstream specialists cannot test what your pass missed.
 
 ## Why Recon Completeness Matters
 
@@ -71,16 +73,17 @@ httpx wastes wordlist budget on dead hosts):
 
 1. **`wafw00f`** — identify the WAF tier first; the result drives the rate-limit choice for
    nmap, httpx, ffuf, and nuclei.
-2. **`nmap`** — port + service enumeration. Use the `.gov` / firewalled / multi-host profile
-   from `agent/skills/port-scanning/SKILL.md` when the WAF tier or shared infrastructure
+2. **`nmap`** — port + service enumeration. Use the cautious-tier profile
+   (CDN-fronted / WAF-protected / rate-limited regulated targets) from
+   `agent/skills/port-scanning/SKILL.md` when the WAF tier or shared infrastructure
    warrants it. Extract TLS SAN hosts and rDNS vendor identification before moving on.
 3. **`httpx`** — confirm live web targets with `-tech-detect -title -tls-grab -status-code
    -server`. Capture the `Server:` header, basic-auth realm, and OPTIONS/`DAV:` indicators —
    those are the trigger inputs for the conditional nikto step.
 4. **`whatweb`** — second-source technology fingerprint. Cross-validate httpx; the union is
    the input to the conditional nikto trigger logic.
-5. **`nuclei`** — mandatory curated template pass: `-t cves/ -t exposures/
-   -t misconfiguration/ -t default-logins/ -t exposed-panels/ -t technologies/`. Run via the
+5. **`nuclei`** — mandatory curated template pass: `-t http/cves/,http/exposures/,http/misconfiguration/,http/default-logins/,http/exposed-panels/,http/technologies/`.
+   The `http/` prefix scopes the pass to HTTP templates. Run via the
    reactive-sweep procedure in `agent/skills/nuclei-scanning/SKILL.md` against the URL delta
    this dispatch produces, so template hits become intel/finding candidates *before* Phase 3.
 6. **`ffuf`** (or `feroxbuster` for recursive) — directory fuzz with the L1 wordlist
@@ -141,8 +144,8 @@ specific blocker in `#### Coverage Gaps` so the operator can re-dispatch with de
 - [ ] **whatweb** ran on each live web target; tech fingerprint cross-validated against
   httpx output.
 - [ ] **nuclei** reactive sweep ran against the URL delta this dispatch produced with the
-  curated template set (`-t cves/ -t exposures/ -t misconfiguration/ -t default-logins/
-  -t exposed-panels/ -t technologies/`); template hits triaged into intel/findings.
+  curated template set (`-t http/cves/,http/exposures/,http/misconfiguration/,http/default-logins/,http/exposed-panels/,http/technologies/`);
+  template hits triaged into intel/findings.
 - [ ] **ffuf / feroxbuster** directory fuzz ran with the L1 wordlist
   (`raft-small-directories.txt`) plus tech-extension variants for the identified stack.
 - [ ] **nikto** trigger evaluation completed: every live host's fingerprint was compared
@@ -196,54 +199,34 @@ specific blocker in `#### Coverage Gaps` so the operator can re-dispatch with de
 - [ ] JavaScript files listed for source-analyzer handoff
 - [ ] Obvious API base URLs or secrets visible in page source noted
 
-### Wildcard-Apex Scope Warning
-
-When `scope.json` has wildcard-only entries (e.g., `*.example.test` without a sibling
-bare-apex entry) AND your crawl output includes apex URLs (`https://example.test/...`),
-surface a structured warning in the return payload — strict apex-wildcard semantics
-exclude the bare apex, so silently ingesting or silently dropping the apex hides a
-scope decision the operator must make. Add a `scope_warnings` array to the structured
-return with one entry per affected apex:
-
-```
-"scope_warnings": [
-  {
-    "kind": "wildcard-only-no-apex",
-    "wildcard_entry": "*.example.test",
-    "apex_host": "example.test",
-    "apex_url_samples": ["https://example.test/", "https://example.test/login"],
-    "recommendation": "Add 'example.test' as an explicit scope entry to admit the apex, or treat as out-of-scope per VDP."
-  }
-]
-```
-
-The operator turns each `scope_warnings` row into the Wildcard-Apex Checkpoint
-(numbered choice presented to the user) before continuing to Phase 2. Do not
-silently ingest apex URLs against a wildcard-only scope and do not silently drop
-them — the operator needs the structured warning to record the user's choice.
-
 ### Coverage Gap Declaration Rule
 
-A skipped methodology step is a hard failure of this dispatch — not an acceptable
-"declared gap." Before producing output, rerun any missing mandatory step
-(`wafw00f → nmap → httpx → whatweb → nuclei → ffuf → conditional nikto`) unless an
+A skipped methodology step is a hard failure of this dispatch UNLESS the dispatch context
+explicitly authorized the skip via `dispatch_mode` plus a stated rationale (see the
+Load-First escape hatch above and the "Declare-alternate-ordering" clause in
+`agent/skills/web-recon/SKILL.md`). Before producing output, rerun any missing default step
+(`wafw00f → nmap → httpx → whatweb → nuclei → ffuf → conditional nikto`) unless either an
 environmental blocker (target unreachable, WAF lockout, tool missing from runtime image)
-makes the rerun impossible. Only then declare the gap in `#### Coverage Gaps` with:
+makes the rerun impossible OR the dispatch authorized the skip. Declare every skip in
+`#### Coverage Gaps` with:
 
-- Which mandatory step was missed
-- Why the step could not run (specific blocker, not "deprioritized")
+- Which default step was missed
+- Why the step could not run OR the dispatch-mode + rationale that authorized the skip
 - Recommended follow-up action for the operator (which `aith assess kali` retry profile,
   which credentials, which alternate tool)
 
 The operator uses `#### Coverage Gaps` to decide whether to re-dispatch you with a
-targeted objective before leaving Phase 1. An empty gaps section means every mandatory
+targeted objective before leaving Phase 1. An empty gaps section means every default
 tool ran AND every checklist item is verified — not "I assumed it was fine." A populated
-gaps section means a mandatory step genuinely could not run; the operator will
-re-dispatch.
+gaps section means a step was either blocked or scoped out by the dispatch; the operator
+decides whether to re-dispatch.
 
 ## Output Contract
 
-Return concise structured output with these sections:
+The required output sections are scoped to the dispatch shape so half-phase pivots do not
+have to fabricate empty sections.
+
+**Full Phase-1a-bootstrap dispatches** (default — wildcard or apex Phase 1) emit:
 
 - `#### Summary`
 - `#### Stats`
@@ -252,10 +235,21 @@ Return concise structured output with these sections:
 - `#### Top API / Object Reference Paths`
 - `#### Tech Stack`
 - `#### Coverage Gaps` — REQUIRED. Declare every self-check item you could NOT complete. If none, state "No coverage gaps — all self-check items completed."
-- `#### Scope Warnings` — REQUIRED when crawl output yields apex URLs against wildcard-only scope; otherwise omit. Use the structured `scope_warnings` array shape from "Wildcard-Apex Scope Warning" above so the operator can route each row to the Wildcard-Apex Checkpoint.
 - `#### Findings`
 - `#### Intelligence`
 - `#### Recommended Phase 3 Ordering`
+
+**Hypothesis-driven half-phase recon-pivot dispatches** (e.g., "fingerprint api.foo.com only —
+recon-pivot half-phase") emit only the load-bearing sections:
+
+- `#### Findings`
+- `#### Tech Stack`
+- `#### Coverage Gaps`
+
+The narrower output matches the narrower scope: a recon-pivot dispatch is solving a single
+hypothesis (often one host, one stack), so the `#### Surface Candidates` /
+`#### Recommended Phase 3 Ordering` sections would be empty pass-through. Use the full
+template only when the dispatch produced full-phase coverage.
 
 `#### Surface Candidates` should be directly ingestible by the operator into durable surface state.
 `#### Coverage Gaps` is read by the operator to decide whether Phase 1 needs a targeted depth pass.

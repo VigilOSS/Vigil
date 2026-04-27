@@ -20,10 +20,11 @@ import argparse
 import json
 import sys
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.intel_types import INTEL_TYPES
 from assess.lib.json_inputs import parse_json_argument
+from assess.lib.schema_validation import collect_patch_validation_errors, load_schema
 
 
 def register(subparsers) -> None:
@@ -61,7 +62,7 @@ def run(args) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    _, endpoint_segment = INTEL_TYPES[args.intel_type]
+    schema_name, endpoint_segment = INTEL_TYPES[args.intel_type]
 
     raw_payload = args.inline_payload if args.inline_payload is not None else args.payload
     if raw_payload is None:
@@ -83,6 +84,17 @@ def run(args) -> None:
         print("update-intel: payload must be a non-empty JSON object", file=sys.stderr)
         sys.exit(1)
 
+    # Patch-mode validation surfaces typos (`source` -> `source_name`) before
+    # the HTTP roundtrip; the backend whitelist still has the final say on
+    # which fields are actually updatable.
+    schema = load_schema(schema_name)
+    errors = collect_patch_validation_errors(patch_payload, schema)
+    if errors:
+        print(f"update-intel {args.intel_type}: payload failed schema validation:", file=sys.stderr)
+        for error in errors:
+            print(f"  - {error}", file=sys.stderr)
+        sys.exit(1)
+
     cfg = load_config(args.engagement_dir)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
@@ -94,7 +106,11 @@ def run(args) -> None:
             f"{client._engagement_prefix}/intel/{quote(endpoint_segment)}/{int(args.intel_id)}"
         )
         body = json.dumps({"payload": patch_payload}, ensure_ascii=True).encode("utf-8")
-        _, resp_body = client._request("PATCH", path, body=body)
+        try:
+            _, resp_body = client._request("PATCH", path, body=body)
+        except AssessError as exc:
+            _maybe_explain_409(exc)
+            raise
         try:
             record = json.loads(resp_body)
         except json.JSONDecodeError:
@@ -103,3 +119,15 @@ def run(args) -> None:
         client.close()
 
     print(json.dumps(record, indent=2, ensure_ascii=False))
+
+
+def _maybe_explain_409(exc: AssessError) -> None:
+    msg = str(exc)
+    if not msg.startswith("HTTP 409"):
+        return
+    print(
+        "update-intel: backend rejected with HTTP 409 (natural-key collision).\n"
+        "  Hint: use `aith assess supersede-intel <type> <id> ...` when the new "
+        "payload would change the natural key and you want the prior row retained for audit.",
+        file=sys.stderr,
+    )

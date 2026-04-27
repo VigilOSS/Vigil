@@ -606,6 +606,10 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
   const [sourceFilters, setSourceFilters] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
   const [cmdOpen, setCmdOpen] = useState(false);
+  // When true, rows whose ``superseded_by_id`` is set are filtered out
+  // client-side. Default off so the audit trail remains visible by default;
+  // operators flip this on to mirror the report-writer view.
+  const [hideSuperseded, setHideSuperseded] = useState(false);
 
   // Secondary lookups (FTS search + by-URL).
   const [fts, setFts] = useState<IntelSearchHit[] | null>(null);
@@ -803,6 +807,7 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
       if (entityFilters.size && !entityFilters.has(d.entity)) return false;
       if (statusFilters.size && !statusFilters.has(d.status || "__none__")) return false;
       if (sourceFilters.size && !sourceFilters.has(d.source || "__none__")) return false;
+      if (hideSuperseded && d.supersededById != null) return false;
       if (!matchesQuery(d, parsedQuery)) return false;
       return true;
     });
@@ -814,12 +819,20 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
       return a.title.localeCompare(b.title);
     });
     return list;
-  }, [derivedList, entityFilters, statusFilters, sourceFilters, parsedQuery, matchesQuery]);
+  }, [
+    derivedList,
+    entityFilters,
+    statusFilters,
+    sourceFilters,
+    hideSuperseded,
+    parsedQuery,
+    matchesQuery,
+  ]);
 
   // Reset page when filters change.
   useEffect(() => {
     setPage(0);
-  }, [entityFilters, statusFilters, sourceFilters, query]);
+  }, [entityFilters, statusFilters, sourceFilters, hideSuperseded, query]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   useEffect(() => {
@@ -929,6 +942,10 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
     }
     return c;
   }, [derivedList]);
+  const supersededCount = useMemo(
+    () => derivedList.reduce((acc, d) => acc + (d.supersededById != null ? 1 : 0), 0),
+    [derivedList],
+  );
   const summaryCounts = summary?.counts ?? {};
 
   const toggle = <T,>(set: Set<T>, setter: (s: Set<T>) => void, val: T) => {
@@ -1104,6 +1121,22 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
             <button type="button" className="filter-clear" onClick={clearAll}>
               Clear all ({activeFilterCount})
             </button>
+          )}
+          {supersededCount > 0 && (
+            <label
+              className="filter-chip"
+              style={{ cursor: "pointer", marginLeft: "auto" }}
+              title="Hide rows whose superseded_by_id is set so the list mirrors the report-writer view."
+            >
+              <input
+                type="checkbox"
+                checked={hideSuperseded}
+                onChange={(e) => setHideSuperseded(e.target.checked)}
+                style={{ marginRight: 4 }}
+              />
+              Hide superseded
+              <span className="filter-count">{supersededCount}</span>
+            </label>
           )}
         </div>
 

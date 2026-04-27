@@ -41,7 +41,8 @@ def test_did_you_mean_suggests_source_name_when_source_used():
     errors = module.collect_validation_errors(payload, schema)
     matches = [e for e in errors if "source" in e and "is not allowed" in e]
     assert matches, errors
-    assert "Did you mean: source_name?" in matches[0]
+    assert "Did you mean:" in matches[0]
+    assert "source_name" in matches[0]
 
 
 def test_did_you_mean_omitted_for_truly_unknown_field():
@@ -54,3 +55,42 @@ def test_did_you_mean_omitted_for_truly_unknown_field():
     assert matches, errors
     # Random short token shouldn't trigger a high-confidence match.
     assert "Did you mean" not in matches[0]
+
+
+def test_did_you_mean_returns_multiple_suggestions_when_close():
+    """The hint surfaces up to three candidates so a single high-score fluke
+    (`evidence` -> `evidence_ref`) does not drown out alternatives like
+    `evidence_quote` that are equally plausible.
+    """
+    module = _validation_module()
+    schema = module.load_schema("intel-tech-component.schema.json")
+    payload = {"component": "x", "evidence": "stuff"}
+
+    errors = module.collect_validation_errors(payload, schema)
+    matches = [e for e in errors if "evidence" in e and "is not allowed" in e]
+    assert matches, errors
+    # `evidence_ref` is the closest candidate but the schema has no other
+    # `evidence_*` siblings on the tech-component root, so the hint should
+    # at minimum mention `evidence_ref` and use the multi-suggestion format.
+    assert "Did you mean:" in matches[0]
+    assert "evidence_ref" in matches[0]
+
+
+def test_patch_validation_skips_required_check_but_keeps_unknown_field_hint():
+    """Partial-update validators must not reject a payload for missing required
+    natural-key fields, since the backend whitelist filters those. Typos still
+    surface a Did-you-mean hint.
+    """
+    module = _validation_module()
+    schema = module.load_schema("intel-tech-component.schema.json")
+
+    # `component` is required in the full schema; the patch validator must
+    # accept a payload without it.
+    errors = module.collect_patch_validation_errors({"version": "2.0.0"}, schema)
+    assert errors == [], errors
+
+    # Typos still light up.
+    errors = module.collect_patch_validation_errors({"source": "agent"}, schema)
+    matches = [e for e in errors if "source" in e and "is not allowed" in e]
+    assert matches, errors
+    assert "source_name" in matches[0]

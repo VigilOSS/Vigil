@@ -12,13 +12,20 @@ from __future__ import annotations
 import json
 import sys
 
+from pathlib import Path
+
 from assess.lib.client import AssessError
 from assess.lib.kali import (
     ALLOWED_PHASES,
     PROBE_KIND_ENUM,
     TECHNIQUE_ENUM,
+    _INTENT_MAX_LEN,
+    _resolve_agent_name,
 )
 from assess.lib.kali_jobs import job_list, job_status, job_stop, job_tail, start_job
+
+
+_DEFAULT_JOB_TIMEOUT_SECONDS = 24 * 60 * 60  # 24h hard cap parity with `kali exec` budgets
 
 
 def register(subparsers) -> None:
@@ -30,7 +37,12 @@ def register(subparsers) -> None:
     job_sub.required = False
 
     start = job_sub.add_parser("start", help="Spawn a dtach-supervised job.")
-    start.add_argument("--technique", required=True, help=", ".join(TECHNIQUE_ENUM) if TECHNIQUE_ENUM else "")
+    start.add_argument(
+        "--technique",
+        required=True,
+        choices=list(TECHNIQUE_ENUM) if TECHNIQUE_ENUM else None,
+        help=", ".join(TECHNIQUE_ENUM) if TECHNIQUE_ENUM else "",
+    )
     start.add_argument("--intent", required=True)
     start.add_argument(
         "--probe-kind",
@@ -39,6 +51,22 @@ def register(subparsers) -> None:
         choices=list(PROBE_KIND_ENUM) if PROBE_KIND_ENUM else None,
     )
     start.add_argument("--phase", required=True, choices=list(ALLOWED_PHASES))
+    start.add_argument(
+        "--target-host",
+        dest="target_host",
+        default=None,
+        help="Primary target host the job is acting against (audit metadata).",
+    )
+    start.add_argument(
+        "--timeout",
+        dest="timeout",
+        type=int,
+        default=None,
+        help=(
+            "Wall-clock budget hint in seconds (audit metadata). "
+            f"Defaults to {_DEFAULT_JOB_TIMEOUT_SECONDS}s with a stderr warn when omitted."
+        ),
+    )
     start.add_argument("--destructive", action="store_true")
     start.add_argument("--agent-name", dest="agent_name", required=False, default=None)
     start.add_argument("--container-name", dest="container_name", default="security-research")
@@ -88,19 +116,38 @@ def _print_help_when_missing(args) -> None:
 
 
 def _run_start(args) -> None:
+    intent = args.intent or ""
+    if len(intent) > _INTENT_MAX_LEN:
+        raise AssessError(f"--intent exceeds {_INTENT_MAX_LEN} characters")
+    timeout_value = args.timeout
+    if timeout_value is None:
+        print(
+            "warning: --timeout not provided to `kali job start`; defaulting to "
+            f"{_DEFAULT_JOB_TIMEOUT_SECONDS}s (24h). Pass --timeout SECONDS for a tighter budget.",
+            file=sys.stderr,
+        )
+        timeout_value = _DEFAULT_JOB_TIMEOUT_SECONDS
+    elif timeout_value <= 0:
+        raise AssessError("--timeout must be > 0")
+    resolved_agent = _resolve_agent_name(args.agent_name)
     audit_meta = {
         "technique": args.technique,
-        "intent": args.intent,
+        "intent": intent,
         "probe_kind": args.probe_kind,
         "phase": args.phase,
         "destructive": bool(args.destructive),
-        "agent_name": args.agent_name,
+        "agent_name": resolved_agent or None,
+        "target_host": args.target_host,
+        "timeout_seconds_requested": int(timeout_value),
     }
+    explicit_dir = getattr(args, "engagement_dir", None)
+    engagement_dir = Path(explicit_dir).expanduser().resolve() if explicit_dir else None
     record = start_job(
         list(args.command),
         audit_meta=audit_meta,
         container_name=args.container_name,
         parent_command_run_id=args.parent_command_run_id,
+        engagement_dir=engagement_dir,
     )
     print(json.dumps(record, indent=2, ensure_ascii=False))
 

@@ -129,8 +129,11 @@ def test_aith_engagement_create_emits_scope_summary(tmp_path: Path, capsys) -> N
     assert "wildcard-only entries lacking explicit apex" not in err
 
 
-def test_aith_engagement_create_warns_on_wildcard_only_no_apex(tmp_path: Path, capsys) -> None:
-    """Bootstrap warns when scope has wildcard-only entries without sibling apex."""
+def test_aith_engagement_create_no_warning_under_wildcard_only_scope(
+    tmp_path: Path, capsys
+) -> None:
+    """Wildcard scope admits the bare apex (HackerOne / Bugcrowd / VDP convention),
+    so bootstrap emits no apex warning."""
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
     sandbox_root = install_root / "agent"
@@ -148,8 +151,7 @@ def test_aith_engagement_create_warns_on_wildcard_only_no_apex(tmp_path: Path, c
 
     err = capsys.readouterr().err
     assert "[aith] scope: 1 entries" in err
-    assert "wildcard-only entries lacking explicit apex: *.example.test" in err
-    assert "Add the apex" in err
+    assert "wildcard-only entries lacking explicit apex" not in err
 
 
 def test_aith_engagement_create_no_warning_when_apex_listed_alongside_wildcard(tmp_path: Path, capsys) -> None:

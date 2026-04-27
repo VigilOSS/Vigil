@@ -12,15 +12,35 @@ origin: AI Threat Hunting
 
 ## Tools
 
-The recon methodology is mandatory by default — run every Mandatory step against every live
-in-scope host. Conditional tools only fire when the fingerprint matches their trigger list.
-"Optional only when the target clearly warrants it" is not a recon mode that exists in this
-skill; under-coverage is the most expensive failure path because downstream specialists can
-only test what the recon pass surfaces.
+The recon methodology runs the Default ordering against every live in-scope host for
+unknown internet-facing HTTP targets. The ordering is the default heuristic, not a
+non-negotiable lock — see "Declare-alternate-ordering" below for when an alternate
+ordering is the right call. Conditional tools only fire when the fingerprint matches
+their trigger list.
 
-### Mandatory per target (run for every live host, in this order)
+### Default per target (run for every live host, in this order)
 
 Tool order summary: `wafw00f → nmap → httpx → whatweb → nuclei → ffuf → (nikto IF triggered)`.
+
+### Declare-alternate-ordering
+
+The default ordering applies to unknown internet-facing HTTP targets. A specialist MAY
+declare an alternate ordering at dispatch time when the target shape warrants it, and
+proceed without rerunning the default sequence:
+
+- **IP-only scope** (no DNS surface) — `wafw00f` first is wasted; start with `nmap` for
+  port discovery and let the open-port set drive whether HTTP fingerprinting applies at all.
+- **Non-standard port** (everything on `:8443`/`:9000`/etc.) — `httpx` against the explicit
+  port URL precedes `nmap`; the port set is already known.
+- **Internal / no-WAF target** — skip `wafw00f` (no signal); the rate-limit choice falls
+  through to the no-WAF default from `agent/operator-core.md` "Recon Dispatch Resource Policy".
+- **Reactive sweep on already-fingerprinted stack** — `nuclei` runs against the URL delta
+  without re-running `wafw00f`/`whatweb`; the fingerprint is already in intel.
+
+Record every alternate ordering declaration in `#### Coverage Gaps` (or in a dedicated
+`#### Tool Sequencing` section) with the dispatch-mode and the one-line rationale. The
+declaration is what makes the skip auditable; an undeclared skip remains a hard failure
+of the dispatch.
 
 1. **`wafw00f`** — WAF identification. Run FIRST because the WAF tier drives the rate-limit
    choice for every later tool (nmap, httpx, ffuf, nuclei). See
@@ -36,8 +56,9 @@ Tool order summary: `wafw00f → nmap → httpx → whatweb → nuclei → ffuf 
 4. **`whatweb`** — second-source technology fingerprinting. Cross-validate the httpx
    `-tech-detect` output; whatweb catches stacks httpx misses (and vice versa).
 5. **`nuclei` with curated templates** — mandatory web-vuln pass. Templates:
-   `-t cves/ -t exposures/ -t misconfiguration/ -t default-logins/ -t exposed-panels/
-   -t technologies/`. The reactive sweep procedure lives in
+   `-t http/cves/,http/exposures/,http/misconfiguration/,http/default-logins/,http/exposed-panels/,http/technologies/`.
+   The `http/` prefix scopes the pass to HTTP templates and avoids non-HTTP
+   variants leaking in. The reactive sweep procedure lives in
    `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"; this is the
    web-recon-side reminder that the pass is mandatory, not optional.
 6. **`ffuf` or `feroxbuster` directory fuzz** — minimum L1 wordlist
@@ -71,12 +92,12 @@ hypotheses to the next skill or phase for validation.
 
 ```bash
 # Single host
-aith assess kali wafw00f --target https://TARGET \
+aith assess kali wafw00f https://TARGET \
   --technique RECON --intent "WAF tier identification, drives rate-limit choice for later tools" \
   --probe-kind fingerprint --phase recon --timeout 300
 
 # Multi-host batch
-aith assess kali wafw00f --input-list /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
+aith assess kali wafw00f -i /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
   --technique RECON --intent "WAF tier sweep across in-scope live hosts" \
   --probe-kind fingerprint --phase recon --timeout 1200
 ```
@@ -91,9 +112,7 @@ Map the WAF identity to a rate-limit tier before starting nmap/httpx/ffuf/nuclei
   `-T3 --max-rate 100 --max-retries 2 --host-timeout 300s`, ffuf `-rate 10`, nuclei
   `-rate-limit 25` and `-c 10`.
 
-Full table and detection commands: `agent/references/tools/recon/wafw00f.md`. The
-canonical per-target rate calibration table is in `agent/operator-core.md` "Recon
-Dispatch Resource Policy" — the values above pull from that table.
+Full table and detection commands: `agent/references/tools/recon/wafw00f.md`. The canonical per-target rate calibration table is in `agent/shared-constraints.md` "Per-Target Rate Calibration Table" — the values above pull from that table.
 
 ### Step 0b — Egress reputation check (run AFTER wafw00f, BEFORE nmap)
 
@@ -137,9 +156,9 @@ instead of polluting the work buffer.
 ### Step 1 — Port + Service Scan
 
 ```bash
-aith assess kali nmap-scan --target www.example.gov \
-  --scan-type top-1000 --scripts safe --extra-args "-T3 --max-rate 200 --max-retries 2 --host-timeout 300s" \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_top1000 \
+aith assess kali nmap-scan --target www.example.com \
+  --ports top-1000 --scripts safe --extra-args "-T3 --max-rate 200 --max-retries 2 --host-timeout 300s" \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_top1000 \
   --technique RECON --intent "cautious rate (CDN/WAF-fronted) initial nmap pass" \
   --probe-kind fingerprint --phase recon --timeout 900
 ```
@@ -174,9 +193,10 @@ routinely surface staging hosts and adjacent services that passive sources miss.
 ### Step 2 — httpx Fingerprint
 
 ```bash
-aith assess kali httpx --input-list /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
-  --extra-args "-tech-detect -title -tls-grab -status-code -server -content-length -follow-redirects" \
-  --output /engagements/$ENGAGEMENT_KEY/scans/httpx_fingerprint.jsonl \
+aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
+  -tech-detect -title -tls-grab -status-code \
+  --extra-args "-server -content-length -follow-redirects" \
+  -o /engagements/$ENGAGEMENT_KEY/scans/httpx_fingerprint.jsonl \
   --technique RECON --intent "httpx tech + tls-grab fingerprint" \
   --probe-kind fingerprint --phase recon --timeout 900
 ```
@@ -216,7 +236,7 @@ Sweep Mode" — run that procedure against the URL delta this step produces (htt
 hosts, TLS SAN expansions, vhost-fuzz live hits). The template set:
 
 ```
--t cves/ -t exposures/ -t misconfiguration/ -t default-logins/ -t exposed-panels/ -t technologies/
+-t http/cves/,http/exposures/,http/misconfiguration/,http/default-logins/,http/exposed-panels/,http/technologies/
 ```
 
 Run nuclei reactively after the httpx pass so template hits become intel/finding
@@ -226,10 +246,10 @@ as required, not as the optional "broad scan before exploitation" of older runbo
 ### Step 5 — Directory Fuzzing (mandatory L1 wordlist + tech extensions)
 
 ```bash
-aith assess kali ffuf --target https://TARGET/FUZZ \
-  --wordlist /usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt \
+aith assess kali ffuf -u https://TARGET/FUZZ \
+  -w /usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt \
   --extra-args "-e .php,.html,.js,.txt,.bak,.old,.conf,.xml,.json,.yml,.env,.log,.sql,.zip -ac" \
-  --output /engagements/$ENGAGEMENT_KEY/scans/ffuf_dirs.json \
+  -o /engagements/$ENGAGEMENT_KEY/scans/ffuf_dirs.json -of json \
   --technique RECON --intent "L1 directory fuzz with tech-extension variants" \
   --probe-kind fingerprint --phase recon --timeout 1800
 ```
@@ -251,9 +271,9 @@ Evaluate the trigger fingerprints from `agent/references/tools/recon/nikto.md` a
 the httpx + whatweb output. Run nikto only when at least one trigger fires:
 
 ```bash
-aith assess kali nikto --host www.example.gov --ssl \
+aith assess kali nikto --host www.example.com --ssl \
   -Tuning x60 -Pause 2 -maxtime 300 \
-  -Format json -output /engagements/$ENGAGEMENT_KEY/scans/nikto_www_gov.json \
+  -Format json -output /engagements/$ENGAGEMENT_KEY/scans/nikto_www.json \
   --technique INFO-DISCLOSURE --intent "nikto on legacy IIS/7.5 fingerprint" \
   --probe-kind payload --phase recon --timeout 600
 ```

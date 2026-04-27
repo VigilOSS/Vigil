@@ -20,7 +20,7 @@ origin: AI Threat Hunting
 Before any active step, confirm every binary in the chain is reachable inside the runtime — puredns silently fails when massdns is missing (zero output, no error, exit code 0), and a dnsx fallback against a typical bruteforce wordlist will spike container CPU before stabilizing. Run the preflight once at the top of Phase 1a:
 
 ```bash
-aith assess kali exec -- which massdns puredns dnsx subfinder shuffledns alterx cero asnmap bbot \
+aith assess kali exec -- which alterx asnmap bbot cero dnsx massdns puredns shuffledns subfinder \
   --technique RECON --intent "subdomain-enum tooling preflight" \
   --probe-kind fingerprint --phase recon --timeout 60
 ```
@@ -39,7 +39,7 @@ DNS resolution success-rate parallels the egress reputation problem: if every ho
 
 Subdomain enumeration is the highest-CPU-burst phase of recon. Docker's cgroup limits (`AITH_RUNTIME_MEMORY_GB` / `AITH_RUNTIME_CPUS` / `AITH_RUNTIME_PIDS_LIMIT` / `AITH_RUNTIME_SHM_SIZE` from `.env.example`) bound the burst, but a default rate-limit profile against the wrong target tier still saturates the runtime. Pick the profile by target shape, not by what the apex looks like — wildcards expand the surface and the rate calibration must match the surface, not the seed.
 
-> **Host-CPU note.** DNS bruteforce is the dominant host-CPU and host-network spike in the engagement runtime. massdns sends thousands of UDP packets per second; the host kernel's per-packet network-stack overhead is amplified well beyond what `--cpus` cgroup limits constrain (cgroup CPU limits the userland process, not the host's kernel networking path). Aggressive DNS profiles have crashed Docker on standard laptop hardware. **Default to `polite-residential` everywhere.** Step up to `bursty-OK` only on private/lab resolvers AND with explicit operator opt-in (`--intent "bursty DNS — opted in by operator on private resolver"`). When in doubt, drop a tier.
+> **Host-CPU note.** DNS bruteforce is the dominant host-CPU and host-network spike in the engagement runtime. massdns sends thousands of UDP packets per second; the host kernel's per-packet network-stack overhead is amplified well beyond what `--cpus` cgroup limits constrain (cgroup CPU limits the userland process, not the host's kernel networking path). Aggressive DNS profiles have crashed Docker on Standard-tier hardware. **Default to `polite-residential` everywhere.** `bursty-OK` is gated by runtime tier (see the matrix below); Standard tier never picks it. When in doubt, drop a tier.
 
 Profiles and full tier rationale live in `agent/references/tools/recon/subdomain-enumeration-tools.md`; the three operational tiers below are the load-bearing settings, listed from most cautious (default for any unknown target) down to opt-in only.
 
@@ -48,15 +48,27 @@ Profiles and full tier rationale live in `agent/references/tools/recon/subdomain
 > - `dnsx -rl 100 -t 20 -retry 3 -timeout 5`
 > - Use when: scope target is fronted by a major CDN, has a wildcard DNS that returns canonical CNAMEs, or is a household-name brand.
 
-> **polite-residential default** — small-medium target, public resolvers, Standard runtime tier (8 GB / 4 CPUs). **This is the default for any new engagement** — only step away from it after explicit assessment.
+> **polite-residential default** — small-medium target, public resolvers, available on every runtime tier. **This is the default for any new engagement** — only step away from it after explicit assessment.
 > - `puredns --rate-limit 2500 --wildcard-batch 100000`
 > - `dnsx -rl 300 -t 50 -retry 2`
 > - Use when: bug-bounty scope on residential/SMB infrastructure, shared resolver pool, no specific CDN signal.
 
-> **bursty-OK profile (opt-in only)** — private resolver pool, no shared-infra constraints, target authoritative DNS is generous. **Operator opt-in required** — pass the opt-in note in `--intent` so the audit row records the explicit assessment.
+> **bursty-OK profile (tier-gated)** — private resolver pool, no shared-infra constraints, target authoritative DNS is generous.
 > - `puredns --rate-limit 5000`
 > - `dnsx -rl 500 -t 100`
-> - Use when: private CTF lab, dedicated resolver list (>100 healthy resolvers), single-engagement runtime, AND the operator has explicitly opted in. Higher ceilings have crashed Docker on standard laptop hardware.
+> - Use when: private CTF lab, dedicated resolver list (>100 healthy resolvers), single-engagement runtime.
+
+### Runtime-tier rate ceilings
+
+Read `aith runtime resources` to identify the active tier; the matrix below scales the
+opt-up paths. Standard tier never picks `bursty-OK` (RAM pressure on puredns's
+wildcard-filter dedup map produces silent truncation under heavy bursts on tight cgroups).
+
+| Runtime tier | cautious (`polite-CDN-fronted-target`, 800) | residential (`polite-residential`, 2500) | bursty-OK (5000) |
+|---|---|---|---|
+| Standard (8 GB / 4 CPUs) | available | available | NOT available |
+| Heavy | available | available | opt-in (pass the opt-in note in `--intent`) |
+| Comfortable | available | available | default-available — pick when target shape allows |
 
 When the runtime tier is tighter than Standard (e.g. `AITH_RUNTIME_MEMORY_GB=4`), drop the next tier down regardless of target shape — RAM pressure on puredns's wildcard-filter dedup map produces silent truncation, not a clean OOM.
 
@@ -101,6 +113,8 @@ aith assess kali puredns bruteforce \
 
 Skip Phase 1 entirely when Phase 0 returned >5000 unique subs or the target is a top-tier organization — passive sources have already saturated the namespace and permutation bursts add live hosts at <0.1% rate (see `subdomain-enumeration-tools.md` "When NOT to bruteforce").
 
+Conversely, when Phase 0 returned **0 or fewer than 10 subs**, treat that as a signal that either the configured passive-source API keys are misconfigured (check `${SUBFINDER_*_API_KEY}` env vars) or the target genuinely has no public footprint. In both cases Phase 1 brute is the only signal source — run it, BUT cap it at the cautious-tier rate (`polite-CDN-fronted-target` / `puredns --rate-limit 800`) regardless of target shape, since the wordlist is the only signal and faster rates produce noise rather than coverage. Record the rationale via `aith assess log operator "Phase 0 returned <10 subs — Phase 1 brute @ cautious-tier as sole signal source" "<phase-0 count>" --actor-kind operator`.
+
 ### Phase 2 — Permutation (estimate-first)
 
 `alterx` expands the known-subdomain set 10-100x using built-in patterns. Always run `-enrich -estimate` first to bound the expansion before generating candidates — a 1000-sub input with default patterns can produce 200k+ candidates, and a 5000-sub input can break 500k.
@@ -130,6 +144,25 @@ aith assess kali puredns resolve /engagements/$ENGAGEMENT_KEY/scans/perms.txt \
 
 Abort Phase 2 if the estimate exceeds 500k candidates — narrow the input set first (focus on subdomains that share an apex CNAME or look like staging/dev clusters) instead of resolving a candidate set that will spend hours of runtime CPU for marginal yield.
 
+If `perms_resolved.txt` is empty (alterx produced no expansions or every permutation fell into a wildcard sink), Phase 3 still runs — it consumes `subs_merged.txt` directly, which contains the Phase 0 + Phase 1 union below.
+
+### Phase 2.5 — Merge intermediate outputs
+
+Phase 3 reads from `subs_merged.txt`. Build it once, after Phase 2, by unioning the Phase 0 / Phase 1 / Phase 2 outputs:
+
+```bash
+aith assess kali exec --technique RECON \
+  --intent "Phase 2.5 merge of passive + brute + permutation outputs" \
+  --probe-kind baseline --phase recon --timeout 60 -- bash -c '
+  cat /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
+      /engagements/$ENGAGEMENT_KEY/scans/subs_brute.txt \
+      /engagements/$ENGAGEMENT_KEY/scans/perms_resolved.txt 2>/dev/null \
+    | sort -u > /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt
+'
+```
+
+When a phase did not run (Phase 1 skipped, Phase 2 aborted), the missing file is silently skipped by the redirect and the merge still produces a valid union of the surviving phases.
+
 ### Phase 3 — TLS SAN feedback loop (always-on after 2)
 
 `httpx -tls-grab` and `cero` extract Subject Alternative Names from TLS handshakes. Two complementary patterns:
@@ -139,7 +172,7 @@ Abort Phase 2 if the estimate exceeds 500k candidates — narrow the input set f
 
 ```bash
 # httpx feedback loop
-aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_all.txt \
+aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
   -tls-grab -tls-probe -tech-detect -status-code -title -json \
   -o /engagements/$ENGAGEMENT_KEY/scans/httpx_tls.jsonl \
   --technique DISCOVERY --intent "Phase 3 TLS SAN harvest via httpx -tls-grab" \
@@ -151,7 +184,7 @@ aith assess kali asnmap -d target.example -silent \
   --technique OSINT --intent "Phase 3 ASN → CIDR mapping for cero feed" \
   --probe-kind fingerprint --phase recon --timeout 300
 
-aith assess kali cero -d /engagements/$ENGAGEMENT_KEY/scans/target_cidrs.txt \
+aith assess kali cero -l /engagements/$ENGAGEMENT_KEY/scans/target_cidrs.txt \
   -p 443,8443,9443 -c 100 -t 4 \
   -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans.txt \
   --technique OSINT --intent "Phase 3 TLS SAN scrape across owned CIDRs" \
@@ -251,7 +284,7 @@ After staged enumeration, run the live-host filter pipeline before ingesting sub
 
 ```bash
 # Stage 1: HTTP probing with httpx
-aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_all.txt \
+aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
   -status-code -title -tech-detect -server -content-length -follow-redirects -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/subdomains_live.txt \
   --technique DISCOVERY --intent "live-host confirmation on merged sub list" \
@@ -278,7 +311,7 @@ After ingestion, the operator triggers a reactive nuclei sweep against the newly
 
 ## Extended Resources
 
-- `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table; the DNS-brute column gates puredns/shuffledns invocations.
+- `agent/shared-constraints.md` "Per-Target Rate Calibration Table" — canonical per-target rate calibration; the DNS-brute column gates puredns/shuffledns invocations. Tier-pick prose lives in `agent/operator-core.md` "Recon Dispatch Resource Policy".
 - `agent/references/tools/recon/subdomain-enumeration-tools.md` — comparison matrix, API-key value-for-cost, puredns rate guidance, alterx permutation chain, cero CIDR-feed, bbot passive preset, when-not-to-bruteforce signals.
 - `agent/skills/kali-exec/SKILL.md` — Phase A→D workflow with example invocations (kali-cli foundational skill).
 - `agent/references/tools/recon/puredns.md` — massdns dependency, wildcard tuning, rate-limit ceilings.

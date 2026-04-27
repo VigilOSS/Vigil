@@ -59,10 +59,17 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "-en",
+        "-enrich",
         "--enrich",
         dest="enrich",
         action="store_true",
-        help="-en enrich permutations from input.",
+        help="-enrich (-en) enrich permutations from input.",
+    )
+    p.add_argument(
+        "-estimate",
+        dest="estimate",
+        action="store_true",
+        help="-estimate print candidate count without generating output (always run before -limit).",
     )
     p.add_argument(
         "-limit",
@@ -92,6 +99,8 @@ def run(args) -> None:
         cmd.extend(["-pp", payload])
     if args.enrich:
         cmd.append("-en")
+    if args.estimate:
+        cmd.append("-estimate")
     if args.limit:
         cmd.extend(["-limit", str(args.limit)])
     if args.output:

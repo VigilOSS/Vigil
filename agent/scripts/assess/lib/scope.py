@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -113,27 +112,31 @@ def banner_matches_vendor_saas(banner: str | None) -> str | None:
     return None
 
 
-# AITH_STRICT_APEX_WILDCARD gates whether wildcard-only entries match the bare
-# apex. Default ON: ``*.example.test`` matches ``sub.example.test`` and deeper,
-# but NOT the bare ``example.test`` apex — the apex must be listed explicitly
-# (``example.test`` or ``https://example.test/*``) for the operator to assert
-# VDP authorization on it. Set ``AITH_STRICT_APEX_WILDCARD=0`` (or ``false`` /
-# ``no`` / ``off``) to opt back into the legacy apex-permissive behavior for
-# one cycle while migrating an existing engagement.
-#
-# Deprecation horizon: the opt-out flag is removed in the next minor release;
-# the strict semantics become the only behavior. Migrate existing scopes by
-# adding an explicit apex entry alongside any wildcard-only entry whose apex
-# you intend to authorize.
-_STRICT_APEX_WILDCARD_ENV = "AITH_STRICT_APEX_WILDCARD"
+def _to_a_label(host: str) -> str:
+    """Return the A-label (punycode) form of a hostname, lowercased.
+
+    IDN scope entries can be authored as U-labels (``café.test``) while
+    incoming hostnames arrive A-label-encoded (``xn--caf-dma.test``) or
+    vice versa. Comparing the raw strings would miss the match. Falling
+    back to the input on encode failure preserves IP literals and other
+    non-IDNA strings.
+    """
+    if not host:
+        return ""
+    cleaned = host.strip().rstrip(".").lower()
+    if not cleaned:
+        return ""
+    try:
+        return cleaned.encode("idna").decode("ascii").lower()
+    except (UnicodeError, UnicodeDecodeError):
+        return cleaned
 
 
-def strict_apex_wildcard_enabled() -> bool:
-    """Return True when wildcard-only entries must NOT match the bare apex."""
-    raw = os.environ.get(_STRICT_APEX_WILDCARD_ENV, "").strip().lower()
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    return True
+def _normalize_host_for_match(host: str) -> str:
+    """Return a normalized host suitable for scope matching (lowercase, no trailing dot, A-label)."""
+    if not host:
+        return ""
+    return _to_a_label(host)
 
 
 def normalize_scope_payload(scope: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -189,9 +192,8 @@ def scope_entries(scope: dict[str, Any]) -> list[dict[str, str]]:
 
     Entries use the same coarse semantics as ``check-scope-coverage``: URL
     entries collapse to their host, bare hosts match exactly, and wildcards
-    match subdomains only. Bare apex inclusion requires an explicit scope
-    entry (``example.test`` or ``https://example.test/*`` listed alongside
-    the wildcard) — the apex is NOT covered by ``*.example.test`` on its own.
+    match the bare apex AND every subdomain (HackerOne / Bugcrowd / VDP
+    convention).
     """
     raw_hosts = scope.get("hosts") or []
     if not isinstance(raw_hosts, list):
@@ -212,7 +214,7 @@ def classify_scope_entry(raw: str) -> dict[str, str] | None:
         return None
 
     if stripped.startswith("*.") and len(stripped) > 2:
-        host = stripped[2:].strip().rstrip(".").lower()
+        host = _to_a_label(stripped[2:])
         if not host:
             return None
         return {
@@ -223,7 +225,7 @@ def classify_scope_entry(raw: str) -> dict[str, str] | None:
 
     if "://" in stripped:
         try:
-            host = (urlsplit(stripped).hostname or "").rstrip(".").lower()
+            host = _to_a_label(urlsplit(stripped).hostname or "")
         except ValueError:
             return None
         if not host:
@@ -240,7 +242,7 @@ def classify_scope_entry(raw: str) -> dict[str, str] | None:
     return {
         "scope_entry": stripped,
         "entry_kind": "bare_host",
-        "host": host,
+        "host": _to_a_label(host) or host,
     }
 
 
@@ -325,87 +327,19 @@ def looks_like_host(host: str) -> bool:
 def entry_matches_host(entry: dict[str, str], host: str) -> bool:
     """Return True when ``host`` is covered by this scope entry.
 
-    Wildcard semantics under strict mode (the default): ``*.example.test``
-    matches ``sub.example.test`` and deeper subdomains, but NOT the bare
-    ``example.test`` apex. Bare apex inclusion requires an explicit scope
-    entry (``example.test`` or ``https://example.test/*``) listed alongside
-    the wildcard. Set ``AITH_STRICT_APEX_WILDCARD=0`` to fall back to the
-    legacy apex-permissive behavior for a migration cycle; this opt-out is
-    scheduled for removal in the next minor release.
-
-    The legacy variants of this helper supported one or two argument orders
-    in the codebase. We accept both ``entry_matches_host(entry, host)`` and
-    ``entry_matches_host(host, entry_or_scope)`` so callers don't have to be
-    rewritten — the dict form is detected and handled.
+    Wildcard semantics: ``*.example.test`` matches the bare ``example.test``
+    apex AND every subdomain (HackerOne / Bugcrowd / VDP convention).
     """
     if not host:
         return False
-    normalized = host.rstrip(".").lower()
+    normalized = _normalize_host_for_match(host)
     entry_host = entry["host"]
     if entry["entry_kind"] == "wildcard":
         if normalized.endswith("." + entry_host):
             return True
-        if normalized == entry_host:
-            return not strict_apex_wildcard_enabled()
-        return False
+        return normalized == entry_host
     return normalized == entry_host
 
 
 def host_in_scope(host: str, entries: list[dict[str, str]]) -> bool:
     return any(entry_matches_host(entry, host) for entry in entries)
-
-
-def wildcard_only_entries_lacking_apex(scope: dict[str, Any]) -> list[str]:
-    """Return wildcard host strings whose apex has no explicit scope entry.
-
-    Given a scope object, this walks the ``hosts`` list and returns each
-    raw wildcard string (e.g. ``*.example.test``) for which the apex
-    (``example.test``) has no companion explicit entry — neither a bare
-    host nor a URL-form entry. Callers use this to surface the warning
-    described in the strict apex-wildcard semantics: such entries used to
-    silently match the apex and now do not.
-
-    Returned strings are the raw scope entries as written in scope.json so
-    the operator can find and edit them directly. The order matches the
-    order they appear in ``scope["hosts"]``; duplicates are not collapsed
-    so the operator sees every authoring location.
-    """
-    raw_hosts = scope.get("hosts") if isinstance(scope, dict) else None
-    if not isinstance(raw_hosts, list):
-        return []
-
-    explicit_apex_hosts: set[str] = set()
-    wildcard_seen: list[tuple[str, str]] = []
-    for item in raw_hosts:
-        if not isinstance(item, str):
-            continue
-        entry = classify_scope_entry(item)
-        if entry is None:
-            continue
-        if entry["entry_kind"] == "wildcard":
-            wildcard_seen.append((item, entry["host"]))
-        else:
-            explicit_apex_hosts.add(entry["host"])
-
-    return [raw for raw, host in wildcard_seen if host not in explicit_apex_hosts]
-
-
-def host_matches_wildcard_only_apex(host: str, scope: dict[str, Any]) -> bool:
-    """Return True when ``host`` would have matched a wildcard-only scope entry.
-
-    Used by callers that need to detect "would-have-matched-under-old-semantics"
-    cases for warning emission. Returns True if ``host`` equals the apex of
-    any wildcard scope entry that has no explicit apex companion. Strict mode
-    excludes such hosts from in-scope matching, so this helper exposes the
-    informational gap without changing matching semantics.
-    """
-    if not host:
-        return False
-    normalized = host.rstrip(".").lower()
-    for raw in wildcard_only_entries_lacking_apex(scope):
-        entry = classify_scope_entry(raw)
-        if entry is None:
-            continue
-        if normalized == entry["host"]:
-            return True
-    return False

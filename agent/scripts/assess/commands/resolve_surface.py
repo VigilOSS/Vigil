@@ -35,6 +35,7 @@ def register(subparsers) -> None:
             "  aith assess resolve-surface 42 --status covered --rationale \"vulnerability-analyst confirmed coverage\"\n"
             "  aith assess resolve-surface 99 --status not_applicable --rationale \"static asset, no input vector\"\n"
             "  aith assess resolve-surface 17 --status deferred --rationale \"low-signal, revisit after Phase 5\"\n"
+            "  aith assess resolve-surface 31 --status partially-covered --rationale \"unauth path tested\" --followup-condition \"needs auth re-test\"\n"
             f"\nValid statuses: {valid_statuses}"
         ),
     )
@@ -42,12 +43,14 @@ def register(subparsers) -> None:
     p.add_argument(
         "--status",
         required=True,
-        help=f"New surface status ({valid_statuses})",
+        choices=sorted(RESOLVABLE_STATUSES),
+        type=lambda s: s.lower(),
+        help=f"New surface status ({valid_statuses}). Case-insensitive.",
     )
     p.add_argument(
         "--rationale",
-        default="",
-        help="Reason for the resolution; appended to existing rationale for the audit trail",
+        required=True,
+        help="Reason for the resolution; appended to existing rationale for the audit trail. Required.",
     )
     p.add_argument(
         "--source-name",
@@ -59,19 +62,35 @@ def register(subparsers) -> None:
         default="",
         help="Optional new evidence reference (e.g. command-run id, scan path)",
     )
+    p.add_argument(
+        "--followup-condition",
+        default="",
+        help=(
+            "Required when --status=partially-covered: one-line description of the "
+            "condition the follow-up coverage pass must satisfy (e.g., 'needs auth re-test')."
+        ),
+    )
     p.set_defaults(func=run)
 
 
 def run(args) -> None:
     validate_resolution_status(args.status)
+    if not args.rationale.strip():
+        sys.exit("--rationale must be non-empty")
 
-    payload: dict = {"status": args.status}
-    if args.rationale:
-        payload["rationale"] = args.rationale
+    if args.status == "partially-covered" and not args.followup_condition.strip():
+        sys.exit(
+            "--followup-condition is required when --status=partially-covered "
+            "(one-line description of what the follow-up coverage pass must satisfy)"
+        )
+
+    payload: dict = {"status": args.status, "rationale": args.rationale}
     if args.source_name:
         payload["source_name"] = args.source_name
     if args.evidence_ref:
         payload["evidence_ref"] = args.evidence_ref
+    if args.followup_condition:
+        payload["followup_condition"] = args.followup_condition
 
     cfg = load_config(args.engagement_dir)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)

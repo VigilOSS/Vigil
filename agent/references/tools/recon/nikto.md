@@ -20,9 +20,9 @@ If none of these match, skip nikto entirely. The reactive nuclei sweep already c
 
 ```bash
 aith assess kali nikto \
-  --host www.example.gov --ssl \
+  --host www.example.com --ssl \
   -Tuning x60 -Pause 2 -maxtime 300 \
-  -Format json -output /engagements/$ENGAGEMENT_KEY/scans/nikto_www_gov.json \
+  -Format json -output /engagements/$ENGAGEMENT_KEY/scans/nikto_www.json \
   --technique INFO-DISCLOSURE --intent "nikto on legacy IIS/7.5 fingerprint" \
   --probe-kind payload --phase recon --timeout 600
 ```
@@ -63,7 +63,7 @@ The full tuning category list (use only when researching a specific check class)
 
 ## Pause and rate control
 
-`-Pause N` inserts N seconds between requests. `.gov` and other rate-sensitive targets need `-Pause 2` (or higher). For default-tier WAF-fronted targets, `-Pause 1` is usually enough. Combine with `-maxtime 300` (5-minute wall-clock cap) so the scan ends before WAF lockout windows.
+`-Pause N` inserts N seconds between requests. Cautious-tier (rate-limited / regulated) targets need `-Pause 2` (or higher). For default-tier WAF-fronted targets, `-Pause 1` is usually enough. Combine with `-maxtime 300` (5-minute wall-clock cap) so the scan ends before WAF lockout windows.
 
 ## Eight evasion modes — `-evasion <mode>`
 
@@ -82,17 +82,17 @@ When standard nikto requests trip the WAF, switch evasion mode. Each mode encode
 
 Combine modes by adding the digits (e.g. `-evasion 124` for modes 1, 2, and 4). Most WAFs require mode-2 or mode-7 to be combined with another mode to slip through.
 
-## `.gov` profile (rate-limited, WAF-protected)
+## cautious profile (rate-limited, WAF-protected)
 
 ```bash
 aith assess kali nikto \
-  --host www.example.gov --ssl \
+  --host www.example.com --ssl \
   -Tuning x60 -Pause 2 -maxtime 300 \
-  --technique INFO-DISCLOSURE --intent ".gov nikto, x60 production-safe" \
+  --technique INFO-DISCLOSURE --intent "cautious-tier nikto, x60 production-safe" \
   --probe-kind payload --phase recon --timeout 600
 ```
 
-Cross-reference the `.gov` rate-limit profile in `agent/references/tools/recon/wafw00f.md` (run wafw00f FIRST so the WAF tier is known before nikto calibrates).
+Cross-reference the cautious-tier rate-limit profile in `agent/references/tools/recon/wafw00f.md` (run wafw00f FIRST so the WAF tier is known before nikto calibrates).
 
 ## Output formats
 

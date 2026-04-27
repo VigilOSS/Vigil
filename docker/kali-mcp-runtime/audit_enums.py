@@ -46,6 +46,9 @@ TECHNIQUE_ENUM: tuple[str, ...] = (
     "OSINT",
     "CVE-VALIDATION",
     "EXPLOIT-CHAIN",
+    "META",
+    "HEALTH",
+    "LOG-READ",
     "OTHER",
 )
 

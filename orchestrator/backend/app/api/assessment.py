@@ -232,14 +232,18 @@ class SurfaceUpdateRequest(BaseModel):
     Every field is optional so callers can update only what changed. The
     service helper rejects requests where every field is ``None`` so a
     no-op call surfaces as 400 instead of silently mutating updated_at.
+    ``source_name`` and ``evidence_ref`` reject empty strings (use ``null``
+    to leave the field unchanged) so a deliberate empty does not silently
+    drop on the backend.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["covered", "deferred", "discovered", "not_applicable"] | None = None
+    status: Literal["covered", "deferred", "discovered", "not_applicable", "partially-covered"] | None = None
     rationale: str | None = Field(default=None, max_length=4096)
-    source_name: str | None = Field(default=None, max_length=128)
-    evidence_ref: str | None = Field(default=None, max_length=1024)
+    source_name: str | None = Field(default=None, min_length=1, max_length=128)
+    evidence_ref: str | None = Field(default=None, min_length=1, max_length=1024)
+    followup_condition: str | None = Field(default=None, max_length=500)
 
 
 class AttackChainLinkRequest(BaseModel):
@@ -764,6 +768,7 @@ async def update_surface_endpoint(
         rationale=request.rationale,
         source_name=request.source_name,
         evidence_ref=request.evidence_ref,
+        followup_condition=request.followup_condition,
     )
     await _broadcast(engagement.key, "surface", record)
     return record

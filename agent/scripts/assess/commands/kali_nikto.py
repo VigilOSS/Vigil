@@ -1,4 +1,8 @@
-"""aith assess kali nikto — typed wrapper around nikto inside the runtime."""
+"""aith assess kali nikto — typed wrapper around nikto inside the runtime.
+
+Nikto is a CONDITIONAL tool — specialists evaluate the trigger pattern from
+`agent/references/tools/recon/nikto.md` before calling.
+"""
 from __future__ import annotations
 
 from assess.lib.kali import (

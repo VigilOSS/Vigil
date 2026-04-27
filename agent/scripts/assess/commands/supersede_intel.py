@@ -19,11 +19,54 @@ import argparse
 import json
 import sys
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.intel_types import INTEL_TYPES
 from assess.lib.json_inputs import parse_json_argument
-from assess.lib.schema_validation import collect_validation_errors, load_schema
+from assess.lib.schema_validation import collect_patch_validation_errors, load_schema
+
+
+# Mirrors orchestrator/backend/app/services/intel.py::_INTEL_UPDATABLE_FIELDS so
+# the CLI can echo the actionable column whitelist when a payload filters down
+# to nothing on the backend. Keep in sync with that map.
+_INTEL_UPDATABLE_FIELDS: dict[str, set[str]] = {
+    "tech-component": {
+        "component", "version", "source_name", "confidence", "evidence_ref",
+        "first_seen_at", "last_seen_at", "notes", "provenance",
+    },
+    "person": {
+        "name", "role", "organization", "email", "source_name", "notes", "provenance",
+    },
+    "email": {
+        "address", "role_hint", "linked_person_id", "source_name", "notes", "provenance",
+    },
+    "domain": {
+        "identity", "kind", "value", "source_name", "live_status", "notes", "provenance",
+    },
+    "cve": {
+        "cve_id", "affected_component", "affected_version_range", "cvss_score",
+        "cvss_vector", "cwe_id", "poc_available", "source_name",
+        "validation_status", "linked_finding_slug", "notes", "provenance",
+    },
+    "dns-record": {
+        "record_type", "name", "value", "first_seen", "last_seen",
+        "source_name", "notes", "provenance",
+    },
+    "social-profile": {
+        "subject_kind", "subject_ref", "platform", "handle", "url",
+        "source_name", "notes", "provenance",
+    },
+    "breach-record": {
+        "subject", "breach_name", "breach_date", "data_types", "source_name",
+        "notes", "provenance",
+    },
+    "org-fact": {
+        "fact_key", "fact_value", "source_name", "notes", "provenance",
+    },
+    "note": {
+        "title", "body_markdown", "source_agent", "tags", "source_name", "provenance",
+    },
+}
 
 
 def register(subparsers) -> None:
@@ -85,11 +128,23 @@ def run(args) -> None:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
     if not isinstance(new_payload, dict) or not new_payload:
-        print("supersede-intel: payload must be a non-empty JSON object", file=sys.stderr)
+        updatable = sorted(_INTEL_UPDATABLE_FIELDS.get(args.intel_type, set()))
+        msg = "supersede-intel: payload must be a non-empty JSON object"
+        if updatable:
+            msg += (
+                f"\n  valid update fields for {args.intel_type}: "
+                f"{', '.join(updatable)}"
+            )
+        print(msg, file=sys.stderr)
         sys.exit(1)
 
+    # Supersede payloads are partial-update by design: the backend's
+    # _INTEL_UPDATABLE_FIELDS whitelist filters them, so requiring full
+    # natural-key fields client-side would reject legitimate calls like
+    # `--inline '{"validation_status": "exploited"}'`. Use the patch-mode
+    # validator so typos still raise but missing required fields don't.
     schema = load_schema(schema_name)
-    errors = collect_validation_errors(new_payload, schema)
+    errors = collect_patch_validation_errors(new_payload, schema)
     if errors:
         print(f"supersede-intel {args.intel_type}: payload failed schema validation:", file=sys.stderr)
         for error in errors:
@@ -108,7 +163,11 @@ def run(args) -> None:
             {"payload": new_payload, "rationale": args.rationale},
             ensure_ascii=True,
         ).encode("utf-8")
-        _, resp_body = client._request("POST", path, body=body)
+        try:
+            _, resp_body = client._request("POST", path, body=body)
+        except AssessError as exc:
+            _maybe_explain_409(exc)
+            raise
         try:
             record = json.loads(resp_body)
         except json.JSONDecodeError:
@@ -117,3 +176,16 @@ def run(args) -> None:
         client.close()
 
     print(json.dumps(record, indent=2, ensure_ascii=False))
+
+
+def _maybe_explain_409(exc: AssessError) -> None:
+    """If the backend returned 409, surface the actionable hint before the raw body."""
+    msg = str(exc)
+    if not msg.startswith("HTTP 409"):
+        return
+    print(
+        "supersede-intel: backend rejected with HTTP 409 (natural-key collision).\n"
+        "  Hint: use `aith assess update-intel <type> <id> ...` for in-place edits "
+        "when the new payload's natural key matches the existing row.",
+        file=sys.stderr,
+    )
