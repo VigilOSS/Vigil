@@ -600,9 +600,84 @@ def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pyte
     assert "--pids-limit=1024" in run_command
     assert "--shm-size=2g" in run_command
     assert "--oom-score-adj=-500" in run_command
-    # nofile/nproc rlimits live in /etc/security/limits.d/aith.conf inside the
-    # image. The Dockerfile contract test in test_runtime_tooling_contract.py
-    # asserts the substrings; docker exec children read the limits at start.
+    # nofile/nproc are dockerd-side (default-ulimits in daemon.json); see README
+    # "Container resource limits". `aith runtime start` probes them via
+    # _check_runtime_ulimits and warns to stderr when low.
+
+
+def test_check_runtime_ulimits_warns_when_below_threshold(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "exec", "security-research"] and argv[-1] == "ulimit -n; ulimit -u":
+            return DockerResult(0, "8192\n4096\n", "")
+        return DockerResult(0, "", "")
+
+    start_runtime(RuntimeOptions(install_root=install_root, recreate=False), runner=runner, validate_tools=False)
+    err = capsys.readouterr().err
+    assert "WARN: dockerd default ulimits are low" in err
+    assert "nofile=8192" in err
+    assert "nproc=4096" in err
+
+
+def test_check_runtime_ulimits_silent_when_limits_ok(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "exec", "security-research"] and argv[-1] == "ulimit -n; ulimit -u":
+            return DockerResult(0, "1048576\nunlimited\n", "")
+        return DockerResult(0, "", "")
+
+    start_runtime(RuntimeOptions(install_root=install_root, recreate=False), runner=runner, validate_tools=False)
+    assert "WARN" not in capsys.readouterr().err
+
+
+def test_check_runtime_ulimits_silent_on_exec_failure(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "exec", "security-research"] and argv[-1] == "ulimit -n; ulimit -u":
+            return DockerResult(1, "", "exec failed")
+        return DockerResult(0, "", "")
+
+    start_runtime(RuntimeOptions(install_root=install_root, recreate=False), runner=runner, validate_tools=False)
+    assert "WARN" not in capsys.readouterr().err
 
 
 def test_aith_runtime_resources_renders_configured_and_live_state(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

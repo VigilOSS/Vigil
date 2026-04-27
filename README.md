@@ -108,6 +108,23 @@ Gotchas:
 - WSL2 defaults to 50% of host RAM capped at 8 GB — pin via `%USERPROFILE%\.wslconfig` `[wsl2] memory=12GB processors=8 swap=4GB`.
 - Apple Silicon unified memory tolerates up to 50% of host RAM.
 
+### Container resource limits (optional)
+
+The runtime image does not pin process or file-descriptor rlimits. `docker exec`-launched tools inherit dockerd's daemon defaults — generous on Linux hosts (`nofile=1048576`, `nproc=unlimited`) but tighter on Docker Desktop (`nofile=8192`, `nproc=4096`). `aith runtime start` probes the live limits and prints a stderr WARN when they fall below recommended thresholds.
+
+To raise the daemon defaults so they apply to every container (including `docker exec`-launched specialists), edit `/etc/docker/daemon.json` (Linux) or Docker Desktop → Settings → Docker Engine, then restart dockerd:
+
+```json
+{
+  "default-ulimits": {
+    "nofile": { "Name": "nofile", "Hard": 131072, "Soft": 131072 },
+    "nproc":  { "Name": "nproc",  "Hard": 16384,  "Soft": 16384 }
+  }
+}
+```
+
+Container-side `/etc/security/limits.conf` is not used because `docker exec` does not invoke a PAM session.
+
 ### 2. Orchestrator UI
 
 The orchestrator frontend/backend is a separate local service. It is not part of the Kali runtime image and it is not started by `aith runtime start`.
