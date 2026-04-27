@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Cache Poisoning Testing
 
-> **Kali MCP audit header:** use `X-Technique: OTHER` (cache poisoning spans web-cache-deception, CPDoS, and unkeyed-header abuse — no dedicated enum class). Switch to `REQUEST-SMUGGLING` when the poisoning rides on a smuggled request.
+> **`aith assess kali` audit flags:** use `--technique OTHER` (cache poisoning spans web-cache-deception, CPDoS, and unkeyed-header abuse — no dedicated enum class). Switch to `REQUEST-SMUGGLING` when the poisoning rides on a smuggled request.
 
 ## When to Activate
 
@@ -115,4 +115,3 @@ curl -H "X-Forwarded-Host: attacker.example" -H "X-Forwarded-Scheme: https" http
 - Full request/response pairs for both poisoning and victim requests
 
 ## Extended Resources
-

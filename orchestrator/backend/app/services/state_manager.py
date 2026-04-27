@@ -1327,6 +1327,167 @@ def list_surfaces(engagement_id: int) -> list[dict[str, Any]]:
         return _fetch_all(connection, "SELECT * FROM assessment_surfaces WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
 
 
+def update_surface(
+    engagement_id: int,
+    surface_id: int,
+    *,
+    status_value: str | None = None,
+    rationale: str | None = None,
+    source_name: str | None = None,
+    evidence_ref: str | None = None,
+    followup_condition: str | None = None,
+) -> dict[str, Any]:
+    """Patch an assessment_surfaces row by id.
+
+    Operators reach this through ``aith assess resolve-surface`` to mark
+    discovered surfaces ``covered``, ``not_applicable``, ``deferred``, or
+    ``partially-covered``. Unspecified fields stay untouched, but at least
+    one mutable field must be supplied so the call records something
+    durable. ``rationale`` is appended (mirrors the upsert behavior of
+    ``_upsert_surface``) so the audit trail accumulates context.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    valid_statuses = {"covered", "not_applicable", "deferred", "discovered", "partially-covered"}
+    if status_value is not None and status_value not in valid_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid surface status '{status_value}'; allowed: {sorted(valid_statuses)}",
+        )
+    # Empty strings for source_name / evidence_ref are not a valid clear
+    # signal: callers must pass null to leave the field untouched, or a
+    # real value to set it. The frontend and CLI strip empties before they
+    # reach this layer, so an empty here is a deliberate (but malformed)
+    # call.
+    if source_name is not None and source_name == "":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="source_name cannot be empty; use null to leave unchanged",
+        )
+    if evidence_ref is not None and evidence_ref == "":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="evidence_ref cannot be empty; use null to leave unchanged",
+        )
+    if all(
+        value is None
+        for value in (status_value, rationale, source_name, evidence_ref, followup_condition)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="update-surface requires at least one of status, rationale, source_name, evidence_ref, followup_condition",
+        )
+
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT * FROM assessment_surfaces WHERE engagement_id = ? AND id = ?",
+            (engagement.id, surface_id),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"surface id={surface_id} not found",
+            )
+
+        current_status = str(existing["status"] or "")
+        # Lifecycle guard: regressions to ``discovered`` from a decided
+        # state (covered / not_applicable) erase audit context. Operators
+        # should mark the surface ``deferred`` to re-queue it instead. The
+        # same applies to ``partially-covered`` → ``discovered`` (audit
+        # context loss).
+        if (
+            status_value is not None
+            and status_value == "discovered"
+            and current_status in {"covered", "not_applicable", "partially-covered"}
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"cannot regress surface from '{current_status}' to "
+                    "'discovered'; use 'deferred' to re-queue"
+                ),
+            )
+
+        # When the operator changes status, rationale is mandatory: the
+        # audit trail must capture the WHY of every transition.
+        if (
+            status_value is not None
+            and status_value != current_status
+            and not (rationale and rationale.strip())
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="rationale required when changing surface status",
+            )
+
+        # ``partially-covered`` requires ``followup_condition`` so the
+        # audit trail names what the next coverage pass must satisfy.
+        if status_value == "partially-covered":
+            if not (followup_condition and followup_condition.strip()):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "followup_condition required when status='partially-covered'"
+                    ),
+                )
+
+        assignments: list[str] = []
+        params: list[Any] = []
+        if status_value is not None:
+            assignments.append("status = ?")
+            params.append(status_value)
+            # Transitioning OUT of partially-covered into ``covered`` clears
+            # the followup_condition because the follow-up has completed.
+            if (
+                current_status == "partially-covered"
+                and status_value == "covered"
+                and followup_condition is None
+            ):
+                assignments.append("followup_condition = ?")
+                params.append("")
+        if rationale is not None:
+            existing_rationale = str(existing["rationale"] or "")
+            new_rationale = rationale
+            if (
+                existing_rationale
+                and rationale
+                and rationale not in existing_rationale
+            ):
+                new_rationale = existing_rationale + "\n" + rationale
+            elif rationale == "" or rationale in existing_rationale:
+                new_rationale = existing_rationale
+            assignments.append("rationale = ?")
+            params.append(new_rationale)
+        if source_name is not None:
+            assignments.append("source_name = ?")
+            params.append(source_name)
+        if evidence_ref is not None:
+            assignments.append("evidence_ref = ?")
+            params.append(evidence_ref)
+        if followup_condition is not None:
+            assignments.append("followup_condition = ?")
+            params.append(followup_condition)
+
+        if not assignments:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="update-surface produced no effective changes",
+            )
+
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
+        params.extend([engagement.id, surface_id])
+        connection.execute(
+            f"UPDATE assessment_surfaces SET {', '.join(assignments)} "
+            f"WHERE engagement_id = ? AND id = ?",
+            tuple(params),
+        )
+        row = connection.execute(
+            "SELECT * FROM assessment_surfaces WHERE engagement_id = ? AND id = ?",
+            (engagement.id, surface_id),
+        ).fetchone()
+        assert row is not None
+        return dict(row)
+
+
 def _finding_slug(connection, engagement_id: int, slug: str | None, title: str, canonical_location: str) -> str:
     if slug:
         return slug
@@ -2870,6 +3031,210 @@ def update_coverage_item_status(
     return dict(updated)
 
 
+_VENDOR_SAAS_HOST_SUFFIXES: list[tuple[str, str]] = [
+    # Mirror of agent/scripts/assess/lib/scope.py:_VENDOR_SAAS_SUFFIXES so the
+    # backend projection can answer the "is this host vendor SaaS" question
+    # without spawning a Python subprocess. Keep the two lists in sync; the
+    # CLI is the source of truth for the operator-side checkpoint, this list
+    # exists only so the engagement summary projection can flag pending
+    # decisions for the frontend banner.
+    ("salesforce", ".salesforce.com"),
+    ("salesforce", ".lightning.force.com"),
+    ("salesforce", ".my.salesforce.com"),
+    ("salesforce", ".force.com"),
+    ("servicenow", ".service-now.com"),
+    ("servicenow", ".servicenowservices.com"),
+    ("statuspage", ".statuspage.io"),
+    ("statuspage", ".statuspage.amazon.com"),
+    ("govdelivery", ".govdelivery.com"),
+    ("awsconnect", ".awsconnect.com"),
+    ("awsconnect", ".amazonconnect.com"),
+    ("auth0", ".auth0.com"),
+    ("okta", ".okta.com"),
+    ("okta", ".oktapreview.com"),
+    ("zendesk", ".zendesk.com"),
+    ("freshdesk", ".freshdesk.com"),
+    ("intercom", ".intercom.io"),
+]
+
+
+def _host_is_vendor_saas(host: str | None) -> str | None:
+    if not host:
+        return None
+    normalized = host.strip().rstrip(".").lower()
+    if not normalized:
+        return None
+    for label, suffix in _VENDOR_SAAS_HOST_SUFFIXES:
+        bare = suffix.lstrip(".")
+        if normalized == bare or normalized.endswith(suffix):
+            return label
+    return None
+
+
+def _host_from_endpoint(endpoint: str | None) -> str:
+    raw = (endpoint or "").strip().lower()
+    if not raw:
+        return ""
+    first = raw.split()[0]
+    if "://" in first:
+        try:
+            host = urlparse(first).hostname or ""
+        except ValueError:
+            return ""
+        return host.rstrip(".").lower()
+    if first.startswith("["):
+        closing = first.find("]")
+        if closing > 1:
+            return first[1:closing]
+        return ""
+    return first.split(":", 1)[0].rstrip(".").lower()
+
+
+def vendor_saas_hosts_pending_decision(engagement_id: int) -> list[dict[str, str]]:
+    """Return vendor-SaaS-flagged hosts that have no scope_decision activity entry.
+
+    A vendor-SaaS host is one whose recorded service endpoint or surface
+    target descriptor matches a vendor SaaS suffix (Salesforce, ServiceNow,
+    StatusPage, GovDelivery, AwsConnect, Auth0, Okta, Zendesk, Freshdesk,
+    Intercom). The Vendor-SaaS scope checkpoint records the operator's
+    choice as an activity entry with ``task_name='scope_decision'`` and the
+    host appearing inside ``summary``; hosts that lack that record block
+    the Phase 1 advance gate and surface in the frontend overview banner.
+
+    The projection deliberately does NOT consult ``$DIR/agent-registry.json``
+    on disk — the backend is the source of truth, and the CLI mirrors the
+    decision into an activity entry whenever a checkpoint is recorded.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    pending: dict[str, str] = {}
+    decided: set[str] = set()
+    with get_connection() as connection:
+        service_rows = connection.execute(
+            "SELECT endpoint FROM assessment_services WHERE engagement_id = ?",
+            (engagement.id,),
+        ).fetchall()
+        surface_rows = connection.execute(
+            "SELECT target_descriptor FROM assessment_surfaces WHERE engagement_id = ?",
+            (engagement.id,),
+        ).fetchall()
+        # Activity entries carry the operator's narrative log. A
+        # ``scope_decision`` for a vendor-SaaS host shows up either in
+        # ``title`` (e.g. ``scope_decision: foo.salesforce.com``), the
+        # ``action`` text, or in ``metadata_json`` as a JSON blob carrying
+        # ``{"kind": "scope_decision", "host": "..."}``. We match liberally
+        # across all three fields so a future writer that picks any of them
+        # still satisfies the gate.
+        decision_rows = connection.execute(
+            """
+            SELECT title, action, result, body_markdown, metadata_json
+            FROM activity_entries
+            WHERE engagement_id = ?
+              AND (
+                title LIKE '%scope_decision%'
+                OR action LIKE '%scope_decision%'
+                OR result LIKE '%scope_decision%'
+                OR body_markdown LIKE '%scope_decision%'
+                OR metadata_json LIKE '%scope_decision%'
+              )
+            """,
+            (engagement.id,),
+        ).fetchall()
+    for row in decision_rows:
+        for value in row:
+            if not isinstance(value, str):
+                continue
+            for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+                normalized = token.rstrip(".").lower()
+                if _host_is_vendor_saas(normalized):
+                    decided.add(normalized)
+    for row in service_rows:
+        host = _host_from_endpoint(str(row["endpoint"] if "endpoint" in row.keys() else row[0]))
+        vendor = _host_is_vendor_saas(host)
+        if vendor and host not in decided and host not in pending:
+            pending[host] = vendor
+    for row in surface_rows:
+        host = _host_from_endpoint(str(row["target_descriptor"] if "target_descriptor" in row.keys() else row[0]))
+        vendor = _host_is_vendor_saas(host)
+        if vendor and host not in decided and host not in pending:
+            pending[host] = vendor
+    return [{"host": host, "vendor": vendor} for host, vendor in sorted(pending.items())]
+
+
+_EGRESS_BLOCK_INTENT_PATTERNS = (
+    "egress reputation",
+    "egress-block",
+    "egress block",
+    "cdn-ip-block",
+    "ip-reputation",
+)
+
+
+def egress_block_status(engagement_id: int) -> dict[str, Any]:
+    """Return ``{blocked_pct, pattern, samples_total, samples_blocked}``.
+
+    Reads the most recent egress reputation check from
+    ``assessment_command_runs`` (matched by intent text) and parses the
+    ``egress_block_pct=N`` line out of stdout. When no recent run is
+    available the projection returns zeros so the frontend can show a
+    "not yet sampled" state instead of a stale percentage.
+
+    ``pattern`` is one of ``unknown`` / ``cdn-403`` / ``geoblock-reset`` /
+    ``mixed``, derived from the `403`/`000` ratio in the run output. The
+    pattern is informational; the operator confirms the cause via the
+    Egress reputation checkpoint.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT intent, stdout_preview, created_at
+            FROM assessment_command_runs
+            WHERE engagement_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 50
+            """,
+            (engagement.id,),
+        ).fetchall()
+    for row in rows:
+        intent = (row["intent"] if "intent" in row.keys() else "") or ""
+        if not isinstance(intent, str):
+            continue
+        intent_lower = intent.lower()
+        if not any(needle in intent_lower for needle in _EGRESS_BLOCK_INTENT_PATTERNS):
+            continue
+        stdout = row["stdout_preview"] if "stdout_preview" in row.keys() else ""
+        if not isinstance(stdout, str):
+            stdout = ""
+        match = re.search(r"egress_block_pct\s*=\s*(\d+)", stdout)
+        if not match:
+            continue
+        pct = int(match.group(1))
+        n_403 = len(re.findall(r"\b403\b", stdout))
+        n_000 = len(re.findall(r"\b000\b", stdout))
+        if n_403 and not n_000:
+            pattern = "cdn-403"
+        elif n_000 and not n_403:
+            pattern = "geoblock-reset"
+        elif n_403 and n_000:
+            pattern = "mixed"
+        else:
+            pattern = "unknown"
+        return {
+            "blocked_pct": pct,
+            "pattern": pattern,
+            "samples_total": n_403 + n_000,
+            "samples_blocked": n_403 + n_000,
+            "checked_at": row["created_at"] if "created_at" in row.keys() else None,
+        }
+    return {
+        "blocked_pct": 0,
+        "pattern": "unknown",
+        "samples_total": 0,
+        "samples_blocked": 0,
+        "checked_at": None,
+    }
+
+
 def assessment_summary(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     exploit_candidate_count = len(list_exploit_candidates(engagement.id))
@@ -3043,6 +3408,8 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
         "open_coverage_items": [dict(row) for row in open_coverage_items],
         "attack_chains": [dict(row) for row in attack_chains],
         "service_coverage_gaps": [dict(row) for row in service_coverage_gaps],
+        "vendor_saas_hosts_pending_decision": vendor_saas_hosts_pending_decision(engagement.id),
+        "egress_status": egress_block_status(engagement.id),
     }
 
 
@@ -3385,6 +3752,52 @@ def _resolve_artifact_dir(engagement, override: str | None) -> str | None:
     return str(engagement_root / "scans" / "command-runs")
 
 
+_DEFAULT_DEDUP_WINDOW_SECONDS = 30
+
+
+def _dedup_window_seconds() -> int:
+    raw = os.environ.get("KALI_AUDIT_DEDUP_WINDOW_SECONDS", "")
+    if not raw:
+        return _DEFAULT_DEDUP_WINDOW_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_DEDUP_WINDOW_SECONDS
+    return max(value, 0)
+
+
+def _find_dedup_predecessor(
+    connection: sqlite3.Connection,
+    *,
+    engagement_id: int,
+    command: str,
+    argv_json: str,
+    window_seconds: int,
+) -> int | None:
+    if window_seconds <= 0:
+        return None
+    cutoff = (
+        f"datetime('now', '-{int(window_seconds)} seconds')"
+    )
+    row = connection.execute(
+        f"""
+        SELECT id FROM assessment_command_runs
+        WHERE engagement_id = ?
+          AND command = ?
+          AND argv_json = ?
+          AND status IN ('queued', 'running')
+          AND superseded_by_id IS NULL
+          AND datetime(created_at) >= {cutoff}
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (engagement_id, command, argv_json),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row[0])
+
+
 def record_command_run(
     engagement_id: int,
     *,
@@ -3413,8 +3826,26 @@ def record_command_run(
     intent: str | None = None,
     probe_kind: str | None = None,
     destructive: bool | int | None = None,
+    status: str = "running",
+    stdout_path: str | None = None,
+    stderr_path: str | None = None,
+    peak_rss_bytes: int | None = None,
+    cpu_user_seconds: float | None = None,
+    cpu_system_seconds: float | None = None,
+    working_dir: str | None = None,
+    scope_version: str | None = None,
+    auth_context: str | None = None,
+    strace_path: str | None = None,
+    timeout_seconds_requested: int | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+
+    if not (phase or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="phase is required and cannot be empty",
+        )
 
     run_uuid = _normalize_run_uuid(run_uuid or uuid.uuid4().hex)
     _ensure_command_run_uuid_available(run_uuid)
@@ -3498,13 +3929,47 @@ def record_command_run(
     else:
         destructive_value = 1 if bool(destructive) else 0
 
+    status_value = (status or "running").strip() or "running"
+    argv_json_value = json.dumps(list(argv) if argv else [], ensure_ascii=False)
+
     with get_connection() as connection:
+        # Dedup-at-write-time: if an in-flight row exists with the same
+        # (command, argv_json) for this engagement inside the configurable
+        # window, the CLI's default (force=False) returns the predecessor
+        # row without inserting — otherwise the new row stays stuck at
+        # status='running' because the CLI early-returns and never PATCHes
+        # finalize. With force=True we insert the row and link it via
+        # superseded_by_id so the operator's deliberate retry still records
+        # the supersession audit.
+        superseded_by_id: int | None = None
+        if not force:
+            superseded_by_id = _find_dedup_predecessor(
+                connection,
+                engagement_id=engagement.id,
+                command=command,
+                argv_json=argv_json_value,
+                window_seconds=_dedup_window_seconds(),
+            )
+            if superseded_by_id is not None:
+                _remove_written_command_run_artifacts(
+                    str(stdout_retention["artifact_ref"] or ""),
+                    str(stderr_retention["artifact_ref"] or ""),
+                )
+                predecessor_row = connection.execute(
+                    "SELECT * FROM assessment_command_runs WHERE id = ?",
+                    (superseded_by_id,),
+                ).fetchone()
+                assert predecessor_row is not None
+                serialized = _serialize_command_run(predecessor_row, include_output=True)
+                serialized["superseded_by_id"] = superseded_by_id
+                serialized["dedup_skipped"] = True
+                return serialized
         try:
             cursor = connection.execute(
                 """
                 INSERT INTO assessment_command_runs (
                     engagement_id, run_uuid, command, argv_json, tool_name, tool_bin, route,
-                    agent_name, phase, audit_source,
+                    agent_name, phase, audit_source, status,
                     return_code, timed_out, success,
                     started_at, completed_at, duration_ms,
                     command_hash, stdout_sha256, stderr_sha256,
@@ -3512,10 +3977,14 @@ def record_command_run(
                     stdout_suppression_reason, stderr_suppression_reason,
                     stdout_artifact_ref, stderr_artifact_ref,
                     stdout_bytes, stderr_bytes, notes,
-                    technique, intent, probe_kind, destructive
+                    technique, intent, probe_kind, destructive,
+                    stdout_path, stderr_path,
+                    peak_rss_bytes, cpu_user_seconds, cpu_system_seconds,
+                    working_dir, scope_version, auth_context,
+                    superseded_by_id, strace_path, timeout_seconds_requested
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?,
+                    ?, ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?,
@@ -3523,20 +3992,25 @@ def record_command_run(
                     ?, ?,
                     ?, ?,
                     ?, ?, ?,
-                    ?, ?, ?, ?
+                    ?, ?, ?, ?,
+                    ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?
                 )
                 """,
                 (
                     engagement.id,
                     run_uuid,
                     command,
-                    json.dumps(list(argv) if argv else [], ensure_ascii=False),
+                    argv_json_value,
                     tool_name,
                     tool_bin,
                     route,
                     agent_name,
                     phase,
                     audit_source or "header",
+                    status_value,
                     return_code,
                     1 if timed_out else 0,
                     1 if effective_success else 0,
@@ -3560,6 +4034,17 @@ def record_command_run(
                     intent_value,
                     probe_kind_value,
                     destructive_value,
+                    stdout_path,
+                    stderr_path,
+                    peak_rss_bytes,
+                    cpu_user_seconds,
+                    cpu_system_seconds,
+                    working_dir,
+                    scope_version,
+                    auth_context,
+                    superseded_by_id,
+                    strace_path,
+                    timeout_seconds_requested,
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -3576,6 +4061,341 @@ def record_command_run(
         ).fetchone()
         assert row is not None
         return _serialize_command_run(row, include_output=True)
+
+
+_FINALIZE_TERMINAL_STATUSES = {"completed", "failed", "timed_out", "killed", "lost"}
+_FINALIZE_ALLOWED_STATUSES = _FINALIZE_TERMINAL_STATUSES | {"running"}
+
+
+def finalize_command_run(
+    engagement_id: int,
+    *,
+    command_run_id: int,
+    status_value: str,
+    return_code: int | None = None,
+    ended_at: str,
+    duration_ms: int | None = None,
+    stdout_preview: str | None = None,
+    stderr_preview: str | None = None,
+    timed_out: bool = False,
+    partial_results: bool = False,
+    peak_rss_bytes: int | None = None,
+    cpu_user_seconds: float | None = None,
+    cpu_system_seconds: float | None = None,
+    strace_path: str | None = None,
+) -> dict[str, Any]:
+    """Apply a status update to a pre-exec command-run row.
+
+    Idempotency contract (B4): a row already in a terminal state must not be
+    overwritten — the second writer is signalled with HTTP 409 carrying the
+    existing row. A ``running``-to-``running`` PATCH is a refresh no-op that
+    surfaces ``noop=true`` so the caller can distinguish it from a fresh
+    write."""
+    engagement = _engagement_or_404(engagement_id)
+    if status_value not in _FINALIZE_ALLOWED_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"finalize status must be one of {sorted(_FINALIZE_ALLOWED_STATUSES)}",
+        )
+    with get_connection() as connection:
+        existing_row = connection.execute(
+            "SELECT * FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
+            (engagement.id, command_run_id),
+        ).fetchone()
+        if existing_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="command run not found",
+            )
+        existing_status = (existing_row["status"] or "").strip()
+        if existing_status in _FINALIZE_TERMINAL_STATUSES:
+            serialized = _serialize_command_run(existing_row, include_output=True)
+            serialized["noop"] = True
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        f"command run id={command_run_id} already finalized with "
+                        f"status='{existing_status}'; refusing to overwrite"
+                    ),
+                    "existing": serialized,
+                },
+            )
+        if status_value == "running" and existing_status == "running":
+            serialized = _serialize_command_run(existing_row, include_output=True)
+            serialized["noop"] = True
+            return serialized
+        success_flag = 1 if (status_value == "completed" and (return_code in (0, None) and not timed_out)) else 0
+        if return_code is not None and return_code != 0:
+            success_flag = 0
+        sets: list[str] = [
+            "status = ?",
+            "completed_at = ?",
+            "timed_out = ?",
+            "success = ?",
+        ]
+        values: list[Any] = [
+            status_value,
+            ended_at,
+            1 if timed_out else 0,
+            success_flag,
+        ]
+        if return_code is not None:
+            sets.append("return_code = ?")
+            values.append(int(return_code))
+        if duration_ms is not None:
+            sets.append("duration_ms = ?")
+            values.append(int(duration_ms))
+        if stdout_preview is not None:
+            sets.append("stdout_preview = ?")
+            values.append(stdout_preview)
+        if stderr_preview is not None:
+            sets.append("stderr_preview = ?")
+            values.append(stderr_preview)
+        if peak_rss_bytes is not None:
+            sets.append("peak_rss_bytes = ?")
+            values.append(int(peak_rss_bytes))
+        if cpu_user_seconds is not None:
+            sets.append("cpu_user_seconds = ?")
+            values.append(float(cpu_user_seconds))
+        if cpu_system_seconds is not None:
+            sets.append("cpu_system_seconds = ?")
+            values.append(float(cpu_system_seconds))
+        if strace_path is not None:
+            sets.append("strace_path = ?")
+            values.append(strace_path)
+        sets.append("partial_results = ?")
+        values.append(1 if partial_results else 0)
+        values.append(command_run_id)
+        # Guard against the read→update race when two finalize PATCHes arrive
+        # simultaneously: both can pass the SELECT-based terminal check above,
+        # but the UPDATE must only land when the row is still 'running'. The
+        # loser hits rowcount=0 and is funnelled into the same 409 path with
+        # the canonical row payload that the SELECT-based check uses.
+        cursor = connection.execute(
+            f"UPDATE assessment_command_runs SET {', '.join(sets)} WHERE id = ? AND status = 'running'",
+            tuple(values),
+        )
+        if cursor.rowcount == 0:
+            current_row = connection.execute(
+                "SELECT * FROM assessment_command_runs WHERE id = ?",
+                (command_run_id,),
+            ).fetchone()
+            if current_row is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="command run not found",
+                )
+            serialized = _serialize_command_run(current_row, include_output=True)
+            serialized["noop"] = True
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        f"command run id={command_run_id} already finalized with "
+                        f"status='{(current_row['status'] or '').strip()}'; refusing to overwrite"
+                    ),
+                    "existing": serialized,
+                },
+            )
+        row = connection.execute(
+            "SELECT * FROM assessment_command_runs WHERE id = ?",
+            (command_run_id,),
+        ).fetchone()
+        assert row is not None
+        return _serialize_command_run(row, include_output=True)
+
+
+# ── Assessment job lifecycle ────────────────────────────────────────
+
+
+_JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost"}
+_JOB_VALID_STATUSES = {"queued", "running", *_JOB_TERMINAL_STATUSES}
+
+
+def _serialize_job(row) -> dict[str, Any]:
+    data = dict(row)
+    raw_meta = data.pop("audit_metadata_json", None) or ""
+    if raw_meta:
+        try:
+            data["audit_metadata"] = json.loads(raw_meta)
+        except json.JSONDecodeError:
+            data["audit_metadata"] = None
+    else:
+        data["audit_metadata"] = None
+    return data
+
+
+def record_job(
+    engagement_id: int,
+    *,
+    parent_command_run_id: int | None = None,
+    status_value: str = "queued",
+    started_at: str | None = None,
+    ended_at: str | None = None,
+    exit_code: int | None = None,
+    dtach_socket_path: str | None = None,
+    stdout_path: str | None = None,
+    stderr_path: str | None = None,
+    audit_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    if status_value not in _JOB_VALID_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"job status must be one of {sorted(_JOB_VALID_STATUSES)}",
+        )
+    metadata_json = json.dumps(audit_metadata, ensure_ascii=False) if audit_metadata is not None else None
+    with get_connection() as connection:
+        if parent_command_run_id is not None:
+            row = connection.execute(
+                "SELECT id FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
+                (engagement.id, int(parent_command_run_id)),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="parent_command_run_id does not reference an existing command run for this engagement",
+                )
+        cursor = connection.execute(
+            """
+            INSERT INTO assessment_jobs (
+                engagement_id, parent_command_run_id, status,
+                started_at, ended_at, exit_code,
+                dtach_socket_path, stdout_path, stderr_path,
+                audit_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                engagement.id,
+                parent_command_run_id,
+                status_value,
+                started_at,
+                ended_at,
+                exit_code,
+                dtach_socket_path,
+                stdout_path,
+                stderr_path,
+                metadata_json,
+            ),
+        )
+        out_row = connection.execute(
+            "SELECT * FROM assessment_jobs WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        assert out_row is not None
+        return _serialize_job(out_row)
+
+
+def update_job(
+    engagement_id: int,
+    *,
+    job_id: int,
+    status_value: str | None = None,
+    started_at: str | None = None,
+    ended_at: str | None = None,
+    exit_code: int | None = None,
+    dtach_socket_path: str | None = None,
+    stdout_path: str | None = None,
+    stderr_path: str | None = None,
+    audit_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    sets: list[str] = []
+    values: list[Any] = []
+    if status_value is not None:
+        if status_value not in _JOB_VALID_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"job status must be one of {sorted(_JOB_VALID_STATUSES)}",
+            )
+        sets.append("status = ?")
+        values.append(status_value)
+    if started_at is not None:
+        sets.append("started_at = ?")
+        values.append(started_at)
+    if ended_at is not None:
+        sets.append("ended_at = ?")
+        values.append(ended_at)
+    if exit_code is not None:
+        sets.append("exit_code = ?")
+        values.append(int(exit_code))
+    if dtach_socket_path is not None:
+        sets.append("dtach_socket_path = ?")
+        values.append(dtach_socket_path)
+    if stdout_path is not None:
+        sets.append("stdout_path = ?")
+        values.append(stdout_path)
+    if stderr_path is not None:
+        sets.append("stderr_path = ?")
+        values.append(stderr_path)
+    if audit_metadata is not None:
+        sets.append("audit_metadata_json = ?")
+        values.append(json.dumps(audit_metadata, ensure_ascii=False))
+    if not sets:
+        return get_job(engagement.id, job_id)
+    sets.append("updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT id FROM assessment_jobs WHERE engagement_id = ? AND id = ?",
+            (engagement.id, int(job_id)),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="job not found",
+            )
+        values.extend([engagement.id, int(job_id)])
+        connection.execute(
+            f"UPDATE assessment_jobs SET {', '.join(sets)} WHERE engagement_id = ? AND id = ?",
+            tuple(values),
+        )
+        row = connection.execute(
+            "SELECT * FROM assessment_jobs WHERE id = ?",
+            (int(job_id),),
+        ).fetchone()
+        assert row is not None
+        return _serialize_job(row)
+
+
+def list_jobs(
+    engagement_id: int,
+    *,
+    status_value: str = "",
+    parent_command_run_id: int | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    where = ["engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    if status_value:
+        where.append("status = ?")
+        params.append(status_value)
+    if parent_command_run_id is not None:
+        where.append("parent_command_run_id = ?")
+        params.append(int(parent_command_run_id))
+    params.extend([int(limit), int(offset)])
+    query = (
+        f"SELECT * FROM assessment_jobs "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+    )
+    with get_connection() as connection:
+        rows = connection.execute(query, tuple(params)).fetchall()
+    return [_serialize_job(row) for row in rows]
+
+
+def get_job(engagement_id: int, job_id: int) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM assessment_jobs WHERE engagement_id = ? AND id = ?",
+            (engagement.id, int(job_id)),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+    return _serialize_job(row)
 
 
 def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
@@ -3600,6 +4420,7 @@ def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
         data["destructive"] = None
     else:
         data["destructive"] = bool(destructive_raw)
+    data["partial_results"] = bool(data.get("partial_results"))
     if not include_output:
         # Listings default to lightweight rows so a sub-agent fetching 50
         # records does not load 50 × 64 KiB of preview text into context.

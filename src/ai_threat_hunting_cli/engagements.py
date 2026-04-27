@@ -192,7 +192,16 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     if client_kind in {"codex", "both"}:
         _write_codex_config(agent_root, eng_dir)
     _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
+    _emit_bootstrap_scope_summary(scope)
     return CreatedEngagement(key=key, path=eng_dir)
+
+
+def _emit_bootstrap_scope_summary(scope: dict[str, object]) -> None:
+    """Print a one-line scope summary at bootstrap."""
+    raw_hosts = scope.get("hosts") if isinstance(scope, dict) else None
+    if not isinstance(raw_hosts, list) or not raw_hosts:
+        return
+    print(f"[aith] scope: {len(raw_hosts)} entries", file=sys.stderr)
 
 
 def list_engagements(install_root: Path) -> list[EngagementRow]:
@@ -367,6 +376,19 @@ def _install_client_kind(agent_root: Path) -> str:
 
 def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str) -> None:
     install_root = agent_root.parent
+    # Specialist context isolation invariant:
+    # The per-engagement AGENTS.md/CLAUDE.md written here are operator-only bootstrap pointers.
+    # Specialists never land at this cwd directly — they are dispatched FROM the operator via
+    # the registered wrappers in agent/.codex/agents/*.toml or agent/.claude/agents/*.md, which
+    # tell specialists to NOT read agent/AGENTS.md or agent/CLAUDE.md (those are operator
+    # bootstrap prompts and carry the runtime/startup banner that must not bleed into
+    # specialist responses). Cross-cutting context (audit-flag tables, listener URL
+    # conventions, runtime tier table, half-phase tag definitions) lives in
+    # agent/shared-constraints.md, which every role file's Load First section already
+    # includes (see agent/scripts/render-operator-prompts.sh). If you change how engagement
+    # bootstrap files are seeded — e.g. start landing specialist clients in their own cwd —
+    # make sure the new cwd's local AGENTS.md/CLAUDE.md does not pull operator startup
+    # banner prose into a specialist context.
     common = f"""This engagement directory is only the run-artifact root. Resolve shared prompts, skills, references, and scripts through:
 - Install root: {install_root}
 - Agent workspace root: {agent_root}

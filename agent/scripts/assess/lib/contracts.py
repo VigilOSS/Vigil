@@ -1,13 +1,177 @@
 """Stable CLI contract metadata for helper-owned assessment commands."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 from typing import Any
 
 from .intel_types import INTEL_TYPES
 from .schema_validation import load_schema
+
+
+SPECIALIST_DISPATCH_PERMISSIONS: tuple[str, ...] = (
+    "artifact-only",
+    "passive-probe",
+    "target-facing",
+    "target-facing-destructive",
+)
+
+
+SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
+    "hypothesis-driven",
+    "item-iterating",
+    "deep-manual",
+    "variant-rotation",
+)
+
+
+_SPECIALIST_DISPATCH_REQUIRED_FIELDS: tuple[str, ...] = (
+    "role",
+    "model",
+    "files_allowed",
+    "files_forbidden",
+    "permission",
+    "command_budget",
+    "output",
+    "dispatch_mode",
+)
+
+
+@dataclass
+class SpecialistDispatchContract:
+    """Mirror of the operator-core "Specialist Dispatch Contract" required-fields list.
+
+    Every field on this dataclass corresponds to a row in the contract table
+    documented in ``agent/operator-core.md`` (Specialist Dispatch Contract).
+    Use ``validate_specialist_dispatch_contract`` to check a JSON payload
+    parsed from disk or stdin — the validator returns a list of error strings
+    plus a list of warnings (the ``files_allowed`` / ``files_forbidden`` overlap
+    is a warning rather than a hard error so dispatches that intentionally
+    re-list a path can still proceed).
+    """
+
+    role: str
+    model: str
+    files_allowed: list[str]
+    files_forbidden: list[str]
+    permission: str
+    command_budget: int
+    output: str
+    dispatch_mode: str
+    reasoning: str | None = None
+    extras: dict[str, Any] = field(default_factory=dict)
+
+
+def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list[str]]:
+    """Validate a parsed specialist dispatch payload.
+
+    Returns ``(errors, warnings)``. Errors block the dispatch; warnings are
+    informational (e.g., the ``files_allowed`` / ``files_forbidden`` overlap).
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if not isinstance(payload, dict):
+        return ["dispatch contract must be a JSON object"], warnings
+
+    for field_name in _SPECIALIST_DISPATCH_REQUIRED_FIELDS:
+        if field_name not in payload:
+            errors.append(f"missing required field: {field_name}")
+
+    permission = payload.get("permission")
+    if permission is not None and permission not in SPECIALIST_DISPATCH_PERMISSIONS:
+        errors.append(
+            f"permission '{permission}' is not allowed; "
+            f"valid: {', '.join(SPECIALIST_DISPATCH_PERMISSIONS)}"
+        )
+
+    dispatch_mode = payload.get("dispatch_mode")
+    if dispatch_mode is not None and dispatch_mode not in SPECIALIST_DISPATCH_MODES:
+        errors.append(
+            f"dispatch_mode '{dispatch_mode}' is not allowed; "
+            f"valid: {', '.join(SPECIALIST_DISPATCH_MODES)}"
+        )
+
+    files_allowed = payload.get("files_allowed")
+    files_forbidden = payload.get("files_forbidden")
+    if files_allowed is not None and not isinstance(files_allowed, list):
+        errors.append("files_allowed must be a list of file paths")
+        files_allowed = None
+    if files_forbidden is not None and not isinstance(files_forbidden, list):
+        errors.append("files_forbidden must be a list of file paths")
+        files_forbidden = None
+
+    if isinstance(files_allowed, list) and isinstance(files_forbidden, list):
+        overlap = sorted(set(files_allowed).intersection(files_forbidden))
+        if overlap:
+            warnings.append(
+                f"files_allowed and files_forbidden overlap: {', '.join(overlap)} "
+                "(forbidden takes precedence at the wrapper)"
+            )
+
+    command_budget = payload.get("command_budget")
+    if command_budget is not None:
+        if isinstance(command_budget, bool) or not isinstance(command_budget, int) or command_budget < 0:
+            errors.append("command_budget must be a non-negative integer")
+
+    for str_field in ("role", "model", "output"):
+        value = payload.get(str_field)
+        if value is not None and not isinstance(value, str):
+            errors.append(f"{str_field} must be a string")
+        elif value is not None and not str(value).strip():
+            errors.append(f"{str_field} must be a non-empty string")
+
+    return errors, warnings
+
+
+# Verbs registered under `aith assess kali ...`. Names are kept in sync with
+# the modules under `agent/scripts/assess/commands/kali_*.py`.
+KALI_VERBS: tuple[str, ...] = (
+    "nmap-scan",
+    "nuclei",
+    "httpx",
+    "wafw00f",
+    "ffuf",
+    "sqlmap",
+    "subfinder",
+    "puredns",
+    "dnsx",
+    "nikto",
+    "katana",
+    "gau",
+    "whatweb",
+    "cero",
+    "alterx",
+    "bbot",
+    "exec",
+    "job",
+)
+
+
+_KALI_COMMON_NOTES: tuple[str, ...] = (
+    "Every kali verb requires --technique, --intent, --probe-kind, --phase, and --timeout. The CLI rejects calls missing any of these before it ever reaches the backend.",
+    "--phase is REQUIRED — pass the phase the dispatch was authorized for, not scope.json.current_phase. Allowed: recon, collect, consume-test, verify, exploit, report, code-ingest, code-classify, code-hunt, code-verify, plus the half-phase tags recon-pivot and exploit-recon.",
+    "--destructive marks a write/edit/delete on the target (POST/PUT/PATCH/DELETE, file upload, account creation). Read-only probes leave it off.",
+    "--strace wraps the run in `strace -e trace=network,write,unlink` and pins the artifact path on the audit row. Use for high-stakes destructive runs.",
+    "--force bypasses the dedup window. Use only when re-running an identical command intentionally is the right call.",
+    "--extra-args \"<string>\" is an optional raw-passthrough on every typed verb. The string is shlex-split and appended to the underlying tool argv after the typed-flag-derived args. Use sparingly for long-tail flags the typed verb does not model — the audit row still records the full final argv. --destructive still applies when extra args toggle a destructive mode.",
+)
+
+
+_KALI_COMMON_MISTAKES: tuple[tuple[str, str], ...] = (
+    ("missing --phase", "always pass --phase explicitly; no env-var fallback exists"),
+    ("technique=recon", "uppercase the audit technique tag (RECON, SSRF, SQLI, ...)"),
+    ("intent>200 chars", "intent is trimmed to 200 chars; keep it as a one-line purpose"),
+    ("--via-mcp", "MCP path is removed in Wave 1 — `aith assess kali` is the only path"),
+)
+
+
+def _kali_invocation(verb: str) -> tuple[str, ...]:
+    return (
+        f"aith assess kali {verb} --technique <enum> --intent \"<one-liner>\" "
+        f"--probe-kind <kind> --phase <phase> --timeout 1800 [verb-flags]",
+    )
 
 
 @dataclass(frozen=True)
@@ -290,6 +454,100 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
+    "resolve-surface": CommandContract(
+        name="resolve-surface",
+        summary="PATCH an assessment surface by id (set status + rationale).",
+        schema_name="backend SurfaceUpdateRequest",
+        preferred_invocations=(
+            'aith assess resolve-surface <id> --status covered --rationale "..."',
+            'aith assess resolve-surface <id> --status not_applicable --rationale "..."',
+            'aith assess resolve-surface <id> --status deferred --rationale "..."',
+            'aith assess resolve-surface <id> --status partially-covered --rationale "..." --followup-condition "..."',
+        ),
+        author_supplied_fields=(
+            "status",
+            "rationale",
+            "followup_condition",
+        ),
+        notes=(
+            "Use this to resolve a discovered surface after triage instead of falling back to direct SQL.",
+            "Rationale is appended to existing rationale so the audit trail accumulates context across resolutions.",
+            "--followup-condition is REQUIRED when --status=partially-covered; it captures the one-line condition the follow-up coverage pass must satisfy.",
+        ),
+        common_mistakes=(
+            ("status=discovered", "discovered is the seed state; resolve to covered, not_applicable, deferred, or partially-covered"),
+            ("reason", "use --rationale for the resolution explanation"),
+            ("status=partially-covered without --followup-condition", "the follow-up condition is mandatory for partially-covered so the audit trail names what the next pass must satisfy"),
+        ),
+        examples=(
+            {
+                "status": "covered",
+                "rationale": "vulnerability-analyst confirmed coverage on parameter q",
+            },
+            {
+                "status": "not_applicable",
+                "rationale": "static asset, no input vector",
+            },
+            {
+                "status": "partially-covered",
+                "rationale": "unauth path tested; admin path requires auth",
+                "followup_condition": "needs auth re-test once credentials are issued",
+            },
+        ),
+    ),
+    "update-intel": CommandContract(
+        name="update-intel",
+        summary="PATCH an existing intel row by id without inserting a new history record.",
+        schema_name="backend IntelUpdateRequest (per-type updatable column whitelist)",
+        preferred_invocations=(
+            "aith assess update-intel <type> <id> <patch.json>",
+            "aith assess update-intel <type> <id> --inline '{...}'",
+        ),
+        author_supplied_fields=(
+            "at least one updatable column",
+        ),
+        notes=(
+            "Use update-intel for in-place metadata edits. Use supersede-intel when you want to retain the prior row for audit and insert a wholly new record.",
+            "The backend rejects fields outside the per-type updatable column whitelist so guessed aliases surface immediately.",
+        ),
+        common_mistakes=(
+            ("source", "use source_name"),
+            ("agent", "use source_name or provenance.agent_name"),
+        ),
+        examples=(
+            {"validation_status": "exploited"},
+            {"notes": "Confirmed working PoC against staging"},
+        ),
+    ),
+    "supersede-intel": CommandContract(
+        name="supersede-intel",
+        summary="Insert a replacement intel row; old row stays for audit but is filtered from reports.",
+        schema_name="type-specific intel schema for the new payload",
+        preferred_invocations=(
+            'aith assess supersede-intel <type> <id> <new.json> --rationale "..."',
+            'aith assess supersede-intel <type> <id> --inline \'{...}\' --rationale "..."',
+        ),
+        author_supplied_fields=(
+            "type-specific required fields for the new record",
+            "--rationale (free text)",
+        ),
+        notes=(
+            "Use this when an intel row was wrong but the operator wants to retain the prior observation for audit.",
+            "Report-writer filters on superseded_by_id IS NULL so superseded rows do not appear in reports, but stay queryable for cascade-delete and audit.",
+        ),
+        common_mistakes=(
+            ("source", "use source_name"),
+            ("rationale-collision", "if the new natural key matches the existing row, use update-intel instead"),
+        ),
+        examples=(
+            {
+                "component": "nginx",
+                "version": "1.27.0",
+                "source_name": "vulnerability-analyst",
+                "confidence": "confirmed",
+            },
+        ),
+    ),
 }
 
 
@@ -325,6 +583,8 @@ _RAW_ENDPOINT_RULES = (
 def contract_names() -> list[str]:
     names = list(_CONTRACTS)
     names.extend(f"record-intel {intel_type}" for intel_type in sorted(INTEL_TYPES))
+    names.append("kali")
+    names.extend(f"kali {verb}" for verb in KALI_VERBS)
     return sorted(names)
 
 
@@ -332,6 +592,11 @@ def get_contract(name: str) -> CommandContract | None:
     if name.startswith("record-intel "):
         _, _, intel_type = name.partition(" ")
         return _record_intel_contract(intel_type)
+    if name == "kali":
+        return _kali_root_contract()
+    if name.startswith("kali "):
+        _, _, verb = name.partition(" ")
+        return _kali_verb_contract(verb)
     return _CONTRACTS.get(name)
 
 
@@ -512,6 +777,148 @@ def _schema_required_names(schema_name: str) -> list[str]:
     if not isinstance(required, list):
         return []
     return sorted(str(name) for name in required)
+
+
+_KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
+    "nmap-scan": (
+        "Top-1000 ports is the default; use --ports full for `-p-`, or pass an explicit list (e.g. 22,80,443).",
+        "--scripts default,vuln triggers heavy NSE — set a high --timeout (1800+) or dispatch via `aith assess kali job start`.",
+    ),
+    "nuclei": (
+        "Pass either -u or -l. Severity filters and `-as` (automatic) shape the run.",
+        "Long sweeps belong in `aith assess kali job start nuclei ...`.",
+    ),
+    "sqlmap": (
+        "sqlmap's own `--technique` is exposed as `--sql-technique` so it doesn't collide with the audit `--technique` flag.",
+    ),
+    "cero": (
+        "TLS-handshake SAN scraper — connects to TCP/TLS on the listed ports and harvests certificate Subject Alternative Names. Complements CT-log enumeration when targets issue private certs.",
+        "Feed CIDR ranges (after asnmap CIDR mapping) for non-DNS subdomain discovery. Pass --only-cidrs when the input is exclusively CIDR.",
+        "Default ports are 443,8443; add 9443/8444/etc. via -p when the target advertises additional TLS endpoints.",
+        "Read-only TCP/TLS handshakes — leave --destructive off.",
+    ),
+    "alterx": (
+        "Subdomain permutation generator — takes known subdomains and emits permutation candidates for downstream resolution. Pair with `kali puredns resolve` so the permutation list is wildcard-filtered before DNS spend.",
+        "Default invocation uses alterx built-in patterns; pass -p '{{sub}}-{{word}}.{{suffix}}' (repeatable) only when the engagement justifies a custom pattern.",
+        "Output is a stream of candidate FQDNs; pipe to puredns or write to file via -o.",
+    ),
+    "bbot": (
+        "Multi-module recon scanner. Canonical passive subdomain invocation: `bbot -t <target> -p subdomain-enum -rf passive`. Add modules with -m or presets with -p; gate active modules behind --allow-deadly + --destructive.",
+        "--allow-deadly requires --destructive — bbot's deadly modules perform real attacks (fuzzing, brute-force, exploit). The CLI hard-fails if --allow-deadly is passed without --destructive so the audit row stays truthful.",
+        "Long passive sweeps (`-p subdomain-enum`) regularly run 15-30 minutes — set --timeout 1800 or wrap in `kali job start`.",
+    ),
+    "exec": (
+        "Use only when no typed verb fits. Tool-name attribution falls back to argv[0] for audit recording.",
+    ),
+    "job": (
+        "Long-running probes go through `aith assess kali job start ...`. The dtach session is parented by tini so it survives the calling shell.",
+        "Subcommands: start | status | tail | stop | list.",
+    ),
+}
+
+
+_KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
+    "nmap-scan": (
+        {
+            "command": "aith assess kali nmap-scan --target example.com --ports top-1000 --service-detection --technique RECON --intent 'Phase 1 baseline port + service' --probe-kind fingerprint --phase recon --timeout 1800",
+        },
+    ),
+    "nuclei": (
+        {
+            "command": "aith assess kali nuclei -l hosts.txt -t http/cves/ -severity high,critical -rate-limit 50 -c 25 -bs 25 -jsonl -o scans/nuclei.jsonl --technique RECON --intent 'reactive sweep on Phase-1 URL delta' --probe-kind fingerprint --phase recon --timeout 1800",
+        },
+    ),
+    "sqlmap": (
+        {
+            "command": "aith assess kali sqlmap -u 'https://target/?id=1' --batch --sql-technique BEUSTQ --level 3 --risk 2 --technique SQLI --intent 'verify SQLi on id parameter' --probe-kind payload --phase consume-test --timeout 1800",
+        },
+    ),
+    "cero": (
+        {
+            "command": "aith assess kali cero -d 198.51.100.0/24 -p 443,8443,9443 -c 100 -t 4 -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans.txt --technique OSINT --intent 'TLS SAN scraping for non-CT subs' --probe-kind fingerprint --phase recon --timeout 600",
+        },
+    ),
+    "alterx": (
+        {
+            "command": "aith assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt -limit 200000 -o /engagements/$ENGAGEMENT_KEY/scans/perms.txt --technique RECON --intent 'permutation candidate generation from passive subs' --probe-kind fingerprint --phase recon --timeout 600",
+        },
+    ),
+    "bbot": (
+        {
+            "command": "aith assess kali bbot -t example.com -p subdomain-enum -rf passive -o /engagements/$ENGAGEMENT_KEY/scans/bbot_subs --technique OSINT --intent 'deep passive subdomain enum' --probe-kind fingerprint --phase recon --timeout 1800",
+        },
+    ),
+    "job": (
+        {
+            "command": "aith assess kali job start --technique RECON --intent 'long nuclei sweep' --probe-kind fingerprint --phase recon -- nuclei -l targets.txt -t http/cves/",
+        },
+        {
+            "command": "aith assess kali job status 42",
+        },
+    ),
+}
+
+
+def _kali_root_contract() -> CommandContract:
+    return CommandContract(
+        name="kali",
+        summary="Run Kali tools inside the runtime container with audit recording.",
+        schema_name="(per-verb argparse + CommandRunRecordRequest backend model)",
+        preferred_invocations=(
+            "aith assess kali <verb> [flags]",
+            "aith assess kali --help",
+            "aith assess contract kali <verb>",
+        ),
+        author_supplied_fields=(
+            "--technique <enum>",
+            "--intent \"<one-line purpose>\"",
+            "--probe-kind {fingerprint|baseline|payload|exploit|replay|cleanup}",
+            "--phase <enum>",
+            "--timeout <seconds>",
+        ),
+        notes=_KALI_COMMON_NOTES + (
+            f"Verbs: {', '.join(KALI_VERBS)}.",
+        ),
+        common_mistakes=_KALI_COMMON_MISTAKES,
+        examples=(
+            {"command": "aith assess kali nmap-scan --target example.com --ports top-100 --technique RECON --intent 'fast top-100 sweep' --probe-kind fingerprint --phase recon --timeout 600"},
+        ),
+    )
+
+
+def _kali_verb_contract(verb: str) -> CommandContract | None:
+    if verb not in KALI_VERBS:
+        return None
+    notes = _KALI_COMMON_NOTES + _KALI_VERB_NOTES.get(verb, ())
+    examples = _KALI_VERB_EXAMPLES.get(verb, ())
+    invocation = _kali_invocation(verb)
+    author_fields: tuple[str, ...] = (
+        "--technique <enum>",
+        "--intent \"<one-line purpose>\"",
+        "--probe-kind <kind>",
+        "--phase <phase>",
+        "--timeout <seconds>",
+        "tool-specific flags (see `aith assess kali "
+        + verb
+        + " --help`)",
+    )
+    # `exec` and `job` are raw-passthrough wrappers; they do not expose the
+    # typed-verb `--extra-args` flag because every argument after the audit
+    # metadata is already raw passthrough.
+    if verb not in ("exec", "job"):
+        author_fields = author_fields + (
+            "--extra-args \"<raw flags>\" (optional, shlex-split passthrough for long-tail flags)",
+        )
+    return CommandContract(
+        name=f"kali {verb}",
+        summary=f"Run `{verb}` inside the runtime container with audit recording.",
+        schema_name="argparse + CommandRunRecordRequest backend model",
+        preferred_invocations=invocation,
+        author_supplied_fields=author_fields,
+        notes=notes,
+        common_mistakes=_KALI_COMMON_MISTAKES,
+        examples=examples,
+    )
 
 
 def _record_intel_contract(intel_type: str) -> CommandContract | None:

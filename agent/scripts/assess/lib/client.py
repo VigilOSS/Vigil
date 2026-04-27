@@ -80,8 +80,16 @@ class AssessmentClient:
         connect_timeout: float = 2.0,
         read_timeout: float = 10.0,
         max_retries: int | None = None,
+        accept_409: bool = False,
     ) -> tuple[int, str]:
-        """Execute an HTTP request with retry logic."""
+        """Execute an HTTP request with retry logic.
+
+        ``accept_409`` lets callers treat HTTP 409 as success and receive the
+        canonical row payload back. The finalize PATCH on assessment
+        command-runs uses 409 as a "you raced another writer; here is the
+        row that won" signal — surfacing it as ``AssessError`` would force
+        callers to parse exception text to recover the canonical row.
+        """
         retries = max_retries if max_retries is not None else self.MAX_RETRIES
         headers = {"Content-Type": "application/json"} if body else {}
 
@@ -95,6 +103,9 @@ class AssessmentClient:
                 resp_body = resp.read().decode("utf-8", errors="replace")
 
                 if resp.status < 400:
+                    return resp.status, resp_body
+
+                if accept_409 and resp.status == 409:
                     return resp.status, resp_body
 
                 if resp.status in self.RETRYABLE_STATUSES and attempt < retries - 1:
@@ -136,12 +147,27 @@ class AssessmentClient:
         _, resp_body = self._request("POST", path, body=body)
         return json.loads(resp_body)
 
-    def patch(self, endpoint: str, payload: dict) -> dict:
-        """PATCH /assessment/{endpoint}."""
+    def patch(self, endpoint: str, payload: dict, *, accept_409: bool = False) -> dict:
+        """PATCH /assessment/{endpoint}.
+
+        When ``accept_409`` is True, an HTTP 409 from the backend is treated
+        as success and the parsed body is returned. The finalize PATCH on
+        command-runs uses 409 to surface the canonical row when a second
+        writer races a terminal-state row — see `_patch_finalize` in
+        ``lib/kali.py``.
+        """
         path = f"{self._assessment_prefix}/{endpoint}"
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-        _, resp_body = self._request("PATCH", path, body=body)
-        return json.loads(resp_body)
+        status_code, resp_body = self._request("PATCH", path, body=body, accept_409=accept_409)
+        parsed = json.loads(resp_body)
+        if accept_409 and status_code == 409 and isinstance(parsed, dict):
+            # Backend shape: {"detail": {"message": ..., "existing": <row>}}
+            detail = parsed.get("detail")
+            if isinstance(detail, dict) and isinstance(detail.get("existing"), dict):
+                row = dict(detail["existing"])
+                row["finalize_409"] = True
+                return row
+        return parsed
 
     def get_engagement(self, endpoint: str, query: str = "") -> Any:
         """GET /engagements/{key}/{endpoint} — non-assessment scoped (intel, activity)."""

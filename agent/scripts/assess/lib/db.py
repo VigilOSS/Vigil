@@ -32,6 +32,13 @@ def db_init(db_path: str) -> None:
     references them. The CREATE TABLE IF NOT EXISTS path is still authoritative
     for fresh DBs; the migration helper is a no-op when the table does not
     exist yet, and a no-op when the columns are already present.
+
+    After executescript runs the schema, drop and recreate the
+    ``work_items_per_host`` view so legacy DBs pick up the port-stripping
+    fix. ``CREATE VIEW IF NOT EXISTS`` in the schema file is a no-op when an
+    older view already exists with the buggy host expression, so the helper
+    DROPs first and re-runs CREATE — the view is purely derived state, no
+    rows to lose.
     """
     if not Path(db_path).is_file():
         raise SystemExit(f"db_init: database not found: {db_path}")
@@ -43,9 +50,64 @@ def db_init(db_path: str) -> None:
         _apply_work_items_priority_migration(conn)
         schema_sql = _SCHEMA_FILE.read_text(encoding="utf-8")
         conn.executescript(schema_sql)
+        _apply_work_items_per_host_view(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _apply_work_items_per_host_view(conn: sqlite3.Connection) -> None:
+    """Install the per-host aggregate view (1D.2), refreshing it on legacy DBs.
+
+    The view is purely derived state: dropping and recreating it does not
+    touch any work_items row. We always drop first so an older engagement
+    that already has the buggy pre-port-strip host expression cached in the
+    schema picks up the corrected expression on the next ingest pass. Fresh
+    DBs got the right expression via ``executescript``; this helper is the
+    catch-up path for upgrades.
+    """
+    has_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='work_items'"
+    ).fetchone()
+    if not has_table:
+        return
+    conn.execute("DROP VIEW IF EXISTS work_items_per_host")
+    conn.execute(
+        """
+        CREATE VIEW work_items_per_host AS
+        WITH host_with_port AS (
+            SELECT
+                id,
+                status,
+                cluster_key,
+                CASE
+                    WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
+                        THEN substr(
+                            substr(url, instr(url, '://') + 3),
+                            1,
+                            instr(substr(url, instr(url, '://') + 3), '/') - 1
+                        )
+                    ELSE substr(url, instr(url, '://') + 3)
+                END AS host_authority
+            FROM work_items
+            WHERE url IS NOT NULL AND url != ''
+        )
+        SELECT
+            lower(
+                CASE
+                    WHEN instr(host_authority, ':') > 0
+                        THEN substr(host_authority, 1, instr(host_authority, ':') - 1)
+                    ELSE host_authority
+                END
+            ) AS host,
+            SUM(CASE WHEN status IN ('pending', 'processing', 'done') THEN 1 ELSE 0 END) AS active_count,
+            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+            SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done_count,
+            SUM(CASE WHEN cluster_key LIKE 'deferred:%' THEN 1 ELSE 0 END) AS deferred_count
+        FROM host_with_port
+        GROUP BY host
+        """
+    )
 
 
 def _apply_work_items_priority_migration(conn: sqlite3.Connection) -> None:

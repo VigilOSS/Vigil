@@ -7,6 +7,22 @@ services:
     cap_add:
       - NET_RAW
       - NET_ADMIN
+      - SYS_PTRACE
+    mem_swappiness: 0
+    memswap_limit: 8G
+    shm_size: 1G
+    oom_score_adj: -500
+    ulimits:
+      nofile:
+        soft: 32768
+        hard: 32768
+      nproc: 8192
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: "4"
+          pids: 512
 
   runtime-lightweight-dev:
     # Development-only image for faster local Dockerfile iteration. Operator
@@ -19,6 +35,7 @@ services:
     cap_add:
       - NET_RAW
       - NET_ADMIN
+      - SYS_PTRACE
 
   mitmproxy:
     build:

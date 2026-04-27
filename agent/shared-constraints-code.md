@@ -39,9 +39,9 @@ not read. Never request operator-mediated expansion when you can resolve it with
 ## 3. Full Filesystem Access
 
 Source code is read directly from the local filesystem via host Bash or Claude Code tools.
-This is NOT target-facing network work -- Kali MCP is not needed for reading source files.
+This is NOT target-facing network work -- `aith assess kali` is not needed for reading source files.
 
-**When code analysis does reach for Kali MCP** (for example, a fuzz campaign or
+**When code analysis does reach for `aith assess kali ...`** (for example, a fuzz campaign or
 binary-triage pass that runs a tool through the runtime), the same coverage-check
 rule as the web mode applies: every call carries `engagement_key`/`agent_name`/`phase`
 and runs land in `assessment_command_runs`. Treat that history as a coverage

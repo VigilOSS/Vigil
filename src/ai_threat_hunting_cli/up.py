@@ -78,7 +78,7 @@ def _start_or_restart_runtime(
             start_runtime(RuntimeOptions(install_root=install_root, recreate=True), runner=runner)
             return
         print("runtime\trunning old image; restart skipped")
-        print("Run `aith runtime restart` when you are ready to reconnect MCP clients.")
+        print("Run `aith runtime restart` when you are ready to pick up the new image.")
         return
 
     print("runtime\talready running")
@@ -96,9 +96,9 @@ def _confirm_runtime_restart(options: UpOptions) -> bool:
 
     timeout = max(0, options.runtime_restart_timeout)
     print(
-        "Runtime image changed. Restarting Kali runtime will close active MCP transports; "
-        "Codex/Claude sessions must reconnect. OOB interactsh client domains may be lost "
-        "unless their session files can resume with the server."
+        "Runtime image changed. Restarting Kali runtime will terminate any in-flight `aith assess kali ...` "
+        "or `docker exec` sessions; OOB interactsh client domains may be lost unless their session files "
+        "can resume with the server."
     )
     print(f"Restart Kali runtime now? [y/N] waiting {timeout}s: ", end="", flush=True)
     readable, _, _ = select.select([sys.stdin], [], [], timeout)

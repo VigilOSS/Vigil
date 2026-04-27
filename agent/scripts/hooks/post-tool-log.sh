@@ -149,7 +149,7 @@ case "$TOOL_NAME" in
       fi
     fi
     if command_hits_in_scope_target_with_raw_curl "$ENG_DIR" "$COMMAND"; then
-      RESULT="VIOLATION: host-side target traffic bypassed Kali MCP. ${RESULT}"
+      RESULT="VIOLATION: host-side target traffic bypassed 'aith assess kali'. ${RESULT}"
     fi
 
     post_activity_entry "hook" "Bash" "$ACTION" "$RESULT"

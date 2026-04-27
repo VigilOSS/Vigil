@@ -7,8 +7,28 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
+from urllib.parse import urlparse
 
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+# Per-host URL budgets (1D.2). The default content-rich tier is 1000 URLs;
+# API-tier hosts (api.* / *.api.example.test) match the same 1000 cap
+# because the prior 200 cap silently truncated legitimate API surface on
+# real engagements (large microservice clusters routinely expose 500+
+# discrete REST routes); sitemap-bearing hosts allow 2000 because the
+# sitemap declares the canonical surface and we should not truncate below
+# it. Operators can still cap a known-noisy host below 1000 with
+# ``--budget-override host:N``.
+PER_HOST_BUDGET_CONTENT_RICH = 1000
+PER_HOST_BUDGET_API_TIER = 1000
+PER_HOST_BUDGET_SITEMAP_BEARING = 2000
+
+_API_TIER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^api\.", re.IGNORECASE),
+    re.compile(r"\.api\.", re.IGNORECASE),
+    re.compile(r"^api-[\w-]+\.", re.IGNORECASE),
+)
 
 # Pre-compiled patterns (one-time cost)
 _GRAPHQL_PATH = re.compile(r"/graphql", re.IGNORECASE)
@@ -137,3 +157,151 @@ def classify_type(method: str, url_path: str, content_type: str = "", body_snipp
 
     # 15. unknown
     return "unknown"
+
+
+def per_host_budget(
+    host: str,
+    *,
+    sitemap_hosts: set[str] | None = None,
+    overrides: dict[str, int] | None = None,
+) -> int:
+    """Return the per-host URL budget for a given host (1D.2).
+
+    Match order is operator-override > sitemap-bearing > API-tier > default.
+    The override is checked first because the operator may legitimately want
+    to cap a known-large content host BELOW 200 (e.g. CDN dump) or RAISE a
+    sitemap-bearing host above 2000; both intents must beat the heuristic
+    rules. Sitemap-bearing matches before API-tier because a sitemap-bearing
+    `api.example.test` host is a strict superset of the API-tier's
+    expectation and the sitemap declares the canonical surface.
+
+    Hostname matching is case-insensitive and tolerates a trailing dot.
+    """
+    if not host:
+        return PER_HOST_BUDGET_CONTENT_RICH
+    normalized = host.rstrip(".").lower()
+
+    if overrides and normalized in overrides:
+        return int(overrides[normalized])
+
+    if sitemap_hosts and normalized in sitemap_hosts:
+        return PER_HOST_BUDGET_SITEMAP_BEARING
+
+    for pattern in _API_TIER_PATTERNS:
+        if pattern.search(normalized):
+            return PER_HOST_BUDGET_API_TIER
+
+    return PER_HOST_BUDGET_CONTENT_RICH
+
+
+def host_active_count(db_path_or_conn, host: str) -> int:
+    """Return the active (pending+processing+done) row count for a host.
+
+    Reads from the ``work_items_per_host`` view, falling back to a direct
+    aggregate query when the view is missing (legacy DBs that bypass the
+    db_init migration). Accepts either a sqlite3.Connection (so the
+    ingestion path can share its existing connection without paying the
+    open/close cost per URL) or a path string.
+
+    Hostname is normalized to lower-case + trailing-dot stripped to match
+    the view's host expression.
+    """
+    normalized = (host or "").rstrip(".").lower()
+    if not normalized:
+        return 0
+
+    owns_conn = False
+    if isinstance(db_path_or_conn, sqlite3.Connection):
+        conn = db_path_or_conn
+    else:
+        conn = sqlite3.connect(str(db_path_or_conn), timeout=5.0)
+        conn.execute("PRAGMA busy_timeout=5000")
+        owns_conn = True
+
+    try:
+        view_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='view' AND name='work_items_per_host'"
+        ).fetchone()
+        if view_exists:
+            row = conn.execute(
+                "SELECT active_count FROM work_items_per_host WHERE host = ?",
+                (normalized,),
+            ).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+
+        # Fallback aggregate when the view migration has not run yet. The
+        # nested substr/instr expression mirrors schema.sql's port-stripped
+        # host extraction so this fallback agrees with the view.
+        row = conn.execute(
+            """
+            WITH host_with_port AS (
+                SELECT
+                    status,
+                    CASE
+                        WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
+                            THEN substr(
+                                substr(url, instr(url, '://') + 3),
+                                1,
+                                instr(substr(url, instr(url, '://') + 3), '/') - 1
+                            )
+                        ELSE substr(url, instr(url, '://') + 3)
+                    END AS host_authority
+                FROM work_items
+                WHERE status IN ('pending', 'processing', 'done')
+                  AND url IS NOT NULL AND url != ''
+            )
+            SELECT COUNT(*) FROM host_with_port
+            WHERE lower(
+                CASE
+                    WHEN instr(host_authority, ':') > 0
+                        THEN substr(host_authority, 1, instr(host_authority, ':') - 1)
+                    ELSE host_authority
+                END
+            ) = ?
+            """,
+            (normalized,),
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def parse_budget_overrides(override_args: list[str] | tuple[str, ...] | None) -> dict[str, int]:
+    """Parse ``--budget-override host:N`` operator overrides into a host->int map.
+
+    Accepts the raw flag values argparse hands us (a list of strings, one per
+    --budget-override occurrence, each in ``host:N`` form). Invalid entries
+    raise ValueError so the CLI fails fast rather than silently dropping a
+    misformatted override. Hostnames are normalized to lower-case +
+    trailing-dot stripped to match the view's host expression.
+    """
+    if not override_args:
+        return {}
+    overrides: dict[str, int] = {}
+    for raw in override_args:
+        if ":" not in raw:
+            raise ValueError(f"--budget-override expects host:N form, got {raw!r}")
+        host_part, _, count_part = raw.partition(":")
+        host_normalized = host_part.strip().rstrip(".").lower()
+        if not host_normalized:
+            raise ValueError(f"--budget-override missing host in {raw!r}")
+        try:
+            count = int(count_part.strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"--budget-override count must be an integer in {raw!r}"
+            ) from exc
+        if count < 0:
+            raise ValueError(f"--budget-override count must be non-negative in {raw!r}")
+        overrides[host_normalized] = count
+    return overrides
+
+
+def host_from_url(url: str) -> str:
+    """Extract a normalized hostname from a URL for budget bookkeeping."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return ""
+    return (parsed.hostname or "").rstrip(".").lower()

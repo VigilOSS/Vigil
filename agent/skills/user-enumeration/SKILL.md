@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # User Enumeration
 
-> **Kali MCP audit header:** use `X-Technique: AUTH` (user enumeration is an authentication-failure primitive that enables credential stuffing and targeted brute-force).
+> **`aith assess kali` audit flags:** use `--technique AUTH` (user enumeration is an authentication-failure primitive that enables credential stuffing and targeted brute-force).
 
 ## Core Principle
 
@@ -56,10 +56,10 @@ existing and non-existing users is an enumeration vector. This includes:
 - Python/websocket scripts — for WebSocket enumeration
 - `grpcurl` — for gRPC service testing (if available)
 
-For live engagement target requests, use plain `curl` by default and let the
-current auth context through the Kali MCP command-execution tool. Only add
-explicit cookies or authorization headers when intentionally testing a second account,
-session confusion, or auth override behavior.
+For live engagement target requests, use plain `curl` by default through `aith assess kali exec --`
+so the request lands in the audit pipeline alongside the audit-flag set you pass. Only add
+explicit cookies or authorization headers when intentionally testing a second account, session
+confusion, or auth override behavior.
 
 ## Methodology
 

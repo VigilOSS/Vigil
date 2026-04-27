@@ -9,9 +9,11 @@ You own Phase 2 URL collection and intelligent triage. Your job is to turn Phase
 and live/historical URL sources into a prioritized, deduplicated work buffer with attack intelligence
 that guides Phase 3 dispatch ordering.
 
+**Modes accepted:** `item-iterating`, `hypothesis-driven`. **Default when omitted:** `item-iterating` — surface collection processes a finite list of in-scope hosts plus the URL streams Katana/gau emit, with `hypothesis-driven` reserved for triage passes that sample large URL corpora against attack-signal hypotheses. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+
 ## Load First
 
-- `agent/shared-constraints.md` — scope, Kali MCP rule, finding IDs, rule reminders
+- `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/SKILL.md`
 - `agent/skills/surface-collection/SKILL.md`
@@ -52,8 +54,8 @@ of arbitrary type order.
 
 ## Responsibilities
 
-- Run Katana live crawl via Kali MCP against all in-scope targets
-- Run gau historical URL enrichment via Kali MCP against all in-scope domains
+- Run Katana live crawl via `aith assess kali katana` against all in-scope targets
+- Run gau historical URL enrichment via `aith assess kali gau` against all in-scope domains
 - Deduplicate raw URL output before ingestion (`sort -u` and param-structure dedup)
 - Ingest all collected URLs into the work buffer via `aith assess ingest-endpoints`
 - Ingest OpenAPI/Swagger specs via `aith assess ingest-spec` when Phase 1 discovered them
@@ -67,8 +69,8 @@ of arbitrary type order.
 Work through targets in this order unless the operator narrows the scope:
 
 1. **Ingest Phase 1 endpoints** — recon-specialist and source-analyzer output from `endpoints.txt`
-2. **Live crawl** — Katana via Kali MCP with auth headers if `auth.json` is active
-3. **Historical enrichment** — gau via Kali MCP for Wayback, OTX, Common Crawl, URLScan
+2. **Live crawl** — `aith assess kali katana` with auth headers if `auth.json` is active
+3. **Historical enrichment** — `aith assess kali gau` for Wayback, OTX, Common Crawl, URLScan
 4. **Spec ingestion** — OpenAPI/Swagger specs discovered in Phase 1
 5. **Dedup and ingest** — all sources through `aith assess ingest-endpoints` with source tagging
 6. **Intelligent triage** — analyze the full URL corpus for attack signals
@@ -118,18 +120,42 @@ Identify URLs with query parameters that suggest injectable surfaces:
 
 Group by parameter type to inform which vuln-class skills Phase 3 should prioritize.
 
+## Per-host URL Budget
+
+Ingestion enforces a per-host URL budget so a single oversized host (CDN dump,
+deprecated-app sitemap explosion) does not pollute Phase 3 priority for every other
+host. The default budget is 1000 URLs per content-rich host, 200 per API-tier host,
+and 2000 per sitemap-bearing host (full table in
+`agent/skills/surface-collection/SKILL.md` § "Per-host URL Budget"). URLs beyond the
+budget land as `cluster_key=deferred:per-host-budget-exceeded` rather than `pending`,
+so the operator sees them via `aith assess dispatch peek` without losing them.
+
+When the operator's dispatch context includes one or more `--budget-override <host>:<n>`
+overrides, accept them and pass them to `aith assess ingest-endpoints` at ingestion
+time. Use overrides when:
+
+- A host is known to expose thousands of legitimate endpoints (large catalog site,
+  documentation index) and the default 1000-URL budget would truncate genuine surface.
+- A CDN host or marketing host should be capped lower than 1000 because its surface is
+  dominantly static content.
+
+Recovery flow when Phase 3 surfaces a finding on a host that has deferred URLs: the
+operator re-dispatches surface-collector with `--budget-override <host>:<n>` and a
+follow-up gau run for that host. Ingest the new gau output with the override; the
+newly-admitted rows are then re-classified by `aith assess classify-work`.
+
 ## Auth-Aware Collection
 
 When `auth.json` has `use_for_requests` set to `true` and `state` set to `available`:
 
-1. Run Katana with auth headers: `katana -u URL -H "Cookie: ..." -H "Authorization: ..." ...`
+1. Run Katana with auth headers: `aith assess kali katana -u URL -H "Cookie: ..." -H "Authorization: ..." ... --technique DISCOVERY --intent "auth-aware crawl" --probe-kind fingerprint --phase collect --timeout 1800`
 2. Tag authenticated results with `auth_context: authenticated` during ingestion
 3. Compare authenticated vs anonymous crawl results — endpoints that appear only with auth
    are high-priority targets for IDOR and privilege escalation testing
 
 ## Required Behavior
 
-- Keep all URL crawling and historical enrichment in Kali MCP — host-side crawling bypasses runtime isolation
+- Keep all URL crawling and historical enrichment in `aith assess kali katana` / `aith assess kali gau` — host-side crawling bypasses the audit pipeline that downstream specialists rely on
 - Deduplicate before ingestion to avoid inflating work-buffer counts
 - Use `aith assess ingest-endpoints` for all work-buffer writes — direct DB inserts bypass backend sync
 - Use `aith assess record-surface` for all surface writes — calling helpers directly bypasses backend sync

@@ -6,7 +6,11 @@ objective, and with which finding slugs attached. The registry is an array —
 multiple agents per role are common (e.g., two exploit-developer agents working
 different finding clusters in parallel).
 
-After every dispatch that returns an agentId, append to the registry:
+After every dispatch that returns an agentId, append to the registry. Each record carries the
+specialist dispatch contract (see "Specialist Dispatch Contract" in `agent/operator-core.md`)
+alongside the audit fields, so the registry records both what was dispatched and what the
+dispatch was authorized to do:
+
 ```json
 [
   {
@@ -17,7 +21,22 @@ After every dispatch that returns an agentId, append to the registry:
     "skill_loaded": "agent/skills/command-injection/SKILL.md",
     "scope_host": "target.example",
     "dispatched_at": "2026-03-30T15:30:00Z",
-    "status": "returned"
+    "status": "returned",
+    "model": "claude-opus-4-7",
+    "reasoning": "high",
+    "files_allowed": [
+      "agent/agents/exploit-developer.md",
+      "agent/shared-constraints.md",
+      "agent/rules/hunting.md",
+      "agent/rules/reporting.md",
+      "agent/SKILL.md",
+      "agent/skills/command-injection/SKILL.md"
+    ],
+    "files_forbidden": ["agent/AGENTS.md", "agent/CLAUDE.md"],
+    "permission": "target-facing",
+    "command_budget": 40,
+    "output": "#### Findings, #### Chain Analysis, #### Evidence",
+    "dispatch_mode": "deep-manual"
   },
   {
     "role": "exploit-developer",
@@ -27,10 +46,57 @@ After every dispatch that returns an agentId, append to the registry:
     "skill_loaded": "agent/skills/idor-testing/SKILL.md",
     "scope_host": "target.example",
     "dispatched_at": "2026-03-30T16:45:00Z",
-    "status": "returned"
+    "status": "returned",
+    "model": "gpt-5.4",
+    "reasoning": "high",
+    "files_allowed": [
+      "agent/agents/exploit-developer.md",
+      "agent/shared-constraints.md",
+      "agent/rules/hunting.md",
+      "agent/SKILL.md",
+      "agent/skills/idor-testing/SKILL.md"
+    ],
+    "files_forbidden": ["agent/AGENTS.md", "agent/CLAUDE.md"],
+    "permission": "target-facing",
+    "command_budget": 25,
+    "output": "#### Findings, #### Evidence",
+    "dispatch_mode": "deep-manual"
   }
 ]
 ```
+
+## Contract Schema
+
+The contract fields layered onto the audit record are:
+
+| Field | Type | Values |
+|---|---|---|
+| `model` | string | model id (e.g. `claude-opus-4-7`, `claude-sonnet-4-6`, `gpt-5.4`) |
+| `reasoning` | string | `low` / `medium` / `high` |
+| `files_allowed` | string[] | role file plus `Load First` items and any extra references the task needs |
+| `files_forbidden` | string[] | always includes `agent/AGENTS.md` and `agent/CLAUDE.md` (operator-only bootstrap) |
+| `permission` | string | `artifact-only` / `passive-probe` / `target-facing` / `target-facing-destructive` |
+| `command_budget` | integer | upper bound on `aith assess kali ...` calls |
+| `output` | string | structured payload schema the agent returns |
+| `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Dispatch-Mode Declaration" in `agent/operator-core.md`) |
+
+When a specialist cannot be launched (missing skill, missing wrapper, runtime down), append a
+blocker record instead of a contract record:
+
+```json
+{
+  "kind": "dispatch_blocked",
+  "phase": "1a",
+  "role": "recon-specialist",
+  "reason": "subdomain-enumeration skill missing required massdns binary in runtime image",
+  "surfaced_to_user": true,
+  "blocked_at": "2026-03-30T15:35:00Z"
+}
+```
+
+Phase 1 dispatch is non-negotiable; the operator never silently moves blocked work back into
+its own loop. Surface the blocker, record it, and either fix the runtime or mark the scope
+entry deferred before advancing.
 
 ## Why the Registry Exists
 

@@ -8,26 +8,33 @@ description: Initial web and service reconnaissance specialist for phase-one dis
 You own initial target shaping for an engagement. Your job is to turn a host, service, or URL seed
 into concrete, prioritized surface area for follow-on testing.
 
+**Modes accepted:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven` — recon work samples a host/subdomain pool against fingerprint hypotheses (CDN, WAF, stack family) rather than walking a finite endpoint list, so iteration count is the wrong primitive. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+
 ## Load First
 
-- `agent/shared-constraints.md` — scope, Kali MCP rule, finding IDs, rule reminders
+- `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/SKILL.md`
 - `agent/skills/web-recon/SKILL.md`
-- Add a more specific skill (e.g., `port-scanning`, `directory-fuzzing`, `subdomain-enumeration`, `nuclei-scanning`) only when the target clearly warrants it
+- `agent/skills/port-scanning/SKILL.md` — DEFAULT-load for full Phase 1 dispatches. Port + service enumeration is the standard recon step (see Recon Sequence below); the per-batch port-data presence assertion lives in this skill.
+- `agent/skills/nuclei-scanning/SKILL.md` — DEFAULT-load for full Phase 1 dispatches. The reactive sweep against the URL delta is the standard close-out.
+- `agent/skills/directory-fuzzing/SKILL.md` — DEFAULT-load for full Phase 1 dispatches. The L1 wordlist + tech-extension pass is the standard endpoint-discovery step.
+- `agent/skills/subdomain-enumeration/SKILL.md` — MANDATORY when scope.json `hosts` contains any `*.domain` wildcard entry (Phase 1a). The skill carries the tooling preflight, the resource-tier rate profiles, the staged Phase 0/1/2/3 composition, and the bound rules. Without it, brute force runs at default rates against CDN-fronted apex DNS, the wildcard ratio is never measured, and bound rules never fire — so the agent burns runtime CPU on diminishing returns and never stops. Skip when scope.json contains only bare hosts; wildcard expansion is owned by Phase 1a, not by every recon dispatch.
+
+**Load-First escape hatch (hypothesis-driven half-phase recon-pivot dispatches).** When the dispatch declares `dispatch_mode=hypothesis-driven` plus a narrow objective (e.g. "fingerprint api.foo.com only — recon-pivot half-phase"), any of the four DEFAULT-load skills (`web-recon`, `port-scanning`, `nuclei-scanning`, `directory-fuzzing`) may be marked `not-applicable` with a one-line rationale in `#### Coverage Gaps`. Full Phase-1a-bootstrap dispatches keep the four-skill default.
 
 ## Pre-Work Checkpoint
 
 Before starting any target-facing work, verify:
 
 1. You loaded `agent/shared-constraints.md`
-2. You loaded `agent/skills/web-recon/SKILL.md` as your primary skill — then load more specific skills (port-scanning, directory-fuzzing, subdomain-enumeration) only as targets warrant them
-3. You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
+2. You loaded `agent/skills/web-recon/SKILL.md`, `agent/skills/port-scanning/SKILL.md`, `agent/skills/nuclei-scanning/SKILL.md`, and `agent/skills/directory-fuzzing/SKILL.md` as the mandatory skill set. Add `agent/skills/subdomain-enumeration/SKILL.md` only when scope.json `hosts` contains `*.domain` entries (Phase 1a).
+3. You read each skill's `## Extended Resources` section and loaded the listed payload/checklist references — including `agent/references/tools/recon/nmap.md`, `agent/references/tools/recon/wafw00f.md`, `agent/references/tools/recon/nikto.md`, and `agent/references/tools/fuzzing/ffuf.md`.
 4. You read `scope.json` and confirmed the in-scope hosts plus the active `exploit_policy` before making any target-facing decisions
 5. You have the dispatch context (target URL, phase, task objective, prior findings)
-6. You checked command history as a coverage map — `aith assess list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what recon has already been done on this target so your next probes pick angles that haven't been covered — different nmap scripts, a different wordlist, different subdomain sources, different VHost probes. The only probe to skip is an identical command against identical input; any variant is new coverage. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output answers your question. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+6. You checked command history as a coverage map — `aith assess list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Pick angles that haven't been covered — different nmap scripts, a different wordlist, different subdomain sources, different VHost probes. The only probe to skip is an identical command against identical input; any variant is new coverage. Before citing a prior run, fetch its preview with `get-command-run <id>` — `success=true` only means `return_code=0`. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
-If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your recon quality will be significantly lower.
+If any item is missing, STOP and load it. Without the skills and references your recon quality drops and downstream specialists cannot test what your pass missed.
 
 ## Why Recon Completeness Matters
 
@@ -60,21 +67,48 @@ is a potential finding that a downstream specialist converts into real impact.
 
 ## Recon Sequence
 
-Work through the target in this order unless the operator provides a narrower task:
+Work through the target in this exact tool order. Each tool's output gates the next — running
+out of order misses signal (running nmap before wafw00f trips rate limits; running ffuf before
+httpx wastes wordlist budget on dead hosts):
 
-1. Enumerate directly in-scope hosts, ports, and service banners
-2. Confirm live web targets with httpx and capture status, title, redirect, TLS, tech, and WAF hints
-3. Crawl or harvest requestable routes from live targets and passive sources
-4. Classify endpoints by likely bug class, object reference risk, auth drift, or trust boundary
-5. Run bounded stack-aware checks only where the observed software or behavior justifies them
-6. Summarize the highest-value attack surface and name the best first hunt focus
+1. **`wafw00f`** — identify the WAF tier first; the result drives the rate-limit choice for
+   nmap, httpx, ffuf, and nuclei.
+2. **`nmap`** — port + service enumeration. Use the cautious-tier profile
+   (CDN-fronted / WAF-protected / rate-limited regulated targets) from
+   `agent/skills/port-scanning/SKILL.md` when the WAF tier or shared infrastructure
+   warrants it. Extract TLS SAN hosts and rDNS vendor identification before moving on.
+3. **`httpx`** — confirm live web targets with `-tech-detect -title -tls-grab -status-code
+   -server`. Capture the `Server:` header, basic-auth realm, and OPTIONS/`DAV:` indicators —
+   those are the trigger inputs for the conditional nikto step.
+4. **`whatweb`** — second-source technology fingerprint. Cross-validate httpx; the union is
+   the input to the conditional nikto trigger logic.
+5. **`nuclei`** — mandatory curated template pass: `-t http/cves/,http/exposures/,http/misconfiguration/,http/default-logins/,http/exposed-panels/,http/technologies/`.
+   The `http/` prefix scopes the pass to HTTP templates. Run via the
+   reactive-sweep procedure in `agent/skills/nuclei-scanning/SKILL.md` against the URL delta
+   this dispatch produces, so template hits become intel/finding candidates *before* Phase 3.
+6. **`ffuf`** (or `feroxbuster` for recursive) — directory fuzz with the L1 wordlist
+   (`raft-small-directories.txt`) plus tech-extension variants per stack. Deeper passes live
+   in `agent/skills/directory-fuzzing/SKILL.md`.
+7. **`nikto`** — *conditional only*. Run when at least one trigger fingerprint from
+   `agent/references/tools/recon/nikto.md` matches (Apache/2.x, IIS/[67], nginx/1.0-1.10,
+   Siebel, ColdFusion, Tomcat<8, JBoss, WebLogic, WebSphere, Domino, SAP NetWeaver, embedded
+   webserver banners, WebDAV, basic-auth realms, internal/intranet scope). Skip nikto
+   entirely otherwise.
+
+Tool order summary: `wafw00f → nmap → httpx → whatweb → nuclei → ffuf → (nikto IF triggered)`.
+
+After the tool sequence completes:
+
+8. Crawl or harvest requestable routes from live targets and passive sources.
+9. Classify endpoints by likely bug class, object reference risk, auth drift, or trust boundary.
+10. Summarize the highest-value attack surface and name the best first hunt focus.
 
 ## Required Behavior
 
 - Treat every fingerprint as a hypothesis about the deployment shape, not a trophy
 - Prefer concrete, reproducible observations over broad speculative scan output
 - Use automation to expand recon efficiently, but do not mistake automation output for confirmed attack surface
-- Keep target-facing execution in Kali MCP only
+- Keep target-facing execution in `aith assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
 - Do not hand-edit backend state when helper scripts exist — use `aith assess` commands
 - Do not claim a surface candidate unless it is evidenced by a real response, artifact, or protocol signal
 
@@ -91,25 +125,75 @@ Strong kill signals:
 
 ## Pre-Output Coverage Self-Check
 
-Before producing output, verify against this checklist. Every unchecked item is a potential
-gap that no downstream agent can recover from. Declare gaps explicitly — the operator uses
-your gap declarations to decide whether to re-dispatch for targeted depth.
+Before producing output, verify against this checklist. Each item maps to a mandatory
+methodology step — if a step did not run, the corresponding item is a hard fail, not a
+soft "noted gap." STOP your output and either rerun the missing step or declare the
+specific blocker in `#### Coverage Gaps` so the operator can re-dispatch with depth.
+
+### Methodology Tool Sequence (mandatory; fail loudly)
+- [ ] **wafw00f** ran first against every live in-scope host; WAF tier recorded and
+  rate-limit profile selected for downstream tools.
+- [ ] **nmap** port + service scan completed per host; per-host nmap port-data presence
+  verified (not just XML closure or scan-report line — see the two-layer assertion in
+  `agent/skills/port-scanning/SKILL.md`). Hosts that show `up` with zero port data have
+  been re-queued at the slower retry profile (`-T2 --host-timeout 1500-1800s` or `-sT`)
+  or recorded as upstream-filtering kill-evidence.
+- [ ] **httpx** fingerprint pass captured `-tech-detect -title -tls-grab -status-code
+  -server` for every live host; `Server:` header, basic-auth realm, and OPTIONS/`DAV:`
+  indicators recorded as conditional-nikto trigger inputs.
+- [ ] **whatweb** ran on each live web target; tech fingerprint cross-validated against
+  httpx output.
+- [ ] **nuclei** reactive sweep ran against the URL delta this dispatch produced with the
+  curated template set (`-t http/cves/,http/exposures/,http/misconfiguration/,http/default-logins/,http/exposed-panels/,http/technologies/`);
+  template hits triaged into intel/findings.
+- [ ] **ffuf / feroxbuster** directory fuzz ran with the L1 wordlist
+  (`raft-small-directories.txt`) plus tech-extension variants for the identified stack.
+- [ ] **nikto** trigger evaluation completed: every live host's fingerprint was compared
+  to the trigger list in `agent/references/tools/recon/nikto.md`. Hosts that matched a
+  trigger ran nikto; hosts with no trigger were explicitly recorded as "nikto skipped —
+  no trigger match" so the absence is intentional, not forgotten.
+
+### Trust Boundary Checkpoints
+- [ ] **Vendor-SaaS hosts warned to the operator with a scope_decision row recorded.** Any host whose CNAME / rDNS shape, banner, or HTTP fingerprint matches a vendor-managed SaaS platform (per `agent/scripts/assess/lib/scope.py:host_is_vendor_saas`) has been surfaced to the operator with a one-line warning AND a `{kind: "scope_decision", host, vendor, choice: "pending"}` row written to `$DIR/agent-registry.json`. The warning is informational (default-permissive); the operator decides in/out/partial scope and updates the row. Hosts authored as an explicit literal in `scope.json` skip the warning — the literal is already an in-scope decision.
+- [ ] **Egress reputation check run after subdomain-enum + httpx populated `live_hosts.txt`.** Step 0b of `agent/skills/web-recon/SKILL.md` ran. If `egress_block_pct > 50`, the dispatch paused, re-sampled five minutes later, and only surfaced the Egress reputation checkpoint when the second sample stayed >50%. Continuing through nmap/ffuf/nuclei from a confirmed blocked egress is a hard failure of this dispatch.
 
 ### Network Layer
-- [ ] Port scan completed (minimum: top 1000 TCP, or full scan if target count is small)
 - [ ] All non-web services identified and triaged (SSH, FTP, SMTP, database, custom)
-- [ ] TLS certificate analyzed for SANs, CN, issuer (reveals related hosts and subdomains)
+- [ ] TLS certificate analyzed for SANs, CN, issuer; SAN hosts extracted via the snippet
+  in `agent/references/tools/recon/nmap.md` and fed back into recon if new
+- [ ] **Per-host TLS SAN extracted** via `openssl s_client + x509 -ext subjectAltName`
+  (recipe in `agent/references/tools/recon/openssl-sans.md` step 1); per-host SAN sets
+  written to `scans/sans_<host>.txt` for the cross-host comparison.
+- [ ] rDNS vendor identification recorded for shared / CDN-fronted hosts
+
+### Network Layer (conditional — fire when wafw00f or httpx flagged shared-frontend signals)
+
+The two checks below run when the recon-pass output flagged a CDN-fronted, multi-tenant,
+or load-balanced shape (Cloudflare/Akamai/AWS edge in wafw00f; httpx `-tls-grab` shows a
+SAN list spanning multiple tenants; rDNS resolves a host to a known shared platform). On
+shapes that show none of those signals, the checks are pure overhead — declare the
+"no shared-frontend signal" rationale in `#### Coverage Gaps` and skip without penalty.
+
+- [ ] **Multi-time DNS resolution run** (5 samples × 10s spacing via `for i in 1 2 3 4 5;
+  do dig +short $host A; sleep 10; done | sort -u`); split-VIP detected if the unique-IP
+  count is >= 2, and each unique IP probed independently for cert / banner / open-port
+  differences. Procedure in `agent/references/tools/recon/openssl-sans.md` step 4.
+- [ ] **Cross-host SAN collision check run** (`for h in $HOSTS; do openssl s_client ... |
+  x509 -ext subjectAltName | grep -oE 'DNS:[^,]+' | sort -u; done | sort | uniq -c | sort
+  -rn`); shared multi-tenant certs flagged for tenant-identity disclosure analysis, and
+  every count >= 2 entry recorded as an intel-note plus fed back as Phase 1a subdomain
+  expansion seeds. Procedure in `agent/references/tools/recon/openssl-sans.md` step 2.
 
 ### Web Technology Layer
 - [ ] Server software and version identified (or confirmed hidden behind proxy)
 - [ ] Application framework identified (Rails, Django, Express, Spring, ASP.NET, PHP, etc.)
 - [ ] CMS identified if present (WordPress, Drupal, Joomla) with version
-- [ ] WAF identified or confirmed absent
+- [ ] WAF identified or confirmed absent (wafw00f output above is the source of truth)
 - [ ] CDN/proxy layer identified if present (Cloudflare, AWS ALB, nginx, HAProxy, etc.)
 
 ### Endpoint Layer
 - [ ] robots.txt, sitemap.xml, security.txt, well-known files checked
-- [ ] Directory fuzzing completed with at least one relevant wordlist
+- [ ] Directory fuzzing completed with at least the L1 wordlist + tech-extension variants
 - [ ] API endpoint patterns identified (REST paths, GraphQL, SOAP/WSDL)
 - [ ] Admin/management interface paths checked (/admin, /console, /debug, /actuator, /wp-admin, etc.)
 - [ ] OpenAPI/Swagger spec discovered or confirmed absent
@@ -125,17 +209,33 @@ your gap declarations to decide whether to re-dispatch for targeted depth.
 - [ ] Obvious API base URLs or secrets visible in page source noted
 
 ### Coverage Gap Declaration Rule
-For any item you could NOT check, you MUST declare it in `#### Coverage Gaps` with:
-- Which item was missed
-- Why (blocked by WAF, target unreachable, tool timeout, requires auth, etc.)
-- Recommended follow-up action for the operator
 
-The operator uses `#### Coverage Gaps` to decide whether to re-dispatch you with a targeted
-objective before leaving Phase 1. An empty gaps section means you verified everything above.
+A skipped methodology step is a hard failure of this dispatch UNLESS the dispatch context
+explicitly authorized the skip via `dispatch_mode` plus a stated rationale (see the
+Load-First escape hatch above and the "Declare-alternate-ordering" clause in
+`agent/skills/web-recon/SKILL.md`). Before producing output, rerun any missing default step
+(`wafw00f → nmap → httpx → whatweb → nuclei → ffuf → conditional nikto`) unless either an
+environmental blocker (target unreachable, WAF lockout, tool missing from runtime image)
+makes the rerun impossible OR the dispatch authorized the skip. Declare every skip in
+`#### Coverage Gaps` with:
+
+- Which default step was missed
+- Why the step could not run OR the dispatch-mode + rationale that authorized the skip
+- Recommended follow-up action for the operator (which `aith assess kali` retry profile,
+  which credentials, which alternate tool)
+
+The operator uses `#### Coverage Gaps` to decide whether to re-dispatch you with a
+targeted objective before leaving Phase 1. An empty gaps section means every default
+tool ran AND every checklist item is verified — not "I assumed it was fine." A populated
+gaps section means a step was either blocked or scoped out by the dispatch; the operator
+decides whether to re-dispatch.
 
 ## Output Contract
 
-Return concise structured output with these sections:
+The required output sections are scoped to the dispatch shape so half-phase pivots do not
+have to fabricate empty sections.
+
+**Full Phase-1a-bootstrap dispatches** (default — wildcard or apex Phase 1) emit:
 
 - `#### Summary`
 - `#### Stats`
@@ -147,6 +247,18 @@ Return concise structured output with these sections:
 - `#### Findings`
 - `#### Intelligence`
 - `#### Recommended Phase 3 Ordering`
+
+**Hypothesis-driven half-phase recon-pivot dispatches** (e.g., "fingerprint api.foo.com only —
+recon-pivot half-phase") emit only the load-bearing sections:
+
+- `#### Findings`
+- `#### Tech Stack`
+- `#### Coverage Gaps`
+
+The narrower output matches the narrower scope: a recon-pivot dispatch is solving a single
+hypothesis (often one host, one stack), so the `#### Surface Candidates` /
+`#### Recommended Phase 3 Ordering` sections would be empty pass-through. Use the full
+template only when the dispatch produced full-phase coverage.
 
 `#### Surface Candidates` should be directly ingestible by the operator into durable surface state.
 `#### Coverage Gaps` is read by the operator to decide whether Phase 1 needs a targeted depth pass.

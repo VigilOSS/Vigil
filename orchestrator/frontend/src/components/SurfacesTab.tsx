@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AssessmentFindingLink, AssessmentSurface } from "../lib/api";
-import { listAssessmentFindingLinks } from "../lib/api";
+import type { AssessmentFindingLink, AssessmentSurface, SurfacePatchPayload } from "../lib/api";
+import {
+  listAssessmentFindingLinks,
+  listAssessmentSurfaces,
+  patchAssessmentSurface,
+} from "../lib/api";
 
 type SurfacesTabProps = {
   engagementKey: string;
   surfaces: AssessmentSurface[];
+  // Optional: parent refresh hook so a successful PATCH triggers a fresh
+  // list fetch instead of waiting for the next polling tick.
+  onSurfaceUpdated?: (surface: AssessmentSurface) => void;
 };
 
 type GroupedSurfaces = {
@@ -109,11 +116,97 @@ const IconClose = () => (
 
 // ── Component ─────────────────────────────────────────────────────────
 
-export function SurfacesTab({ engagementKey, surfaces }: SurfacesTabProps) {
+export function SurfacesTab({ engagementKey, surfaces, onSurfaceUpdated }: SurfacesTabProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [findingLinks, setFindingLinks] = useState<AssessmentFindingLink[]>([]);
   const [linksError, setLinksError] = useState<string | null>(null);
   const [selected, setSelected] = useState<AssessmentSurface | null>(null);
+  // Track the in-flight PATCH so the inline button shows a busy state and
+  // disables itself until the network round-trip resolves.
+  const [pendingResolution, setPendingResolution] = useState<string | null>(null);
+  const [resolutionError, setResolutionError] = useState<string | null>(null);
+  const [resolutionRationale, setResolutionRationale] = useState<string>("");
+  // Local shadow of the parent ``surfaces`` prop. The parent does not
+  // currently wire ``onSurfaceUpdated`` back into its list, so without a
+  // shadow the table goes stale until the next polling tick. We seed
+  // from the prop and merge updates locally; whenever the prop changes
+  // (poll refresh) it wins.
+  const [localSurfaces, setLocalSurfaces] = useState<AssessmentSurface[]>(surfaces);
+  useEffect(() => {
+    setLocalSurfaces(surfaces);
+  }, [surfaces]);
+
+  const mergeLocalSurface = useCallback((updated: AssessmentSurface) => {
+    setLocalSurfaces((current) => {
+      const idx = current.findIndex((s) => s.id === updated.id);
+      if (idx === -1) return [updated, ...current];
+      const next = current.slice();
+      next[idx] = updated;
+      return next;
+    });
+  }, []);
+
+  const resolveSurfaceStatus = useCallback(
+    async (status: SurfacePatchPayload["status"]) => {
+      if (!selected || !status) return;
+      setResolutionError(null);
+      setPendingResolution(status);
+      const submittedRationale = resolutionRationale;
+      try {
+        const updated = await patchAssessmentSurface(engagementKey, selected.id, {
+          status,
+          rationale: submittedRationale || undefined,
+        });
+        setSelected(updated);
+        mergeLocalSurface(updated);
+        setResolutionRationale("");
+        onSurfaceUpdated?.(updated);
+      } catch (err: unknown) {
+        // Network errors are ambiguous: the PATCH may have already landed
+        // server-side. Refetch the list so we can tell, then either treat
+        // the operation as successful (the change is durable) or surface
+        // the error so the operator can retry without double-appending
+        // the rationale.
+        const errorMessage =
+          err instanceof Error ? err.message : "Failed to update surface status";
+        try {
+          const fresh = await listAssessmentSurfaces(engagementKey);
+          const refreshed = fresh.find((s) => s.id === selected.id) ?? null;
+          if (refreshed) {
+            const rationaleLanded =
+              !submittedRationale ||
+              (refreshed.rationale ?? "").includes(submittedRationale);
+            const statusLanded = refreshed.status === status;
+            if (statusLanded && rationaleLanded) {
+              // The first PATCH succeeded server-side despite the network
+              // error. Reflect the persisted state and do not surface an
+              // error — retrying would double-append the rationale.
+              setSelected(refreshed);
+              mergeLocalSurface(refreshed);
+              setResolutionRationale("");
+              onSurfaceUpdated?.(refreshed);
+              return;
+            }
+            // The change did not land. Reseed selected with what is
+            // actually persisted (so subsequent retries diff against the
+            // server's truth) and surface the error so the operator can
+            // retry safely.
+            setSelected(refreshed);
+            mergeLocalSurface(refreshed);
+          }
+        } catch {
+          // Refetch failed too — fall through to surface the original
+          // error. The operator will see "Failed to update" and can
+          // retry; the server-side substring dedup on rationale will
+          // prevent a double-append on the happy path.
+        }
+        setResolutionError(errorMessage);
+      } finally {
+        setPendingResolution(null);
+      }
+    },
+    [engagementKey, mergeLocalSurface, onSurfaceUpdated, resolutionRationale, selected],
+  );
 
   const [query, setQuery] = useState("");
   const [typeFilters, setTypeFilters] = useState<Set<string>>(new Set());
@@ -156,9 +249,9 @@ export function SurfacesTab({ engagementKey, surfaces }: SurfacesTabProps) {
   // Pre-compute searchable corpus per surface
   const corpusBySurfaceId = useMemo(() => {
     const m = new Map<number, string>();
-    for (const s of surfaces) m.set(s.id, buildSearchCorpus(s));
+    for (const s of localSurfaces) m.set(s.id, buildSearchCorpus(s));
     return m;
-  }, [surfaces]);
+  }, [localSurfaces]);
 
   const parsedQuery = useMemo(() => parseQuery(query), [query]);
 
@@ -193,44 +286,44 @@ export function SurfacesTab({ engagementKey, surfaces }: SurfacesTabProps) {
   );
 
   const filteredSurfaces = useMemo(() => {
-    return surfaces.filter((s) => {
+    return localSurfaces.filter((s) => {
       if (typeFilters.size && !typeFilters.has(s.surface_type || "unknown")) return false;
       if (statusFilters.size && !statusFilters.has(s.status || "")) return false;
       if (sourceFilters.size && !sourceFilters.has(s.source_name || "")) return false;
       if (!matchesQuery(s, parsedQuery)) return false;
       return true;
     });
-  }, [surfaces, typeFilters, statusFilters, sourceFilters, parsedQuery, matchesQuery]);
+  }, [localSurfaces, typeFilters, statusFilters, sourceFilters, parsedQuery, matchesQuery]);
 
   const groups = useMemo(() => groupSurfaces(filteredSurfaces), [filteredSurfaces]);
 
   // Counts computed over unfiltered list so chips remain meaningful
   const typeCounts = useMemo(() => {
     const c: Record<string, number> = {};
-    for (const s of surfaces) {
+    for (const s of localSurfaces) {
       const k = s.surface_type || "unknown";
       c[k] = (c[k] || 0) + 1;
     }
     return c;
-  }, [surfaces]);
+  }, [localSurfaces]);
   const statusCounts = useMemo(() => {
     const c: Record<string, number> = {};
-    for (const s of surfaces) {
+    for (const s of localSurfaces) {
       const k = s.status || "";
       if (!k) continue;
       c[k] = (c[k] || 0) + 1;
     }
     return c;
-  }, [surfaces]);
+  }, [localSurfaces]);
   const sourceCounts = useMemo(() => {
     const c: Record<string, number> = {};
-    for (const s of surfaces) {
+    for (const s of localSurfaces) {
       const k = s.source_name || "";
       if (!k) continue;
       c[k] = (c[k] || 0) + 1;
     }
     return c;
-  }, [surfaces]);
+  }, [localSurfaces]);
 
   function toggle(type: string) {
     setExpanded((current) => ({ ...current, [type]: !current[type] }));
@@ -307,8 +400,8 @@ export function SurfacesTab({ engagementKey, surfaces }: SurfacesTabProps) {
           </div>
           <div className="toolbar-right">
             <span className="meta-text">
-              {filteredSurfaces.length} of {surfaces.length} surface
-              {surfaces.length === 1 ? "" : "s"}
+              {filteredSurfaces.length} of {localSurfaces.length} surface
+              {localSurfaces.length === 1 ? "" : "s"}
               {linksError ? " · links unavailable" : ""}
             </span>
           </div>
@@ -388,7 +481,7 @@ export function SurfacesTab({ engagementKey, surfaces }: SurfacesTabProps) {
 
         {groups.length === 0 ? (
           <p className="empty-state" style={{ padding: "20px" }}>
-            {surfaces.length === 0
+            {localSurfaces.length === 0
               ? "No surfaces discovered yet."
               : "No surfaces match the current filters."}
           </p>
@@ -532,6 +625,45 @@ export function SurfacesTab({ engagementKey, surfaces }: SurfacesTabProps) {
                     </div>
                   )}
                 </div>
+              </div>
+
+              <div className="section">
+                <p className="section-title">Resolve status</p>
+                <p className="meta-text" style={{ margin: "0 0 8px" }}>
+                  Resolve a discovered surface to covered, not_applicable, or deferred.
+                  The rationale is appended to the existing audit trail.
+                </p>
+                <textarea
+                  rows={2}
+                  placeholder="Rationale (optional, appended to the audit trail)"
+                  value={resolutionRationale}
+                  onChange={(e) => setResolutionRationale(e.target.value)}
+                  style={{
+                    width: "100%",
+                    boxSizing: "border-box",
+                    fontSize: "0.85rem",
+                    padding: "6px 8px",
+                    marginBottom: "8px",
+                  }}
+                />
+                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                  {(["covered", "not_applicable", "deferred"] as const).map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      className={`filter-chip ${pendingResolution === s ? "is-active" : ""}`}
+                      disabled={pendingResolution != null}
+                      onClick={() => void resolveSurfaceStatus(s)}
+                    >
+                      {pendingResolution === s ? "Saving…" : `Mark ${s}`}
+                    </button>
+                  ))}
+                </div>
+                {resolutionError && (
+                  <p className="meta-text" style={{ color: "var(--c-error, #c33)", margin: "8px 0 0" }}>
+                    {resolutionError}
+                  </p>
+                )}
               </div>
 
               {selected.rationale && (

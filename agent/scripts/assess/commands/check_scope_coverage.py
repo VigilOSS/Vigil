@@ -61,7 +61,61 @@ from assess.lib.scope import (
     classify_scope_entry,
     entry_matches_host,
     host_from_token,
+    host_is_vendor_saas,
 )
+
+
+def _explicit_literal_scope_hosts(entries: list[dict[str, Any]]) -> set[str]:
+    """Hosts authored explicitly in ``scope.json`` (bare host or URL entry).
+
+    Wildcard entries are excluded — those expand to subdomains the operator
+    did not enumerate by hand, and a vendor-SaaS subdomain that appears
+    under wildcard expansion is the genuinely ambiguous case the
+    Vendor-SaaS scope checkpoint exists to resolve. An explicit literal
+    (e.g. ``customer.my.salesforce.com`` typed directly into scope.json) is
+    already the operator's in-scope decision; making the gate fire on it
+    is theatre.
+    """
+    return {
+        entry["host"]
+        for entry in entries
+        if entry.get("entry_kind") in ("bare_host", "url") and entry.get("host")
+    }
+
+
+def _vendor_saas_decided_hosts(engagement_dir: str) -> set[str]:
+    """Return the set of hosts that already carry a vendor-SaaS scope decision.
+
+    The Vendor-SaaS scope checkpoint records the user's choice in
+    ``$DIR/agent-registry.json`` as ``{kind: "scope_decision", host: ...}``.
+    Hosts in that set are excluded from the phase-advance gate.
+    """
+    registry_path = Path(engagement_dir) / "agent-registry.json"
+    if not registry_path.is_file():
+        return set()
+    try:
+        raw = registry_path.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    if not raw.strip():
+        return set()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return set()
+    rows = data if isinstance(data, list) else data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return set()
+    decisions: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("kind") or "").strip() != "scope_decision":
+            continue
+        host = row.get("host")
+        if isinstance(host, str) and host.strip():
+            decisions.add(host.strip().rstrip(".").lower())
+    return decisions
 
 
 # Services count as "live" when the backend state is anything except
@@ -168,7 +222,31 @@ def run(args: argparse.Namespace) -> None:
             )
         )
 
+    # Vendor-SaaS undecided hosts: any host known to services/surfaces/work
+    # that matches a vendor-SaaS suffix and has no recorded scope_decision
+    # blocks the gate. The user-facing checkpoint must record a decision
+    # (in-scope, out-of-scope, partial-scope) before phase advance — UNLESS
+    # the operator already authored the host as an explicit literal entry in
+    # scope.json (a bare-host or url entry that resolves exactly to this
+    # host). Wildcard-matched discoveries still gate; those are the genuinely
+    # ambiguous case (the operator wrote ``*.example.test`` and a vendor
+    # subdomain showed up under expansion). An explicit literal in scope.json
+    # is already an unambiguous in-scope decision.
+    decided_hosts = _vendor_saas_decided_hosts(cfg.engagement_dir)
+    explicit_literal_hosts = _explicit_literal_scope_hosts(entries)
+    vendor_saas_pending = _vendor_saas_hosts_pending_decision(
+        services=services_list,
+        surfaces=surfaces_list,
+        work_by_host=work_by_host,
+        decided_hosts=decided_hosts | explicit_literal_hosts,
+    )
+
     overall_gaps = _collect_overall_gaps(report_entries, args.require_stage)
+    if vendor_saas_pending and args.require_stage is not None:
+        for host, vendor in vendor_saas_pending:
+            overall_gaps.append(
+                f"vendor-saas: {host} (vendor={vendor}) has no scope_decision in agent-registry.json"
+            )
     ready = not overall_gaps
 
     report = {
@@ -176,6 +254,9 @@ def run(args: argparse.Namespace) -> None:
         "required_stage": args.require_stage,
         "entries": report_entries,
         "overall_gaps": overall_gaps,
+        "vendor_saas_pending_decision": [
+            {"host": host, "vendor": vendor} for host, vendor in vendor_saas_pending
+        ],
         "ready": ready,
     }
 
@@ -505,6 +586,38 @@ def _load_work_items_by_host(db_path: Path) -> dict[str, dict[str, int]]:
 # ---------------------------------------------------------------------------
 
 
+def _vendor_saas_hosts_pending_decision(
+    *,
+    services: list[dict[str, Any]],
+    surfaces: list[dict[str, Any]],
+    work_by_host: dict[str, dict[str, int]],
+    decided_hosts: set[str],
+) -> list[tuple[str, str]]:
+    """Return ``[(host, vendor), ...]`` for vendor-SaaS hosts lacking a decision.
+
+    Walks every host present in services / surfaces / work_items, classifies
+    each via :func:`host_is_vendor_saas`, and excludes any host that already
+    carries a scope_decision row in ``agent-registry.json``. Output is sorted
+    by host string for deterministic output.
+    """
+    seen: dict[str, str] = {}
+    for svc in services:
+        host = _endpoint_host(str(svc.get("endpoint") or ""))
+        vendor = host_is_vendor_saas(host)
+        if host and vendor and host not in decided_hosts and host not in seen:
+            seen[host] = vendor
+    for surface in surfaces:
+        host = _endpoint_host(str(surface.get("target_descriptor") or ""))
+        vendor = host_is_vendor_saas(host)
+        if host and vendor and host not in decided_hosts and host not in seen:
+            seen[host] = vendor
+    for host in work_by_host.keys():
+        vendor = host_is_vendor_saas(host)
+        if host and vendor and host not in decided_hosts and host not in seen:
+            seen[host] = vendor
+    return sorted(seen.items())
+
+
 def _collect_overall_gaps(entries: list[dict[str, Any]], required_stage: str | None) -> list[str]:
     if required_stage is None:
         return []
@@ -568,3 +681,12 @@ def _render_text(report: dict[str, Any], *, verbose: bool) -> None:
         print("gaps:")
         for msg in report["overall_gaps"]:
             print(f"  - {msg}")
+
+    vendor_saas_pending = report.get("vendor_saas_pending_decision") or []
+    if vendor_saas_pending:
+        print("vendor-saas-pending-decision:")
+        for row in vendor_saas_pending:
+            print(
+                f"  - {row['host']} (vendor={row['vendor']}) — record a "
+                f"scope_decision in agent-registry.json before recon dispatch"
+            )

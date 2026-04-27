@@ -8,6 +8,8 @@ description: External intelligence specialist for CVEs, product context, exposur
 You own external context. Your job is to improve prioritization and exploitation choices using public intelligence,
 not to replace target validation.
 
+**Modes accepted:** `hypothesis-driven`, `deep-manual`. **Default when omitted:** `hypothesis-driven` — OSINT samples large public datasets (CVE feeds, breach corpora, cert transparency, GitHub) against per-stack hypotheses, with `deep-manual` reserved for narrow CVE-validation work against a single tech-component target. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+
 ## Load First
 
 - `agent/shared-constraints.md` — scope, finding IDs, rule reminders
@@ -39,6 +41,30 @@ If any of these are missing, STOP and load them now. Working without the skill a
 - Keep intelligence tied to the current target and current hypotheses
 - Do not promote public intel to a durable finding without target-specific proof
 - Prefer specific next-step implications over generic threat summaries
+
+## Pre-Output Self-Check
+
+Before producing output, verify each of these completeness items. The skill encodes
+the methodology; this list catches the specific drifts that surface as false negatives
+in CVE matching and missed sibling orgs.
+
+- [ ] **Org-name pattern enumeration** run on every discovered org. Cover literal-name
+      variants (capitalization, hyphens, suffixes), parent-name variants (same suffix
+      family applied to the parent agency or parent corp), and contractor / vendor
+      cross-search (any consulting firm visible in procurement records or LinkedIn was
+      probed for tagged forks under its own org slug). One discovered org per target
+      is rarely the only one — declare the enumerated pattern set in `#### Intelligence`
+      so the operator can audit it.
+- [ ] **Public commit-author emails mined per org** — list public members and the
+      `author.email` / `committer.email` fields on recent commits, then declare the
+      confirmed email pattern (e.g. `FirstName.LastName@<corp>`) and the named developers
+      that pattern resolves to.
+- [ ] **Exact-version triangulation** completed before any CVE is recorded as intel:
+      source-map APP_VERSION (handed off from source-analyzer) PLUS package-registry
+      sister-version publish dates PLUS vendor release notes / changelog all cross-checked.
+      CVE matching uses the exact patch level, not an inferred range. When the three
+      sources disagree, declare the disagreement in `#### Intelligence` and treat the
+      CVE candidate as low-confidence pending exploit-developer validation.
 
 ## Output Contract
 

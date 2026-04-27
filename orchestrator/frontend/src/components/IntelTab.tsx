@@ -241,6 +241,10 @@ type Derived = {
   tags: string[];
   updated_at: string;
   created_at: string;
+  // Populated when the row was superseded via `aith assess supersede-intel`.
+  // The IntelRow uses this to render the row distinctly (struck-through, badge).
+  supersededById: number | null;
+  supersededAt: string | null;
   raw: Record<string, unknown>;
   searchCorpus: string;
 };
@@ -449,6 +453,14 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
     JSON.stringify(raw),
   ];
 
+  const supersededByRaw = raw.superseded_by_id;
+  const supersededById =
+    typeof supersededByRaw === "number" && Number.isFinite(supersededByRaw)
+      ? supersededByRaw
+      : null;
+  const supersededAt =
+    typeof raw.superseded_at === "string" && raw.superseded_at ? (raw.superseded_at as string) : null;
+
   return {
     id,
     entity,
@@ -466,6 +478,8 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
     tags,
     updated_at,
     created_at,
+    supersededById,
+    supersededAt,
     raw,
     searchCorpus: corpusParts.filter(Boolean).join(" \n ").toLowerCase(),
   };
@@ -592,6 +606,10 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
   const [sourceFilters, setSourceFilters] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
   const [cmdOpen, setCmdOpen] = useState(false);
+  // When true, rows whose ``superseded_by_id`` is set are filtered out
+  // client-side. Default off so the audit trail remains visible by default;
+  // operators flip this on to mirror the report-writer view.
+  const [hideSuperseded, setHideSuperseded] = useState(false);
 
   // Secondary lookups (FTS search + by-URL).
   const [fts, setFts] = useState<IntelSearchHit[] | null>(null);
@@ -789,6 +807,7 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
       if (entityFilters.size && !entityFilters.has(d.entity)) return false;
       if (statusFilters.size && !statusFilters.has(d.status || "__none__")) return false;
       if (sourceFilters.size && !sourceFilters.has(d.source || "__none__")) return false;
+      if (hideSuperseded && d.supersededById != null) return false;
       if (!matchesQuery(d, parsedQuery)) return false;
       return true;
     });
@@ -800,12 +819,20 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
       return a.title.localeCompare(b.title);
     });
     return list;
-  }, [derivedList, entityFilters, statusFilters, sourceFilters, parsedQuery, matchesQuery]);
+  }, [
+    derivedList,
+    entityFilters,
+    statusFilters,
+    sourceFilters,
+    hideSuperseded,
+    parsedQuery,
+    matchesQuery,
+  ]);
 
   // Reset page when filters change.
   useEffect(() => {
     setPage(0);
-  }, [entityFilters, statusFilters, sourceFilters, query]);
+  }, [entityFilters, statusFilters, sourceFilters, hideSuperseded, query]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   useEffect(() => {
@@ -915,6 +942,10 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
     }
     return c;
   }, [derivedList]);
+  const supersededCount = useMemo(
+    () => derivedList.reduce((acc, d) => acc + (d.supersededById != null ? 1 : 0), 0),
+    [derivedList],
+  );
   const summaryCounts = summary?.counts ?? {};
 
   const toggle = <T,>(set: Set<T>, setter: (s: Set<T>) => void, val: T) => {
@@ -1090,6 +1121,22 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
             <button type="button" className="filter-clear" onClick={clearAll}>
               Clear all ({activeFilterCount})
             </button>
+          )}
+          {supersededCount > 0 && (
+            <label
+              className="filter-chip"
+              style={{ cursor: "pointer", marginLeft: "auto" }}
+              title="Hide rows whose superseded_by_id is set so the list mirrors the report-writer view."
+            >
+              <input
+                type="checkbox"
+                checked={hideSuperseded}
+                onChange={(e) => setHideSuperseded(e.target.checked)}
+                style={{ marginRight: 4 }}
+              />
+              Hide superseded
+              <span className="filter-count">{supersededCount}</span>
+            </label>
           )}
         </div>
 
@@ -1393,21 +1440,31 @@ function IntelRow({
   const isCveWithSev = d.entity === "cve" && d.sev != null;
   const barClass = isCveWithSev ? `sevbar-${d.sev}` : `ibar-${d.entity}`;
   const pillClass = isCveWithSev ? String(d.sev) : `itype-${d.entity}`;
+  const superseded = d.supersededById != null;
+  // Struck-through styling + dim opacity flags the row as historical.
+  // The superseder id is rendered as a tag so the operator can tell at a
+  // glance which canonical row replaced it.
+  const supersededStyle: React.CSSProperties | undefined = superseded
+    ? { textDecoration: "line-through", opacity: 0.55 }
+    : undefined;
   return (
     <button
       type="button"
-      className={`frow ${selected ? "is-selected" : ""}`}
+      className={`frow ${selected ? "is-selected" : ""} ${superseded ? "is-superseded" : ""}`}
       onClick={onClick}
       data-id={d.id}
+      data-superseded={superseded ? "true" : undefined}
       ref={(el) => registerRef?.(d.id, el)}
       style={gridTemplate ? { gridTemplateColumns: gridTemplate, minWidth: "fit-content" } : { minWidth: "fit-content" }}
     >
       <span className={`frow-sevbar ${barClass}`} />
       <span className={`frow-sev ${pillClass}`}>{d.entityLabel}</span>
       <span className="frow-main">
-        <span className="frow-title">{highlight(d.title, freeTerms)}</span>
+        <span className="frow-title" style={supersededStyle}>
+          {highlight(d.title, freeTerms)}
+        </span>
         <span className="frow-meta">
-          {d.subtitle && <span className="mono">{truncate(d.subtitle, 80)}</span>}
+          {d.subtitle && <span className="mono" style={supersededStyle}>{truncate(d.subtitle, 80)}</span>}
           {d.source && (
             <>
               <span className="dot" />
@@ -1422,8 +1479,13 @@ function IntelRow({
           )}
         </span>
       </span>
-      <span className="frow-loc">{d.location || ""}</span>
+      <span className="frow-loc" style={supersededStyle}>{d.location || ""}</span>
       <span className="frow-tags">
+        {superseded && (
+          <span className="tag" title={`Replaced by intel id=${d.supersededById}`}>
+            superseded → #{d.supersededById}
+          </span>
+        )}
         {d.sevLabel && <span className="tag cve">{d.sevLabel}</span>}
         {d.tags.slice(0, 4).map((t, i) => (
           <span key={`t-${i}-${t}`} className="tag">{t}</span>
@@ -1555,6 +1617,8 @@ const BASE_KEYS_HANDLED = new Set<string>([
   "source_name",
   "notes",
   "provenance",
+  "superseded_by_id",
+  "superseded_at",
   "created_at",
   "updated_at",
 ]);

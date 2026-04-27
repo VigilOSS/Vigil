@@ -1,2 +1,4 @@
 app
+data
+scripts
 tests

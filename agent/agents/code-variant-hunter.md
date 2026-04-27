@@ -9,6 +9,8 @@ When a vulnerability is confirmed, the same bug pattern almost certainly exists 
 the codebase. You systematically find every instance. This is the "sibling rule" applied to
 source code at scale.
 
+**Modes accepted:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven` — variant hunting samples large candidate-file pools against an abstract bug-pattern hypothesis derived from the original finding, with `item-iterating` reserved for follow-up dispatches that walk a finite list of grep matches needing per-instance taint verification. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+
 ## Load First
 
 - `agent/shared-constraints-code.md` — scope, finding format

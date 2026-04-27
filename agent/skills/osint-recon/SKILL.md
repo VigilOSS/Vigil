@@ -122,6 +122,76 @@ Pull people and org facts from the backend (`aith assess list-intel person` and 
     curl -s "https://api.hunter.io/v2/domain-search?domain=<domain>&api_key=$HUNTER_API_KEY" \
       | jq '.data.emails[] | {value, type, confidence}'
 
+### 5. Org-name Pattern Enumeration
+
+Once one GitHub org is discovered for a target organization, enumerate the org-name pattern
+space before declaring GitHub OSINT done. Single-name lookups miss sibling orgs that share
+the same parent (research arms, internal-tooling orgs, OSS forks, contractor accounts) —
+those siblings frequently carry the most exploitable artifacts because they receive less
+scrutiny than the flagship org.
+
+1. **Variants on the literal org name** — capitalization, hyphenation, suffixes. For an org
+   "Acme" probe `acme`, `Acme`, `ACME`, `acme-corp`, `acmegov`, `acme-internal`, `acme-tools`,
+   `acme-research`, `acme-oss`, `Acme-Inc`. Issue each as a `/search/users?q=<pattern>+type:org`
+   query (see `agent/references/tools/recon/github-osint.md` for the curl + jq pipeline).
+2. **Variants on the parent agency or parent corporation name** — same suffix family
+   (`-internal`, `-research`, `-oss`, `-tools`, `-Inc`) applied to the parent's literal name.
+3. **Cross-search public code for discovered org names** — once you have a confirmed org name,
+   run a GitHub global code search for that name appearing in OTHER public repos (forks,
+   contributor README links, CI config that pulls private packages by org slug). Hits in
+   forks are gold — they expose internal repo names that the org's owner page hides behind
+   private visibility.
+4. **Per discovered org, enumerate public members and recent commit author emails** — list
+   members via `/orgs/<org>/members` and recent commits via `/repos/<org>/<repo>/commits`,
+   then jq-extract `author.email` and `committer.email`. The email pattern that emerges
+   (e.g. `FirstName.LastName@<corp>`) confirms the corporate email format and identifies
+   named developers whose handles map to LinkedIn / personal repos.
+5. **Cross-reference contractor and vendor names** — when procurement records, public
+   case studies, or LinkedIn show a consulting firm working with the target, search GitHub
+   for tagged forks or affiliated repos under the contractor's org slug. Contractor repos
+   often contain target-specific configuration, deployment scripts, or proof-of-concept
+   code with hardcoded internal URLs and credentials.
+
+Wrap every HTTP probe in `aith assess kali exec --` with the audit envelope so the run
+lands in the audit pipeline. Concrete commands and rate-limit guidance live in
+`agent/references/tools/recon/github-osint.md`.
+
+### 6. Exact-version Triangulation
+
+When vendor exact version is needed for CVE matching, multi-source triangulate before
+committing to a range. A version-only inferred range (e.g. "2.x because the login page
+shows 2.0 features") routinely fails: backported security patches keep an old major
+running while sister-package fingerprints reveal the precise patch level. Triangulation
+prevents both false-negative CVE misses (patched version that still matches a CVE
+published against an unpatched line) and false-positive findings (a CVE filed against
+a version older than what is actually deployed).
+
+1. **Source-map APP_VERSION / BUILD_HASH constants** — webpack/Vite bundles routinely
+   inline `APP_VERSION`, `BUILD_HASH`, `__GIT_SHA__`, `__BUILD_VERSION__`, and Sentry
+   release-tag identifiers. Cross-link to `agent/skills/source-analysis/SKILL.md`'s
+   "APP_VERSION / BUILD_HASH / Sentry-release extraction" section for the grep recipes.
+2. **Package registry sister-package publish dates** — vendors that publish their
+   libraries from a monorepo ship sister packages on the same release day. Cross-checking
+   the publish dates of two or three sibling packages narrows the deployed version to
+   one release. Query the registry directly:
+   - npm: `https://registry.npmjs.org/<pkg>/<version>` → `time` field (per-version timestamps).
+   - pypi: `https://pypi.org/pypi/<pkg>/<version>/json` → `urls[].upload_time`.
+   - maven central: `https://search.maven.org/solrsearch/select?q=g:<group>+a:<artifact>+v:<version>&wt=json` → `response.docs[].timestamp`.
+3. **Vendor public release notes / changelog** — convert each candidate version to a
+   release date and confirm at least one externally-visible feature in the deployed app
+   matches a feature the changelog attributes to that version.
+4. **Vendor security bulletins for the patched-version line** — confirms which CVEs are
+   NOT applicable to the deployed version. A CVE published against `<X.Y.Z` is still in
+   play for `X.Y.(Z-1)` even if the vendor backported the patch into a downstream branch;
+   the bulletin tells you which downstream branch carries the fix.
+5. **Sentry release tag in minified bundles** — Sentry's `Sentry.init({release: ...})`
+   call is often pinned to the build's git tag or short SHA. Grep source-maps for `release:`
+   and cross-reference against the vendor's tag list to derive the exact commit.
+
+Worked examples per vendor (npm/pypi/maven probe pipelines and Sentry grep recipes) are
+in `agent/references/payloads/version-fingerprint-probes.md`. Wrap every HTTP probe in
+`aith assess kali exec --` with the audit envelope.
+
 ## CVE Validation Gate
 
 CVE recording rules are defined in `agent/agents/osint-analyst.md` § Finding Recording.
