@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,9 @@ from .paths import container_host_url, resolve_orchestrator_base_url
 
 HEAVY_TIER_HOST_GB_THRESHOLD = 32
 HEAVY_TIER_TARGET_GB = 16
+
+ULIMIT_NOFILE_RECOMMENDED = 65536
+ULIMIT_NPROC_RECOMMENDED = 8192
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +50,7 @@ def start_runtime(options: RuntimeOptions, *, runner: docker.Runner = docker.run
         _validate_mounts(options.container_name, data_dir, engagements_dir, runner=runner)
         if validate_tools:
             _validate_tools(options.container_name, runner=runner)
+        _check_runtime_ulimits(options.container_name, runner=runner)
         return
 
     if docker.container_exists(options.container_name, runner=runner):
@@ -87,6 +92,7 @@ def start_runtime(options: RuntimeOptions, *, runner: docker.Runner = docker.run
     _validate_mounts(options.container_name, data_dir, engagements_dir, runner=runner)
     if validate_tools:
         _validate_tools(options.container_name, runner=runner)
+    _check_runtime_ulimits(options.container_name, runner=runner)
 
 
 def stop_runtime(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> None:
@@ -178,6 +184,46 @@ def _validate_image_current(options: RuntimeOptions, *, runner: docker.Runner) -
         raise SystemExit(
             "Runtime container image drift detected. Recreate with `aith runtime restart`."
         )
+
+
+def _check_runtime_ulimits(container_name: str, *, runner: docker.Runner) -> None:
+    """Warn to stderr when dockerd defaults look low for the workload.
+
+    `docker exec`-launched processes inherit from dockerd's daemon defaults, not
+    from container PID 1's `--ulimit`, and `/etc/security/limits.conf` only
+    applies under PAM. The fix is dockerd-side (daemon.json `default-ulimits`);
+    this probe just surfaces the gap so operators don't chase phantom
+    `too many open files` errors during a long Phase 3.
+    """
+    result = runner(["docker", "exec", container_name, "sh", "-lc", "ulimit -n; ulimit -u"])
+    if result.returncode != 0:
+        return
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return
+    nofile = _parse_ulimit_value(lines[0])
+    nproc = _parse_ulimit_value(lines[1])
+    warnings: list[str] = []
+    if nofile is not None and nofile < ULIMIT_NOFILE_RECOMMENDED:
+        warnings.append(f"nofile={nofile} (recommend >={ULIMIT_NOFILE_RECOMMENDED})")
+    if nproc is not None and nproc < ULIMIT_NPROC_RECOMMENDED:
+        warnings.append(f"nproc={nproc} (recommend >={ULIMIT_NPROC_RECOMMENDED})")
+    if warnings:
+        print(
+            "[aith] WARN: dockerd default ulimits are low: "
+            + ", ".join(warnings)
+            + ". See README 'Container resource limits' for the daemon.json fix.",
+            file=sys.stderr,
+        )
+
+
+def _parse_ulimit_value(raw: str) -> int | None:
+    if raw == "unlimited":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 def _validate_tools(container_name: str, *, runner: docker.Runner) -> None:
