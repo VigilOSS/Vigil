@@ -121,9 +121,21 @@ def _run_classify(db_path: Path, batch: int = 500):
     module.run(SimpleNamespace(db_path=str(db_path), batch=batch))
 
 
-def _run_list_clusters(db_path: Path, status: str = "pending", limit: int = 100):
+def _run_list_clusters(
+    db_path: Path,
+    status: str = "pending",
+    limit: int = 100,
+    host: str = "",
+):
     module = _load_list_clusters_module()
-    module.run(SimpleNamespace(db_path=str(db_path), status=status, limit=limit))
+    module.run(
+        SimpleNamespace(
+            db_path=str(db_path),
+            status=status,
+            limit=limit,
+            host=host,
+        )
+    )
 
 
 def _run_dispatch(
@@ -131,6 +143,7 @@ def _run_dispatch(
     action: str,
     extra: list[str] | None = None,
     reason: str = "",
+    by: str = "status",
 ):
     module = _load_dispatch_module()
     module.run(
@@ -139,6 +152,7 @@ def _run_dispatch(
             action=action,
             extra=extra or [],
             reason=reason,
+            by=by,
         )
     )
 
@@ -606,3 +620,451 @@ def test_list_clusters_orders_by_max_priority(tmp_path: Path, capsys) -> None:
     assert ssrf_entry["max_priority_score"] == 45
     assert ssrf_entry["avg_priority_score"] == 45.0
     assert len(ssrf_entry["sample_urls"]) == 2
+
+
+def test_dispatch_peek_returns_pending_rows_without_claiming(
+    tmp_path: Path, capsys
+) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    for idx in range(3):
+        _insert_work_item(
+            db_path,
+            queue_key=f"api:{idx}",
+            url_path=f"/api/users/{idx}",
+            case_type="api",
+            priority_score=50 - idx,
+        )
+    # Adjacent type that should not appear in peek output for `api`.
+    _insert_work_item(
+        db_path,
+        queue_key="form:1",
+        url_path="/login",
+        case_type="form",
+        priority_score=99,
+    )
+
+    _run_dispatch(db_path, "peek", ["api", "5"])
+    rows = json.loads(capsys.readouterr().out)
+    assert len(rows) == 3
+    assert all(row["type"] == "api" for row in rows)
+    # Peek must not flip status.
+    conn = sqlite3.connect(str(db_path))
+    try:
+        statuses = {
+            row[0]
+            for row in conn.execute(
+                "SELECT status FROM work_items WHERE type = 'api'"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert statuses == {"pending"}
+
+
+def test_dispatch_defer_items_flips_specific_ids(tmp_path: Path, capsys) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    ids: list[int] = []
+    for idx in range(4):
+        ids.append(
+            _insert_work_item(
+                db_path,
+                queue_key=f"api:{idx}",
+                url_path=f"/api/users/{idx}",
+                case_type="api",
+                priority_score=10,
+            )
+        )
+
+    targets = f"{ids[0]},{ids[2]}"
+    _run_dispatch(db_path, "defer-items", [targets], reason="manual triage")
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = {
+            row[0]: (row[1], row[2])
+            for row in conn.execute(
+                "SELECT id, status, terminal_reason FROM work_items"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+    assert rows[ids[0]] == ("skipped", "manual triage")
+    assert rows[ids[2]] == ("skipped", "manual triage")
+    assert rows[ids[1]] == ("pending", None)
+    assert rows[ids[3]] == ("pending", None)
+
+
+def test_dispatch_defer_items_rejects_empty_reason(tmp_path: Path, capsys) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    item_id = _insert_work_item(
+        db_path,
+        queue_key="api:1",
+        url_path="/api/users/1",
+        case_type="api",
+    )
+    with pytest.raises(SystemExit):
+        _run_dispatch(db_path, "defer-items", [str(item_id)], reason="")
+    stderr = capsys.readouterr().err
+    assert "--reason is required" in stderr
+
+
+def test_dispatch_stats_by_host_groups_by_url_host(tmp_path: Path, capsys) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="a:1",
+        url_path="/a",
+        url="https://example.test/a",
+        case_type="api",
+    )
+    _insert_work_item(
+        db_path,
+        queue_key="a:2",
+        url_path="/b",
+        url="https://example.test/b",
+        case_type="api",
+    )
+    _insert_work_item(
+        db_path,
+        queue_key="b:1",
+        url_path="/x",
+        url="https://other.example/x",
+        case_type="api",
+    )
+
+    _run_dispatch(db_path, "stats", by="host")
+    out = capsys.readouterr().out
+    assert "example.test|pending|2" in out
+    assert "other.example|pending|1" in out
+
+
+def test_dispatch_stats_by_cluster_includes_max_priority(
+    tmp_path: Path, capsys
+) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="x:1",
+        url_path="/x",
+        cluster_key="gf:rce",
+        priority_score=50,
+    )
+    _insert_work_item(
+        db_path,
+        queue_key="x:2",
+        url_path="/y",
+        cluster_key="gf:rce",
+        priority_score=20,
+    )
+
+    _run_dispatch(db_path, "stats", by="cluster")
+    out = capsys.readouterr().out
+    assert "gf:rce|pending|2|max_priority=50" in out
+
+
+def test_list_clusters_filters_by_host(tmp_path: Path, capsys) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="a:1",
+        url_path="/a",
+        url="https://example.test/a",
+        cluster_key="gf:rce",
+        priority_score=50,
+    )
+    _insert_work_item(
+        db_path,
+        queue_key="b:1",
+        url_path="/x",
+        url="https://other.example/x",
+        cluster_key="gf:xss",
+        priority_score=30,
+    )
+
+    _run_list_clusters(db_path, host="example.test")
+    payload = json.loads(capsys.readouterr().out)
+    keys = [entry["cluster_key"] for entry in payload["clusters"]]
+    assert keys == ["gf:rce"]
+    assert payload["host_filter"] == "example.test"
+
+
+# ---------------------------------------------------------------------------
+# 1D.2 — per-host URL budget regression coverage
+# ---------------------------------------------------------------------------
+
+
+def _load_classify_lib_module():
+    return _load_script_module(
+        "test_classify_lib_module",
+        "agent/scripts/assess/lib/classify.py",
+    )
+
+
+def _load_ingest_module():
+    return _load_script_module(
+        "test_ingest_endpoints_module",
+        "agent/scripts/assess/commands/ingest_endpoints.py",
+    )
+
+
+def _bulk_insert_for_host(
+    db_path: Path,
+    *,
+    host: str,
+    n_pending: int,
+    n_deferred: int = 0,
+    case_type: str = "page",
+    queue_prefix: str = "host",
+) -> None:
+    """Seed the work_items table with rows split between pending and deferred.
+
+    Mirrors the pattern the ingestion path produces — pending rows look like
+    a normal admit, while deferred rows carry the budget-exceeded cluster_key
+    and terminal_reason. Used to drive the budget-decision tests below
+    without paying the cost of stubbing the full ingestion HTTP roundtrip.
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for idx in range(n_pending):
+            conn.execute(
+                """INSERT INTO work_items
+                (queue_key, method, url, url_path, type, source, status, priority_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    f"{queue_prefix}-pending:{idx}",
+                    "GET",
+                    f"https://{host}/p{idx}",
+                    f"/p{idx}",
+                    case_type,
+                    "test",
+                    "pending",
+                    0,
+                ),
+            )
+        for idx in range(n_deferred):
+            conn.execute(
+                """INSERT INTO work_items
+                (queue_key, method, url, url_path, type, source, status,
+                 cluster_key, terminal_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    f"{queue_prefix}-defer:{idx}",
+                    "GET",
+                    f"https://{host}/d{idx}",
+                    f"/d{idx}",
+                    case_type,
+                    "test",
+                    "deferred",
+                    "deferred:per-host-budget-exceeded",
+                    "per-host-budget-exceeded",
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_per_host_budget_caps_content_rich_at_1000(tmp_path: Path) -> None:
+    """A typical content-rich host caps at 1000 active rows. The 1001st URL
+    must defer with cluster_key='deferred:per-host-budget-exceeded' rather
+    than admit."""
+    classify_lib = _load_classify_lib_module()
+    db_path = _make_fresh_db(tmp_path)
+
+    # Default content-rich tier returns 1000.
+    assert classify_lib.per_host_budget("example.test") == classify_lib.PER_HOST_BUDGET_CONTENT_RICH
+    assert classify_lib.PER_HOST_BUDGET_CONTENT_RICH == 1000
+
+    _bulk_insert_for_host(
+        db_path,
+        host="example.test",
+        n_pending=1000,
+        queue_prefix="content",
+    )
+
+    # The view should report the host at exactly 1000 active rows.
+    assert classify_lib.host_active_count(str(db_path), "example.test") == 1000
+
+    # Now the budget gate replicates the ingest decision: the next URL would
+    # exceed the budget, so it must be inserted as deferred.
+    ingest = _load_ingest_module()
+    ingest._insert_budget_exceeded_work_item(
+        db_path=str(db_path),
+        method="GET",
+        url="https://example.test/over1001",
+        url_path="/over1001",
+        query_params={},
+        body_params={},
+        path_params={},
+        cookie_params={},
+        case_type="page",
+        source="test",
+        params_sig="",
+        auth_context="anonymous",
+        host="example.test",
+        budget=1000,
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM work_items WHERE status='pending' AND url LIKE 'https://example.test/%'"
+        ).fetchone()[0]
+        deferred = conn.execute(
+            "SELECT COUNT(*), MAX(cluster_key), MAX(terminal_reason) "
+            "FROM work_items WHERE status='deferred' AND url LIKE 'https://example.test/%'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert pending == 1000
+    assert deferred[0] == 1
+    assert deferred[1] == "deferred:per-host-budget-exceeded"
+    assert deferred[2] == "per-host-budget-exceeded"
+
+
+def test_per_host_budget_api_tier_at_200(tmp_path: Path) -> None:
+    """An ``api.*`` host caps at 200 because its surface is method × parameter
+    rather than URL × URL. The classifier is purely hostname-driven so the
+    test passes without reading any sitemap or recon intel."""
+    classify_lib = _load_classify_lib_module()
+    db_path = _make_fresh_db(tmp_path)
+
+    # api.* matches the API-tier rule.
+    assert classify_lib.per_host_budget("api.example.test") == classify_lib.PER_HOST_BUDGET_API_TIER
+    assert classify_lib.PER_HOST_BUDGET_API_TIER == 200
+
+    # *.api.* also matches.
+    assert classify_lib.per_host_budget("staging.api.example.test") == classify_lib.PER_HOST_BUDGET_API_TIER
+
+    _bulk_insert_for_host(
+        db_path,
+        host="api.example.test",
+        n_pending=200,
+        queue_prefix="api",
+    )
+
+    assert classify_lib.host_active_count(str(db_path), "api.example.test") == 200
+
+
+def test_per_host_budget_sitemap_at_2000(tmp_path: Path) -> None:
+    """A sitemap-bearing host raises the budget to 2000 because the sitemap
+    declares the canonical surface and we must not truncate below it. The
+    sitemap-bearing flag is supplied by the operator at ingestion time
+    (``--sitemap-host`` flag or backend intel lookup)."""
+    classify_lib = _load_classify_lib_module()
+
+    sitemap_hosts = {"docs.example.test"}
+    assert classify_lib.per_host_budget(
+        "docs.example.test", sitemap_hosts=sitemap_hosts
+    ) == classify_lib.PER_HOST_BUDGET_SITEMAP_BEARING
+    assert classify_lib.PER_HOST_BUDGET_SITEMAP_BEARING == 2000
+
+    # Sitemap-bearing wins over API-tier when both apply: the sitemap is the
+    # canonical surface declaration, so honor it.
+    assert classify_lib.per_host_budget(
+        "api.example.test", sitemap_hosts={"api.example.test"}
+    ) == classify_lib.PER_HOST_BUDGET_SITEMAP_BEARING
+
+
+def test_per_host_budget_override_via_dispatch_context(tmp_path: Path) -> None:
+    """The operator passes ``--budget-override host:N`` to override the
+    default. The override beats every heuristic rule (API-tier, sitemap-
+    bearing, and content-rich) so the operator can both raise and lower the
+    cap on a specific host without rewriting the heuristic table."""
+    classify_lib = _load_classify_lib_module()
+
+    # parse_budget_overrides handles the operator-side flag parsing and
+    # normalizes hostnames.
+    overrides = classify_lib.parse_budget_overrides(
+        ["EXAMPLE.test:5000", "api.example.test:50"]
+    )
+    assert overrides == {"example.test": 5000, "api.example.test": 50}
+
+    # Override raises a content-rich host above its 1000 default.
+    assert classify_lib.per_host_budget("example.test", overrides=overrides) == 5000
+    # Override LOWERS an API-tier host below its 200 default.
+    assert classify_lib.per_host_budget("api.example.test", overrides=overrides) == 50
+
+    # Sitemap-bearing AND override → override still wins.
+    assert classify_lib.per_host_budget(
+        "example.test",
+        sitemap_hosts={"example.test"},
+        overrides=overrides,
+    ) == 5000
+
+    # Bad override input fails fast.
+    with pytest.raises(ValueError):
+        classify_lib.parse_budget_overrides(["malformed-no-colon"])
+    with pytest.raises(ValueError):
+        classify_lib.parse_budget_overrides(["host.test:notanumber"])
+
+
+def test_work_items_per_host_view_aggregates_across_statuses(tmp_path: Path) -> None:
+    """The work_items_per_host view sums active/pending/done/deferred counts
+    by host so the classify-work output and ingest budget gate share the same
+    source of truth."""
+    db_path = _make_fresh_db(tmp_path)
+    _bulk_insert_for_host(
+        db_path,
+        host="alpha.example.test",
+        n_pending=3,
+        n_deferred=2,
+        queue_prefix="alpha",
+    )
+    _bulk_insert_for_host(
+        db_path,
+        host="beta.example.test",
+        n_pending=1,
+        queue_prefix="beta",
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = {
+            row[0]: {
+                "active": row[1],
+                "pending": row[2],
+                "done": row[3],
+                "deferred": row[4],
+            }
+            for row in conn.execute(
+                "SELECT host, active_count, pending_count, done_count, deferred_count "
+                "FROM work_items_per_host ORDER BY host"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+    assert rows["alpha.example.test"]["active"] == 3
+    assert rows["alpha.example.test"]["pending"] == 3
+    assert rows["alpha.example.test"]["deferred"] == 2
+    assert rows["beta.example.test"]["active"] == 1
+    assert rows["beta.example.test"]["pending"] == 1
+
+
+def test_classify_work_emits_per_host_budget_signal(tmp_path: Path, capsys) -> None:
+    """``classify-work`` includes a ``per_host_budget`` summary in its JSON
+    output so the operator sees which hosts are at-budget without separately
+    reading the view."""
+    db_path = _make_fresh_db(tmp_path)
+    # Seed an api-tier host at its 200 cap.
+    _bulk_insert_for_host(
+        db_path,
+        host="api.example.test",
+        n_pending=200,
+        n_deferred=5,
+        queue_prefix="apicap",
+    )
+
+    _run_classify(db_path)
+    summary = json.loads(capsys.readouterr().out)
+
+    per_host = {entry["host"]: entry for entry in summary["per_host_budget"]}
+    assert "api.example.test" in per_host
+    api_entry = per_host["api.example.test"]
+    assert api_entry["budget"] == 200
+    assert api_entry["active_count"] == 200
+    assert api_entry["at_budget"] is True
+    assert api_entry["budget_deferred_count"] == 5

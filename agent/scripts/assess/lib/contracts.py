@@ -339,6 +339,91 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
+    "resolve-surface": CommandContract(
+        name="resolve-surface",
+        summary="PATCH an assessment surface by id (set status + rationale).",
+        schema_name="backend SurfaceUpdateRequest",
+        preferred_invocations=(
+            'aith assess resolve-surface <id> --status covered --rationale "..."',
+            'aith assess resolve-surface <id> --status not_applicable --rationale "..."',
+            'aith assess resolve-surface <id> --status deferred --rationale "..."',
+        ),
+        author_supplied_fields=(
+            "status",
+            "rationale",
+        ),
+        notes=(
+            "Use this to resolve a discovered surface after triage instead of falling back to direct SQL.",
+            "Rationale is appended to existing rationale so the audit trail accumulates context across resolutions.",
+        ),
+        common_mistakes=(
+            ("status=discovered", "discovered is the seed state; resolve to covered, not_applicable, or deferred"),
+            ("reason", "use --rationale for the resolution explanation"),
+        ),
+        examples=(
+            {
+                "status": "covered",
+                "rationale": "vulnerability-analyst confirmed coverage on parameter q",
+            },
+            {
+                "status": "not_applicable",
+                "rationale": "static asset, no input vector",
+            },
+        ),
+    ),
+    "update-intel": CommandContract(
+        name="update-intel",
+        summary="PATCH an existing intel row by id without inserting a new history record.",
+        schema_name="backend IntelUpdateRequest (per-type updatable column whitelist)",
+        preferred_invocations=(
+            "aith assess update-intel <type> <id> <patch.json>",
+            "aith assess update-intel <type> <id> --inline '{...}'",
+        ),
+        author_supplied_fields=(
+            "at least one updatable column",
+        ),
+        notes=(
+            "Use update-intel for in-place metadata edits. Use supersede-intel when you want to retain the prior row for audit and insert a wholly new record.",
+            "The backend rejects fields outside the per-type updatable column whitelist so guessed aliases surface immediately.",
+        ),
+        common_mistakes=(
+            ("source", "use source_name"),
+            ("agent", "use source_name or provenance.agent_name"),
+        ),
+        examples=(
+            {"validation_status": "exploited"},
+            {"notes": "Confirmed working PoC against staging"},
+        ),
+    ),
+    "supersede-intel": CommandContract(
+        name="supersede-intel",
+        summary="Insert a replacement intel row; old row stays for audit but is filtered from reports.",
+        schema_name="type-specific intel schema for the new payload",
+        preferred_invocations=(
+            'aith assess supersede-intel <type> <id> <new.json> --rationale "..."',
+            'aith assess supersede-intel <type> <id> --inline \'{...}\' --rationale "..."',
+        ),
+        author_supplied_fields=(
+            "type-specific required fields for the new record",
+            "--rationale (free text)",
+        ),
+        notes=(
+            "Use this when an intel row was wrong but the operator wants to retain the prior observation for audit.",
+            "Report-writer filters on superseded_by_id IS NULL so superseded rows do not appear in reports, but stay queryable for cascade-delete and audit.",
+        ),
+        common_mistakes=(
+            ("source", "use source_name"),
+            ("rationale-collision", "if the new natural key matches the existing row, use update-intel instead"),
+        ),
+        examples=(
+            {
+                "component": "nginx",
+                "version": "1.27.0",
+                "source_name": "vulnerability-analyst",
+                "confidence": "confirmed",
+            },
+        ),
+    ),
 }
 
 

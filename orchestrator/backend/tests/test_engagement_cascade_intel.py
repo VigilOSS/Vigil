@@ -99,6 +99,20 @@ def test_engagement_delete_cascades_every_intel_and_activity_table(client, isola
     )
     assert activity.status_code == 201, activity.text
 
+    # Seed an additional supersede pair so cascade-delete must reach
+    # rows whose ``superseded_by_id`` points back into the same table.
+    listing = client.get(f"{INTEL_BASE}/tech-components")
+    assert listing.status_code == 200, listing.text
+    tech_id = listing.json()[0]["id"]
+    superseded = client.post(
+        f"{INTEL_BASE}/tech-components/{tech_id}/supersede",
+        json={
+            "payload": {"component": "seed-tech", "version": "0.0.2"},
+            "rationale": "Bumped during seed",
+        },
+    )
+    assert superseded.status_code == 201, superseded.text
+
     # Sanity: every table has at least one row before the delete.
     counts_before = _count_rows(
         engagement_id,
@@ -106,6 +120,7 @@ def test_engagement_delete_cascades_every_intel_and_activity_table(client, isola
     )
     for table, count in counts_before.items():
         assert count >= 1, f"{table} was not seeded (count={count})"
+    assert counts_before["intel_tech_components"] >= 2
 
     # Explicit cascade delete via the public endpoint.
     response = client.delete(

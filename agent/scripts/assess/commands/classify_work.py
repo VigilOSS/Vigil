@@ -210,14 +210,93 @@ def run(args: argparse.Namespace) -> None:
             if len(rows) < batch:
                 break
 
+        per_host = _per_host_budget_summary(conn)
+
         summary = {
             "classified": classified,
             "updated": updated,
             "by_cluster": dict(sorted(cluster_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "per_host_budget": per_host,
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     finally:
         conn.close()
+
+
+def _per_host_budget_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return per-host budget signal for the classify-work cluster output (1D.2).
+
+    Each row carries the host's active count, the budget that applies, the
+    deferred count under ``deferred:per-host-budget-exceeded``, and a
+    boolean flag that flips when the host has hit its budget. The operator
+    reads this section to decide whether to raise budget on a specific host
+    via ``--budget-override host:N`` and re-run gau, or to leave the deferred
+    surplus alone.
+
+    The budget is computed via ``classify.per_host_budget`` so the classify
+    output stays consistent with the ingest gate. When the
+    ``work_items_per_host`` view is missing (legacy DBs), this function
+    returns an empty list rather than raising — the migration path in
+    ``db_init`` will install the view on the next ingestion run.
+    """
+    view_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='view' AND name='work_items_per_host'"
+    ).fetchone()
+    if not view_exists:
+        return []
+
+    rows = conn.execute(
+        """
+        SELECT host, active_count, pending_count, done_count, deferred_count
+        FROM work_items_per_host
+        WHERE host IS NOT NULL AND host != ''
+        ORDER BY active_count DESC, host
+        """
+    ).fetchall()
+
+    # Lazy import to avoid a circular import via assess.lib.classify which
+    # is the canonical home for the per-host budget defaults.
+    from assess.lib.classify import per_host_budget
+
+    summary: list[dict[str, Any]] = []
+    for row in rows:
+        host = row["host"]
+        active = int(row["active_count"] or 0)
+        budget = per_host_budget(host)
+        # Pull the per-host deferred count for ``deferred:per-host-budget-exceeded``
+        # specifically so the operator sees budget-driven defers separately
+        # from egress-blocked or other deferred clusters.
+        budget_deferred = conn.execute(
+            """
+            SELECT COUNT(*) FROM work_items
+            WHERE cluster_key = 'deferred:per-host-budget-exceeded'
+              AND lower(
+                CASE
+                    WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
+                        THEN substr(
+                            substr(url, instr(url, '://') + 3),
+                            1,
+                            instr(substr(url, instr(url, '://') + 3), '/') - 1
+                        )
+                    ELSE substr(url, instr(url, '://') + 3)
+                END
+              ) = ?
+            """,
+            (host,),
+        ).fetchone()[0]
+        summary.append(
+            {
+                "host": host,
+                "active_count": active,
+                "pending_count": int(row["pending_count"] or 0),
+                "done_count": int(row["done_count"] or 0),
+                "deferred_count": int(row["deferred_count"] or 0),
+                "budget_deferred_count": int(budget_deferred or 0),
+                "budget": budget,
+                "at_budget": active >= budget,
+            }
+        )
+    return summary
 
 
 def _classify_row(row: sqlite3.Row) -> dict[str, Any] | None:

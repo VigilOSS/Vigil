@@ -115,3 +115,30 @@ CREATE INDEX IF NOT EXISTS idx_work_items_consume ON work_items(status, type);
 CREATE INDEX IF NOT EXISTS idx_work_items_source ON work_items(source);
 CREATE INDEX IF NOT EXISTS idx_work_items_created ON work_items(created_at);
 CREATE INDEX IF NOT EXISTS idx_work_items_priority ON work_items(status, priority_score DESC, cluster_key);
+
+-- Per-host aggregate view for budget enforcement (1D.2). Built from `url`
+-- parsing because `work_items` does not carry a separate host column;
+-- `dispatch.py` uses the same substring expression for its `stats by=host`
+-- output, so this view shares the host-extraction semantics with the rest
+-- of the buffer. The `active_count` and `pending_count` columns drive the
+-- per-host budget check inside `ingest-endpoints`; the `deferred_count`
+-- column lets the operator audit how many URLs the budget pushed off the
+-- pending queue.
+CREATE VIEW IF NOT EXISTS work_items_per_host AS
+SELECT
+    CASE
+        WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
+            THEN lower(substr(
+                substr(url, instr(url, '://') + 3),
+                1,
+                instr(substr(url, instr(url, '://') + 3), '/') - 1
+            ))
+        ELSE lower(substr(url, instr(url, '://') + 3))
+    END AS host,
+    SUM(CASE WHEN status IN ('pending', 'processing', 'done') THEN 1 ELSE 0 END) AS active_count,
+    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+    SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done_count,
+    SUM(CASE WHEN cluster_key LIKE 'deferred:%' THEN 1 ELSE 0 END) AS deferred_count
+FROM work_items
+WHERE url IS NOT NULL AND url != ''
+GROUP BY host;

@@ -559,7 +559,7 @@ def test_aith_mcp_subcommand_prints_deprecation_and_exits_two(capsys: pytest.Cap
 
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
-    assert "removed in the 2026-04-26 cutover" in err
+    assert "removed in the typed-CLI cutover" in err
     assert "aith assess kali" in err
 
 
@@ -599,9 +599,9 @@ def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pyte
     assert "--pids-limit=1024" in run_command
     assert "--shm-size=2g" in run_command
     assert "--oom-score-adj=-500" in run_command
-    nofile_idx = run_command.index("nofile=32768:32768")
+    nofile_idx = run_command.index("nofile=131072:131072")
     assert run_command[nofile_idx - 1] == "--ulimit"
-    nproc_idx = run_command.index("nproc=8192")
+    nproc_idx = run_command.index("nproc=16384")
     assert run_command[nproc_idx - 1] == "--ulimit"
 
 

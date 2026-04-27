@@ -106,6 +106,74 @@ def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path) -> Non
     assert not (created.path / "start_codex.sh").exists()
 
 
+def test_aith_engagement_create_emits_scope_summary(tmp_path: Path, capsys) -> None:
+    """Bootstrap should print a one-line scope summary."""
+    repo_root = Path(__file__).resolve().parents[3]
+    install_root = tmp_path / "install"
+    sandbox_root = install_root / "agent"
+    sandbox_root.mkdir(parents=True)
+    _copy_agent_fixture(repo_root / "agent", sandbox_root, client="both")
+
+    create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="web",
+            target="https://app.example.com",
+            hosts=["app.example.com", "admin.example.com"],
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "[aith] scope: 2 entries" in err
+    # All entries are bare hosts — no wildcard-only-no-apex warning.
+    assert "wildcard-only entries lacking explicit apex" not in err
+
+
+def test_aith_engagement_create_warns_on_wildcard_only_no_apex(tmp_path: Path, capsys) -> None:
+    """Bootstrap warns when scope has wildcard-only entries without sibling apex."""
+    repo_root = Path(__file__).resolve().parents[3]
+    install_root = tmp_path / "install"
+    sandbox_root = install_root / "agent"
+    sandbox_root.mkdir(parents=True)
+    _copy_agent_fixture(repo_root / "agent", sandbox_root, client="both")
+
+    create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="web",
+            target="https://example.test",
+            hosts=["*.example.test"],
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "[aith] scope: 1 entries" in err
+    assert "wildcard-only entries lacking explicit apex: *.example.test" in err
+    assert "Add the apex" in err
+
+
+def test_aith_engagement_create_no_warning_when_apex_listed_alongside_wildcard(tmp_path: Path, capsys) -> None:
+    """No warning when both apex and wildcard are listed (operator-confirmed apex inclusion)."""
+    repo_root = Path(__file__).resolve().parents[3]
+    install_root = tmp_path / "install"
+    sandbox_root = install_root / "agent"
+    sandbox_root.mkdir(parents=True)
+    _copy_agent_fixture(repo_root / "agent", sandbox_root, client="both")
+
+    create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="web",
+            target="https://example.test",
+            hosts=["example.test", "*.example.test"],
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "[aith] scope: 2 entries" in err
+    assert "wildcard-only entries lacking explicit apex" not in err
+
+
 def test_aith_start_codex_exports_engagement_environment(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"

@@ -1,6 +1,14 @@
 """Surface validation constants and helpers."""
 from __future__ import annotations
 
+# Mutable statuses for by-id resolution. ``discovered`` is the seed state
+# only; agents resolve to one of the three terminal states below.
+RESOLVABLE_STATUSES = frozenset({
+    "covered",
+    "not_applicable",
+    "deferred",
+})
+
 VALID_SURFACE_TYPES = frozenset({
     "auth_entry",
     "account_recovery",
@@ -34,5 +42,19 @@ def validate_surface_status(status: str) -> None:
         valid = ", ".join(sorted(VALID_STATUSES))
         raise SystemExit(
             f"invalid surface status: {status}. "
+            f"Valid statuses: {valid}"
+        )
+
+
+def validate_resolution_status(status: str) -> None:
+    """Reject statuses that are not valid resolutions.
+
+    ``discovered`` is the seed state — operators can only resolve a
+    surface to ``covered``, ``not_applicable``, or ``deferred``.
+    """
+    if status not in RESOLVABLE_STATUSES:
+        valid = ", ".join(sorted(RESOLVABLE_STATUSES))
+        raise SystemExit(
+            f"invalid resolution status: {status}. "
             f"Valid statuses: {valid}"
         )

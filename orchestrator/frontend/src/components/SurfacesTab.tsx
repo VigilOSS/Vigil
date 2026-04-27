@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AssessmentFindingLink, AssessmentSurface } from "../lib/api";
-import { listAssessmentFindingLinks } from "../lib/api";
+import type { AssessmentFindingLink, AssessmentSurface, SurfacePatchPayload } from "../lib/api";
+import { listAssessmentFindingLinks, patchAssessmentSurface } from "../lib/api";
 
 type SurfacesTabProps = {
   engagementKey: string;
   surfaces: AssessmentSurface[];
+  // Optional: parent refresh hook so a successful PATCH triggers a fresh
+  // list fetch instead of waiting for the next polling tick.
+  onSurfaceUpdated?: (surface: AssessmentSurface) => void;
 };
 
 type GroupedSurfaces = {
@@ -109,11 +112,40 @@ const IconClose = () => (
 
 // ── Component ─────────────────────────────────────────────────────────
 
-export function SurfacesTab({ engagementKey, surfaces }: SurfacesTabProps) {
+export function SurfacesTab({ engagementKey, surfaces, onSurfaceUpdated }: SurfacesTabProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [findingLinks, setFindingLinks] = useState<AssessmentFindingLink[]>([]);
   const [linksError, setLinksError] = useState<string | null>(null);
   const [selected, setSelected] = useState<AssessmentSurface | null>(null);
+  // Track the in-flight PATCH so the inline button shows a busy state and
+  // disables itself until the network round-trip resolves.
+  const [pendingResolution, setPendingResolution] = useState<string | null>(null);
+  const [resolutionError, setResolutionError] = useState<string | null>(null);
+  const [resolutionRationale, setResolutionRationale] = useState<string>("");
+
+  const resolveSurfaceStatus = useCallback(
+    async (status: SurfacePatchPayload["status"]) => {
+      if (!selected || !status) return;
+      setResolutionError(null);
+      setPendingResolution(status);
+      try {
+        const updated = await patchAssessmentSurface(engagementKey, selected.id, {
+          status,
+          rationale: resolutionRationale || undefined,
+        });
+        setSelected(updated);
+        setResolutionRationale("");
+        onSurfaceUpdated?.(updated);
+      } catch (err: unknown) {
+        setResolutionError(
+          err instanceof Error ? err.message : "Failed to update surface status",
+        );
+      } finally {
+        setPendingResolution(null);
+      }
+    },
+    [engagementKey, onSurfaceUpdated, resolutionRationale, selected],
+  );
 
   const [query, setQuery] = useState("");
   const [typeFilters, setTypeFilters] = useState<Set<string>>(new Set());
@@ -532,6 +564,45 @@ export function SurfacesTab({ engagementKey, surfaces }: SurfacesTabProps) {
                     </div>
                   )}
                 </div>
+              </div>
+
+              <div className="section">
+                <p className="section-title">Resolve status</p>
+                <p className="meta-text" style={{ margin: "0 0 8px" }}>
+                  Resolve a discovered surface to covered, not_applicable, or deferred.
+                  The rationale is appended to the existing audit trail.
+                </p>
+                <textarea
+                  rows={2}
+                  placeholder="Rationale (optional, appended to the audit trail)"
+                  value={resolutionRationale}
+                  onChange={(e) => setResolutionRationale(e.target.value)}
+                  style={{
+                    width: "100%",
+                    boxSizing: "border-box",
+                    fontSize: "0.85rem",
+                    padding: "6px 8px",
+                    marginBottom: "8px",
+                  }}
+                />
+                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                  {(["covered", "not_applicable", "deferred"] as const).map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      className={`filter-chip ${pendingResolution === s ? "is-active" : ""}`}
+                      disabled={pendingResolution != null}
+                      onClick={() => void resolveSurfaceStatus(s)}
+                    >
+                      {pendingResolution === s ? "Saving…" : `Mark ${s}`}
+                    </button>
+                  ))}
+                </div>
+                {resolutionError && (
+                  <p className="meta-text" style={{ color: "var(--c-error, #c33)", margin: "8px 0 0" }}>
+                    {resolutionError}
+                  </p>
+                )}
               </div>
 
               {selected.rationale && (

@@ -1327,6 +1327,90 @@ def list_surfaces(engagement_id: int) -> list[dict[str, Any]]:
         return _fetch_all(connection, "SELECT * FROM assessment_surfaces WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
 
 
+def update_surface(
+    engagement_id: int,
+    surface_id: int,
+    *,
+    status_value: str | None = None,
+    rationale: str | None = None,
+    source_name: str | None = None,
+    evidence_ref: str | None = None,
+) -> dict[str, Any]:
+    """Patch an assessment_surfaces row by id.
+
+    Operators reach this through ``aith assess resolve-surface`` to mark
+    discovered surfaces ``covered``, ``not_applicable``, or ``deferred``.
+    Unspecified fields stay untouched, but at least one mutable field must
+    be supplied so the call records something durable. ``rationale`` is
+    appended (mirrors the upsert behavior of ``_upsert_surface``) so the
+    audit trail accumulates context.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    valid_statuses = {"covered", "not_applicable", "deferred", "discovered"}
+    if status_value is not None and status_value not in valid_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid surface status '{status_value}'; allowed: {sorted(valid_statuses)}",
+        )
+    if all(value is None for value in (status_value, rationale, source_name, evidence_ref)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="update-surface requires at least one of status, rationale, source_name, evidence_ref",
+        )
+
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT * FROM assessment_surfaces WHERE engagement_id = ? AND id = ?",
+            (engagement.id, surface_id),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"surface id={surface_id} not found",
+            )
+
+        assignments: list[str] = []
+        params: list[Any] = []
+        if status_value is not None:
+            assignments.append("status = ?")
+            params.append(status_value)
+        if rationale is not None:
+            existing_rationale = str(existing["rationale"] or "")
+            new_rationale = rationale
+            if existing_rationale and rationale and existing_rationale != rationale:
+                new_rationale = existing_rationale + "\n" + rationale
+            elif rationale == "":
+                new_rationale = existing_rationale
+            assignments.append("rationale = ?")
+            params.append(new_rationale)
+        if source_name is not None and source_name != "":
+            assignments.append("source_name = ?")
+            params.append(source_name)
+        if evidence_ref is not None and evidence_ref != "":
+            assignments.append("evidence_ref = ?")
+            params.append(evidence_ref)
+
+        if not assignments:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="update-surface produced no effective changes",
+            )
+
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
+        params.extend([engagement.id, surface_id])
+        connection.execute(
+            f"UPDATE assessment_surfaces SET {', '.join(assignments)} "
+            f"WHERE engagement_id = ? AND id = ?",
+            tuple(params),
+        )
+        row = connection.execute(
+            "SELECT * FROM assessment_surfaces WHERE engagement_id = ? AND id = ?",
+            (engagement.id, surface_id),
+        ).fetchone()
+        assert row is not None
+        return dict(row)
+
+
 def _finding_slug(connection, engagement_id: int, slug: str | None, title: str, canonical_location: str) -> str:
     if slug:
         return slug
@@ -2870,6 +2954,210 @@ def update_coverage_item_status(
     return dict(updated)
 
 
+_VENDOR_SAAS_HOST_SUFFIXES: list[tuple[str, str]] = [
+    # Mirror of agent/scripts/assess/lib/scope.py:_VENDOR_SAAS_SUFFIXES so the
+    # backend projection can answer the "is this host vendor SaaS" question
+    # without spawning a Python subprocess. Keep the two lists in sync; the
+    # CLI is the source of truth for the operator-side checkpoint, this list
+    # exists only so the engagement summary projection can flag pending
+    # decisions for the frontend banner.
+    ("salesforce", ".salesforce.com"),
+    ("salesforce", ".lightning.force.com"),
+    ("salesforce", ".my.salesforce.com"),
+    ("salesforce", ".force.com"),
+    ("servicenow", ".service-now.com"),
+    ("servicenow", ".servicenowservices.com"),
+    ("statuspage", ".statuspage.io"),
+    ("statuspage", ".statuspage.amazon.com"),
+    ("govdelivery", ".govdelivery.com"),
+    ("awsconnect", ".awsconnect.com"),
+    ("awsconnect", ".amazonconnect.com"),
+    ("auth0", ".auth0.com"),
+    ("okta", ".okta.com"),
+    ("okta", ".oktapreview.com"),
+    ("zendesk", ".zendesk.com"),
+    ("freshdesk", ".freshdesk.com"),
+    ("intercom", ".intercom.io"),
+]
+
+
+def _host_is_vendor_saas(host: str | None) -> str | None:
+    if not host:
+        return None
+    normalized = host.strip().rstrip(".").lower()
+    if not normalized:
+        return None
+    for label, suffix in _VENDOR_SAAS_HOST_SUFFIXES:
+        bare = suffix.lstrip(".")
+        if normalized == bare or normalized.endswith(suffix):
+            return label
+    return None
+
+
+def _host_from_endpoint(endpoint: str | None) -> str:
+    raw = (endpoint or "").strip().lower()
+    if not raw:
+        return ""
+    first = raw.split()[0]
+    if "://" in first:
+        try:
+            host = urlparse(first).hostname or ""
+        except ValueError:
+            return ""
+        return host.rstrip(".").lower()
+    if first.startswith("["):
+        closing = first.find("]")
+        if closing > 1:
+            return first[1:closing]
+        return ""
+    return first.split(":", 1)[0].rstrip(".").lower()
+
+
+def vendor_saas_hosts_pending_decision(engagement_id: int) -> list[dict[str, str]]:
+    """Return vendor-SaaS-flagged hosts that have no scope_decision activity entry.
+
+    A vendor-SaaS host is one whose recorded service endpoint or surface
+    target descriptor matches a vendor SaaS suffix (Salesforce, ServiceNow,
+    StatusPage, GovDelivery, AwsConnect, Auth0, Okta, Zendesk, Freshdesk,
+    Intercom). The Vendor-SaaS scope checkpoint records the operator's
+    choice as an activity entry with ``task_name='scope_decision'`` and the
+    host appearing inside ``summary``; hosts that lack that record block
+    the Phase 1 advance gate and surface in the frontend overview banner.
+
+    The projection deliberately does NOT consult ``$DIR/agent-registry.json``
+    on disk — the backend is the source of truth, and the CLI mirrors the
+    decision into an activity entry whenever a checkpoint is recorded.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    pending: dict[str, str] = {}
+    decided: set[str] = set()
+    with get_connection() as connection:
+        service_rows = connection.execute(
+            "SELECT endpoint FROM assessment_services WHERE engagement_id = ?",
+            (engagement.id,),
+        ).fetchall()
+        surface_rows = connection.execute(
+            "SELECT target_descriptor FROM assessment_surfaces WHERE engagement_id = ?",
+            (engagement.id,),
+        ).fetchall()
+        # Activity entries carry the operator's narrative log. A
+        # ``scope_decision`` for a vendor-SaaS host shows up either in
+        # ``title`` (e.g. ``scope_decision: foo.salesforce.com``), the
+        # ``action`` text, or in ``metadata_json`` as a JSON blob carrying
+        # ``{"kind": "scope_decision", "host": "..."}``. We match liberally
+        # across all three fields so a future writer that picks any of them
+        # still satisfies the gate.
+        decision_rows = connection.execute(
+            """
+            SELECT title, action, result, body_markdown, metadata_json
+            FROM activity_entries
+            WHERE engagement_id = ?
+              AND (
+                title LIKE '%scope_decision%'
+                OR action LIKE '%scope_decision%'
+                OR result LIKE '%scope_decision%'
+                OR body_markdown LIKE '%scope_decision%'
+                OR metadata_json LIKE '%scope_decision%'
+              )
+            """,
+            (engagement.id,),
+        ).fetchall()
+    for row in decision_rows:
+        for value in row:
+            if not isinstance(value, str):
+                continue
+            for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+                normalized = token.rstrip(".").lower()
+                if _host_is_vendor_saas(normalized):
+                    decided.add(normalized)
+    for row in service_rows:
+        host = _host_from_endpoint(str(row["endpoint"] if "endpoint" in row.keys() else row[0]))
+        vendor = _host_is_vendor_saas(host)
+        if vendor and host not in decided and host not in pending:
+            pending[host] = vendor
+    for row in surface_rows:
+        host = _host_from_endpoint(str(row["target_descriptor"] if "target_descriptor" in row.keys() else row[0]))
+        vendor = _host_is_vendor_saas(host)
+        if vendor and host not in decided and host not in pending:
+            pending[host] = vendor
+    return [{"host": host, "vendor": vendor} for host, vendor in sorted(pending.items())]
+
+
+_EGRESS_BLOCK_INTENT_PATTERNS = (
+    "egress reputation",
+    "egress-block",
+    "egress block",
+    "cdn-ip-block",
+    "ip-reputation",
+)
+
+
+def egress_block_status(engagement_id: int) -> dict[str, Any]:
+    """Return ``{blocked_pct, pattern, samples_total, samples_blocked}``.
+
+    Reads the most recent egress reputation check from
+    ``assessment_command_runs`` (matched by intent text) and parses the
+    ``egress_block_pct=N`` line out of stdout. When no recent run is
+    available the projection returns zeros so the frontend can show a
+    "not yet sampled" state instead of a stale percentage.
+
+    ``pattern`` is one of ``unknown`` / ``cdn-403`` / ``geoblock-reset`` /
+    ``mixed``, derived from the `403`/`000` ratio in the run output. The
+    pattern is informational; the operator confirms the cause via the
+    Egress reputation checkpoint.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT intent, stdout_preview, created_at
+            FROM assessment_command_runs
+            WHERE engagement_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 50
+            """,
+            (engagement.id,),
+        ).fetchall()
+    for row in rows:
+        intent = (row["intent"] if "intent" in row.keys() else "") or ""
+        if not isinstance(intent, str):
+            continue
+        intent_lower = intent.lower()
+        if not any(needle in intent_lower for needle in _EGRESS_BLOCK_INTENT_PATTERNS):
+            continue
+        stdout = row["stdout_preview"] if "stdout_preview" in row.keys() else ""
+        if not isinstance(stdout, str):
+            stdout = ""
+        match = re.search(r"egress_block_pct\s*=\s*(\d+)", stdout)
+        if not match:
+            continue
+        pct = int(match.group(1))
+        n_403 = len(re.findall(r"\b403\b", stdout))
+        n_000 = len(re.findall(r"\b000\b", stdout))
+        if n_403 and not n_000:
+            pattern = "cdn-403"
+        elif n_000 and not n_403:
+            pattern = "geoblock-reset"
+        elif n_403 and n_000:
+            pattern = "mixed"
+        else:
+            pattern = "unknown"
+        return {
+            "blocked_pct": pct,
+            "pattern": pattern,
+            "samples_total": n_403 + n_000,
+            "samples_blocked": n_403 + n_000,
+            "checked_at": row["created_at"] if "created_at" in row.keys() else None,
+        }
+    return {
+        "blocked_pct": 0,
+        "pattern": "unknown",
+        "samples_total": 0,
+        "samples_blocked": 0,
+        "checked_at": None,
+    }
+
+
 def assessment_summary(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     exploit_candidate_count = len(list_exploit_candidates(engagement.id))
@@ -3043,6 +3331,8 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
         "open_coverage_items": [dict(row) for row in open_coverage_items],
         "attack_chains": [dict(row) for row in attack_chains],
         "service_coverage_gaps": [dict(row) for row in service_coverage_gaps],
+        "vendor_saas_hosts_pending_decision": vendor_saas_hosts_pending_decision(engagement.id),
+        "egress_status": egress_block_status(engagement.id),
     }
 
 

@@ -1,9 +1,10 @@
 """Runtime tooling contract — verify the `aith-threat-hunting` runtime container has every
 binary the subdomain-enumeration pipeline assumes.
 
-The 2026-04-24 SSA engagement burned a Phase 1a slot when puredns ran without massdns and
-silently produced empty output. This test pins the binary set so an image drift can be caught
-at CI/handoff time, before an engagement loses time to silent degradation.
+puredns silently fails when massdns is missing (zero output, exit code 0); the dnsx fallback
+against a typical bruteforce wordlist then spikes container CPU. This test pins the binary set
+so an image drift can be caught at CI/handoff time, before a Phase 1a dispatch loses time to
+silent degradation.
 
 Marked `@pytest.mark.integration` so CI without docker (or with a stale image tag) skips
 cleanly via the bundled `addopts = -m 'not integration'`. To run this test explicitly after
@@ -59,8 +60,8 @@ def test_runtime_full_dockerfile_declares_subdomain_enum_binaries():
     assert not missing, (
         "agent/docker/runtime-full/Dockerfile is missing references to: "
         f"{missing}. The subdomain-enumeration SKILL preflights these binaries; if any are "
-        "dropped from the runtime image, the 2026-04-24 SSA-style silent-degradation failure "
-        "mode reappears."
+        "dropped from the runtime image, the silent-degradation failure mode (puredns→empty / "
+        "dnsx fallback CPU spike) reappears."
     )
 
 

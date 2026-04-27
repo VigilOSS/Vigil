@@ -33,6 +33,8 @@ If any binary is missing, do NOT silently fall back — pause active enumeration
 
 The runtime image is heavy by design — every binary in the preflight list is already installed in `runtime-full`. A missing binary indicates image drift, not a tooling gap.
 
+DNS resolution success-rate parallels the egress reputation problem: if every host resolves but no host responds with HTTP signal, run the egress reputation check first (`agent/references/runtime-guides/cdn-ip-blocking.md`) before assuming a tooling failure.
+
 ## Docker-resource-safe profiles
 
 Subdomain enumeration is the highest-CPU-burst phase of recon. Docker's cgroup limits (`AITH_RUNTIME_MEMORY_GB` / `AITH_RUNTIME_CPUS` / `AITH_RUNTIME_PIDS_LIMIT` / `AITH_RUNTIME_SHM_SIZE` from `.env.example`) bound the burst, but a default rate-limit profile against the wrong target tier still saturates the runtime. Pick the profile by target shape, not by what the apex looks like — wildcards expand the surface and the rate calibration must match the surface, not the seed.
@@ -165,6 +167,53 @@ aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
 
 The lean dnsx invocation (no `-json`, no `-resp` on bulk inputs) is deliberate — see `agent/references/tools/recon/dnsx.md` for the NXDOMAIN/CPU spike pattern. Enrich survivors with a second JSON pass only after the merged set is filtered.
 
+## TLS SAN extraction as a primary source
+
+Phase 3 above treats TLS SAN extraction as a *feedback* step — applied after passive + active + permutation. That ordering is correct for greenfield enumeration on a new wildcard, but in two situations the SAN set is a *primary* source rather than a feedback loop:
+
+1. **Cross-host SAN collision is signaling a shared multi-tenant cert.** When the
+   web-recon TLS / SAN / vhost cross-host pass surfaces SAN entries that appear in two
+   or more hosts' certs (the count >= 2 entries from
+   `agent/references/tools/recon/openssl-sans.md` step 2), each SAN entry is a candidate
+   subdomain even when no passive source records it — multi-tenant certs commonly
+   embed staging / internal tenant SANs that never appear in CT logs.
+2. **vhost-cert mismatch flags a frontend exposing a non-matching default cert.** When
+   the cert's CN or first SAN does not match the requested hostname, the cert's actual
+   CN / SANs are adjacent attack surface — the frontend serves the requested name but
+   the cert proves the host is sitting on a shared edge whose default certificate
+   covers a different name.
+
+In both cases, treat the SAN set as a primary subdomain source and feed it through
+`dnsx -resp` for live-host confirmation in the same dispatch:
+
+```bash
+# Per-host SAN extraction (full recipe in openssl-sans.md step 1)
+aith assess kali exec --technique RECON \
+  --intent "per-host TLS SAN extraction as primary subdomain source" \
+  --probe-kind fingerprint --phase recon --timeout 300 -- bash -c '
+  while read HOST; do
+    OUT="/engagements/$ENGAGEMENT_KEY/scans/sans_${HOST}.txt"
+    echo | timeout 10 openssl s_client -connect "$HOST:443" -servername "$HOST" 2>/dev/null \
+      | openssl x509 -noout -ext subjectAltName 2>/dev/null \
+      | grep -oE "DNS:[^,]+" | sed "s/DNS://" | sort -u > "$OUT"
+  done < /engagements/$ENGAGEMENT_KEY/scans/in_scope_hosts.txt
+'
+
+# Merge SAN-discovered names and confirm via dnsx -resp
+aith assess kali exec --technique RECON \
+  --intent "dnsx -resp confirmation of SAN-discovered subdomains" \
+  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
+  cat /engagements/$ENGAGEMENT_KEY/scans/sans_*.txt | sort -u \
+    > /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt
+  aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt \
+    -a -resp -silent -o /engagements/$ENGAGEMENT_KEY/scans/san_live.txt
+'
+```
+
+`san_live.txt` is the primary input to `aith assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum` for this dispatch. The full openssl extraction loop, the cross-host collision counter, and the vhost-cert match check live in `agent/references/tools/recon/openssl-sans.md` — call into it from this section rather than duplicating mechanics here.
+
+This section does NOT replace the Phase 3 TLS SAN feedback loop above; it sits alongside it. The Phase 3 loop is the breadth-first sweep across the merged sub list (post-Phase 0/1/2). The SAN-as-primary section fires when the cross-host signal is already strong (a shared multi-tenant cert was detected, or a vhost-cert mismatch was found), so the enumeration is depth-first against the cert's actual coverage set rather than breadth-first against the apex's enumerated subset.
+
 ## Bound rules
 
 Stopping criteria are explicit because subdomain enumeration is the easiest place to burn a runtime budget on diminishing returns.
@@ -235,6 +284,7 @@ After ingestion, the operator triggers a reactive nuclei sweep against the newly
 - `agent/references/tools/recon/puredns.md` — massdns dependency, wildcard tuning, rate-limit ceilings.
 - `agent/references/tools/recon/dnsx.md` — NXDOMAIN/CPU spike pattern, two-step brute-then-enrich, GOMAXPROCS profile.
 - `agent/references/tools/recon/cero.md` — TLS SAN scraper post-asnmap CIDR feed.
+- `agent/references/tools/recon/openssl-sans.md` — per-host TLS SAN extraction loop, cross-host SAN collision counter, vhost / cert mismatch detection, multi-time DNS resolution recipe; powers the "TLS SAN extraction as a primary source" section.
 - `agent/references/tools/recon/alterx.md` — permutation generator with `{{sub}}/{{suffix}}` DSL.
 - `agent/references/tools/recon/asnmap.md` — CIDR mapping by ASN, feeds cero.
 - `agent/references/tools/recon/bbot.md` — multi-module passive preset.

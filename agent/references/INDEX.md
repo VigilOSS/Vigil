@@ -136,6 +136,12 @@ Copy-pasteable payloads organized by attack type. Used by: exploit-developer, vu
 | `payloads/business-logic-payloads.md` | Negative quantity, coupon abuse, payment bypass, mass assignment |
 | `payloads/info-disclosure-probes.md` | Standard endpoints checklist (/metrics, /.env, /actuator, cloud metadata) |
 | `payloads/rate-limit-bypass-payloads.md` | IP spoofing headers by CDN, path variation, account rotation, parameter pollution |
+| `payloads/version-fingerprint-probes.md` | Vendor exact-version triangulation — npm/pypi/maven publish-date probes, Sentry release-tag → git-SHA recipes, per-vendor mapping examples |
+| `payloads/salesforce-aura-payloads.md` | Salesforce Aura / Lightning Communities deep-enum: POST envelope shape, SObject namespace probe list, tenant-singleton Id prefixes, chain-walk reference fields, IDOR boundedness test |
+| `payloads/servicenow-glide-payloads.md` | ServiceNow GlideRecord deep-enum: well-known table probe list, `sysparm_query` DSL, `sysparm_display_value=true` chain-walk pattern, IDOR boundedness test |
+| `payloads/drupal-jsonapi-payloads.md` | Drupal JSON:API deep-enum: entity-type / bundle list, sparse-fieldset abuse, `filter[]` query DSL, `?include` chain-walk, IDOR boundedness test |
+| `payloads/pexip-admin-api-payloads.md` | Pexip Infinity admin-API deep-enum: namespace probe list, anonymous-vs-default-admin-vs-credentialed reachability triad, configuration-leak chain seeds |
+| `payloads/csp-default-grep.md` | Vendor-template CSP / CORS placeholder grep — placeholder-literal regex, unsafe-inline + unsafe-eval check, overly-broad wildcard check, per-vendor known-default snippets, sweep helper |
 | `payloads/yara-cobalt-strike.md` | YARA rules for Cobalt Strike beacon config, default cert, shellcode stager, XOR keys |
 
 ## code-vuln-patterns/ — SAST-Surviving Vulnerability Patterns
@@ -216,6 +222,8 @@ Quick-reference per tool, organized by usage phase.
 | `tools/recon/gau.md` | Historical URL discovery (Wayback, OTX, Common Crawl, URLScan) |
 | `tools/recon/gf.md` | URL parameter-pattern classifier (xss, ssrf, redirect, idor, sqli, lfi, debug) with 1ndianl33t patterns |
 | `tools/recon/trufflehog.md` | Secret scanner (filesystem mode, 800+ detectors, v3 positional-path syntax, `--no-verification` default) |
+| `tools/recon/github-osint.md` | GitHub OSINT — org-name pattern enumeration (literal/parent/contractor variants), public-member listing, commit-author email mining, code-search cross-reference; rate-limit etiquette and `GITHUB_TOKEN` pattern |
+| `tools/recon/openssl-sans.md` | Per-host TLS SAN extraction (openssl s_client + x509 -ext subjectAltName), cross-host SAN collision detection (shared multi-tenant cert flag), vhost / cert mismatch detection, multi-time DNS resolution (split-VIP detection), dnsx live-host confirmation of SAN-discovered names |
 
 ### tools/fuzzing/ — Used by: fuzzer, recon-specialist
 
@@ -290,6 +298,7 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 | `runtime-guides/subagent-registry.md` | `agent-registry.json` schema and its role as the engagement audit trail; how to hand off state between dispatches by carrying prior output and durable-state pointers forward in the new dispatch prompt |
 | `runtime-guides/command-history-auditing.md` | How to read `aith assess list-command-runs` as a coverage map — use it to pick variants that haven't been probed, not to gate-keep reruns; includes field-interpretation guide for retention/suppression |
 | `runtime-guides/kali-cli.md` | `aith assess kali` troubleshooting: discovery failures, dispatch-time guardrails (no broad pkill, per-agent binary copy, docker-exec parallelism cap), common errors (`audit POST 422 phase required`, dedup window, dtach missing), and the canonical smoke test |
+| `runtime-guides/cdn-ip-blocking.md` | CDN/edge IP-reputation block detection signals (403 + reference codes, TCP reset, 000-status), the egress reputation curl script, four mitigation options (program allowlist / residential proxy / browser-based tool / accept-gap), give-up-vs-escalate rule, and the `aith assess ingest-endpoints --egress-blocked-hosts` cross-reference |
 | `handoff-protocols.md` | Agent-to-agent handoff rules and expected downstream actions |
 | `subdomain-enumeration.md` | Subdomain enumeration (when `*.domain` in hosts), prioritization, and sliding-window execution rules |
 

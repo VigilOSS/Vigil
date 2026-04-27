@@ -47,13 +47,44 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help=f"Work-item status filter (default: {_DEFAULT_STATUS}). Switch to 'skipped' to "
         "audit deferred clusters.",
     )
+    p.add_argument(
+        "--host",
+        default="",
+        help="Filter clusters to those whose representative URLs match the given hostname. "
+        "Operates as a CLI-side post-filter on the cluster query so both deferred and "
+        "pending status filters keep working unchanged.",
+    )
     p.set_defaults(func=run)
+
+
+def _url_host(url: str) -> str:
+    """Extract the host portion of a URL string for ``--host`` filtering.
+
+    work_items rows store the full URL in ``url``; we parse just enough to
+    isolate the hostname so the filter matches on a real component rather
+    than a substring of the path.
+    """
+    if not url:
+        return ""
+    candidate = url.strip()
+    scheme_marker = "://"
+    if scheme_marker in candidate:
+        candidate = candidate.split(scheme_marker, 1)[1]
+    # Drop credentials prefix if any.
+    if "@" in candidate:
+        candidate = candidate.split("@", 1)[1]
+    slash_idx = candidate.find("/")
+    host_with_port = candidate if slash_idx == -1 else candidate[:slash_idx]
+    if ":" in host_with_port:
+        host_with_port = host_with_port.split(":", 1)[0]
+    return host_with_port.lower()
 
 
 def run(args: argparse.Namespace) -> None:
     db_path = args.db_path
     limit = max(1, int(args.limit))
     status = args.status
+    host_filter = (args.host or "").strip().lower()
 
     db_init(db_path)
 
@@ -91,6 +122,19 @@ def run(args: argparse.Namespace) -> None:
                 """,
                 (status, row["cluster_key"], row["cluster_key"], _SAMPLE_URLS),
             ).fetchall()
+
+            sample_urls = [
+                f"{sample['method']} {sample['url']}"
+                for sample in sample_rows
+            ]
+
+            # CLI-side filter so the SQL stays simple and the filter
+            # cooperates with both pending and skipped statuses.
+            if host_filter:
+                hosts = {_url_host(sample["url"]) for sample in sample_rows}
+                if host_filter not in hosts:
+                    continue
+
             clusters.append({
                 "cluster_key": row["cluster_key"],
                 "count": row["count"],
@@ -98,14 +142,12 @@ def run(args: argparse.Namespace) -> None:
                 "avg_priority_score": round(row["avg_priority"] or 0.0, 2),
                 "earliest_created_at": row["earliest_created_at"],
                 "latest_created_at": row["latest_created_at"],
-                "sample_urls": [
-                    f"{sample['method']} {sample['url']}"
-                    for sample in sample_rows
-                ],
+                "sample_urls": sample_urls,
             })
 
         print(json.dumps({
             "status": status,
+            "host_filter": host_filter or None,
             "cluster_count": len(clusters),
             "clusters": clusters,
         }, ensure_ascii=False, indent=2))

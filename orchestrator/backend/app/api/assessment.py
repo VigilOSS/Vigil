@@ -226,6 +226,22 @@ class SurfaceRecordRequest(BaseModel):
     status: Literal["covered", "deferred", "discovered", "not_applicable"] = "discovered"
 
 
+class SurfaceUpdateRequest(BaseModel):
+    """Patch shape for ``PATCH /assessment/surfaces/{id}``.
+
+    Every field is optional so callers can update only what changed. The
+    service helper rejects requests where every field is ``None`` so a
+    no-op call surfaces as 400 instead of silently mutating updated_at.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["covered", "deferred", "discovered", "not_applicable"] | None = None
+    rationale: str | None = Field(default=None, max_length=4096)
+    source_name: str | None = Field(default=None, max_length=128)
+    evidence_ref: str | None = Field(default=None, max_length=1024)
+
+
 class AttackChainLinkRequest(BaseModel):
     relation: str = Field(default="step", min_length=1, max_length=64)
     entity_kind: str = Field(min_length=1, max_length=64)
@@ -722,6 +738,32 @@ async def create_surface(engagement_key: str, request: SurfaceRecordRequest) -> 
         rationale=request.rationale,
         evidence_ref=request.evidence_ref,
         status_value=request.status,
+    )
+    await _broadcast(engagement.key, "surface", record)
+    return record
+
+
+@router.patch("/surfaces/{surface_id}")
+async def update_surface_endpoint(
+    engagement_key: str,
+    surface_id: int,
+    request: SurfaceUpdateRequest,
+) -> dict[str, Any]:
+    """Patch an assessment_surfaces row by id.
+
+    The dedicated by-id PATCH lets the operator resolve a discovered surface
+    to ``covered``, ``not_applicable``, or ``deferred`` without re-deriving
+    the (surface_type, target_descriptor) UPSERT key. ``aith assess
+    resolve-surface`` is the helper that drives this endpoint.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.update_surface(
+        engagement.id,
+        surface_id,
+        status_value=request.status,
+        rationale=request.rationale,
+        source_name=request.source_name,
+        evidence_ref=request.evidence_ref,
     )
     await _broadcast(engagement.key, "surface", record)
     return record

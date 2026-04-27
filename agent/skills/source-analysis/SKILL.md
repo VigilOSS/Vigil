@@ -103,6 +103,91 @@ This creates durable request/service coverage candidates and, when the local buf
 ### 6. Source Map Analysis
 Fetch .map → extract `sources` array → reconstruct original source for analysis.
 
+### 6a. APP_VERSION / BUILD_HASH / Sentry-release Extraction
+
+When a vendor product has been fingerprinted from the recon pass, source-maps and minified
+bundles routinely inline build-time constants that pin the deployed version to a specific
+patch level. Extracting these constants is a precondition for accurate CVE matching —
+osint-analyst's exact-version triangulation cross-checks them against package-registry
+sister-version dates and vendor changelogs. A version inferred from feature flags alone
+is too loose for CVE work.
+
+Grep patterns to run against fetched bundles, source-maps, and inline scripts:
+
+```bash
+# Constants commonly inlined by webpack DefinePlugin / Vite define / build scripts
+grep -EHn 'APP_VERSION|__APP_VERSION__|BUILD_HASH|__BUILD_HASH__|__GIT_SHA__|__BUILD_VERSION__' \
+  /engagements/$ENGAGEMENT_KEY/downloads/*.js \
+  /engagements/$ENGAGEMENT_KEY/downloads/*.js.map
+
+# Sentry release-tag — pinned to git tag or short SHA in production builds
+grep -EHn 'Sentry\.init\([^)]*release:|process\.env\.SENTRY_RELEASE|SENTRY_RELEASE' \
+  /engagements/$ENGAGEMENT_KEY/downloads/*.js \
+  /engagements/$ENGAGEMENT_KEY/downloads/*.js.map
+
+# package.json fragments are sometimes inlined at the bottom of bundles
+grep -EHn '"version"\s*:\s*"[0-9]+\.[0-9]+\.[0-9]+' /engagements/$ENGAGEMENT_KEY/downloads/*.js
+```
+
+When a value is found, hand it to osint-analyst as part of the `#### Intelligence` output
+so the triangulation step in `agent/skills/osint-recon/SKILL.md` (Exact-version
+triangulation) can cross-reference package-registry sister-version dates and confirm the
+exact patch level. Per-vendor mapping examples live in
+`agent/references/payloads/version-fingerprint-probes.md`.
+
+### 6b. Vendor-product CSP / CORS re-baseline + deep-enum handoff
+
+When the source-map fingerprint or the `sources[]` paths inside the .map files (or the
+package-name strings in `chunk-vendors.<hash>.js`) match a vendor product — e.g.,
+`@salesforce/lightning-design-system`, `@servicenow/sn-*`, Drupal core modules under
+`core/misc/drupal*.js`, or Pexip's `pexrtc.js` — fire two follow-on probes before
+returning. The fingerprint match is the trigger for both probes; without it, neither
+fires from a generic SPA bundle.
+
+#### Vendor-product CSP / CORS re-baseline
+
+Re-pull the page's response headers and grep for the vendor's installer-template
+placeholder literals. Vendor products ship with permissive CSPs and operators are
+expected to harden them; a placeholder surviving into production confirms the operator
+did not run the vendor's hardening checklist.
+
+```bash
+aith assess kali exec --technique INFO-DISCLOSURE \
+  --intent "vendor-product CSP/CORS re-baseline header capture" \
+  --probe-kind fingerprint --phase recon --timeout 30 -- \
+  curl -sSI 'https://TARGET/' \
+  > /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
+
+aith assess kali exec --technique INFO-DISCLOSURE \
+  --intent "vendor-product placeholder + unsafe-inline/eval grep" \
+  --probe-kind payload --phase recon --timeout 60 -- bash -c '
+  grep -inE "example\.(com|org|net|test)|domain-here\.tld|your-domain\.tld|placeholder|REPLACE_ME|TODO|FIXME|localhost|127\.0\.0\.1|::1" \
+    /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
+  grep -iE "script-src[^;]*unsafe-inline[^;]*unsafe-eval|script-src[^;]*unsafe-eval[^;]*unsafe-inline" \
+    /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
+'
+```
+
+Match against `Content-Security-Policy`, `Access-Control-Allow-Origin`, `Feature-Policy`,
+`Permissions-Policy`, and `X-Frame-Options`. Full per-vendor default snippets (Salesforce
+Communities, ServiceNow, Drupal, Pexip, Cisco appliance) and the sweep helper live in
+`agent/references/payloads/csp-default-grep.md`. When one placeholder fires, retrieve the
+vendor's published "production hardening checklist" and verify whether the deployment
+fails three or more items — the lesson is "the operator skipped the hardening pass," not
+the specific directive.
+
+#### Vendor-platform deep-enumeration handoff
+
+When the fingerprint matches a vendor multi-tenant platform AND any anonymous read
+primitive surfaces from the source analysis (a route the bundle calls without
+`Authorization`, a hardcoded admin path, an exposed `getRecordWithFields` endpoint), the
+**same dispatch** must run the matching deep-enum playbook from
+`agent/skills/vendor-platform-enum/SKILL.md`. The four playbooks (Salesforce Aura,
+ServiceNow GlideRecord, Drupal JSON:API, Pexip admin API) each chain namespace
+enumeration, tenant-singleton reads, chain-walks, and IDOR boundedness tests; stopping at
+the first leak misses the full anonymous-readable namespace that the vendor template
+exposed.
+
 ### 7. Hypothesis Promotion
 
 - Hidden admin or support routes: verify whether they sit behind a weaker trust boundary than the main app.

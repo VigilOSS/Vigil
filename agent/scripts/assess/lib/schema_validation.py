@@ -1,6 +1,7 @@
 """Minimal JSON Schema validation for bundled assessment payload schemas."""
 from __future__ import annotations
 
+import difflib
 import json
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,22 @@ _SCHEMA_DIR = Path(__file__).resolve().parents[3] / "schemas"
 def load_schema(schema_name: str) -> dict[str, Any]:
     schema_path = _SCHEMA_DIR / schema_name
     return json.loads(schema_path.read_text(encoding="utf-8"))
+
+
+def _suggest_close_match(unknown_field: str, allowed_fields: list[str]) -> str | None:
+    """Return a "Did you mean: <closest>?" hint for an unknown field name.
+
+    ``difflib.get_close_matches`` runs a quick similarity score; we keep the
+    cutoff at 0.6 so accidental matches on very short strings don't fire.
+    The hint surfaces only when there's a single close candidate so the
+    operator isn't overwhelmed with low-confidence guesses.
+    """
+    if not allowed_fields:
+        return None
+    matches = difflib.get_close_matches(unknown_field, allowed_fields, n=1, cutoff=0.6)
+    if not matches:
+        return None
+    return matches[0]
 
 
 def collect_validation_errors(payload: Any, schema: dict[str, Any], *, path: str = "payload") -> list[str]:
@@ -52,9 +69,16 @@ def _validate_value(value: Any, schema: dict[str, Any], path: str, errors: list[
         properties = schema.get("properties", {})
         additional_properties = schema.get("additionalProperties", True)
         if additional_properties is False:
+            allowed_keys = sorted(properties.keys()) if isinstance(properties, dict) else []
             for key in value:
                 if key not in properties:
-                    errors.append(f"{path}.{key} is not allowed")
+                    suggestion = _suggest_close_match(key, allowed_keys)
+                    if suggestion:
+                        errors.append(
+                            f"{path}.{key} is not allowed. Did you mean: {suggestion}?"
+                        )
+                    else:
+                        errors.append(f"{path}.{key} is not allowed")
         for key, child_value in value.items():
             child_schema = properties.get(key)
             if isinstance(child_schema, dict):

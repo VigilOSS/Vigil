@@ -197,7 +197,7 @@ def main(argv: list[str] | None = None) -> None:
     mitm_sub.add_parser("status")
     mitm_sub.add_parser("cert")
 
-    # `aith mcp` retired in the 2026-04-26 cutover. Keep the parser so calls fail with a clear message
+    # `aith mcp` retired in the typed-CLI cutover. Keep the parser so calls fail with a clear message
     # instead of argparse's generic "unknown command" error; downstream handler prints the deprecation note.
     mcp_p = sub.add_parser("mcp", help="(removed) Kali MCP support retired; use `aith assess kali ...`")
     mcp_p.add_argument("mcp_args", nargs=argparse.REMAINDER)
@@ -573,9 +573,9 @@ def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
 
 
 def _mcp(args: argparse.Namespace) -> None:
-    """Stub: Kali MCP support was removed in the 2026-04-26 cutover."""
+    """Stub: Kali MCP support was removed in the typed-CLI cutover."""
     print(
-        "aith mcp install/status/uninstall/remove/repair were removed in the 2026-04-26 cutover.",
+        "aith mcp install/status/uninstall/remove/repair were removed in the typed-CLI cutover.",
         file=sys.stderr,
     )
     print(

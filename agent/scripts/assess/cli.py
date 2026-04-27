@@ -129,6 +129,7 @@ def main(argv: list[str] | None = None) -> None:
         merge_session,
         patch,
         reset_finding,
+        resolve_surface,
         post,
         record_chain,
         record_finding,
@@ -136,7 +137,9 @@ def main(argv: list[str] | None = None) -> None:
         record_proposal,
         record_surface,
         review_exploits,
+        supersede_intel,
         update_finding,
+        update_intel,
         verify_finding,
     )
 
@@ -150,6 +153,9 @@ def main(argv: list[str] | None = None) -> None:
         post,
         patch,
         update_finding,
+        update_intel,
+        supersede_intel,
+        resolve_surface,
         reset_finding,
         verify_finding,
         kill_finding,

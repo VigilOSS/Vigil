@@ -95,6 +95,45 @@ Full table and detection commands: `agent/references/tools/recon/wafw00f.md`. Th
 canonical per-target rate calibration table is in `agent/operator-core.md` "Recon
 Dispatch Resource Policy" — the values above pull from that table.
 
+### Step 0b — Egress reputation check (run AFTER wafw00f, BEFORE nmap)
+
+If wafw00f identifies a CDN-fronted target, sample 10 representative live
+hosts through `curl` to confirm the runtime's egress IP is not on the CDN
+edge's reputation list. A pattern of 403 / 000-status responses across the
+sample is the signature of an IP-reputation block (or a JA3/JA4 TLS
+fingerprint block) — running nmap, ffuf, and nuclei against a blocked
+egress burns a full dispatch with no signal. Catch the block once:
+
+```bash
+aith assess kali exec --technique RECON \
+  --intent "egress reputation sample (CDN-IP-block detection)" \
+  --probe-kind fingerprint --phase recon --timeout 300 -- bash -c '
+REPRS=$(head -10 /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt)
+blocked=0; total=0
+for h in $REPRS; do
+  code=$(curl -sS -o /dev/null -w "%{http_code}" -m 10 "https://$h/" || echo 000)
+  [ "$code" = "403" ] || [ "$code" = "000" ] && blocked=$((blocked+1))
+  total=$((total+1))
+done
+pct=$((blocked * 100 / total))
+echo "egress_block_pct=$pct"
+[ "$pct" -gt 50 ] && echo "WARN: egress reputation blocked on >50% of sampled hosts"
+'
+```
+
+If `egress_block_pct > 50`, STOP target-facing recon and surface the
+Egress reputation checkpoint to the operator (numbered choice with the four
+mitigation options). Continuing through nmap/ffuf/nuclei from a blocked
+egress produces no signal and burns dispatch budget. Methodology, the four
+mitigation options, and the give-up-vs-escalate rule live in
+`agent/references/runtime-guides/cdn-ip-blocking.md`.
+
+If a subset of representative hosts returned 100% 403, write those host
+strings into `$DIR/scans/egress_blocked_hosts.txt` so subsequent
+`aith assess ingest-endpoints --egress-blocked-hosts <file>` invocations
+defer URLs to those hosts with `cluster_key=deferred:egress-blocked`
+instead of polluting the work buffer.
+
 ### Step 1 — Port + Service Scan
 
 ```bash
@@ -257,6 +296,110 @@ aith assess kali exec --technique RECON --intent "TLS cert SAN/CN/issuer extract
 The TLS cert SAN list often exposes adjacent hosts that should be added to the
 engagement's discovered surface.
 
+### Step 8a — TLS / SAN / vhost cross-host
+
+The per-host TLS-grab in step 8 (and the `nmap` / `httpx` SAN extraction in steps 1-2)
+records SANs *per host*. The cross-host view is what flags shared multi-tenant
+certs, vhost-cert mismatches, and split-VIP load-balanced clusters — none of which
+the per-host tools surface on their own. Run this step before leaving Phase 1 so
+the SAN-discovered subdomains feed back into Phase 1a / Phase 3.
+
+The detailed recipes — per-host SAN extraction loop, the cross-host collision
+counter (`for h in $HOSTS; do echo | timeout 10 openssl s_client ... | openssl x509
+-noout -ext subjectAltName | grep -oE 'DNS:[^,]+' | sort -u; done | sort | uniq -c
+| sort -rn`), the vhost-cert match check, and the dnsx confirmation pass — live
+in `agent/references/tools/recon/openssl-sans.md`. The three sub-steps below are
+the methodology summary; mechanics live in the recipe.
+
+#### Multi-time DNS resolution (split-VIP detection)
+
+```bash
+aith assess kali exec --technique RECON --intent "multi-time DNS resolution — detect split-VIP load-balanced clusters" \
+  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
+  for i in 1 2 3 4 5; do dig +short TARGET_HOST A; sleep 60; done | sort -u
+'
+```
+
+A single DNS lookup misses split-VIP load-balanced clusters — when a name
+resolves to a different IP across multiple resolutions, each unique IP can be
+probed independently and may serve different content / different cert / different
+rate-limit policy. Five samples spaced 60s apart land close to most rotation TTLs
+(30-300s) without burning host wall time. Two or more unique IPs across the
+sample set indicates split-VIP; capture each IP's cert via openssl `s_client
+-connect <ip>:443 -servername <hostname>` because different cluster IPs sometimes
+carry different certs.
+
+#### Cross-host SAN collision detection
+
+Loop openssl s_client across the in-scope host list, extract each cert's SAN
+set, and count how many hosts share each SAN entry. A SAN that appears in two or
+more hosts' certs indicates a shared multi-tenant cert (one cert serving
+multiple tenant SANs) — a tenant-identity disclosure surface and a vhost-routing
+hint. The full collision-counter script lives in `openssl-sans.md` step 2;
+high-count entries are recorded as intel-notes and fed back as Phase 1a
+subdomain expansion seeds.
+
+#### vhost-cert mismatch detection
+
+For each in-scope host, compare the served cert's CN (and SAN list) against the
+requested hostname. Mismatches indicate a shared frontend serving a non-matching
+default cert — a frontend-misconfiguration signal that can leak adjacent tenant
+identities, plus the cert's actual CN / SANs are adjacent attack surface
+(record each as a follow-up subdomain candidate). Recipe: `openssl-sans.md`
+step 3.
+
+### Step 8b — Vendor-template CSP/CORS re-baseline check
+
+When step 3 (whatweb) or step 4 (nuclei `technologies/`) identifies a vendor
+product (Salesforce Communities, ServiceNow, Drupal, Pexip Infinity, generic
+appliance vendors), re-pull the response headers and grep for placeholder
+literals from the vendor's installer template. A vendor product fingerprint is
+the trigger for this re-baseline pass — the initial recon-pass headers
+established the deployment exists; the re-baseline check examines whether the
+headers reflect the vendor's hardened defaults or the installer-template
+defaults. Run this step before leaving Phase 1.
+
+```bash
+aith assess kali exec --technique INFO-DISCLOSURE --intent "vendor-template CSP/CORS re-baseline header capture" \
+  --probe-kind fingerprint --phase recon --timeout 30 -- \
+  curl -sSI 'https://TARGET/' \
+  > /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
+
+aith assess kali exec --technique INFO-DISCLOSURE --intent "vendor-template placeholder grep" \
+  --probe-kind payload --phase recon --timeout 60 -- bash -c '
+  grep -inE "example\.(com|org|net|test)|domain-here\.tld|your-domain\.tld|your\.domain|placeholder|change-?me|REPLACE_ME|TODO|FIXME|localhost|127\.0\.0\.1|::1" \
+    /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
+  grep -iE "script-src[^;]*unsafe-inline[^;]*unsafe-eval|script-src[^;]*unsafe-eval[^;]*unsafe-inline" \
+    /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
+  grep -iE "script-src[^;]*\bhttps?:\b|script-src[^;]*\bdata:|script-src[^;]*\bblob:" \
+    /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
+'
+```
+
+The four checks fire together:
+
+1. **Placeholder-literal grep** — `https://example.com`, `https://example.org`,
+   `localhost`, `*.example.org`, `domain-here.tld`, `placeholder`,
+   `your-domain.tld` in any directive of `Content-Security-Policy`,
+   `Access-Control-Allow-Origin`, `Feature-Policy`, `Permissions-Policy`,
+   `X-Frame-Options`. A placeholder surviving into production confirms the
+   operator did not run the vendor's hardening checklist.
+2. **`'unsafe-inline'` + `'unsafe-eval'` in `script-src`** — either alone is a
+   yellow flag; both together inside one `script-src` is a red flag that the
+   policy was generated by a permissive-by-default template.
+3. **Overly-broad wildcards** — `*.amazonaws.com`, `*.cloudfront.net`,
+   `https:` alone, `data:` / `blob:` in `script-src` are XSS-amplification
+   hazards.
+4. **Compare against vendor's published "production hardening checklist"** —
+   most vendors ship a hardening guide that flags exactly these defaults. When
+   one item fires, retrieve the vendor's checklist and verify whether the
+   deployment fails three or more items — the pattern is "the operator skipped
+   the checklist," not the specific directive.
+
+Full grep regexes, the per-vendor known-default snippets (Salesforce
+Communities, ServiceNow, Drupal, Pexip Infinity, Cisco appliance), and the
+sweep helper script live in `agent/references/payloads/csp-default-grep.md`.
+
 ### Step 9 — Well-Known Files
 
 ```bash
@@ -335,6 +478,7 @@ aith assess kali exec --technique RECON --intent "OpenAPI / Swagger / GraphQL en
 ## Extended Resources
 
 - `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table (cautious tier, CDN-fronted, WAF-protected, vendor SaaS, origin)
+- `agent/references/runtime-guides/cdn-ip-blocking.md` — egress reputation check, four mitigation options (allowlist / proxy / browser / accept gap), give-up-vs-escalate rule
 - `agent/references/tools/recon/nmap.md` — port/service discovery, cautious-tier profile, TLS SAN extraction, rDNS, multi-host `-iL`, port-data presence assertion
 - `agent/references/tools/recon/whatweb.md` — web technology fingerprinting depth levels
 - `agent/references/tools/recon/httpx.md` — HTTP probing, tech detection, live host confirmation
@@ -343,3 +487,5 @@ aith assess kali exec --technique RECON --intent "OpenAPI / Swagger / GraphQL en
 - `agent/references/tools/recon/curl.md` — HTTP request crafting and manual inspection
 - `agent/references/tools/fuzzing/ffuf.md` — directory/parameter/vhost fuzzing, L1/L2/L3 wordlist escalation
 - `agent/references/payloads/info-disclosure-probes.md` — standard endpoint checklist (/metrics, /.env, /actuator, cloud metadata)
+- `agent/references/tools/recon/openssl-sans.md` — per-host TLS SAN extraction, cross-host SAN collision detection (shared multi-tenant cert flag), vhost / cert mismatch detection, multi-time DNS resolution recipe (powers Step 8a)
+- `agent/references/payloads/csp-default-grep.md` — vendor-template CSP / CORS placeholder-literal grep, unsafe-inline+unsafe-eval check, overly-broad wildcard check, per-vendor known-default snippets, sweep helper (powers Step 8b)

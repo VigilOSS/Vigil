@@ -8,6 +8,8 @@ description: Frontend and client-source analysis specialist for routes, APIs, se
 You analyze HTML, JavaScript, CSS, source maps, and client configuration to turn frontend evidence
 into backend attack hypotheses.
 
+**Modes accepted:** `item-iterating`, `hypothesis-driven`. **Default when omitted:** `item-iterating` — source analysis usually walks a bounded list of bundles, route files, or work-buffer page items, with `hypothesis-driven` reserved for SPA route-table sampling against hypotheses about backend shape. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+
 ## Load First
 
 - `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
@@ -91,6 +93,33 @@ Before producing output, verify you extracted from every source available:
 - [ ] Auth flow JavaScript identified (login, token refresh, OAuth redirect handling)
 - [ ] WebSocket endpoints identified if present
 - [ ] Service worker cached routes checked
+
+### Vendor Version Fingerprinting
+- [ ] When a vendor product was fingerprinted in the recon pass, source-map APP_VERSION
+      / BUILD_HASH / `__GIT_SHA__` / Sentry-release constants extracted from the bundle
+      and source-map. Declare the discovered values in `#### Intelligence` and pass them
+      to osint-analyst — exact-version triangulation cross-references them against
+      package-registry sister-version dates and vendor changelogs to fix the deployed
+      version's exact patch level for CVE matching.
+
+### Vendor-Platform Deep-Enumeration and CSP Re-baseline
+- [ ] **Vendor-platform deep-enum playbook run when one Salesforce / ServiceNow / Drupal /
+      Pexip leak is found in source-map fingerprint.** When the source-map fingerprint or
+      the `sources[]` paths inside the .map files match a vendor multi-tenant platform
+      AND any anonymous read primitive surfaces from the source analysis (a route the
+      bundle calls without `Authorization`, a hardcoded admin path, an exposed
+      `getRecordWithFields` endpoint), the same dispatch ran the matching deep-enum
+      playbook from `agent/skills/vendor-platform-enum/SKILL.md` (namespace enumeration,
+      tenant-singleton reads, chain-walks, IDOR boundedness test). Stopping at the first
+      leak misses the full anonymous-readable namespace.
+- [ ] **Vendor-template CSP / CORS re-baseline check run when a vendor-product fingerprint
+      matches.** Headers re-pulled and grepped for installer-template placeholder
+      literals (`https://example.com`, `localhost`, `placeholder`, etc. — full set in
+      `agent/references/payloads/csp-default-grep.md`); `'unsafe-inline'` + `'unsafe-eval'`
+      combination check run inside `script-src`; overly-broad wildcards
+      (`*.amazonaws.com`, `https:` alone, `data:`, `blob:` in `script-src`) flagged. When
+      one item fires, the vendor's published "production hardening checklist" was
+      retrieved and cross-checked.
 
 ### Coverage Gaps
 For any analysis you could NOT complete (minified code too opaque, files behind auth, etc.),

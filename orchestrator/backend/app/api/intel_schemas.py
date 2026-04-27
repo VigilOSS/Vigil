@@ -167,8 +167,37 @@ class _IntelResponseBase(BaseModel):
     source_name: str = ""
     notes: str = ""
     provenance: dict[str, Any] = Field(default_factory=dict)
+    superseded_by_id: int | None = None
+    superseded_at: str | None = None
     created_at: str
     updated_at: str
+
+
+# ── Update + supersede request models ──────────────────────
+
+
+class IntelUpdateRequest(BaseModel):
+    """Generic patch payload for ``PATCH /intel/{type}/{id}``.
+
+    The route receives a flat dict and the service helper validates the
+    field set against the per-type updatable column whitelist. Using a
+    permissive ``dict`` here keeps the patch contract uniform across the
+    ten intel types — the per-type request models above are POST shapes,
+    not PATCH shapes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class IntelSupersedeRequest(BaseModel):
+    """Replacement payload for ``POST /intel/{type}/{id}/supersede``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    payload: dict[str, Any] = Field(default_factory=dict)
+    rationale: str = Field(default="", max_length=4096)
 
 
 class TechComponentRecord(_IntelResponseBase):

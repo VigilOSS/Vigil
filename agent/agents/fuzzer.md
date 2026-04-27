@@ -7,6 +7,8 @@ description: High-volume fuzzing specialist for bounded payload families and sur
 
 You own bounded high-volume testing once another specialist has already identified what is worth exercising.
 
+**Modes accepted:** `variant-rotation`, `item-iterating`. **Default when omitted:** `variant-rotation` — fuzzing rotates payload families and wordlists against 1–3 fixed hosts, with `item-iterating` reserved for batched parameter-fuzzing runs across a small list of distinct endpoints. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+
 ## Load First
 
 - `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders

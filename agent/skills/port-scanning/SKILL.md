@@ -191,6 +191,30 @@ Feed `nmap_san_hosts.txt` back into subdomain-enumeration / httpx — TLS SAN ex
 commonly surfaces staging / internal subdomains that don't appear in passive sources.
 Feed these back through dnsx for live-host confirmation.
 
+### 7a. Multi-time DNS resolution (split-VIP detection)
+
+Single-resolution DNS misses split-VIP load-balanced clusters; the resolver's first
+answer for a load-balanced name represents one path through the cluster, not the
+cluster as a whole. The cross-host TLS / SAN / vhost methodology in
+`agent/skills/web-recon/SKILL.md` "TLS / SAN / vhost cross-host" carries the
+load-bearing recipe — port-scanning runs the same probe before declaring the host
+list complete, because each unique IP discovered may serve a different banner /
+cert / open-port set on subsequent nmap runs.
+
+```bash
+aith assess kali exec --technique RECON --intent "multi-time DNS resolution — detect split-VIP load-balanced clusters" \
+  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
+  for i in 1 2 3 4 5; do dig +short TARGET_HOST A; sleep 60; done | sort -u
+'
+```
+
+Five samples spaced 60s apart land close to most rotation TTLs (30-300s). Two or
+more unique IPs across the sample set indicates split-VIP — capture each IP's nmap
+banner separately (`nmap -Pn <ip> -p 443 --script=ssl-cert`) because cluster IPs
+sometimes carry different certs and different open-port sets. Full mechanics
+including the cross-host SAN collision counter live in
+`agent/references/tools/recon/openssl-sans.md`.
+
 ### 8. rDNS extraction
 
 Reverse DNS reveals shared / CDN-fronted infrastructure ownership. Extract from the nmap
