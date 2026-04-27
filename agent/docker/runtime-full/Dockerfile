@@ -183,9 +183,6 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install "bbot==${BBOT_VERSION}"; \
     fi
 
-RUN mkdir -p /etc/security/limits.d && \
-    printf '* soft nofile 131072\n* hard nofile 131072\n* soft nproc 16384\n* hard nproc 16384\nroot soft nofile 131072\nroot hard nofile 131072\nroot soft nproc 16384\nroot hard nproc 16384\n' > /etc/security/limits.d/aith.conf
-
 RUN mkdir -p /opt/mcp-tools /data
 COPY docker/kali-mcp-runtime/audit_enums.py /opt/mcp-tools/audit_enums.py
 COPY docker/callback_listener.py /opt/mcp-tools/callback_listener.py

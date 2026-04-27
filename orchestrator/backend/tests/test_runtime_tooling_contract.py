@@ -99,26 +99,6 @@ def test_runtime_full_dockerfile_declares_subdomain_enum_binaries():
     )
 
 
-def test_runtime_full_dockerfile_sets_resource_limits():
-    """The runtime image must ship `/etc/security/limits.d/aith.conf` with the
-    nofile=131072 / nproc=16384 ceilings. Previously these were passed via
-    `docker run --ulimit`, but `docker exec` did not propagate them to the
-    children specialists actually launch. Pinning the limits inside the image
-    keeps them on every exec without relying on the run-time argv.
-    """
-    text = RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
-    assert "/etc/security/limits.d/aith.conf" in text, (
-        "agent/docker/runtime-full/Dockerfile must write /etc/security/limits.d/aith.conf"
-    )
-    for needle in (
-        "nofile 131072",
-        "nproc 16384",
-    ):
-        assert needle in text, (
-            f"agent/docker/runtime-full/Dockerfile must declare `{needle}` in the limits file"
-        )
-
-
 def test_runtime_full_dockerfile_declares_port_scan_binaries():
     """F20 — port-scanning/SKILL.md depends on `xmllint` (libxml2-utils package) for the Layer-2
     XML XPath assertion. Without it, the per-host port-data presence gate falls back to text-only
