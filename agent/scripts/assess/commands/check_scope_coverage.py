@@ -65,6 +65,24 @@ from assess.lib.scope import (
 )
 
 
+def _explicit_literal_scope_hosts(entries: list[dict[str, Any]]) -> set[str]:
+    """Hosts authored explicitly in ``scope.json`` (bare host or URL entry).
+
+    Wildcard entries are excluded — those expand to subdomains the operator
+    did not enumerate by hand, and a vendor-SaaS subdomain that appears
+    under wildcard expansion is the genuinely ambiguous case the
+    Vendor-SaaS scope checkpoint exists to resolve. An explicit literal
+    (e.g. ``customer.my.salesforce.com`` typed directly into scope.json) is
+    already the operator's in-scope decision; making the gate fire on it
+    is theatre.
+    """
+    return {
+        entry["host"]
+        for entry in entries
+        if entry.get("entry_kind") in ("bare_host", "url") and entry.get("host")
+    }
+
+
 def _vendor_saas_decided_hosts(engagement_dir: str) -> set[str]:
     """Return the set of hosts that already carry a vendor-SaaS scope decision.
 
@@ -207,13 +225,20 @@ def run(args: argparse.Namespace) -> None:
     # Vendor-SaaS undecided hosts: any host known to services/surfaces/work
     # that matches a vendor-SaaS suffix and has no recorded scope_decision
     # blocks the gate. The user-facing checkpoint must record a decision
-    # (in-scope, out-of-scope, partial-scope) before phase advance.
+    # (in-scope, out-of-scope, partial-scope) before phase advance — UNLESS
+    # the operator already authored the host as an explicit literal entry in
+    # scope.json (a bare-host or url entry that resolves exactly to this
+    # host). Wildcard-matched discoveries still gate; those are the genuinely
+    # ambiguous case (the operator wrote ``*.example.test`` and a vendor
+    # subdomain showed up under expansion). An explicit literal in scope.json
+    # is already an unambiguous in-scope decision.
     decided_hosts = _vendor_saas_decided_hosts(cfg.engagement_dir)
+    explicit_literal_hosts = _explicit_literal_scope_hosts(entries)
     vendor_saas_pending = _vendor_saas_hosts_pending_decision(
         services=services_list,
         surfaces=surfaces_list,
         work_by_host=work_by_host,
-        decided_hosts=decided_hosts,
+        decided_hosts=decided_hosts | explicit_literal_hosts,
     )
 
     overall_gaps = _collect_overall_gaps(report_entries, args.require_stage)

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -18,16 +17,15 @@ from urllib.parse import urlsplit
 # need a scope-decision checkpoint before recon-specialist dispatches against
 # them — testing the underlying vendor platform rather than the customer's
 # integration is usually out of scope for a VDP and produces noise instead of
-# signal. The matcher is best-effort: it pattern-matches CNAME / rDNS suffix
-# indicators and a small list of HTTP banner regexes against fingerprint
-# strings the operator already collected during recon. The operator confirms
-# every match via the Vendor-SaaS scope checkpoint before any recon dispatch
-# fires.
+# signal. The matcher is purely lexical on hostname shape; the operator
+# confirms every match via the Vendor-SaaS scope checkpoint before any recon
+# dispatch fires.
 #
-# Suffix matches use the "endswith on a hostname segment boundary" rule so
-# ``foo.salesforce.com.evil.test`` does not match Salesforce. Prefix the
-# pattern with a leading dot in the table; the matcher checks both
-# ``host == suffix.lstrip(".")`` and ``host.endswith(suffix)``.
+# Suffix matches require a strict subdomain boundary. Vendor SaaS shows up
+# as ``<tenant>.salesforce.com``, never as the bare ``salesforce.com`` apex
+# (which is the vendor's own corporate site, not a customer asset). Prefix
+# every entry with a leading dot in the table; the matcher uses
+# ``host.endswith(suffix)`` only.
 _VENDOR_SAAS_SUFFIXES: list[tuple[str, str]] = [
     # (vendor label, hostname suffix)
     ("salesforce", ".salesforce.com"),
@@ -49,34 +47,16 @@ _VENDOR_SAAS_SUFFIXES: list[tuple[str, str]] = [
     ("intercom", ".intercom.io"),
 ]
 
-# Banner / page-title / canonical-URL regex hints. Each entry is a
-# ``(label, compiled-pattern)`` tuple. The lookup is best-effort and matches
-# substrings on case-insensitive input — the operator confirms the result via
-# the user-facing checkpoint before any recon dispatch.
-_VENDOR_SAAS_BANNER_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("salesforce", re.compile(r"salesforce", re.IGNORECASE)),
-    ("salesforce", re.compile(r"lightning\.force\.com", re.IGNORECASE)),
-    ("servicenow", re.compile(r"service-?now", re.IGNORECASE)),
-    ("statuspage", re.compile(r"statuspage(\.io)?", re.IGNORECASE)),
-    ("govdelivery", re.compile(r"govdelivery", re.IGNORECASE)),
-    ("awsconnect", re.compile(r"amazon ?connect|awsconnect", re.IGNORECASE)),
-    ("auth0", re.compile(r"auth0", re.IGNORECASE)),
-    ("okta", re.compile(r"\bokta\b", re.IGNORECASE)),
-    ("zendesk", re.compile(r"zendesk", re.IGNORECASE)),
-    ("freshdesk", re.compile(r"freshdesk", re.IGNORECASE)),
-    ("intercom", re.compile(r"intercom\.io", re.IGNORECASE)),
-]
-
 
 def host_is_vendor_saas(host: str | None) -> str | None:
     """Return the vendor label for a known SaaS-platform-fronted host or None.
 
-    Pattern matching is suffix-based on the hostname (CNAME / rDNS shape) and
-    is purely lexical — no DNS resolution, HTTP probing, or backend lookup
-    happens at call time, so the function is safe to invoke inside scope
-    filters and admission gates. The operator already has rDNS / banner data
-    in intel before this gate fires; this helper is the deterministic part of
-    the operator's vendor-SaaS scope checkpoint.
+    Pattern matching is strict-subdomain on the hostname (CNAME / rDNS shape)
+    and is purely lexical — no DNS resolution, HTTP probing, or backend
+    lookup happens at call time, so the function is safe to invoke inside
+    scope filters and admission gates. A bare ``salesforce.com`` apex is
+    never a customer asset; only ``<tenant>.salesforce.com`` and similar
+    subdomains return a vendor label.
 
     Returns the vendor label (e.g. ``"salesforce"``, ``"servicenow"``,
     ``"statuspage"``, ``"govdelivery"``, ``"awsconnect"``) on the first
@@ -89,25 +69,7 @@ def host_is_vendor_saas(host: str | None) -> str | None:
     if not normalized:
         return None
     for label, suffix in _VENDOR_SAAS_SUFFIXES:
-        bare = suffix.lstrip(".")
-        if normalized == bare or normalized.endswith(suffix):
-            return label
-    return None
-
-
-def banner_matches_vendor_saas(banner: str | None) -> str | None:
-    """Return the vendor label for a banner / page-title hint or None.
-
-    Best-effort secondary signal for hosts whose CNAME / rDNS shape does not
-    expose the vendor (e.g. CNAME flattened to the customer apex). The
-    operator-side flow combines this with ``host_is_vendor_saas`` and only
-    treats a match as authoritative after the user-facing checkpoint
-    records the scope decision.
-    """
-    if not banner:
-        return None
-    for label, pattern in _VENDOR_SAAS_BANNER_PATTERNS:
-        if pattern.search(banner):
+        if normalized.endswith(suffix):
             return label
     return None
 

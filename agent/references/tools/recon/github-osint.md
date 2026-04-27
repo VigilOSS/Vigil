@@ -7,9 +7,11 @@ without sending a single probe at the target's own infrastructure. This file
 carries the concrete curl + jq pipelines that `agent/skills/osint-recon/SKILL.md`
 references from its "Org-name pattern enumeration" section.
 
-All examples wrap the HTTP probe in `aith assess kali exec --` so the run lands
-in the audit pipeline. Use `--technique OSINT --intent "<concise>" --probe-kind
-fingerprint --phase <current> --timeout <seconds>` on every call.
+All examples wrap the HTTP probe in `aith assess kali exec` so the run lands
+in the audit pipeline. Place every audit flag (`--technique OSINT --intent
+"<concise>" --probe-kind fingerprint --phase <current> --timeout <seconds>`)
+BEFORE the trailing `-- bash -c '...'`. Flags after the heredoc go to bash
+itself and are silently dropped by aith.
 
 ## Authentication
 
@@ -24,12 +26,12 @@ authenticated bucket instead.
 export GITHUB_TOKEN="<personal-access-token-with-public_repo-scope>"
 
 # Sanity-check the token's remaining budget before a long enumeration run
-aith assess kali exec -- bash -c '
+aith assess kali exec --technique OSINT --intent "GitHub rate-limit sanity check" \
+  --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
     https://api.github.com/rate_limit \
     | jq ".rate"
-' --technique OSINT --intent "GitHub rate-limit sanity check" \
-  --probe-kind fingerprint --phase recon --timeout 60
+'
 ```
 
 The token never leaves the runtime container; it is read from the container's
@@ -43,15 +45,16 @@ parent name with `/search/users?q=<pattern>+type:org`.
 
 ```bash
 # Variants on the literal name "Acme"
-aith assess kali exec -- bash -c '
+aith assess kali exec --technique OSINT \
+  --intent "GitHub org-name pattern enumeration for Acme variants" \
+  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
   for variant in acme Acme ACME acme-corp acmegov acme-internal acme-tools acme-research acme-oss Acme-Inc; do
     curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
       "https://api.github.com/search/users?q=${variant}+type:org" \
       | jq -c --arg v "$variant" "{variant: \$v, total_count, hits: [.items[] | {login, html_url, avatar_url}]}"
     sleep 1
   done
-' --technique OSINT --intent "GitHub org-name pattern enumeration for Acme variants" \
-  --probe-kind fingerprint --phase recon --timeout 600
+'
 ```
 
 The `sleep 1` between requests keeps the call rate well below the 5,000/hr
@@ -68,12 +71,12 @@ name.
 Once an org is confirmed, list its public members:
 
 ```bash
-aith assess kali exec -- bash -c '
+aith assess kali exec --technique OSINT --intent "GitHub public-member listing for <org>" \
+  --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
     "https://api.github.com/orgs/<org>/members?per_page=100" \
     | jq "[.[] | {login, html_url}]"
-' --technique OSINT --intent "GitHub public-member listing for <org>" \
-  --probe-kind fingerprint --phase recon --timeout 60
+'
 ```
 
 `/orgs/<org>/members` returns only public members; private membership is not
@@ -87,18 +90,21 @@ and `committer.email` fields on recent commits. These are not hidden behind
 GitHub's email-privacy toggle if the developer has not enabled it.
 
 ```bash
-aith assess kali exec -- bash -c '
+aith assess kali exec --technique OSINT \
+  --intent "GitHub commit-author email mining for <org>/<repo>" \
+  --probe-kind fingerprint --phase recon --timeout 120 -- bash -c '
   curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
     "https://api.github.com/repos/<org>/<repo>/commits?per_page=100" \
     | jq -r "[.[].commit | .author.email, .committer.email] | unique | .[]"
-' --technique OSINT --intent "GitHub commit-author email mining for <org>/<repo>" \
-  --probe-kind fingerprint --phase recon --timeout 120
+'
 ```
 
 Aggregate across the org's most-active repos:
 
 ```bash
-aith assess kali exec -- bash -c '
+aith assess kali exec --technique OSINT \
+  --intent "GitHub commit-author emails across <org>'s top 30 repos" \
+  --probe-kind fingerprint --phase recon --timeout 1200 -- bash -c '
   REPOS=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
     "https://api.github.com/orgs/<org>/repos?per_page=30&sort=updated" \
     | jq -r ".[].name")
@@ -108,8 +114,7 @@ aith assess kali exec -- bash -c '
       | jq -r "[.[].commit | .author.email, .committer.email] | unique | .[]"
     sleep 1
   done | sort -u
-' --technique OSINT --intent "GitHub commit-author emails across <org>'s top 30 repos" \
-  --probe-kind fingerprint --phase recon --timeout 1200
+'
 ```
 
 Filter on the corporate domain to drop personal/no-reply emails and emit the
@@ -117,10 +122,10 @@ canonical email pattern:
 
 ```bash
 # Pipe the previous output through this to keep only emails that match the corp domain
-aith assess kali exec -- bash -c '
+aith assess kali exec --technique OSINT --intent "Filter commit-author emails to corp domain" \
+  --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   cat /tmp/raw_emails.txt | grep -iE "@(<corp>\\.com|<subsidiary>\\.com)$" | sort -u
-' --technique OSINT --intent "Filter commit-author emails to corp domain" \
-  --probe-kind fingerprint --phase recon --timeout 60
+'
 ```
 
 The dominant pattern (e.g. `FirstName.LastName@<corp>.com`,
@@ -136,12 +141,12 @@ README links, CI configuration that pulls private packages by org slug).
 GitHub's code search exposes those references:
 
 ```bash
-aith assess kali exec -- bash -c '
+aith assess kali exec --technique OSINT --intent "GitHub code search cross-reference for <org>" \
+  --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
     "https://api.github.com/search/code?q=%22<org>%22&per_page=50" \
     | jq "[.items[] | {repo: .repository.full_name, path, html_url}]"
-' --technique OSINT --intent "GitHub code search cross-reference for <org>" \
-  --probe-kind fingerprint --phase recon --timeout 60
+'
 ```
 
 Hits in third-party repos surface internal repo names, deployment hostnames,
@@ -154,15 +159,16 @@ firm working with the target, search GitHub for tagged forks or affiliated
 repos under the contractor's org slug:
 
 ```bash
-aith assess kali exec -- bash -c '
+aith assess kali exec --technique OSINT \
+  --intent "Contractor org repo cross-search for target-keyword" \
+  --probe-kind fingerprint --phase recon --timeout 300 -- bash -c '
   for contractor_slug in <contractor1> <contractor2>; do
     curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
       "https://api.github.com/orgs/${contractor_slug}/repos?per_page=100" \
       | jq -c --arg c "$contractor_slug" "{contractor: \$c, repos: [.[] | select(.name | test(\"<target-keyword>\"; \"i\")) | {name, html_url, description}]}"
     sleep 1
   done
-' --technique OSINT --intent "Contractor org repo cross-search for target-keyword" \
-  --probe-kind fingerprint --phase recon --timeout 300
+'
 ```
 
 Contractor repos often contain target-specific configuration, deployment

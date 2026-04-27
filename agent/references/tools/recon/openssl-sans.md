@@ -124,14 +124,14 @@ Single-resolution DNS misses split-VIP load-balanced clusters. When a name resol
 ```bash
 aith assess kali exec --technique RECON \
   --intent "multi-time DNS resolution — detect split-VIP load-balanced clusters" \
-  --probe-kind fingerprint --phase recon --timeout 600 -- \
+  --probe-kind fingerprint --phase recon --timeout 120 -- \
   bash -c '
     HOST="$1"
     OUT="/engagements/$ENGAGEMENT_KEY/scans/dns_multi_${HOST}.txt"
     : > "$OUT"
     for i in 1 2 3 4 5; do
       dig +short "$HOST" A >> "$OUT"
-      sleep 60
+      sleep 10
     done
     sort -u "$OUT"
   ' -- TARGET_HOST
@@ -143,25 +143,41 @@ Interpretation:
 - 2-3 unique IPs → small load-balanced cluster (typical).
 - 4+ unique IPs across 5 samples → wide cluster; each IP is independently probeable. Capture each IP's cert via step 1 (`-connect <ip>:443 -servername <hostname>`) — different IPs in the cluster sometimes carry different certs.
 
-The 60-second spacing between samples is deliberate: most DNS-rotation TTLs are 30-300 seconds, so 60s lands close to the rotation cadence without burning host wall time. A dispatch that needs faster resolution can drop to 30s; never go below that without an explicit rate-limit assessment.
+Five samples × 10s spacing (50s total) catches the common GSLB / round-robin
+rotation cadence without blocking the dispatch on a five-minute sleep loop.
+Most DNS-rotation TTLs land in the 30-300s band; if the first pass shows a
+single IP and the operator suspects a longer rotation, re-run with `sleep 60`
+inside a follow-up dispatch.
 
 ## 5. dnsx live-host confirmation of SAN-discovered names
 
-The SAN extraction in step 1 surfaces candidate subdomains that did not appear in passive sources. Feed them through `dnsx -resp` to confirm which ones are live before adding them to the work buffer:
+The SAN extraction in step 1 surfaces candidate subdomains that did not appear in passive sources. Feed them through `dnsx -resp` to confirm which ones are live before adding them to the work buffer.
+
+This is a TWO-call sequence: aith is a host-side CLI and is not on the runtime container's `$PATH`, so a nested `aith assess kali dnsx` inside a `kali exec` heredoc cannot run. Build the candidate list inside the runtime via `kali exec`, then issue a separate `kali dnsx` call from the host so its audit row stamps the dnsx invocation cleanly.
 
 ```bash
+# Step 5a — build the candidate list inside the runtime (host-readable path).
 aith assess kali exec --technique RECON \
-  --intent "dnsx -resp confirmation of SAN-discovered subdomains" \
-  --probe-kind fingerprint --phase recon --timeout 600 -- \
+  --intent "build SAN candidate list from per-host SAN sets" \
+  --probe-kind fingerprint --phase recon --timeout 60 -- \
   bash -c '
     cat /engagements/$ENGAGEMENT_KEY/scans/sans_*.txt \
       | sort -u > /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt
-    aith assess kali dnsx \
-      -l /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt \
-      -a -resp -silent \
-      -o /engagements/$ENGAGEMENT_KEY/scans/san_live.txt
+    wc -l /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt
   '
+
+# Step 5b — confirm live SAN-discovered names with a separate dnsx call so the
+# audit row records dnsx by name (a single nested wrapper would lose the
+# dnsx-specific audit metadata).
+aith assess kali dnsx \
+  -l /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt \
+  -a -resp -silent \
+  -o /engagements/$ENGAGEMENT_KEY/scans/san_live.txt \
+  --technique RECON --intent "dnsx -resp confirmation of SAN-discovered subdomains" \
+  --probe-kind fingerprint --phase recon --timeout 600
 ```
+
+Tradeoff for one-call collapse: `dnsx` is on the runtime container's `$PATH`, so a single `kali exec ... -- bash -c '... dnsx ...'` heredoc would also run, but the audit row would be stamped against `bash` rather than `dnsx`, and downstream coverage queries (`list-command-runs --tool-bin dnsx`) would miss the run. Use the two-call form unless audit fidelity is explicitly out of scope.
 
 `san_live.txt` is the input to `aith assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum` — every confirmed live SAN-discovered name becomes a Phase 2 collection target.
 

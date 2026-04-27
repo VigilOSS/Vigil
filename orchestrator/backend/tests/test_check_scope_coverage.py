@@ -912,32 +912,8 @@ def test_explicit_apex_plus_wildcard(monkeypatch, tmp_path: Path, capsys) -> Non
     assert "vendor-saas.example.test" in by_scope["*.example.test"]["live_host_samples"]
 
 
-def test_vendor_saas_blocks_phase_advance_without_decision(monkeypatch, tmp_path: Path, capsys) -> None:
-    """A vendor-SaaS-flagged host without a recorded scope_decision blocks the gate.
-
-    Uses a synthetic suffix in scope to ensure the vendor classifier sees the
-    host. ``host_is_vendor_saas`` matches CNAME / rDNS suffixes; the test
-    monkeypatches the suffix table to register a test-only label so the
-    fixture host (``vendor-saas-platform.example.test``) never collides with
-    a real customer's CNAME during local runs.
-    """
-    eng = tmp_path / "engagement"
-    eng.mkdir()
-    _write_scope(eng, hosts=["vendor-saas-platform.example.test"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db,
-        queue_key="vs:1",
-        url="https://vendor-saas-platform.example.test/api/health",
-        url_path="/api/health",
-        status="done",
-    )
-
-    # Patch the suffix table on the live ``assess.lib.scope`` module so the
-    # fixture host registers as vendor SaaS without us having to put a real
-    # vendor's domain in test fixtures. We need the module instance the
-    # check_scope_coverage import resolves to (not a fresh load), so import
-    # via sys.path the same way the loader does.
+def _patch_vendor_saas_suffix(monkeypatch, label: str, suffix: str) -> None:
+    """Append a test-only suffix to the live vendor-SaaS suffix table."""
     scripts_root = _scripts_root()
     if str(scripts_root) not in sys.path:
         sys.path.insert(0, str(scripts_root))
@@ -947,8 +923,35 @@ def test_vendor_saas_blocks_phase_advance_without_decision(monkeypatch, tmp_path
     monkeypatch.setattr(
         scope_mod,
         "_VENDOR_SAAS_SUFFIXES",
-        list(scope_mod._VENDOR_SAAS_SUFFIXES) + [("vendor-saas-platform", ".example.test")],
+        list(scope_mod._VENDOR_SAAS_SUFFIXES) + [(label, suffix)],
     )
+
+
+def test_vendor_saas_blocks_phase_advance_under_wildcard_expansion(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A vendor-SaaS host that surfaced under wildcard expansion (NOT an
+    explicit literal in scope.json) blocks the gate until a scope_decision
+    is recorded.
+
+    ``host_is_vendor_saas`` matches CNAME / rDNS suffixes; the test
+    monkeypatches the suffix table so the fixture host registers as vendor
+    SaaS without putting a real vendor's domain in test fixtures.
+    """
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    # Wildcard scope: the vendor-SaaS host appears under expansion, not as
+    # an explicit literal — that is the genuinely ambiguous case the
+    # checkpoint exists to resolve.
+    _write_scope(eng, hosts=["*.example.test"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db,
+        queue_key="vs:1",
+        url="https://vendor-saas-platform.example.test/api/health",
+        url_path="/api/health",
+        status="done",
+    )
+
+    _patch_vendor_saas_suffix(monkeypatch, "vendor-saas-platform", ".example.test")
 
     services = [{"endpoint": "vendor-saas-platform.example.test", "state": "up"}]
     surfaces = [
@@ -990,6 +993,46 @@ def test_vendor_saas_blocks_phase_advance_without_decision(monkeypatch, tmp_path
         encoding="utf-8",
     )
 
+    _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is True, report
+    assert report["vendor_saas_pending_decision"] == []
+
+
+def test_vendor_saas_explicit_literal_in_scope_skips_gate(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A vendor-SaaS host authored as an explicit literal in scope.json is
+    already the operator's in-scope decision, so the gate must not fire on
+    it. The Vendor-SaaS scope checkpoint exists for the wildcard-expansion
+    case where the operator did not author the host by hand; firing on a
+    literal entry is theatre.
+    """
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    # Explicit literal entry — the operator typed the host directly.
+    _write_scope(eng, hosts=["vendor-saas-platform.example.test"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db,
+        queue_key="vs:1",
+        url="https://vendor-saas-platform.example.test/api/health",
+        url_path="/api/health",
+        status="done",
+    )
+
+    _patch_vendor_saas_suffix(monkeypatch, "vendor-saas-platform", ".example.test")
+
+    services = [{"endpoint": "vendor-saas-platform.example.test", "state": "up"}]
+    surfaces = [
+        {"target_descriptor": "https://vendor-saas-platform.example.test/api/health"},
+    ]
+
+    # No scope_decision recorded — but the literal entry skips the gate.
     _run(
         monkeypatch,
         eng,

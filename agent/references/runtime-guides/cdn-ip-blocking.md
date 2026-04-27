@@ -57,28 +57,55 @@ This usually overlaps with shape #2 but also covers TLS handshake aborts
 
 ## Egress reputation script
 
-Run this against the live-host list before Phase 3 dispatch. It samples up
-to 10 representative hosts, counts 403/000 responses, and emits the block
-percentage. Default-conservative: do not increase the sample size or remove
-the 10s per-host timeout. The script is intentionally lightweight to avoid
-adding load on hosts that are already 403'ing.
+Run this against the live-host list during Phase 1 Step 0b (recon-specialist,
+after subdomain-enum + httpx have populated `live_hosts.txt`). It samples up
+to 10 representative hosts, distinguishes alive-and-blocked from dead, and
+emits the block percentage over the alive sample. Default-conservative: do
+not increase the sample size or remove the per-host timeout. The script is
+intentionally lightweight to avoid adding load on hosts that are already
+403'ing. Wrap the whole script in `aith assess kali exec` so the audit row
+records the sweep against the runtime egress IP.
 
 ```bash
-REPRS=$(head -10 "$DIR/scans/live_hosts.txt")
+aith assess kali exec --technique RECON \
+  --intent "egress reputation sample (CDN-IP-block detection)" \
+  --probe-kind fingerprint --phase recon --timeout 300 -- bash -c '
+REPRS=$(head -10 "$ENGAGEMENT_DIR/scans/live_hosts.txt")
 blocked=0; total=0
 for h in $REPRS; do
-  code=$(curl -sS -o /dev/null -w '%{http_code}' -m 10 "https://$h/" || echo 000)
-  [ "$code" = "403" ] || [ "$code" = "000" ] && blocked=$((blocked+1))
-  total=$((total+1))
+  # curl -w "%{http_code}" prints "000" cleanly on connection failure; no
+  # ||-fallback needed (the fallback would print "000\n000" and break the
+  # comparison below).
+  code=$(curl -sS -o /dev/null -w "%{http_code}" -m 10 "https://$h/")
+  case "$code" in
+    000)
+      # Dead host (DNS failure, no listener, connection refused). Not the
+      # signal we are sampling for — exclude from total.
+      ;;
+    403)
+      blocked=$((blocked+1)); total=$((total+1))
+      ;;
+    *)
+      total=$((total+1))
+      ;;
+  esac
+  sleep 1
 done
+if [ "$total" -eq 0 ]; then
+  echo "egress check skipped: no live hosts to sample"
+  exit 0
+fi
 pct=$((blocked * 100 / total))
-echo "egress_block_pct=$pct"
-[ "$pct" -gt 50 ] && echo "WARN: egress reputation blocked on >50% of sampled hosts"
+echo "egress_block_pct=$pct (blocked=$blocked alive=$total)"
+[ "$pct" -gt 50 ] && echo "WARN: egress reputation blocked on >50% of alive sampled hosts"
+'
 ```
 
-When the script reports `egress_block_pct > 50`, the operator surfaces the
-numbered checkpoint with the four mitigation options below. Record the
-chosen option in `$DIR/agent-registry.json` with
+When the script reports `egress_block_pct > 50`, re-run the script after a
+five-minute pause; transient rate-limit shape often clears on its own and
+fires the sweep above the 50% line for one sample window. Only fire the
+four-way checkpoint below when the second sample also stays >50%. Record
+the chosen option in `$DIR/agent-registry.json` with
 `{kind: "egress_decision", blocked_pct: N, choice: "..."}`.
 
 If a subset of hosts in the representative set returned 100% 403, write

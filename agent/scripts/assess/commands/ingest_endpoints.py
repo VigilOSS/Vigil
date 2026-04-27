@@ -21,7 +21,6 @@ from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.db import db_init, db_insert_work_item
 from assess.lib.params import extract_url_path, extract_query_params, extract_path_params, generate_params_sig
-from assess.lib.scope import load_scope
 
 
 def register(subparsers) -> None:
@@ -126,18 +125,6 @@ def run(args) -> None:
     eng_dir = cfg.engagement_dir
     auth_context = auth_active_context(eng_dir)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-
-    # Load scope.json so the egress-block and per-host budget gates have a
-    # consistent view of the engagement scope. Fail closed if missing —
-    # ingest must not silently admit URLs without scope context.
-    try:
-        scope_data: dict = load_scope(eng_dir)
-    except SystemExit as exc:
-        print(
-            f"ERROR: scope.json missing or unparseable ({exc})",
-            file=sys.stderr,
-        )
-        sys.exit(1)
 
     # Egress-blocked deferral: hosts whose representative responses returned a
     # 100% 403 cluster from the runtime egress IP get deferred at ingestion

@@ -114,14 +114,18 @@ Map the WAF identity to a rate-limit tier before starting nmap/httpx/ffuf/nuclei
 
 Full table and detection commands: `agent/references/tools/recon/wafw00f.md`. The canonical per-target rate calibration table is in `agent/shared-constraints.md` "Per-Target Rate Calibration Table" — the values above pull from that table.
 
-### Step 0b — Egress reputation check (run AFTER wafw00f, BEFORE nmap)
+### Step 0b — Egress reputation check (run after subdomain-enum + httpx populate live_hosts.txt, before nmap)
 
-If wafw00f identifies a CDN-fronted target, sample 10 representative live
-hosts through `curl` to confirm the runtime's egress IP is not on the CDN
-edge's reputation list. A pattern of 403 / 000-status responses across the
-sample is the signature of an IP-reputation block (or a JA3/JA4 TLS
-fingerprint block) — running nmap, ffuf, and nuclei against a blocked
-egress burns a full dispatch with no signal. Catch the block once:
+The egress reputation check requires `live_hosts.txt` as input, so it runs
+after Phase 1a subdomain enumeration and the httpx live-host pass have
+populated that file — not after wafw00f alone. Sample up to 10
+representative hosts through `curl` to confirm the runtime's egress IP is
+not on the CDN edge's reputation list. A pattern of 403 across alive hosts
+is the signature of an IP-reputation block (or a JA3/JA4 TLS fingerprint
+block); 000 from curl signals a dead host (DNS failure, no listener,
+TCP-reset on connect) and is excluded from the sample. Running nmap, ffuf,
+and nuclei against a blocked egress burns a full dispatch with no signal.
+Catch the block once:
 
 ```bash
 aith assess kali exec --technique RECON \
@@ -130,21 +134,40 @@ aith assess kali exec --technique RECON \
 REPRS=$(head -10 /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt)
 blocked=0; total=0
 for h in $REPRS; do
-  code=$(curl -sS -o /dev/null -w "%{http_code}" -m 10 "https://$h/" || echo 000)
-  [ "$code" = "403" ] || [ "$code" = "000" ] && blocked=$((blocked+1))
-  total=$((total+1))
+  # curl -w "%{http_code}" prints "000" cleanly on connection failure; no
+  # ||-fallback needed (the fallback would print "000\n000" and break the
+  # comparison below).
+  code=$(curl -sS -o /dev/null -w "%{http_code}" -m 10 "https://$h/")
+  case "$code" in
+    000)
+      # Dead host — DNS failure, no listener, or TCP-reset. Not what we
+      # are sampling for; exclude from total.
+      ;;
+    403)
+      blocked=$((blocked+1)); total=$((total+1))
+      ;;
+    *)
+      total=$((total+1))
+      ;;
+  esac
+  sleep 1
 done
+if [ "$total" -eq 0 ]; then
+  echo "egress check skipped: no live hosts to sample"
+  exit 0
+fi
 pct=$((blocked * 100 / total))
-echo "egress_block_pct=$pct"
-[ "$pct" -gt 50 ] && echo "WARN: egress reputation blocked on >50% of sampled hosts"
+echo "egress_block_pct=$pct (blocked=$blocked alive=$total)"
+[ "$pct" -gt 50 ] && echo "WARN: egress reputation blocked on >50% of alive sampled hosts"
 '
 ```
 
-If `egress_block_pct > 50`, STOP target-facing recon and surface the
-Egress reputation checkpoint to the operator (numbered choice with the four
-mitigation options). Continuing through nmap/ffuf/nuclei from a blocked
-egress produces no signal and burns dispatch budget. Methodology, the four
-mitigation options, and the give-up-vs-escalate rule live in
+If `egress_block_pct > 50`, STOP target-facing recon, pause five minutes,
+and re-run the sample. Transient rate-limit shape often clears on its own
+and trips the sweep above the 50% line for one sample window. Only when
+the second sample also stays >50% should you surface the Egress reputation
+checkpoint (numbered choice with the four mitigation options). Methodology,
+the four mitigation options, and the give-up-vs-escalate rule live in
 `agent/references/runtime-guides/cdn-ip-blocking.md`.
 
 If a subset of representative hosts returned 100% 403, write those host

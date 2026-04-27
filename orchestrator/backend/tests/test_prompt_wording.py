@@ -737,12 +737,15 @@ def test_vendor_saas_and_egress_checkpoints_present():
         "agent/references/INDEX.md must register `runtime-guides/cdn-ip-blocking.md`"
     )
 
-    # Recon-specialist self-check pins the two new gates.
+    # Recon-specialist self-check pins the two new gates. Round 5 softened
+    # the vendor-SaaS framing from "must record decision before dispatch" to
+    # "warn the operator and record a pending row" so the bullet wording is
+    # less directive but still anchors the check.
     recon_specialist = (repo_root / "agent" / "agents" / "recon-specialist.md").read_text(
         encoding="utf-8"
     )
-    assert "Vendor-SaaS hosts flagged with scope decision recorded" in recon_specialist, (
-        "recon-specialist.md self-check must include the vendor-SaaS scope decision item"
+    assert "Vendor-SaaS hosts warned to the operator" in recon_specialist, (
+        "recon-specialist.md self-check must include the vendor-SaaS warning item"
     )
     assert "Egress reputation check run" in recon_specialist, (
         "recon-specialist.md self-check must include the egress reputation check item"
@@ -1548,9 +1551,12 @@ def test_osint_recon_pins_exact_version_triangulation_section():
 
 def test_surface_collection_pins_per_host_url_budget_formula():
     """1D.2 — surface-collection SKILL.md must carry the per-host URL budget
-    formula (1000 content-rich / 200 API-tier / 2000 sitemap-bearing) and the
-    recovery flow that re-runs gau on a host with --budget-override after a
-    Phase 3 finding warrants follow-up crawl."""
+    formula (1000 content-rich / 1000 API-tier / 2000 sitemap-bearing) and
+    the recovery flow that re-runs gau on a host with --budget-override
+    when classify-work scores deferred clusters above the default cap.
+
+    Round 5 raised the API-tier cap from 200 to 1000 because the lower cap
+    silently truncated legitimate microservice surface."""
     repo_root = Path(__file__).resolve().parents[3]
     skill = (
         repo_root / "agent" / "skills" / "surface-collection" / "SKILL.md"
@@ -1559,11 +1565,10 @@ def test_surface_collection_pins_per_host_url_budget_formula():
     assert "Per-host URL Budget" in skill, (
         "surface-collection/SKILL.md must carry the `Per-host URL Budget` heading"
     )
-    # The three numeric tiers must be named explicitly so the formula cannot
-    # silently drift.
+    # The two numeric tiers must be named explicitly so the formula cannot
+    # silently drift. (API-tier shares the 1000 default after Round 5.)
     for fragment in (
         "1000 URLs / host",
-        "200 URLs / host",
         "2000 URLs / host",
         "content-rich",
         "API-tier",

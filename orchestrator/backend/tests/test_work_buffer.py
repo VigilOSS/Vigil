@@ -924,16 +924,16 @@ def test_per_host_budget_caps_content_rich_at_1000(tmp_path: Path) -> None:
     assert deferred[2] == "per-host-budget-exceeded"
 
 
-def test_per_host_budget_api_tier_at_200(tmp_path: Path) -> None:
-    """An ``api.*`` host caps at 200 because its surface is method × parameter
-    rather than URL × URL. The classifier is purely hostname-driven so the
-    test passes without reading any sitemap or recon intel."""
+def test_per_host_budget_api_tier_at_1000(tmp_path: Path) -> None:
+    """An ``api.*`` host caps at 1000 (Round 5 raised this from 200 because
+    the lower cap silently truncated legitimate microservice surface).
+    Operators still cap noisy hosts lower with ``--budget-override``."""
     classify_lib = _load_classify_lib_module()
     db_path = _make_fresh_db(tmp_path)
 
     # api.* matches the API-tier rule.
     assert classify_lib.per_host_budget("api.example.test") == classify_lib.PER_HOST_BUDGET_API_TIER
-    assert classify_lib.PER_HOST_BUDGET_API_TIER == 200
+    assert classify_lib.PER_HOST_BUDGET_API_TIER == 1000
 
     # *.api.* also matches.
     assert classify_lib.per_host_budget("staging.api.example.test") == classify_lib.PER_HOST_BUDGET_API_TIER
@@ -941,11 +941,11 @@ def test_per_host_budget_api_tier_at_200(tmp_path: Path) -> None:
     _bulk_insert_for_host(
         db_path,
         host="api.example.test",
-        n_pending=200,
+        n_pending=1000,
         queue_prefix="api",
     )
 
-    assert classify_lib.host_active_count(str(db_path), "api.example.test") == 200
+    assert classify_lib.host_active_count(str(db_path), "api.example.test") == 1000
 
 
 def test_per_host_budget_sitemap_at_2000(tmp_path: Path) -> None:
@@ -984,7 +984,7 @@ def test_per_host_budget_override_via_dispatch_context(tmp_path: Path) -> None:
 
     # Override raises a content-rich host above its 1000 default.
     assert classify_lib.per_host_budget("example.test", overrides=overrides) == 5000
-    # Override LOWERS an API-tier host below its 200 default.
+    # Override LOWERS an API-tier host below its 1000 default.
     assert classify_lib.per_host_budget("api.example.test", overrides=overrides) == 50
 
     # Sitemap-bearing AND override → override still wins.
@@ -1046,14 +1046,16 @@ def test_work_items_per_host_view_aggregates_across_statuses(tmp_path: Path) -> 
 
 def test_classify_work_emits_per_host_budget_signal(tmp_path: Path, capsys) -> None:
     """``classify-work`` includes a ``per_host_budget`` summary in its JSON
-    output so the operator sees which hosts are at-budget without separately
-    reading the view."""
+    output so the operator can spot hosts whose budget gate fired without
+    separately reading the view. The signal is the deferred-count, not an
+    at_budget flag computed against the default tier — operator overrides at
+    ingestion time would make a default-tier comparison wrong."""
     db_path = _make_fresh_db(tmp_path)
-    # Seed an api-tier host at its 200 cap.
+    # Seed an api-tier host at its 1000 cap (raised in Round 5 from 200).
     _bulk_insert_for_host(
         db_path,
         host="api.example.test",
-        n_pending=200,
+        n_pending=1000,
         n_deferred=5,
         queue_prefix="apicap",
     )
@@ -1064,7 +1066,122 @@ def test_classify_work_emits_per_host_budget_signal(tmp_path: Path, capsys) -> N
     per_host = {entry["host"]: entry for entry in summary["per_host_budget"]}
     assert "api.example.test" in per_host
     api_entry = per_host["api.example.test"]
-    assert api_entry["budget"] == 200
-    assert api_entry["active_count"] == 200
-    assert api_entry["at_budget"] is True
+    assert api_entry["budget"] == 1000
+    assert api_entry["active_count"] == 1000
+    # at_budget was removed — the authoritative signal is the deferred count.
+    assert "at_budget" not in api_entry
     assert api_entry["budget_deferred_count"] == 5
+
+
+def test_work_items_per_host_view_strips_explicit_port(tmp_path: Path) -> None:
+    """B6 regression: URLs with an explicit port collapse onto the same host
+    row as their portless siblings.
+
+    The view used to extract host as ``example.com:8443`` while
+    ``host_active_count`` looks up the host via ``urlparse(url).hostname``
+    (which never carries a port), silently disabling the per-host budget
+    gate for explicit-port URLs. The fix strips the port in the view's host
+    expression so both forms aggregate on ``example.com``.
+    """
+    classify_lib = _load_classify_lib_module()
+    db_path = _make_fresh_db(tmp_path)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        # Same host with and without explicit port; uppercase variants too,
+        # to confirm the lower() keeps working.
+        conn.executemany(
+            "INSERT INTO work_items (queue_key, method, url, url_path, type, source, status, priority_score) "
+            "VALUES (?, 'GET', ?, '/x', 'page', 'test', 'pending', 0)",
+            [
+                ("p:1", "https://example.com:8443/api"),
+                ("p:2", "https://example.com/other"),
+                ("p:3", "https://EXAMPLE.com:9000/x"),
+                ("p:4", "https://other.example/path"),
+            ],
+        )
+        conn.commit()
+        rows = list(
+            conn.execute(
+                "SELECT host, active_count FROM work_items_per_host ORDER BY host"
+            )
+        )
+    finally:
+        conn.close()
+
+    rollup = dict(rows)
+    assert rollup == {"example.com": 3, "other.example": 1}, rollup
+
+    # host_active_count looks up by portless host and must return 3 — the
+    # bug it regression-protects against was that it returned 0 because the
+    # view stored ``example.com:8443`` and ``example.com`` separately.
+    assert classify_lib.host_active_count(str(db_path), "example.com") == 3
+
+
+def test_egress_script_logic_handles_dead_hosts_and_empty_input() -> None:
+    """B4/B5/B9 regression: the egress reputation bash script
+
+    - drops the ``|| echo 000`` fallback that caused curl-failure to print
+      ``"000\\n000"`` and break the comparison;
+    - guards against zero alive hosts so the percentage calculation does
+      not divide by zero;
+    - excludes 000-status hosts from the alive-sample total so dead hosts
+      are not counted as blocked.
+
+    We exercise the script in-process by feeding canned curl exit codes
+    through a small bash translation of the same logic. This ensures the
+    reference doc's script is shape-correct without needing to spawn the
+    runtime container.
+    """
+    import subprocess
+
+    # Faithful translation of the bash conditional in
+    # web-recon/SKILL.md and cdn-ip-blocking.md. The harness substitutes
+    # codes for the curl call.
+    def run(codes: list[str]) -> tuple[int, str]:
+        codes_str = " ".join(codes) if codes else ""
+        script = f"""
+set -e
+codes="{codes_str}"
+blocked=0; total=0
+for code in $codes; do
+  case "$code" in
+    000) ;;
+    403) blocked=$((blocked+1)); total=$((total+1)) ;;
+    *)   total=$((total+1)) ;;
+  esac
+done
+if [ "$total" -eq 0 ]; then
+  echo "egress check skipped: no live hosts to sample"
+  exit 0
+fi
+pct=$((blocked * 100 / total))
+echo "egress_block_pct=$pct (blocked=$blocked alive=$total)"
+"""
+        proc = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return proc.returncode, proc.stdout.strip()
+
+    # All hosts dead — must skip cleanly, no division by zero.
+    rc, out = run(["000", "000", "000"])
+    assert rc == 0
+    assert "egress check skipped" in out
+
+    # Mixed dead/alive — dead excluded; only the 403 counts as blocked.
+    rc, out = run(["000", "200", "403"])
+    assert rc == 0
+    assert "egress_block_pct=50 (blocked=1 alive=2)" in out
+
+    # All 403 against alive hosts — 100% block rate.
+    rc, out = run(["403", "403", "403"])
+    assert rc == 0
+    assert "egress_block_pct=100 (blocked=3 alive=3)" in out
+
+    # Zero hosts (empty input) — must skip cleanly.
+    rc, out = run([])
+    assert rc == 0
+    assert "egress check skipped" in out

@@ -140,7 +140,7 @@ per-host formula keeps budget proportional to the host's likely attack-surface d
 | Host class | Budget | Rationale |
 |---|---|---|
 | content-rich hosts (typical web app: HTML pages, blog, marketing content) | **1000 URLs / host** | Default for hosts not matching the API-tier or sitemap-bearing rules. |
-| API-tier hosts (`api.*`, `*.api.example.test`, hosts whose URL surface is mostly endpoints) | **200 URLs / host** | API hosts produce a smaller endpoint surface; Phase 3 testing is method × parameter, not URL × URL. |
+| API-tier hosts (`api.*`, `*.api.example.test`, hosts whose URL surface is mostly endpoints) | **1000 URLs / host** | Same as content-rich. The earlier 200 cap silently truncated real microservice clusters with hundreds of legitimate REST routes; operators still cap a noisy API host lower with `--budget-override`. |
 | sitemap-bearing hosts (sitemap.xml provides an explicit upper-bound list) | **2000 URLs / host** | Don't truncate below the sitemap's count; the sitemap is the host's own declaration of canonical surface. |
 
 Operator override: pass `--budget-override <host>:<n>` on the dispatch context when a
@@ -151,16 +151,21 @@ honors the override at ingestion time; URLs beyond the budget land as
 sees them in `aith assess dispatch peek` output without polluting the work-buffer
 priority queue.
 
-#### Recovery flow when a Phase 3 finding warrants more budget
+#### Recovery flow when classify-work scores deferred clusters above default
 
-When Phase 3 testing produces a finding on host X and the operator wants follow-up crawl
-for adjacent surface, re-run gau against X with an increased budget instead of leaving
-the deferred surplus untouched:
+When classify-work assigns a high priority to any cluster on a host that already
+deferred surplus URLs (e.g., a host that hit the 1000 cap and where the
+`gf:ssrf` cluster surfaces with 50 candidates), the operator should auto-raise
+the budget for that host and re-ingest:
 
-1. Inspect the deferred bucket: `aith assess dispatch "$DB" peek deferred:per-host-budget-exceeded 50` (Wave 3 1D.1's `dispatch peek` lands the read-only preview).
-2. Re-run gau for the host with a wider scope: `aith assess kali gau X --subs --threads 5 ... -o /engagements/$ENGAGEMENT_KEY/scans/gau_<host>_followup.txt --technique DISCOVERY --intent "follow-up gau on host X after Phase 3 finding" --probe-kind fingerprint --phase consume-test --timeout 1800`.
-3. Re-ingest with the override: pipe the new gau output into `aith assess ingest-endpoints` and pass `--budget-override <host>:<n>` so the new URLs admit beyond the default cap.
+1. Inspect the deferred bucket: `aith assess dispatch "$DB" peek deferred:per-host-budget-exceeded 50`.
+2. If high-priority clusters appear in the deferred set, re-run gau for the host
+   with a wider scope: `aith assess kali gau X --subs --threads 5 ... -o /engagements/$ENGAGEMENT_KEY/scans/gau_<host>_followup.txt --technique DISCOVERY --intent "follow-up gau after classify-work scored deferred cluster" --probe-kind fingerprint --phase consume-test --timeout 1800`.
+3. Re-ingest with the override: pipe the new gau output into `aith assess ingest-endpoints` and pass `--budget-override <host>:<n>` so the new URLs admit beyond the default cap. Pick `<n>` large enough to cover the deferred surplus you just inspected.
 4. Re-run `aith assess classify-work` to score the newly-admitted rows before the next dispatch.
+
+This loop keeps the default cap conservative while surfacing the recovery path
+the moment classify-work flags real signal in the deferred set.
 
 #### Egress-blocked hosts
 

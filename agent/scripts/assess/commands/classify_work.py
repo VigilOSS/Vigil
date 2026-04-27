@@ -226,15 +226,26 @@ def run(args: argparse.Namespace) -> None:
 def _per_host_budget_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Return per-host budget signal for the classify-work cluster output (1D.2).
 
-    Each row carries the host's active count, the budget that applies, the
-    deferred count under ``deferred:per-host-budget-exceeded``, and a
-    boolean flag that flips when the host has hit its budget. The operator
-    reads this section to decide whether to raise budget on a specific host
-    via ``--budget-override host:N`` and re-run gau, or to leave the deferred
+    Each row carries the host's active count, the *default* budget that
+    applies (with no operator override), and the deferred count under
+    ``deferred:per-host-budget-exceeded``. The operator reads this section
+    to decide whether to raise budget on a specific host via
+    ``--budget-override host:N`` and re-run gau, or to leave the deferred
     surplus alone.
 
-    The budget is computed via ``classify.per_host_budget`` so the classify
-    output stays consistent with the ingest gate. When the
+    We do not surface an ``at_budget`` flag here. classify-work is run after
+    ingestion, so any per-host override the operator passed to
+    ``ingest-endpoints --budget-override`` already shaped which URLs landed
+    in pending vs deferred — replaying the default-budget heuristic in the
+    classify-work summary would mark a host as "at budget" against the
+    wrong number. The authoritative signal is the deferred-count: a non-zero
+    ``budget_deferred_count`` on a host means the budget gate fired during
+    ingestion, regardless of which budget value applied. Operators who want
+    to review the surplus run ``aith assess dispatch peek
+    deferred:per-host-budget-exceeded N``.
+
+    The budget value is the default-tier classification from
+    ``classify.per_host_budget`` (no overrides). When the
     ``work_items_per_host`` view is missing (legacy DBs), this function
     returns an empty list rather than raising — the migration path in
     ``db_init`` will install the view on the next ingestion run.
@@ -265,22 +276,34 @@ def _per_host_budget_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         budget = per_host_budget(host)
         # Pull the per-host deferred count for ``deferred:per-host-budget-exceeded``
         # specifically so the operator sees budget-driven defers separately
-        # from egress-blocked or other deferred clusters.
+        # from egress-blocked or other deferred clusters. Mirrors the
+        # port-stripped host extraction in schema.sql's view.
         budget_deferred = conn.execute(
             """
-            SELECT COUNT(*) FROM work_items
-            WHERE cluster_key = 'deferred:per-host-budget-exceeded'
-              AND lower(
+            WITH host_with_port AS (
+                SELECT
+                    cluster_key,
+                    CASE
+                        WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
+                            THEN substr(
+                                substr(url, instr(url, '://') + 3),
+                                1,
+                                instr(substr(url, instr(url, '://') + 3), '/') - 1
+                            )
+                        ELSE substr(url, instr(url, '://') + 3)
+                    END AS host_authority
+                FROM work_items
+                WHERE cluster_key = 'deferred:per-host-budget-exceeded'
+                  AND url IS NOT NULL AND url != ''
+            )
+            SELECT COUNT(*) FROM host_with_port
+            WHERE lower(
                 CASE
-                    WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
-                        THEN substr(
-                            substr(url, instr(url, '://') + 3),
-                            1,
-                            instr(substr(url, instr(url, '://') + 3), '/') - 1
-                        )
-                    ELSE substr(url, instr(url, '://') + 3)
+                    WHEN instr(host_authority, ':') > 0
+                        THEN substr(host_authority, 1, instr(host_authority, ':') - 1)
+                    ELSE host_authority
                 END
-              ) = ?
+            ) = ?
             """,
             (host,),
         ).fetchone()[0]
@@ -293,7 +316,6 @@ def _per_host_budget_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 "deferred_count": int(row["deferred_count"] or 0),
                 "budget_deferred_count": int(budget_deferred or 0),
                 "budget": budget,
-                "at_budget": active >= budget,
             }
         )
     return summary
