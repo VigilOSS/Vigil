@@ -192,7 +192,53 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     if client_kind in {"codex", "both"}:
         _write_codex_config(agent_root, eng_dir)
     _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
+    _emit_bootstrap_scope_summary(scope)
     return CreatedEngagement(key=key, path=eng_dir)
+
+
+def _emit_bootstrap_scope_summary(scope: dict[str, object]) -> None:
+    """Print a one-line scope summary at bootstrap and warn on wildcard-only-no-apex.
+
+    Strict apex-wildcard semantics exclude the bare apex from a wildcard-only
+    entry. Surfacing the wildcard-only-no-apex case at bootstrap (rather than
+    on first ingestion) gives the operator a chance to decide before any
+    crawler output materializes — adding the apex explicitly is a one-line
+    scope.json edit if intended.
+    """
+    raw_hosts = scope.get("hosts") if isinstance(scope, dict) else None
+    if not isinstance(raw_hosts, list) or not raw_hosts:
+        return
+    explicit_apex_hosts: set[str] = set()
+    wildcard_seen: list[tuple[str, str]] = []
+    for raw in raw_hosts:
+        if not isinstance(raw, str):
+            continue
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("*.") and len(stripped) > 2:
+            apex = stripped[2:].strip().rstrip(".").lower()
+            if apex:
+                wildcard_seen.append((stripped, apex))
+        elif "://" in stripped:
+            parsed = urlparse(stripped)
+            host = (parsed.hostname or "").rstrip(".").lower()
+            if host:
+                explicit_apex_hosts.add(host)
+        else:
+            apex = stripped.rstrip(".").lower().split(":")[0].strip("[]")
+            if apex:
+                explicit_apex_hosts.add(apex)
+    print(f"[aith] scope: {len(raw_hosts)} entries", file=sys.stderr)
+    missing = [raw for raw, apex in wildcard_seen if apex not in explicit_apex_hosts]
+    if missing:
+        listing = ", ".join(missing)
+        print(
+            f"[aith] scope-warning: wildcard-only entries lacking explicit apex: {listing}. "
+            f"Strict apex-wildcard semantics exclude the bare apex from these entries. "
+            f"Add the apex (e.g., 'example.test') as an explicit scope entry to admit it.",
+            file=sys.stderr,
+        )
 
 
 def list_engagements(install_root: Path) -> list[EngagementRow]:
@@ -367,6 +413,15 @@ def _install_client_kind(agent_root: Path) -> str:
 
 def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str) -> None:
     install_root = agent_root.parent
+    # Specialist context isolation invariant:
+    # The per-engagement AGENTS.md/CLAUDE.md written here are operator-only bootstrap pointers.
+    # Specialists never land at this cwd directly — they are dispatched FROM the operator via
+    # the registered wrappers in agent/.codex/agents/*.toml or agent/.claude/agents/*.md, which
+    # carry the explicit "Do NOT read agent/AGENTS.md or agent/CLAUDE.md" instruction (see
+    # agent/scripts/render-operator-prompts.sh). If you change how engagement bootstrap files
+    # are seeded — e.g. start landing specialist clients in their own cwd — make sure the new
+    # cwd's local AGENTS.md/CLAUDE.md does not pull operator bootstrap into a specialist
+    # context, or the operator startup banner will bleed into specialist responses.
     common = f"""This engagement directory is only the run-artifact root. Resolve shared prompts, skills, references, and scripts through:
 - Install root: {install_root}
 - Agent workspace root: {agent_root}

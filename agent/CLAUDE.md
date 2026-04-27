@@ -170,6 +170,68 @@ Every dispatch must include:
   - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `aith assess fetch` — pass all B candidates (chain-target endpoints) through, since pre-filtering hides chain opportunities
   - For `report-writer`: no finding context needed — the agent queries `report-findings?mode=final` for final reports or `report-findings?mode=draft` for interim reports
 
+### Specialist Dispatch Contract
+
+Every dispatch declares an explicit contract. The contract is what bounds the specialist's
+context, command authority, and output shape — without it, the operator is implicitly trusting
+the wrapper to enforce limits the wrapper does not actually know about. Sub-agents are not
+"read-only by default": they may execute target-facing commands when the contract grants
+`permission >= passive-probe` or `target-facing`. The boundary is contract-driven, not
+hard-coded — a recon dispatch that needs to run wafw00f and nmap declares `target-facing`
+and the specialist proceeds; an analysis dispatch that should only read recorded artifacts
+declares `artifact-only` and the specialist refuses target-facing commands.
+
+Required fields per dispatch:
+
+| Field | Values |
+|---|---|
+| `role` | `recon-specialist` / `source-analyzer` / `surface-collector` / `vulnerability-analyst` / `exploit-developer` / `fuzzer` / `osint-analyst` / `report-writer` / `code-architect` / `code-vuln-hunter` / `code-variant-hunter` / `code-vuln-verifier` |
+| `model` | `claude-opus-4-7` / `claude-sonnet-4-6` / `gpt-5.4` / etc. (per the default-model policy in the Core Loop) |
+| `reasoning` | `low` / `medium` / `high` |
+| `files_allowed` | explicit list — the role file, its declared `Load First` items, plus any extra references the task needs |
+| `files_forbidden` | always includes `agent/AGENTS.md` and `agent/CLAUDE.md` (operator-only bootstrap; carries the startup banner that bleeds into specialist responses if loaded) |
+| `permission` | `artifact-only` / `passive-probe` / `target-facing` / `target-facing-destructive` (cross-reference the per-target rate calibration table in "Recon Dispatch Resource Policy" before granting `target-facing`) |
+| `command_budget` | upper bound on `aith assess kali ...` calls the specialist may issue this dispatch |
+| `output` | the structured payload schema the agent returns (e.g., `#### Findings`, `#### Surface Candidates`, `#### Coverage Gaps`) |
+| `dispatch_mode` | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Dispatch-Mode Declaration" below) |
+
+After every dispatch, append the contract to `$DIR/agent-registry.json` alongside the existing
+audit fields (role, agent_id, task, finding_slugs, skill_loaded, scope_host, dispatched_at,
+status). The contract becomes part of the registry record so report-writer and later operators
+can audit not only what was dispatched but what the dispatch was authorized to do. Schema in
+`agent/references/runtime-guides/subagent-registry.md`.
+
+### Dispatch-Mode Declaration
+
+Every dispatch declares its mode explicitly. The mode determines whether the agent processes a
+finite item list, samples a target pool against hypotheses, manually walks a small set, or
+rotates payload variants against fixed hosts. The wrong mode causes overrun (item-iterating
+agent given a target pool runs out of context after 30 items; hypothesis-driven agent given a
+50-item budget fails to sample broadly).
+
+| Mode | Items per agent | Reasoning |
+|---|---|---|
+| `hypothesis-driven` | 200–1000 (target pool) | Agent samples per hypothesis; iteration count is the wrong primitive. Drop per-item budget; the agent handles its own deferral. |
+| `item-iterating` | 30–100 hard cap | Process up to N, defer the rest with `aith assess dispatch defer-items <ids> --reason ...`. |
+| `deep-manual` | 10–30 | 5–15 messages per item. |
+| `variant-rotation` | 1–3 hosts | Items are payload variants, not URLs. |
+
+The dispatch context names the mode and the agent adapts its loop accordingly. If the operator
+omits the mode, the agent picks the safest default for its role:
+
+- `vulnerability-analyst` → `item-iterating`
+- `recon-specialist` → `hypothesis-driven`
+- `surface-collector` → `item-iterating`
+- `source-analyzer` → `item-iterating`
+- `fuzzer` → `variant-rotation`
+- `exploit-developer` → `deep-manual`
+- `osint-analyst` → `hypothesis-driven`
+- `report-writer` → `deep-manual`
+- `code-architect` → `hypothesis-driven`
+- `code-vuln-hunter` → `item-iterating`
+- `code-variant-hunter` → `hypothesis-driven`
+- `code-vuln-verifier` → `deep-manual`
+
 ### Pre-Dispatch Checklist
 
 Before every dispatch, verify:
@@ -194,6 +256,7 @@ Before accepting that a specialist dispatch is complete, verify the agent proved
 - [ ] **Attacker outcome stated:** Can you read the finding and immediately say what the attacker gains? ("Attacker extracts session token and accesses victim's vault" — not "TLS validation is disabled")
 - [ ] **Outcome demonstrated:** Did the agent show the exploitation step, not just the vulnerability? Captured credentials must be replayed. Leaked tokens must be used. File read primitives must read a meaningful file. If the agent stopped at "vulnerability exists," send it back with the specific next step.
 - [ ] **Proof is submission-ready:** Would a Bugcrowd/HackerOne triager accept this as demonstrated impact? If the proof requires the triager to imagine the next step, the agent's work is not done.
+- [ ] **Stderr-log inspected when "no results" is the headline finding.** When a specialist reports a tool ran but produced nothing, the operator inspects the actual stderr artifact (`aith assess get-command-run <id>` for the wrapper preview, or read the on-disk `*.err` log) before treating "no findings" as evidence of tool failure. A common false-alarm pattern: a reactive nuclei sweep produces "no findings" because the wappalyzer fingerprint of every host was too generic for the auto-template-selection (`-as`) — that is expected behavior, not failure. The stderr log shows `Templates loaded for current scan: NNNN` and is the source of truth.
 
 If any gate fails, dispatch a new agent (or re-dispatch the same role) with the specific gap and the prior agent's output as context: "You proved the upload bridge accepts arbitrary paths — now read /etc/passwd through it and show the contents." Do not record the finding at an inflated severity until the outcome is proved.
 
@@ -224,9 +287,14 @@ DB="$DIR/cases.db"
 
 1. **Phase 1 — Reconnaissance**
 
+   **Phase 1a/1b dispatch is non-negotiable.** Target-facing recon (1a wildcard subdomain enum, 1b parallel recon + source analysis, 1c reactive nuclei sweep) MUST go through `recon-specialist` and `source-analyzer` dispatches. The operator's role is bounded to scope preparation, command-budget approval, resource-threshold monitoring, and durable-state recording — running target-facing tools directly in the operator loop crowds operator context with low-level recon detail and skips the wrapper-bound skill load that downstream specialists rely on as a coverage map. Operator MUST NOT run target-facing tools directly, even for "quick checks". If a specialist cannot be launched (missing skill, missing wrapper, runtime down), record the blocker in `$DIR/agent-registry.json` with `{kind: "dispatch_blocked", phase: "1a", reason: "...", surfaced_to_user: true}` and surface to the user. Never silently move work back into the operator loop.
+
    **1a. Wildcard subdomain enumeration (when scope.json `hosts` contains `*.domain` entries)** — dispatch `recon-specialist` with `agent/skills/subdomain-enumeration/SKILL.md` loaded BEFORE the parallel recon+source pass. Subdomain expansion must land before downstream steps because 1b's endpoint inventory and 1c's reactive nuclei sweep both consume live hosts as input; running them first against the apex alone misses the wildcard surface entirely. Output: live subdomains ingested via `aith assess ingest-endpoints "$DB" subdomain-enum` so they flow into the work buffer alongside apex hosts.
    Before dispatching subdomain enumeration, run `aith assess kali exec -- which massdns puredns dnsx subfinder cero alterx asnmap bbot shuffledns` to confirm tooling. Missing binaries → fix the runtime, do not silently degrade — puredns silently fails when massdns is missing (zero output, no error, exit code 0), and a dnsx fallback against a typical bruteforce wordlist will spike container CPU before stabilizing. Recon-specialist dispatches scanning multiple hosts MUST use `nmap -iL hosts.txt`. The operator never asks a specialist to loop nmap per-host; consolidation is non-negotiable. If the specialist generates `for h in hosts; do aith assess kali nmap-scan --target $h ...`, the operator catches it in dispatch review and re-dispatches with the consolidated command.
    Skip 1a when scope.json contains only bare hosts — there is nothing to expand, so dispatching enum wastes a context window.
+   - **Wildcard-apex checkpoint.** When `scope.json` has wildcard-only entries (e.g., `*.example.test` without a sibling bare-apex entry) AND the crawler output yields apex URLs, the operator surfaces a numbered checkpoint to the user: (1) include the apex by adding `example.test` to scope; (2) keep the apex excluded; (3) treat the apex as out-of-scope per VDP. Record the choice in `$DIR/agent-registry.json` with `{kind: "scope_decision", host: "example.test", choice: "..."}`.
+   - **Vendor-SaaS scope checkpoint.** When wafw00f, nmap rDNS, or HTTP fingerprinting indicates a host's underlying application is vendor-managed SaaS (e.g., the host's CNAME or rDNS resolves into a vendor's platform domain — checked programmatically via `agent/scripts/assess/lib/scope.py:host_is_vendor_saas`), surface a numbered checkpoint to the user **before** dispatching recon-specialist for that host: (1) in-scope per VDP — proceed with recon; (2) out-of-scope per VDP — skip and exclude from buffer; (3) partial scope — test the asset's surface but not the underlying vendor platform. Record the choice in `$DIR/agent-registry.json` with `{kind: "scope_decision", host: "<host>", vendor: "<vendor>", choice: "..."}`. `aith assess check-scope-coverage --require-stage enum` blocks Phase 1 advance until every flagged vendor-SaaS host carries a recorded decision.
+   - **Egress reputation checkpoint.** Before Phase 3 dispatch, run the egress reputation check (a small `curl -o /dev/null -w '%{http_code}\n'` sweep against representative live hosts — see `agent/references/runtime-guides/cdn-ip-blocking.md`). If >50% of representative hosts return `403` (consistent with CDN-edge IP-reputation block) or TCP-reset on connect (consistent with geoblock), surface a numbered checkpoint to the user with four mitigation options: (1) request IP allowlisting from the target program (standard for authorized VDP); (2) route through a residential proxy or clean-IP VPS; (3) use a browser-based tool inside the runtime (presents a legitimate JA3/JA4 TLS fingerprint); (4) accept the limited coverage and document the gap as a Phase-3 blocker. Record the choice in `$DIR/agent-registry.json` with `{kind: "egress_decision", blocked_pct: N, choice: "..."}`. Hosts identified by the check feed into `aith assess ingest-endpoints --egress-blocked-hosts <file>` so URLs to them defer with `cluster_key=deferred:egress-blocked` instead of polluting the work buffer.
 
    **1b. Parallel recon + source analysis** — dispatch `recon-specialist` + `source-analyzer` in parallel because their work is independent and sequential dispatch doubles wall time for no coverage gain. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 — leaving non-web triage on the operator loses the skill's methodology depth.
 

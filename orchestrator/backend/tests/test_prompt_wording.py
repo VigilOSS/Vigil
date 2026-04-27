@@ -669,6 +669,105 @@ def test_scope_coverage_gates_present():
     )
 
 
+def test_wildcard_apex_checkpoint_present():
+    """1F.1 — operator-core.md Phase 1a must surface a Wildcard-Apex Checkpoint
+    when scope has wildcard-only entries and crawl output yields apex URLs.
+    Strict apex-wildcard semantics exclude the bare apex; without this checkpoint
+    the operator silently drops apex URLs and the user never gets to decide."""
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+    markers = {
+        "Wildcard-apex checkpoint": "checkpoint header",
+        "scope_decision": "agent-registry recording kind",
+        "wildcard-only entries": "wildcard-only-no-apex condition phrase",
+    }
+    for substring, label in markers.items():
+        assert substring in operator_core, (
+            f"operator-core.md is missing `{substring}` ({label}) — "
+            f"Wildcard-Apex Checkpoint has drifted"
+        )
+
+
+def test_vendor_saas_and_egress_checkpoints_present():
+    """1C.5 + 1G.1 — operator-core.md Phase 1 must carry both the Vendor-SaaS
+    scope checkpoint and the Egress reputation checkpoint sub-bullets, and the
+    cdn-ip-blocking.md cross-references must resolve from the recon skills and
+    the references INDEX.md."""
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+
+    # Operator-core checkpoint sub-bullets.
+    assert "Vendor-SaaS scope checkpoint" in operator_core, (
+        "operator-core.md is missing the `Vendor-SaaS scope checkpoint` sub-bullet"
+    )
+    assert "Egress reputation checkpoint" in operator_core, (
+        "operator-core.md is missing the `Egress reputation checkpoint` sub-bullet"
+    )
+    # Vendor-SaaS sub-bullet must point at the host classifier helper so the
+    # operator's check is mechanical, not a guess.
+    assert "host_is_vendor_saas" in operator_core, (
+        "operator-core.md must reference `host_is_vendor_saas` so the operator's"
+        " vendor-SaaS check is mechanical, not a guess"
+    )
+    # Egress sub-bullet must point at the runtime guide for the four
+    # mitigation options and the give-up-vs-escalate rule.
+    assert "agent/references/runtime-guides/cdn-ip-blocking.md" in operator_core, (
+        "operator-core.md must reference `cdn-ip-blocking.md` for the four egress"
+        " mitigation options and the give-up-vs-escalate rule"
+    )
+    # The runtime guide itself exists and carries the four numbered mitigation
+    # subsections plus the egress reputation curl script.
+    cdn_guide = repo_root / "agent" / "references" / "runtime-guides" / "cdn-ip-blocking.md"
+    assert cdn_guide.is_file(), "agent/references/runtime-guides/cdn-ip-blocking.md is missing"
+    cdn_text = cdn_guide.read_text(encoding="utf-8")
+    for needle in (
+        "egress_block_pct",
+        "Request IP allowlisting",
+        "residential proxy",
+        "browser-based tool",
+        "Accept the limited coverage",
+    ):
+        assert needle in cdn_text, (
+            f"cdn-ip-blocking.md is missing `{needle}`"
+        )
+
+    # Web-recon skill carries the egress reputation step right after wafw00f.
+    web_recon = (repo_root / "agent" / "skills" / "web-recon" / "SKILL.md").read_text(encoding="utf-8")
+    assert "Egress reputation check" in web_recon, (
+        "web-recon/SKILL.md is missing the `Egress reputation check` step"
+    )
+    assert "cdn-ip-blocking.md" in web_recon, (
+        "web-recon/SKILL.md must cross-reference `cdn-ip-blocking.md`"
+    )
+
+    # Subdomain-enumeration skill cross-links to the egress reputation check
+    # because DNS resolution success-rate parallels the egress reputation
+    # problem.
+    subenum = (repo_root / "agent" / "skills" / "subdomain-enumeration" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "cdn-ip-blocking.md" in subenum, (
+        "subdomain-enumeration/SKILL.md must cross-link to `cdn-ip-blocking.md`"
+    )
+
+    # INDEX.md registers the new runtime guide.
+    index = (repo_root / "agent" / "references" / "INDEX.md").read_text(encoding="utf-8")
+    assert "runtime-guides/cdn-ip-blocking.md" in index, (
+        "agent/references/INDEX.md must register `runtime-guides/cdn-ip-blocking.md`"
+    )
+
+    # Recon-specialist self-check pins the two new gates.
+    recon_specialist = (repo_root / "agent" / "agents" / "recon-specialist.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Vendor-SaaS hosts flagged with scope decision recorded" in recon_specialist, (
+        "recon-specialist.md self-check must include the vendor-SaaS scope decision item"
+    )
+    assert "Egress reputation check run" in recon_specialist, (
+        "recon-specialist.md self-check must include the egress reputation check item"
+    )
+
+
 def test_no_broad_pkill_rule_present_in_shared_constraints():
     """1A.4 — the no-broad-`pkill` rule lives in `agent/shared-constraints.md` so every
     specialist loads it on first dispatch. The rule and the safe alternatives must stay
@@ -980,6 +1079,237 @@ def test_no_dot_gov_profile_body_text_in_recon_skills():
             )
 
 
+def test_specialist_wrappers_carry_context_isolation_paragraph():
+    """1C.1 — every rendered specialist wrapper (Claude `.md` + Codex `.toml`) MUST carry the
+    standardized SPECIALIST CONTEXT ISOLATION paragraph naming the forbidden bootstrap files
+    (`agent/AGENTS.md` and `agent/CLAUDE.md`). Without it, the operator startup banner bleeds
+    into specialist responses on first dispatch."""
+    repo_root = Path(__file__).resolve().parents[3]
+    claude_dir = repo_root / "agent" / ".claude" / "agents"
+    codex_dir = repo_root / "agent" / ".codex" / "agents"
+
+    specialist_names = [
+        "recon-specialist",
+        "source-analyzer",
+        "surface-collector",
+        "vulnerability-analyst",
+        "exploit-developer",
+        "fuzzer",
+        "osint-analyst",
+        "report-writer",
+        "code-architect",
+        "code-vuln-hunter",
+        "code-variant-hunter",
+        "code-vuln-verifier",
+    ]
+
+    for name in specialist_names:
+        for wrapper in (claude_dir / f"{name}.md", codex_dir / f"{name}.toml"):
+            assert wrapper.exists(), f"specialist wrapper missing: {wrapper}"
+            text = wrapper.read_text(encoding="utf-8")
+            assert "SPECIALIST CONTEXT ISOLATION" in text, (
+                f"{wrapper}: missing SPECIALIST CONTEXT ISOLATION paragraph"
+            )
+            # Forbid-list must be explicit so a future render that drops one file fails CI.
+            assert "agent/AGENTS.md" in text, (
+                f"{wrapper}: SPECIALIST CONTEXT ISOLATION paragraph must name `agent/AGENTS.md`"
+            )
+            assert "agent/CLAUDE.md" in text, (
+                f"{wrapper}: SPECIALIST CONTEXT ISOLATION paragraph must name `agent/CLAUDE.md`"
+            )
+
+    # The render script itself must contain the forbid-list so the next render produces it.
+    render_script = (repo_root / "agent" / "scripts" / "render-operator-prompts.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "SPECIALIST CONTEXT ISOLATION" in render_script
+    assert "agent/AGENTS.md" in render_script
+    assert "agent/CLAUDE.md" in render_script
+
+
+def test_specialist_dispatch_contract_present_in_operator_core():
+    """1C.1 — operator-core.md gains a Specialist Dispatch Contract section that names every
+    required field (role, model, reasoning, files_allowed, files_forbidden, permission,
+    command_budget, output, dispatch_mode). Without the contract section, dispatches degrade
+    into freeform task strings and the agent-registry record loses its authorization fields."""
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+
+    assert "### Specialist Dispatch Contract" in operator_core, (
+        "operator-core.md is missing the `### Specialist Dispatch Contract` section heading"
+    )
+    for field in (
+        "`role`",
+        "`model`",
+        "`reasoning`",
+        "`files_allowed`",
+        "`files_forbidden`",
+        "`permission`",
+        "`command_budget`",
+        "`output`",
+        "`dispatch_mode`",
+    ):
+        assert field in operator_core, (
+            f"Specialist Dispatch Contract section is missing the {field} field"
+        )
+    # The forbid-list must always include the operator bootstrap files.
+    assert "always includes `agent/AGENTS.md` and `agent/CLAUDE.md`" in operator_core, (
+        "Specialist Dispatch Contract must always forbid `agent/AGENTS.md` and `agent/CLAUDE.md`"
+    )
+    # Sub-agents are not "read-only by default" — the boundary is contract-driven. The prose
+    # may wrap across lines, so squash whitespace before the substring check.
+    operator_core_squashed = " ".join(operator_core.split())
+    assert "Sub-agents are not \"read-only by default\"" in operator_core_squashed, (
+        "operator-core.md must explicitly drop the read-only-by-default framing in favor of "
+        "contract-driven permission grants"
+    )
+    assert "permission >= passive-probe" in operator_core, (
+        "operator-core.md must show the contract-driven permission gate "
+        "(`permission >= passive-probe`)"
+    )
+
+
+def test_phase_1_dispatch_only_guardrail_present():
+    """1C.2 — Phase 1a/1b dispatch is non-negotiable. The operator must not run target-facing
+    recon directly. Losing this guardrail collapses the orchestrator model and crowds operator
+    context with low-level recon detail."""
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+
+    assert "Phase 1a/1b dispatch is non-negotiable" in operator_core, (
+        "operator-core.md is missing the Phase 1a/1b dispatch-only guardrail heading"
+    )
+    assert "Operator MUST NOT run target-facing tools directly" in operator_core, (
+        "operator-core.md is missing the explicit operator-MUST-NOT-run-target-facing-tools rule"
+    )
+    # The blocker-record contract must be explicit so blockers do not silently fall back to the
+    # operator loop.
+    assert "dispatch_blocked" in operator_core, (
+        "operator-core.md is missing the `dispatch_blocked` registry record kind for blocked dispatches"
+    )
+    assert "surfaced_to_user" in operator_core, (
+        "operator-core.md is missing the `surfaced_to_user` flag in the blocker-record contract"
+    )
+
+
+def test_dispatch_completion_gate_includes_stderr_log_inspection():
+    """1C.3 — when a specialist reports "no findings", the operator must inspect the actual
+    stderr artifact before accepting the headline. Reactive nuclei sweeps in particular emit
+    "templates loaded" lines on stderr that prove the tool ran successfully even when the
+    summary says zero hits."""
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+
+    assert "Stderr-log inspected when \"no results\" is the headline finding" in operator_core, (
+        "Dispatch Completion Gate must include the stderr-log inspection bullet"
+    )
+    # The bullet must point at the canonical lookup commands so operators don't guess.
+    assert "aith assess get-command-run" in operator_core
+    assert "Templates loaded for current scan" in operator_core, (
+        "stderr-log inspection bullet must name the `Templates loaded for current scan` "
+        "marker so operators know what to look for in the nuclei false-alarm pattern"
+    )
+
+
+def test_dispatch_mode_declaration_table_present():
+    """1C.4 — operator-core.md must define the four dispatch modes and their item-budget
+    boundaries. Without explicit mode declaration, item budgets and target pools collide and
+    specialists overrun their context windows."""
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+
+    assert "### Dispatch-Mode Declaration" in operator_core, (
+        "operator-core.md is missing the `### Dispatch-Mode Declaration` section heading"
+    )
+    for mode in ("hypothesis-driven", "item-iterating", "deep-manual", "variant-rotation"):
+        assert f"`{mode}`" in operator_core, (
+            f"Dispatch-Mode Declaration table is missing the `{mode}` mode"
+        )
+    # Per-mode item budgets that establish the rule of thumb.
+    assert "200–1000" in operator_core or "200-1000" in operator_core
+    assert "30–100" in operator_core or "30-100" in operator_core
+    assert "10–30" in operator_core or "10-30" in operator_core
+    assert "1–3 hosts" in operator_core or "1-3 hosts" in operator_core
+
+
+def test_specialist_agents_declare_modes_accepted():
+    """1C.4 — every specialist role file declares which dispatch modes it accepts and the
+    default mode when the operator omits the field. Without the declaration, the operator has
+    no canonical place to read role-default pairings."""
+    repo_root = Path(__file__).resolve().parents[3]
+    agent_dir = repo_root / "agent" / "agents"
+
+    specialists = [
+        "recon-specialist",
+        "source-analyzer",
+        "surface-collector",
+        "vulnerability-analyst",
+        "exploit-developer",
+        "fuzzer",
+        "osint-analyst",
+        "report-writer",
+        "code-architect",
+        "code-vuln-hunter",
+        "code-variant-hunter",
+        "code-vuln-verifier",
+    ]
+    for name in specialists:
+        path = agent_dir / f"{name}.md"
+        text = path.read_text(encoding="utf-8")
+        assert "**Modes accepted:**" in text, (
+            f"{path}: missing `**Modes accepted:**` field"
+        )
+        assert "**Default when omitted:**" in text, (
+            f"{path}: missing `**Default when omitted:**` field"
+        )
+
+
+def test_subagent_registry_schema_carries_contract_fields():
+    """1C.1 / 1C.4 — the registry schema MUST document every contract field so the registry
+    record captures both what was dispatched and what the dispatch was authorized to do."""
+    repo_root = Path(__file__).resolve().parents[3]
+    registry = (
+        repo_root / "agent" / "references" / "runtime-guides" / "subagent-registry.md"
+    ).read_text(encoding="utf-8")
+
+    assert "## Contract Schema" in registry, (
+        "subagent-registry.md is missing the `## Contract Schema` heading"
+    )
+    for field in (
+        "`model`",
+        "`reasoning`",
+        "`files_allowed`",
+        "`files_forbidden`",
+        "`permission`",
+        "`command_budget`",
+        "`output`",
+        "`dispatch_mode`",
+    ):
+        assert field in registry, f"subagent-registry.md is missing the {field} contract field"
+    # Blocker-record kind must be documented so dispatch_blocked entries land in the right shape.
+    assert "dispatch_blocked" in registry
+    assert "surfaced_to_user" in registry
+
+
+def test_engagements_py_pins_specialist_isolation_invariant():
+    """1C.1 — the per-engagement AGENTS.md/CLAUDE.md helper points at operator instructions. A
+    code comment must record the specialist-isolation invariant so a future change that lands
+    specialists at this cwd does not silently re-introduce the operator-banner leak."""
+    repo_root = Path(__file__).resolve().parents[3]
+    engagements_py = (
+        repo_root / "src" / "ai_threat_hunting_cli" / "engagements.py"
+    ).read_text(encoding="utf-8")
+
+    assert "Specialist context isolation invariant" in engagements_py, (
+        "engagements.py must carry the `Specialist context isolation invariant` comment so "
+        "the per-engagement AGENTS.md/CLAUDE.md seeding rule is documented inline"
+    )
+    # The comment must explicitly point at the specialist wrappers as the carrier of the
+    # forbid-rule, not at the per-engagement bootstrap files.
+    assert "registered wrappers" in engagements_py
+    assert "Do NOT read agent/AGENTS.md" in engagements_py
+
+
 def test_no_dated_engagement_citations_in_methodology():
     """1Z.19 — engagement citations dated 2026-04-2X (e.g., "SSA VDP 2026-04-26",
     "engagement 2026-04-26", "2026-04-24 SSA engagement") must not appear in methodology
@@ -1014,4 +1344,413 @@ def test_no_dated_engagement_citations_in_methodology():
         "Dated engagement citations (2026-04-2X) remain in the methodology corpus. "
         "Strip the provenance and keep the lesson in neutral, timeless prose.\n"
         + "\n".join(offenders)
+    )
+
+
+def test_osint_recon_pins_org_name_pattern_enumeration_section():
+    """1H.3 — osint-recon SKILL.md must carry the org-name pattern enumeration
+    methodology and link to the github-osint reference. Org-name single-name
+    lookups miss sibling orgs; the pattern enumeration section is what keeps the
+    methodology aware of literal-name + parent-name + contractor variants."""
+    repo_root = Path(__file__).resolve().parents[3]
+    skill = (repo_root / "agent" / "skills" / "osint-recon" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Org-name Pattern Enumeration" in skill, (
+        "osint-recon/SKILL.md must carry the `Org-name Pattern Enumeration` heading"
+    )
+    # Each pillar of the enumeration must be present so an agent reading the
+    # skill cannot collapse the methodology back to a single-name lookup.
+    for fragment in (
+        "Variants on the literal org name",
+        "Variants on the parent agency or parent corporation name",
+        "Cross-search public code for discovered org names",
+        "public members and recent commit author emails",
+        "contractor and vendor names",
+    ):
+        assert fragment in skill, (
+            f"osint-recon/SKILL.md missing org-name pattern fragment: {fragment!r}"
+        )
+    assert "agent/references/tools/recon/github-osint.md" in skill, (
+        "osint-recon/SKILL.md must cross-link to the github-osint reference"
+    )
+
+
+def test_osint_recon_pins_exact_version_triangulation_section():
+    """1H.4 — osint-recon SKILL.md must carry the exact-version triangulation
+    methodology (source-map APP_VERSION + sister-package dates + vendor
+    changelog + Sentry release tag), and the source-analysis SKILL must carry
+    the corresponding APP_VERSION extraction grep recipes that feed it."""
+    repo_root = Path(__file__).resolve().parents[3]
+    osint = (repo_root / "agent" / "skills" / "osint-recon" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    source_analysis = (
+        repo_root / "agent" / "skills" / "source-analysis" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    # osint-recon side: the triangulation section names every cross-check.
+    assert "Exact-version Triangulation" in osint, (
+        "osint-recon/SKILL.md must carry the `Exact-version Triangulation` heading"
+    )
+    for fragment in (
+        "Source-map APP_VERSION",
+        "Package registry sister-package publish dates",
+        "Vendor public release notes",
+        "Vendor security bulletins",
+        "Sentry release tag",
+        "registry.npmjs.org",
+        "pypi.org/pypi",
+        "search.maven.org",
+    ):
+        assert fragment in osint, (
+            f"osint-recon/SKILL.md missing exact-version triangulation fragment: {fragment!r}"
+        )
+    assert "agent/references/payloads/version-fingerprint-probes.md" in osint, (
+        "osint-recon/SKILL.md must cross-link to the version-fingerprint-probes payload"
+    )
+
+    # source-analysis side: APP_VERSION / BUILD_HASH / Sentry-release grep recipes.
+    assert "APP_VERSION" in source_analysis, (
+        "source-analysis/SKILL.md must extract APP_VERSION constants"
+    )
+    for fragment in (
+        "BUILD_HASH",
+        "__GIT_SHA__",
+        "Sentry",
+    ):
+        assert fragment in source_analysis, (
+            f"source-analysis/SKILL.md missing version-extraction fragment: {fragment!r}"
+        )
+    assert "agent/skills/osint-recon/SKILL.md" in source_analysis, (
+        "source-analysis/SKILL.md must cross-link back to osint-recon for triangulation"
+    )
+
+
+def test_surface_collection_pins_per_host_url_budget_formula():
+    """1D.2 — surface-collection SKILL.md must carry the per-host URL budget
+    formula (1000 content-rich / 200 API-tier / 2000 sitemap-bearing) and the
+    recovery flow that re-runs gau on a host with --budget-override after a
+    Phase 3 finding warrants follow-up crawl."""
+    repo_root = Path(__file__).resolve().parents[3]
+    skill = (
+        repo_root / "agent" / "skills" / "surface-collection" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Per-host URL Budget" in skill, (
+        "surface-collection/SKILL.md must carry the `Per-host URL Budget` heading"
+    )
+    # The three numeric tiers must be named explicitly so the formula cannot
+    # silently drift.
+    for fragment in (
+        "1000 URLs / host",
+        "200 URLs / host",
+        "2000 URLs / host",
+        "content-rich",
+        "API-tier",
+        "sitemap-bearing",
+        "--budget-override",
+        "deferred:per-host-budget-exceeded",
+    ):
+        assert fragment in skill, (
+            f"surface-collection/SKILL.md missing per-host budget fragment: {fragment!r}"
+        )
+    # Recovery flow must reference dispatch peek (Wave 3 1D.1).
+    assert "dispatch" in skill and "peek" in skill, (
+        "surface-collection/SKILL.md must reference `aith assess dispatch peek` for recovery"
+    )
+
+
+def test_references_index_registers_new_files_for_1h3_and_1h4():
+    """1H.3 + 1H.4 — INDEX.md must register the github-osint and
+    version-fingerprint-probes references so agents can find them via the
+    canonical reference library lookup."""
+    repo_root = Path(__file__).resolve().parents[3]
+    index = (repo_root / "agent" / "references" / "INDEX.md").read_text(encoding="utf-8")
+
+    # 1H.3 — github-osint
+    assert "tools/recon/github-osint.md" in index, (
+        "INDEX.md must register tools/recon/github-osint.md (1H.3)"
+    )
+    # 1H.4 — version-fingerprint-probes
+    assert "payloads/version-fingerprint-probes.md" in index, (
+        "INDEX.md must register payloads/version-fingerprint-probes.md (1H.4)"
+    )
+
+
+def test_osint_analyst_self_check_carries_org_pattern_and_version_triangulation():
+    """1H.3 + 1H.4 — osint-analyst.md must carry the Pre-Output Self-Check
+    items for org-name pattern enumeration AND exact-version triangulation."""
+    repo_root = Path(__file__).resolve().parents[3]
+    text = (repo_root / "agent" / "agents" / "osint-analyst.md").read_text(encoding="utf-8")
+
+    assert "Pre-Output Self-Check" in text, (
+        "osint-analyst.md must carry the `Pre-Output Self-Check` heading"
+    )
+    # 1H.3 self-check
+    assert "Org-name pattern enumeration" in text, (
+        "osint-analyst.md self-check must include Org-name pattern enumeration item (1H.3)"
+    )
+    assert "commit-author emails" in text, (
+        "osint-analyst.md self-check must include commit-author email mining item (1H.3)"
+    )
+    # 1H.4 self-check
+    assert "Exact-version triangulation" in text, (
+        "osint-analyst.md self-check must include Exact-version triangulation item (1H.4)"
+    )
+
+
+def test_source_analyzer_self_check_carries_app_version_extraction():
+    """1H.4 — source-analyzer.md self-check must include the APP_VERSION /
+    BUILD_HASH / Sentry-release extraction step and the handoff to
+    osint-analyst for triangulation."""
+    repo_root = Path(__file__).resolve().parents[3]
+    text = (repo_root / "agent" / "agents" / "source-analyzer.md").read_text(encoding="utf-8")
+
+    assert "APP_VERSION" in text, (
+        "source-analyzer.md self-check must include APP_VERSION extraction item (1H.4)"
+    )
+    assert "Sentry-release" in text or "Sentry release" in text, (
+        "source-analyzer.md self-check must reference Sentry release-tag extraction (1H.4)"
+    )
+    assert "osint-analyst" in text, (
+        "source-analyzer.md self-check must mention the handoff to osint-analyst (1H.4)"
+    )
+
+
+def test_surface_collector_accepts_per_host_budget_override():
+    """1D.2 — surface-collector.md must document accepting `--budget-override`
+    from operator dispatch context."""
+    repo_root = Path(__file__).resolve().parents[3]
+    text = (repo_root / "agent" / "agents" / "surface-collector.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Per-host URL Budget" in text, (
+        "surface-collector.md must document the per-host URL budget"
+    )
+    assert "--budget-override" in text, (
+        "surface-collector.md must accept --budget-override from the operator (1D.2)"
+    )
+
+
+def test_vendor_platform_enum_skill_registered():
+    """1H.1 — `vendor-platform-enum` skill must be registered in the skill index, and the
+    four paired payload references must be listed in the references INDEX. The skill
+    deep-enumerates Salesforce SObjects, ServiceNow GlideRecord rows, Drupal JSON:API
+    entities, and Pexip admin-API namespaces when one read primitive surfaces; without
+    the registration entries, the operator and specialists cannot discover it."""
+    repo_root = Path(__file__).resolve().parents[3]
+    skill_index = (repo_root / "agent" / "SKILL.md").read_text(encoding="utf-8")
+    references_index = (repo_root / "agent" / "references" / "INDEX.md").read_text(
+        encoding="utf-8"
+    )
+    skill_path = (
+        repo_root / "agent" / "skills" / "vendor-platform-enum" / "SKILL.md"
+    )
+    assert skill_path.exists(), (
+        "agent/skills/vendor-platform-enum/SKILL.md must exist as the deep-enum skill (1H.1)"
+    )
+
+    # Skill index registration with paired references list.
+    assert "agent/skills/vendor-platform-enum/SKILL.md" in skill_index, (
+        "agent/SKILL.md must register `vendor-platform-enum` (1H.1)"
+    )
+    for payload in (
+        "salesforce-aura-payloads.md",
+        "servicenow-glide-payloads.md",
+        "drupal-jsonapi-payloads.md",
+        "pexip-admin-api-payloads.md",
+    ):
+        assert payload in skill_index, (
+            f"agent/SKILL.md vendor-platform-enum entry must list `{payload}` as a paired "
+            f"reference (1H.1)"
+        )
+        assert payload in references_index, (
+            f"agent/references/INDEX.md must list `payloads/{payload}` (1H.1)"
+        )
+
+    # Skill body must document the four playbooks plus the IDOR boundedness test that is
+    # the load-bearing severity-decision input.
+    skill_text = skill_path.read_text(encoding="utf-8")
+    assert "Salesforce Aura" in skill_text
+    assert "ServiceNow GlideRecord" in skill_text
+    assert "Drupal JSON:API" in skill_text
+    assert "Pexip" in skill_text
+    assert "bounded-vs-systemic" in skill_text.lower(), (
+        "vendor-platform-enum/SKILL.md must document the bounded-vs-systemic IDOR test (1H.1)"
+    )
+
+
+def test_csp_default_grep_methodology_present():
+    """1H.2 — vendor-template CSP/CORS re-baseline check must appear in web-recon and
+    source-analysis skills (so both recon-specialist and source-analyzer fire it when a
+    vendor product fingerprints), and the csp-default-grep payload reference must be
+    registered in the references INDEX."""
+    repo_root = Path(__file__).resolve().parents[3]
+    web_recon = (repo_root / "agent" / "skills" / "web-recon" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    source_analysis = (
+        repo_root / "agent" / "skills" / "source-analysis" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    references_index = (repo_root / "agent" / "references" / "INDEX.md").read_text(
+        encoding="utf-8"
+    )
+    payload_path = (
+        repo_root / "agent" / "references" / "payloads" / "csp-default-grep.md"
+    )
+    assert payload_path.exists(), (
+        "agent/references/payloads/csp-default-grep.md must exist (1H.2)"
+    )
+
+    # web-recon must carry the vendor-template re-baseline step and reference the payload.
+    assert "Vendor-template CSP/CORS re-baseline" in web_recon, (
+        "web-recon/SKILL.md must add the `Vendor-template CSP/CORS re-baseline` step (1H.2)"
+    )
+    assert "csp-default-grep.md" in web_recon, (
+        "web-recon/SKILL.md must cross-link `csp-default-grep.md` (1H.2)"
+    )
+
+    # source-analysis must carry the vendor-product CSP re-baseline step.
+    assert "Vendor-product CSP / CORS re-baseline" in source_analysis or (
+        "Vendor-product CSP/CORS re-baseline" in source_analysis
+    ), (
+        "source-analysis/SKILL.md must add the vendor-product CSP/CORS re-baseline step (1H.2)"
+    )
+    assert "csp-default-grep.md" in source_analysis, (
+        "source-analysis/SKILL.md must cross-link `csp-default-grep.md` (1H.2)"
+    )
+
+    # Reference registered in INDEX.
+    assert "payloads/csp-default-grep.md" in references_index, (
+        "references/INDEX.md must list `payloads/csp-default-grep.md` (1H.2)"
+    )
+
+    # info-disclosure-testing carries the cross-link.
+    info_disc = (
+        repo_root / "agent" / "skills" / "info-disclosure-testing" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert "csp-default-grep.md" in info_disc, (
+        "info-disclosure-testing/SKILL.md must cross-link `csp-default-grep.md` (1H.2)"
+    )
+
+
+def test_cross_host_tls_san_methodology_present():
+    """1H.5 — multi-time DNS resolution + cross-host SAN collision detection + vhost-cert
+    mismatch must appear in web-recon, the openssl-sans recipe must exist and be
+    registered, port-scanning must cross-link, and subdomain-enumeration must add the
+    `TLS SAN extraction as a primary source` section."""
+    repo_root = Path(__file__).resolve().parents[3]
+    web_recon = (repo_root / "agent" / "skills" / "web-recon" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    port_scanning = (
+        repo_root / "agent" / "skills" / "port-scanning" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    subdomain_enum = (
+        repo_root / "agent" / "skills" / "subdomain-enumeration" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    references_index = (repo_root / "agent" / "references" / "INDEX.md").read_text(
+        encoding="utf-8"
+    )
+    recipe_path = (
+        repo_root / "agent" / "references" / "tools" / "recon" / "openssl-sans.md"
+    )
+    assert recipe_path.exists(), (
+        "agent/references/tools/recon/openssl-sans.md must exist (1H.5)"
+    )
+
+    # web-recon must add the multi-time DNS, cross-host SAN collision, and vhost-mismatch
+    # methodology. The exact loop signature is the load-bearing pin.
+    assert "Multi-time DNS resolution" in web_recon, (
+        "web-recon/SKILL.md must add the `Multi-time DNS resolution` step (1H.5)"
+    )
+    assert "for i in 1 2 3 4 5; do dig +short" in web_recon, (
+        "web-recon/SKILL.md must show the `for i in 1 2 3 4 5; do dig +short ...` "
+        "multi-time DNS loop (1H.5)"
+    )
+    assert "Cross-host SAN collision" in web_recon, (
+        "web-recon/SKILL.md must add the `Cross-host SAN collision` step (1H.5)"
+    )
+    assert "vhost-cert mismatch" in web_recon.lower(), (
+        "web-recon/SKILL.md must add the vhost-cert mismatch step (1H.5)"
+    )
+    assert "openssl-sans.md" in web_recon, (
+        "web-recon/SKILL.md must cross-link `openssl-sans.md` (1H.5)"
+    )
+
+    # port-scanning carries the multi-time DNS cross-link.
+    assert "Multi-time DNS resolution" in port_scanning, (
+        "port-scanning/SKILL.md must add the multi-time DNS cross-link (1H.5)"
+    )
+    assert "openssl-sans.md" in port_scanning, (
+        "port-scanning/SKILL.md must cross-link `openssl-sans.md` (1H.5)"
+    )
+
+    # subdomain-enumeration carries the SAN-as-primary section.
+    assert "TLS SAN extraction as a primary source" in subdomain_enum, (
+        "subdomain-enumeration/SKILL.md must add the `TLS SAN extraction as a primary "
+        "source` section (1H.5)"
+    )
+    assert "openssl-sans.md" in subdomain_enum, (
+        "subdomain-enumeration/SKILL.md must cross-link `openssl-sans.md` (1H.5)"
+    )
+
+    # Reference registered in INDEX.
+    assert "tools/recon/openssl-sans.md" in references_index, (
+        "references/INDEX.md must list `tools/recon/openssl-sans.md` (1H.5)"
+    )
+
+
+def test_recon_specialist_self_check_pins_san_and_dns_items():
+    """1H.5 — recon-specialist.md self-check must include per-host TLS SAN extraction,
+    multi-time DNS resolution, and cross-host SAN collision check items."""
+    repo_root = Path(__file__).resolve().parents[3]
+    text = (repo_root / "agent" / "agents" / "recon-specialist.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Per-host TLS SAN extracted" in text, (
+        "recon-specialist.md self-check must include the per-host TLS SAN extraction "
+        "item (1H.5)"
+    )
+    assert "Multi-time DNS resolution run" in text, (
+        "recon-specialist.md self-check must include the multi-time DNS resolution "
+        "item (1H.5)"
+    )
+    assert "Cross-host SAN collision check run" in text, (
+        "recon-specialist.md self-check must include the cross-host SAN collision check "
+        "item (1H.5)"
+    )
+
+
+def test_source_analyzer_self_check_pins_vendor_deep_enum_and_csp_recheck():
+    """1H.1 + 1H.2 — source-analyzer.md self-check must include the vendor-platform
+    deep-enum playbook trigger and the vendor-template CSP/CORS re-baseline check."""
+    repo_root = Path(__file__).resolve().parents[3]
+    text = (repo_root / "agent" / "agents" / "source-analyzer.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Vendor-platform deep-enum playbook run" in text, (
+        "source-analyzer.md self-check must include the vendor-platform deep-enum "
+        "playbook trigger (1H.1)"
+    )
+    assert "Vendor-template CSP / CORS re-baseline" in text or (
+        "Vendor-template CSP/CORS re-baseline" in text
+    ), (
+        "source-analyzer.md self-check must include the vendor-template CSP/CORS "
+        "re-baseline check (1H.2)"
+    )
+
+
+def test_vulnerability_analyst_self_check_pins_vendor_deep_enum():
+    """1H.1 — vulnerability-analyst.md must include the vendor-platform deep-enum
+    playbook trigger in its Pre-Output self-check."""
+    repo_root = Path(__file__).resolve().parents[3]
+    text = (repo_root / "agent" / "agents" / "vulnerability-analyst.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Vendor-platform deep-enum playbook run" in text, (
+        "vulnerability-analyst.md self-check must include the vendor-platform deep-enum "
+        "playbook trigger (1H.1)"
     )

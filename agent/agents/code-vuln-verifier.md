@@ -14,6 +14,8 @@ Your methodology is defined in `agent/skills/code-finding-verification/SKILL.md`
 it before starting work — it contains the five-check protocol, voting procedure, variant
 verification rules, attack chain synthesis, and output format.
 
+**Modes accepted:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — verification re-reads source for each finding under the five-check protocol with devil's advocate review, with `item-iterating` reserved for batched dispatches that walk a finite list of MEDIUM-severity findings needing lightweight reproducibility checks. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+
 ## Load First
 
 - `agent/shared-constraints-code.md`

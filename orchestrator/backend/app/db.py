@@ -1623,6 +1623,8 @@ def init_db() -> None:
                 last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_tech_components(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, component, version),
@@ -1642,6 +1644,8 @@ def init_db() -> None:
                 source_name TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_people(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, name),
@@ -1660,6 +1664,8 @@ def init_db() -> None:
                 source_name TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_emails(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, address),
@@ -1680,6 +1686,8 @@ def init_db() -> None:
                 live_status TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_domains(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, identity, kind),
@@ -1704,6 +1712,8 @@ def init_db() -> None:
                 linked_finding_slug TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_cves(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, cve_id, affected_component),
@@ -1724,6 +1734,8 @@ def init_db() -> None:
                 source_name TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_dns_records(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, record_type, name, value),
@@ -1744,6 +1756,8 @@ def init_db() -> None:
                 source_name TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_social_profiles(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, subject_kind, subject_ref, platform, handle),
@@ -1763,6 +1777,8 @@ def init_db() -> None:
                 source_name TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_breach_records(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, subject, breach_name),
@@ -1780,6 +1796,8 @@ def init_db() -> None:
                 source_name TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_org_facts(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, fact_key),
@@ -1798,6 +1816,8 @@ def init_db() -> None:
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 source_name TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_notes(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, title),
@@ -2007,6 +2027,34 @@ def init_db() -> None:
             connection.execute(
                 "INSERT INTO activity_entries_fts(activity_entries_fts) VALUES ('rebuild')"
             )
+
+        # Intel supersede migration: each intel_* row may be marked stale when
+        # a newer record displaces it. Report-writer filters on
+        # superseded_by_id IS NULL so historical rows stay queryable for
+        # audit but never appear in the report. Idempotent: re-runs skip
+        # tables that already carry the columns.
+        _INTEL_SUPERSEDE_TABLES: tuple[str, ...] = (
+            "intel_tech_components",
+            "intel_people",
+            "intel_emails",
+            "intel_domains",
+            "intel_cves",
+            "intel_dns_records",
+            "intel_social_profiles",
+            "intel_breach_records",
+            "intel_org_facts",
+            "intel_notes",
+        )
+        for intel_table in _INTEL_SUPERSEDE_TABLES:
+            intel_columns = _table_columns(connection, intel_table)
+            if intel_columns and "superseded_by_id" not in intel_columns:
+                connection.execute(
+                    f"ALTER TABLE {intel_table} ADD COLUMN superseded_by_id INTEGER REFERENCES {intel_table}(id) ON DELETE SET NULL"
+                )
+            if intel_columns and "superseded_at" not in intel_columns:
+                connection.execute(
+                    f"ALTER TABLE {intel_table} ADD COLUMN superseded_at TEXT"
+                )
         # ── End Intel Tables ──────────────────────────────────────
 
         _migrate_legacy_finding_slug_references(connection)

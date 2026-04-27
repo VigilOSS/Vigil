@@ -32,6 +32,12 @@ def db_init(db_path: str) -> None:
     references them. The CREATE TABLE IF NOT EXISTS path is still authoritative
     for fresh DBs; the migration helper is a no-op when the table does not
     exist yet, and a no-op when the columns are already present.
+
+    After executescript runs the schema, also ensure the
+    ``work_items_per_host`` view exists for legacy DBs that pre-date the
+    per-host budget aggregate (1D.2). ``CREATE VIEW IF NOT EXISTS`` in the
+    schema file covers fresh DBs; the helper covers schema-old DBs that have
+    already cached the schema's executescript without re-reading the new view.
     """
     if not Path(db_path).is_file():
         raise SystemExit(f"db_init: database not found: {db_path}")
@@ -43,9 +49,54 @@ def db_init(db_path: str) -> None:
         _apply_work_items_priority_migration(conn)
         schema_sql = _SCHEMA_FILE.read_text(encoding="utf-8")
         conn.executescript(schema_sql)
+        _apply_work_items_per_host_view(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _apply_work_items_per_host_view(conn: sqlite3.Connection) -> None:
+    """Install the per-host aggregate view (1D.2) on legacy DBs.
+
+    Older engagements have ``work_items`` rows but no ``work_items_per_host``
+    view. ``executescript`` already runs the ``CREATE VIEW IF NOT EXISTS``
+    statement from schema.sql, so this helper is the safety net for the case
+    where a custom DB file was created outside the standard schema flow. We
+    only install the view when the ``work_items`` table is present so the
+    helper stays a no-op for non-engagement DBs that may share this lib.
+    """
+    has_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='work_items'"
+    ).fetchone()
+    if not has_table:
+        return
+    has_view = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='view' AND name='work_items_per_host'"
+    ).fetchone()
+    if has_view:
+        return
+    conn.execute(
+        """
+        CREATE VIEW IF NOT EXISTS work_items_per_host AS
+        SELECT
+            CASE
+                WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
+                    THEN lower(substr(
+                        substr(url, instr(url, '://') + 3),
+                        1,
+                        instr(substr(url, instr(url, '://') + 3), '/') - 1
+                    ))
+                ELSE lower(substr(url, instr(url, '://') + 3))
+            END AS host,
+            SUM(CASE WHEN status IN ('pending', 'processing', 'done') THEN 1 ELSE 0 END) AS active_count,
+            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+            SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done_count,
+            SUM(CASE WHEN cluster_key LIKE 'deferred:%' THEN 1 ELSE 0 END) AS deferred_count
+        FROM work_items
+        WHERE url IS NOT NULL AND url != ''
+        GROUP BY host
+        """
+    )
 
 
 def _apply_work_items_priority_migration(conn: sqlite3.Connection) -> None:

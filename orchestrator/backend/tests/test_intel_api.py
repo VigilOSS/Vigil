@@ -579,3 +579,116 @@ def test_unknown_engagement_returns_404(client, isolate_settings):
     assert client.get(f"{base}/summary").status_code == 404
     assert client.get(f"{base}/tech-components").status_code == 404
     assert client.post(f"{base}/notes", json={"title": "x"}).status_code == 404
+
+
+# ──────────────────────────────────────────────────────────────
+# update + supersede + listing filter behavior
+# ──────────────────────────────────────────────────────────────
+
+
+def test_update_intel_patches_existing_row_and_rejects_unknown_field(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "vendor-saas-platform", "version": "1.0.0", "source_name": "wappalyzer"},
+    )
+    assert created.status_code == 201, created.text
+    intel_id = created.json()["id"]
+
+    patched = client.patch(
+        f"{INTEL_BASE}/tech-components/{intel_id}",
+        json={"payload": {"confidence": "confirmed", "notes": "Re-fingerprinted"}},
+    )
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["id"] == intel_id
+    assert body["confidence"] == "confirmed"
+    assert body["notes"] == "Re-fingerprinted"
+
+    # unknown field surfaces as a structured error rather than silently dropping.
+    bad = client.patch(
+        f"{INTEL_BASE}/tech-components/{intel_id}",
+        json={"payload": {"version_label": "x"}},
+    )
+    assert bad.status_code == 400, bad.text
+
+
+def test_supersede_intel_marks_old_row_and_filters_from_list(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "vendor-saas-platform", "version": "1.0.0", "source_name": "wappalyzer"},
+    )
+    assert created.status_code == 201, created.text
+    old_id = created.json()["id"]
+
+    superseded = client.post(
+        f"{INTEL_BASE}/tech-components/{old_id}/supersede",
+        json={
+            "payload": {
+                "component": "vendor-saas-platform",
+                "version": "2.0.0",
+                "source_name": "vulnerability-analyst",
+                "confidence": "confirmed",
+            },
+            "rationale": "Banner re-fingerprinted; version bumped",
+        },
+    )
+    assert superseded.status_code == 201, superseded.text
+    body = superseded.json()
+    assert body["current"]["version"] == "2.0.0"
+    new_id = body["current"]["id"]
+    assert new_id != old_id
+    assert body["superseded"]["superseded_by_id"] == new_id
+    assert body["superseded"]["superseded_at"]
+    assert "[superseded-by id=" in body["superseded"]["notes"]
+
+    # Default list endpoint includes both rows so the UI can render
+    # historical state distinctly.
+    listing = client.get(f"{INTEL_BASE}/tech-components")
+    assert listing.status_code == 200
+    items = listing.json()
+    ids = {row["id"] for row in items}
+    assert ids == {old_id, new_id}
+
+    # The old row is still queryable but flagged.
+    old_row = next(row for row in items if row["id"] == old_id)
+    assert old_row["superseded_by_id"] == new_id
+
+
+def test_supersede_intel_collision_with_natural_key_returns_409(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "vendor-saas-platform", "version": "1.0.0", "source_name": "wappalyzer"},
+    )
+    assert created.status_code == 201, created.text
+    intel_id = created.json()["id"]
+
+    # Same natural key (component, version) → service helper raises 409.
+    collision = client.post(
+        f"{INTEL_BASE}/tech-components/{intel_id}/supersede",
+        json={
+            "payload": {"component": "vendor-saas-platform", "version": "1.0.0"},
+            "rationale": "Wrong call — should have been update-intel",
+        },
+    )
+    assert collision.status_code == 409, collision.text
+
+
+def test_update_intel_unknown_id_returns_404(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    response = client.patch(
+        f"{INTEL_BASE}/tech-components/9999",
+        json={"payload": {"notes": "ghost"}},
+    )
+    assert response.status_code == 404, response.text

@@ -15,6 +15,8 @@ You hunt for bugs that survived every static analysis tool -- multi-function rea
 combinatorial integer issues, incomplete patches, state machine bugs, and error path
 vulnerabilities. You read source code directly, not pre-digested annotations.
 
+**Modes accepted:** `item-iterating`, `deep-manual`. **Default when omitted:** `item-iterating` — vuln hunting walks a bounded file-batch from the analysis queue, with `deep-manual` reserved for a small set of critical functions that need 5–15 messages per function for multi-step taint reasoning. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+
 ## Load First
 
 - `agent/shared-constraints-code.md` -- scope, filesystem access, anti-rationalization rules, finding format

@@ -9,6 +9,8 @@ You own Phase 2 URL collection and intelligent triage. Your job is to turn Phase
 and live/historical URL sources into a prioritized, deduplicated work buffer with attack intelligence
 that guides Phase 3 dispatch ordering.
 
+**Modes accepted:** `item-iterating`, `hypothesis-driven`. **Default when omitted:** `item-iterating` — surface collection processes a finite list of in-scope hosts plus the URL streams Katana/gau emit, with `hypothesis-driven` reserved for triage passes that sample large URL corpora against attack-signal hypotheses. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+
 ## Load First
 
 - `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
@@ -117,6 +119,30 @@ Identify URLs with query parameters that suggest injectable surfaces:
 - Template/render params: `template`, `view`, `render`, `format`
 
 Group by parameter type to inform which vuln-class skills Phase 3 should prioritize.
+
+## Per-host URL Budget
+
+Ingestion enforces a per-host URL budget so a single oversized host (CDN dump,
+deprecated-app sitemap explosion) does not pollute Phase 3 priority for every other
+host. The default budget is 1000 URLs per content-rich host, 200 per API-tier host,
+and 2000 per sitemap-bearing host (full table in
+`agent/skills/surface-collection/SKILL.md` § "Per-host URL Budget"). URLs beyond the
+budget land as `cluster_key=deferred:per-host-budget-exceeded` rather than `pending`,
+so the operator sees them via `aith assess dispatch peek` without losing them.
+
+When the operator's dispatch context includes one or more `--budget-override <host>:<n>`
+overrides, accept them and pass them to `aith assess ingest-endpoints` at ingestion
+time. Use overrides when:
+
+- A host is known to expose thousands of legitimate endpoints (large catalog site,
+  documentation index) and the default 1000-URL budget would truncate genuine surface.
+- A CDN host or marketing host should be capped lower than 1000 because its surface is
+  dominantly static content.
+
+Recovery flow when Phase 3 surfaces a finding on a host that has deferred URLs: the
+operator re-dispatches surface-collector with `--budget-override <host>:<n>` and a
+follow-up gau run for that host. Ingest the new gau output with the override; the
+newly-admitted rows are then re-classified by `aith assess classify-work`.
 
 ## Auth-Aware Collection
 

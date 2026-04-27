@@ -16,14 +16,24 @@ def register(subparsers) -> None:
     p.add_argument("db_path", help="Path to cases.db")
     p.add_argument(
         "action",
-        help="stats|fetch|fetch-by-priority|defer-cluster|done|error|reset-stale|retry-errors|migrate|requeue",
+        help=(
+            "stats|fetch|fetch-by-priority|peek|defer-cluster|defer-items|done|error|"
+            "reset-stale|retry-errors|migrate|requeue"
+        ),
     )
     p.add_argument("extra", nargs="*", help="Action-specific arguments")
     p.add_argument(
         "--reason",
         default="",
-        help="Reason for defer-cluster (required for that action). Free text; "
-        "stored in terminal_reason so operators can audit why a cluster was skipped.",
+        help="Reason for defer-cluster / defer-items (required for those actions). Free text; "
+        "stored in terminal_reason so operators can audit why a cluster or item was skipped.",
+    )
+    p.add_argument(
+        "--by",
+        default="status",
+        choices=("status", "source", "cluster", "host"),
+        help="Group axis for `stats` (default: status). 'cluster' / 'host' / 'source' "
+        "let the operator slice the buffer along the axis that matters for the next dispatch.",
     )
     p.set_defaults(func=run)
 
@@ -36,7 +46,15 @@ def run(args) -> None:
     db_init(db_path)
 
     if action == "stats":
-        _stats(db_path)
+        by = getattr(args, "by", "status") or "status"
+        _stats(db_path, by=by)
+    elif action == "peek":
+        if len(extra) < 1:
+            print("Usage: dispatch <db> peek <type> [limit]", file=sys.stderr)
+            sys.exit(1)
+        peek_type = extra[0]
+        peek_limit = int(extra[1]) if len(extra) > 1 else 10
+        _peek(db_path, peek_type, peek_limit)
     elif action == "fetch":
         if len(extra) < 3:
             print("Usage: dispatch <db> fetch <type> <limit> <agent>", file=sys.stderr)
@@ -66,6 +84,22 @@ def run(args) -> None:
             )
             sys.exit(1)
         _defer_cluster(db_path, extra[0], reason)
+    elif action == "defer-items":
+        if not extra:
+            print(
+                "Usage: dispatch <db> defer-items <id1,id2,...> --reason TEXT",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        reason = (getattr(args, "reason", "") or "").strip()
+        if not reason:
+            print(
+                "defer-items: --reason is required so terminal_reason records why "
+                "the items were deferred; rerun with --reason \"<explanation>\".",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _defer_items(db_path, extra[0], reason)
     elif action == "done":
         if not extra:
             print("Usage: dispatch <db> done <id_list>", file=sys.stderr)
@@ -91,27 +125,162 @@ def run(args) -> None:
     else:
         print(f"Unknown action: {action}", file=sys.stderr)
         print(
-            "Actions: stats, fetch, fetch-by-priority, defer-cluster, done, error, "
-            "reset-stale, retry-errors, migrate, requeue",
+            "Actions: stats, peek, fetch, fetch-by-priority, defer-cluster, "
+            "defer-items, done, error, reset-stale, retry-errors, migrate, requeue",
             file=sys.stderr,
         )
         sys.exit(1)
 
 
-def _stats(db_path: str) -> None:
-    print("--- Work Buffer Statistics ---")
-    rows = db_query(db_path, "SELECT status, type, COUNT(*) as count FROM work_items GROUP BY status, type ORDER BY status, type")
-    for row in rows:
-        print(f"{row['status']}|{row['type']}|{row['count']}")
-    print()
-    print("--- Summary ---")
-    rows = db_query(db_path, "SELECT status, COUNT(*) as count FROM work_items GROUP BY status ORDER BY status")
-    for row in rows:
-        print(f"{row['status']}|{row['count']}")
-    print()
-    rows = db_query(db_path, "SELECT 'TOTAL' as label, COUNT(*) as count FROM work_items")
-    for row in rows:
-        print(f"{row['label']}|{row['count']}")
+def _stats(db_path: str, *, by: str = "status") -> None:
+    """Print work-buffer statistics grouped by ``by``.
+
+    Default (``status``) preserves the legacy three-block output that every
+    operator script and dashboard depends on. Alternative axes (``source``,
+    ``cluster``, ``host``) emit a single grouped block keyed by the chosen
+    axis so the operator can decide which specialist to dispatch next from
+    the same dataset.
+    """
+    if by == "status":
+        print("--- Work Buffer Statistics ---")
+        rows = db_query(
+            db_path,
+            "SELECT status, type, COUNT(*) as count FROM work_items "
+            "GROUP BY status, type ORDER BY status, type",
+        )
+        for row in rows:
+            print(f"{row['status']}|{row['type']}|{row['count']}")
+        print()
+        print("--- Summary ---")
+        rows = db_query(
+            db_path,
+            "SELECT status, COUNT(*) as count FROM work_items GROUP BY status ORDER BY status",
+        )
+        for row in rows:
+            print(f"{row['status']}|{row['count']}")
+        print()
+        rows = db_query(
+            db_path,
+            "SELECT 'TOTAL' as label, COUNT(*) as count FROM work_items",
+        )
+        for row in rows:
+            print(f"{row['label']}|{row['count']}")
+        return
+
+    if by == "source":
+        print("--- Work Buffer by Source ---")
+        rows = db_query(
+            db_path,
+            "SELECT COALESCE(source, '') AS source, status, COUNT(*) as count "
+            "FROM work_items GROUP BY source, status ORDER BY source, status",
+        )
+        for row in rows:
+            label = row["source"] or "(none)"
+            print(f"{label}|{row['status']}|{row['count']}")
+        return
+
+    if by == "cluster":
+        print("--- Work Buffer by Cluster ---")
+        rows = db_query(
+            db_path,
+            "SELECT COALESCE(cluster_key, '') AS cluster_key, status, COUNT(*) as count, "
+            "MAX(priority_score) as max_priority "
+            "FROM work_items GROUP BY cluster_key, status "
+            "ORDER BY max_priority DESC, cluster_key",
+        )
+        for row in rows:
+            label = row["cluster_key"] or "(none)"
+            print(
+                f"{label}|{row['status']}|{row['count']}|max_priority={row['max_priority'] or 0}"
+            )
+        return
+
+    if by == "host":
+        print("--- Work Buffer by Host ---")
+        # url_path stores everything after the host; we extract the host from
+        # the full URL via SQL substring functions so this stays a single
+        # GROUP BY without per-row Python work.
+        rows = db_query(
+            db_path,
+            """
+            SELECT
+                CASE
+                    WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
+                        THEN substr(
+                            substr(url, instr(url, '://') + 3),
+                            1,
+                            instr(substr(url, instr(url, '://') + 3), '/') - 1
+                        )
+                    ELSE substr(url, instr(url, '://') + 3)
+                END AS host,
+                status,
+                COUNT(*) as count
+            FROM work_items
+            WHERE url IS NOT NULL AND url != ''
+            GROUP BY host, status
+            ORDER BY host, status
+            """,
+        )
+        for row in rows:
+            host = row["host"] or "(none)"
+            print(f"{host}|{row['status']}|{row['count']}")
+        return
+
+
+def _peek(db_path: str, type_val: str, limit: int) -> None:
+    """Read-only preview of pending items of the given type.
+
+    Unlike ``fetch``, this leaves the rows in ``pending`` so the operator
+    can inspect them before claiming. Use this when you need to decide
+    whether to ``defer-cluster``, ``defer-items``, or dispatch a
+    specialist.
+    """
+    import sqlite3
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        rows = conn.execute(
+            """
+            SELECT * FROM work_items
+            WHERE status = 'pending' AND type = ?
+            ORDER BY priority_score DESC, cluster_key, id
+            LIMIT ?
+            """,
+            (type_val, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+    print(json.dumps([dict(row) for row in rows], indent=2, ensure_ascii=False))
+
+
+def _defer_items(db_path: str, id_list: str, reason: str) -> None:
+    """Mark specific work-item ids as skipped with a terminal reason.
+
+    Symmetric to ``defer-cluster`` but per-id. Only flips pending rows so a
+    processing dispatch is not clobbered mid-work; rerun ``reset-stale``
+    first if you need to defer in-flight rows.
+    """
+    import sqlite3
+
+    ids = _validate_id_list(id_list)
+    placeholders = ",".join("?" * len(ids))
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        cursor = conn.execute(
+            f"""UPDATE work_items
+                SET status = 'skipped',
+                    terminal_reason = ?
+                WHERE status = 'pending' AND id IN ({placeholders})""",
+            (reason, *ids),
+        )
+        conn.commit()
+        print(
+            f"Deferred {cursor.rowcount} pending item(s): {id_list} (reason: {reason})"
+        )
+    finally:
+        conn.close()
 
 
 def _fetch(db_path: str, type_val: str, limit: int, agent: str) -> None:

@@ -130,6 +130,63 @@ with different parameter values = one work item). Review stats to confirm reason
 counts — if a single source contributed disproportionately, investigate whether dedup
 is working correctly.
 
+### Per-host URL Budget (replaces global URL caps)
+
+The work buffer is bounded per-host, not globally. A single global URL ceiling either
+truncates a sitemap-bearing host that legitimately exposes thousands of pages or fails
+to defer a 50,000-URL CDN dump that pollutes Phase 3 priority for every other host. The
+per-host formula keeps budget proportional to the host's likely attack-surface depth:
+
+| Host class | Budget | Rationale |
+|---|---|---|
+| content-rich hosts (typical web app: HTML pages, blog, marketing content) | **1000 URLs / host** | Default for hosts not matching the API-tier or sitemap-bearing rules. |
+| API-tier hosts (`api.*`, `*.api.example.test`, hosts whose URL surface is mostly endpoints) | **200 URLs / host** | API hosts produce a smaller endpoint surface; Phase 3 testing is method × parameter, not URL × URL. |
+| sitemap-bearing hosts (sitemap.xml provides an explicit upper-bound list) | **2000 URLs / host** | Don't truncate below the sitemap's count; the sitemap is the host's own declaration of canonical surface. |
+
+Operator override: pass `--budget-override <host>:<n>` on the dispatch context when a
+specific host needs a non-default cap (a host known to expose thousands of legitimate
+endpoints, or a CDN host that should be capped lower than 1000). Surface-collector
+honors the override at ingestion time; URLs beyond the budget land as
+`cluster_key=deferred:per-host-budget-exceeded` rather than `pending`, so the operator
+sees them in `aith assess dispatch peek` output without polluting the work-buffer
+priority queue.
+
+#### Recovery flow when a Phase 3 finding warrants more budget
+
+When Phase 3 testing produces a finding on host X and the operator wants follow-up crawl
+for adjacent surface, re-run gau against X with an increased budget instead of leaving
+the deferred surplus untouched:
+
+1. Inspect the deferred bucket: `aith assess dispatch "$DB" peek deferred:per-host-budget-exceeded 50` (Wave 3 1D.1's `dispatch peek` lands the read-only preview).
+2. Re-run gau for the host with a wider scope: `aith assess kali gau X --subs --threads 5 ... -o /engagements/$ENGAGEMENT_KEY/scans/gau_<host>_followup.txt --technique DISCOVERY --intent "follow-up gau on host X after Phase 3 finding" --probe-kind fingerprint --phase consume-test --timeout 1800`.
+3. Re-ingest with the override: pipe the new gau output into `aith assess ingest-endpoints` and pass `--budget-override <host>:<n>` so the new URLs admit beyond the default cap.
+4. Re-run `aith assess classify-work` to score the newly-admitted rows before the next dispatch.
+
+#### Egress-blocked hosts
+
+A host that responds to every probe with HTTP 403 (CDN-IP-blocked egress) belongs in a
+`deferred` cluster with `terminal_reason=egress-blocked, see CDN-IP playbook` and a
+cross-link to `agent/references/runtime-guides/cdn-ip-blocking.md`. The egress-blocked
+deferral path is owned by W4a-1; per-host budget enforcement here coexists with that
+deferral by adding distinct ingestion-time functions rather than reshaping the existing
+egress-blocked path.
+
+#### Newly-discovered hosts post-OSINT
+
+Subdomain enumeration deltas and Phase 1 OSINT discoveries that surface a new host
+AFTER initial ingestion MUST receive their own gau pass — surface-collector cannot
+skip them on the assumption that initial collection was exhaustive. A new host
+inherits the default per-host budget and is ingested through the standard path.
+
+#### Admin / internal / config URL preservation under egress block
+
+When historical gau discovers admin / internal / config paths on a host that is
+currently egress-blocked, save those URLs as intel-notes via
+`aith assess record-intel note` even though the live work item lands in the
+deferred bucket. The path patterns themselves reveal target-environment exposure
+(staging hostnames, internal-tooling routes, config endpoints) and feed the report
+narrative even when live testing is blocked.
+
 ### Step 6: Intelligent Triage
 
 This is the core value-add over the previous operator-orchestrated pipeline. After

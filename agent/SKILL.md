@@ -47,6 +47,10 @@ Read `agent/shared-constraints.md` first, then select from this index.
   **Use when:** Gathering CVEs, public disclosures, DNS exposure, org intel, or historical breach data.
   **Paired references:** _(web-sourced; no local payload files)_
 
+- `agent/skills/vendor-platform-enum/SKILL.md`
+  **Use when:** A single vendor-platform read primitive surfaces (Salesforce SObject, ServiceNow GlideRecord row, Drupal JSON:API entity, Pexip admin-API namespace) — the same dispatch must run the matching deep-enum playbook before returning, because stopping at the first leak misses the full anonymous-readable namespace.
+  **Paired references:** `references/payloads/salesforce-aura-payloads.md`, `references/payloads/servicenow-glide-payloads.md`, `references/payloads/drupal-jsonapi-payloads.md`, `references/payloads/pexip-admin-api-payloads.md`
+
 - `agent/skills/athena-log-investigation/SKILL.md`
   **Use when:** Logs are available after exploit work and you need to check for prior exploitation evidence.
   **Paired references:** _(environment-specific; consult operator for log source)_

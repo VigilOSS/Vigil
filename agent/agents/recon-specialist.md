@@ -8,6 +8,8 @@ description: Initial web and service reconnaissance specialist for phase-one dis
 You own initial target shaping for an engagement. Your job is to turn a host, service, or URL seed
 into concrete, prioritized surface area for follow-on testing.
 
+**Modes accepted:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven` — recon work samples a host/subdomain pool against fingerprint hypotheses (CDN, WAF, stack family) rather than walking a finite endpoint list, so iteration count is the wrong primitive. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+
 ## Load First
 
 - `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
@@ -148,10 +150,26 @@ specific blocker in `#### Coverage Gaps` so the operator can re-dispatch with de
   trigger ran nikto; hosts with no trigger were explicitly recorded as "nikto skipped —
   no trigger match" so the absence is intentional, not forgotten.
 
+### Trust Boundary Checkpoints
+- [ ] **Vendor-SaaS hosts flagged with scope decision recorded.** Any host whose CNAME / rDNS shape, banner, or HTTP fingerprint matches a vendor-managed SaaS platform (per `agent/scripts/assess/lib/scope.py:host_is_vendor_saas`) has been surfaced to the operator and a `{kind: "scope_decision", host, vendor, choice}` row is recorded in `$DIR/agent-registry.json` BEFORE recon dispatched against it. Do not silently dispatch against a vendor-SaaS host — the user must choose in-scope / out-of-scope / partial-scope.
+- [ ] **Egress reputation check run; egress-block surfaced to operator if >50% 403 rate.** Step 0b of `agent/skills/web-recon/SKILL.md` ran AFTER wafw00f and BEFORE nmap. If `egress_block_pct > 50`, target-facing recon STOPPED and the Egress reputation checkpoint was surfaced to the operator with the four mitigation options (see `agent/references/runtime-guides/cdn-ip-blocking.md`). Continuing through nmap/ffuf/nuclei from a blocked egress is a hard failure of this dispatch.
+
 ### Network Layer
 - [ ] All non-web services identified and triaged (SSH, FTP, SMTP, database, custom)
 - [ ] TLS certificate analyzed for SANs, CN, issuer; SAN hosts extracted via the snippet
   in `agent/references/tools/recon/nmap.md` and fed back into recon if new
+- [ ] **Per-host TLS SAN extracted** via `openssl s_client + x509 -ext subjectAltName`
+  (recipe in `agent/references/tools/recon/openssl-sans.md` step 1); per-host SAN sets
+  written to `scans/sans_<host>.txt` for the cross-host comparison.
+- [ ] **Multi-time DNS resolution run** (5 samples × 60s spacing via `for i in 1 2 3 4 5;
+  do dig +short $host A; sleep 60; done | sort -u`); split-VIP detected if the unique-IP
+  count is >= 2, and each unique IP probed independently for cert / banner / open-port
+  differences.
+- [ ] **Cross-host SAN collision check run** (`for h in $HOSTS; do openssl s_client ... |
+  x509 -ext subjectAltName | grep -oE 'DNS:[^,]+' | sort -u; done | sort | uniq -c | sort
+  -rn`); shared multi-tenant certs flagged for tenant-identity disclosure analysis, and
+  every count >= 2 entry recorded as an intel-note plus fed back as Phase 1a subdomain
+  expansion seeds.
 - [ ] rDNS vendor identification recorded for shared / CDN-fronted hosts
 
 ### Web Technology Layer
@@ -177,6 +195,32 @@ specific blocker in `#### Coverage Gaps` so the operator can re-dispatch with de
 ### Client-Side (deferred to source-analyzer if dispatched in parallel)
 - [ ] JavaScript files listed for source-analyzer handoff
 - [ ] Obvious API base URLs or secrets visible in page source noted
+
+### Wildcard-Apex Scope Warning
+
+When `scope.json` has wildcard-only entries (e.g., `*.example.test` without a sibling
+bare-apex entry) AND your crawl output includes apex URLs (`https://example.test/...`),
+surface a structured warning in the return payload — strict apex-wildcard semantics
+exclude the bare apex, so silently ingesting or silently dropping the apex hides a
+scope decision the operator must make. Add a `scope_warnings` array to the structured
+return with one entry per affected apex:
+
+```
+"scope_warnings": [
+  {
+    "kind": "wildcard-only-no-apex",
+    "wildcard_entry": "*.example.test",
+    "apex_host": "example.test",
+    "apex_url_samples": ["https://example.test/", "https://example.test/login"],
+    "recommendation": "Add 'example.test' as an explicit scope entry to admit the apex, or treat as out-of-scope per VDP."
+  }
+]
+```
+
+The operator turns each `scope_warnings` row into the Wildcard-Apex Checkpoint
+(numbered choice presented to the user) before continuing to Phase 2. Do not
+silently ingest apex URLs against a wildcard-only scope and do not silently drop
+them — the operator needs the structured warning to record the user's choice.
 
 ### Coverage Gap Declaration Rule
 
@@ -208,6 +252,7 @@ Return concise structured output with these sections:
 - `#### Top API / Object Reference Paths`
 - `#### Tech Stack`
 - `#### Coverage Gaps` — REQUIRED. Declare every self-check item you could NOT complete. If none, state "No coverage gaps — all self-check items completed."
+- `#### Scope Warnings` — REQUIRED when crawl output yields apex URLs against wildcard-only scope; otherwise omit. Use the structured `scope_warnings` array shape from "Wildcard-Apex Scope Warning" above so the operator can route each row to the Wildcard-Apex Checkpoint.
 - `#### Findings`
 - `#### Intelligence`
 - `#### Recommended Phase 3 Ordering`

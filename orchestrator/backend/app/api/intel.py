@@ -23,12 +23,29 @@ from .intel_schemas import (
     EmailRecordRequest,
     IntelByUrlResponse,
     IntelSummaryResponse,
+    IntelSupersedeRequest,
+    IntelUpdateRequest,
     NoteRecordRequest,
     OrgFactRecordRequest,
     PersonRecordRequest,
     SocialProfileRecordRequest,
     TechComponentRecordRequest,
 )
+
+
+# Map URL plural segment -> CLI/type slug used by services.intel helpers.
+_INTEL_TYPE_BY_PLURAL: dict[str, str] = {
+    "tech-components": "tech-component",
+    "people": "person",
+    "emails": "email",
+    "domains": "domain",
+    "cves": "cve",
+    "dns-records": "dns-record",
+    "social-profiles": "social-profile",
+    "breach-records": "breach-record",
+    "org-facts": "org-fact",
+    "notes": "note",
+}
 
 
 router = APIRouter(prefix="/engagements/{engagement_key}/intel", tags=["intel"])
@@ -333,3 +350,63 @@ async def create_note(engagement_key: str, request: NoteRecordRequest) -> dict[s
     )
     await _broadcast(engagement.key, "note", record)
     return record
+
+
+# ── PATCH + supersede ──────────────────────────────────────
+
+
+def _resolve_intel_plural(intel_type_plural: str) -> str:
+    intel_type = _INTEL_TYPE_BY_PLURAL.get(intel_type_plural)
+    if not intel_type:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"unknown intel type segment '{intel_type_plural}'",
+        )
+    return intel_type
+
+
+@router.patch("/{intel_type_plural}/{intel_id}")
+async def patch_intel_record(
+    engagement_key: str,
+    intel_type_plural: str,
+    intel_id: int,
+    request: IntelUpdateRequest,
+) -> dict[str, Any]:
+    """In-place patch on an intel row by id.
+
+    The body shape is ``{"payload": {...}}`` so the agent CLI can stream a
+    raw JSON object as ``payload`` without conflating it with route-level
+    metadata. Field-level validation lives in the service helper.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    intel_type = _resolve_intel_plural(intel_type_plural)
+    record = intel_service.update_intel(engagement.id, intel_type, intel_id, request.payload)
+    await _broadcast(engagement.key, intel_type.replace("-", "_"), record)
+    return record
+
+
+@router.post("/{intel_type_plural}/{intel_id}/supersede", status_code=status.HTTP_201_CREATED)
+async def supersede_intel_record(
+    engagement_key: str,
+    intel_type_plural: str,
+    intel_id: int,
+    request: IntelSupersedeRequest,
+) -> dict[str, Any]:
+    """Insert a replacement intel row and mark the old row as superseded.
+
+    Returns ``{"superseded": {...}, "current": {...}}`` so callers can render
+    both rows side-by-side without a second fetch.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    intel_type = _resolve_intel_plural(intel_type_plural)
+    result = intel_service.supersede_intel(
+        engagement.id,
+        intel_type,
+        intel_id,
+        request.payload,
+        rationale=request.rationale,
+    )
+    await _broadcast(engagement.key, intel_type.replace("-", "_"), result.get("current", {}))
+    return result

@@ -241,6 +241,18 @@ Return to the operator:
 - Cap body storage at 1 MB per response via httpx `-response-size-to-save`
 - No speculative findings — reproduce the hit before recording
 
+## Per-host Budget Interaction
+
+GAU corpora are per-host by construction (a single gau invocation pulls historical URLs for
+one domain at a time). When the corpus exceeds the host's budget configured in
+`agent/skills/surface-collection/SKILL.md` § "Per-host URL Budget" (1000 content-rich /
+200 API-tier / 2000 sitemap-bearing), surplus URLs admit to
+`cluster_key=deferred:per-host-budget-exceeded` rather than `pending`. The Step 4 cluster
+manifest should still surface the deferred set under `proposed_defers` so the operator can
+audit which clusters were deferred for budget rather than for low signal — those are
+candidates for the recovery flow (re-run gau with `--budget-override <host>:<n>` when a
+Phase 3 finding warrants follow-up crawl on that host).
+
 ## Extended Resources
 
 - `agent/references/INDEX.md` (GF Pattern Library section) — per-bucket reference library with load conditions, parameter keys, weights, and examples
@@ -248,5 +260,5 @@ Return to the operator:
 - `agent/references/tools/recon/gf.md` — gf load order, gf-before-uro rule
 - `agent/references/tools/recon/httpx.md` — httpx body storage and rate tuning
 - `agent/references/tools/recon/gau.md` — gau (upstream source for the corpus this skill triages)
-- `agent/skills/surface-collection/SKILL.md` — Phase 2 collection upstream of this skill (gau-triage is a follow-up pass)
+- `agent/skills/surface-collection/SKILL.md` — Phase 2 collection upstream of this skill (gau-triage is a follow-up pass) and per-host URL budget formula (1000 content-rich / 200 API-tier / 2000 sitemap-bearing)
 - `agent/skills/sensitive-data-detection/SKILL.md` — ad-hoc body/secret scanning for single responses (not bulk corpora)
