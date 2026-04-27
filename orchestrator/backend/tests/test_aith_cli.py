@@ -8,6 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -599,10 +600,9 @@ def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pyte
     assert "--pids-limit=1024" in run_command
     assert "--shm-size=2g" in run_command
     assert "--oom-score-adj=-500" in run_command
-    nofile_idx = run_command.index("nofile=131072:131072")
-    assert run_command[nofile_idx - 1] == "--ulimit"
-    nproc_idx = run_command.index("nproc=16384")
-    assert run_command[nproc_idx - 1] == "--ulimit"
+    # nofile/nproc rlimits live in /etc/security/limits.d/aith.conf inside the
+    # image. The Dockerfile contract test in test_runtime_tooling_contract.py
+    # asserts the substrings; docker exec children read the limits at start.
 
 
 def test_aith_runtime_resources_renders_configured_and_live_state(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1241,3 +1241,599 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
     up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=lambda *args, **kwargs: None)
 
     assert calls[:3] == ["runtime", "orchestrator", "frp-prompt"]
+
+
+# ---------------------------------------------------------------------------
+# Wave 3 W3-B mutation-helper coverage
+# ---------------------------------------------------------------------------
+
+
+def _load_assess_main():
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.cli import main as assess_main  # type: ignore[import-not-found]
+
+    return assess_main
+
+
+def _seed_dispatch_db(db_path: Path, rows: list[dict[str, object]]) -> None:
+    """Insert synthetic work_items rows for dispatch / list-clusters tests."""
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.lib.db import db_init  # type: ignore[import-not-found]
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.touch()
+    db_init(str(db_path))
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for row in rows:
+            conn.execute(
+                """INSERT INTO work_items
+                (queue_key, method, url, url_path, query_params, body_params,
+                 type, source, status, priority_score, cluster_key, terminal_reason)
+                VALUES (?, ?, ?, ?, '{}', '{}', ?, 'test', ?, ?, ?, ?)""",
+                (
+                    row["queue_key"],
+                    row.get("method", "GET"),
+                    row["url"],
+                    row.get("url_path", "/"),
+                    row.get("type", "api"),
+                    row.get("status", "pending"),
+                    row.get("priority_score", 0),
+                    row.get("cluster_key"),
+                    row.get("terminal_reason"),
+                ),
+            )
+            if "id" in row:
+                conn.execute(
+                    "UPDATE work_items SET id = ? WHERE queue_key = ?",
+                    (row["id"], row["queue_key"]),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_resolve_surface_requires_rationale(capsys: pytest.CaptureFixture[str]) -> None:
+    """P1 #2: --rationale is required so the audit trail is never empty."""
+    assess_main = _load_assess_main()
+    with pytest.raises(SystemExit):
+        assess_main(["resolve-surface", "1", "--status", "covered"])
+    err = capsys.readouterr().err
+    assert "--rationale" in err
+
+
+def test_resolve_surface_rejects_empty_rationale(capsys: pytest.CaptureFixture[str]) -> None:
+    """P1 #2: --rationale='' surfaces an early error before HTTP."""
+    assess_main = _load_assess_main()
+    with pytest.raises(SystemExit) as exc:
+        assess_main(["resolve-surface", "1", "--status", "covered", "--rationale", "   "])
+    assert "--rationale must be non-empty" in (str(exc.value) or "")
+
+
+def test_resolve_surface_lowercases_status(capsys: pytest.CaptureFixture[str]) -> None:
+    """P3 #1: --status is case-insensitive and rejected by argparse choices when invalid."""
+    assess_main = _load_assess_main()
+    # Mixed-case input parses to lowercase via type=lambda.
+    with pytest.raises(SystemExit):
+        assess_main(["resolve-surface", "1", "--status", "BOGUS", "--rationale", "x"])
+    err = capsys.readouterr().err
+    assert "invalid choice" in err.lower() or "invalid choice" in str(err)
+
+
+def test_resolve_surface_partially_covered_requires_followup_condition(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """N7 — `--status partially-covered` without `--followup-condition` exits with a clear error."""
+    assess_main = _load_assess_main()
+    with pytest.raises(SystemExit) as exc:
+        assess_main(
+            [
+                "resolve-surface",
+                "1",
+                "--status",
+                "partially-covered",
+                "--rationale",
+                "unauth path tested",
+            ]
+        )
+    message = str(exc.value) or ""
+    assert "--followup-condition" in message
+    assert "partially-covered" in message
+
+
+def test_resolve_surface_accepts_partially_covered_with_followup_condition(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """N7 — argparse round-trip: `partially-covered` with a follow-up condition parses
+    cleanly and the payload reaches the backend client with `followup_condition`."""
+    module = _load_assess_module(
+        "round3_resolve_surface_module",
+        "agent/scripts/assess/commands/resolve_surface.py",
+    )
+
+    captured: dict[str, dict] = {}
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def patch(self, path: str, payload: dict) -> dict:
+            captured["path"] = path
+            captured["payload"] = payload
+            return {"id": 42, "status": payload["status"], **payload}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(tmp_path),
+            engagement_key="eng-test",
+            agent_root=str(tmp_path),
+        ),
+    )
+
+    module.run(
+        SimpleNamespace(
+            surface_id=42,
+            status="partially-covered",
+            rationale="unauth path tested",
+            source_name="",
+            evidence_ref="",
+            followup_condition="needs auth re-test",
+            engagement_dir=str(tmp_path),
+        )
+    )
+
+    assert captured["path"] == "surfaces/42"
+    assert captured["payload"]["status"] == "partially-covered"
+    assert captured["payload"]["followup_condition"] == "needs auth re-test"
+
+
+def _load_assess_module(name: str, relative: str):
+    """Load an assess CLI submodule by relative path so tests can call ``module.run`` directly."""
+    import importlib.util
+
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    module_path = repo_root / relative
+    spec = importlib.util.spec_from_file_location(name, module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run_dispatch_action(db_path: Path, action: str, extra: list[str] | None = None, reason: str = "") -> None:
+    module = _load_assess_module(
+        "wave3_dispatch_module",
+        "agent/scripts/assess/commands/dispatch.py",
+    )
+    module.run(
+        SimpleNamespace(
+            db_path=str(db_path),
+            action=action,
+            extra=list(extra or []),
+            reason=reason,
+            by="status",
+        )
+    )
+
+
+def _run_list_clusters_action(
+    db_path: Path,
+    status: str = "pending",
+    limit: int = 100,
+    host: str = "",
+) -> None:
+    module = _load_assess_module(
+        "wave3_list_clusters_module",
+        "agent/scripts/assess/commands/list_clusters.py",
+    )
+    module.run(
+        SimpleNamespace(
+            db_path=str(db_path),
+            status=status,
+            limit=limit,
+            host=host,
+        )
+    )
+
+
+def test_dispatch_defer_items_accepts_multiple_positional_ids(tmp_path: Path) -> None:
+    """P1 #10: defer-items must affect every id, not just extra[0]."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(
+        db,
+        [
+            {"queue_key": "q:1", "url": "https://target.example/a", "id": 1},
+            {"queue_key": "q:2", "url": "https://target.example/b", "id": 2},
+            {"queue_key": "q:3", "url": "https://target.example/c", "id": 3},
+        ],
+    )
+
+    _run_dispatch_action(db, "defer-items", ["1", "2", "3"], reason="low signal")
+
+    rows = sqlite3.connect(str(db)).execute(
+        "SELECT id, status, terminal_reason FROM work_items ORDER BY id"
+    ).fetchall()
+    assert [(r[0], r[1]) for r in rows] == [(1, "skipped"), (2, "skipped"), (3, "skipped")]
+    assert all(r[2] == "low signal" for r in rows)
+
+
+def test_dispatch_defer_items_accepts_comma_separated(tmp_path: Path) -> None:
+    """P1 #10: comma form still works alongside the multi-positional form."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(
+        db,
+        [
+            {"queue_key": "q:1", "url": "https://target.example/a", "id": 10},
+            {"queue_key": "q:2", "url": "https://target.example/b", "id": 11},
+        ],
+    )
+
+    _run_dispatch_action(db, "defer-items", ["10,11"], reason="noise")
+
+    rows = sqlite3.connect(str(db)).execute(
+        "SELECT status FROM work_items ORDER BY id"
+    ).fetchall()
+    assert [r[0] for r in rows] == ["skipped", "skipped"]
+
+
+def test_dispatch_defer_items_with_no_ids_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P1 #10: empty / pure-comma id input must abort instead of silently no-op."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(db, [])
+
+    with pytest.raises(SystemExit):
+        _run_dispatch_action(db, "defer-items", [], reason="x")
+    err = capsys.readouterr().err
+    assert "Usage" in err or "id" in err.lower()
+
+
+def test_dispatch_defer_items_pure_comma_string_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P3 #15: a pure-comma id_list (e.g. ',') must abort instead of silently no-op."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(db, [])
+
+    with pytest.raises(SystemExit):
+        _run_dispatch_action(db, "defer-items", [","], reason="x")
+    err = capsys.readouterr().err
+    assert "at least one numeric ID" in err
+
+
+def test_dispatch_defer_items_zero_rows_exits_nonzero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P2 #11: zero matched rows must surface an error so a typo isn't a silent success."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(
+        db,
+        [
+            {"queue_key": "q:1", "url": "https://target.example/a", "id": 1, "status": "done"},
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        _run_dispatch_action(db, "defer-items", ["1"], reason="x")
+    err = capsys.readouterr().err
+    assert "no pending items matched" in err
+
+
+def test_dispatch_done_marks_every_id(tmp_path: Path) -> None:
+    """P1 #10: done must update all ids, not just the first one in `extra`."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(
+        db,
+        [
+            {"queue_key": "q:1", "url": "https://target.example/a", "id": 1, "status": "processing"},
+            {"queue_key": "q:2", "url": "https://target.example/b", "id": 2, "status": "processing"},
+        ],
+    )
+
+    _run_dispatch_action(db, "done", ["1", "2"])
+
+    rows = sqlite3.connect(str(db)).execute("SELECT status FROM work_items ORDER BY id").fetchall()
+    assert [r[0] for r in rows] == ["done", "done"]
+
+
+def test_dispatch_peek_invalid_limit_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P3 #12: a non-integer peek limit prints a clean usage line instead of a stacktrace."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(db, [])
+    with pytest.raises(SystemExit):
+        _run_dispatch_action(db, "peek", ["api", "abc"])
+    err = capsys.readouterr().err
+    assert "must be an integer" in err
+
+
+def test_dispatch_fetch_by_priority_warns_when_only_non_routable_pending(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P2 #14: pending rows in non-routable types must surface a stderr WARN."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(
+        db,
+        [
+            {
+                "queue_key": "img:1",
+                "url": "https://target.example/logo.png",
+                "id": 1,
+                "type": "image",
+                "status": "pending",
+            },
+        ],
+    )
+
+    _run_dispatch_action(db, "fetch-by-priority", ["10", "auto"])
+
+    captured = capsys.readouterr()
+    assert "WARN fetch-by-priority" in captured.err
+    assert "image" in captured.err
+
+
+def test_list_clusters_host_filter_matches_full_population(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P1 #25: --host considers ALL items per cluster, not just the first 5 samples."""
+    db = tmp_path / "cases.db"
+    rows = []
+    # Cluster A: 6 items on other-host.com, then 1 on target.example (sample window covers
+    # only the first 5 by priority — the legacy implementation would miss target.example).
+    for i in range(6):
+        rows.append(
+            {
+                "queue_key": f"a:{i}",
+                "url": f"https://other-host.com/x{i}",
+                "id": i + 1,
+                "cluster_key": "alpha",
+                "priority_score": 100 - i,
+                "type": "api",
+            }
+        )
+    rows.append(
+        {
+            "queue_key": "a:target",
+            "url": "https://target.example/important",
+            "id": 100,
+            "cluster_key": "alpha",
+            "priority_score": 1,
+            "type": "api",
+        }
+    )
+    # Cluster B: only on other-host.com.
+    rows.append(
+        {
+            "queue_key": "b:1",
+            "url": "https://other-host.com/y",
+            "id": 200,
+            "cluster_key": "beta",
+            "priority_score": 50,
+            "type": "api",
+        }
+    )
+    _seed_dispatch_db(db, rows)
+
+    _run_list_clusters_action(db, host="target.example")
+    payload = json.loads(capsys.readouterr().out)
+    cluster_keys = [c["cluster_key"] for c in payload["clusters"]]
+    assert "alpha" in cluster_keys
+    assert "beta" not in cluster_keys
+
+
+def test_list_clusters_host_filter_supports_wildcard(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Bonus #26: '*.example.com' fnmatches subdomains, exact 'example.com' does not."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(
+        db,
+        [
+            {
+                "queue_key": "a:1",
+                "url": "https://api.example.com/v1",
+                "id": 1,
+                "cluster_key": "alpha",
+                "priority_score": 10,
+            },
+            {
+                "queue_key": "a:2",
+                "url": "https://example.com/",
+                "id": 2,
+                "cluster_key": "beta",
+                "priority_score": 5,
+            },
+        ],
+    )
+
+    _run_list_clusters_action(db, host="*.example.com")
+    payload = json.loads(capsys.readouterr().out)
+    cluster_keys = [c["cluster_key"] for c in payload["clusters"]]
+    assert "alpha" in cluster_keys
+    assert "beta" not in cluster_keys
+
+    # Exact apex match excludes subdomain-only clusters.
+    _run_list_clusters_action(db, host="example.com")
+    payload = json.loads(capsys.readouterr().out)
+    cluster_keys = [c["cluster_key"] for c in payload["clusters"]]
+    assert "beta" in cluster_keys
+    assert "alpha" not in cluster_keys
+
+
+def test_supersede_intel_partial_payload_passes_client_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2 #5: a partial payload (no natural-key fields) must clear the client-side validator.
+
+    We monkeypatch the HTTP client and config loader so the test never reaches
+    the network and just asserts the schema-validation gate accepted the
+    partial payload before dispatching the request.
+    """
+    supersede_module = _load_assess_module(
+        "wave3_supersede_intel_module",
+        "agent/scripts/assess/commands/supersede_intel.py",
+    )
+
+    captured: dict[str, object] = {}
+
+    class _StubClient:
+        _engagement_prefix = "/engagements/test"
+
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def _request(self, method: str, path: str, body: bytes | None = None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["body"] = body
+            return 200, json.dumps({"id": 5, "validation_status": "exploited"})
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(supersede_module, "AssessmentClient", _StubClient)
+    monkeypatch.setattr(
+        supersede_module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(tmp_path),
+            engagement_key="eng-test",
+            agent_root=str(tmp_path),
+        ),
+    )
+
+    supersede_module.run(
+        SimpleNamespace(
+            intel_type="cve",
+            intel_id=5,
+            payload=None,
+            inline_payload='{"validation_status":"exploited"}',
+            rationale="post-validation",
+            engagement_dir=str(tmp_path),
+        )
+    )
+
+    assert captured["method"] == "POST"
+    assert "/intel/cves/5/supersede" in str(captured["path"])
+
+
+def test_validate_dispatch_contract_accepts_minimal_payload(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P3 #31: the validator returns OK for a contract with every required field set."""
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "vulnerability-analyst",
+        "model": "claude-opus-4-7",
+        "files_allowed": ["agent/agents/vulnerability-analyst.md"],
+        "files_forbidden": ["agent/CLAUDE.md", "agent/AGENTS.md"],
+        "permission": "passive-probe",
+        "command_budget": 25,
+        "output": "#### Findings",
+        "dispatch_mode": "item-iterating",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assess_main(["validate-dispatch-contract", str(contract_path)])
+    assert "OK" in capsys.readouterr().out
+
+
+def test_validate_dispatch_contract_rejects_unknown_permission(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P3 #31: unknown permission values surface as errors so the contract fails closed."""
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "vulnerability-analyst",
+        "model": "claude-opus-4-7",
+        "files_allowed": [],
+        "files_forbidden": [],
+        "permission": "godmode",
+        "command_budget": 5,
+        "output": "#### Findings",
+        "dispatch_mode": "item-iterating",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        assess_main(["validate-dispatch-contract", str(contract_path)])
+    err = capsys.readouterr().err
+    assert "permission" in err and "godmode" in err
+
+
+def test_validate_dispatch_contract_warns_on_overlap(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P3 #31: files_allowed ∩ files_forbidden is a warning, not a hard error."""
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "vulnerability-analyst",
+        "model": "claude-opus-4-7",
+        "files_allowed": ["agent/CLAUDE.md"],
+        "files_forbidden": ["agent/CLAUDE.md", "agent/AGENTS.md"],
+        "permission": "artifact-only",
+        "command_budget": 0,
+        "output": "#### Findings",
+        "dispatch_mode": "deep-manual",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assess_main(["validate-dispatch-contract", str(contract_path)])
+    captured = capsys.readouterr()
+    assert "OK" in captured.out
+    assert "WARN" in captured.err and "overlap" in captured.err
+
+
+def test_actor_kind_warn_on_non_log_subcommand(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P3 #33: passing --actor-kind to a subcommand that doesn't consume it warns on stderr."""
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "vulnerability-analyst",
+        "model": "claude-opus-4-7",
+        "files_allowed": [],
+        "files_forbidden": [],
+        "permission": "artifact-only",
+        "command_budget": 0,
+        "output": "#### Findings",
+        "dispatch_mode": "deep-manual",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assess_main(
+        [
+            "--actor-kind",
+            "operator",
+            "validate-dispatch-contract",
+            str(contract_path),
+        ]
+    )
+    err = capsys.readouterr().err
+    assert "--actor-kind=operator ignored" in err

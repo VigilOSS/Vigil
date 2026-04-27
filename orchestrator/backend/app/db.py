@@ -744,6 +744,7 @@ def init_db() -> None:
                 rationale TEXT NOT NULL DEFAULT '',
                 evidence_ref TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'discovered',
+                followup_condition TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, surface_type, target_descriptor),
@@ -751,6 +752,14 @@ def init_db() -> None:
             )
             """
         )
+        # Additive migration for existing deployments that predate the
+        # ``partially-covered`` lifecycle state and its companion
+        # ``followup_condition`` column.
+        surface_columns = _table_columns(connection, "assessment_surfaces")
+        if surface_columns and "followup_condition" not in surface_columns:
+            connection.execute(
+                "ALTER TABLE assessment_surfaces ADD COLUMN followup_condition TEXT NOT NULL DEFAULT ''"
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS assessment_findings (
@@ -1711,6 +1720,7 @@ def init_db() -> None:
                 validation_status TEXT NOT NULL DEFAULT 'unverified',
                 linked_finding_slug TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
+                details_json TEXT NOT NULL DEFAULT '{}',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
                 superseded_by_id INTEGER REFERENCES intel_cves(id) ON DELETE SET NULL,
                 superseded_at TEXT,
@@ -1721,6 +1731,14 @@ def init_db() -> None:
             )
             """
         )
+        # Additive migration for existing deployments — adds details_json so
+        # validation_status='attempted_blocked' rows can persist their
+        # ``block_reason`` and any future structured detail field.
+        cve_columns = _table_columns(connection, "intel_cves")
+        if cve_columns and "details_json" not in cve_columns:
+            connection.execute(
+                "ALTER TABLE intel_cves ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}'"
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS intel_dns_records (
@@ -2033,6 +2051,13 @@ def init_db() -> None:
         # superseded_by_id IS NULL so historical rows stay queryable for
         # audit but never appear in the report. Idempotent: re-runs skip
         # tables that already carry the columns.
+        #
+        # Wrapped in ``BEGIN IMMEDIATE`` + commit/rollback so the 20 ALTER
+        # statements either all succeed or all roll back. Mid-loop failure
+        # (disk full, FK constraint mismatch on ALTER REFERENCES) used to
+        # leave the schema split-brain — half the intel_* tables carrying the
+        # supersede columns and half not — which made downstream code paths
+        # unsafe to run.
         _INTEL_SUPERSEDE_TABLES: tuple[str, ...] = (
             "intel_tech_components",
             "intel_people",
@@ -2045,16 +2070,29 @@ def init_db() -> None:
             "intel_org_facts",
             "intel_notes",
         )
-        for intel_table in _INTEL_SUPERSEDE_TABLES:
-            intel_columns = _table_columns(connection, intel_table)
-            if intel_columns and "superseded_by_id" not in intel_columns:
-                connection.execute(
-                    f"ALTER TABLE {intel_table} ADD COLUMN superseded_by_id INTEGER REFERENCES {intel_table}(id) ON DELETE SET NULL"
-                )
-            if intel_columns and "superseded_at" not in intel_columns:
-                connection.execute(
-                    f"ALTER TABLE {intel_table} ADD COLUMN superseded_at TEXT"
-                )
+        # Flush any implicit Python-sqlite3 transaction before starting an
+        # explicit BEGIN IMMEDIATE — Python's sqlite3 driver opens a deferred
+        # txn on first DML, and a manual BEGIN inside that txn raises
+        # ``cannot start a transaction within a transaction``. Committing
+        # first releases the implicit txn cleanly.
+        if connection.in_transaction:
+            connection.commit()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            for intel_table in _INTEL_SUPERSEDE_TABLES:
+                intel_columns = _table_columns(connection, intel_table)
+                if intel_columns and "superseded_by_id" not in intel_columns:
+                    connection.execute(
+                        f"ALTER TABLE {intel_table} ADD COLUMN superseded_by_id INTEGER REFERENCES {intel_table}(id) ON DELETE SET NULL"
+                    )
+                if intel_columns and "superseded_at" not in intel_columns:
+                    connection.execute(
+                        f"ALTER TABLE {intel_table} ADD COLUMN superseded_at TEXT"
+                    )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
         # ── End Intel Tables ──────────────────────────────────────
 
         _migrate_legacy_finding_slug_references(connection)

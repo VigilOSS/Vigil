@@ -6,15 +6,34 @@ For live engagement targets, run cero via `aith assess kali cero` (typed verb, a
 
 **Where it lives:** `/usr/local/bin/cero` in `runtime-full` (`go install github.com/glebarez/cero@latest` — see `agent/docker/runtime-full/Dockerfile`).
 
+## Wrapper flag mapping (read first)
+
+The typed wrapper exposes targets via `--target` / `--domain` (single domain or CIDR) and `-l` / `--input-list` (file of domains/CIDRs piped to cero on stdin). The wrapper does **not** bind argparse `-d` to the target argument because cero's native `-d` flag is a toggle (filter results to valid domain names only), not a target argument. The toggle is exposed as `--only-domains`. Reach for `-l` whenever your target list is in a file; reach for `--target` for a single ad-hoc host.
+
 ## Resource-safe invocation (Phase 3 TLS SAN feedback loop)
 
-The high-value pattern is asnmap → cero. Feed an asnmap-derived CIDR range into cero with default ports and concurrency=100; the runtime image ships these defaults.
+The high-value pattern is asnmap → cero. Feed an asnmap-derived CIDR file into cero with default ports and concurrency=100; the runtime image ships these defaults.
 
 ```bash
-aith assess kali cero -d /engagements/$ENGAGEMENT_KEY/scans/target_cidrs.txt \
+# File-input form (asnmap → cero feedback loop)
+aith assess kali cero -l /engagements/$ENGAGEMENT_KEY/scans/target_cidrs.txt \
   -p 443,8443,9443 -c 100 -t 4 \
   -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans.txt \
   --technique OSINT --intent "TLS SAN scrape across asnmap-derived CIDRs" \
+  --probe-kind fingerprint --phase recon --timeout 600
+
+# Single-target form
+aith assess kali cero --target 198.51.100.0/24 \
+  -p 443,8443,9443 -c 100 -t 4 \
+  -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans_single.txt \
+  --technique OSINT --intent "TLS SAN scrape on single CIDR" \
+  --probe-kind fingerprint --phase recon --timeout 600
+
+# --only-domains toggle (cero -d): filter results to valid domain names
+aith assess kali cero -l /engagements/$ENGAGEMENT_KEY/scans/target_cidrs.txt \
+  --only-domains -p 443 \
+  -o /engagements/$ENGAGEMENT_KEY/scans/cero_domain_sans.txt \
+  --technique OSINT --intent "TLS SAN scrape, domain-name results only" \
   --probe-kind fingerprint --phase recon --timeout 600
 ```
 

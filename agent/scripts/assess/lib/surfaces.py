@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 # Mutable statuses for by-id resolution. ``discovered`` is the seed state
-# only; agents resolve to one of the three terminal states below.
+# only; agents resolve to ``covered``, ``not_applicable``, ``deferred``, or
+# ``partially-covered`` (when a coverage pass partially completed and a
+# follow-up condition is recorded).
 RESOLVABLE_STATUSES = frozenset({
     "covered",
     "not_applicable",
     "deferred",
+    "partially-covered",
 })
 
 VALID_SURFACE_TYPES = frozenset({
@@ -25,6 +28,7 @@ VALID_STATUSES = frozenset({
     "covered",
     "not_applicable",
     "deferred",
+    "partially-covered",
 })
 
 

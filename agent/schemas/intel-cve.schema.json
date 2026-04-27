@@ -61,8 +61,10 @@
       "enum": [
         "unverified",
         "version_match",
-        "ruled_out",
-        "exploited"
+        "poc_available_unverified",
+        "attempted_blocked",
+        "exploited",
+        "ruled_out"
       ],
       "default": "unverified"
     },
@@ -76,6 +78,18 @@
       "type": "string",
       "maxLength": 4096,
       "default": ""
+    },
+    "details": {
+      "type": "object",
+      "additionalProperties": true,
+      "default": {},
+      "properties": {
+        "block_reason": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Required when validation_status='attempted_blocked' — names the WAF/IPS/runtime block that prevented validation."
+        }
+      }
     },
     "provenance": {
       "type": "object",
@@ -93,17 +107,51 @@
         },
         "evidence_quote": {
           "type": "string"
-        },
-        "superseded_by_id": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "minimum": 1,
-          "default": null,
-          "description": "Backend id of the intel row that superseded this one. Set automatically by `aith assess supersede-intel`; report-writer filters on this so stale rows do not appear in reports."
         }
       }
+    },
+    "superseded_by_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "default": null,
+      "description": "Backend id of the intel row that superseded this one. Set automatically by `aith assess supersede-intel`; report-writer filters on this so stale rows do not appear in reports."
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "validation_status": {
+            "const": "attempted_blocked"
+          }
+        },
+        "required": [
+          "validation_status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "details": {
+            "type": "object",
+            "required": [
+              "block_reason"
+            ],
+            "properties": {
+              "block_reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              }
+            }
+          }
+        },
+        "required": [
+          "details"
+        ]
+      }
+    }
+  ]
 }

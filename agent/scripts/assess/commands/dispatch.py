@@ -53,13 +53,13 @@ def run(args) -> None:
             print("Usage: dispatch <db> peek <type> [limit]", file=sys.stderr)
             sys.exit(1)
         peek_type = extra[0]
-        peek_limit = int(extra[1]) if len(extra) > 1 else 10
+        peek_limit = _safe_int_arg(extra[1], "limit") if len(extra) > 1 else 10
         _peek(db_path, peek_type, peek_limit)
     elif action == "fetch":
         if len(extra) < 3:
             print("Usage: dispatch <db> fetch <type> <limit> <agent>", file=sys.stderr)
             sys.exit(1)
-        _fetch(db_path, extra[0], int(extra[1]), extra[2])
+        _fetch(db_path, extra[0], _safe_int_arg(extra[1], "limit"), extra[2])
     elif action == "fetch-by-priority":
         if len(extra) < 1:
             print(
@@ -67,7 +67,11 @@ def run(args) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        _fetch_by_priority(db_path, int(extra[0]), extra[1] if len(extra) > 1 else "auto")
+        _fetch_by_priority(
+            db_path,
+            _safe_int_arg(extra[0], "limit"),
+            extra[1] if len(extra) > 1 else "auto",
+        )
     elif action == "defer-cluster":
         if not extra:
             print(
@@ -87,7 +91,8 @@ def run(args) -> None:
     elif action == "defer-items":
         if not extra:
             print(
-                "Usage: dispatch <db> defer-items <id1,id2,...> --reason TEXT",
+                "Usage: dispatch <db> defer-items <id> [<id> ...] --reason TEXT\n"
+                "       dispatch <db> defer-items <id1,id2,...> --reason TEXT",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -99,24 +104,24 @@ def run(args) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        _defer_items(db_path, extra[0], reason)
+        _defer_items(db_path, extra, reason)
     elif action == "done":
         if not extra:
-            print("Usage: dispatch <db> done <id_list>", file=sys.stderr)
+            print("Usage: dispatch <db> done <id> [<id> ...]", file=sys.stderr)
             sys.exit(1)
-        _done(db_path, extra[0])
+        _done(db_path, extra)
     elif action == "error":
         if not extra:
-            print("Usage: dispatch <db> error <id_list>", file=sys.stderr)
+            print("Usage: dispatch <db> error <id> [<id> ...]", file=sys.stderr)
             sys.exit(1)
-        _error(db_path, extra[0])
+        _error(db_path, extra)
     elif action == "reset-stale":
         if not extra:
             print("Usage: dispatch <db> reset-stale <minutes>", file=sys.stderr)
             sys.exit(1)
-        _reset_stale(db_path, int(extra[0]))
+        _reset_stale(db_path, _safe_int_arg(extra[0], "minutes"))
     elif action == "retry-errors":
-        max_retries = int(extra[0]) if extra else 2
+        max_retries = _safe_int_arg(extra[0], "max_retries") if extra else 2
         _retry_errors(db_path, max_retries)
     elif action == "migrate":
         pass  # db_init already ran
@@ -199,12 +204,14 @@ def _stats(db_path: str, *, by: str = "status") -> None:
         print("--- Work Buffer by Host ---")
         # url_path stores everything after the host; we extract the host from
         # the full URL via SQL substring functions so this stays a single
-        # GROUP BY without per-row Python work.
+        # GROUP BY without per-row Python work. Schemeless URLs (instr(url,
+        # '://') = 0) bucket under 'unknown' instead of slicing into the path.
         rows = db_query(
             db_path,
             """
             SELECT
                 CASE
+                    WHEN instr(url, '://') = 0 THEN 'unknown'
                     WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
                         THEN substr(
                             substr(url, instr(url, '://') + 3),
@@ -254,12 +261,22 @@ def _peek(db_path: str, type_val: str, limit: int) -> None:
     print(json.dumps([dict(row) for row in rows], indent=2, ensure_ascii=False))
 
 
-def _defer_items(db_path: str, id_list: str, reason: str) -> None:
+def _safe_int_arg(value: str, name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        print(f"ERROR: {name} must be an integer (got '{value}')", file=sys.stderr)
+        sys.exit(1)
+
+
+def _defer_items(db_path: str, id_list, reason: str) -> None:
     """Mark specific work-item ids as skipped with a terminal reason.
 
     Symmetric to ``defer-cluster`` but per-id. Only flips pending rows so a
     processing dispatch is not clobbered mid-work; rerun ``reset-stale``
-    first if you need to defer in-flight rows.
+    first if you need to defer in-flight rows. When zero rows match, exit
+    non-zero so an operator typo (or stale id list) does not look like a
+    successful defer.
     """
     import sqlite3
 
@@ -276,8 +293,19 @@ def _defer_items(db_path: str, id_list: str, reason: str) -> None:
             (reason, *ids),
         )
         conn.commit()
+        affected = cursor.rowcount
+        ids_repr = ",".join(str(i) for i in ids)
+        if affected == 0:
+            print(
+                f"defer-items: no pending items matched the given ids "
+                f"(already processed or invalid?): {ids_repr}\n"
+                f"  note: items in 'processing'/'done'/'skipped' are not affected; "
+                f"run reset-stale before defer if you need to flip in-flight rows.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(
-            f"Deferred {cursor.rowcount} pending item(s): {id_list} (reason: {reason})"
+            f"Deferred {affected} pending item(s): {ids_repr} (reason: {reason})"
         )
     finally:
         conn.close()
@@ -312,6 +340,7 @@ def _fetch(db_path: str, type_val: str, limit: int, agent: str) -> None:
 _VULN_ANALYST_TYPES = ("api", "api-spec", "form", "upload", "graphql", "websocket")
 _SOURCE_ANALYZER_TYPES = ("page", "javascript", "stylesheet", "data")
 _ROUTED_TYPES = _VULN_ANALYST_TYPES + _SOURCE_ANALYZER_TYPES
+_SKIP_TYPES = ("image", "font", "media", "binary", "archive", "unknown")
 
 
 def _agent_route(agent: str) -> tuple[str, ...] | None:
@@ -402,6 +431,25 @@ def _fetch_by_priority(db_path: str, limit: int, agent: str) -> None:
                 r.get("id") or 0,
             ),
         )
+        if not result:
+            non_routable = conn.execute(
+                """SELECT type, COUNT(*) as count
+                   FROM work_items
+                   WHERE status = 'pending' AND terminal_reason IS NULL
+                   GROUP BY type""",
+            ).fetchall()
+            non_routable_pairs = [
+                (row["type"], row["count"]) for row in non_routable if row["type"] not in allowed_types
+            ]
+            if non_routable_pairs:
+                total = sum(count for _, count in non_routable_pairs)
+                types_summary = ", ".join(f"{t}={c}" for t, c in non_routable_pairs)
+                print(
+                    f"WARN fetch-by-priority: queue has {total} pending item(s) "
+                    f"but all are in non-routable types ({types_summary}); "
+                    f"routable types are: {', '.join(allowed_types)}.",
+                    file=sys.stderr,
+                )
         print(json.dumps(result, indent=2, ensure_ascii=False))
     finally:
         conn.close()
@@ -433,23 +481,46 @@ def _defer_cluster(db_path: str, cluster_key: str, reason: str) -> None:
         conn.close()
 
 
-def _validate_id_list(id_list: str) -> list[int]:
-    """Validate and parse comma-separated ID list."""
-    import re
-    if not re.match(r"^[0-9,]+$", id_list):
-        print("ERROR: id_list must contain only numeric IDs separated by commas", file=sys.stderr)
+def _validate_id_list(id_list) -> list[int]:
+    """Parse and validate IDs given as a comma-separated string OR a list of tokens.
+
+    Accepts either ``"1,2,3"``, ``["1", "2", "3"]``, or mixed forms like
+    ``["1,2", "3"]``. Pure-comma strings (``","``) and empty inputs raise so a
+    typo doesn't silently turn into a no-op UPDATE.
+    """
+    if isinstance(id_list, (list, tuple)):
+        tokens: list[str] = []
+        for entry in id_list:
+            tokens.extend(str(entry).split(","))
+    else:
+        tokens = str(id_list).split(",")
+    cleaned = [token.strip() for token in tokens if token.strip()]
+    if not cleaned:
+        print(
+            "ERROR: id_list must contain at least one numeric ID (got empty/comma-only input)",
+            file=sys.stderr,
+        )
         sys.exit(1)
-    return [int(x) for x in id_list.split(",") if x]
+    ids: list[int] = []
+    for token in cleaned:
+        if not token.isdigit():
+            print(
+                f"ERROR: id_list must contain only numeric IDs (got '{token}')",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        ids.append(int(token))
+    return ids
 
 
-def _done(db_path: str, id_list: str) -> None:
+def _done(db_path: str, id_list) -> None:
     ids = _validate_id_list(id_list)
     placeholders = ",".join("?" * len(ids))
     db_exec(db_path, f"UPDATE work_items SET status='done' WHERE id IN ({placeholders})", tuple(ids))
-    print(f"Marked done: {id_list}")
+    print(f"Marked done: {','.join(str(i) for i in ids)}")
 
 
-def _error(db_path: str, id_list: str) -> None:
+def _error(db_path: str, id_list) -> None:
     ids = _validate_id_list(id_list)
     placeholders = ",".join("?" * len(ids))
     db_exec(
@@ -457,7 +528,7 @@ def _error(db_path: str, id_list: str) -> None:
         f"UPDATE work_items SET status='error', retry_count = COALESCE(retry_count,0) + 1 WHERE id IN ({placeholders})",
         tuple(ids),
     )
-    print(f"Marked error: {id_list}")
+    print(f"Marked error: {','.join(str(i) for i in ids)}")
 
 
 def _reset_stale(db_path: str, minutes: int) -> None:

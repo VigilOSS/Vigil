@@ -77,7 +77,11 @@ shared-runtime processes. The Kali runtime is shared infrastructure across
 parallel specialists, so a broad signal by binary name kills sibling agents'
 work — losing potentially hours of recon. The audit pipeline already
 cascades SIGTERM→SIGKILL into the in-container PID on timeout, so manual
-cleanup is rarely needed; when it is, kill by tracked PID only.
+cleanup is rarely needed; when it is, **PID-targeted kill is OK** — `kill
+-TERM <pid>` against a tracked, in-container PID only signals your own
+process, not siblings. The forbidden pattern is the *binary-name* selector
+(`pkill -f nmap`, `killall nuclei`); the safe pattern is the *PID*
+selector (`kill -TERM "$(cat /tmp/aith-pid-<run_uuid>)"`).
 
 What to do instead — track the lifecycle of every process you spawn and stop
 only the one you started:
@@ -447,3 +451,83 @@ Never pass JSON as an inline shell argument.
 These follow the same backend-first principle as finding recording. Do not defer chain or credential
 recording to the operator. The agent that proves the state writes it; the operator verifies it landed in
 canonical backend state and avoids writing duplicate rows.
+
+---
+
+## 11. Kali Artifact Paths
+
+Engagement artifacts live at one physical location on disk but have two names depending on where the command runs.
+
+- **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR`. Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local file work, `aith assess` calls, and any script running on the host.
+- **Kali side** — `/engagements/$ENGAGEMENT_KEY` is the same directory via the bind mount managed by `aith runtime start`. Launchers also export `ENGAGEMENT_KEY` (the basename of `$DIR`) so commands inside the runtime can resolve it.
+- **`aith assess kali ...` invocations MUST reference paths as `/engagements/$ENGAGEMENT_KEY/...`** in their command argv — the host path `$DIR` is not valid inside the container, and writing to `/tmp` or `/data` for engagement-scoped artifacts loses them outside the shared-infra conventions.
+
+---
+
+## 12. Listener URL Contract
+
+Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are operator-controlled (see §2a). The dispatch context delivers their URLs through two well-known files:
+
+- `$DIR/.listener_url` — present when the operator has provisioned a reverse-shell listener / tunnel address. Read it to learn where shells should call back.
+- `$DIR/.oob_url` — present when the operator has provisioned an interactsh server. Read it to embed an OOB callback host in payloads.
+
+Agents READ these files (never write). When `.oob_url` is missing, fall back to time-based detection and note the substitution in your output. When `.listener_url` is missing and exploitation needs one, record a blocked technique via `aith assess post blocked-techniques <json-file>` instead of attempting to bind a port yourself.
+
+Hit-checking and log paths (`/data/oob/clients/<name>.log`, `/data/oob/server.log`, `/data/shell-*.log`, `/data/oob/frpc.log`) are documented in `agent/references/offensive-tactics/frp-tunneling.md` and `agent/references/offensive-tactics/shell-handling.md`. Read them via `aith assess kali exec -- cat /data/<log-path>` so the read is audit-recorded.
+
+---
+
+## 13. Intel Recording Rules
+
+When your output includes `#### Intelligence`, the operator translates each row into a structured JSON payload matching the relevant `schemas/intel-*.schema.json` and records it via:
+
+```
+aith assess record-intel <type> <json-file>
+```
+
+Valid `<type>` values: `tech-component`, `person`, `email`, `domain`, `cve`, `dns-record`, `social-profile`, `breach-record`, `org-fact`, `note`.
+
+Run `aith assess contract record-intel <type>` before authoring the JSON — intel schemas are strict (`additionalProperties=false`) and reject guessed aliases like `source` when the schema says `source_name`.
+
+The backend deduplicates per-engagement on natural keys: tech stack on Component (+ Version), people on Name, emails on Address, domains on Identity + Kind, CVEs on `cve_id`. Credentials live in the assessment domain (`assessment_credentials`); use `aith assess post credentials`, not `record-intel`.
+
+Prose intel that doesn't fit a structured row goes to `record-intel note` — it is FTS-indexed and engagement-scoped.
+
+---
+
+## 14. Per-Target Rate Calibration Table
+
+Operators set per-target rate calibration before dispatch; specialists pull values from this table rather than guessing. Vendor names appear as **trait-match examples**, not canonical categories — pick the row on the trait, not the brand.
+
+| Target trait | nmap profile | dir-fuzz rate | nuclei | DNS brute (puredns rl) | concurrent nmap procs |
+|---|---|---|---|---|---|
+| Cloud-fronted (any major CDN/edge — examples: Cloudflare, Akamai, Fastly, CloudFront) | `-T3 --max-rate 100` | 50–100 req/s | `--rate-limit 100-150 -bs 25 -c 25` | 800 (polite-CDN-fronted-target) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
+| Origin / single-server (no CDN, no WAF) | `-T2 --max-rate 30` | 5–10 req/s | `--rate-limit 30 -bs 10 -c 10` | 2500 (polite-residential) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
+| WAF-protected (any vendor WAF tier — Cloudflare WAF, Akamai App & API, F5 ASM, AWS WAF, Imperva) | `-T2 --max-rate 30` | 1–3 req/s | `--rate-limit 30 -bs 10 -c 10` | 800 (polite-CDN-fronted-target) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
+| High-friction policy / regulated (`.gov`, `.mil`, finance, healthcare) | `-T2 --max-rate 50 --host-timeout 1500s` | ≤2 req/s | `--rate-limit 30 -bs 10 -c 10` | 800 (polite-CDN-fronted-target) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
+| Vendor SaaS (e.g., Salesforce, ServiceNow, StatusPage, Auth0, Okta) | `-T3 --max-rate 60` | 20 req/s | `--rate-limit 60 -bs 15 -c 15` | 800 (polite-CDN-fronted-target — vendor-controlled DNS, lower rate) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
+
+The DNS-brute column matches the canonical SKILL profile names in `agent/skills/subdomain-enumeration/SKILL.md` "Docker-resource-safe profiles". Available profiles per runtime tier (read `aith runtime resources` to confirm the active tier):
+
+| Runtime tier | `polite-CDN-fronted-target` (cautious 800) | `polite-residential` (2500) | `bursty-OK` (5000) |
+|---|---|---|---|
+| Standard | available | available | NOT available |
+| Heavy | available | available | available (opt-in via `--intent`) |
+| Comfortable | available | available | available (default-eligible for trait rows that allow it) |
+
+`bursty-OK` is never the matrix default; selection requires an explicit operator note in `--intent`.
+
+The "concurrent nmap procs" column scales with the runtime tier: Standard = 2, Heavy = 4, Comfortable = 8. Consolidation is the rule — prefer one `nmap -iL hosts.txt` over N parallel `nmap host` invocations (see `agent/skills/port-scanning/SKILL.md` "Process consolidation"); the cap governs split-by-profile parallel sweeps when consolidation is genuinely impractical.
+
+---
+
+## 15. File Organization
+
+| Type | Directory |
+|------|-----------|
+| Downloaded pages/JS/CSS | downloads/ |
+| Scan output | scans/ |
+| Custom scripts/exploits | tools/ |
+| Background PIDs | pids/ |
+
+Root: `scope.json`, `report.md`, `auth.json`, and the transient worker buffer only. Activity log and intel live in the orchestrator backend — query via `aith assess fetch activity-entries` and `aith assess list-intel`.

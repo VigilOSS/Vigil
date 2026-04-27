@@ -45,9 +45,9 @@ Resource Policy" — the values in this section pull from that table.
 ### 2. Quick Initial Scan
 ```bash
 aith assess kali nmap-scan --target TARGET \
-  --scan-type top-1000 --scripts safe \
+  --ports top-1000 --scripts safe \
   --extra-args "-Pn -T3 --max-rate 200 --max-retries 2 --host-timeout 300s" \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_initial \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_initial \
   --technique RECON --intent "initial top-1000 + safe scripts at cautious rate (CDN/WAF-fronted)" \
   --probe-kind fingerprint --phase recon --timeout 900
 # -Pn: skip host discovery (required when ICMP is blocked by firewall)
@@ -55,21 +55,21 @@ aith assess kali nmap-scan --target TARGET \
 
 ### 3. Full TCP Scan
 ```bash
-aith assess kali nmap-scan --target TARGET --scan-type full-tcp \
+aith assess kali nmap-scan --target TARGET --ports full \
   --extra-args "-Pn -T3 --max-rate 200" \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_full_tcp \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_full_tcp \
   --technique RECON --intent "full-port TCP at cautious rate (CDN/WAF-fronted)" \
   --probe-kind fingerprint --phase recon --timeout 1800
 # Speed optimization: discover ports first, then deep scan
-aith assess kali nmap-scan --target TARGET --scan-type ports-only \
-  --extra-args "-Pn -sS -T3 --min-rate 500" \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/ports_only \
+aith assess kali nmap-scan --target TARGET --ports full --scan-type sS \
+  --extra-args "-Pn -T3 --min-rate 500" \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/ports_only \
   --technique RECON --intent "ports-only sweep before targeted -sV" \
   --probe-kind fingerprint --phase recon --timeout 1800
 PORTS=$(grep -oE '[0-9]+/open' /engagements/$ENGAGEMENT_KEY/scans/ports_only.gnmap | cut -d/ -f1 | tr '\n' ',' | sed 's/,$//')
-aith assess kali nmap-scan --target TARGET --scan-type targeted --ports "$PORTS" \
-  --extra-args "-Pn -sV -sC -T3" \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_targeted \
+aith assess kali nmap-scan --target TARGET --ports "$PORTS" --scan-type sV \
+  --extra-args "-Pn -sC -T3" \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_targeted \
   --technique RECON --intent "service detection on discovered open ports" \
   --probe-kind fingerprint --phase recon --timeout 1800
 ```
@@ -81,10 +81,11 @@ profile. The per-host port-data assertion below catches host-timeout failures ac
 batch:
 
 ```bash
-aith assess kali nmap-scan --input-list /engagements/$ENGAGEMENT_KEY/scans/in_scope_hosts.txt \
-  --scan-type top-1000 --scripts safe \
+aith assess kali nmap-scan --target placeholder \
+  -iL /engagements/$ENGAGEMENT_KEY/scans/in_scope_hosts.txt \
+  --ports top-1000 --scripts safe \
   --extra-args "-Pn -T3 --max-rate 200 --max-retries 2 --host-timeout 300s" \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_batch \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_batch \
   --technique RECON --intent "multi-host nmap batch at cautious rate (CDN/WAF-fronted)" \
   --probe-kind fingerprint --phase recon --timeout 3600
 ```
@@ -97,24 +98,11 @@ pattern.
 
 ### 5. Process consolidation
 
-Prefer one nmap process scanning multiple hosts via `-iL hosts.txt` over N parallel
-`nmap host` invocations. Nmap's parallelism is **internal**: `--max-parallelism`,
-`--min-parallelism`, and the `-T<n>` template tune host-and-port concurrency without
-spawning extra processes. Spawning N nmap processes amplifies host CPU per port without
-proportional speedup, and creates N audit rows that look like progress while actually
-competing for the same network/CPU budget.
+Use `-iL hosts.txt` rather than N parallel `nmap host` invocations. Nmap's parallelism is internal: `--max-parallelism`, `--min-parallelism`, and `-T<n>` tune host-and-port concurrency without spawning extra processes. Per-host loops amplify CPU without proportional speedup and create N audit rows that compete for the same network budget.
 
-Concurrency cap (across all dispatches sharing the runtime): **2 concurrent nmap processes
-maximum**. If two specialists need to scan disjoint host sets in parallel, each runs **one**
-consolidated `-iL` invocation, not a per-host loop.
+Split-by-profile parallel sweeps are allowed up to the runtime-tier cap (Standard 2 / Heavy 4 / Comfortable 8 — read `aith runtime resources`) when two disjoint scan profiles run against the same host list. If you need to split work across specialists for context-window reasons, split the host list into N files and run one `-iL` per specialist — never N per-host invocations.
 
-When you have a long host list, batch by `-iL` and let nmap's internal parallelism work; if
-you need to split work across two specialists for context-window reasons, split the host LIST
-into two files and run one `-iL` per specialist. Never split a list into N per-host invocations.
-
-The full per-target consolidation rule and the rate-calibration cross-reference live in
-`agent/operator-core.md` "Recon Dispatch Resource Policy" — the policy's "concurrent nmap
-procs" column is the operator-side enforcement of this rule.
+The trait-row table that drives the cap lives in `agent/shared-constraints.md` "Per-Target Rate Calibration Table"; tier-pick prose is in `agent/operator-core.md` "Recon Dispatch Resource Policy".
 
 ### 6. Per-host port-data presence assertion (mandatory before declaring batch complete)
 
@@ -150,9 +138,9 @@ Hosts that the assertion flags as gaps fall into two categories:
 1. **Local rate / WAF intercept** — re-queue the host at the slower retry profile:
    `-T2 --host-timeout 1500-1800s` (or `-sT` if upstream filtering rejects SYN scans):
    ```bash
-   aith assess kali nmap-scan --target $hostname --scan-type top-1000 \
+   aith assess kali nmap-scan --target $hostname --ports top-1000 \
      --extra-args "-Pn -sT -T2 --max-retries 3 --host-timeout 1800s" \
-     --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_retry_$hostname \
+     -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_retry_$hostname \
      --technique RECON --intent "slow retry on host-timeout flagged by port-data assertion" \
      --probe-kind fingerprint --phase recon --timeout 2400
    ```
@@ -242,9 +230,9 @@ the edge often produce false positives.
 
 ### 9. Service Detection
 ```bash
-aith assess kali nmap-scan --target TARGET --scan-type targeted --ports "PORT1,PORT2" \
-  --extra-args "-sV --version-intensity 5" \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_versions \
+aith assess kali nmap-scan --target TARGET --ports "PORT1,PORT2" --scan-type sV \
+  --extra-args "--version-intensity 5" \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_versions \
   --technique RECON --intent "deep version detection on suspect ports" \
   --probe-kind fingerprint --phase recon --timeout 600
 
@@ -257,37 +245,37 @@ aith assess kali exec --technique RECON --intent "nc banner grab" \
 ### 10. Script Scanning
 ```bash
 aith assess kali nmap-scan --target TARGET --scripts vuln \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_vuln \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_vuln \
   --technique RECON --intent "vuln NSE category" \
   --probe-kind payload --phase recon --timeout 1800
 aith assess kali nmap-scan --target TARGET --scripts http-enum --ports 80,443 \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_http_enum \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_http_enum \
   --technique RECON --intent "http-enum NSE on web ports" \
   --probe-kind fingerprint --phase recon --timeout 600
 aith assess kali nmap-scan --target TARGET --scripts smb-enum-shares,smb-enum-users --ports 445 \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_smb_enum \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_smb_enum \
   --technique RECON --intent "SMB enumeration NSE" \
   --probe-kind fingerprint --phase recon --timeout 600
 aith assess kali nmap-scan --target TARGET --scripts ftp-anon --ports 21 \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_ftp_anon \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_ftp_anon \
   --technique RECON --intent "FTP anonymous-login check" \
   --probe-kind fingerprint --phase recon --timeout 300
 aith assess kali nmap-scan --target TARGET --scripts ssh-auth-methods --ports 22 \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_ssh \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_ssh \
   --technique RECON --intent "SSH auth-methods enumeration" \
   --probe-kind fingerprint --phase recon --timeout 300
 ```
 
 ### 11. UDP Scan
 ```bash
-aith assess kali nmap-scan --target TARGET --scan-type udp-top \
+aith assess kali nmap-scan --target TARGET --scan-type sU --ports top-100 \
   --extra-args "-T3 --max-retries 2" \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_udp \
-  --technique RECON --intent "top-50 UDP sweep" \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_udp \
+  --technique RECON --intent "top-100 UDP sweep" \
   --probe-kind fingerprint --phase recon --timeout 1800
-aith assess kali nmap-scan --target TARGET --ports 53,67,68,69,123,161,162,500,514,1900 \
-  --extra-args "-sU -T3" \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_udp_targeted \
+aith assess kali nmap-scan --target TARGET --ports 53,67,68,69,123,161,162,500,514,1900 --scan-type sU \
+  --extra-args "-T3" \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_udp_targeted \
   --technique RECON --intent "targeted UDP service ports" \
   --probe-kind fingerprint --phase recon --timeout 900
 ```
@@ -299,17 +287,17 @@ aith assess kali nmap-scan --target TARGET --ports PORT \
   --extra-args "-f -sV" \
   --technique RECON --intent "fragmented packets evasion" \
   --probe-kind fingerprint --phase recon --timeout 600 \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_evasion_fragment
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_evasion_fragment
 aith assess kali nmap-scan --target TARGET --ports PORT \
   --extra-args "-D RND:5 -sV" \
   --technique RECON --intent "decoy scan evasion" \
   --probe-kind fingerprint --phase recon --timeout 600 \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_evasion_decoy
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_evasion_decoy
 aith assess kali nmap-scan --target TARGET --ports PORT \
   --extra-args "--source-port 53 -sV" \
   --technique RECON --intent "source-port 53 evasion" \
   --probe-kind fingerprint --phase recon --timeout 600 \
-  --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_evasion_srcport
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_evasion_srcport
 ```
 
 ### 13. Output Parsing

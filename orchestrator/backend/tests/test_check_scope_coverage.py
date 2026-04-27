@@ -833,26 +833,20 @@ def test_collection_gate_fails_when_no_surfaces_or_work_items(monkeypatch, tmp_p
 
 
 # ---------------------------------------------------------------------------
-# Wildcard-apex strict-semantics tests (1F.1)
+# Wildcard-apex semantics
 # ---------------------------------------------------------------------------
 
 
-def test_wildcard_only_excludes_apex(monkeypatch, tmp_path: Path, capsys) -> None:
-    """A wildcard-only scope (`*.example.test`) must NOT match the bare apex.
-
-    Strict apex-wildcard semantics: services/surfaces/work_items keyed to the
-    bare apex `example.test` produce zero coverage under `*.example.test`.
-    Subdomains (e.g., `corp.example.test`) still match.
-    """
+def test_wildcard_admits_apex(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A wildcard scope entry covers the bare apex AND every subdomain
+    (HackerOne / Bugcrowd / VDP convention)."""
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["*.example.test"])
     db = _make_cases_db(eng)
-    # Apex URL — must NOT count toward the wildcard entry.
     _insert_work_item(
         db, queue_key="apex:1", url="https://example.test/", url_path="/", status="pending"
     )
-    # Subdomain URL — must count toward the wildcard entry.
     _insert_work_item(
         db,
         queue_key="sub:1",
@@ -862,12 +856,12 @@ def test_wildcard_only_excludes_apex(monkeypatch, tmp_path: Path, capsys) -> Non
     )
 
     services = [
-        {"endpoint": "example.test", "state": "up"},  # Apex — not counted.
-        {"endpoint": "corp.example.test", "state": "up"},  # Subdomain — counted.
+        {"endpoint": "example.test", "state": "up"},
+        {"endpoint": "corp.example.test", "state": "up"},
     ]
     surfaces = [
-        {"target_descriptor": "https://example.test/"},  # Apex — not counted.
-        {"target_descriptor": "https://corp.example.test/api"},  # Subdomain — counted.
+        {"target_descriptor": "https://example.test/"},
+        {"target_descriptor": "https://corp.example.test/api"},
     ]
 
     _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum")
@@ -875,17 +869,15 @@ def test_wildcard_only_excludes_apex(monkeypatch, tmp_path: Path, capsys) -> Non
     assert report["ready"] is True, report
     entry = report["entries"][0]
     assert entry["entry_kind"] == "wildcard"
-    # Apex must NOT inflate live_hosts/surfaces/work counts under a wildcard-only entry.
-    assert entry["live_hosts"] == 1, entry
-    assert entry["live_host_samples"] == ["corp.example.test"]
-    assert entry["surfaces_count"] == 1
-    assert entry["work_queued"]["pending"] == 1
-    # The wildcard-only-no-apex section should surface the entry.
-    assert "*.example.test" in report.get("wildcard_only_no_apex", [])
+    assert entry["live_hosts"] == 2, entry
+    assert entry["surfaces_count"] == 2
+    assert entry["work_queued"]["pending"] == 2
 
 
 def test_explicit_apex_plus_wildcard(monkeypatch, tmp_path: Path, capsys) -> None:
-    """Listing the apex AND the wildcard covers both apex and subdomains."""
+    """Listing the apex AND the wildcard covers both apex and subdomains.
+    The wildcard entry already admits the apex; the explicit apex entry still
+    matches and reports its own sample."""
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["example.test", "*.example.test"])
@@ -914,43 +906,10 @@ def test_explicit_apex_plus_wildcard(monkeypatch, tmp_path: Path, capsys) -> Non
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
     by_scope = {entry["scope_entry"]: entry for entry in report["entries"]}
-    # Bare apex entry counts the apex.
     assert by_scope["example.test"]["live_hosts"] == 1
     assert by_scope["example.test"]["live_host_samples"] == ["example.test"]
-    # Wildcard entry counts the subdomain (and NOT the apex, which is now
-    # explicitly captured by the bare-host entry above).
-    assert by_scope["*.example.test"]["live_hosts"] == 1
-    assert by_scope["*.example.test"]["live_host_samples"] == ["vendor-saas.example.test"]
-    # No wildcard-only-no-apex warning when the apex is explicitly listed.
-    assert report.get("wildcard_only_no_apex", []) == []
-
-
-def test_wildcard_only_no_apex_warning(monkeypatch, tmp_path: Path, capsys) -> None:
-    """`--require-stage` reports include a wildcard-only-no-apex warning section.
-
-    When scope has `*.example.test` without a bare-apex sibling, the report
-    surfaces the entry in `wildcard_only_no_apex` so operators see a migration
-    candidate even when the gate passes for other reasons.
-    """
-    eng = tmp_path / "engagement"
-    eng.mkdir()
-    _write_scope(eng, hosts=["*.example.test"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db,
-        queue_key="sub:warn",
-        url="https://corp.example.test/x",
-        url_path="/x",
-        status="pending",
-    )
-
-    services = [{"endpoint": "corp.example.test", "state": "up"}]
-    surfaces = [{"target_descriptor": "https://corp.example.test/x"}]
-
-    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="collection")
-    report = json.loads(capsys.readouterr().out)
-    assert report["ready"] is True, report
-    assert "wildcard_only_no_apex" in report
+    assert by_scope["*.example.test"]["live_hosts"] == 2
+    assert "vendor-saas.example.test" in by_scope["*.example.test"]["live_host_samples"]
 
 
 def test_vendor_saas_blocks_phase_advance_without_decision(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1041,3 +1000,5 @@ def test_vendor_saas_blocks_phase_advance_without_decision(monkeypatch, tmp_path
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
     assert report["vendor_saas_pending_decision"] == []
+
+

@@ -754,6 +754,10 @@ type IntelRowBase = {
   // distinctly (struck-through, link to the superseder).
   superseded_by_id: number | null;
   superseded_at: string | null;
+  // Leaf of the supersede chain. Equal to ``id`` when this row is the
+  // canonical record; otherwise points to the latest replacement so the
+  // UI can chase to current state in a single hop.
+  canonical_id: number | null;
   created_at: string;
   updated_at: string;
 };

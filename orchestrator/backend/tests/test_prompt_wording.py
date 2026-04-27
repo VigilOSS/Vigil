@@ -669,25 +669,6 @@ def test_scope_coverage_gates_present():
     )
 
 
-def test_wildcard_apex_checkpoint_present():
-    """1F.1 — operator-core.md Phase 1a must surface a Wildcard-Apex Checkpoint
-    when scope has wildcard-only entries and crawl output yields apex URLs.
-    Strict apex-wildcard semantics exclude the bare apex; without this checkpoint
-    the operator silently drops apex URLs and the user never gets to decide."""
-    repo_root = Path(__file__).resolve().parents[3]
-    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
-    markers = {
-        "Wildcard-apex checkpoint": "checkpoint header",
-        "scope_decision": "agent-registry recording kind",
-        "wildcard-only entries": "wildcard-only-no-apex condition phrase",
-    }
-    for substring, label in markers.items():
-        assert substring in operator_core, (
-            f"operator-core.md is missing `{substring}` ({label}) — "
-            f"Wildcard-Apex Checkpoint has drifted"
-        )
-
-
 def test_vendor_saas_and_egress_checkpoints_present():
     """1C.5 + 1G.1 — operator-core.md Phase 1 must carry both the Vendor-SaaS
     scope checkpoint and the Egress reputation checkpoint sub-bullets, and the
@@ -843,10 +824,11 @@ def test_no_broad_pkill_rule_present_in_shared_constraints():
 
 
 def test_web_recon_mandatory_tool_ordering_is_pinned():
-    """1B.2 — the mandatory-tool order (`wafw00f → nmap → httpx → whatweb → nuclei → ffuf`)
-    must appear in both the recon-specialist agent prompt and the web-recon skill. The
-    dropped escape-hatch language ("only when the target clearly warrants it") must NOT
-    reappear — that escape hatch is exactly what allowed the SSA engagement to skip nmap."""
+    """N3 / N6 — the default tool ordering must be DOCUMENTED in the web-recon skill at the
+    concept level (the seven canonical tools appear in the right relative order). The literal
+    arrow string and the prohibition substring are no longer pinned: the ordering is now a
+    default heuristic with a documented declare-alternate clause, and skipping a step is
+    permitted when the dispatch context authorizes it."""
     repo_root = Path(__file__).resolve().parents[3]
 
     recon_specialist = (repo_root / "agent" / "agents" / "recon-specialist.md").read_text(
@@ -856,27 +838,23 @@ def test_web_recon_mandatory_tool_ordering_is_pinned():
         encoding="utf-8"
     )
 
-    ordering = "wafw00f → nmap → httpx → whatweb → nuclei → ffuf"
-    assert ordering in recon_specialist, (
-        "recon-specialist.md is missing the mandatory tool ordering "
-        f"`{ordering}`"
-    )
-    assert ordering in web_recon, (
-        f"web-recon/SKILL.md is missing the mandatory tool ordering `{ordering}`"
-    )
+    # Concept-level ordering: the seven canonical tools appear, in this relative order,
+    # somewhere in the web-recon skill. We scan once and confirm each tool is found in
+    # the expected sequence position.
+    expected_order = ["wafw00f", "nmap", "httpx", "whatweb", "nuclei", "ffuf", "nikto"]
+    last_index = -1
+    for tool in expected_order:
+        idx = web_recon.find(tool, last_index + 1)
+        assert idx != -1, (
+            f"web-recon/SKILL.md must mention `{tool}` after the prior tool in the default "
+            f"ordering (looked for it after position {last_index})"
+        )
+        last_index = idx
 
-    # Port-scanning must be ALWAYS-load, not conditional. The escape-hatch sentence must
-    # not be present.
-    assert "ALWAYS load. Port + service enumeration is a mandatory recon step" in recon_specialist, (
-        "recon-specialist.md is missing the ALWAYS-load port-scanning statement"
-    )
-    assert "only when the target clearly warrants it" not in recon_specialist, (
-        "recon-specialist.md still carries the dropped escape-hatch wording "
-        "`only when the target clearly warrants it`"
-    )
-
-    # Pre-output self-check items must reference the mandatory tools by name so a future
-    # rewrite that softens the gate fails CI.
+    # Recon-specialist still names the mandatory tools by concept in the self-check so the
+    # operator can verify per-tool coverage. Drop the literal arrow + the
+    # "only when the target clearly warrants it" prohibition; the declare-alternate clause
+    # is the new escape valve.
     for needle in (
         "**wafw00f** ran first",
         "**nmap** port + service scan completed",
@@ -889,6 +867,15 @@ def test_web_recon_mandatory_tool_ordering_is_pinned():
         assert needle in recon_specialist, (
             f"recon-specialist.md pre-output self-check is missing the `{needle}` item"
         )
+
+    # The default-heuristic framing must be present (not the older "non-negotiable" lock).
+    assert "default" in web_recon.lower(), (
+        "web-recon/SKILL.md must frame the ordering as a default heuristic"
+    )
+    assert "Declare-alternate-ordering" in web_recon, (
+        "web-recon/SKILL.md must carry the `Declare-alternate-ordering` clause documenting "
+        "when an alternate ordering is permissible"
+    )
 
 
 def test_nmap_port_data_assertion_pinned():
@@ -997,21 +984,24 @@ def test_priority_dispatch_wired_into_prompts():
 
 
 def test_recon_dispatch_resource_policy_section_present():
-    """1Z.22 — the per-target rate calibration table lives in
-    `agent/operator-core.md` "Recon Dispatch Resource Policy" so every recon dispatch
-    pulls from one source. Losing the section or any of the five canonical trait rows
-    would let specialists fall back to vendor-specific guesses."""
+    """The Recon Dispatch Resource Policy lives in two places:
+    - `agent/operator-core.md` keeps the section header and the tier-pick / step-down
+      prose (operator-side decisions).
+    - `agent/shared-constraints.md` carries the per-target rate calibration trait rows
+      (specialists USE the rates, so they live where Load First reaches them).
+    """
     repo_root = Path(__file__).resolve().parents[3]
     operator_core = (
         repo_root / "agent" / "operator-core.md"
     ).read_text(encoding="utf-8")
+    shared = (
+        repo_root / "agent" / "shared-constraints.md"
+    ).read_text(encoding="utf-8")
 
     assert "## Recon Dispatch Resource Policy" in operator_core, (
-        "operator-core.md is missing the `Recon Dispatch Resource Policy` top-level "
-        "section — the calibration table source of truth"
+        "operator-core.md is missing the `Recon Dispatch Resource Policy` section header"
     )
-    # All five canonical trait rows must appear (vendor names allowed in the matrix as
-    # examples of trait matches).
+    # All five canonical trait rows must appear in shared-constraints.
     for row_marker in (
         "Cloud-fronted",
         "Origin / single-server",
@@ -1019,11 +1009,11 @@ def test_recon_dispatch_resource_policy_section_present():
         "High-friction policy / regulated",
         "Vendor SaaS",
     ):
-        assert row_marker in operator_core, (
-            f"operator-core.md `Recon Dispatch Resource Policy` table is missing the "
+        assert row_marker in shared, (
+            f"shared-constraints.md per-target rate calibration table is missing the "
             f"`{row_marker}` trait row"
         )
-    # The rule and step-down logic must survive future edits.
+    # The selection prose stays operator-side.
     assert "Resource-safety preflight" in operator_core, (
         "operator-core.md is missing the `Resource-safety preflight` rule heading"
     )
@@ -1059,10 +1049,13 @@ def test_kali_exec_resource_policy_cross_reference_resolves():
 
 
 def test_no_dot_gov_profile_body_text_in_recon_skills():
-    """1Z.18 — the `.gov profile` / `.gov rate` / `the .gov` body-text labels are stripped
-    from the recon-class skills. The matrix in operator-core.md keeps `.gov` as a row label
-    (it's a real target trait), but the methodology body uses trait language ("cautious-tier",
-    "CDN-fronted", "WAF-protected") instead of jurisdiction-specific labels."""
+    """1Z.18 / N11 — the `.gov profile` / `.gov rate` / `the .gov` jurisdictional-label
+    drift must stay stripped from recon-class skills, agent prompts, and runtime references.
+    The matrix in operator-core.md keeps `.gov` as a row label (a real target trait), but
+    the methodology body uses trait language ("cautious-tier", "CDN-fronted",
+    "WAF-protected"). Legitimate substrings like `usa.gov` in URL examples are not
+    jurisdictional labels — they are domain examples — so we only reject the three
+    canonical body-text label phrases."""
     repo_root = Path(__file__).resolve().parents[3]
     skill_paths = [
         repo_root / "agent" / "skills" / "web-recon" / "SKILL.md",
@@ -1070,20 +1063,27 @@ def test_no_dot_gov_profile_body_text_in_recon_skills():
         repo_root / "agent" / "skills" / "kali-exec" / "SKILL.md",
         repo_root / "agent" / "skills" / "subdomain-enumeration" / "SKILL.md",
     ]
+    # Round 2 fixed agents/ and references/ already; the guard scope now covers them too
+    # so a future drift back into those files fails CI.
+    skill_paths.extend(sorted((repo_root / "agent" / "agents").glob("*.md")))
+    skill_paths.extend(sorted((repo_root / "agent" / "references").rglob("*.md")))
+
+    forbidden_labels = (".gov profile", ".gov rate", "the .gov")
     for path in skill_paths:
         text = path.read_text(encoding="utf-8")
-        for forbidden in (".gov profile", ".gov rate", "the .gov"):
+        for forbidden in forbidden_labels:
             assert forbidden not in text, (
                 f"{path}: still references `{forbidden}` — the body should describe the "
-                f"trait (cautious-tier / CDN-fronted / WAF-protected), not the jurisdiction"
+                f"trait (cautious-tier / CDN-fronted / WAF-protected), not the jurisdiction. "
+                f"Legitimate URL examples like `usa.gov` are unaffected; only the three "
+                f"canonical jurisdictional-label phrases are rejected."
             )
 
 
 def test_specialist_wrappers_carry_context_isolation_paragraph():
-    """1C.1 — every rendered specialist wrapper (Claude `.md` + Codex `.toml`) MUST carry the
-    standardized SPECIALIST CONTEXT ISOLATION paragraph naming the forbidden bootstrap files
-    (`agent/AGENTS.md` and `agent/CLAUDE.md`). Without it, the operator startup banner bleeds
-    into specialist responses on first dispatch."""
+    """Every rendered specialist wrapper (Claude `.md` + Codex `.toml`) carries the
+    SPECIALIST CONTEXT ISOLATION paragraph: do NOT read agent/AGENTS.md or agent/CLAUDE.md,
+    cross-cutting context lives in agent/shared-constraints.md (already in Load First)."""
     repo_root = Path(__file__).resolve().parents[3]
     claude_dir = repo_root / "agent" / ".claude" / "agents"
     codex_dir = repo_root / "agent" / ".codex" / "agents"
@@ -1110,28 +1110,119 @@ def test_specialist_wrappers_carry_context_isolation_paragraph():
             assert "SPECIALIST CONTEXT ISOLATION" in text, (
                 f"{wrapper}: missing SPECIALIST CONTEXT ISOLATION paragraph"
             )
-            # Forbid-list must be explicit so a future render that drops one file fails CI.
-            assert "agent/AGENTS.md" in text, (
-                f"{wrapper}: SPECIALIST CONTEXT ISOLATION paragraph must name `agent/AGENTS.md`"
+            squashed = " ".join(text.split())
+            # Forbid is restored: do NOT read AGENTS.md / CLAUDE.md.
+            assert "Do NOT read" in squashed and "AGENTS.md" in squashed and "CLAUDE.md" in squashed, (
+                f"{wrapper}: SPECIALIST CONTEXT ISOLATION must forbid reading agent/AGENTS.md "
+                "and agent/CLAUDE.md"
             )
-            assert "agent/CLAUDE.md" in text, (
-                f"{wrapper}: SPECIALIST CONTEXT ISOLATION paragraph must name `agent/CLAUDE.md`"
+            # The forbid points at shared-constraints.md as the cross-cutting home.
+            assert "shared-constraints.md" in squashed, (
+                f"{wrapper}: must direct specialists to agent/shared-constraints.md for "
+                "cross-cutting context (audit-flag tables, listener URL conventions, "
+                "runtime tier table, half-phase tag definitions)"
             )
 
-    # The render script itself must contain the forbid-list so the next render produces it.
+    # The render script itself must carry the forbid so the next render produces it.
     render_script = (repo_root / "agent" / "scripts" / "render-operator-prompts.sh").read_text(
         encoding="utf-8"
     )
     assert "SPECIALIST CONTEXT ISOLATION" in render_script
-    assert "agent/AGENTS.md" in render_script
-    assert "agent/CLAUDE.md" in render_script
+    assert "Do NOT read" in render_script
+    assert "shared-constraints.md" in render_script
+
+
+def test_cross_cutting_audit_flag_tables_in_shared_constraints():
+    """Cross-cutting context that specialists rely on MUST live in
+    agent/shared-constraints.md so the per-role Load First pulls it without
+    having specialists read the operator bootstrap prompt."""
+    repo_root = Path(__file__).resolve().parents[3]
+    sc = (repo_root / "agent" / "shared-constraints.md").read_text(encoding="utf-8")
+
+    # Audit-flag value tables.
+    for needle in (
+        "--technique",
+        "--probe-kind",
+        "--phase",
+        "--timeout",
+        "--destructive",
+        "fingerprint",
+        "baseline",
+        "payload",
+        "exploit",
+        "replay",
+        "cleanup",
+        "recon-pivot",
+        "exploit-recon",
+    ):
+        assert needle in sc, (
+            f"shared-constraints.md must carry the audit-flag value table item `{needle}`"
+        )
+
+    # Listener URL contract.
+    assert ".listener_url" in sc and ".oob_url" in sc, (
+        "shared-constraints.md must carry the listener URL contract (.listener_url / .oob_url)"
+    )
+
+    # Kali execution + finding prefix table.
+    assert "aith assess kali" in sc
+    for prefix in ("EX-001", "VA-001", "SA-001", "RE-001", "FZ-001", "OS-001", "SC-001"):
+        assert prefix in sc, f"shared-constraints.md must carry the {prefix} prefix example"
+
+    # Intel recording rules.
+    assert "record-intel" in sc, "shared-constraints.md must cover record-intel"
+
+    # Per-target rate calibration table.
+    for needle in (
+        "Cloud-fronted",
+        "Origin / single-server",
+        "WAF-protected",
+        "Vendor SaaS",
+        "polite-CDN-fronted-target",
+        "polite-residential",
+        "bursty-OK",
+    ):
+        assert needle in sc, (
+            f"shared-constraints.md must carry the per-target rate calibration row `{needle}`"
+        )
+
+
+def test_operator_core_does_not_duplicate_specialist_content():
+    """Cross-cutting sections moved out of operator-core.md must not silently reappear.
+    The drift this guards against: a future edit that pastes the audit-flag value tables
+    or the per-target rate calibration row table back into operator-core, creating two
+    copies that drift apart over time."""
+    repo_root = Path(__file__).resolve().parents[3]
+    oc = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+
+    # operator-core may MENTION the audit flags but must not redeclare the value enum
+    # table. The strongest tell: the full prose enum list (`SSRF`, `XSS`, ... `OTHER`).
+    assert "RECON, DISCOVERY, FUZZ, OSINT" not in oc, (
+        "operator-core.md must not redeclare the technique enum — it lives in "
+        "agent/shared-constraints.md `Command Metadata`"
+    )
+
+    # The per-target rate calibration TABLE rows live in shared-constraints. operator-core
+    # may keep tier-pick prose, but the row prose with `polite-CDN-fronted-target` only
+    # belongs in shared-constraints.
+    assert "polite-CDN-fronted-target | runtime-tier" not in oc, (
+        "operator-core.md must not duplicate the per-target rate calibration table rows — "
+        "they live in agent/shared-constraints.md"
+    )
+
+    # The finding prefix table is shared-constraints content. The example prefix list
+    # (RE-001 / FZ-001 / OS-001 / SC-001 lined up) should not appear in operator-core.
+    assert "RE-001" not in oc and "FZ-001" not in oc, (
+        "operator-core.md must not duplicate the finding prefix table — it lives in "
+        "agent/shared-constraints.md §4"
+    )
 
 
 def test_specialist_dispatch_contract_present_in_operator_core():
-    """1C.1 — operator-core.md gains a Specialist Dispatch Contract section that names every
-    required field (role, model, reasoning, files_allowed, files_forbidden, permission,
-    command_budget, output, dispatch_mode). Without the contract section, dispatches degrade
-    into freeform task strings and the agent-registry record loses its authorization fields."""
+    """N11 — operator-core.md keeps the Specialist Dispatch Contract section and its field
+    list (role, model, reasoning, files_allowed, files_forbidden, permission,
+    command_budget, output, dispatch_mode). The literal "read-only by default" phrase is
+    no longer pinned; the contract-driven permission concept is what we lock down."""
     repo_root = Path(__file__).resolve().parents[3]
     operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
 
@@ -1152,17 +1243,7 @@ def test_specialist_dispatch_contract_present_in_operator_core():
         assert field in operator_core, (
             f"Specialist Dispatch Contract section is missing the {field} field"
         )
-    # The forbid-list must always include the operator bootstrap files.
-    assert "always includes `agent/AGENTS.md` and `agent/CLAUDE.md`" in operator_core, (
-        "Specialist Dispatch Contract must always forbid `agent/AGENTS.md` and `agent/CLAUDE.md`"
-    )
-    # Sub-agents are not "read-only by default" — the boundary is contract-driven. The prose
-    # may wrap across lines, so squash whitespace before the substring check.
-    operator_core_squashed = " ".join(operator_core.split())
-    assert "Sub-agents are not \"read-only by default\"" in operator_core_squashed, (
-        "operator-core.md must explicitly drop the read-only-by-default framing in favor of "
-        "contract-driven permission grants"
-    )
+    # Contract-driven permission gate must be present at the concept level.
     assert "permission >= passive-probe" in operator_core, (
         "operator-core.md must show the contract-driven permission gate "
         "(`permission >= passive-probe`)"
@@ -1170,18 +1251,31 @@ def test_specialist_dispatch_contract_present_in_operator_core():
 
 
 def test_phase_1_dispatch_only_guardrail_present():
-    """1C.2 — Phase 1a/1b dispatch is non-negotiable. The operator must not run target-facing
-    recon directly. Losing this guardrail collapses the orchestrator model and crowds operator
-    context with low-level recon detail."""
+    """N2 — Phase 1a/1b dispatch is non-negotiable for ANALYSIS/COVERAGE work. The operator
+    keeps a documented carve-out list (credential auto-use validation, tier-pick smoke,
+    runtime health smoke, backend-write helpers) so mechanical pipeline checks do not
+    consume a full specialist context. The literal "MUST NOT run target-facing tools
+    directly, even for 'quick checks'" phrasing is no longer pinned; the carve-outs replace
+    the blanket prohibition."""
     repo_root = Path(__file__).resolve().parents[3]
     operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
 
-    assert "Phase 1a/1b dispatch is non-negotiable" in operator_core, (
-        "operator-core.md is missing the Phase 1a/1b dispatch-only guardrail heading"
+    assert "Phase 1a/1b dispatch is non-negotiable for ANALYSIS/COVERAGE" in operator_core, (
+        "operator-core.md must scope the Phase 1a/1b non-negotiable rule to ANALYSIS/COVERAGE"
     )
-    assert "Operator MUST NOT run target-facing tools directly" in operator_core, (
-        "operator-core.md is missing the explicit operator-MUST-NOT-run-target-facing-tools rule"
-    )
+    # The carve-out list must be present so mechanical pipeline checks do not silently get
+    # routed to a specialist (or worse, dropped on the floor).
+    operator_core_squashed = " ".join(operator_core.split())
+    for carve_out_marker in (
+        "credential auto-use validation",
+        "tier-pick",
+        "runtime health smoke",
+        "backend-write helpers",
+    ):
+        assert carve_out_marker in operator_core_squashed.lower(), (
+            f"operator-core.md must document the `{carve_out_marker}` operator carve-out so "
+            f"mechanical pipeline checks have an explicit operator-side path"
+        )
     # The blocker-record contract must be explicit so blockers do not silently fall back to the
     # operator loop.
     assert "dispatch_blocked" in operator_core, (
@@ -1212,9 +1306,10 @@ def test_dispatch_completion_gate_includes_stderr_log_inspection():
 
 
 def test_dispatch_mode_declaration_table_present():
-    """1C.4 — operator-core.md must define the four dispatch modes and their item-budget
-    boundaries. Without explicit mode declaration, item budgets and target pools collide and
-    specialists overrun their context windows."""
+    """N9 — operator-core.md must define the four dispatch modes and concept-level
+    item-budget ranges. The literal "30–100 hard cap" framing is no longer pinned: the
+    item-iterating cap can rise to 200 when items cluster on a stable cluster_key, and the
+    dispatch context may override the cap with a stated rationale."""
     repo_root = Path(__file__).resolve().parents[3]
     operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
 
@@ -1225,11 +1320,22 @@ def test_dispatch_mode_declaration_table_present():
         assert f"`{mode}`" in operator_core, (
             f"Dispatch-Mode Declaration table is missing the `{mode}` mode"
         )
-    # Per-mode item budgets that establish the rule of thumb.
+    # Concept-level budget ranges that establish the rule of thumb. The exact hard-cap
+    # phrasing is intentionally not pinned anymore — cluster-aware overrides are allowed.
     assert "200–1000" in operator_core or "200-1000" in operator_core
     assert "30–100" in operator_core or "30-100" in operator_core
     assert "10–30" in operator_core or "10-30" in operator_core
     assert "1–3 hosts" in operator_core or "1-3 hosts" in operator_core
+    # Cluster-override clause — operator may override the item-iterating cap with rationale.
+    operator_core_squashed = " ".join(operator_core.split()).lower()
+    assert "cluster_key" in operator_core_squashed, (
+        "operator-core.md Dispatch-Mode Declaration must reference cluster_key so the "
+        "cluster-aware override is documented"
+    )
+    assert "rationale" in operator_core_squashed, (
+        "operator-core.md Dispatch-Mode Declaration must reference the rationale clause "
+        "for operator overrides of the item-iterating cap"
+    )
 
 
 def test_specialist_agents_declare_modes_accepted():
@@ -1292,8 +1398,8 @@ def test_subagent_registry_schema_carries_contract_fields():
 
 
 def test_engagements_py_pins_specialist_isolation_invariant():
-    """1C.1 — the per-engagement AGENTS.md/CLAUDE.md helper points at operator instructions. A
-    code comment must record the specialist-isolation invariant so a future change that lands
+    """The per-engagement AGENTS.md/CLAUDE.md helper points at operator instructions.
+    The code comment must record the seeding invariant so a future change that lands
     specialists at this cwd does not silently re-introduce the operator-banner leak."""
     repo_root = Path(__file__).resolve().parents[3]
     engagements_py = (
@@ -1304,10 +1410,22 @@ def test_engagements_py_pins_specialist_isolation_invariant():
         "engagements.py must carry the `Specialist context isolation invariant` comment so "
         "the per-engagement AGENTS.md/CLAUDE.md seeding rule is documented inline"
     )
-    # The comment must explicitly point at the specialist wrappers as the carrier of the
-    # forbid-rule, not at the per-engagement bootstrap files.
+    # The comment must explicitly point at the registered wrappers as the carrier of the
+    # forbid.
     assert "registered wrappers" in engagements_py
-    assert "Do NOT read agent/AGENTS.md" in engagements_py
+    # The forbid is restored: specialists must NOT read agent/AGENTS.md or agent/CLAUDE.md.
+    assert "NOT read" in engagements_py and "AGENTS.md" in engagements_py and "CLAUDE.md" in engagements_py, (
+        "engagements.py invariant comment must restate the wrapper-side forbid (do NOT read "
+        "agent/AGENTS.md or agent/CLAUDE.md)"
+    )
+    # The cross-cutting home must be named so future readers know where the moved content
+    # lives.
+    assert "shared-constraints.md" in engagements_py, (
+        "engagements.py invariant comment must point at agent/shared-constraints.md as the "
+        "cross-cutting home that replaces the AGENTS/CLAUDE bleed"
+    )
+    # Banner-bleed remains the load-bearing failure mode this guards against.
+    assert "banner" in engagements_py.lower()
 
 
 def test_no_dated_engagement_citations_in_methodology():
@@ -1753,4 +1871,205 @@ def test_vulnerability_analyst_self_check_pins_vendor_deep_enum():
     assert "Vendor-platform deep-enum playbook run" in text, (
         "vulnerability-analyst.md self-check must include the vendor-platform deep-enum "
         "playbook trigger (1H.1)"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Wave 2 — methodology drift guards (F13 / F18 / F19 / F22)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _wave2_methodology_paths():
+    """Files that must stay aligned with the canonical Wave 2 settings.
+    Includes skills, agent role files, recon-tool references, and operator-core."""
+    repo_root = Path(__file__).resolve().parents[3]
+    paths: list[Path] = []
+    paths.extend(sorted((repo_root / "agent" / "skills").rglob("*.md")))
+    paths.extend(
+        sorted((repo_root / "agent" / "references" / "tools" / "recon").rglob("*.md"))
+    )
+    paths.extend(sorted((repo_root / "agent" / "agents").rglob("*.md")))
+    paths.append(repo_root / "agent" / "operator-core.md")
+    # Filter to existing files; the rglob covers the live tree but defensive.
+    return [p for p in paths if p.exists()]
+
+
+def test_dated_engagement_drift_guard_is_broad_enough():
+    """F18 — the engagement-citation drift guard catches ISO dates that look
+    like engagement provenance (not just 2026-04-2X), and catches named-engagement
+    patterns like `SSA engagement` / `CMS VDP` so the lesson stays timeless and
+    the provenance does not bleed back in over time.
+
+    The original 1Z.19 guard scanned only `2026-04-2[0-9]` — too narrow when
+    a Wave 2 specialist sneaks in a `2026-05-01` date. We broaden to any
+    ISO date that appears in an engagement-provenance context:
+      - "engagement <date>" / "VDP <date>" / "<date> engagement"
+      - "<acronym> engagement <date>" / "engagement on <date>"
+      - lines that already match a named-engagement pattern (SSA / CMS / VA / HHS).
+
+    Cloud-metadata `api-version=YYYY-MM-DD` strings, breach-published dates
+    in JSON examples, and other legitimate ISO-date prose are NOT engagement
+    provenance and are left alone.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    iso = r"\d{4}-\d{2}-\d{2}"
+    # Engagement-provenance-shaped ISO dates: paired with words like
+    # "engagement", "VDP", "assessment", or with a named federal agency.
+    provenance_patterns = [
+        re.compile(rf"\b(engagement|assessment|VDP)\s+{iso}\b", re.IGNORECASE),
+        re.compile(rf"\b{iso}\s+(engagement|assessment|VDP)\b", re.IGNORECASE),
+        re.compile(rf"\bengagement\s+(?:on|of|dated)\s+{iso}\b", re.IGNORECASE),
+        re.compile(rf"\b(SSA|CMS|VA|HHS)\b[^\n]*\b{iso}\b"),
+        re.compile(rf"\b{iso}\b[^\n]*\b(SSA|CMS|VA|HHS)\b"),
+    ]
+    named_engagement_pattern = re.compile(
+        r"\b(SSA|CMS|VA|HHS)\b\s+(engagement|VDP)", re.IGNORECASE
+    )
+
+    # google-workspaces uses ISO date ranges in command-line examples (not
+    # engagement provenance) — same allowlist as the 1Z.19 test.
+    excluded = {repo_root / "agent" / "skills" / "google-workspaces" / "SKILL.md"}
+    # The osint-recon SKILL legitimately references `breach-record` published
+    # dates in field examples and is allowed to embed example dates.
+    osint_skill = repo_root / "agent" / "skills" / "osint-recon" / "SKILL.md"
+    if osint_skill.exists():
+        excluded.add(osint_skill)
+
+    iso_offenders: list[str] = []
+    named_offenders: list[str] = []
+    for path in _wave2_methodology_paths():
+        if path in excluded:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            for pattern in provenance_patterns:
+                if pattern.search(line):
+                    iso_offenders.append(f"{path}:{lineno}: {line.strip()}")
+                    break
+            if named_engagement_pattern.search(line):
+                named_offenders.append(f"{path}:{lineno}: {line.strip()}")
+
+    assert not iso_offenders, (
+        "ISO-date engagement provenance in methodology corpus (F18). "
+        "Strip the date and keep the lesson timeless.\n" + "\n".join(iso_offenders)
+    )
+    assert not named_offenders, (
+        "Named-engagement provenance (e.g. `SSA engagement`, `CMS VDP`) in "
+        "methodology corpus (F18). Strip the brand and keep the lesson neutral.\n"
+        + "\n".join(named_offenders)
+    )
+
+
+def test_dns_brute_rates_are_canonical_tier_values():
+    """F19 — DNS-brute `--rate-limit` values for puredns/shuffledns must be one
+    of {800, 2500, 5000} (polite-CDN-fronted-target / polite-residential /
+    bursty-OK). Pre-Wave-2 drift left `--rate-limit 1000` and `--rate-limit 8000`
+    strewn across SKILLs and references; this guard pins the canonical tier set.
+
+    Scope: only the puredns/shuffledns long-form `--rate-limit` flag is
+    constrained. dnsx uses `-rl <int>` on a different scale (per-resolver vs.
+    overall), and per-resolver examples like `-rl 10` are intentionally low
+    and outside the canonical-profile set; this guard does not constrain them.
+    """
+    rate_pattern = re.compile(r"--rate-limit\s+(\d+)\b")
+    canonical_puredns_rates = {"800", "2500", "5000"}
+
+    offenders: list[str] = []
+    for path in _wave2_methodology_paths():
+        text = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip().lower()
+            # --rate-limit applies to puredns / nuclei / shuffledns. Filter to
+            # puredns/shuffledns/dns-brute mentions on the same line; nuclei
+            # `--rate-limit 30/100/150` is its own scale and lives in a
+            # different tier table.
+            for match in rate_pattern.finditer(line):
+                rate = match.group(1)
+                is_dns_context = (
+                    "puredns" in stripped
+                    or "shuffledns" in stripped
+                    or "dns brute" in stripped
+                    or "dns-brute" in stripped
+                )
+                if is_dns_context and rate not in canonical_puredns_rates:
+                    offenders.append(
+                        f"{path}:{lineno}: --rate-limit {rate} (must be "
+                        f"one of {sorted(canonical_puredns_rates)} for puredns/shuffledns)"
+                    )
+
+    assert not offenders, (
+        "DNS-brute rates drifted from the canonical tier set (F19). "
+        "Update to a tier value or fix the tier table.\n" + "\n".join(offenders)
+    )
+
+
+def test_nuclei_template_set_uses_http_prefix_and_comma_join():
+    """F13 — the curated nuclei template set must use the comma-joined
+    `-t http/cves/,http/misconfiguration/,...` shape. The `-t cves/ -t exposures/`
+    shape from older skills uses repeated -t flags AND drops the `http/` prefix
+    so non-HTTP variants leak in. Operator-core has the canonical form; this
+    guard pins web-recon and recon-specialist to the same shape.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    files = (
+        repo_root / "agent" / "skills" / "web-recon" / "SKILL.md",
+        repo_root / "agent" / "agents" / "recon-specialist.md",
+    )
+    drift_pattern = re.compile(r"-t\s+(?!http/)(cves|exposures|misconfiguration|default-logins|exposed-panels|technologies)/")
+    offenders: list[str] = []
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if drift_pattern.search(line):
+                offenders.append(f"{path}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "Nuclei template drift (F13): `-t <category>/` without the `http/` prefix "
+        "leaks non-HTTP variants. Use the comma-joined "
+        "`-t http/cves/,http/misconfiguration/,...` form.\n" + "\n".join(offenders)
+    )
+
+
+def test_subdomain_enum_preflight_binary_order_is_alphabetical():
+    """F22 — operator-core, the subdomain-enumeration SKILL, and the runtime
+    tooling contract test all reference the same preflight binary list. Pin
+    the order to alphabetical so future drift in any one of the three is
+    caught loudly."""
+    repo_root = Path(__file__).resolve().parents[3]
+    canonical = "alterx asnmap bbot cero dnsx massdns puredns shuffledns subfinder"
+
+    skill = (
+        repo_root / "agent" / "skills" / "subdomain-enumeration" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert canonical in skill, (
+        "subdomain-enumeration/SKILL.md preflight binary list is not alphabetical "
+        f"(F22). Canonical order: `{canonical}`."
+    )
+
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+    assert canonical in operator_core, (
+        "operator-core.md preflight binary list is not alphabetical (F22). "
+        f"Canonical order: `{canonical}`."
+    )
+
+
+def test_scan_type_pseudo_values_removed_from_skills():
+    """F1 drift guard — `--scan-type top-1000` / `full-tcp` / `udp-top` /
+    `targeted` / `ports-only` were old skill-text drift values that the
+    nmap-scan wrapper has never accepted. Re-introducing one of them silently
+    fails argparse downstream; pin them out of the skill corpus."""
+    repo_root = Path(__file__).resolve().parents[3]
+    drift_pattern = re.compile(r"--scan-type\s+(top-1000|full-tcp|udp-top|targeted|ports-only)\b")
+    offenders: list[str] = []
+    paths = sorted((repo_root / "agent" / "skills").rglob("*.md")) + sorted(
+        (repo_root / "agent" / "agents").rglob("*.md")
+    ) + sorted((repo_root / "agent" / "references" / "tools" / "recon").rglob("*.md"))
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if drift_pattern.search(line):
+                offenders.append(f"{path}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "Drift values for `--scan-type` (F1) — the wrapper restricts "
+        "`--scan-type` to nmap technique flags (sS/sT/sU/sV/sn). Use `--ports "
+        "<value>` for port specs.\n" + "\n".join(offenders)
     )

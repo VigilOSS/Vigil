@@ -62,7 +62,6 @@ from assess.lib.scope import (
     entry_matches_host,
     host_from_token,
     host_is_vendor_saas,
-    wildcard_only_entries_lacking_apex,
 )
 
 
@@ -225,18 +224,11 @@ def run(args: argparse.Namespace) -> None:
             )
     ready = not overall_gaps
 
-    # Wildcard-only-no-apex warning section: when a wildcard entry has no
-    # explicit apex companion, the apex is excluded by strict semantics. This
-    # is informational, not gating — we always surface it (regardless of
-    # --require-stage) so operators see migration candidates.
-    wildcard_only_no_apex = wildcard_only_entries_lacking_apex(scope_data)
-
     report = {
         "engagement_key": cfg.engagement_key,
         "required_stage": args.require_stage,
         "entries": report_entries,
         "overall_gaps": overall_gaps,
-        "wildcard_only_no_apex": wildcard_only_no_apex,
         "vendor_saas_pending_decision": [
             {"host": host, "vendor": vendor} for host, vendor in vendor_saas_pending
         ],
@@ -664,15 +656,6 @@ def _render_text(report: dict[str, Any], *, verbose: bool) -> None:
         print("gaps:")
         for msg in report["overall_gaps"]:
             print(f"  - {msg}")
-
-    wildcard_only_no_apex = report.get("wildcard_only_no_apex") or []
-    if wildcard_only_no_apex:
-        print("wildcard-only-no-apex:")
-        for raw in wildcard_only_no_apex:
-            print(
-                f"  - {raw} (bare apex is excluded by strict semantics; add the "
-                f"apex as an explicit scope entry to include it)"
-            )
 
     vendor_saas_pending = report.get("vendor_saas_pending_decision") or []
     if vendor_saas_pending:

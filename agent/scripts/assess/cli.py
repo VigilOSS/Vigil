@@ -7,6 +7,7 @@ import sys
 
 _ROOT_FLAGS_WITH_VALUE = {"--engagement-dir", "--actor-kind"}
 _ROOT_FLAG_PREFIXES = ("--engagement-dir=", "--actor-kind=")
+_ACTOR_KIND_CONSUMERS = frozenset({"log"})
 
 
 def _hoist_root_flags(argv: list[str]) -> list[str]:
@@ -21,10 +22,18 @@ def _hoist_root_flags(argv: list[str]) -> list[str]:
     hit `unrecognized arguments`. This pre-pass hoists the flag (and any
     `--flag=value` form) to the very front so the original argparse contract
     is preserved without duplicating the flag on every subparser.
+
+    Edge cases (P3 #14/#15/#16):
+    - Reject `--engagement-dir <flag-shaped-value>` so the operator notices
+      a missing path rather than silently passing the next flag as the dir.
+    - Reject duplicate `--engagement-dir` occurrences (any mix of `--flag x`
+      and `--flag=x`); the first wins in argparse's normal flow but a
+      duplicate signals an operator mistake worth surfacing.
     """
     hoisted: list[str] = []
     rest: list[str] = []
     found_double_dash = False
+    seen_engagement_dir = 0
     i = 0
     while i < len(argv):
         token = argv[i]
@@ -34,10 +43,32 @@ def _hoist_root_flags(argv: list[str]) -> list[str]:
             i += 1
             continue
         if not found_double_dash and token in _ROOT_FLAGS_WITH_VALUE and i + 1 < len(argv):
-            hoisted.extend([token, argv[i + 1]])
+            value = argv[i + 1]
+            if token == "--engagement-dir":
+                if value.startswith("-"):
+                    sys.exit(
+                        f"--engagement-dir: value '{value}' looks like a flag; "
+                        "pass an absolute or relative path"
+                    )
+                seen_engagement_dir += 1
+                if seen_engagement_dir > 1:
+                    sys.exit("--engagement-dir was specified more than once")
+            hoisted.extend([token, value])
             i += 2
             continue
         if not found_double_dash and any(token.startswith(prefix) for prefix in _ROOT_FLAG_PREFIXES):
+            if token.startswith("--engagement-dir="):
+                value = token.split("=", 1)[1]
+                if not value:
+                    sys.exit("--engagement-dir: value is empty; pass an absolute or relative path")
+                if value.startswith("-"):
+                    sys.exit(
+                        f"--engagement-dir: value '{value}' looks like a flag; "
+                        "pass an absolute or relative path"
+                    )
+                seen_engagement_dir += 1
+                if seen_engagement_dir > 1:
+                    sys.exit("--engagement-dir was specified more than once")
             hoisted.append(token)
             i += 1
             continue
@@ -101,6 +132,7 @@ def main(argv: list[str] | None = None) -> None:
         ingest_endpoints,
         ingest_spec,
         kali_alterx,
+        kali_asnmap,
         kali_bbot,
         kali_cero,
         kali_dnsx,
@@ -140,6 +172,7 @@ def main(argv: list[str] | None = None) -> None:
         supersede_intel,
         update_finding,
         update_intel,
+        validate_dispatch_contract,
         verify_finding,
     )
 
@@ -192,6 +225,7 @@ def main(argv: list[str] | None = None) -> None:
         code_record_analysis,
         code_coverage,
         contract,
+        validate_dispatch_contract,
     ):
         mod.register(sub)
 
@@ -203,6 +237,7 @@ def main(argv: list[str] | None = None) -> None:
     kali_sub.required = False
     for kali_mod in (
         kali_alterx,
+        kali_asnmap,
         kali_bbot,
         kali_cero,
         kali_dnsx,
@@ -236,6 +271,17 @@ def main(argv: list[str] | None = None) -> None:
     if not args.command:
         parser.print_help()
         sys.exit(1)
+
+    # --actor-kind only feeds activity-entry writers (currently `log`); warn
+    # when the operator passes it for a subcommand that ignores the value
+    # rather than silently dropping it.
+    if getattr(args, "actor_kind", None) and args.command not in _ACTOR_KIND_CONSUMERS:
+        print(
+            f"WARN --actor-kind={args.actor_kind} ignored: subcommand "
+            f"'{args.command}' does not record activity entries; consumers: "
+            f"{', '.join(sorted(_ACTOR_KIND_CONSUMERS))}",
+            file=sys.stderr,
+        )
 
     try:
         args.func(args)

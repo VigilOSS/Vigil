@@ -41,7 +41,7 @@ sweeps, ffuf with deep wordlists, multi-host puredns runs.
 JOB_ID=$(aith assess kali job start \
   --technique RECON --intent "phase 1 nmap full-tcp scan" \
   --probe-kind fingerprint --phase recon --timeout 7200 \
-  -- nmap-scan --target www.example.gov --scan-type full-tcp \
+  -- nmap-scan --target www.example.gov --ports full \
      --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_full \
   | jq -r '.job_id')
 

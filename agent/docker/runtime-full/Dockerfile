@@ -24,6 +24,11 @@ ARG DNSX_VERSION=v1.2.3
 ARG GAU_VERSION=v2.2.4
 ARG DALFOX_VERSION=v2.12.0
 ARG PUREDNS_VERSION=v2.1.1
+ARG SHUFFLEDNS_VERSION=v1.1.0
+ARG ALTERX_VERSION=v0.0.5
+ARG ASNMAP_VERSION=v1.1.2
+ARG CERO_VERSION=v1.4.4
+ARG BBOT_VERSION=2.6.0
 ARG GF_VERSION=v0.0.0-20200618134122-dcd4c361f9f5
 ARG GF_PATTERNS_REF=f686f06ae647726578920084c894100d702496cc
 ARG FEROXBUSTER_VERSION=2.13.1
@@ -100,13 +105,13 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       cp /root/go/bin/dalfox /usr/local/bin/dalfox && \
       GOPATH=/root/go go install "github.com/d3mondev/puredns/v2@${PUREDNS_VERSION}" && \
       cp /root/go/bin/puredns /usr/local/bin/puredns && \
-      GOPATH=/root/go go install "github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest" && \
+      GOPATH=/root/go go install "github.com/projectdiscovery/shuffledns/cmd/shuffledns@${SHUFFLEDNS_VERSION}" && \
       cp /root/go/bin/shuffledns /usr/local/bin/shuffledns && \
-      GOPATH=/root/go go install "github.com/projectdiscovery/alterx/cmd/alterx@latest" && \
+      GOPATH=/root/go go install "github.com/projectdiscovery/alterx/cmd/alterx@${ALTERX_VERSION}" && \
       cp /root/go/bin/alterx /usr/local/bin/alterx && \
-      GOPATH=/root/go go install "github.com/projectdiscovery/asnmap/cmd/asnmap@latest" && \
+      GOPATH=/root/go go install "github.com/projectdiscovery/asnmap/cmd/asnmap@${ASNMAP_VERSION}" && \
       cp /root/go/bin/asnmap /usr/local/bin/asnmap && \
-      GOPATH=/root/go go install "github.com/glebarez/cero@latest" && \
+      GOPATH=/root/go go install "github.com/glebarez/cero@${CERO_VERSION}" && \
       cp /root/go/bin/cero /usr/local/bin/cero && \
       GOPATH=/root/go go install "github.com/tomnomnom/gf@${GF_VERSION}" && \
       cp /root/go/bin/gf /usr/local/bin/gf && \
@@ -175,8 +180,11 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
     fi
 
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
-      PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install bbot; \
+      PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install "bbot==${BBOT_VERSION}"; \
     fi
+
+RUN mkdir -p /etc/security/limits.d && \
+    printf '* soft nofile 131072\n* hard nofile 131072\n* soft nproc 16384\n* hard nproc 16384\nroot soft nofile 131072\nroot hard nofile 131072\nroot soft nproc 16384\nroot hard nproc 16384\n' > /etc/security/limits.d/aith.conf
 
 RUN mkdir -p /opt/mcp-tools /data
 COPY docker/kali-mcp-runtime/audit_enums.py /opt/mcp-tools/audit_enums.py

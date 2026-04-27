@@ -191,17 +191,15 @@ def test_proxy_addon_loads_legacy_scope_keys(tmp_path: Path) -> None:
     assert collector._is_in_scope("out-of-scope.test") is False
 
 
-def test_filter_scope_keeps_only_exactly_scoped_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_filter_scope_keeps_in_scope_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_script_module(
         "test_filter_scope_module",
         "agent/scripts/assess/commands/filter_scope.py",
     )
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
-    # Strict apex-wildcard semantics: a wildcard-only entry does NOT match its
-    # bare apex. The fixture lists `*.example.com` without a sibling
-    # `example.com`, so apex URLs against example.com are excluded. Adding a
-    # bare-host entry alongside the wildcard would re-admit them.
+    # `*.example.com` admits the bare apex (HackerOne / Bugcrowd / VDP
+    # convention) and every subdomain.
     (engagement_dir / "scope.json").write_text(
         json.dumps(
             {
@@ -250,12 +248,10 @@ def test_filter_scope_keeps_only_exactly_scoped_hosts(monkeypatch, tmp_path: Pat
     captured = capsys.readouterr()
     assert captured.out.splitlines() == [
         "https://api.example.com/a",
+        "https://example.com/apex",
         "https://app.other.test/v1",
         "api.example.net:8443",
     ]
-    # The apex URL should produce a strict-semantics warning on stderr.
-    assert "https://example.com/apex" in captured.err
-    assert "bare apex is excluded" in captured.err
 
 
 def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) -> None:

@@ -1,13 +1,128 @@
 """Stable CLI contract metadata for helper-owned assessment commands."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 from typing import Any
 
 from .intel_types import INTEL_TYPES
 from .schema_validation import load_schema
+
+
+SPECIALIST_DISPATCH_PERMISSIONS: tuple[str, ...] = (
+    "artifact-only",
+    "passive-probe",
+    "target-facing",
+    "target-facing-destructive",
+)
+
+
+SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
+    "hypothesis-driven",
+    "item-iterating",
+    "deep-manual",
+    "variant-rotation",
+)
+
+
+_SPECIALIST_DISPATCH_REQUIRED_FIELDS: tuple[str, ...] = (
+    "role",
+    "model",
+    "files_allowed",
+    "files_forbidden",
+    "permission",
+    "command_budget",
+    "output",
+    "dispatch_mode",
+)
+
+
+@dataclass
+class SpecialistDispatchContract:
+    """Mirror of the operator-core "Specialist Dispatch Contract" required-fields list.
+
+    Every field on this dataclass corresponds to a row in the contract table
+    documented in ``agent/operator-core.md`` (Specialist Dispatch Contract).
+    Use ``validate_specialist_dispatch_contract`` to check a JSON payload
+    parsed from disk or stdin — the validator returns a list of error strings
+    plus a list of warnings (the ``files_allowed`` / ``files_forbidden`` overlap
+    is a warning rather than a hard error so dispatches that intentionally
+    re-list a path can still proceed).
+    """
+
+    role: str
+    model: str
+    files_allowed: list[str]
+    files_forbidden: list[str]
+    permission: str
+    command_budget: int
+    output: str
+    dispatch_mode: str
+    reasoning: str | None = None
+    extras: dict[str, Any] = field(default_factory=dict)
+
+
+def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list[str]]:
+    """Validate a parsed specialist dispatch payload.
+
+    Returns ``(errors, warnings)``. Errors block the dispatch; warnings are
+    informational (e.g., the ``files_allowed`` / ``files_forbidden`` overlap).
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if not isinstance(payload, dict):
+        return ["dispatch contract must be a JSON object"], warnings
+
+    for field_name in _SPECIALIST_DISPATCH_REQUIRED_FIELDS:
+        if field_name not in payload:
+            errors.append(f"missing required field: {field_name}")
+
+    permission = payload.get("permission")
+    if permission is not None and permission not in SPECIALIST_DISPATCH_PERMISSIONS:
+        errors.append(
+            f"permission '{permission}' is not allowed; "
+            f"valid: {', '.join(SPECIALIST_DISPATCH_PERMISSIONS)}"
+        )
+
+    dispatch_mode = payload.get("dispatch_mode")
+    if dispatch_mode is not None and dispatch_mode not in SPECIALIST_DISPATCH_MODES:
+        errors.append(
+            f"dispatch_mode '{dispatch_mode}' is not allowed; "
+            f"valid: {', '.join(SPECIALIST_DISPATCH_MODES)}"
+        )
+
+    files_allowed = payload.get("files_allowed")
+    files_forbidden = payload.get("files_forbidden")
+    if files_allowed is not None and not isinstance(files_allowed, list):
+        errors.append("files_allowed must be a list of file paths")
+        files_allowed = None
+    if files_forbidden is not None and not isinstance(files_forbidden, list):
+        errors.append("files_forbidden must be a list of file paths")
+        files_forbidden = None
+
+    if isinstance(files_allowed, list) and isinstance(files_forbidden, list):
+        overlap = sorted(set(files_allowed).intersection(files_forbidden))
+        if overlap:
+            warnings.append(
+                f"files_allowed and files_forbidden overlap: {', '.join(overlap)} "
+                "(forbidden takes precedence at the wrapper)"
+            )
+
+    command_budget = payload.get("command_budget")
+    if command_budget is not None:
+        if isinstance(command_budget, bool) or not isinstance(command_budget, int) or command_budget < 0:
+            errors.append("command_budget must be a non-negative integer")
+
+    for str_field in ("role", "model", "output"):
+        value = payload.get(str_field)
+        if value is not None and not isinstance(value, str):
+            errors.append(f"{str_field} must be a string")
+        elif value is not None and not str(value).strip():
+            errors.append(f"{str_field} must be a non-empty string")
+
+    return errors, warnings
 
 
 # Verbs registered under `aith assess kali ...`. Names are kept in sync with
@@ -347,18 +462,22 @@ _CONTRACTS: dict[str, CommandContract] = {
             'aith assess resolve-surface <id> --status covered --rationale "..."',
             'aith assess resolve-surface <id> --status not_applicable --rationale "..."',
             'aith assess resolve-surface <id> --status deferred --rationale "..."',
+            'aith assess resolve-surface <id> --status partially-covered --rationale "..." --followup-condition "..."',
         ),
         author_supplied_fields=(
             "status",
             "rationale",
+            "followup_condition",
         ),
         notes=(
             "Use this to resolve a discovered surface after triage instead of falling back to direct SQL.",
             "Rationale is appended to existing rationale so the audit trail accumulates context across resolutions.",
+            "--followup-condition is REQUIRED when --status=partially-covered; it captures the one-line condition the follow-up coverage pass must satisfy.",
         ),
         common_mistakes=(
-            ("status=discovered", "discovered is the seed state; resolve to covered, not_applicable, or deferred"),
+            ("status=discovered", "discovered is the seed state; resolve to covered, not_applicable, deferred, or partially-covered"),
             ("reason", "use --rationale for the resolution explanation"),
+            ("status=partially-covered without --followup-condition", "the follow-up condition is mandatory for partially-covered so the audit trail names what the next pass must satisfy"),
         ),
         examples=(
             {
@@ -368,6 +487,11 @@ _CONTRACTS: dict[str, CommandContract] = {
             {
                 "status": "not_applicable",
                 "rationale": "static asset, no input vector",
+            },
+            {
+                "status": "partially-covered",
+                "rationale": "unauth path tested; admin path requires auth",
+                "followup_condition": "needs auth re-test once credentials are issued",
             },
         ),
     ),

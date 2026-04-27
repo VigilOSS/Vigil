@@ -21,7 +21,7 @@ from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.db import db_init, db_insert_work_item
 from assess.lib.params import extract_url_path, extract_query_params, extract_path_params, generate_params_sig
-from assess.lib.scope import host_matches_wildcard_only_apex, load_scope
+from assess.lib.scope import load_scope
 
 
 def register(subparsers) -> None:
@@ -127,17 +127,17 @@ def run(args) -> None:
     auth_context = auth_active_context(eng_dir)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
 
-    # Strict apex-wildcard admission gate: load scope.json so URLs whose host
-    # is the bare apex of a wildcard-only entry are rejected at ingestion
-    # rather than admitted to ``pending``. Rejected rows go to a ``rejected``
-    # cluster on the work_items row so the operator can see them without
-    # mining a hidden buffer.
+    # Load scope.json so the egress-block and per-host budget gates have a
+    # consistent view of the engagement scope. Fail closed if missing —
+    # ingest must not silently admit URLs without scope context.
     try:
         scope_data: dict = load_scope(eng_dir)
-    except SystemExit:
-        scope_data = {}
-    rejected_apex_count = 0
-    rejected_warned_apexes: set[str] = set()
+    except SystemExit as exc:
+        print(
+            f"ERROR: scope.json missing or unparseable ({exc})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Egress-blocked deferral: hosts whose representative responses returned a
     # 100% 403 cluster from the runtime egress IP get deferred at ingestion
@@ -244,42 +244,7 @@ def run(args) -> None:
 
             # Build observation payload
             parsed = urlparse(url)
-
-            # Apex-not-explicitly-scoped admission gate. When the URL's host
-            # is the bare apex of a wildcard-only scope entry, the strict
-            # semantics exclude it. Rather than silently dropping (which
-            # hides the surface from operator review) or admitting it (which
-            # leaks the surface into Phase 3 dispatch), we mark the work
-            # item as rejected with a stable cluster_key so the operator can
-            # inspect rejected URLs alongside other buffer state.
             apex_host = (parsed.hostname or "").rstrip(".").lower()
-            if apex_host and host_matches_wildcard_only_apex(apex_host, scope_data):
-                rejected_apex_count += 1
-                if apex_host not in rejected_warned_apexes:
-                    rejected_warned_apexes.add(apex_host)
-                    print(
-                        f"WARN: {url} matches *.{apex_host} but bare apex is excluded by "
-                        f"strict semantics. To include the apex, add '{apex_host}' as an "
-                        f"explicit scope entry. Rejected URL recorded with "
-                        f"reason='apex-not-explicitly-scoped'.",
-                        file=sys.stderr,
-                    )
-                _insert_rejected_apex_work_item(
-                    db_path=db_path,
-                    method=method,
-                    url=url,
-                    url_path=url_path,
-                    query_params=query_params,
-                    body_params=body_params,
-                    path_params=path_params,
-                    cookie_params=cookie_params,
-                    case_type=case_type,
-                    source=source,
-                    params_sig=params_sig,
-                    auth_context=auth_context,
-                    apex_host=apex_host,
-                )
-                continue
 
             # Egress-blocked deferral: when the egress reputation check (see
             # cdn-ip-blocking.md) marks a host as CDN-edge-blocking the
@@ -438,12 +403,6 @@ def run(args) -> None:
         client.close()
 
     print(f"[ingest] Ingested {count} work items from source '{source}'")
-    if rejected_apex_count:
-        print(
-            f"[ingest] Rejected {rejected_apex_count} apex URL(s) under wildcard-only scope "
-            f"(reason='apex-not-explicitly-scoped'). Add the apex as an explicit scope entry to admit them.",
-            file=sys.stderr,
-        )
     if egress_blocked_count:
         print(
             f"[ingest] Deferred {egress_blocked_count} URL(s) to egress-blocked hosts "
@@ -581,59 +540,3 @@ def _insert_egress_blocked_work_item(
         conn.close()
 
 
-def _insert_rejected_apex_work_item(
-    *,
-    db_path: str,
-    method: str,
-    url: str,
-    url_path: str,
-    query_params,
-    body_params,
-    path_params,
-    cookie_params,
-    case_type: str,
-    source: str,
-    params_sig: str,
-    auth_context: str,
-    apex_host: str,
-) -> None:
-    """Insert a rejected work item directly so the operator can review it.
-
-    The standard ``db_insert_work_item`` helper hard-codes the row status to
-    ``pending``/``skipped`` based on type and does not surface a rejection
-    reason — both of which would hide the apex-not-explicitly-scoped URL
-    from operator review. We write directly with status=``rejected``,
-    cluster_key=``rejected:apex-not-explicitly-scoped``, and a terminal
-    reason that the work-buffer audits already understand.
-    """
-    queue_key = f"rejected:apex:{apex_host}:{url}"
-    qp = json.dumps(query_params) if isinstance(query_params, dict) else str(query_params)
-    bp = json.dumps(body_params) if isinstance(body_params, dict) else str(body_params)
-    pp = json.dumps(path_params) if isinstance(path_params, dict) else str(path_params)
-    cp = json.dumps(cookie_params) if isinstance(cookie_params, dict) else str(cookie_params)
-    conn = sqlite3.connect(db_path, timeout=5.0)
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute(
-            """INSERT OR IGNORE INTO work_items (
-                queue_key, auth_context, method, url, url_path,
-                query_params, body_params, path_params, cookie_params,
-                type, source, status, params_key_sig,
-                cluster_key, terminal_reason
-            ) VALUES (
-                ?, ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?
-            )""",
-            (
-                queue_key, auth_context, method, url, url_path,
-                qp, bp, pp, cp,
-                case_type, source, "rejected", params_sig,
-                "rejected:apex-not-explicitly-scoped",
-                "apex-not-explicitly-scoped",
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()

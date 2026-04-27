@@ -25,6 +25,7 @@ def register(subparsers) -> None:
     p.add_argument("-rl", dest="rate_limit", default="", help="Rate limit per second.")
     p.add_argument("-t", dest="threads", default="", help="Worker threads.")
     p.add_argument("-retry", dest="retry", default="", help="Retry count.")
+    p.add_argument("-timeout", dest="dns_timeout", default="", help="Per-query timeout in seconds.")
     p.add_argument("-a", dest="a_records", action="store_true", help="-a A record probe.")
     p.add_argument("-cname", dest="cname", action="store_true", help="-cname records.")
     p.add_argument("-resp", dest="resp", action="store_true", help="-resp full response.")
@@ -51,6 +52,8 @@ def run(args) -> None:
         cmd.extend(["-t", str(args.threads)])
     if args.retry:
         cmd.extend(["-retry", str(args.retry)])
+    if args.dns_timeout:
+        cmd.extend(["-timeout", str(args.dns_timeout)])
     if args.a_records:
         cmd.append("-a")
     if args.cname:

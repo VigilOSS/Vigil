@@ -22,7 +22,7 @@ Skills should point you at `aith assess contract kali <verb>` for field tables i
 
 ## Verb menu
 
-18 verbs total: 16 typed and 2 fallback. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles.
+19 verbs total: 17 typed and 2 fallback. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles.
 
 | Verb | Use | Paired reference |
 |------|-----|------------------|
@@ -35,7 +35,8 @@ Skills should point you at `aith assess contract kali <verb>` for field tables i
 | `kali subfinder` | Passive subdomain enumeration (Tier A). | `references/tools/recon/subdomain-enumeration-tools.md` |
 | `kali bbot` | Deep passive recon (Tier A+). `bbot -p subdomain-enum -rf passive -t <target>`. `--allow-deadly` requires `--destructive`. | `references/tools/recon/subdomain-enumeration-tools.md` |
 | `kali cero` | TLS-handshake SAN scraper (Tier B). CIDR-fed; complements CT logs. | `references/tools/recon/subdomain-enumeration-tools.md` |
-| `kali alterx` | Subdomain permutation generator (Tier C). Feed into `puredns resolve`. | `references/tools/recon/subdomain-enumeration-tools.md` |
+| `kali alterx` | Subdomain permutation generator (Tier C). Feed into `puredns resolve`. Run `-enrich -estimate` first to bound output before `-limit N`. | `references/tools/recon/subdomain-enumeration-tools.md` |
+| `kali asnmap` | ASN → CIDR mapper. Resolves a domain or org name to its announced IP ranges; the cero feed for the Phase 3 TLS SAN sweep. | `references/tools/recon/asnmap.md` |
 | `kali puredns` | Active DNS brute-force with massdns + wildcard filter (Tier C). | `references/tools/recon/puredns.md` |
 | `kali dnsx` | Bulk DNS resolution and record enrichment (Tier D). | `references/tools/recon/dnsx.md` |
 | `kali nikto` (CONDITIONAL — see triggers in `references/tools/recon/nikto.md`) | Web vuln scanner; legacy/odd-stack only. CLI flag is `--host <h>` (not `-h`, which argparse reserves for help) — the underlying nikto invocation builds `nikto -h <host>` correctly. | `references/tools/recon/nikto.md` |
@@ -75,7 +76,7 @@ The CLI fails closed when these are missing. Pass them explicitly — there is n
 
 | Flag | Purpose | Notes |
 |------|---------|-------|
-| `--technique <enum>` | Vulnerability class this command tests. | Allowed values: `SSRF`, `XSS`, `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`, `RFI`, `OPEN-REDIRECT`, `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`, `RATE-LIMIT`, `INFO-DISCLOSURE`, `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `OTHER`. Pick the enum the skill maps to (`sqli-testing` → `SQLI`); use `OTHER` only when no specific class fits. |
+| `--technique <enum>` | Vulnerability class this command tests, OR the operator-side category for non-attack runs. | Allowed values: `SSRF`, `XSS`, `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`, `RFI`, `OPEN-REDIRECT`, `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`, `RATE-LIMIT`, `INFO-DISCLOSURE`, `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `META`, `HEALTH`, `LOG-READ`, `OTHER`. Pick the enum the skill maps to (`sqli-testing` → `SQLI`); use `META` for operator-side dispatch metadata, registry writes, and scope decisions; `HEALTH` for runtime health checks (smoke test, version probes, container-status); `LOG-READ` for reading existing artifacts/log files (no new probes); `OTHER` only when no specific class fits. |
 | `--intent "<text>"` | ≤200-char one-liner of purpose. | Replaces the old `echo "=== label ==="` pattern. The intent is what makes `list-command-runs --q <keyword>` searchable across an engagement. |
 | `--probe-kind <kind>` | What the command represents. | One of `fingerprint` (learning the target, no payload) / `baseline` (vanilla control request, for diff) / `payload` (crafted attack payload testing a hypothesis) / `exploit` (attacker-outcome proof) / `replay` (captured primitive on a new surface) / `cleanup` (undoing target-side changes). |
 | `--phase <enum>` | The phase the dispatch was authorized for. | REQUIRED. See "Phase tags" below — pass the dispatch phase, not `scope.json.current_phase`. |
@@ -106,7 +107,7 @@ The half-phase tags exist because the audit row must reflect what the dispatch w
 
 ## Cross-reference: rate-limit calibration
 
-Per-target rate guidance (cautious-tier, CDN-fronted, WAF-protected, vendor-SaaS, origin profiles) lives in `agent/operator-core.md` "Recon Dispatch Resource Policy" so the operator and every specialist see the same table. Do not duplicate the table here — the examples below pull values from that table, and the table is the single source of truth.
+Per-target rate guidance (Cloud-fronted, Origin, WAF-protected, vendor-SaaS, high-friction) lives in `agent/shared-constraints.md` "Per-Target Rate Calibration Table". Tier-pick prose stays in `agent/operator-core.md` "Recon Dispatch Resource Policy".
 
 ## Examples per verb
 
@@ -232,9 +233,9 @@ aith assess kali subfinder -d example.com -all -recursive -t 30 \
 
 aith assess kali puredns resolve /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
   -r /engagements/$ENGAGEMENT_KEY/wordlists/resolvers.txt \
-  --rate-limit 1000 \
+  --rate-limit 800 \
   -w /engagements/$ENGAGEMENT_KEY/scans/subs_resolved.txt \
-  --technique RECON --intent "active wildcard-aware resolution of passive set" \
+  --technique RECON --intent "active wildcard-aware resolution @ polite-CDN-fronted-target rate" \
   --probe-kind fingerprint --phase recon --timeout 1800
 
 aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_resolved.txt \
@@ -275,7 +276,7 @@ aith assess kali bbot -t example.com -p subdomain-enum -rf passive \
 `kali cero` reads CIDR ranges (or domains) and harvests TLS-handshake Subject Alternative Names. It is complementary to CT logs because targets that issue private/internal certs do not appear in CT — only by handshaking the IP do those names surface. Pair with asnmap CIDR mapping upstream so cero gets a real CIDR block to sweep.
 
 ```bash
-aith assess kali cero -d 198.51.100.0/24 -p 443,8443,9443 -c 100 -t 4 \
+aith assess kali cero --target 198.51.100.0/24 -p 443,8443,9443 -c 100 -t 4 \
   -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans.txt \
   --technique OSINT --intent "TLS SAN scraping for non-CT subs" \
   --probe-kind fingerprint --phase recon --timeout 600
@@ -294,9 +295,9 @@ aith assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
 
 aith assess kali puredns resolve /engagements/$ENGAGEMENT_KEY/scans/perms.txt \
   -r /engagements/$ENGAGEMENT_KEY/wordlists/resolvers.txt \
-  --rate-limit 5000 \
+  --rate-limit 2500 \
   -w /engagements/$ENGAGEMENT_KEY/scans/perms_resolved.txt \
-  --technique RECON --intent "permutation bruteforce resolve" \
+  --technique RECON --intent "permutation bruteforce resolve @ polite-residential rate" \
   --probe-kind fingerprint --phase recon --timeout 1800
 ```
 
@@ -305,7 +306,7 @@ aith assess kali puredns resolve /engagements/$ENGAGEMENT_KEY/scans/perms.txt \
 `kali dnsx -all -resp` resolves the merged sub list and emits A/AAAA/CNAME/MX/NS/TXT records. This is the final pass — its output drives live-host confirmation (`httpx`) and the reactive nuclei sweep.
 
 ```bash
-aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_all.txt \
+aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
   -all -resp \
   -o /engagements/$ENGAGEMENT_KEY/scans/dnsx_full.jsonl \
   --technique RECON --intent "DNS resolution + record sweep" \
@@ -424,6 +425,10 @@ When you know what you want to learn, this lookup gets you to the right verb wit
 ## Coverage check before probing
 
 Every typed verb and `kali exec` writes an audit row with `command`, `argv`, `tool`, `agent`, `phase`, `technique`, `intent`, `probe_kind`, `destructive`, exit code, timings, and an output preview. Treat that history as a coverage map — search for prior work on this surface before dispatching, with `aith assess list-command-runs --q <keyword>`. The full coverage-vs-duplicate decision table lives in `agent/references/runtime-guides/command-history-auditing.md`. The shared `agent/shared-constraints.md §2b` has the agent-side rule.
+
+## Process cleanup discipline
+
+> Never `pkill <toolname>` (e.g. `pkill -f nmap`, `pkill -f ffuf`) — broad pkill stomps on sibling specialist processes in the shared runtime. For async jobs, use `aith assess kali job stop <id>` (signals only the job-owned in-container PID); for synchronous calls, the CLI already handles the SIGTERM/SIGKILL escalation on `--timeout` expiry.
 
 ## Troubleshooting and runtime errors
 
