@@ -475,23 +475,23 @@ def test_ingest_admits_apex_under_wildcard_scope(
     assert rejected == 0
 
 
-def test_ingest_fails_closed_on_missing_scope_json(monkeypatch, tmp_path: Path, capsys) -> None:
-    """Missing scope.json must fail non-zero with a clear error rather than
-    silently admitting URLs without scope context."""
+def test_ingest_runs_without_scope_json(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Ingestion no longer reads scope.json — Round 4 deleted the only consumer
+    (the strict-apex check). The ingest path admits URLs based on the
+    egress-blocked + per-host budget gates alone, so a missing scope.json
+    must not block ingestion."""
     eng = tmp_path / "engagement"
     eng.mkdir()
-    module, args, _fake = _ingest_setup(
+    module, args, fake = _ingest_setup(
         monkeypatch,
         eng,
         scope_payload=None,
         input_lines=["https://example.test/login"],
     )
 
-    with pytest.raises(SystemExit) as excinfo:
-        module.run(args)
-    assert excinfo.value.code == 1
-    err = capsys.readouterr().err
-    assert "scope.json missing or unparseable" in err
+    module.run(args)
+    posted_urls = [payload["url"] for _, payload in fake.posts]
+    assert "https://example.test/login" in posted_urls
 
 
 def test_ingest_idn_apex_a_label_url_admitted_under_u_label_wildcard(

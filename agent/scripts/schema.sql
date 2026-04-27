@@ -124,21 +124,41 @@ CREATE INDEX IF NOT EXISTS idx_work_items_priority ON work_items(status, priorit
 -- per-host budget check inside `ingest-endpoints`; the `deferred_count`
 -- column lets the operator audit how many URLs the budget pushed off the
 -- pending queue.
+--
+-- Host extraction strips an explicit port so that `example.com` and
+-- `example.com:8443` collapse onto the same row — `host_active_count` in
+-- `lib/classify.py` looks the host up via `urlparse(url).hostname`, which
+-- never carries the port, and missing the port-strip silently disables the
+-- per-host budget gate for explicit-port URLs.
 CREATE VIEW IF NOT EXISTS work_items_per_host AS
+WITH host_with_port AS (
+    SELECT
+        id,
+        status,
+        cluster_key,
+        CASE
+            WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
+                THEN substr(
+                    substr(url, instr(url, '://') + 3),
+                    1,
+                    instr(substr(url, instr(url, '://') + 3), '/') - 1
+                )
+            ELSE substr(url, instr(url, '://') + 3)
+        END AS host_authority
+    FROM work_items
+    WHERE url IS NOT NULL AND url != ''
+)
 SELECT
-    CASE
-        WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
-            THEN lower(substr(
-                substr(url, instr(url, '://') + 3),
-                1,
-                instr(substr(url, instr(url, '://') + 3), '/') - 1
-            ))
-        ELSE lower(substr(url, instr(url, '://') + 3))
-    END AS host,
+    lower(
+        CASE
+            WHEN instr(host_authority, ':') > 0
+                THEN substr(host_authority, 1, instr(host_authority, ':') - 1)
+            ELSE host_authority
+        END
+    ) AS host,
     SUM(CASE WHEN status IN ('pending', 'processing', 'done') THEN 1 ELSE 0 END) AS active_count,
     SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
     SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done_count,
     SUM(CASE WHEN cluster_key LIKE 'deferred:%' THEN 1 ELSE 0 END) AS deferred_count
-FROM work_items
-WHERE url IS NOT NULL AND url != ''
+FROM host_with_port
 GROUP BY host;

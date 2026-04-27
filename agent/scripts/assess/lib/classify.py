@@ -13,12 +13,15 @@ from urllib.parse import urlparse
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # Per-host URL budgets (1D.2). The default content-rich tier is 1000 URLs;
-# API-tier hosts (api.* / *.api.example.test) cap at 200 because their
-# surface is method × parameter, not URL × URL; sitemap-bearing hosts allow
-# 2000 because the sitemap declares the canonical surface and we should not
-# truncate below it.
+# API-tier hosts (api.* / *.api.example.test) match the same 1000 cap
+# because the prior 200 cap silently truncated legitimate API surface on
+# real engagements (large microservice clusters routinely expose 500+
+# discrete REST routes); sitemap-bearing hosts allow 2000 because the
+# sitemap declares the canonical surface and we should not truncate below
+# it. Operators can still cap a known-noisy host below 1000 with
+# ``--budget-override host:N``.
 PER_HOST_BUDGET_CONTENT_RICH = 1000
-PER_HOST_BUDGET_API_TIER = 200
+PER_HOST_BUDGET_API_TIER = 1000
 PER_HOST_BUDGET_SITEMAP_BEARING = 2000
 
 _API_TIER_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -226,22 +229,35 @@ def host_active_count(db_path_or_conn, host: str) -> int:
             ).fetchone()
             return int(row[0]) if row and row[0] is not None else 0
 
-        # Fallback aggregate when the view migration has not run yet.
+        # Fallback aggregate when the view migration has not run yet. The
+        # nested substr/instr expression mirrors schema.sql's port-stripped
+        # host extraction so this fallback agrees with the view.
         row = conn.execute(
             """
-            SELECT COUNT(*) FROM work_items
-            WHERE status IN ('pending', 'processing', 'done')
-              AND lower(
+            WITH host_with_port AS (
+                SELECT
+                    status,
+                    CASE
+                        WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
+                            THEN substr(
+                                substr(url, instr(url, '://') + 3),
+                                1,
+                                instr(substr(url, instr(url, '://') + 3), '/') - 1
+                            )
+                        ELSE substr(url, instr(url, '://') + 3)
+                    END AS host_authority
+                FROM work_items
+                WHERE status IN ('pending', 'processing', 'done')
+                  AND url IS NOT NULL AND url != ''
+            )
+            SELECT COUNT(*) FROM host_with_port
+            WHERE lower(
                 CASE
-                    WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
-                        THEN substr(
-                            substr(url, instr(url, '://') + 3),
-                            1,
-                            instr(substr(url, instr(url, '://') + 3), '/') - 1
-                        )
-                    ELSE substr(url, instr(url, '://') + 3)
+                    WHEN instr(host_authority, ':') > 0
+                        THEN substr(host_authority, 1, instr(host_authority, ':') - 1)
+                    ELSE host_authority
                 END
-              ) = ?
+            ) = ?
             """,
             (normalized,),
         ).fetchone()

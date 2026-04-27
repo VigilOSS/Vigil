@@ -154,8 +154,8 @@ specific blocker in `#### Coverage Gaps` so the operator can re-dispatch with de
   no trigger match" so the absence is intentional, not forgotten.
 
 ### Trust Boundary Checkpoints
-- [ ] **Vendor-SaaS hosts flagged with scope decision recorded.** Any host whose CNAME / rDNS shape, banner, or HTTP fingerprint matches a vendor-managed SaaS platform (per `agent/scripts/assess/lib/scope.py:host_is_vendor_saas`) has been surfaced to the operator and a `{kind: "scope_decision", host, vendor, choice}` row is recorded in `$DIR/agent-registry.json` BEFORE recon dispatched against it. Do not silently dispatch against a vendor-SaaS host — the user must choose in-scope / out-of-scope / partial-scope.
-- [ ] **Egress reputation check run; egress-block surfaced to operator if >50% 403 rate.** Step 0b of `agent/skills/web-recon/SKILL.md` ran AFTER wafw00f and BEFORE nmap. If `egress_block_pct > 50`, target-facing recon STOPPED and the Egress reputation checkpoint was surfaced to the operator with the four mitigation options (see `agent/references/runtime-guides/cdn-ip-blocking.md`). Continuing through nmap/ffuf/nuclei from a blocked egress is a hard failure of this dispatch.
+- [ ] **Vendor-SaaS hosts warned to the operator with a scope_decision row recorded.** Any host whose CNAME / rDNS shape, banner, or HTTP fingerprint matches a vendor-managed SaaS platform (per `agent/scripts/assess/lib/scope.py:host_is_vendor_saas`) has been surfaced to the operator with a one-line warning AND a `{kind: "scope_decision", host, vendor, choice: "pending"}` row written to `$DIR/agent-registry.json`. The warning is informational (default-permissive); the operator decides in/out/partial scope and updates the row. Hosts authored as an explicit literal in `scope.json` skip the warning — the literal is already an in-scope decision.
+- [ ] **Egress reputation check run after subdomain-enum + httpx populated `live_hosts.txt`.** Step 0b of `agent/skills/web-recon/SKILL.md` ran. If `egress_block_pct > 50`, the dispatch paused, re-sampled five minutes later, and only surfaced the Egress reputation checkpoint when the second sample stayed >50%. Continuing through nmap/ffuf/nuclei from a confirmed blocked egress is a hard failure of this dispatch.
 
 ### Network Layer
 - [ ] All non-web services identified and triaged (SSH, FTP, SMTP, database, custom)
@@ -164,16 +164,25 @@ specific blocker in `#### Coverage Gaps` so the operator can re-dispatch with de
 - [ ] **Per-host TLS SAN extracted** via `openssl s_client + x509 -ext subjectAltName`
   (recipe in `agent/references/tools/recon/openssl-sans.md` step 1); per-host SAN sets
   written to `scans/sans_<host>.txt` for the cross-host comparison.
-- [ ] **Multi-time DNS resolution run** (5 samples × 60s spacing via `for i in 1 2 3 4 5;
-  do dig +short $host A; sleep 60; done | sort -u`); split-VIP detected if the unique-IP
+- [ ] rDNS vendor identification recorded for shared / CDN-fronted hosts
+
+### Network Layer (conditional — fire when wafw00f or httpx flagged shared-frontend signals)
+
+The two checks below run when the recon-pass output flagged a CDN-fronted, multi-tenant,
+or load-balanced shape (Cloudflare/Akamai/AWS edge in wafw00f; httpx `-tls-grab` shows a
+SAN list spanning multiple tenants; rDNS resolves a host to a known shared platform). On
+shapes that show none of those signals, the checks are pure overhead — declare the
+"no shared-frontend signal" rationale in `#### Coverage Gaps` and skip without penalty.
+
+- [ ] **Multi-time DNS resolution run** (5 samples × 10s spacing via `for i in 1 2 3 4 5;
+  do dig +short $host A; sleep 10; done | sort -u`); split-VIP detected if the unique-IP
   count is >= 2, and each unique IP probed independently for cert / banner / open-port
-  differences.
+  differences. Procedure in `agent/references/tools/recon/openssl-sans.md` step 4.
 - [ ] **Cross-host SAN collision check run** (`for h in $HOSTS; do openssl s_client ... |
   x509 -ext subjectAltName | grep -oE 'DNS:[^,]+' | sort -u; done | sort | uniq -c | sort
   -rn`); shared multi-tenant certs flagged for tenant-identity disclosure analysis, and
   every count >= 2 entry recorded as an intel-note plus fed back as Phase 1a subdomain
-  expansion seeds.
-- [ ] rDNS vendor identification recorded for shared / CDN-fronted hosts
+  expansion seeds. Procedure in `agent/references/tools/recon/openssl-sans.md` step 2.
 
 ### Web Technology Layer
 - [ ] Server software and version identified (or confirmed hidden behind proxy)
