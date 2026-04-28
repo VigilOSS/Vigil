@@ -30,20 +30,6 @@ from .config import Config, load_config
 
 _DEFAULT_CONTAINER_NAME = "security-research"
 
-_DEDUP_BLOCK_ENV = "KALI_AUDIT_DEDUP_BLOCK"
-
-
-def _dedup_block_enabled() -> bool:
-    """Return True when the operator has opted into block-on-dedup mode.
-
-    Default behavior is warn-and-continue: a dedup hit prints the warning
-    but the command still executes. Setting `KALI_AUDIT_DEDUP_BLOCK` to
-    `1` / `true` / `yes` (case-insensitive) restores the original
-    block-and-require-force semantics. Anything else (unset, `0`, blank,
-    garbage) leaves the new warn-and-continue default in place.
-    """
-    raw = os.environ.get(_DEDUP_BLOCK_ENV, "")
-    return raw.strip().lower() in ("1", "true", "yes")
 
 _SHELL_BINARIES = frozenset({"sh", "bash", "dash", "zsh", "/bin/sh", "/bin/bash", "/bin/dash", "/usr/bin/sh", "/usr/bin/bash", "/usr/bin/env"})
 
@@ -298,7 +284,12 @@ def _validate_inputs(
     if timeout is None or timeout <= 0:
         raise AssessError("--timeout (seconds) is required and must be > 0")
     if not agent_name:
-        raise AssessError("--agent-name is required (or set AGENT_NAME)")
+        # `_resolve_agent_name` always returns a non-empty string thanks to the
+        # default-to-"operator" fallback, so reaching this branch means an
+        # internal regression (e.g. someone bypassed the resolver). Defense in
+        # depth — keep the guard with a different message so the failure mode
+        # is clear if it ever fires.
+        raise AssessError("internal error: agent_name unexpectedly empty")
 
 
 def _peak_rss_kilobytes_to_bytes(peak_kb: int) -> int:
@@ -327,20 +318,15 @@ def _read_proc_peak_rss(pid: int) -> Optional[int]:
 def _container_pid_file(run_uuid: str) -> str:
     """Path inside the container where the wrapper shell records the user
     command's PID. Sharing the engagement-wide ``run_uuid`` here means the
-    audit row, the strace artifact (when enabled), and this pid file all key
-    on the same identifier — the operator can grep one ID across all three."""
+    audit row and this pid file key on the same identifier — the operator
+    can grep one ID across both."""
     return f"/tmp/aith-pid-{run_uuid}.pid"
-
-
-def _container_strace_file(run_uuid: str) -> str:
-    return f"/tmp/aith-strace-{run_uuid}.log"
 
 
 def _build_docker_exec(
     cmd: list[str],
     *,
     container_name: str,
-    strace: bool,
     run_uuid: str,
 ) -> list[str]:
     """Wrap the user command in a tiny shell that records the in-container
@@ -358,14 +344,7 @@ def _build_docker_exec(
     # cascade, but never let a pid-write failure (ENOSPC, read-only /tmp,
     # missing dir) stop the user command from running. If the write fails,
     # surface the reason on stderr so orphan analysis isn't a silent guess.
-    if strace:
-        strace_log = _container_strace_file(run_uuid)
-        tail = (
-            f'exec strace -f -e trace=network,write,unlink '
-            f'-o {strace_log} "$@"'
-        )
-    else:
-        tail = 'exec "$@"'
+    tail = 'exec "$@"'
     wrapper = (
         f'echo $$ > {pid_file} && {tail} || '
         f'(echo "aith: PID write to {pid_file} failed (errno=$?); proceeding without pid-file" >&2; {tail})'
@@ -524,7 +503,6 @@ def _patch_finalize(
     peak_rss_bytes: int | None,
     cpu_user_seconds: float | None,
     cpu_system_seconds: float | None,
-    strace_path: str | None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "status": status,
@@ -542,33 +520,45 @@ def _patch_finalize(
         payload["cpu_user_seconds"] = float(cpu_user_seconds)
     if cpu_system_seconds is not None:
         payload["cpu_system_seconds"] = float(cpu_system_seconds)
-    if strace_path:
-        payload["strace_path"] = strace_path
     # 409 from the finalize endpoint means a concurrent finalize already
     # wrote the canonical row — accept it and return that row, do not raise.
     return client.patch(f"command-runs/{int(run_id)}", payload, accept_409=True)
 
 
-def _build_preview(text: str, *, head_bytes: int = 4096, tail_bytes: int = 4096) -> str:
-    raw = text.encode("utf-8", errors="replace") if isinstance(text, str) else bytes(text)
-    if len(raw) <= head_bytes + tail_bytes:
-        return raw.decode("utf-8", errors="replace")
-    head = raw[:head_bytes].decode("utf-8", errors="replace")
-    tail = raw[-tail_bytes:].decode("utf-8", errors="replace")
-    return f"{head}\n...\n[truncated {len(raw) - head_bytes - tail_bytes} bytes]\n...\n{tail}"
-
-
 def _read_safely(path: Path, *, max_bytes: int = 32_768) -> str:
+    """Return a preview of ``path`` capped at ``max_bytes``.
+
+    For files smaller than ``max_bytes`` the full content is returned. For
+    larger files we read ``head_budget`` bytes from the start and seek to the
+    actual end-of-file for the tail — the previous implementation read
+    ``max_bytes + 1`` bytes from the START and called the second half "tail",
+    which silently lied about file content past the 32K mark (ISSUE-007).
+    """
     if not path.is_file():
         return ""
     try:
-        with path.open("rb") as fh:
-            data = fh.read(max_bytes + 1)
+        size = path.stat().st_size
     except OSError:
         return ""
-    if not data:
+    if size == 0:
         return ""
-    return _build_preview(data.decode("utf-8", errors="replace"), head_bytes=max_bytes // 2, tail_bytes=max_bytes // 2)
+    head_budget = max_bytes // 2
+    tail_budget = max_bytes - head_budget
+    try:
+        with path.open("rb") as fh:
+            if size <= max_bytes:
+                return fh.read().decode("utf-8", errors="replace")
+            head = fh.read(head_budget)
+            fh.seek(-tail_budget, os.SEEK_END)
+            tail = fh.read(tail_budget)
+    except OSError:
+        return ""
+    elided = size - len(head) - len(tail)
+    return (
+        f"{head.decode('utf-8', errors='replace')}\n"
+        f"...\n[truncated {elided} bytes from middle of {size}-byte file]\n...\n"
+        f"{tail.decode('utf-8', errors='replace')}"
+    )
 
 
 def _write_failed_audit_marker(engagement_dir: Path, *, run_uuid: str, error: str) -> None:
@@ -582,10 +572,20 @@ def _write_failed_audit_marker(engagement_dir: Path, *, run_uuid: str, error: st
 
 
 def _resolve_agent_name(explicit: str | None) -> str:
+    """Resolve --agent-name with env-var fallback and an "operator" default.
+
+    Precedence: explicit flag > $AGENT_NAME > $AITH_AGENT_NAME > "operator".
+    The default lets the operator run mechanical pipeline checks (tier-pick
+    smoke, runtime health, credential validation) without remembering to set
+    --agent-name. Specialist dispatch wrappers export AGENT_NAME=<role>
+    explicitly, so the default never bleeds into specialist contexts.
+    """
     if explicit:
         return explicit
     env_value = os.environ.get("AGENT_NAME") or os.environ.get("AITH_AGENT_NAME") or ""
-    return env_value
+    if env_value:
+        return env_value
+    return "operator"
 
 
 def _resolve_engagement_dir(explicit: Path | None, cfg: Config) -> Path:
@@ -607,7 +607,6 @@ def kali_exec(
     engagement_dir: Path | None = None,
     engagement_key: str | None = None,
     force: bool = False,
-    strace: bool = False,
     container_name: str = _DEFAULT_CONTAINER_NAME,
     config: Config | None = None,
     tool_name: str | None = None,
@@ -640,7 +639,6 @@ def kali_exec(
     out_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = out_dir / f"{run_uuid}.out"
     stderr_path = out_dir / f"{run_uuid}.err"
-    strace_path = out_dir / f"{run_uuid}.strace" if strace else None
 
     started_at_iso = _utcnow_iso()
     started_monotonic = time.monotonic()
@@ -670,7 +668,6 @@ def kali_exec(
     docker_argv = _build_docker_exec(
         cmd,
         container_name=container_name,
-        strace=strace,
         run_uuid=run_uuid,
     )
 
@@ -704,73 +701,18 @@ def kali_exec(
             run_id = int(row.get("id")) if row.get("id") is not None else None
             superseded_by_id = row.get("superseded_by_id")
             if superseded_by_id and not force:
-                # Default behavior is warn-and-continue: parallel specialists
-                # racing on the same wildcard list inside the dedup window
-                # should not be hard-blocked, because that pushes operators
-                # toward `--force` as a habit. Operators who genuinely want
-                # the old block-on-dup mode opt in via KALI_AUDIT_DEDUP_BLOCK.
-                # `--force` still suppresses the warning entirely.
-                #
-                # Audit-truth contract (ISSUE-003): the backend now ALWAYS
-                # inserts a fresh row on dedup hit and links it to the
-                # predecessor via ``superseded_by_id``. ``run_id`` here is the
-                # NEW row's id, so the finalize PATCH below will target our
-                # own row — not collapse two executions into one as the old
-                # row-merge behavior did.
+                # Warn-and-continue: parallel specialists racing on the same
+                # wildcard list inside the dedup window should not be hard-
+                # blocked. The backend has already inserted a fresh row and
+                # linked it to the predecessor via ``superseded_by_id``; the
+                # finalize PATCH below targets that NEW row's id.
+                # ``--force`` suppresses the warning entirely (and also tells
+                # the backend to skip the supersede link).
                 print(
                     f"warning: dedup hit — equivalent command-run id={superseded_by_id} "
                     f"is still in flight.",
                     file=sys.stderr,
                 )
-                if _dedup_block_enabled():
-                    print(
-                        f"warning: {_DEDUP_BLOCK_ENV} is set; refusing to run. "
-                        "Pass --force to bypass.",
-                        file=sys.stderr,
-                    )
-                    # Block-mode: the new row exists in the database and must
-                    # land in a terminal status so sweep-orphans does not pick
-                    # it up. ``aborted-dedup`` records "we would have run but
-                    # a peer was already in flight" — distinct from `killed`
-                    # (which implies a subprocess actually ran) and from
-                    # `superseded` which is reserved for intel rows.
-                    if run_id is not None:
-                        try:
-                            _patch_finalize(
-                                client,
-                                run_id=run_id,
-                                status="aborted-dedup",
-                                return_code=None,
-                                ended_at_iso=_utcnow_iso(),
-                                duration_ms=0,
-                                stdout_preview="",
-                                stderr_preview="",
-                                timed_out=False,
-                                partial_results=False,
-                                peak_rss_bytes=None,
-                                cpu_user_seconds=None,
-                                cpu_system_seconds=None,
-                                strace_path=None,
-                            )
-                        except AssessError as exc:
-                            print(
-                                f"warning: aborted-dedup finalize PATCH failed: {exc}; "
-                                "row may stay running and need orphan sweep.",
-                                file=sys.stderr,
-                            )
-                    return KaliResult(
-                        run_id=run_id,
-                        status="superseded",
-                        return_code=None,
-                        stdout_path=str(stdout_path),
-                        stderr_path=str(stderr_path),
-                        duration_ms=0,
-                        peak_rss_bytes=None,
-                        stdout_preview="",
-                        stderr_preview="",
-                        timed_out=False,
-                        partial_results=False,
-                    )
         except AssessError as exc:
             print(
                 f"warning: pre-exec audit POST failed: {exc}; continuing without audit row.",
@@ -896,7 +838,6 @@ def kali_exec(
                     peak_rss_bytes=peak_rss_bytes,
                     cpu_user_seconds=cpu_user_seconds,
                     cpu_system_seconds=cpu_system_seconds,
-                    strace_path=str(strace_path) if strace_path else None,
                 )
             except AssessError as exc:
                 # 409 races are now handled inside _patch_finalize; reaching
@@ -975,21 +916,16 @@ def add_required_kali_flags(parser) -> None:
         "--force",
         action="store_true",
         help=(
-            "Suppress the dedup warning entirely and skip the supersede record. "
-            "Default behavior is warn-and-continue (set "
-            "KALI_AUDIT_DEDUP_BLOCK=1 to restore the old block-on-dup mode)."
+            "Suppress the dedup warning entirely. The subprocess still runs in either "
+            "case — dedup hits no longer block, only warn — but --force also tells the "
+            "backend to skip the supersede-link record on the new row."
         ),
-    )
-    parser.add_argument(
-        "--strace",
-        action="store_true",
-        help="Wrap in `strace -e trace=network,write,unlink` and spill the artifact.",
     )
     parser.add_argument(
         "--agent-name",
         dest="kali_agent_name",
         default=None,
-        help="Dispatching agent name (defaults to $AGENT_NAME / $AITH_AGENT_NAME).",
+        help="Dispatching agent name (defaults to $AGENT_NAME / $AITH_AGENT_NAME / 'operator').",
     )
     parser.add_argument(
         "--container-name",
@@ -1069,7 +1005,6 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
         "timeout": int(args.timeout),
         "agent_name": getattr(args, "kali_agent_name", None),
         "force": bool(getattr(args, "force", False)),
-        "strace": bool(getattr(args, "strace", False)),
         "container_name": getattr(args, "container_name", _DEFAULT_CONTAINER_NAME),
     }
     if explicit_dir:

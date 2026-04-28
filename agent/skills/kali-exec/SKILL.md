@@ -83,8 +83,7 @@ The CLI fails closed when these are missing. Pass them explicitly — there is n
 | `--phase <enum>` | The phase the dispatch was authorized for. | REQUIRED. See "Phase tags" below — pass the dispatch phase, not `scope.json.current_phase`. |
 | `--timeout <seconds>` | Wall-clock budget. | Required. Default suggestion: 1800 for synchronous probes; longer budgets must use `kali job start`. |
 | `--destructive` | Flag for writes/deletes. | Off by default. Set when the command does POST/PUT/PATCH/DELETE, file upload, account creation, config change, or any state-modifying shell exec on the target. |
-| `--force` | Suppress the dedup-warning log and skip the supersede check entirely. Default behavior is warn-and-continue (set `KALI_AUDIT_DEDUP_BLOCK=1` env var to restore the old block-on-dup mode). | The CLI hashes `(command, argv_json)` and warns when an identical command ran within `KALI_AUDIT_DEDUP_WINDOW_SECONDS` (default 30s). The default policy is warn-and-continue so parallel specialists racing on the same wildcard list don't hard-block each other. Use `--force` only when you also want to suppress the warning (for an intentional retry). |
-| `--strace` | Wrap in `strace -e trace=network,write,unlink`. | Optional. Use for `--probe-kind exploit` or `--destructive` so the audit row records network egress and disk writes. The strace artifact spills to the same `scans/kali/` directory as stdout/stderr. |
+| `--force` | Suppress the dedup-warning log for an intentional retry. | The CLI hashes `(command, argv_json)` and warns when an identical command ran within `KALI_AUDIT_DEDUP_WINDOW_SECONDS` (default 30s), but the new command always executes — the backend records a fresh audit row regardless, with `superseded_by_id` linking it to the predecessor when applicable. `--force` suppresses only the warning text; it does not change run behavior or backend state. |
 
 `--engagement-key` and `--agent-name` are auto-derived from `${ENGAGEMENT_DIR}/engagement.json` and the dispatching role context — do not pass them manually unless correcting an inferred value.
 
@@ -380,7 +379,7 @@ aith assess kali exec -- \
         -t 4 -f -o /engagements/$ENGAGEMENT_KEY/scans/hydra_ssh.txt \
         ssh://target.example.com \
   --technique AUTH --intent "hydra ssh brute, small wordlist, throttled" \
-  --probe-kind payload --phase exploit --timeout 3600 --destructive --strace
+  --probe-kind payload --phase exploit --timeout 3600 --destructive
 ```
 
 ### `kali job`

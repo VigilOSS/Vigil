@@ -54,21 +54,42 @@ Not every non-404 is a finding. Classify anomalies before escalating:
 
 On shared platforms, also watch for account identifiers (account IDs, subdomain names, shard IDs) appearing in unexpected responses.
 
+## Mandatory Closing Sequence
+
+Before your dispatch returns, run in this order:
+
+1. `aith assess record-finding fuzzer <finding-json>` for each confirmed finding
+2. `aith assess record-surface <surface-json>` for any new surface fuzzing uncovered (newly-evidenced parameter, hidden directory, etc.)
+3. `aith assess ingest-endpoints "$DIR/cases.db" fuzzer` for newly discovered paths
+4. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at the raw fuzzer hit log under `$DIR/scans/fuzzer/`), and role-specific extras (`payloads_tried`, `hits`, `hit_ratio`)
+
+Skipping the handoff write means the operator has nothing to feed into the next
+dispatch — there is no `agent-registry.json` fallback any more. Schema for
+`--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+
+The `record-handoff` step is idempotent and called incrementally — checkpoint
+after each major step in your methodology, not only at the end. See
+`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
+
+Anomalies that need vulnerability-analyst follow-up belong in the handoff
+`next_steps` (action: "validate the N anomalous responses", recommended_agent:
+`vulnerability-analyst`). The full hit log goes in `working_artifacts` so the next
+agent can read it directly.
+
 ## Output Contract
 
-Return concise structured output with these sections when relevant:
+Reason through the fuzz pass in your response — describe the payload families
+exercised, the hit-ratio you observed, which anomalies look like real signal vs
+WAF artifacts, which parameters or directories are worth validation follow-up.
+Backend writes via the Mandatory Closing Sequence above are what makes the
+state durable; the response is your reflection on top of that.
 
-- `#### Objective`
-- `#### Anomalies`
-- `#### New Surface Candidates`
-- `#### Findings`
-- `#### Recommended Next Actions`
-
-## Finding Recording
-
-**MANDATORY:** If fuzzing produces confirmed findings, record each via
-`aith assess record-finding fuzzer <finding-json-file>` before your task completes.
-Do not defer recording to the operator. Unrecorded findings are lost data.
+Don't truncate reasoning to be brief — careful anomaly-signal analysis directly
+improves vulnerability-analyst's downstream validation work (see
+`agent/shared-constraints.md` §16). Hit details live in the raw hit log under
+`$DIR/scans/fuzzer/` (linked via `working_artifacts`) and anomaly-triage actions
+live in `next_steps` — so the response can stay focused on signal interpretation
+rather than restating canonical state.
 
 ## OOB Callback Confirmation
 

@@ -2193,3 +2193,278 @@ def test_operator_core_pins_render_handoff_helper_in_cross_dispatch_continuity()
         "the renderer reads it directly so the registry-write instruction "
         "must name it."
     )
+
+
+def test_handoff_schema_reference_exists_and_indexed():
+    """Round 9 — the handoff JSON schema lives in
+    `agent/references/runtime-guides/handoff-schema.md` and must be registered in
+    the references INDEX. Every specialist role file points at this file from its
+    Mandatory Closing Sequence; if the file or the index entry drifts away the
+    pointer breaks."""
+    repo_root = Path(__file__).resolve().parents[3]
+    schema = (
+        repo_root / "agent" / "references" / "runtime-guides" / "handoff-schema.md"
+    )
+    assert schema.exists(), "agent/references/runtime-guides/handoff-schema.md must exist"
+    text = schema.read_text(encoding="utf-8")
+    # Top-level structure markers.
+    for needle in (
+        "## Schema",
+        "## Field-by-field guidance",
+        "## Per-role examples",
+        "## CLI usage",
+    ):
+        assert needle in text, f"handoff-schema.md is missing the `{needle}` section"
+    # Required schema fields.
+    for field in (
+        "agent_id",
+        "agent_role",
+        "phase",
+        "summary",
+        "confidence",
+        "finding_slugs",
+        "coverage_gaps",
+        "next_steps",
+        "runtime_issues",
+        "working_artifacts",
+        "open_questions",
+        "recommended_next_agent",
+        "extras",
+    ):
+        assert f"`{field}`" in text, f"handoff-schema.md is missing the `{field}` field"
+    # CLI usage names the canonical helper.
+    assert "aith assess dispatch record-handoff --from-json" in text, (
+        "handoff-schema.md must document the `record-handoff --from-json` CLI"
+    )
+    # INDEX.md registers the new file.
+    index = (repo_root / "agent" / "references" / "INDEX.md").read_text(encoding="utf-8")
+    assert "runtime-guides/handoff-schema.md" in index, (
+        "agent/references/INDEX.md must register `runtime-guides/handoff-schema.md`"
+    )
+
+
+def test_subagent_registry_documents_backend_tables():
+    """Round 9 — `agent/references/runtime-guides/subagent-registry.md` was rewritten
+    to document the three backend dispatch tables (assessment_dispatches,
+    assessment_dispatch_handoffs, assessment_dispatch_decisions) and their CLI
+    verbs. The previous JSON-file framing (`$DIR/agent-registry.json`) is removed
+    as the canonical mechanism — the file mention may remain only in the
+    "previous file is removed" sentence."""
+    repo_root = Path(__file__).resolve().parents[3]
+    text = (
+        repo_root / "agent" / "references" / "runtime-guides" / "subagent-registry.md"
+    ).read_text(encoding="utf-8")
+
+    # Backend table names appear.
+    for table in (
+        "assessment_dispatches",
+        "assessment_dispatch_handoffs",
+        "assessment_dispatch_decisions",
+    ):
+        assert table in text, f"subagent-registry.md must document the `{table}` table"
+    # CLI verbs are documented.
+    for verb in (
+        "dispatch register",
+        "dispatch update-status",
+        "dispatch list",
+        "dispatch get",
+        "dispatch record-decision",
+        "dispatch record-handoff",
+        "dispatch render-handoff",
+    ):
+        assert verb in text, f"subagent-registry.md must document the `aith assess {verb}` verb"
+    # Decision kinds appear.
+    for kind in ("scope_decision", "egress_decision", "dispatch_blocked"):
+        assert kind in text, f"subagent-registry.md must document the `{kind}` decision kind"
+
+
+def test_shared_constraints_carries_output_hygiene_section():
+    """Round 9b — the "Output Hygiene — Backend Is Canonical" section in
+    `agent/shared-constraints.md` keeps the backend-canonical rule and the
+    mandatory closing sequence, but the prescriptive minimal-output template
+    Round 9 introduced was walked back per Anthropic's April 2026 postmortem
+    (https://www.anthropic.com/engineering/april-23-postmortem) — restrictive
+    response-shape instructions degraded reasoning quality. The section heading
+    and the record-handoff step remain; the "Wrote to backend / ≤200 chars /
+    That's it" template is gone."""
+    repo_root = Path(__file__).resolve().parents[3]
+    sc = (repo_root / "agent" / "shared-constraints.md").read_text(encoding="utf-8")
+
+    # Section header — heading stays.
+    assert "Output Hygiene" in sc, (
+        "shared-constraints.md must carry the `Output Hygiene` section heading"
+    )
+    assert "Backend Is Canonical" in sc, (
+        "shared-constraints.md `Output Hygiene` section must carry the "
+        "`Backend Is Canonical` framing"
+    )
+
+    # Mandatory-closing-sequence anchor must stay.
+    assert "Mandatory closing sequence" in sc or "Mandatory Closing Sequence" in sc, (
+        "shared-constraints.md `Output Hygiene` section must keep the "
+        "mandatory closing sequence list"
+    )
+    assert "render-handoff" in sc, (
+        "shared-constraints.md `Output Hygiene` section must reference "
+        "`render-handoff` so operators know how to read canonical state"
+    )
+
+    # The closing-sequence step list ends on record-handoff.
+    assert "aith assess dispatch record-handoff --from-json" in sc, (
+        "shared-constraints.md `Output Hygiene` section must reference the "
+        "`aith assess dispatch record-handoff --from-json` closing step"
+    )
+
+    # The handoff schema reference resolves to the new file.
+    assert "agent/references/runtime-guides/handoff-schema.md" in sc, (
+        "shared-constraints.md `Output Hygiene` section must point at the "
+        "handoff-schema.md reference"
+    )
+
+    # Positive guard: the softened framing must explicitly preserve reasoning
+    # quality. This is the Round 9b walk-back signal — without it, the section
+    # could drift back toward terse-response prescriptions.
+    assert "Reasoning quality" in sc or "Don't truncate" in sc, (
+        "shared-constraints.md `Output Hygiene` section must carry the "
+        "softened `Reasoning quality > response brevity` framing (Round 9b)"
+    )
+
+    # Anti-pattern guard: the prescriptive Round 9 template literals must NOT
+    # reappear. They contradict Anthropic's published prompting guidance and
+    # caused observable reasoning degradation in Round 10 testing.
+    forbidden = (
+        "≤200 chars",
+        "That's it",
+        "**Wrote to backend:**",
+    )
+    offenders = [needle for needle in forbidden if needle in sc]
+    assert not offenders, (
+        "shared-constraints.md `Output Hygiene` section must NOT carry the "
+        "Round 9 prescriptive template fragments (Anthropic April 2026 "
+        f"postmortem walk-back); found: {offenders}"
+    )
+
+
+def test_specialist_role_files_carry_mandatory_closing_sequence():
+    """Round 9 — every specialist role file must carry a `Mandatory Closing
+    Sequence` section that ends on `aith assess dispatch record-handoff
+    --from-json`. Without it, the role drifts back to writing markdown sections
+    that duplicate backend state."""
+    repo_root = Path(__file__).resolve().parents[3]
+    agent_dir = repo_root / "agent" / "agents"
+    specialists = [
+        "recon-specialist",
+        "source-analyzer",
+        "surface-collector",
+        "vulnerability-analyst",
+        "exploit-developer",
+        "fuzzer",
+        "osint-analyst",
+        "report-writer",
+        "code-architect",
+        "code-vuln-hunter",
+        "code-variant-hunter",
+        "code-vuln-verifier",
+    ]
+    for name in specialists:
+        path = agent_dir / f"{name}.md"
+        text = path.read_text(encoding="utf-8")
+        assert "## Mandatory Closing Sequence" in text, (
+            f"{name}.md must carry a `## Mandatory Closing Sequence` section"
+        )
+        assert "aith assess dispatch record-handoff --from-json" in text, (
+            f"{name}.md `Mandatory Closing Sequence` must reference "
+            "`aith assess dispatch record-handoff --from-json`"
+        )
+        assert "agent/references/runtime-guides/handoff-schema.md" in text, (
+            f"{name}.md must point at the handoff-schema.md reference"
+        )
+        # Round 9c — every role file's closing sequence must point specialists
+        # at the incremental-checkpoint pattern, so they call record-handoff
+        # after each major step rather than only at the end. Either word is
+        # acceptable; the schema doc owns the per-role cadence.
+        lower = text.lower()
+        assert ("idempotent" in lower) or ("checkpoint" in lower), (
+            f"{name}.md `Mandatory Closing Sequence` must reference "
+            "`idempotent` or `checkpoint` so the agent calls record-handoff "
+            "incrementally, not just at the end "
+            "(see `agent/references/runtime-guides/handoff-schema.md` "
+            "\"Checkpointing\")"
+        )
+
+
+def test_handoff_schema_doc_carries_checkpointing_section():
+    """Round 9c — `agent/references/runtime-guides/handoff-schema.md` is the
+    single owner of the incremental-checkpoint pattern and per-role cadence.
+    The role files reference it; this test ensures the section actually exists
+    so those references don't dangle."""
+    repo_root = Path(__file__).resolve().parents[3]
+    schema = (
+        repo_root / "agent" / "references" / "runtime-guides" / "handoff-schema.md"
+    ).read_text(encoding="utf-8")
+    assert "## Checkpointing" in schema, (
+        "handoff-schema.md must carry a `## Checkpointing` section that "
+        "documents the incremental-checkpoint pattern"
+    )
+    # Positive guard for cadence guidance — the section names per-role cadence.
+    assert "checkpoint after each" in schema.lower(), (
+        "handoff-schema.md `Checkpointing` section must describe the "
+        "after-each-step cadence"
+    )
+    # The section must call out idempotent semantics so agents understand a
+    # repeat call replaces (not duplicates) the prior row.
+    assert "idempotent" in schema.lower(), (
+        "handoff-schema.md `Checkpointing` section must call out that "
+        "record-handoff is idempotent"
+    )
+
+
+def test_shared_constraints_section_16_points_at_checkpoint_pattern():
+    """Round 9c — `shared-constraints.md` §16 is the always-loaded layer that
+    every specialist sees on dispatch. The mandatory-closing-sequence list
+    there must reference the checkpoint pattern documented in
+    handoff-schema.md so agents discover it."""
+    repo_root = Path(__file__).resolve().parents[3]
+    sc = (repo_root / "agent" / "shared-constraints.md").read_text(encoding="utf-8")
+    assert "agent/references/runtime-guides/handoff-schema.md" in sc, (
+        "shared-constraints.md must link to handoff-schema.md"
+    )
+    # The pointer to the Checkpointing pattern should explicitly call it out.
+    lower = sc.lower()
+    assert "incrementally" in lower or "checkpoint" in lower, (
+        "shared-constraints.md §16 must reference incremental checkpointing"
+    )
+
+
+def test_no_strace_or_dedup_block_in_owned_corpus():
+    """Round 9 — `--strace` and `KALI_AUDIT_DEDUP_BLOCK` were removed from kali.py
+    by the parallel backend cutover. The prompt corpus this PR owns (skills,
+    agents, references, shared-constraints, operator-core, .env.example) must
+    not reference either."""
+    repo_root = Path(__file__).resolve().parents[3]
+    paths: list[Path] = []
+    for sub in ("skills", "agents", "references"):
+        paths.extend(sorted((repo_root / "agent" / sub).rglob("*.md")))
+    for name in (
+        "operator-core.md",
+        "operator-core-code.md",
+        "shared-constraints.md",
+        "shared-constraints-code.md",
+        ".env.example",
+    ):
+        candidate = repo_root / "agent" / name
+        if candidate.exists():
+            paths.append(candidate)
+
+    offenders: list[str] = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        if "--strace" in text:
+            offenders.append(f"{path}: contains `--strace`")
+        if "KALI_AUDIT_DEDUP_BLOCK" in text:
+            offenders.append(f"{path}: contains `KALI_AUDIT_DEDUP_BLOCK`")
+    assert not offenders, (
+        "Round 9 cleanup — `--strace` and `KALI_AUDIT_DEDUP_BLOCK` are no longer "
+        "supported by the kali CLI. Drop both from the prompt corpus.\n"
+        + "\n".join(offenders)
+    )

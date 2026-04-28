@@ -66,30 +66,45 @@ in CVE matching and missed sibling orgs.
       sources disagree, declare the disagreement in `#### Intelligence` and treat the
       CVE candidate as low-confidence pending exploit-developer validation.
 
+## Mandatory Closing Sequence
+
+Before your dispatch returns, run in this order:
+
+1. `aith assess record-intel <type> <intel-json>` for every intel row — one call per row (cve, tech-component, person, email, domain, dns-record, social-profile, breach-record, org-fact, note). CVE matches are intel, not findings.
+2. `aith assess record-finding osint-analyst <finding-json>` ONLY when you have target-specific proof that does not require exploit-developer validation (breached credentials confirmed against the target, public data leak containing target-specific secrets).
+3. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (`cve_matches`, `high_value_cve_matches`, `intel_rows`, `github_orgs_enumerated`)
+
+Skipping the handoff write means the operator has nothing to feed into the next
+dispatch — there is no `agent-registry.json` fallback any more. Schema for
+`--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+
+The `record-handoff` step is idempotent and called incrementally — checkpoint
+after each major step in your methodology, not only at the end. See
+`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
+
+High-value CVE matches that need exploit-developer validation belong in the
+handoff `next_steps` (action: "validate CVE-YYYY-NNNN against live target",
+recommended_agent: `exploit-developer`, rationale).
+
 ## Output Contract
 
-Return concise structured output with these sections when relevant:
+Reason through the intel pass in your response — describe which sources you
+queried, why version-matched CVEs look high-value, what the breach data
+suggests about credential reuse risk, which org facts could pivot into the
+next phase. Backend writes via the Mandatory Closing Sequence above are what
+makes the state durable; the response is your reflection on top of that.
 
-- `#### Intelligence`
-- `#### Why It Matters Here`
-- `#### Recommended Next Actions`
+Don't truncate reasoning to be brief — careful CVE-context analysis directly
+improves exploit-developer's validation prioritization (see
+`agent/shared-constraints.md` §16). Why-it-matters and recommended-next-actions
+live in the handoff `next_steps` — so the response can stay focused on the
+intel narrative rather than restating canonical state.
 
-## Finding Recording
-
-**CVE matches are intel, not findings.** When you discover CVEs that match the target's version
-strings, record them in `#### Intelligence` output AND via
-`aith assess record-intel cve <cve-json-file>` (matches
-`schemas/intel-cve.schema.json` — run `aith assess contract record-intel cve`
-to print the allowed/required fields and a worked example before authoring the JSON;
-intel schemas are strict and reject guessed aliases like `source` vs `source_name`)
-— NOT as durable findings via `record-finding`. A CVE with a public PoC does not become
-a finding until exploit-developer validates it against the actual target (backported patches,
-missing CGI binaries, disabled modules, and firewall rules all invalidate version-only matches).
-
-Only record a finding via `aith assess record-finding osint-analyst <finding-json-file>`
-when you have target-specific proof that does not require exploit-developer validation — for example,
-breached credentials confirmed against the target's email domain, or a public data leak containing
-target-specific secrets.
+**CVE matches are intel, not findings.** A CVE with a public PoC does not become a
+finding until exploit-developer validates it against the actual target (backported
+patches, missing CGI binaries, disabled modules, and firewall rules all invalidate
+version-only matches). Run `aith assess contract record-intel cve` to print the
+allowed/required fields before authoring the JSON; intel schemas are strict.
 
 ## Handoffs
 

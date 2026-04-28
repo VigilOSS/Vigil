@@ -183,17 +183,18 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     _write_report(eng_dir, options.engagement_type, name=name, target=target_normalized, repos=repos, date_label=date_label)
     _write_auth_scaffold(eng_dir, "none" if options.engagement_type == "code" else options.auth_mode, created_at)
     _write_json(eng_dir / "sessions" / "index.json", [])
-    _write_json(eng_dir / "agent-registry.json", [])
-    # The launcher reads both ORCHESTRATOR_BASE_URL and AGENT_NAME out of this
-    # file via grep (preserving the legacy ORCHESTRATOR_BASE_URL contract: the
-    # last file's value wins, with parent-shell exports taking precedence).
-    # AGENT_NAME=operator gives `aith assess kali` something to use without
-    # forcing the operator to remember --agent-name for tier-pick smoke /
-    # runtime health / credential validation work. Specialists override this
-    # by exporting AGENT_NAME=<role> in the dispatch wrapper before launching,
-    # so the default does not bleed into specialist contexts.
+    # Round 9: dispatch tracking + handoff content moved into the orchestrator
+    # backend (assessment_dispatches / assessment_dispatch_handoffs /
+    # assessment_dispatch_decisions). The legacy `agent-registry.json` file is
+    # no longer initialized at engagement create — operators write via
+    # `aith assess dispatch register|record-handoff|record-decision` instead.
+    #
+    # AGENT_NAME defaulting to "operator" is now handled in
+    # agent/scripts/assess/lib/kali.py (`_resolve_agent_name`) so the env file
+    # only carries `ORCHESTRATOR_BASE_URL`; specialists still override
+    # AGENT_NAME=<role> in their dispatch wrapper.
     (eng_dir / ".orchestrator.env").write_text(
-        "ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000\nAGENT_NAME=operator\n",
+        "ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000\n",
         encoding="utf-8",
     )
     _init_cases_db(agent_root, eng_dir)
@@ -527,20 +528,16 @@ def _write_launcher(agent_root: Path, eng_dir: Path, client: str, permission_arg
     extra = f" {permission_arg}" if permission_arg else ""
     # The launcher exports operator-side env from the per-engagement
     # .orchestrator.env (and the install-root .env / .orchestrator.env
-    # fallbacks). Precedence rules differ between the two exported keys:
+    # fallbacks). The legacy contract for ORCHESTRATOR_BASE_URL is preserved
+    # verbatim: parent-shell export wins over file values; among file values
+    # the LAST file wins (install-root .env overrides per-eng).
     #
-    # - ORCHESTRATOR_BASE_URL: parent-shell export wins over file values; among
-    #   file values the LAST file wins (install-root .env overrides per-eng).
-    #   Original contract preserved verbatim — operators rely on the install-
-    #   root .env to repoint the URL after `aith install --root <other>`.
-    #
-    # - AGENT_NAME: parent-shell export wins; among file values the FIRST hit
-    #   wins (per-engagement .orchestrator.env beats fallbacks). The default
-    #   we plant there is `operator`, used by `aith assess kali` for tier-pick
-    #   smoke / runtime health / credential validation work the operator
-    #   executes directly. Specialist dispatch wrappers export AGENT_NAME
-    #   before launching, so the default does not bleed into specialist
-    #   contexts.
+    # AGENT_NAME is no longer exported here. The kali.py helper now defaults
+    # to "operator" when neither --agent-name nor $AGENT_NAME / $AITH_AGENT_NAME
+    # is set, so operator-executed mechanical pipeline work (tier-pick smoke,
+    # runtime health, credential validation) still records the right
+    # agent_name without the launcher poking the env. Specialist dispatch
+    # wrappers continue to export AGENT_NAME=<role> before launching.
     script = f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -559,18 +556,6 @@ if [[ -z "${{ORCHESTRATOR_BASE_URL:-}}" ]]; then
       candidate="$(grep -E '^ORCHESTRATOR_BASE_URL=' "$env_file" | tail -n1 | cut -d= -f2- || true)"
       if [[ -n "$candidate" ]]; then
         export ORCHESTRATOR_BASE_URL="${{candidate%/}}"
-      fi
-    fi
-  done
-fi
-
-if [[ -z "${{AGENT_NAME:-}}" ]]; then
-  for env_file in "$ENGAGEMENT_DIR/.orchestrator.env" "$AI_THREAT_HUNTING_INSTALL_DIR/.orchestrator.env" "$AI_THREAT_HUNTING_INSTALL_DIR/.env"; do
-    if [[ -f "$env_file" ]]; then
-      candidate="$(grep -E '^AGENT_NAME=' "$env_file" | tail -n1 | cut -d= -f2- || true)"
-      if [[ -n "$candidate" ]]; then
-        export AGENT_NAME="$candidate"
-        break
       fi
     fi
   done

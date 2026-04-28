@@ -2,8 +2,8 @@
 
 The operator-core "Specialist Dispatch Contract" is currently enforced only by
 prose; this helper turns the contract table into a runnable validator so the
-operator can pipe a JSON payload through before recording it in
-``agent-registry.json``.
+operator can pipe a JSON payload through before passing it to
+``aith assess dispatch register --from-json <path>``.
 
 Usage::
 

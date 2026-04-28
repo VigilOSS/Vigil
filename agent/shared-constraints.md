@@ -153,18 +153,13 @@ truthful instead of degrading to a stale env-var default.
   `code-ingest`, `code-classify`, `code-hunt`, `code-verify`, plus the
   half-phase tags `recon-pivot` (mid-engagement recon on newly-surfaced host)
   and `exploit-recon` (additional fingerprinting during exploit phase).
-- **`--force`** — suppress the dedup-warning log and skip the supersede
-  check entirely. Default behavior is warn-and-continue (set
-  `KALI_AUDIT_DEDUP_BLOCK=1` env var to restore the old block-on-dup mode).
+- **`--force`** — suppress the dedup-warning log for an intentional retry.
   The CLI hashes `(command, argv_json)` and warns when an identical command
-  ran within `KALI_AUDIT_DEDUP_WINDOW_SECONDS` (default 30s); under the
-  default policy the warning fires but the command still executes, so
-  parallel specialists racing on the same wildcard list don't hard-block
-  each other. Pass `--force` when you also want to suppress the warning
-  for an intentional retry.
-- **`--strace`** — wrap in `strace -e trace=network,write,unlink`. Use for
-  `--probe-kind exploit` or `--destructive` so the audit row records network
-  egress and disk writes.
+  ran within `KALI_AUDIT_DEDUP_WINDOW_SECONDS` (default 30s), but the new
+  command always executes — the backend records a fresh audit row regardless,
+  with `superseded_by_id` linking it to the predecessor when applicable. Pass
+  `--force` only to suppress the warning text; it does not change run
+  behavior or backend state.
 
 `--engagement-key` and `--agent-name` are auto-derived from
 `${ENGAGEMENT_DIR}/engagement.json` and the dispatching role context — do not
@@ -531,3 +526,51 @@ roles that do.
 | Background PIDs | pids/ |
 
 Root: `scope.json`, `report.md`, `auth.json`, and the transient worker buffer only. Activity log and intel live in the orchestrator backend — query via `aith assess fetch activity-entries` and `aith assess list-intel`.
+
+---
+
+## 16. Output Hygiene — Backend Is Canonical
+
+The backend stores the canonical, queryable state of the engagement: findings in
+the findings table (`aith assess record-finding`), intel rows in `intel_*` tables
+(`record-intel`), surface candidates in the surfaces table (`record-surface`),
+credentials and attack chains in their tables, and the cross-cutting handoff
+(summary / coverage gaps / next steps / runtime issues / working artifacts /
+open questions / specialty extras) in `assessment_dispatch_handoffs`
+(`aith assess dispatch record-handoff --from-json <path>`).
+
+The operator queries those tables directly — `render-handoff <agent-id>`, `fetch
+findings`, `list-intel`, `list-clusters` — to assemble the next dispatch's
+context. The markdown response you return is your *reflection* on the work, not
+the canonical record of it.
+
+### Mandatory closing sequence (every specialist runs this before returning)
+
+1. `aith assess record-finding <role> <finding-json>` per finding.
+2. `aith assess record-intel <type> <intel-json>` per intel row.
+3. `aith assess record-surface <surface-json>` per surface candidate.
+4. `aith assess dispatch record-handoff --from-json <path>` to capture
+   summary, coverage gaps, next steps, runtime issues, working artifacts, open
+   questions, and any specialty extras.
+
+Step 4 is the canonical "what was done / what's missing / what's next" record.
+Skipping it means the operator has no structured record to feed into the next
+dispatch — there is no `agent-registry.json` fallback any more.
+
+Step 4's `record-handoff` is idempotent — call it incrementally after each
+major step in your methodology, not only at the end. See
+`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for the
+pattern and per-role cadence.
+
+Schema for the `--from-json` payload: `agent/references/runtime-guides/handoff-schema.md`.
+
+### Reasoning quality > response brevity
+
+Reason fully through the work as you go — narrate observations between tool
+calls, work through hypotheses, summarize findings as you discover them. That's
+how Claude reasons well, and red-team work depends on careful reasoning. Don't
+truncate analysis to be brief.
+
+The point of §16 is not "be terse"; it's "don't let the markdown response
+*replace* the backend writes." Both can coexist: detailed reasoning in the
+response, structured state in the backend.

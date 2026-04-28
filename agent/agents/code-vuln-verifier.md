@@ -126,6 +126,44 @@ aith assess record-chain code-vuln-verifier <chain-json>
 aith assess record-finding code-vuln-verifier <new-finding-json>
 ```
 
+## Mandatory Closing Sequence
+
+Before your dispatch returns, run in this order:
+
+1. `aith assess verify-finding <slug> <verification-json>` for each confirm/downgrade/dispute decision
+2. `aith assess kill-finding <slug> ...` for each kill decision
+3. `aith assess record-chain code-vuln-verifier <chain-json>` for any composed chains
+4. `aith assess record-finding code-vuln-verifier <new-finding-json>` for net-new spot-check bugs (rare)
+5. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
+
+Skipping the handoff write means the operator has nothing to feed into the next
+dispatch — there is no `agent-registry.json` fallback any more. Schema for
+`--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+
+The `record-handoff` step is idempotent and called incrementally — checkpoint
+after each major step in your methodology, not only at the end. See
+`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
+
+Multi-perspective voting requests for ambiguous findings live in the handoff
+`open_questions` so the operator routes them.
+
+## Output Contract (Dispatch Response)
+
+Reason through the verification work in your response — describe the
+five-check protocol applied to each finding, the devil's-advocate counter-
+arguments you considered, why you reached confirm/downgrade/kill on each one,
+which findings need a multi-perspective vote. Backend writes via the
+Mandatory Closing Sequence above (verify-finding / kill-finding /
+record-chain payloads) are what makes the state durable; the response is your
+reflection on top of that.
+
+Don't truncate reasoning to be brief — careful verifier reasoning is what
+keeps false-positives out of the report (see `agent/shared-constraints.md`
+§16). Per-finding disposition tables, five-check-protocol walkthroughs, and
+devil's-advocate rationale all live in the verify-finding / kill-finding
+payloads on the backend — so the response can stay focused on verification
+narrative rather than restating canonical state.
+
 ## Finding Prefix: VF
 
 Your primary role is to update existing findings (confirm, downgrade, kill) and create attack

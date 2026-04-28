@@ -181,11 +181,26 @@ Required fields per dispatch:
 | `output` | the structured payload schema the agent returns (e.g., `#### Findings`, `#### Surface Candidates`, `#### Coverage Gaps`) |
 | `dispatch_mode` | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Dispatch-Mode Declaration" below) |
 
-After every dispatch, append the contract to `$DIR/agent-registry.json` alongside the existing
-audit fields (role, agent_id, task, finding_slugs, skill_loaded, scope_host, dispatched_at,
-status). The contract becomes part of the registry record so report-writer and later operators
-can audit not only what was dispatched but what the dispatch was authorized to do. Schema in
-`agent/references/runtime-guides/subagent-registry.md`.
+When the operator launches a specialist, register the dispatch up front:
+
+```bash
+aith assess dispatch register \
+    --agent-id <id> --agent-role <role> \
+    --task "..." --skill <path> --scope-host <host> \
+    --model <name> --reasoning <level> \
+    --permission <level> --command-budget <N> --dispatch-mode <mode>
+```
+
+When the dispatch returns, mark it complete with the slugs it produced:
+
+```bash
+aith assess dispatch update-status <agent-id> --status completed --finding-slugs <slugs>
+```
+
+This writes to the `assessment_dispatches` table — the contract becomes part of the
+audit row so report-writer and later operators can audit not only what was
+dispatched but what the dispatch was authorized to do. Table schema and the full
+CLI verb list: `agent/references/runtime-guides/subagent-registry.md`.
 
 ### Dispatch-Mode Declaration
 
@@ -218,7 +233,7 @@ omits the mode, the agent picks the safest default for its role:
 
 Before every dispatch, verify:
 
-- [ ] Agent registry checked for a prior dispatch against this task — if one exists, the new prompt carries forward its condensed output and durable-state pointers (finding slugs, `$DIR/` paths) rather than re-running the same objective (see Cross-Dispatch Continuity below)
+- [ ] Dispatch table checked for a prior dispatch against this task — `aith assess dispatch list --task-q "<keyword>"` (and optionally `--role <role>`); if a prior dispatch exists, the new prompt carries forward its rendered handoff blob (`aith assess dispatch render-handoff <prior-agent-id>`) instead of re-running the same objective (see Cross-Dispatch Continuity below)
 - [ ] Agent identity named and target URL specified
 - [ ] Current phase stated with specific task objective (not just "test this")
 - [ ] Skill to load identified from `agent/SKILL.md`
@@ -244,21 +259,57 @@ If any gate fails, dispatch a new agent (or re-dispatch the same role) with the 
 
 ### Cross-Dispatch Continuity
 
-Every dispatch launches a fresh agent — treat each dispatch as a clean-room environment that inherits only what the operator explicitly hands it. Session tokens, cookie jars, discovered endpoints, partial PoC steps, and next-step plans travel to the next dispatch through the dispatch prompt and durable state (backend records, engagement files), because the harness rebuilds subagent context from those sources on each launch.
+Every dispatch launches a fresh agent — treat each dispatch as a clean-room environment that inherits only what the operator explicitly hands it. Session tokens, discovered endpoints, partial PoC steps, and next-step plans travel through the dispatch prompt and durable state (backend records, engagement files), because the harness rebuilds subagent context from those sources on each launch.
 
-Append to `$DIR/agent-registry.json` after every dispatch that returns an agentId — this is the engagement audit trail, the DEDUP input, AND the input the handoff renderer reads. Skipping a write costs both the pre-dispatch duplicate check and the report-writer's ability to trace which agent produced which finding, AND breaks the next dispatch's handoff blob. Record role, task, finding slugs, skill loaded, scope host, timestamp, status, working_artifacts, and `next_step` (the exact action the new agent should take); the renderer pulls every field directly.
+**Specialist closing sequence** — every specialist writes a structured handoff before its dispatch returns: `aith assess dispatch record-handoff --from-json <path>`. The handoff captures summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras. This row is canonical for "what was done, what's missing, what's next" — schema in `agent/references/runtime-guides/handoff-schema.md`.
 
-**Use `aith assess dispatch render-handoff <agent-id>` to produce the handoff blob; paste its output into the next dispatch's prompt.** The renderer reads the prior dispatch's registry entry, fetches each finding slug from the backend (404s render inline as "slug missing"), checks every `working_artifacts` path on disk (missing files surface as "missing" so the new agent doesn't chase deleted state), and emits a markdown blob hard-capped at `--max-lines` (default 40). The findings list collapses to "... and N more" before any fixed section drops, and the next-step line is always emitted — when the registry has no `next_step` it reads "not recorded — set explicitly in this dispatch" so the new prompt cannot silently drop the next action.
+**Operator dispatch tracking** — when the operator launches a specialist, register the dispatch:
 
-Run it for every continuation dispatch (exploit chains, credential reuse, follow-up probes) — the rendered blob already carries:
+```bash
+aith assess dispatch register \
+    --agent-id <id> --agent-role <role> \
+    --task "..." --skill <path> --scope-host <host> \
+    --model <name> --reasoning <level> \
+    --permission <level> --command-budget <N> --dispatch-mode <mode>
+```
+
+Update the status when it returns:
+
+```bash
+aith assess dispatch update-status <agent-id> --status completed --finding-slugs <slugs>
+```
+
+**Operator handoff render** — run `aith assess dispatch render-handoff <agent-id>` and paste its output into the next dispatch's prompt:
+
+```bash
+aith assess dispatch render-handoff <agent-id>
+```
+
+The renderer reads the handoff table, fetches each finding slug (404 → "slug missing in backend"), checks every working_artifact path on disk (missing → "(state: missing)"), and emits a markdown blob hard-capped at `--max-lines` (default 40). The findings list collapses to "... and N more" before runtime_issues / working_artifacts. Summary, coverage gaps, and next steps are never trimmed.
+
+The blob already carries:
 - Finding slugs (with title + severity from the backend) the new agent can `fetch` for full context
 - Working-artifact paths under `$DIR/tools/`, `$DIR/scans/`, `$DIR/downloads/` with present/missing state
 - Credential ids captured by the prior dispatch (vulnerability-analyst / exploit-developer roles only)
-- The specific next step the prior dispatch recorded
+- The next-step list the prior dispatch recorded — each `next_step` entry names an action, target, recommended_agent, and rationale
 
-Bypassing the renderer to paste transcript excerpts is the failure mode this helper exists to prevent: full transcript pastes crowd out the objective and inflate context linearly across long chains, while the renderer's blob stays bounded and pulls canonical state from the backend. Durable content (findings, intel, activity entries, credentials) lives in the backend; the dispatch prompt carries pointers plus the specific next step.
+**DEDUP** uses the dispatches table — `aith assess dispatch list --task-q "<keyword>"` shows prior dispatches against the same objective. Replaces the old `agent-registry.json` scan.
 
-Registry schema, the `next_step` field, and a sample rendered blob: `agent/references/runtime-guides/subagent-registry.md`
+**Decision rows** — vendor-SaaS scope warnings, egress-block decisions, and dispatch-blocked records all live in the dispatch_decisions table:
+
+```bash
+aith assess dispatch record-decision --kind scope_decision --host api.foo.com --vendor "Vendor SaaS" --choice pending --surfaced-to-user
+aith assess dispatch record-decision --kind egress_decision --choice browser-based-tool --payload-json '{"egress_block_pct": 67}'
+aith assess dispatch record-decision --kind dispatch_blocked --phase recon --reason "missing massdns binary in runtime image" --surfaced-to-user
+```
+
+Bypassing the renderer to paste transcript excerpts is the failure mode this helper exists to prevent: full transcript pastes crowd out the objective and inflate context linearly across long chains, while the renderer's blob stays bounded and pulls canonical state from the backend. Durable content (findings, intel, activity entries, credentials) lives in the backend; the dispatch prompt carries pointers plus the bounded handoff blob.
+
+The previous `agent-registry.json` file is removed entirely. All dispatch tracking, handoff content, and decision rows live in the backend tables.
+
+**Sub-agent halts.** Claude Code sub-agents halt when they approach context exhaustion (~200K tokens). The harness returns control to the operator with a `use SendMessage to continue this agent` hint. SendMessage-based resume requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` (a persistent-agent-teams feature, not what this workflow uses). When a sub-agent halts, the most recent `record-handoff` checkpoint in the backend is the canonical record of what was done; specialists are prompted to checkpoint after each major step (`agent/references/runtime-guides/handoff-schema.md` "Checkpointing"). Re-dispatch a continuation with the rendered handoff blob as input.
+
+Schema for the handoff JSON: `agent/references/runtime-guides/handoff-schema.md`. Backend table schemas + full CLI verb list: `agent/references/runtime-guides/subagent-registry.md`.
 
 ## Phase Flow
 
@@ -271,13 +322,13 @@ DB="$DIR/cases.db"
 
 1. **Phase 1 — Reconnaissance**
 
-   **Phase 1a/1b dispatch is non-negotiable for ANALYSIS/COVERAGE.** Target-facing recon (1a wildcard subdomain enum, 1b parallel recon + source analysis, 1c reactive nuclei sweep) goes through `recon-specialist` and `source-analyzer`. The operator handles scope prep, command-budget approval, resource thresholds, and durable-state recording. Operator carve-outs (mechanical pipeline checks): (1) credential auto-use validation — single login test; (2) tier-pick smoke — one `wafw00f` or `httpx` HEAD per host; (3) runtime health smoke — `aith assess kali --help`, version probes, container-status; (4) backend-write helpers — `record-finding`, `supersede-intel`, `resolve-surface`, etc. Everything else target-facing is specialist work. If a specialist cannot be launched (missing skill, missing wrapper, runtime down), record `{kind: "dispatch_blocked", phase: "1a", reason: "...", surfaced_to_user: true}` in `$DIR/agent-registry.json` and surface to the user — never silently move analysis work back into the operator loop.
+   **Phase 1a/1b dispatch is non-negotiable for ANALYSIS/COVERAGE.** Target-facing recon (1a wildcard subdomain enum, 1b parallel recon + source analysis, 1c reactive nuclei sweep) goes through `recon-specialist` and `source-analyzer`. The operator handles scope prep, command-budget approval, resource thresholds, and durable-state recording. Operator carve-outs (mechanical pipeline checks): (1) credential auto-use validation — single login test; (2) tier-pick smoke — one `wafw00f` or `httpx` HEAD per host; (3) runtime health smoke — `aith assess kali --help`, version probes, container-status; (4) backend-write helpers — `record-finding`, `supersede-intel`, `resolve-surface`, etc. Everything else target-facing is specialist work. If a specialist cannot be launched (missing skill, missing wrapper, runtime down), record the blocker via `aith assess dispatch record-decision --kind dispatch_blocked --phase 1a --reason "..." --surfaced-to-user` (the row carries `kind=dispatch_blocked` plus `surfaced_to_user=true`) and surface to the user — never silently move analysis work back into the operator loop.
 
    **1a. Wildcard subdomain enumeration (when scope.json `hosts` contains `*.domain` entries)** — dispatch `recon-specialist` with `agent/skills/subdomain-enumeration/SKILL.md` loaded BEFORE the parallel recon+source pass. Subdomain expansion must land before downstream steps because 1b's endpoint inventory and 1c's reactive nuclei sweep both consume live hosts as input; running them first against the apex alone misses the wildcard surface entirely. Output: live subdomains ingested via `aith assess ingest-endpoints "$DB" subdomain-enum` so they flow into the work buffer alongside apex hosts.
    Before dispatching subdomain enumeration, run `aith assess kali exec -- which alterx asnmap bbot cero dnsx massdns puredns shuffledns subfinder` to confirm tooling. Missing binaries → fix the runtime, do not silently degrade — puredns silently fails when massdns is missing (zero output, no error, exit code 0), and a dnsx fallback against a typical bruteforce wordlist will spike container CPU before stabilizing. Recon-specialist dispatches scanning multiple hosts MUST use `nmap -iL hosts.txt`. The operator never asks a specialist to loop nmap per-host; consolidation is non-negotiable. If the specialist generates `for h in hosts; do aith assess kali nmap-scan --target $h ...`, the operator catches it in dispatch review and re-dispatches with the consolidated command.
    Skip 1a when scope.json contains only bare hosts — there is nothing to expand, so dispatching enum wastes a context window.
-   - **Vendor-SaaS scope checkpoint.** When the first Phase 1 recon dispatch returns wafw00f / nmap rDNS / httpx fingerprint output that flags a host's underlying application as vendor-managed SaaS (per `agent/scripts/assess/lib/scope.py:host_is_vendor_saas` — strict-subdomain match on CNAME or rDNS), warn once per host and record the flag to `$DIR/agent-registry.json` with `{kind: "scope_decision", host: "<host>", vendor: "<vendor>", choice: "pending"}`. The detection requires recon output, so the checkpoint fires AFTER the first recon dispatch returns, not before — surfacing it pre-dispatch is circular (vendor-SaaS detection needs the dispatch's output). The default policy is permissive: warn and continue. The checkpoint blocks Phase 1 advance only when the operator opts in via `aith assess check-scope-coverage --require-stage enum --strict-vendor-saas`. The flagged options for the user are: (1) in-scope per VDP — proceed with recon; (2) out-of-scope per VDP — skip and exclude from buffer; (3) partial scope — test the asset's surface but not the underlying vendor platform. Hosts authored as an explicit literal in `scope.json` (bare host or URL entry, NOT wildcard expansion) skip the gate entirely — the literal is already the operator's in-scope decision.
-   - **Egress reputation checkpoint.** Phase 1 Step 0b in recon-specialist owns the egress check (procedure in `agent/references/runtime-guides/cdn-ip-blocking.md`). The check runs INSIDE the recon-specialist dispatch, AFTER subdomain-enum + httpx have populated `live_hosts.txt` (the input the script reads). When `egress_block_pct > 50`, recon-specialist pauses, re-samples after five minutes, and only surfaces the four-option checkpoint when the second sample stays >50%. Most >50% block-rate is transient rate-limit shape, not IP reputation; the re-sample loop catches the false-positive case. The four mitigation options: (1) request IP allowlisting from the target program (standard for authorized VDP); (2) route through a residential proxy or clean-IP VPS; (3) use a browser-based tool inside the runtime (presents a legitimate JA3/JA4 TLS fingerprint); (4) accept the limited coverage and document the gap as a Phase-3 blocker. Record the choice in `$DIR/agent-registry.json` with `{kind: "egress_decision", blocked_pct: N, choice: "..."}`. Hosts identified by the check feed into `aith assess ingest-endpoints --egress-blocked-hosts <file>` so URLs to them defer with `cluster_key=deferred:egress-blocked` instead of polluting the work buffer.
+   - **Vendor-SaaS scope checkpoint.** When the first Phase 1 recon dispatch returns wafw00f / nmap rDNS / httpx fingerprint output that flags a host's underlying application as vendor-managed SaaS (per `agent/scripts/assess/lib/scope.py:host_is_vendor_saas` — strict-subdomain match on CNAME or rDNS), warn once per host and record the flag via `aith assess dispatch record-decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user`. The detection requires recon output, so the checkpoint fires AFTER the first recon dispatch returns, not before — surfacing it pre-dispatch is circular (vendor-SaaS detection needs the dispatch's output). The default policy is permissive: warn and continue. The checkpoint blocks Phase 1 advance only when the operator opts in via `aith assess check-scope-coverage --require-stage enum --strict-vendor-saas`. The flagged options for the user are: (1) in-scope per VDP — proceed with recon; (2) out-of-scope per VDP — skip and exclude from buffer; (3) partial scope — test the asset's surface but not the underlying vendor platform. Hosts authored as an explicit literal in `scope.json` (bare host or URL entry, NOT wildcard expansion) skip the gate entirely — the literal is already the operator's in-scope decision.
+   - **Egress reputation checkpoint.** Phase 1 Step 0b in recon-specialist owns the egress check (procedure in `agent/references/runtime-guides/cdn-ip-blocking.md`). The check runs INSIDE the recon-specialist dispatch, AFTER subdomain-enum + httpx have populated `live_hosts.txt` (the input the script reads). When `egress_block_pct > 50`, recon-specialist pauses, re-samples after five minutes, and only surfaces the four-option checkpoint when the second sample stays >50%. Most >50% block-rate is transient rate-limit shape, not IP reputation; the re-sample loop catches the false-positive case. The four mitigation options: (1) request IP allowlisting from the target program (standard for authorized VDP); (2) route through a residential proxy or clean-IP VPS; (3) use a browser-based tool inside the runtime (presents a legitimate JA3/JA4 TLS fingerprint); (4) accept the limited coverage and document the gap as a Phase-3 blocker. Record the choice via `aith assess dispatch record-decision --kind egress_decision --choice <option> --payload-json '{"blocked_pct": N}'`. Hosts identified by the check feed into `aith assess ingest-endpoints --egress-blocked-hosts <file>` so URLs to them defer with `cluster_key=deferred:egress-blocked` instead of polluting the work buffer.
 
    **1b. Parallel recon + source analysis** — dispatch `recon-specialist` + `source-analyzer` in parallel because their work is independent and sequential dispatch doubles wall time for no coverage gain. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 — leaving non-web triage on the operator loses the skill's methodology depth.
 

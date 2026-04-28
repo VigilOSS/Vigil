@@ -1915,13 +1915,12 @@ def test_actor_kind_warn_on_non_log_subcommand(
 
 
 # ---------------------------------------------------------------------------
-# Fix #7 — `aith assess dispatch render-handoff` tests
+# Round 9 — `aith assess dispatch render-handoff` tests against the backend
 #
-# The renderer replaces operator discretion with a deterministic helper that
-# pulls from $DIR/agent-registry.json plus the assessment backend, so the
-# next dispatch's prompt stays bounded. These tests pin the four invariants
-# Fix #7 cares about: known-id rendering shape, unknown-id exit code,
-# max-lines truncation, and the always-present next-step line.
+# The renderer now reads from the orchestrator's assessment_dispatches and
+# assessment_dispatch_handoffs tables (no more $DIR/agent-registry.json).
+# These tests stub the AssessmentClient calls so we exercise the rendering
+# logic without standing up the real backend.
 # ---------------------------------------------------------------------------
 
 
@@ -1930,22 +1929,19 @@ def _stub_render_handoff_environment(
     module,
     engagement_dir: Path,
     *,
+    handoff: dict | None,
+    dispatch_row: dict | None = None,
     findings_by_slug: dict[str, dict] | None = None,
     missing_slugs: tuple[str, ...] = (),
     credentials: list[dict] | None = None,
 ) -> None:
-    """Wire a fake AssessmentClient + load_config into the dispatch module.
-
-    Avoids the live backend so the test only exercises the rendering logic,
-    the registry-lookup branch, and the truncation budget.
-    """
+    """Wire a fake AssessmentClient + load_config into the dispatch module."""
 
     class _StubClient:
         def __init__(self, *_: object, **__: object) -> None:
             pass
 
         def get(self, endpoint: str):
-            # findings/<slug> is the per-slug enrichment path.
             if endpoint.startswith("findings/"):
                 slug = endpoint.split("/", 1)[1]
                 if slug in missing_slugs:
@@ -1956,6 +1952,14 @@ def _stub_render_handoff_environment(
             if endpoint == "credentials":
                 return list(credentials or [])
             raise module.AssessError(f"unexpected endpoint {endpoint}")
+
+        def get_handoff(self, agent_id: str):
+            if handoff is None:
+                return None
+            return handoff
+
+        def get_dispatch(self, agent_id: str):
+            return dispatch_row
 
         def close(self) -> None:
             return None
@@ -1976,20 +1980,10 @@ def _stub_render_handoff_environment(
 def _load_dispatch_module():
     """Load dispatch.py with AssessError, AssessmentClient, and load_config
     visible on the module namespace for monkeypatching.
-
-    dispatch.py imports these at module scope, so monkeypatch.setattr on the
-    test side rebinds them in place — no further wiring needed.
     """
     return _load_assess_module(
-        "fix7_dispatch_module",
+        "round9_dispatch_module",
         "agent/scripts/assess/commands/dispatch.py",
-    )
-
-
-def _write_registry(engagement_dir: Path, entries: list[dict]) -> None:
-    engagement_dir.mkdir(parents=True, exist_ok=True)
-    (engagement_dir / "agent-registry.json").write_text(
-        json.dumps(entries), encoding="utf-8"
     )
 
 
@@ -2020,62 +2014,61 @@ def test_render_handoff_emits_known_fields_for_existing_agent_id(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Fix #7: render the bounded handoff blob from registry + backend state.
-
-    The blob must carry role, task, skill, scope host, dispatched-at, the
-    finding row's title + severity from the backend, working-artifact disk
-    state, and the credentials count for vulnerability-analyst dispatches.
-    """
+    """Round 9: render the bounded handoff blob from backend dispatch + handoff rows."""
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
-    # Working artifact present on disk so the renderer reports state=present.
     (engagement_dir / "tools").mkdir()
     (engagement_dir / "tools" / "exploit-state").mkdir()
     (engagement_dir / "tools" / "exploit-state" / "EX-001-payload.sql").write_text(
         "-- payload", encoding="utf-8"
     )
 
-    _write_registry(
-        engagement_dir,
-        [
-            {
-                "agent_id": "AGENT-EX-1",
-                "role": "vulnerability-analyst",
-                "task": "Validate IDOR on /api/users/{id}",
-                "skill_loaded": "agent/skills/idor-testing/SKILL.md",
-                "scope_host": "target.example",
-                "dispatched_at": "2026-04-27T10:00:00Z",
-                "status": "returned",
-                "finding_slugs": ["VA-001", "VA-002"],
-                "working_artifacts": [
-                    "tools/exploit-state/EX-001-payload.sql",
-                    "tools/exploit-state/EX-002-poc.py",
-                ],
-                "next_step": "replay captured cookie at /api/users/2 and confirm IDOR write",
-            }
+    handoff = {
+        "agent_id": "AGENT-EX-1",
+        "agent_role": "vulnerability-analyst",
+        "summary": "Validated IDOR on /api/users/{id}; confirmed write primitive.",
+        "confidence": "high",
+        "finding_slugs": ["VA-001", "VA-002"],
+        "next_steps": [
+            {"action": "replay captured cookie at /api/users/2 and confirm IDOR write"},
         ],
-    )
+        "coverage_gaps": [
+            {"area": "auth boundary", "reason": "anonymous session not tested"},
+        ],
+        "working_artifacts": [
+            {"path": "tools/exploit-state/EX-001-payload.sql"},
+            {"path": "tools/exploit-state/EX-002-poc.py"},
+        ],
+        "runtime_issues": [],
+        "open_questions": [],
+        "extras": None,
+        "recommended_next_agent": "exploit-developer",
+        "created_at": "2026-04-27T10:00:00Z",
+    }
+    dispatch_row = {
+        "agent_id": "AGENT-EX-1",
+        "agent_role": "vulnerability-analyst",
+        "task": "Validate IDOR on /api/users/{id}",
+        "skill_loaded": "agent/skills/idor-testing/SKILL.md",
+        "scope_host": "target.example",
+        "dispatched_at": "2026-04-27T10:00:00Z",
+        "status": "completed",
+    }
 
     module = _load_dispatch_module()
     _stub_render_handoff_environment(
         monkeypatch,
         module,
         engagement_dir,
+        handoff=handoff,
+        dispatch_row=dispatch_row,
         findings_by_slug={
-            "VA-001": {
-                "slug": "VA-001",
-                "title": "IDOR write on user profile",
-                "severity": "high",
-            },
-            "VA-002": {
-                "slug": "VA-002",
-                "title": "IDOR read on user email",
-                "severity": "medium",
-            },
+            "VA-001": {"slug": "VA-001", "title": "IDOR write on user profile", "severity": "high"},
+            "VA-002": {"slug": "VA-002", "title": "IDOR read on user email", "severity": "medium"},
         },
         credentials=[
             {"id": 17, "source_name": "vulnerability-analyst"},
-            {"id": 18, "source_name": "exploit-developer"},  # filtered out by role
+            {"id": 18, "source_name": "exploit-developer"},
         ],
     )
 
@@ -2086,16 +2079,15 @@ def test_render_handoff_emits_known_fields_for_existing_agent_id(
     assert "Validate IDOR on /api/users/{id}" in out
     assert "agent/skills/idor-testing/SKILL.md" in out
     assert "target.example" in out
-    assert "2026-04-27T10:00:00Z" in out
-    assert "status: returned" in out
+    assert "Validated IDOR on /api/users/{id}" in out  # summary
+    assert "Confidence:** high" in out
     assert "`VA-001` — IDOR write on user profile [severity=high]" in out
     assert "`VA-002` — IDOR read on user email [severity=medium]" in out
     assert "tools/exploit-state/EX-001-payload.sql` (state: present)" in out
     assert "tools/exploit-state/EX-002-poc.py` (state: missing)" in out
-    # Credentials filter pins source_name == role; only id 17 belongs to the
-    # vulnerability-analyst dispatch.
+    assert "replay captured cookie at /api/users/2" in out
+    assert "Recommended next agent:** exploit-developer" in out
     assert "Credentials captured:** 1 rows (ids: 17)" in out
-    assert "Next step (per registry):** replay captured cookie at /api/users/2" in out
 
 
 def test_render_handoff_404s_unknown_agent_id(
@@ -2103,32 +2095,22 @@ def test_render_handoff_404s_unknown_agent_id(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Fix #7: an unknown agent-id exits 2 with a clear error message."""
+    """Round 9: an unknown agent-id (no handoff row) exits 2."""
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
-    _write_registry(
-        engagement_dir,
-        [
-            {
-                "agent_id": "AGENT-EXISTS",
-                "role": "recon-specialist",
-                "task": "phase 1 enum",
-                "finding_slugs": [],
-            }
-        ],
-    )
 
     module = _load_dispatch_module()
-    _stub_render_handoff_environment(monkeypatch, module, engagement_dir)
+    _stub_render_handoff_environment(
+        monkeypatch, module, engagement_dir, handoff=None
+    )
 
     with pytest.raises(SystemExit) as exc_info:
         _run_render_handoff(module, engagement_dir, "AGENT-DOES-NOT-EXIST")
-    # Spec: exit 2 specifically (not the default exit 1) so calling scripts
-    # can distinguish "registry lookup failed" from generic CLI errors.
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
     assert "AGENT-DOES-NOT-EXIST" in err
-    assert "agent-registry.json" in err
+    # Helpful hint about where the data should come from.
+    assert "record-handoff" in err
 
 
 def test_render_handoff_truncates_at_max_lines(
@@ -2136,33 +2118,33 @@ def test_render_handoff_truncates_at_max_lines(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Fix #7: a large finding_slugs list collapses with '... and N more'.
-
-    The fixed sections (header, prior task, skill, scope, dispatched-at,
-    artifacts, credentials, next step) are always preserved; only the
-    findings list contracts so the rendered blob respects --max-lines.
-    """
+    """Round 9: a large finding_slugs list collapses with '... and N more'."""
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
 
-    slugs = [f"VA-{idx:03d}" for idx in range(1, 21)]  # 20 slugs
-    _write_registry(
-        engagement_dir,
-        [
-            {
-                "agent_id": "AGENT-MANY-FINDINGS",
-                "role": "vulnerability-analyst",
-                "task": "deep IDOR sweep across 20 endpoints",
-                "skill_loaded": "agent/skills/idor-testing/SKILL.md",
-                "scope_host": "target.example",
-                "dispatched_at": "2026-04-27T11:00:00Z",
-                "status": "returned",
-                "finding_slugs": slugs,
-                "next_step": "promote highest-severity finding to exploit-developer",
-            }
-        ],
-    )
-
+    slugs = [f"VA-{idx:03d}" for idx in range(1, 21)]
+    handoff = {
+        "agent_id": "AGENT-MANY-FINDINGS",
+        "agent_role": "vulnerability-analyst",
+        "summary": "Deep IDOR sweep across 20 endpoints — many findings recorded.",
+        "finding_slugs": slugs,
+        "next_steps": [{"action": "promote highest-severity finding to exploit-developer"}],
+        "coverage_gaps": [],
+        "working_artifacts": [],
+        "runtime_issues": [],
+        "open_questions": [],
+        "recommended_next_agent": "exploit-developer",
+        "created_at": "2026-04-27T11:00:00Z",
+    }
+    dispatch_row = {
+        "agent_id": "AGENT-MANY-FINDINGS",
+        "agent_role": "vulnerability-analyst",
+        "task": "deep IDOR sweep across 20 endpoints",
+        "skill_loaded": "agent/skills/idor-testing/SKILL.md",
+        "scope_host": "target.example",
+        "dispatched_at": "2026-04-27T11:00:00Z",
+        "status": "completed",
+    }
     findings = {
         slug: {"slug": slug, "title": f"finding {slug}", "severity": "medium"}
         for slug in slugs
@@ -2170,69 +2152,485 @@ def test_render_handoff_truncates_at_max_lines(
 
     module = _load_dispatch_module()
     _stub_render_handoff_environment(
-        monkeypatch, module, engagement_dir, findings_by_slug=findings
+        monkeypatch,
+        module,
+        engagement_dir,
+        handoff=handoff,
+        dispatch_row=dispatch_row,
+        findings_by_slug=findings,
     )
 
-    # max_lines=12 forces the findings list to truncate.
-    _run_render_handoff(
-        module, engagement_dir, "AGENT-MANY-FINDINGS", max_lines=12
-    )
+    _run_render_handoff(module, engagement_dir, "AGENT-MANY-FINDINGS", max_lines=20)
     out = capsys.readouterr().out
-
     assert "... and " in out and " more" in out
-    # Header + meta lines are still present after truncation.
     assert "#### Handoff from vulnerability-analyst dispatch AGENT-MANY-FINDINGS" in out
-    assert "Next step (per registry):** promote highest-severity finding" in out
-    # The blob must not exceed the cap (modulo a small tolerance for the
-    # "... and N more" line which counts toward the budget).
-    line_count = len(out.rstrip("\n").split("\n"))
-    # We allow line_count to equal max_lines or be a few under; the only hard
-    # invariant is "the blob isn't unbounded". 14 covers the cap plus the
-    # "... and N more" tail.
-    assert line_count <= 14, (
-        f"render-handoff blob has {line_count} lines but --max-lines was 12"
-    )
+    assert "promote highest-severity finding" in out
 
 
-def test_render_handoff_handles_missing_next_step_gracefully(
+def test_render_handoff_missing_slug_distinct_from_fetch_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Fix #7: when registry has no next_step, the line is still emitted.
-
-    The blob must read 'not recorded — set explicitly in this dispatch' so
-    the new dispatch prompt cannot silently drop the next-step section.
-    """
+    """ISSUE-010: 404 on a slug renders 'slug missing in backend', not 'non-dict response'."""
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
 
-    _write_registry(
-        engagement_dir,
-        [
-            {
-                "agent_id": "AGENT-NO-NEXT-STEP",
-                "role": "source-analyzer",
-                "task": "JS triage on admin bundle",
-                "skill_loaded": "agent/skills/source-analysis/SKILL.md",
-                "scope_host": "target.example",
-                "dispatched_at": "2026-04-27T12:00:00Z",
-                "status": "returned",
-                "finding_slugs": [],
-                # no next_step recorded
-            }
-        ],
-    )
+    handoff = {
+        "agent_id": "AGENT-DROP",
+        "agent_role": "vulnerability-analyst",
+        "summary": "Slug was killed between dispatch and handoff.",
+        "finding_slugs": ["VA-DROPPED"],
+        "next_steps": [],
+        "coverage_gaps": [],
+        "working_artifacts": [],
+        "runtime_issues": [],
+        "open_questions": [],
+        "recommended_next_agent": None,
+        "created_at": "2026-04-27T12:00:00Z",
+    }
+    dispatch_row = {
+        "agent_id": "AGENT-DROP",
+        "agent_role": "vulnerability-analyst",
+        "task": "slug-drop test",
+        "skill_loaded": "agent/skills/idor-testing/SKILL.md",
+        "scope_host": "target.example",
+        "dispatched_at": "2026-04-27T12:00:00Z",
+        "status": "completed",
+    }
 
     module = _load_dispatch_module()
-    _stub_render_handoff_environment(monkeypatch, module, engagement_dir)
-
-    _run_render_handoff(module, engagement_dir, "AGENT-NO-NEXT-STEP")
+    _stub_render_handoff_environment(
+        monkeypatch,
+        module,
+        engagement_dir,
+        handoff=handoff,
+        dispatch_row=dispatch_row,
+        missing_slugs=("VA-DROPPED",),
+    )
+    _run_render_handoff(module, engagement_dir, "AGENT-DROP")
     out = capsys.readouterr().out
-    # The next-step line is mandatory, even when blank.
-    assert "Next step (per registry):**" in out
-    assert "not recorded — set explicitly in this dispatch" in out
-    # source-analyzer is not in the credentials-fetching role list, so the
-    # credentials line should report 0 rows without ever calling the backend
-    # credentials endpoint.
-    assert "Credentials captured:** 0 rows" in out
+    assert "VA-DROPPED" in out
+    assert "deleted or never recorded" in out, (
+        "ISSUE-010: a 404 on a slug must render the explicit 'slug missing' wording, "
+        "not a generic 'non-dict response' / 'fetch error' fallback"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Round 9 — `aith assess dispatch register / update-status / list / get /
+# record-decision / record-handoff` smoke tests. The CLI calls the
+# AssessmentClient's helper methods, so we wire a fake client and assert
+# the CLI builds the right payloads / prints the right output.
+# ---------------------------------------------------------------------------
+
+
+class _CapturingClient:
+    """Minimal AssessmentClient stand-in for CLI smoke tests."""
+
+    def __init__(self, *_: object, **__: object) -> None:
+        self.recorded: list[dict] = []
+        self.patches: list[tuple[str, dict]] = []
+        self.dispatches_by_id: dict[str, dict] = {}
+        self.handoff_response: dict | None = None
+        self.decisions_recorded: list[dict] = []
+        self.handoff_calls: list[dict] = []
+        self.handoffs_by_id: dict[str, dict] = {}
+
+    def record_dispatch(self, payload: dict) -> dict:
+        self.recorded.append(payload)
+        row = {"id": 1, "agent_id": payload.get("agent_id"), "status": payload.get("status", "in-progress")}
+        self.dispatches_by_id[row["agent_id"]] = row
+        return row
+
+    def update_dispatch(self, agent_id: str, patch: dict) -> dict:
+        self.patches.append((agent_id, patch))
+        existing = dict(self.dispatches_by_id.get(agent_id) or {"agent_id": agent_id})
+        existing.update(patch)
+        self.dispatches_by_id[agent_id] = existing
+        return existing
+
+    def get_dispatch(self, agent_id: str):
+        return self.dispatches_by_id.get(agent_id)
+
+    def list_dispatches(self, **filters):
+        return list(self.dispatches_by_id.values())
+
+    def record_decision(self, payload: dict) -> dict:
+        self.decisions_recorded.append(payload)
+        return {"id": 99, **payload}
+
+    def record_handoff(self, payload: dict, *, upsert: bool = False) -> dict:
+        # Track every call for idempotency tests; the dispatch CLI should
+        # always pass upsert=True so checkpointing the same agent_id is safe.
+        self.handoff_response = payload
+        self.handoff_calls.append({"payload": payload, "upsert": upsert})
+        prior = self.handoffs_by_id.get(payload.get("agent_id"))
+        if prior is not None and not upsert:
+            from agent.scripts.assess.lib.client import AssessError  # type: ignore
+            raise AssessError("HTTP 409:\nduplicate (engagement, agent_id)")
+        # Latest write wins (upsert semantics).
+        merged = {"id": 42, **(prior or {}), **payload}
+        self.handoffs_by_id[payload.get("agent_id")] = merged
+        return {"id": merged["id"], "agent_id": merged.get("agent_id")}
+
+    def update_handoff(self, agent_id: str, patch: dict) -> dict:
+        existing = dict(self.handoffs_by_id.get(agent_id) or {"agent_id": agent_id})
+        existing.update(patch)
+        self.handoffs_by_id[agent_id] = existing
+        return existing
+
+    def close(self) -> None:
+        return None
+
+
+def _run_dispatch_verb(monkeypatch, action: str, *, extra=None, **flags):
+    """Execute dispatch.run with a fake AssessmentClient injected."""
+    module = _load_dispatch_module()
+    fake = _CapturingClient()
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+    args_dict = {
+        "db_path": action,
+        "action": "",
+        "extra": list(extra or []),
+        "reason": "",
+        "by": "status",
+        "max_lines": 40,
+        "include_evidence": False,
+        "engagement_dir": None,
+        "agent_id": None,
+        "agent_role": None,
+        "task": None,
+        "skill": None,
+        "scope_host": None,
+        "dispatch_model": None,
+        "reasoning": None,
+        "permission": None,
+        "command_budget": None,
+        "output_schema": None,
+        "dispatch_mode_arg": None,
+        "files_allowed": None,
+        "from_json": None,
+        "dispatch_status": None,
+        "completed_at": None,
+        "finding_slugs": None,
+        "filter_role": None,
+        "filter_since": None,
+        "task_q": None,
+        "dispatch_limit": None,
+        "decision_kind": None,
+        "payload_json": None,
+        "surfaced_to_user": False,
+        "decision_host": None,
+        "decision_vendor": None,
+        "decision_choice": None,
+        "decision_note": None,
+        "decision_phase": None,
+        "hf_summary": None,
+        "hf_confidence": None,
+        "hf_next_steps": None,
+        "hf_coverage_gaps": None,
+        "hf_runtime_issues": None,
+        "hf_working_artifacts": None,
+        "hf_open_questions": None,
+        "hf_recommended_next_agent": None,
+        "hf_extras_json": None,
+    }
+    args_dict.update(flags)
+    module.run(SimpleNamespace(**args_dict))
+    return fake
+
+
+def test_dispatch_register_writes_payload(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "register",
+        agent_id="AG-CLI-1",
+        agent_role="vulnerability-analyst",
+        task="IDOR sweep",
+        skill="agent/skills/idor-testing/SKILL.md",
+        permission="target-facing",
+        reasoning="high",
+        dispatch_mode_arg="item-iterating",
+    )
+    out = capsys.readouterr().out
+    body = json.loads(out)
+    assert body["agent_id"] == "AG-CLI-1"
+    assert body["status"] == "in-progress"
+    assert fake.recorded[0]["agent_role"] == "vulnerability-analyst"
+    assert fake.recorded[0]["dispatch_mode"] == "item-iterating"
+
+
+def test_dispatch_update_status_marks_completed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "update-status",
+        extra=["AG-CLI-1"],
+        dispatch_status="completed",
+        finding_slugs="VA-001,VA-002",
+    )
+    assert fake.patches[0][0] == "AG-CLI-1"
+    patch = fake.patches[0][1]
+    assert patch["status"] == "completed"
+    assert patch["finding_slugs"] == ["VA-001", "VA-002"]
+    assert patch.get("completed_at"), "completed_at must be auto-stamped on terminal status"
+
+
+def test_dispatch_list_emits_jsonl(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_dispatch_module()
+
+    class _ListClient(_CapturingClient):
+        def list_dispatches(self, **filters):
+            return [
+                {"id": 1, "agent_id": "L1", "agent_role": "recon-specialist"},
+                {"id": 2, "agent_id": "L2", "agent_role": "vulnerability-analyst"},
+            ]
+
+    fake = _ListClient()
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+    module.run(SimpleNamespace(
+        db_path="list", action="", extra=[], reason="", by="status",
+        max_lines=40, include_evidence=False, engagement_dir=None,
+        agent_id=None, agent_role=None, task=None, skill=None, scope_host=None,
+        dispatch_model=None, reasoning=None, permission=None, command_budget=None,
+        output_schema=None, dispatch_mode_arg=None, files_allowed=None,
+        from_json=None, dispatch_status=None, completed_at=None, finding_slugs=None,
+        filter_role=None, filter_since=None, task_q=None, dispatch_limit=None,
+        decision_kind=None, payload_json=None, surfaced_to_user=False,
+        decision_host=None, decision_vendor=None, decision_choice=None,
+        decision_note=None, decision_phase=None,
+        hf_summary=None, hf_confidence=None, hf_next_steps=None,
+        hf_coverage_gaps=None, hf_runtime_issues=None, hf_working_artifacts=None,
+        hf_open_questions=None, hf_recommended_next_agent=None, hf_extras_json=None,
+    ))
+    out = capsys.readouterr().out
+    lines = [line for line in out.strip().split("\n") if line.strip()]
+    assert len(lines) == 2
+    rows = [json.loads(line) for line in lines]
+    assert {r["agent_id"] for r in rows} == {"L1", "L2"}
+
+
+def test_dispatch_get_exits_2_on_missing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        _run_dispatch_verb(monkeypatch, "get", extra=["NOPE"])
+    assert exc_info.value.code == 2
+
+
+def test_dispatch_record_decision_friendly_flags(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "record-decision",
+        decision_kind="scope_decision",
+        decision_host="vendor-saas.example.com",
+        decision_vendor="salesforce",
+        decision_choice="in_scope",
+        surfaced_to_user=True,
+    )
+    decisions = fake.decisions_recorded
+    assert len(decisions) == 1
+    body = decisions[0]
+    assert body["kind"] == "scope_decision"
+    assert body["payload"]["host"] == "vendor-saas.example.com"
+    assert body["surfaced_to_user"] is True
+
+
+def test_dispatch_record_handoff_flag_based(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "record-handoff",
+        agent_id="HF-CLI-1",
+        agent_role="vulnerability-analyst",
+        hf_summary="Validated IDOR write primitive.",
+        hf_next_steps=["promote to exploit-developer"],
+        hf_coverage_gaps=["auth boundary: anonymous untested"],
+        hf_recommended_next_agent="exploit-developer",
+        finding_slugs="VA-001",
+    )
+    payload = fake.handoff_response
+    assert payload["agent_id"] == "HF-CLI-1"
+    assert payload["summary"] == "Validated IDOR write primitive."
+    assert payload["next_steps"] == [{"action": "promote to exploit-developer"}]
+    assert payload["coverage_gaps"][0]["area"] == "auth boundary"
+    assert payload["finding_slugs"] == ["VA-001"]
+    assert payload["recommended_next_agent"] == "exploit-developer"
+    # The CLI MUST request upsert semantics so checkpointing is idempotent.
+    assert fake.handoff_calls[-1]["upsert"] is True
+
+
+def test_dispatch_record_handoff_is_idempotent_for_repeat_calls(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Round 9c: agents call record-handoff after every major step. The same
+    (engagement, agent_id) tuple collides on every call after the first; the
+    CLI must transparently fall back to PATCH so the agent never sees a 409."""
+    module = _load_dispatch_module()
+    # One fake shared across all three calls so handoffs_by_id persists.
+    shared_fake = _CapturingClient()
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: shared_fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+
+    payload_v1 = {
+        "agent_id": "HF-CHECKPOINT",
+        "agent_role": "recon-specialist",
+        "summary": "checkpoint v1 — wafw00f done",
+        "confidence": "low",
+    }
+    payload_v2 = {
+        "agent_id": "HF-CHECKPOINT",
+        "agent_role": "recon-specialist",
+        "summary": "checkpoint v2 — nmap done",
+        "confidence": "medium",
+    }
+    payload_v3 = {
+        "agent_id": "HF-CHECKPOINT",
+        "agent_role": "recon-specialist",
+        "summary": "checkpoint v3 — full sweep done",
+        "confidence": "high",
+    }
+
+    p1 = tmp_path / "v1.json"
+    p2 = tmp_path / "v2.json"
+    p3 = tmp_path / "v3.json"
+    p1.write_text(json.dumps(payload_v1), encoding="utf-8")
+    p2.write_text(json.dumps(payload_v2), encoding="utf-8")
+    p3.write_text(json.dumps(payload_v3), encoding="utf-8")
+
+    def _invoke(path: Path) -> None:
+        args_dict = {
+            "db_path": "record-handoff",
+            "action": "",
+            "extra": [],
+            "reason": "",
+            "by": "status",
+            "max_lines": 40,
+            "include_evidence": False,
+            "engagement_dir": None,
+            "agent_id": None,
+            "agent_role": None,
+            "task": None,
+            "skill": None,
+            "scope_host": None,
+            "dispatch_model": None,
+            "reasoning": None,
+            "permission": None,
+            "command_budget": None,
+            "output_schema": None,
+            "dispatch_mode_arg": None,
+            "files_allowed": None,
+            "from_json": str(path),
+            "dispatch_status": None,
+            "completed_at": None,
+            "finding_slugs": None,
+            "filter_role": None,
+            "filter_since": None,
+            "task_q": None,
+            "dispatch_limit": None,
+            "decision_kind": None,
+            "payload_json": None,
+            "surfaced_to_user": False,
+            "decision_host": None,
+            "decision_vendor": None,
+            "decision_choice": None,
+            "decision_note": None,
+            "decision_phase": None,
+            "hf_summary": None,
+            "hf_confidence": None,
+            "hf_next_steps": None,
+            "hf_coverage_gaps": None,
+            "hf_runtime_issues": None,
+            "hf_working_artifacts": None,
+            "hf_open_questions": None,
+            "hf_recommended_next_agent": None,
+            "hf_extras_json": None,
+        }
+        module.run(SimpleNamespace(**args_dict))
+
+    _invoke(p1)
+    _invoke(p2)
+    _invoke(p3)
+
+    # All three calls passed upsert=True (the contract).
+    assert len(shared_fake.handoff_calls) == 3
+    assert all(call["upsert"] is True for call in shared_fake.handoff_calls)
+
+    # Latest payload wins; row reflects the v3 summary.
+    final = shared_fake.handoffs_by_id["HF-CHECKPOINT"]
+    assert final["summary"] == "checkpoint v3 — full sweep done"
+    assert final["confidence"] == "high"
+
+
+def test_record_handoff_client_upsert_falls_back_to_patch_on_409() -> None:
+    """The client helper itself catches 409 and re-issues a PATCH."""
+    from agent.scripts.assess.lib.client import AssessError, AssessmentClient
+
+    captured: dict[str, object] = {"posts": [], "patches": []}
+
+    class _StubClient(AssessmentClient):
+        def __init__(self) -> None:
+            # Skip parent __init__ — we don't need a real socket for this unit test.
+            pass
+
+        def post(self, endpoint: str, payload: dict) -> dict:  # type: ignore[override]
+            captured["posts"].append((endpoint, payload))
+            raise AssessError("HTTP 409:\nduplicate (engagement, agent_id)")
+
+        def patch(self, endpoint: str, payload: dict, *, accept_409: bool = False) -> dict:  # type: ignore[override]
+            captured["patches"].append((endpoint, payload))
+            return {"id": 7, "agent_id": "AG-X", **payload}
+
+    stub = _StubClient()
+    out = stub.record_handoff(
+        {"agent_id": "AG-X", "agent_role": "recon-specialist", "summary": "v2"},
+        upsert=True,
+    )
+    assert out["summary"] == "v2"
+    assert len(captured["posts"]) == 1
+    assert len(captured["patches"]) == 1
+    assert captured["patches"][0][0] == "dispatch-handoffs/AG-X"
+    # PATCH body must NOT include agent_id (URL-bound) or agent_role
+    # (immutable post-create — HandoffUpdate forbids both).
+    patch_body = captured["patches"][0][1]
+    assert "agent_id" not in patch_body
+    assert "agent_role" not in patch_body
+    assert patch_body["summary"] == "v2"

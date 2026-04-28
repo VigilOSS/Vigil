@@ -4,6 +4,7 @@
 **/node_modules/
 **/dist/
 **/data/
+**/*.egg-info/
 *.sqlite3
 *.db
 .env
@@ -12,3 +13,6 @@ workspace/
 opencode-home/
 agent/engagements/*
 !agent/engagements/.gitkeep
+CLAUDE-REVIEW.md
+CODEX-FINDINGS.md
+build/

@@ -160,7 +160,7 @@ specific blocker in `#### Coverage Gaps` so the operator can re-dispatch with de
   no trigger match" so the absence is intentional, not forgotten.
 
 ### Trust Boundary Checkpoints
-- [ ] **Vendor-SaaS hosts warned to the operator with a scope_decision row recorded.** Any host whose CNAME / rDNS shape, banner, or HTTP fingerprint matches a vendor-managed SaaS platform (per `agent/scripts/assess/lib/scope.py:host_is_vendor_saas`) has been surfaced to the operator with a one-line warning AND a `{kind: "scope_decision", host, vendor, choice: "pending"}` row written to `$DIR/agent-registry.json`. The warning is informational (default-permissive); the operator decides in/out/partial scope and updates the row. Hosts authored as an explicit literal in `scope.json` skip the warning — the literal is already an in-scope decision.
+- [ ] **Vendor-SaaS hosts warned to the operator with a scope_decision row recorded.** Any host whose CNAME / rDNS shape, banner, or HTTP fingerprint matches a vendor-managed SaaS platform (per `agent/scripts/assess/lib/scope.py:host_is_vendor_saas`) has been surfaced to the operator with a one-line warning AND a scope_decision row written via `aith assess dispatch record-decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user`. The warning is informational (default-permissive); the operator decides in/out/partial scope and updates the row. Hosts authored as an explicit literal in `scope.json` skip the warning — the literal is already an in-scope decision.
 - [ ] **Egress reputation check run after subdomain-enum + httpx populated `live_hosts.txt`.** Step 0b of `agent/skills/web-recon/SKILL.md` ran. If `egress_block_pct > 50`, the dispatch paused, re-sampled five minutes later, and only surfaced the Egress reputation checkpoint when the second sample stayed >50%. Continuing through nmap/ffuf/nuclei from a confirmed blocked egress is a hard failure of this dispatch.
 
 ### Network Layer
@@ -236,45 +236,46 @@ tool ran AND every checklist item is verified — not "I assumed it was fine." A
 gaps section means a step was either blocked or scoped out by the dispatch; the operator
 decides whether to re-dispatch.
 
+## Mandatory Closing Sequence
+
+Before your dispatch returns, run in this order:
+
+1. `aith assess record-finding recon-specialist <finding-json>` for each finding (already required)
+2. `aith assess record-intel <type> <intel-json>` for each intel row (already required)
+3. `aith assess record-surface <surface-json>` for each surface candidate (already required)
+4. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `live_host_count`, `egress_block_pct`, `wildcard_subs_resolved`)
+
+Skipping the handoff write means the operator has nothing to feed into the next
+dispatch — there is no `agent-registry.json` fallback any more. The handoff row IS
+the next dispatch's input. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+
+The `record-handoff` step is idempotent and called incrementally — checkpoint
+after each major step in your methodology, not only at the end. See
+`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
+
+The recon-specialist `coverage_gaps` field carries every self-check item this dispatch
+could NOT complete. The `next_steps` field carries the recommended Phase 3 ordering —
+each entry names the action, target, recommended_agent, and rationale. Surface-candidate
+priority signals go into the surface rows themselves via `record-surface`; the handoff
+does not duplicate them.
+
 ## Output Contract
 
-The required output sections are scoped to the dispatch shape so half-phase pivots do not
-have to fabricate empty sections.
+Reason through the work in your response — describe what you found, what the
+fingerprint suggests, which hosts and surfaces look high-value, where you'd look
+next. Backend writes via the Mandatory Closing Sequence above are what makes the
+state durable; the response is your reflection on top of that, written for the
+operator and downstream specialists who'll inherit the context.
 
-**Full Phase-1a-bootstrap dispatches** (default — wildcard or apex Phase 1) emit:
+Don't truncate reasoning to be brief — chain-of-thought analysis directly improves
+the quality of recon hypotheses (see `agent/shared-constraints.md` §16). Coverage
+gaps, recommended Phase 3 ordering, surface-prioritization rationale, runtime
+issues, and working artifacts all live in the handoff row's structured fields,
+and the operator pulls them via `render-handoff` — which means you can think
+freely in the response without having to ration words for canonical state.
 
-- `#### Summary`
-- `#### Stats`
-- `#### Priority Attack Surfaces`
-- `#### Surface Candidates`
-- `#### Top API / Object Reference Paths`
-- `#### Tech Stack`
-- `#### Coverage Gaps` — REQUIRED. Declare every self-check item you could NOT complete. If none, state "No coverage gaps — all self-check items completed."
-- `#### Findings`
-- `#### Intelligence`
-- `#### Recommended Phase 3 Ordering`
-
-**Hypothesis-driven half-phase recon-pivot dispatches** (e.g., "fingerprint api.foo.com only —
-recon-pivot half-phase") emit only the load-bearing sections:
-
-- `#### Findings`
-- `#### Tech Stack`
-- `#### Coverage Gaps`
-
-The narrower output matches the narrower scope: a recon-pivot dispatch is solving a single
-hypothesis (often one host, one stack), so the `#### Surface Candidates` /
-`#### Recommended Phase 3 Ordering` sections would be empty pass-through. Use the full
-template only when the dispatch produced full-phase coverage.
-
-`#### Surface Candidates` should be directly ingestible by the operator into durable surface state.
-`#### Coverage Gaps` is read by the operator to decide whether Phase 1 needs a targeted depth pass.
-`#### Recommended Phase 3 Ordering` should name the next specialist and the first focus area, not just say "keep testing."
-
-## Finding Recording
-
-**MANDATORY:** If your recon produces findings (e.g., exposed admin panels, default credentials,
-information disclosure), record each via `aith assess record-finding recon-specialist <finding-json-file>`
-before your task completes. Do not defer recording to the operator. Unrecorded findings are lost data.
+The recon-pivot half-phase dispatch shape is the same — narrower set of writes
+(often 0 surfaces, 1-2 intel notes, 0-1 findings), same backend-canonical rule.
 
 ## Key Principles
 
