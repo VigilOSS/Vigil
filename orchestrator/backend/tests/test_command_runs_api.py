@@ -1006,6 +1006,79 @@ def test_finalize_patch_terminal_to_terminal_returns_409(client, isolate_setting
     assert refetched["duration_ms"] == 5000
 
 
+def test_finalize_patch_concurrent_double_patch_is_consistent(client, isolate_settings):
+    """B4 concurrency contract: two near-simultaneous PATCHes must produce a
+    consistent row state — exactly one writer's payload lands in the DB,
+    the other returns 409 carrying that canonical row. The bug this test
+    guards against is the read-then-update race where both writers pass a
+    SELECT-based terminal check and both UPDATEs land, with the loser
+    silently overwriting the winner's status/return_code/duration_ms.
+
+    We use a ThreadPoolExecutor against the FastAPI TestClient. The TestClient
+    runs requests sequentially within a single asyncio loop, so this test
+    exercises the *gate* (UPDATE ... WHERE status='running') rather than true
+    OS-level concurrency, but the gate is the load-bearing invariant: after
+    the first writer commits, the second writer's UPDATE matches zero rows
+    and the rowcount=0 branch must funnel into the same 409 path.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(client, _base_payload(status="running")).json()
+    cmd_run_id = created["id"]
+
+    payload_a = {
+        "status": "completed",
+        "return_code": 0,
+        "ended_at": "2026-04-17T12:00:05Z",
+        "duration_ms": 5000,
+        "stdout_preview": "writer-A finalize",
+    }
+    payload_b = {
+        "status": "killed",
+        "return_code": -9,
+        "ended_at": "2026-04-17T12:00:10Z",
+        "duration_ms": 10000,
+        "stdout_preview": "writer-B finalize",
+    }
+
+    def fire(payload):
+        return client.patch(
+            f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{cmd_run_id}",
+            json=payload,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fa = pool.submit(fire, payload_a)
+        fb = pool.submit(fire, payload_b)
+        ra, rb = fa.result(), fb.result()
+
+    statuses = {ra.status_code, rb.status_code}
+    # Either both succeed-with-noop (impossible — one row, one status) OR
+    # one 200 + one 409. The bug shape is "two 200s with conflicting state".
+    assert statuses == {200, 409}, (
+        f"concurrent finalize must produce 200+409, got {ra.status_code}+{rb.status_code}: "
+        f"{ra.text} | {rb.text}"
+    )
+
+    # The DB-side row must reflect whichever writer won — the 409 response
+    # carries the canonical existing row, and re-fetching agrees with it.
+    winner_response = ra if ra.status_code == 200 else rb
+    loser_response = rb if ra.status_code == 200 else ra
+    winner_payload = winner_response.json()
+    loser_existing = loser_response.json()["detail"]["existing"]
+    assert winner_payload["status"] == loser_existing["status"]
+    assert winner_payload["return_code"] == loser_existing["return_code"]
+    assert winner_payload["duration_ms"] == loser_existing["duration_ms"]
+
+    refetched = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{cmd_run_id}"
+    ).json()
+    assert refetched["status"] == winner_payload["status"]
+    assert refetched["return_code"] == winner_payload["return_code"]
+    assert refetched["duration_ms"] == winner_payload["duration_ms"]
+
+
 def test_finalize_patch_running_to_terminal_succeeds(client, isolate_settings):
     """B4 sanity: the normal happy path still works — a running row promotes
     to a terminal state and the DB row reflects the PATCH payload."""
@@ -1267,3 +1340,4 @@ def test_pre_existing_rows_keep_status_completed_default_after_alter(client, iso
     rows = state_manager.list_command_runs(1)
     assert len(rows) == 1
     assert rows[0]["status"] == "completed"
+

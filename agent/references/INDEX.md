@@ -59,8 +59,8 @@ Attack techniques organized by kill chain phase. Used by: operator, exploit-deve
 
 | File | Techniques |
 |------|-----------|
-| `offensive-tactics/shell-handling.md` | pwncat-vl listeners, tmux session management, reverse shell payloads, log tailing for LLM visibility |
-| `offensive-tactics/frp-tunneling.md` | `aith oob` frp/interactsh setup, per-agent OOB clients, tunnel logging, reverse shell and OOB DNS/HTTP callback conventions |
+| `offensive-tactics/shell-handling.md` | pwncat-vl listeners, tmux session management, reverse shell payloads, log tailing for LLM visibility — paired with `agent/skills/exploit-playbook-authoring/SKILL.md` for playbook bash structure and `# MANUAL:` annotation conventions |
+| `offensive-tactics/frp-tunneling.md` | `aith oob` frp/interactsh setup, per-agent OOB clients, tunnel logging, reverse shell and OOB DNS/HTTP callback conventions — paired with `agent/skills/exploit-playbook-authoring/SKILL.md` for playbook authoring conventions |
 
 ### offensive-tactics/persistence/
 
@@ -223,7 +223,7 @@ Quick-reference per tool, organized by usage phase.
 | `tools/recon/gf.md` | URL parameter-pattern classifier (xss, ssrf, redirect, idor, sqli, lfi, debug) with 1ndianl33t patterns |
 | `tools/recon/trufflehog.md` | Secret scanner (filesystem mode, 800+ detectors, v3 positional-path syntax, `--no-verification` default) |
 | `tools/recon/github-osint.md` | GitHub OSINT — org-name pattern enumeration (literal/parent/contractor variants), public-member listing, commit-author email mining, code-search cross-reference; rate-limit etiquette and `GITHUB_TOKEN` pattern |
-| `tools/recon/openssl-sans.md` | Per-host TLS SAN extraction (openssl s_client + x509 -ext subjectAltName), cross-host SAN collision detection (shared multi-tenant cert flag), vhost / cert mismatch detection, multi-time DNS resolution (split-VIP detection), dnsx live-host confirmation of SAN-discovered names |
+| `tools/recon/openssl-sans.md` | Per-host TLS SAN extraction (openssl s_client + x509 -ext subjectAltName), cross-host SAN collision detection (shared multi-tenant cert flag), vhost / cert mismatch detection, multi-time DNS resolution (split-VIP detection), dnsx live-host confirmation of SAN-discovered names — paired with `agent/skills/tls-vhost-correlation/SKILL.md` |
 
 ### tools/fuzzing/ — Used by: fuzzer, recon-specialist
 

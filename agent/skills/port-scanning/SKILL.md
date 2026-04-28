@@ -337,6 +337,22 @@ grep "open" /engagements/$ENGAGEMENT_KEY/scans/nmap_targeted.txt | grep -v "filt
   kill-evidence intel-note
 - Non-web services to hand off for deeper testing
 
+## Output Contract
+
+The skill produces these structured sections in the recon-specialist's return payload.
+Backend writes (`record-finding`, `record-intel`, `record-surface`) are the durable
+record; this contract names what each markdown section should hold so downstream
+specialists can parse the output consistently.
+
+| Section | Holds |
+|---|---|
+| `#### Summary` | One-paragraph headline: hosts scanned, profile chosen, open-port total, port-data-assertion pass/fail count. |
+| `#### Open Services` | Per-host table of `host : port/proto : service : version : NSE notes`. The canonical port-and-service inventory feeding `record-surface` for non-web services and dispatch decisions for follow-on testing. |
+| `#### Findings` | Decisive findings already proved by the scan (default-creds via NSE, anonymous FTP, well-known-vuln NSE hit). Each must also be recorded via `aith assess record-finding`. |
+| `#### Surface Candidates` | Non-web services that warrant deeper triage (Redis, Elasticsearch, Docker API, MongoDB, exposed RDP, etc.) — each surfaced via `aith assess record-surface`. |
+| `#### Intelligence` | TLS SAN hosts surfaced from `ssl-cert` NSE, rDNS vendor identification for shared / CDN-fronted IPs, OS detection output, banner anomalies. Each row landed via `aith assess record-intel <type>`. |
+| `#### Coverage Gaps` | Every host the per-host port-data assertion flagged as a gap and the disposition (re-queued at slower retry profile, recorded as upstream-filtering kill-evidence, deferred). UDP coverage gaps. Hosts that hit the host-timeout. The operator uses this section to decide whether to re-dispatch a slower retry pass. |
+
 ## Extended Resources
 
 - `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table (cautious tier, CDN-fronted, WAF-protected, vendor SaaS, origin)

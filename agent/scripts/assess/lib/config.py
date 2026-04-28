@@ -52,29 +52,34 @@ def resolve_engagement_dir(cli_flag: str | None = None) -> str:
     raise SystemExit("Cannot resolve engagement directory. Set --engagement-dir, $ENGAGEMENT_DIR, or run from a dir with scope.json.")
 
 
+def _candidate_env_files(engagement_dir: str, agent_root: str) -> list[str]:
+    """Return the ordered list of env files the resolver searches.
+
+    Parent-shell env var wins; among files, the resolver picks the first
+    hit (the contract is that nearer-to-the-engagement files override
+    install-root defaults).
+    """
+    install_root = str(Path(agent_root).parent)
+    candidates = [
+        os.path.join(install_root, ".env"),
+        os.path.join(install_root, ".orchestrator.env"),
+    ]
+    env_eng_dir = os.environ.get("ENGAGEMENT_DIR", "")
+    if env_eng_dir:
+        candidates.append(os.path.join(env_eng_dir, ".orchestrator.env"))
+    candidates.append(os.path.join(os.getcwd(), ".orchestrator.env"))
+    if engagement_dir:
+        candidates.append(os.path.join(engagement_dir, ".orchestrator.env"))
+    return candidates
+
+
 def resolve_base_url(engagement_dir: str, agent_root: str) -> str:
     """Resolve ORCHESTRATOR_BASE_URL through the env var chain."""
     url = os.environ.get("ORCHESTRATOR_BASE_URL", "")
     if url:
         return url.rstrip("/")
 
-    install_root = str(Path(agent_root).parent)
-
-    candidate_files = [
-        os.path.join(install_root, ".env"),
-        os.path.join(install_root, ".orchestrator.env"),
-    ]
-    # Check $ENGAGEMENT_DIR env var path (may differ from resolved engagement_dir)
-    env_eng_dir = os.environ.get("ENGAGEMENT_DIR", "")
-    if env_eng_dir:
-        candidate_files.append(os.path.join(env_eng_dir, ".orchestrator.env"))
-    # Check current working directory
-    candidate_files.append(os.path.join(os.getcwd(), ".orchestrator.env"))
-    # Check resolved engagement dir
-    if engagement_dir:
-        candidate_files.append(os.path.join(engagement_dir, ".orchestrator.env"))
-
-    for env_file in candidate_files:
+    for env_file in _candidate_env_files(engagement_dir, agent_root):
         env_vars = _read_env_file(env_file)
         val = env_vars.get("ORCHESTRATOR_BASE_URL", "")
         if val:

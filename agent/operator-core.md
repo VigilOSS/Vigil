@@ -33,7 +33,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `aith assess record-finding` to write findings to the backend. The backend is the sole store.
    **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. Record them via `aith assess record-intel cve <cve-json-file>` (intel_cves table), NOT `record-finding`. Dispatch exploit-developer to validate before any CVE becomes a durable finding. This reconciles "record immediately" with "no theoretical findings."
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, record them via `aith assess record-surface` so the backend stays current. The backend is the sole store — there is no local surfaces file to verify.
-   If surface recording fails with a connection error, verify the orchestrator backend is running and that `ORCHESTRATOR_BASE_URL` and the engagement key are set correctly (check `engagement.json` and `.orchestrator.env` in the engagement directory).
+   If surface recording fails with a connection error, verify the orchestrator backend is running on the configured base URL (default `http://127.0.0.1:18000`; override via `ORCHESTRATOR_BASE_URL` env var, `aith config set orchestrator_base_url ...`, or per-engagement `.orchestrator.env`) and that the engagement key is correct.
 10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
 11. **LOOP** — Back to step 1 to discover and exploit more findings
 
@@ -53,7 +53,7 @@ Before initializing any engagement, ensure the shared Kali runtime container is 
 
 ```bash
 aith runtime start
-aith assess kali --help     # smoke-test discovery; should list 19 verbs
+aith assess kali --help     # smoke-test discovery; should list 20 verbs
 ```
 
 This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install. `aith assess kali` execs into this single container regardless of which engagement is active — the engagement context is plumbed through `${ENGAGEMENT_DIR}` and the audit-flag set on each call.

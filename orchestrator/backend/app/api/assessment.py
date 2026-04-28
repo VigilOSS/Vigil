@@ -629,7 +629,10 @@ async def create_probe_run(engagement_key: str, request: ProbeRunRecordRequest) 
 
 
 @router.post("/command-runs", status_code=status.HTTP_201_CREATED)
-async def create_command_run(engagement_key: str, request: CommandRunRecordRequest) -> dict[str, Any]:
+async def create_command_run(
+    engagement_key: str,
+    request: CommandRunRecordRequest,
+) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     payload = request.model_dump()
     if not payload.get("command_hash"):
@@ -670,7 +673,10 @@ async def patch_command_run(
 
 
 @router.post("/jobs", status_code=status.HTTP_201_CREATED)
-async def create_job(engagement_key: str, request: JobCreate) -> dict[str, Any]:
+async def create_job(
+    engagement_key: str,
+    request: JobCreate,
+) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     record = state_manager.record_job(
         engagement.id,

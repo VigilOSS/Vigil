@@ -2468,3 +2468,136 @@ def test_no_strace_or_dedup_block_in_owned_corpus():
         "supported by the kali CLI. Drop both from the prompt corpus.\n"
         + "\n".join(offenders)
     )
+
+
+def test_kali_verb_count_consistent_across_operator_facing_docs():
+    """Verb-count drift guard. The operator-facing docs (operator-core / rendered
+    AGENTS / rendered CLAUDE / kali-cli runtime guide / kali-exec skill) all cite a
+    verb count for `aith assess kali`. A future refactor that adds a verb to
+    `agent/scripts/assess/cli.py` but forgets to update one of these docs leaves
+    the operator with stale guidance — exactly the drift this branch caught (19 /
+    19 / 19 / 15 / 20 across the five docs before the fix). Pin them together so
+    the next add-a-verb refactor cannot diverge without tripping CI.
+
+    The truth is the count of `kali_*.py` modules registered in
+    `agent/scripts/assess/cli.py` (each module is one verb). Read that count
+    and assert every operator-facing doc cites the same number."""
+    repo_root = Path(__file__).resolve().parents[3]
+
+    cli_path = repo_root / "agent" / "scripts" / "assess" / "cli.py"
+    cli_text = cli_path.read_text(encoding="utf-8")
+
+    # Extract the kali-verb registration block: every name in the
+    # `for kali_mod in ( kali_alterx, ..., kali_whatweb ): kali_mod.register(kali_sub)`
+    # tuple maps to one registered verb. Module names include digits (kali_wafw00f),
+    # so [a-z0-9_] not [a-z_].
+    block_match = re.search(
+        r"for kali_mod in \(([^)]+)\)",
+        cli_text,
+        re.DOTALL,
+    )
+    assert block_match is not None, (
+        "could not locate the kali-verb registration block in "
+        "agent/scripts/assess/cli.py — the verb-count drift guard cannot run"
+    )
+    registered_modules = re.findall(r"kali_[a-z0-9_]+", block_match.group(1))
+    expected_count = len(registered_modules)
+    assert expected_count > 0, (
+        "no kali_* modules found in cli.py registration block"
+    )
+
+    docs_to_check = [
+        repo_root / "agent" / "operator-core.md",
+        repo_root / "agent" / "AGENTS.md",
+        repo_root / "agent" / "CLAUDE.md",
+        repo_root / "agent" / "references" / "runtime-guides" / "kali-cli.md",
+        repo_root / "agent" / "skills" / "kali-exec" / "SKILL.md",
+    ]
+
+    # Match phrases like:
+    #   "should list 20 verbs"
+    #   "lists all 20 verbs"
+    #   "20 verbs total"
+    # — case-insensitive and whitespace-tolerant.
+    citation_re = re.compile(
+        r"(?:should\s+list|lists\s+all|list)\s+(\d{1,3})\s+verbs"
+        r"|(\d{1,3})\s+verbs\s+total",
+        re.IGNORECASE,
+    )
+
+    offenders: list[str] = []
+    citations: list[tuple[Path, int]] = []
+    for path in docs_to_check:
+        text = path.read_text(encoding="utf-8")
+        matches = citation_re.findall(text)
+        if not matches:
+            offenders.append(
+                f"{path}: missing a verb-count citation (need a phrase like "
+                f"'list {expected_count} verbs' or '{expected_count} verbs total')"
+            )
+            continue
+        for cite_a, cite_b in matches:
+            cited = int(cite_a or cite_b)
+            citations.append((path, cited))
+            if cited != expected_count:
+                offenders.append(
+                    f"{path}: cites {cited} verbs, expected {expected_count} "
+                    f"(from cli.py registration block)"
+                )
+
+    assert not offenders, (
+        f"Verb-count drift across operator-facing docs (truth = {expected_count} "
+        f"from cli.py):\n" + "\n".join(offenders)
+    )
+
+
+def test_code_map_typed_verb_inventory_complete():
+    """CODE-MAP.md enumerates the typed kali verbs inline (`kali_alterx, ...,
+    kali_whatweb — N typed verbs`). The `aith assess kali` registration block in
+    `agent/scripts/assess/cli.py` is the truth: every typed verb module must appear
+    in the CODE-MAP enumeration, and the cited "N typed verbs" count must match the
+    actual typed-module count. The other operator-facing docs cite a total verb
+    count (`20 verbs`); CODE-MAP cites the typed subcount, so the existing
+    cross-doc drift guard cannot catch this — hence the dedicated test.
+
+    Truth derivation:
+    - Typed verbs = `kali_*.py` registration entries minus the three non-typed
+      modules (`kali_exec` raw passthrough, `kali_job` async lifecycle,
+      `kali_sweep_orphans` host-side maintenance).
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+
+    cli_text = (repo_root / "agent" / "scripts" / "assess" / "cli.py").read_text(
+        encoding="utf-8"
+    )
+    block_match = re.search(r"for kali_mod in \(([^)]+)\)", cli_text, re.DOTALL)
+    assert block_match is not None
+    registered_modules = set(re.findall(r"kali_[a-z0-9_]+", block_match.group(1)))
+    non_typed = {"kali_exec", "kali_job", "kali_sweep_orphans"}
+    typed_modules = registered_modules - non_typed
+    expected_typed_count = len(typed_modules)
+
+    code_map = (repo_root / "CODE-MAP.md").read_text(encoding="utf-8")
+
+    # Cited typed-verb count.
+    typed_count_match = re.search(r"(\d{1,3})\s+typed\s+verbs", code_map)
+    assert typed_count_match is not None, (
+        "CODE-MAP.md is missing the '<N> typed verbs' citation that names the "
+        "typed-kali subcount; the verb-count drift guard cannot run"
+    )
+    cited = int(typed_count_match.group(1))
+    assert cited == expected_typed_count, (
+        f"CODE-MAP.md cites {cited} typed verbs; truth is {expected_typed_count} "
+        f"(from cli.py registration block minus the 3 non-typed modules). "
+        f"Missing from the inline list: "
+        f"{sorted(typed_modules - set(re.findall(r'kali_[a-z0-9_]+', code_map)))}"
+    )
+
+    # Every typed module name must appear in the enumeration.
+    code_map_modules = set(re.findall(r"kali_[a-z0-9_]+", code_map))
+    missing = typed_modules - code_map_modules
+    assert not missing, (
+        f"CODE-MAP.md inline kali-verb enumeration is missing "
+        f"{sorted(missing)} — add them so the doc stays accurate as new typed "
+        f"verbs are registered in cli.py"
+    )

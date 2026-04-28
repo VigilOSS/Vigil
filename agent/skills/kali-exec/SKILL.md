@@ -245,82 +245,17 @@ aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_resolved.txt \
   --probe-kind fingerprint --phase recon --timeout 1200
 ```
 
-## Subdomain enumeration: Phase A→D workflow
+### Subdomain enumeration: Phase 0/1/2/3 staged workflow
 
-Subdomain enumeration is layered because no single technique covers the surface. Run the phases in order; each phase compounds on the previous one. Stop at any phase when its exit signal fires (see "Skip-bruteforce signal" below). The full prioritization rationale and tool-tier table live in `references/tools/recon/subdomain-enumeration-tools.md` — load it before composing custom invocations.
-
-### Phase A — Passive enumeration (always-on)
-
-`kali subfinder` runs against every wildcard scope entry. It is fail-open without API keys (~60-70% of full-key coverage); set the worth-it free keys in `agent/.env.example` to lift coverage (`SUBFINDER_SECURITYTRAILS_API_KEY`, `SUBFINDER_CENSYS_API_ID`/`API_SECRET`, `SUBFINDER_VIRUSTOTAL_API_KEY`, `SUBFINDER_SHODAN_API_KEY` — ranked by signal-per-key). The runtime exposes provider config via the standard subfinder lookup chain (`~/.config/subfinder/provider-config.yaml`), so populating `${SUBFINDER_*_API_KEY}` env vars is enough.
-
-```bash
-aith assess kali subfinder -d example.com -all -recursive -t 30 \
-  -o /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
-  --technique RECON --intent "passive enum" \
-  --probe-kind fingerprint --phase recon --timeout 600
-```
-
-### Phase A+ — Deep passive (optional)
-
-`kali bbot -p subdomain-enum -rf passive` chains 50+ passive sources (CT, DNS aggregators, security feeds) and is materially deeper than subfinder alone. Run when Phase A returned a thin set or the engagement budget allows the longer wall-clock. `-rf passive` excludes active modules; deadly modules require `--allow-deadly --destructive` and a hard-failed CLI gate keeps that contract.
-
-```bash
-aith assess kali bbot -t example.com -p subdomain-enum -rf passive \
-  -o /engagements/$ENGAGEMENT_KEY/scans/bbot_subs \
-  --technique OSINT --intent "deep passive enum" \
-  --probe-kind fingerprint --phase recon --timeout 1800
-```
-
-### Phase B — TLS SAN scraping (CIDR-fed)
-
-`kali cero` reads CIDR ranges (or domains) and harvests TLS-handshake Subject Alternative Names. It is complementary to CT logs because targets that issue private/internal certs do not appear in CT — only by handshaking the IP do those names surface. Pair with asnmap CIDR mapping upstream so cero gets a real CIDR block to sweep.
-
-```bash
-aith assess kali cero --target 198.51.100.0/24 -p 443,8443,9443 -c 100 -t 4 \
-  -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans.txt \
-  --technique OSINT --intent "TLS SAN scraping for non-CT subs" \
-  --probe-kind fingerprint --phase recon --timeout 600
-```
-
-### Phase C — Gated bruteforce (opt-in)
-
-Permutations expand 10-100x, so feed them through wildcard-aware resolution (`puredns resolve`) instead of a raw resolver. `kali alterx` generates the candidate stream; `kali puredns resolve -` reads from stdin so the two compose without an intermediate file. Bruteforce is the highest-CPU step in the workflow — gate behind the skip signal below.
-
-```bash
-aith assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
-  -limit 200000 \
-  -o /engagements/$ENGAGEMENT_KEY/scans/perms.txt \
-  --technique RECON --intent "permutation candidate generation" \
-  --probe-kind fingerprint --phase recon --timeout 600
-
-aith assess kali puredns resolve /engagements/$ENGAGEMENT_KEY/scans/perms.txt \
-  -r /engagements/$ENGAGEMENT_KEY/wordlists/resolvers.txt \
-  --rate-limit 2500 \
-  -w /engagements/$ENGAGEMENT_KEY/scans/perms_resolved.txt \
-  --technique RECON --intent "permutation bruteforce resolve @ polite-residential rate" \
-  --probe-kind fingerprint --phase recon --timeout 1800
-```
-
-### Phase D — Active probe (always-on after C)
-
-`kali dnsx -all -resp` resolves the merged sub list and emits A/AAAA/CNAME/MX/NS/TXT records. This is the final pass — its output drives live-host confirmation (`httpx`) and the reactive nuclei sweep.
-
-```bash
-aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
-  -all -resp \
-  -o /engagements/$ENGAGEMENT_KEY/scans/dnsx_full.jsonl \
-  --technique RECON --intent "DNS resolution + record sweep" \
-  --probe-kind baseline --phase recon --timeout 600
-```
-
-### Skip-bruteforce signal
-
-Skip Phase C entirely when either of these is true — the marginal yield does not justify the CPU spend:
-
-- **Phase A returned >5000 unique subs.** The passive set already covers the namespace; permutation candidates rarely add new live hosts at that volume.
-- **Target is a top-tier organization** (federal agency, F500, large bug-bounty program). Passive sources and CT logs cover the namespace far better than alterx permutations against a brand-name target, and the live-host hit rate per permutation drops sharply.
-
-When skipping C, jump straight from Phase B to Phase D. Record the skip rationale via `aith assess log operator "Phase C bruteforce skipped" "<reason>" --actor-kind operator` so the audit trail explains the missing run.
+The staged subdomain-enumeration workflow is owned by
+[`agent/skills/subdomain-enumeration/SKILL.md`](../subdomain-enumeration/SKILL.md). Load
+that skill when running subdomain workflows; this section is intentionally a stub. The
+skill carries the Phase 0/1/2/3 composition (passive enum, deep passive, TLS SAN
+scraping, gated bruteforce, active probe), the tool-tier rationale, the bound rules
+with quantified thresholds (>5000 subs skip Phase 2, >30% wildcard ratio switch to TLS
+SAN, >500k permutation estimate abort), and the host-CPU note that gates the
+DNS-bruteforce profile against the runtime tier. Pair it with
+`agent/references/tools/recon/subdomain-enumeration-tools.md` for the full tool-tier table.
 
 ### `kali nikto` (CONDITIONAL)
 

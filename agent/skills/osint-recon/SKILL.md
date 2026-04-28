@@ -245,6 +245,23 @@ In short: version-only CVE matches are intel, not findings — record via `aith 
 4. Organizational intel enriching social engineering context
 5. DNS/cert history revealing infrastructure changes
 
+## Output Contract
+
+The skill produces these structured sections in the osint-analyst's return payload.
+Backend writes (`record-intel <type>`, `record-finding` for target-proven results) are
+the durable record; this contract names what each markdown section should hold so
+the operator and downstream specialists can parse the output consistently. The
+"Output Integration" table below this section maps each section's intel rows to the
+specific `record-intel <type>` call.
+
+| Section | Holds |
+|---|---|
+| `#### Summary` | One-paragraph headline: tech components researched, CVE matches, breach hits, GitHub orgs enumerated, exact-version triangulation outcomes. |
+| `#### Findings` | Decisive findings the OSINT pass already proved against the live target (e.g., a breach-leaked credential validated to log in, a CVE PoC reproduced). Each must also be recorded via `aith assess record-finding`. CVE matches without target-specific proof stay in `#### Intelligence` per the CVE Validation Gate. |
+| `#### Intelligence` | The bulk of OSINT output. CVE matches → `record-intel cve`. Breach records → `record-intel breach-record`. Historical URLs → `record-intel dns-record`. Social profiles → `record-intel social-profile`. Org facts → `record-intel org-fact`. Tech-component fingerprints → `record-intel tech-component`. Free-form prose → `record-intel note`. See "Output Integration" below for the per-type mapping. |
+| `#### Surface Candidates` | Historical URLs / hidden endpoints surfaced via `gau` / `waymore` / SecurityTrails that warrant active probing, fed back via `aith assess ingest-endpoints` so they enter the work buffer. |
+| `#### Coverage Gaps` | API keys missing for SecurityTrails / Hunter / HIBP, rate-limited GitHub queries that did not complete, theHarvester modules that errored, exact-version triangulation that could not pin a single patch level. The operator uses this section to decide whether to re-dispatch with credentials. |
+
 ## Output Integration
 
 Raw OSINT collection is recorded via `aith assess record-intel <type> <json-file>` so the

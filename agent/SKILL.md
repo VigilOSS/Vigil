@@ -51,6 +51,14 @@ Read `agent/shared-constraints.md` first, then select from this index.
   **Use when:** A single vendor-platform read primitive surfaces (Salesforce SObject, ServiceNow GlideRecord row, Drupal JSON:API entity, Pexip admin-API namespace) — the same dispatch must run the matching deep-enum playbook before returning, because stopping at the first leak misses the full anonymous-readable namespace.
   **Paired references:** `references/payloads/salesforce-aura-payloads.md`, `references/payloads/servicenow-glide-payloads.md`, `references/payloads/drupal-jsonapi-payloads.md`, `references/payloads/pexip-admin-api-payloads.md`
 
+- `agent/skills/tls-vhost-correlation/SKILL.md`
+  **Use when:** Recon-pass output flagged a CDN-fronted, multi-tenant, or load-balanced shape; running the cross-host SAN collision counter, the multi-time DNS split-VIP loop, and the vhost-cert mismatch check to surface shared multi-tenant certs, load-balanced cluster cert variation, and adjacent tenant attack surface. Owned by recon-specialist as a sub-procedure of Phase 1 web-recon.
+  **Paired references:** `references/tools/recon/openssl-sans.md`
+
+- `agent/skills/exploit-playbook-authoring/SKILL.md`
+  **Use when:** Exploit-developer (or any specialist) has confirmed an exploit and is about to write the replayable script under `tools/exploit-state/playbook-<slug>.sh` — owns bash structure (`set -euo pipefail`), `# MANUAL:` annotation rule, file-path expectations, reproduction requirements, and a worked example.
+  **Paired references:** `references/offensive-tactics/shell-handling.md`, `references/offensive-tactics/frp-tunneling.md`
+
 - `agent/skills/athena-log-investigation/SKILL.md`
   **Use when:** Logs are available after exploit work and you need to check for prior exploitation evidence.
   **Paired references:** _(environment-specific; consult operator for log source)_

@@ -140,8 +140,7 @@ def _run_filter_scope(monkeypatch, engagement_dir: Path, lines: list[str], capsy
         lambda engagement_dir_flag=None: SimpleNamespace(
             engagement_dir=str(engagement_dir),
             engagement_key="eng",
-            base_url="http://example.test",
-        ),
+            base_url="http://example.test",),
     )
     module.run(
         SimpleNamespace(
@@ -205,8 +204,7 @@ def test_filter_scope_streams_stdin(monkeypatch, tmp_path: Path, capsys) -> None
         lambda engagement_dir_flag=None: SimpleNamespace(
             engagement_dir=str(engagement_dir),
             engagement_key="eng",
-            base_url="http://example.test",
-        ),
+            base_url="http://example.test",),
     )
 
     consumed: list[str] = []
@@ -419,13 +417,12 @@ def _ingest_setup(
         lambda engagement_dir_flag=None: SimpleNamespace(
             engagement_dir=str(engagement_dir),
             engagement_key="eng",
-            base_url="http://example.test",
-        ),
+            base_url="http://example.test",),
     )
     monkeypatch.setattr(module, "auth_active_context", lambda eng_dir: "anonymous")
 
     fake = _FakeIngestClient()
-    monkeypatch.setattr(module, "AssessmentClient", lambda base, key: fake)
+    monkeypatch.setattr(module, "AssessmentClient", lambda *args, **kwargs: fake)
 
     args = SimpleNamespace(
         engagement_dir=str(engagement_dir),

@@ -257,3 +257,5 @@ def test_parent_command_run_cascade_set_null(client, isolate_settings):
     )
     assert response.status_code == 200
     assert response.json()["parent_command_run_id"] is None
+
+

@@ -2634,3 +2634,106 @@ def test_record_handoff_client_upsert_falls_back_to_patch_on_409() -> None:
     assert "agent_id" not in patch_body
     assert "agent_role" not in patch_body
     assert patch_body["summary"] == "v2"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# resolve_orchestrator_base_url precedence chain
+#
+# Resolution order (highest → lowest):
+#   1. ORCHESTRATOR_BASE_URL env var (explicit override)
+#   2. Per-engagement ``.orchestrator.env`` (and install-root variants)
+#   3. ``aith config get orchestrator_base_url`` (persistent default)
+#   4. Hardcoded fallback ``http://127.0.0.1:18000``
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_resolve_orchestrator_base_url_env_var_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+    (engagement_dir / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-env-file:9000\n", encoding="utf-8"
+    )
+
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://from-env-var:1234/")
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: "http://from-config:5678")
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == "http://from-env-var:1234"
+    )
+
+
+def test_resolve_orchestrator_base_url_engagement_env_file_wins_over_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+    (engagement_dir / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-env-file:9000/\n", encoding="utf-8"
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: "http://from-config:5678")
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == "http://from-env-file:9000"
+    )
+
+
+def test_resolve_orchestrator_base_url_aith_config_falls_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With env var unset and no engagement env file override, aith config
+    is consulted before the hardcoded default."""
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+    # No env file at all — everything falls through to the config layer.
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: "http://from-config:5678/")
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == "http://from-config:5678"
+    )
+
+
+def test_resolve_orchestrator_base_url_falls_back_to_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import (
+        DEFAULT_ORCHESTRATOR_BASE_URL,
+        resolve_orchestrator_base_url,
+    )
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: None)
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == DEFAULT_ORCHESTRATOR_BASE_URL
+    )

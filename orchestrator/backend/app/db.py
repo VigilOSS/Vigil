@@ -538,6 +538,12 @@ def init_db() -> None:
             )
             """
         )
+        # NOTE: Older dev databases may carry an ``engagement_token`` column
+        # left over from a previous experiment. SQLite < 3.35 cannot DROP
+        # COLUMN, and even with newer SQLite a rewrite would force every
+        # operator to take downtime. The orchestrator simply stops reading
+        # and writing the column; fresh DBs created from the schema above
+        # never have it.
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS engagement_sessions (
@@ -2218,7 +2224,12 @@ def get_connection() -> Iterator[sqlite3.Connection]:
         gc.collect()
 
 
-def create_engagement(key: str, target: str, status: str, engagement_root: str) -> Engagement:
+def create_engagement(
+    key: str,
+    target: str,
+    status: str,
+    engagement_root: str,
+) -> Engagement:
     with get_connection() as connection:
         cursor = connection.execute(
             """
