@@ -246,17 +246,19 @@ If any gate fails, dispatch a new agent (or re-dispatch the same role) with the 
 
 Every dispatch launches a fresh agent — treat each dispatch as a clean-room environment that inherits only what the operator explicitly hands it. Session tokens, cookie jars, discovered endpoints, partial PoC steps, and next-step plans travel to the next dispatch through the dispatch prompt and durable state (backend records, engagement files), because the harness rebuilds subagent context from those sources on each launch.
 
-Append to `$DIR/agent-registry.json` after every dispatch that returns an agentId — this is the engagement audit trail and the DEDUP input, so skipping a write costs both the pre-dispatch duplicate check and the report-writer's ability to trace which agent produced which finding. Record role, task, finding slugs, skill loaded, scope host, timestamp, and status; the registry is read to build the next handoff prompt and to audit prior work.
+Append to `$DIR/agent-registry.json` after every dispatch that returns an agentId — this is the engagement audit trail, the DEDUP input, AND the input the handoff renderer reads. Skipping a write costs both the pre-dispatch duplicate check and the report-writer's ability to trace which agent produced which finding, AND breaks the next dispatch's handoff blob. Record role, task, finding slugs, skill loaded, scope host, timestamp, status, working_artifacts, and `next_step` (the exact action the new agent should take); the renderer pulls every field directly.
 
-When continuing multi-step work (exploit chains, credential reuse, follow-up probes), the new dispatch prompt carries forward the prior agent's relevant output:
-- Captured session tokens, cookies, and CSRF values from the prior agent's transcript
-- Discovered endpoints and intermediate PoC steps
-- Durable-state pointers: finding slugs, `$DIR/tools/` paths, credential ids the new agent can `fetch` from the backend
-- The specific next step the new agent should take (the exact action, not a rehash of the original objective)
+**Use `aith assess dispatch render-handoff <agent-id>` to produce the handoff blob; paste its output into the next dispatch's prompt.** The renderer reads the prior dispatch's registry entry, fetches each finding slug from the backend (404s render inline as "slug missing"), checks every `working_artifacts` path on disk (missing files surface as "missing" so the new agent doesn't chase deleted state), and emits a markdown blob hard-capped at `--max-lines` (default 40). The findings list collapses to "... and N more" before any fixed section drops, and the next-step line is always emitted — when the registry has no `next_step` it reads "not recorded — set explicitly in this dispatch" so the new prompt cannot silently drop the next action.
 
-Keep handoff prompts bounded — durable content lives in the backend (findings, intel, activity entries) and engagement files, and the dispatch prompt carries pointers plus the specific next step. A full transcript paste into the next prompt crowds out the objective and inflates context linearly across long chains; two or three excerpted lines (the captured token, the working payload, the next action) paired with finding slugs and file paths are enough for the new agent to `fetch` canonical state and continue.
+Run it for every continuation dispatch (exploit chains, credential reuse, follow-up probes) — the rendered blob already carries:
+- Finding slugs (with title + severity from the backend) the new agent can `fetch` for full context
+- Working-artifact paths under `$DIR/tools/`, `$DIR/scans/`, `$DIR/downloads/` with present/missing state
+- Credential ids captured by the prior dispatch (vulnerability-analyst / exploit-developer roles only)
+- The specific next step the prior dispatch recorded
 
-Registry schema and handoff-prompt examples: `agent/references/runtime-guides/subagent-registry.md`
+Bypassing the renderer to paste transcript excerpts is the failure mode this helper exists to prevent: full transcript pastes crowd out the objective and inflate context linearly across long chains, while the renderer's blob stays bounded and pulls canonical state from the backend. Durable content (findings, intel, activity entries, credentials) lives in the backend; the dispatch prompt carries pointers plus the specific next step.
+
+Registry schema, the `next_step` field, and a sample rendered blob: `agent/references/runtime-guides/subagent-registry.md`
 
 ## Phase Flow
 
@@ -379,7 +381,7 @@ condition, and expected wall-clock. Specialists do not guess these — operators
 
 ### Per-target rate calibration table
 
-The trait-row table (Cloud-fronted / Origin / WAF-protected / High-friction / Vendor SaaS) and the runtime-tier × DNS-profile matrix live in `agent/shared-constraints.md` "Per-Target Rate Calibration Table". Specialists pull values from there; this section covers tier selection and step-down rules.
+The trait-row table (Cloud-fronted / Origin / WAF-protected / High-friction / Vendor SaaS) and the runtime-tier × DNS-profile matrix live in `agent/references/recon/rate-calibration.md` (extracted from `shared-constraints.md` §14 to keep the every-specialist load lighter). Recon-class specialists pull values from there; this section covers tier selection and step-down rules.
 
 ### Picking a tier
 

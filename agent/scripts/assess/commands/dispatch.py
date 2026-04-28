@@ -5,10 +5,21 @@ Replaces dispatcher.sh with parameterized SQL.
 from __future__ import annotations
 
 import json
+import os
 import sys
 
+from assess.lib.client import AssessmentClient, AssessError
+from assess.lib.config import load_config
 from assess.lib.db import db_init, db_query, db_exec, db_insert_work_item
 from assess.lib.params import extract_url_path, extract_query_params, extract_path_params, generate_params_sig
+
+
+# Actions that don't need a cases.db (work-buffer SQLite). When the first
+# positional arg matches one of these names, we treat it as the action and
+# leave db_path empty rather than forcing the operator to pass a useless path.
+# render-handoff is operator-glue for cross-dispatch continuity (Fix #7) — it
+# pulls from $DIR/agent-registry.json and the backend, never the work buffer.
+_DBLESS_ACTIONS = ("render-handoff",)
 
 
 def register(subparsers) -> None:
@@ -16,9 +27,11 @@ def register(subparsers) -> None:
     p.add_argument("db_path", help="Path to cases.db")
     p.add_argument(
         "action",
+        nargs="?",
+        default="",
         help=(
             "stats|fetch|fetch-by-priority|peek|defer-cluster|defer-items|done|error|"
-            "reset-stale|retry-errors|migrate|requeue"
+            "reset-stale|retry-errors|migrate|requeue|render-handoff"
         ),
     )
     p.add_argument("extra", nargs="*", help="Action-specific arguments")
@@ -35,6 +48,20 @@ def register(subparsers) -> None:
         help="Group axis for `stats` (default: status). 'cluster' / 'host' / 'source' "
         "let the operator slice the buffer along the axis that matters for the next dispatch.",
     )
+    p.add_argument(
+        "--max-lines",
+        type=int,
+        default=40,
+        help="render-handoff: hard cap on output lines (default 40). The findings list "
+        "is truncated with a '... and N more' tail when the rendered blob would exceed "
+        "the cap.",
+    )
+    p.add_argument(
+        "--include-evidence",
+        action="store_true",
+        help="render-handoff: include one short evidence excerpt per finding slug. Off by "
+        "default to keep the handoff blob bounded.",
+    )
     p.set_defaults(func=run)
 
 
@@ -42,6 +69,38 @@ def run(args) -> None:
     db_path = args.db_path
     action = args.action
     extra = args.extra or []
+
+    # render-handoff and other dbless actions don't take a cases.db; the
+    # operator types `aith assess dispatch render-handoff <agent-id>` and
+    # argparse parks the action name in the db_path slot. Shift it so the
+    # rest of the dispatcher can route normally.
+    if (db_path or "") in _DBLESS_ACTIONS:
+        if action:
+            # Operator typed the action where db_path goes; whatever landed
+            # in the action slot is actually the first action-specific arg.
+            extra = [action] + list(extra)
+        action = db_path
+        db_path = ""
+
+    if not action:
+        print(
+            "Usage: aith assess dispatch <db> <action> [...]\n"
+            "       aith assess dispatch render-handoff <agent-id> [--max-lines N] [--include-evidence]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if action == "render-handoff":
+        _render_handoff(args, extra)
+        return
+
+    if not db_path:
+        print(
+            f"Usage: aith assess dispatch <db> {action} [...]\n"
+            f"  '{action}' requires a path to cases.db as the first positional.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     db_init(db_path)
 
@@ -665,3 +724,352 @@ def _requeue(db_path: str) -> None:
         count += 1
 
     print(f"Requeued {count} new work item(s)")
+
+
+# ---------------------------------------------------------------------------
+# render-handoff — bounded handoff blob generator (Fix #7)
+#
+# Cross-Dispatch Continuity in operator-core.md tells the operator to keep
+# handoff prompts bounded ("two or three excerpted lines + finding slugs +
+# file paths"). Without a helper the operator's discretion was the only
+# protection; under parallelism that degrades — operators paste full
+# transcripts because it's fast and the dispatch prompt arrives bloated.
+#
+# render-handoff replaces that discretion with a deterministic emitter that
+# pulls from durable state ($DIR/agent-registry.json + the assessment backend)
+# and emits a markdown blob the operator pastes verbatim into the next
+# dispatch prompt. The output is hard-capped at --max-lines (default 40); the
+# findings list collapses to "... and N more" before any fixed sections drop.
+# ---------------------------------------------------------------------------
+
+
+def _render_handoff(args, extra: list[str]) -> None:
+    """Emit a bounded markdown handoff blob for a prior dispatch.
+
+    Reads ``$DIR/agent-registry.json`` for the entry whose ``agent_id``
+    matches the given id, then enriches with backend finding records and
+    optional credential rows so the operator can paste the result into the
+    next dispatch prompt without copying transcript excerpts.
+    """
+    if not extra:
+        print(
+            "Usage: aith assess dispatch render-handoff <agent-id> "
+            "[--max-lines N] [--include-evidence]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    agent_id = extra[0].strip()
+    if not agent_id:
+        print(
+            "render-handoff: agent-id must be a non-empty string",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    max_lines = max(1, int(getattr(args, "max_lines", 40) or 40))
+    include_evidence = bool(getattr(args, "include_evidence", False))
+
+    # Resolve engagement directory the same way other helper-owned commands do
+    # (config layer): CLI --engagement-dir, then $ENGAGEMENT_DIR, then cwd if
+    # it contains scope.json.
+    cfg = load_config(getattr(args, "engagement_dir", None))
+    registry_path = os.path.join(cfg.engagement_dir, "agent-registry.json")
+    entry = _registry_lookup(registry_path, agent_id)
+    if entry is None:
+        print(
+            f"render-handoff: agent-id '{agent_id}' not found in "
+            f"{registry_path}; the registry is the durable record of who was "
+            f"dispatched, so a missing entry means the prior dispatch never "
+            f"appended (or the id was mistyped).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    role = str(entry.get("role") or "<unknown role>")
+    task = str(entry.get("task") or "<unrecorded task>")
+    skill_loaded = entry.get("skill_loaded") or entry.get("skill") or ""
+    scope_host = entry.get("scope_host") or ""
+    dispatched_at = entry.get("dispatched_at") or entry.get("timestamp") or ""
+    status = entry.get("status") or ""
+    finding_slugs = entry.get("finding_slugs") or entry.get("findings") or []
+    if not isinstance(finding_slugs, list):
+        finding_slugs = [finding_slugs]
+    finding_slugs = [str(s).strip() for s in finding_slugs if str(s).strip()]
+
+    next_step = entry.get("next_step")
+    if not isinstance(next_step, str):
+        next_step = ""
+    next_step = next_step.strip()
+
+    working_artifacts = entry.get("working_artifacts") or []
+    if not isinstance(working_artifacts, list):
+        working_artifacts = [working_artifacts]
+    working_artifacts = [str(p).strip() for p in working_artifacts if str(p).strip()]
+
+    # Per-slug enrichment from the backend. Tolerate 404s gracefully — the
+    # operator may have killed a finding between dispatch and handoff render.
+    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    finding_rows: list[dict] = []
+    try:
+        for slug in finding_slugs:
+            try:
+                row = client.get(f"findings/{slug}")
+            except AssessError as exc:
+                if "HTTP 404" in str(exc):
+                    finding_rows.append({"slug": slug, "_missing": True})
+                    continue
+                # Any other error: surface but continue so the operator gets
+                # the rest of the blob. Network blips shouldn't fail the
+                # whole render.
+                finding_rows.append({"slug": slug, "_error": str(exc).splitlines()[0]})
+                continue
+            if isinstance(row, dict):
+                row.setdefault("slug", slug)
+                finding_rows.append(row)
+            else:
+                finding_rows.append({"slug": slug, "_error": "non-dict response"})
+
+        credential_rows: list[dict] = []
+        if role in ("vulnerability-analyst", "exploit-developer"):
+            try:
+                creds = client.get("credentials")
+            except AssessError:
+                creds = []
+            if isinstance(creds, list):
+                # The credentials table doesn't carry a formal agent_id
+                # column, so we filter by source_name == role as the closest
+                # available signal. Operators who need stricter tracking can
+                # widen the filter later; this is enough to surface "the
+                # vulnerability-analyst dispatch captured 2 cred rows".
+                credential_rows = [
+                    c for c in creds
+                    if isinstance(c, dict) and (c.get("source_name") or "") == role
+                ]
+    finally:
+        client.close()
+
+    # Local-disk presence check for working artifacts. The convention is that
+    # tools live under $DIR/tools/, but the registry may record other paths
+    # under $DIR/scans/ or $DIR/downloads/ — resolve every entry against the
+    # engagement dir so the operator catches references to deleted files.
+    artifact_states: list[tuple[str, str]] = []
+    for path in working_artifacts:
+        if os.path.isabs(path):
+            full = path
+        else:
+            full = os.path.join(cfg.engagement_dir, path)
+        artifact_states.append((path, "present" if os.path.exists(full) else "missing"))
+
+    # Build the rendered blob, then truncate the findings tail if the line
+    # budget would be exceeded. The fixed sections (header + meta + next step)
+    # are always preserved; only the findings list collapses, since that is
+    # the unbounded axis.
+    blob = _render_handoff_blob(
+        agent_id=agent_id,
+        role=role,
+        task=task,
+        skill_loaded=skill_loaded,
+        scope_host=scope_host,
+        dispatched_at=dispatched_at,
+        status=status,
+        finding_rows=finding_rows,
+        artifact_states=artifact_states,
+        credential_rows=credential_rows,
+        next_step=next_step,
+        include_evidence=include_evidence,
+        max_lines=max_lines,
+    )
+    print(blob)
+
+
+def _registry_lookup(registry_path: str, agent_id: str) -> dict | None:
+    """Return the registry entry whose agent_id matches, or None.
+
+    Tolerates a missing or malformed registry — the helper should fail with a
+    clear "agent-id not found" rather than crashing the operator's terminal
+    on a JSON parse error.
+    """
+    try:
+        with open(registry_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, list):
+        return None
+    for entry in data:
+        if isinstance(entry, dict) and str(entry.get("agent_id") or "").strip() == agent_id:
+            return entry
+    return None
+
+
+def _render_handoff_blob(
+    *,
+    agent_id: str,
+    role: str,
+    task: str,
+    skill_loaded: str,
+    scope_host: str,
+    dispatched_at: str,
+    status: str,
+    finding_rows: list[dict],
+    artifact_states: list[tuple[str, str]],
+    credential_rows: list[dict],
+    next_step: str,
+    include_evidence: bool,
+    max_lines: int,
+) -> str:
+    """Build the markdown handoff blob with the documented section order.
+
+    The section order matches the spec in operator-core.md "Cross-Dispatch
+    Continuity": header, prior task, skill loaded, scope host, dispatched at,
+    findings recorded, working artifacts, credentials captured, next step.
+    The next-step line is always emitted (even when blank) so the new
+    dispatch prompt sees an explicit "set this in the next prompt" reminder
+    if the prior agent did not record one.
+    """
+    head = [
+        f"#### Handoff from {role} dispatch {agent_id}",
+        f"- **Prior task:** {task}",
+        f"- **Skill loaded:** {skill_loaded or '(none recorded)'}",
+        f"- **Scope host:** {scope_host or '(none recorded)'}",
+        f"- **Dispatched at:** {dispatched_at or '(unknown)'} (status: {status or 'unknown'})",
+    ]
+
+    finding_lines = _findings_section(finding_rows, include_evidence=include_evidence)
+    artifact_lines = _artifacts_section(artifact_states)
+    credentials_line = _credentials_section(credential_rows)
+    next_step_line = _next_step_section(next_step)
+
+    fixed_section_count = (
+        len(head)
+        + 1  # findings header line
+        + len(artifact_lines)
+        + 1  # credentials line
+        + 1  # next step line
+    )
+
+    # Reserve room for the fixed scaffolding plus at least one finding row
+    # (or the "(none recorded)" placeholder) so the cap can never produce a
+    # blob that omits the findings header entirely.
+    findings_budget = max(1, max_lines - fixed_section_count)
+    finding_body, truncated_count = _truncate_findings(finding_lines, findings_budget)
+
+    lines: list[str] = []
+    lines.extend(head)
+    lines.append("- **Findings recorded:**")
+    lines.extend(finding_body)
+    if truncated_count > 0:
+        lines.append(f"  - ... and {truncated_count} more")
+    lines.extend(artifact_lines)
+    lines.append(credentials_line)
+    lines.append(next_step_line)
+    return "\n".join(lines)
+
+
+def _findings_section(finding_rows: list[dict], *, include_evidence: bool) -> list[str]:
+    """One indented bullet per recorded slug; '(none recorded)' when empty."""
+    if not finding_rows:
+        return ["  - (none recorded)"]
+    lines: list[str] = []
+    for row in finding_rows:
+        slug = str(row.get("slug") or "<no-slug>")
+        if row.get("_missing"):
+            lines.append(f"  - `{slug}` — slug missing (deleted or never recorded)")
+            continue
+        if row.get("_error"):
+            lines.append(f"  - `{slug}` — fetch error: {row['_error']}")
+            continue
+        title = str(row.get("title") or "(untitled)")
+        severity = str(row.get("severity") or "unknown")
+        lines.append(f"  - `{slug}` — {title} [severity={severity}]")
+        if include_evidence:
+            details = row.get("details") if isinstance(row.get("details"), dict) else {}
+            evidence = ""
+            if isinstance(details, dict):
+                evidence = str(details.get("evidence") or "").strip()
+            if not evidence:
+                evidence = str(row.get("notes") or "").strip()
+            if evidence:
+                snippet = evidence.splitlines()[0][:160]
+                lines.append(f"    - evidence: {snippet}")
+    return lines
+
+
+def _artifacts_section(artifact_states: list[tuple[str, str]]) -> list[str]:
+    """Working-artifact bullets with on-disk present/missing state."""
+    lines = ["- **Working artifacts:**"]
+    if not artifact_states:
+        lines.append("  - (none recorded)")
+        return lines
+    for path, state in artifact_states:
+        lines.append(f"  - `{path}` (state: {state})")
+    return lines
+
+
+def _credentials_section(credential_rows: list[dict]) -> str:
+    """Single-line summary: count + comma-separated ids."""
+    count = len(credential_rows)
+    ids = ", ".join(
+        str(c.get("id"))
+        for c in credential_rows
+        if isinstance(c, dict) and c.get("id") is not None
+    )
+    if count == 0:
+        return "- **Credentials captured:** 0 rows"
+    return f"- **Credentials captured:** {count} rows (ids: {ids or 'unknown'})"
+
+
+def _next_step_section(next_step: str) -> str:
+    """Always-present next-step line so the new dispatch can't silently drop it."""
+    if not next_step:
+        return (
+            "- **Next step (per registry):** not recorded — set explicitly in this dispatch"
+        )
+    return f"- **Next step (per registry):** {next_step}"
+
+
+def _truncate_findings(
+    lines: list[str], budget: int
+) -> tuple[list[str], int]:
+    """Trim the findings section to ``budget`` lines.
+
+    Returns ``(kept_lines, truncated_count)`` where ``truncated_count`` is the
+    number of finding bullets dropped from the tail. A finding bullet is any
+    line starting with ``  - `` (two spaces); evidence sub-lines (``    - ``)
+    are dropped together with their parent bullet so the output never shows
+    an orphaned evidence line.
+    """
+    if budget <= 0:
+        budget = 1
+    if len(lines) <= budget:
+        return lines, 0
+
+    kept: list[str] = []
+    truncated = 0
+    # Walk the input and group each top-level finding bullet with any of its
+    # evidence sub-lines (indented four spaces). When the group would push
+    # us past the budget, we drop the rest as a single "... and N more" tail.
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        group = [line]
+        j = i + 1
+        while j < len(lines) and lines[j].startswith("    - "):
+            group.append(lines[j])
+            j += 1
+        if len(kept) + len(group) <= budget:
+            kept.extend(group)
+            i = j
+            continue
+        # No room: count this and every later top-level bullet as truncated.
+        truncated = 1
+        i = j
+        while i < len(lines):
+            if lines[i].startswith("  - ") and not lines[i].startswith("    - "):
+                truncated += 1
+            i += 1
+        break
+    return kept, truncated

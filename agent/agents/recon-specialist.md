@@ -12,23 +12,29 @@ into concrete, prioritized surface area for follow-on testing.
 
 ## Load First
 
+**MANDATORY (load before any target work):**
+
 - `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/SKILL.md`
-- `agent/skills/web-recon/SKILL.md`
+- `agent/skills/web-recon/SKILL.md` — the foundational recon sequence and tool ordering
 - `agent/skills/port-scanning/SKILL.md` — DEFAULT-load for full Phase 1 dispatches. Port + service enumeration is the standard recon step (see Recon Sequence below); the per-batch port-data presence assertion lives in this skill.
-- `agent/skills/nuclei-scanning/SKILL.md` — DEFAULT-load for full Phase 1 dispatches. The reactive sweep against the URL delta is the standard close-out.
-- `agent/skills/directory-fuzzing/SKILL.md` — DEFAULT-load for full Phase 1 dispatches. The L1 wordlist + tech-extension pass is the standard endpoint-discovery step.
+- `agent/references/recon/rate-calibration.md` — the trait-row rate table extracted from shared-constraints. Recon dispatches consume rate values per-target before invoking nmap/ffuf/nuclei.
+
+**LOAD-ON-FIRST-USE (lazy; load when the recon sequence first reaches the relevant step):**
+
+- `agent/skills/nuclei-scanning/SKILL.md` — load when the dispatch is about to run step 5 (nuclei reactive sweep). Holding it out of the first-load set keeps the bootstrap lighter for hypothesis-driven dispatches that never reach a URL-delta sweep.
+- `agent/skills/directory-fuzzing/SKILL.md` — load when the dispatch is about to run step 6 (ffuf / feroxbuster L1 wordlist pass). Same rationale.
 - `agent/skills/subdomain-enumeration/SKILL.md` — MANDATORY when scope.json `hosts` contains any `*.domain` wildcard entry (Phase 1a). The skill carries the tooling preflight, the resource-tier rate profiles, the staged Phase 0/1/2/3 composition, and the bound rules. Without it, brute force runs at default rates against CDN-fronted apex DNS, the wildcard ratio is never measured, and bound rules never fire — so the agent burns runtime CPU on diminishing returns and never stops. Skip when scope.json contains only bare hosts; wildcard expansion is owned by Phase 1a, not by every recon dispatch.
 
-**Load-First escape hatch (hypothesis-driven half-phase recon-pivot dispatches).** When the dispatch declares `dispatch_mode=hypothesis-driven` plus a narrow objective (e.g. "fingerprint api.foo.com only — recon-pivot half-phase"), any of the four DEFAULT-load skills (`web-recon`, `port-scanning`, `nuclei-scanning`, `directory-fuzzing`) may be marked `not-applicable` with a one-line rationale in `#### Coverage Gaps`. Full Phase-1a-bootstrap dispatches keep the four-skill default.
+**Load-First escape hatch (hypothesis-driven half-phase recon-pivot dispatches).** When the dispatch declares `dispatch_mode=hypothesis-driven` plus a narrow objective (e.g. "fingerprint api.foo.com only — recon-pivot half-phase"), the lazy-load skills (`nuclei-scanning`, `directory-fuzzing`) typically stay unloaded and the mandatory `port-scanning` skill MAY be marked `not-applicable` with a one-line rationale in `#### Coverage Gaps`. Full Phase-1a-bootstrap dispatches keep the mandatory + relevant lazy skills loaded.
 
 ## Pre-Work Checkpoint
 
 Before starting any target-facing work, verify:
 
 1. You loaded `agent/shared-constraints.md`
-2. You loaded `agent/skills/web-recon/SKILL.md`, `agent/skills/port-scanning/SKILL.md`, `agent/skills/nuclei-scanning/SKILL.md`, and `agent/skills/directory-fuzzing/SKILL.md` as the mandatory skill set. Add `agent/skills/subdomain-enumeration/SKILL.md` only when scope.json `hosts` contains `*.domain` entries (Phase 1a).
+2. You loaded the mandatory skill set: `agent/skills/web-recon/SKILL.md`, `agent/skills/port-scanning/SKILL.md`, and the rate-calibration reference at `agent/references/recon/rate-calibration.md`. The lazy-load skills `agent/skills/nuclei-scanning/SKILL.md` and `agent/skills/directory-fuzzing/SKILL.md` load on first use (when the recon sequence reaches step 5 or step 6 respectively). Add `agent/skills/subdomain-enumeration/SKILL.md` only when scope.json `hosts` contains `*.domain` entries (Phase 1a).
 3. You read each skill's `## Extended Resources` section and loaded the listed payload/checklist references — including `agent/references/tools/recon/nmap.md`, `agent/references/tools/recon/wafw00f.md`, `agent/references/tools/recon/nikto.md`, and `agent/references/tools/fuzzing/ffuf.md`.
 4. You read `scope.json` and confirmed the in-scope hosts plus the active `exploit_policy` before making any target-facing decisions
 5. You have the dispatch context (target URL, phase, task objective, prior findings)

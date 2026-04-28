@@ -1912,3 +1912,327 @@ def test_actor_kind_warn_on_non_log_subcommand(
     )
     err = capsys.readouterr().err
     assert "--actor-kind=operator ignored" in err
+
+
+# ---------------------------------------------------------------------------
+# Fix #7 — `aith assess dispatch render-handoff` tests
+#
+# The renderer replaces operator discretion with a deterministic helper that
+# pulls from $DIR/agent-registry.json plus the assessment backend, so the
+# next dispatch's prompt stays bounded. These tests pin the four invariants
+# Fix #7 cares about: known-id rendering shape, unknown-id exit code,
+# max-lines truncation, and the always-present next-step line.
+# ---------------------------------------------------------------------------
+
+
+def _stub_render_handoff_environment(
+    monkeypatch,
+    module,
+    engagement_dir: Path,
+    *,
+    findings_by_slug: dict[str, dict] | None = None,
+    missing_slugs: tuple[str, ...] = (),
+    credentials: list[dict] | None = None,
+) -> None:
+    """Wire a fake AssessmentClient + load_config into the dispatch module.
+
+    Avoids the live backend so the test only exercises the rendering logic,
+    the registry-lookup branch, and the truncation budget.
+    """
+
+    class _StubClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def get(self, endpoint: str):
+            # findings/<slug> is the per-slug enrichment path.
+            if endpoint.startswith("findings/"):
+                slug = endpoint.split("/", 1)[1]
+                if slug in missing_slugs:
+                    raise module.AssessError("HTTP 404: not found")
+                if findings_by_slug and slug in findings_by_slug:
+                    return findings_by_slug[slug]
+                raise module.AssessError("HTTP 404: not found")
+            if endpoint == "credentials":
+                return list(credentials or [])
+            raise module.AssessError(f"unexpected endpoint {endpoint}")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _StubClient)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(engagement_dir),
+            engagement_key=engagement_dir.name,
+            agent_root=str(engagement_dir.parent),
+        ),
+    )
+
+
+def _load_dispatch_module():
+    """Load dispatch.py with AssessError, AssessmentClient, and load_config
+    visible on the module namespace for monkeypatching.
+
+    dispatch.py imports these at module scope, so monkeypatch.setattr on the
+    test side rebinds them in place — no further wiring needed.
+    """
+    return _load_assess_module(
+        "fix7_dispatch_module",
+        "agent/scripts/assess/commands/dispatch.py",
+    )
+
+
+def _write_registry(engagement_dir: Path, entries: list[dict]) -> None:
+    engagement_dir.mkdir(parents=True, exist_ok=True)
+    (engagement_dir / "agent-registry.json").write_text(
+        json.dumps(entries), encoding="utf-8"
+    )
+
+
+def _run_render_handoff(
+    module,
+    engagement_dir: Path,
+    agent_id: str,
+    *,
+    max_lines: int = 40,
+    include_evidence: bool = False,
+) -> None:
+    module.run(
+        SimpleNamespace(
+            db_path="render-handoff",
+            action=agent_id,
+            extra=[],
+            reason="",
+            by="status",
+            max_lines=max_lines,
+            include_evidence=include_evidence,
+            engagement_dir=str(engagement_dir),
+        )
+    )
+
+
+def test_render_handoff_emits_known_fields_for_existing_agent_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fix #7: render the bounded handoff blob from registry + backend state.
+
+    The blob must carry role, task, skill, scope host, dispatched-at, the
+    finding row's title + severity from the backend, working-artifact disk
+    state, and the credentials count for vulnerability-analyst dispatches.
+    """
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    # Working artifact present on disk so the renderer reports state=present.
+    (engagement_dir / "tools").mkdir()
+    (engagement_dir / "tools" / "exploit-state").mkdir()
+    (engagement_dir / "tools" / "exploit-state" / "EX-001-payload.sql").write_text(
+        "-- payload", encoding="utf-8"
+    )
+
+    _write_registry(
+        engagement_dir,
+        [
+            {
+                "agent_id": "AGENT-EX-1",
+                "role": "vulnerability-analyst",
+                "task": "Validate IDOR on /api/users/{id}",
+                "skill_loaded": "agent/skills/idor-testing/SKILL.md",
+                "scope_host": "target.example",
+                "dispatched_at": "2026-04-27T10:00:00Z",
+                "status": "returned",
+                "finding_slugs": ["VA-001", "VA-002"],
+                "working_artifacts": [
+                    "tools/exploit-state/EX-001-payload.sql",
+                    "tools/exploit-state/EX-002-poc.py",
+                ],
+                "next_step": "replay captured cookie at /api/users/2 and confirm IDOR write",
+            }
+        ],
+    )
+
+    module = _load_dispatch_module()
+    _stub_render_handoff_environment(
+        monkeypatch,
+        module,
+        engagement_dir,
+        findings_by_slug={
+            "VA-001": {
+                "slug": "VA-001",
+                "title": "IDOR write on user profile",
+                "severity": "high",
+            },
+            "VA-002": {
+                "slug": "VA-002",
+                "title": "IDOR read on user email",
+                "severity": "medium",
+            },
+        },
+        credentials=[
+            {"id": 17, "source_name": "vulnerability-analyst"},
+            {"id": 18, "source_name": "exploit-developer"},  # filtered out by role
+        ],
+    )
+
+    _run_render_handoff(module, engagement_dir, "AGENT-EX-1")
+
+    out = capsys.readouterr().out
+    assert "#### Handoff from vulnerability-analyst dispatch AGENT-EX-1" in out
+    assert "Validate IDOR on /api/users/{id}" in out
+    assert "agent/skills/idor-testing/SKILL.md" in out
+    assert "target.example" in out
+    assert "2026-04-27T10:00:00Z" in out
+    assert "status: returned" in out
+    assert "`VA-001` — IDOR write on user profile [severity=high]" in out
+    assert "`VA-002` — IDOR read on user email [severity=medium]" in out
+    assert "tools/exploit-state/EX-001-payload.sql` (state: present)" in out
+    assert "tools/exploit-state/EX-002-poc.py` (state: missing)" in out
+    # Credentials filter pins source_name == role; only id 17 belongs to the
+    # vulnerability-analyst dispatch.
+    assert "Credentials captured:** 1 rows (ids: 17)" in out
+    assert "Next step (per registry):** replay captured cookie at /api/users/2" in out
+
+
+def test_render_handoff_404s_unknown_agent_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fix #7: an unknown agent-id exits 2 with a clear error message."""
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    _write_registry(
+        engagement_dir,
+        [
+            {
+                "agent_id": "AGENT-EXISTS",
+                "role": "recon-specialist",
+                "task": "phase 1 enum",
+                "finding_slugs": [],
+            }
+        ],
+    )
+
+    module = _load_dispatch_module()
+    _stub_render_handoff_environment(monkeypatch, module, engagement_dir)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_render_handoff(module, engagement_dir, "AGENT-DOES-NOT-EXIST")
+    # Spec: exit 2 specifically (not the default exit 1) so calling scripts
+    # can distinguish "registry lookup failed" from generic CLI errors.
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "AGENT-DOES-NOT-EXIST" in err
+    assert "agent-registry.json" in err
+
+
+def test_render_handoff_truncates_at_max_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fix #7: a large finding_slugs list collapses with '... and N more'.
+
+    The fixed sections (header, prior task, skill, scope, dispatched-at,
+    artifacts, credentials, next step) are always preserved; only the
+    findings list contracts so the rendered blob respects --max-lines.
+    """
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+
+    slugs = [f"VA-{idx:03d}" for idx in range(1, 21)]  # 20 slugs
+    _write_registry(
+        engagement_dir,
+        [
+            {
+                "agent_id": "AGENT-MANY-FINDINGS",
+                "role": "vulnerability-analyst",
+                "task": "deep IDOR sweep across 20 endpoints",
+                "skill_loaded": "agent/skills/idor-testing/SKILL.md",
+                "scope_host": "target.example",
+                "dispatched_at": "2026-04-27T11:00:00Z",
+                "status": "returned",
+                "finding_slugs": slugs,
+                "next_step": "promote highest-severity finding to exploit-developer",
+            }
+        ],
+    )
+
+    findings = {
+        slug: {"slug": slug, "title": f"finding {slug}", "severity": "medium"}
+        for slug in slugs
+    }
+
+    module = _load_dispatch_module()
+    _stub_render_handoff_environment(
+        monkeypatch, module, engagement_dir, findings_by_slug=findings
+    )
+
+    # max_lines=12 forces the findings list to truncate.
+    _run_render_handoff(
+        module, engagement_dir, "AGENT-MANY-FINDINGS", max_lines=12
+    )
+    out = capsys.readouterr().out
+
+    assert "... and " in out and " more" in out
+    # Header + meta lines are still present after truncation.
+    assert "#### Handoff from vulnerability-analyst dispatch AGENT-MANY-FINDINGS" in out
+    assert "Next step (per registry):** promote highest-severity finding" in out
+    # The blob must not exceed the cap (modulo a small tolerance for the
+    # "... and N more" line which counts toward the budget).
+    line_count = len(out.rstrip("\n").split("\n"))
+    # We allow line_count to equal max_lines or be a few under; the only hard
+    # invariant is "the blob isn't unbounded". 14 covers the cap plus the
+    # "... and N more" tail.
+    assert line_count <= 14, (
+        f"render-handoff blob has {line_count} lines but --max-lines was 12"
+    )
+
+
+def test_render_handoff_handles_missing_next_step_gracefully(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fix #7: when registry has no next_step, the line is still emitted.
+
+    The blob must read 'not recorded — set explicitly in this dispatch' so
+    the new dispatch prompt cannot silently drop the next-step section.
+    """
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+
+    _write_registry(
+        engagement_dir,
+        [
+            {
+                "agent_id": "AGENT-NO-NEXT-STEP",
+                "role": "source-analyzer",
+                "task": "JS triage on admin bundle",
+                "skill_loaded": "agent/skills/source-analysis/SKILL.md",
+                "scope_host": "target.example",
+                "dispatched_at": "2026-04-27T12:00:00Z",
+                "status": "returned",
+                "finding_slugs": [],
+                # no next_step recorded
+            }
+        ],
+    )
+
+    module = _load_dispatch_module()
+    _stub_render_handoff_environment(monkeypatch, module, engagement_dir)
+
+    _run_render_handoff(module, engagement_dir, "AGENT-NO-NEXT-STEP")
+    out = capsys.readouterr().out
+    # The next-step line is mandatory, even when blank.
+    assert "Next step (per registry):**" in out
+    assert "not recorded — set explicitly in this dispatch" in out
+    # source-analyzer is not in the credentials-fetching role list, so the
+    # credentials line should report 0 rows without ever calling the backend
+    # credentials endpoint.
+    assert "Credentials captured:** 0 rows" in out

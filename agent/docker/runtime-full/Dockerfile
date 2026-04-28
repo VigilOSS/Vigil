@@ -184,7 +184,7 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
     fi
 
 RUN mkdir -p /opt/mcp-tools /data
-COPY docker/kali-mcp-runtime/audit_enums.py /opt/mcp-tools/audit_enums.py
+COPY agent/scripts/assess/lib/audit_enums.py /opt/mcp-tools/audit_enums.py
 COPY docker/callback_listener.py /opt/mcp-tools/callback_listener.py
 COPY docker/start-callback.sh /usr/local/bin/start-callback
 RUN chmod +x /usr/local/bin/start-callback

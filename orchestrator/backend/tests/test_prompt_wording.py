@@ -987,24 +987,26 @@ def test_priority_dispatch_wired_into_prompts():
 
 
 def test_recon_dispatch_resource_policy_section_present():
-    """The Recon Dispatch Resource Policy lives in two places:
+    """The Recon Dispatch Resource Policy lives in two places after Fix #8:
     - `agent/operator-core.md` keeps the section header and the tier-pick / step-down
       prose (operator-side decisions).
-    - `agent/shared-constraints.md` carries the per-target rate calibration trait rows
-      (specialists USE the rates, so they live where Load First reaches them).
+    - `agent/references/recon/rate-calibration.md` carries the per-target rate
+      calibration trait rows. Recon-class roles load it on first use; the table
+      was extracted from `shared-constraints.md` §14 to keep the every-specialist
+      load lighter for non-recon roles.
     """
     repo_root = Path(__file__).resolve().parents[3]
     operator_core = (
         repo_root / "agent" / "operator-core.md"
     ).read_text(encoding="utf-8")
-    shared = (
-        repo_root / "agent" / "shared-constraints.md"
+    rate_cal = (
+        repo_root / "agent" / "references" / "recon" / "rate-calibration.md"
     ).read_text(encoding="utf-8")
 
     assert "## Recon Dispatch Resource Policy" in operator_core, (
         "operator-core.md is missing the `Recon Dispatch Resource Policy` section header"
     )
-    # All five canonical trait rows must appear in shared-constraints.
+    # All five canonical trait rows must appear in the new reference file.
     for row_marker in (
         "Cloud-fronted",
         "Origin / single-server",
@@ -1012,10 +1014,14 @@ def test_recon_dispatch_resource_policy_section_present():
         "High-friction policy / regulated",
         "Vendor SaaS",
     ):
-        assert row_marker in shared, (
-            f"shared-constraints.md per-target rate calibration table is missing the "
-            f"`{row_marker}` trait row"
+        assert row_marker in rate_cal, (
+            f"references/recon/rate-calibration.md per-target rate calibration "
+            f"table is missing the `{row_marker}` trait row"
         )
+    # operator-core points at the new reference path.
+    assert "agent/references/recon/rate-calibration.md" in operator_core, (
+        "operator-core.md must point at the extracted rate-calibration reference"
+    )
     # The selection prose stays operator-side.
     assert "Resource-safety preflight" in operator_core, (
         "operator-core.md is missing the `Resource-safety preflight` rule heading"
@@ -1029,6 +1035,38 @@ def test_recon_dispatch_resource_policy_section_present():
     assert "DNS bruteforce gating" in operator_core, (
         "operator-core.md is missing the DNS-bruteforce gating cross-reference"
     )
+
+
+def test_recon_specialist_load_first_marks_lazy_skills():
+    """Fix #8 — recon-specialist Load First splits into MANDATORY (load before any
+    target work) and LOAD-ON-FIRST-USE (lazy). Holding nuclei-scanning and
+    directory-fuzzing out of the first-load set keeps the bootstrap lighter for
+    hypothesis-driven dispatches that never reach those steps. The mandatory
+    set keeps web-recon, port-scanning, shared-constraints, and the new
+    rate-calibration reference."""
+    repo_root = Path(__file__).resolve().parents[3]
+    role = (
+        repo_root / "agent" / "agents" / "recon-specialist.md"
+    ).read_text(encoding="utf-8")
+
+    assert "**MANDATORY (load before any target work):**" in role, (
+        "recon-specialist.md missing MANDATORY load-first heading"
+    )
+    assert "**LOAD-ON-FIRST-USE" in role, (
+        "recon-specialist.md missing LOAD-ON-FIRST-USE lazy-load heading"
+    )
+    # Rate-calibration reference must be in the mandatory set.
+    assert "agent/references/recon/rate-calibration.md" in role, (
+        "recon-specialist.md must reference the new rate-calibration extracted file"
+    )
+    # The two skills the lazy section gates.
+    for fragment in (
+        "load when the dispatch is about to run step 5",
+        "load when the dispatch is about to run step 6",
+    ):
+        assert fragment in role, (
+            f"recon-specialist.md missing lazy-load gating phrase: {fragment!r}"
+        )
 
 
 def test_kali_exec_resource_policy_cross_reference_resolves():
@@ -1175,7 +1213,17 @@ def test_cross_cutting_audit_flag_tables_in_shared_constraints():
     # Intel recording rules.
     assert "record-intel" in sc, "shared-constraints.md must cover record-intel"
 
-    # Per-target rate calibration table.
+    # Per-target rate calibration table now lives in the recon-class reference,
+    # not shared-constraints. Verify the pointer is present and the rate file exists.
+    repo_root_for_pointer = Path(__file__).resolve().parents[3]
+    rate_cal_path = repo_root_for_pointer / "agent" / "references" / "recon" / "rate-calibration.md"
+    assert rate_cal_path.is_file(), (
+        "agent/references/recon/rate-calibration.md must exist (extracted from §14)"
+    )
+    assert "agent/references/recon/rate-calibration.md" in sc, (
+        "shared-constraints.md §14 must point at the extracted rate-calibration reference"
+    )
+    rate_cal = rate_cal_path.read_text(encoding="utf-8")
     for needle in (
         "Cloud-fronted",
         "Origin / single-server",
@@ -1185,8 +1233,8 @@ def test_cross_cutting_audit_flag_tables_in_shared_constraints():
         "polite-residential",
         "bursty-OK",
     ):
-        assert needle in sc, (
-            f"shared-constraints.md must carry the per-target rate calibration row `{needle}`"
+        assert needle in rate_cal, (
+            f"references/recon/rate-calibration.md must carry the per-target rate calibration row `{needle}`"
         )
 
 
@@ -1547,6 +1595,43 @@ def test_osint_recon_pins_exact_version_triangulation_section():
     assert "agent/skills/osint-recon/SKILL.md" in source_analysis, (
         "source-analysis/SKILL.md must cross-link back to osint-recon for triangulation"
     )
+
+
+def test_osint_recon_pins_aith_assess_kali_wrap_rule():
+    """Fix #3 — osint-recon SKILL.md must carry a load-bearing top-of-Methodology
+    rule that every illustrative shell example wraps in `aith assess kali exec --`
+    with the audit envelope. Without this pin, a future edit could re-introduce
+    bare host-side `searchsploit`/`theHarvester`/`bbot`/`curl` examples that bypass
+    the audit pipeline.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    osint = (repo_root / "agent" / "skills" / "osint-recon" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    # Load-bearing rule sentence at the top of Methodology.
+    assert "Audit envelope is mandatory" in osint, (
+        "osint-recon/SKILL.md missing the top-of-Methodology audit-envelope rule"
+    )
+    # Every section must be addressed by the rule, not just one.
+    for fragment in (
+        "Every command in sections 1–6 below is illustrative shell",
+        "aith assess kali exec --",
+        "--technique OSINT",
+        "--probe-kind fingerprint",
+    ):
+        assert fragment in osint, (
+            f"osint-recon/SKILL.md missing audit-envelope rule fragment: {fragment!r}"
+        )
+    # At least one wrapped example per section 1-4 anchoring the pattern.
+    for canonical in (
+        "searchsploit lookup for <component>",
+        "theHarvester email + subdomain enum",
+        "WHOIS lookup for <domain>",
+        "theHarvester linkedin/google enumeration",
+    ):
+        assert canonical in osint, (
+            f"osint-recon/SKILL.md missing canonical wrapped example: {canonical!r}"
+        )
 
 
 def test_surface_collection_pins_per_host_url_budget_formula():
@@ -2077,4 +2162,34 @@ def test_scan_type_pseudo_values_removed_from_skills():
         "Drift values for `--scan-type` (F1) — the wrapper restricts "
         "`--scan-type` to nmap technique flags (sS/sT/sU/sV/sn). Use `--ports "
         "<value>` for port specs.\n" + "\n".join(offenders)
+    )
+
+
+def test_operator_core_pins_render_handoff_helper_in_cross_dispatch_continuity():
+    """Fix #7: operator-core's "Cross-Dispatch Continuity" must lead with the
+    `render-handoff` helper so operators stop pasting transcript excerpts.
+
+    Pinning this here keeps the rendered operator/specialist wrappers honest
+    when the wave-end re-render runs — if the helper sentence regresses out
+    of operator-core, the wrappers regenerate without it and parallel
+    continuation dispatches drift back to unbounded transcript pastes."""
+    repo_root = Path(__file__).resolve().parents[3]
+    operator_core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+
+    # The Cross-Dispatch Continuity section must contain the explicit helper
+    # invocation. This is the load-bearing sentence — without it the section
+    # reverts to "keep handoff prompts bounded" prose discipline.
+    assert (
+        "aith assess dispatch render-handoff <agent-id>" in operator_core
+    ), "operator-core.md no longer references `aith assess dispatch render-handoff <agent-id>`"
+    assert (
+        "paste its output into the next dispatch" in operator_core
+    ), "operator-core.md no longer instructs operators to paste the rendered blob"
+
+    # The next-step recording must call out next_step explicitly so the
+    # registry-write step covers the field the renderer always emits.
+    assert "next_step" in operator_core, (
+        "operator-core.md no longer mentions the registry's `next_step` field; "
+        "the renderer reads it directly so the registry-write instruction "
+        "must name it."
     )

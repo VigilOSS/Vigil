@@ -112,7 +112,7 @@ Map the WAF identity to a rate-limit tier before starting nmap/httpx/ffuf/nuclei
   `-T3 --max-rate 100 --max-retries 2 --host-timeout 300s`, ffuf `-rate 10`, nuclei
   `-rate-limit 25` and `-c 10`.
 
-Full table and detection commands: `agent/references/tools/recon/wafw00f.md`. The canonical per-target rate calibration table is in `agent/shared-constraints.md` "Per-Target Rate Calibration Table" — the values above pull from that table.
+Full table and detection commands: `agent/references/tools/recon/wafw00f.md`. The canonical per-target rate calibration table is in `agent/references/recon/rate-calibration.md` — the values above pull from that table.
 
 ### Step 0b — Egress reputation check (run after subdomain-enum + httpx populate live_hosts.txt, before nmap)
 

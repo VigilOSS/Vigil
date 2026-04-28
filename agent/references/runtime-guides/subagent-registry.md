@@ -80,6 +80,13 @@ The contract fields layered onto the audit record are:
 | `output` | string | structured payload schema the agent returns |
 | `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Dispatch-Mode Declaration" in `agent/operator-core.md`) |
 
+The optional handoff fields the renderer reads alongside the contract record are:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `next_step` | string (optional) | The exact action the new dispatch should take ("replay captured token at `/api/vault` and read the victim's items"). Always emitted by `render-handoff`; when missing, the rendered blob says "not recorded — set explicitly in this dispatch" so the new prompt cannot silently drop the next action. |
+| `working_artifacts` | string[] (optional) | Paths under `$DIR/` (typically `tools/`, `scans/`, or `downloads/`) the prior dispatch produced. Each entry is checked on disk by the renderer; missing files surface as `(state: missing)` so the new agent doesn't chase deleted state. |
+
 When a specialist cannot be launched (missing skill, missing wrapper, runtime down), append a
 blocker record instead of a contract record:
 
@@ -106,27 +113,64 @@ entry deferred before advancing.
   backend activity log (`aith assess fetch activity-entries`) to avoid
   re-dispatching the same role for the same objective.
 - **Handoff source** — when continuing a multi-step task, the registry entry for
-  the prior dispatch identifies which output transcript the new dispatch prompt
-  pulls context from.
+  the prior dispatch is the input the handoff renderer reads. Run
+  `aith assess dispatch render-handoff <agent-id>` to produce the markdown
+  blob; the renderer pulls findings from the backend, checks artifact paths
+  on disk, and emits the always-present next-step line directly from the
+  registry's `next_step` field.
 
 ## Continuing Work Across Dispatches
 
 Every dispatch launches a fresh agent, so continuity lives in what the operator
 hands to the new agent. When the current task continues work the registry shows
 was already started, build the new dispatch prompt from the prior agent's
-relevant output and durable state:
+relevant output and durable state.
+
+The canonical path is the renderer:
+
+```bash
+aith assess dispatch render-handoff <prior-agent-id>
+```
+
+It reads `$DIR/agent-registry.json`, fetches each finding slug from the
+backend, checks every `working_artifacts` path on disk, and emits a markdown
+blob hard-capped at `--max-lines` (default 40). Paste the rendered output
+verbatim into the new dispatch's prompt. The renderer is what turns "two or
+three excerpted lines from the prior transcript" from operator discipline
+into a deterministic helper: the blob is bounded, every field comes from
+durable state, and the next-step line is always emitted.
+
+### Example rendered blob
+
+```markdown
+#### Handoff from exploit-developer dispatch a424a88b02054913d
+- **Prior task:** RCE chain: phpMyAdmin → template injection → webshell
+- **Skill loaded:** agent/skills/command-injection/SKILL.md
+- **Scope host:** target.example
+- **Dispatched at:** 2026-03-30T15:30:00Z (status: returned)
+- **Findings recorded:**
+  - `EX-001` — Authenticated phpMyAdmin RCE via SQL UDF [severity=high]
+  - `EX-002` — Template injection in admin error page [severity=medium]
+- **Working artifacts:**
+  - `tools/exploit-state/EX-001-payload.sql` (state: present)
+  - `tools/exploit-state/EX-002-poc.py` (state: missing)
+- **Credentials captured:** 1 rows (ids: 17)
+- **Next step (per registry):** Use captured admin cookie to chain EX-002 into the phpMyAdmin login form and validate RCE primitive end-to-end.
+```
+
+### Field flow
 
 1. **Same base dispatch template** — role, target, phase, skill to load.
-2. **Prior agent's output excerpts** — paste the specific commands, captured
-   tokens, intermediate PoC steps, and observations from the previous transcript.
-   Narrative continuity (what was tried and why it matters) lives in the prompt,
-   because the new agent rebuilds its mental model from what the dispatch carries.
+2. **Renderer-produced blob** — paste the `render-handoff` output verbatim.
+   The new agent rebuilds its mental model from finding slugs, artifact paths,
+   credential ids, and the next-step line.
 3. **Durable-state pointers** — finding slugs, file paths under `$DIR/`, credential
    ids. The new agent resolves these with `aith assess fetch` instead of relying on
    stale inline copies, which keeps the prompt small and the state canonical.
 4. **Specific next step** — the exact action the prior agent would have taken
    next ("replay captured token at `/api/vault` and read the victim's items"), not
-   a rehash of the original objective.
+   a rehash of the original objective. Recorded in the registry as `next_step`
+   so the renderer surfaces it without operator intervention.
 
 ## Making Handoffs Cheap
 

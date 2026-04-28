@@ -20,15 +20,30 @@ import subprocess
 import sys
 import time
 import uuid
-from importlib import util as _import_util
 from pathlib import Path
 from typing import Any, Optional
 
+from .audit_enums import PROBE_KIND_ENUM, TECHNIQUE_ENUM
 from .client import AssessError, AssessmentClient
 from .config import Config, load_config
 
 
 _DEFAULT_CONTAINER_NAME = "security-research"
+
+_DEDUP_BLOCK_ENV = "KALI_AUDIT_DEDUP_BLOCK"
+
+
+def _dedup_block_enabled() -> bool:
+    """Return True when the operator has opted into block-on-dedup mode.
+
+    Default behavior is warn-and-continue: a dedup hit prints the warning
+    but the command still executes. Setting `KALI_AUDIT_DEDUP_BLOCK` to
+    `1` / `true` / `yes` (case-insensitive) restores the original
+    block-and-require-force semantics. Anything else (unset, `0`, blank,
+    garbage) leaves the new warn-and-continue default in place.
+    """
+    raw = os.environ.get(_DEDUP_BLOCK_ENV, "")
+    return raw.strip().lower() in ("1", "true", "yes")
 
 _SHELL_BINARIES = frozenset({"sh", "bash", "dash", "zsh", "/bin/sh", "/bin/bash", "/bin/dash", "/usr/bin/sh", "/usr/bin/bash", "/usr/bin/env"})
 
@@ -179,36 +194,6 @@ def _analyze_tool_name(cmd: list[str]) -> tuple[str, dict[str, Any]]:
 # `run` callable on every kali_* command should still be reachable for `--help`
 # without going through the helper.
 _KALI_NOOP_ENV = "AITH_KALI_NOOP"
-
-
-# Drift guard: import TECHNIQUE_ENUM / PROBE_KIND_ENUM from the runtime
-# module so adding a new value lands in one place. The runtime sits at
-# `docker/kali-mcp-runtime/audit_enums.py` (hyphen in path → not a package),
-# so we load it via spec_from_file_location and tolerate its absence in
-# install layouts that ship only the agent.
-
-
-def _load_audit_enums() -> tuple[tuple[str, ...], tuple[str, ...]]:
-    runtime_path = (
-        Path(__file__).resolve().parents[4]
-        / "docker"
-        / "kali-mcp-runtime"
-        / "audit_enums.py"
-    )
-    if not runtime_path.is_file():
-        return (), ()
-    spec = _import_util.spec_from_file_location("_kali_audit_enums_runtime", runtime_path)
-    if spec is None or spec.loader is None:
-        return (), ()
-    module = _import_util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return (
-        tuple(getattr(module, "TECHNIQUE_ENUM", ())),
-        tuple(getattr(module, "PROBE_KIND_ENUM", ())),
-    )
-
-
-TECHNIQUE_ENUM, PROBE_KIND_ENUM = _load_audit_enums()
 
 
 # Allowed phase enum mirrors orchestrator/backend/app/api/assessment.py
@@ -719,24 +704,36 @@ def kali_exec(
             run_id = int(row.get("id")) if row.get("id") is not None else None
             superseded_by_id = row.get("superseded_by_id")
             if superseded_by_id and not force:
+                # Default behavior is warn-and-continue: parallel specialists
+                # racing on the same wildcard list inside the dedup window
+                # should not be hard-blocked, because that pushes operators
+                # toward `--force` as a habit. Operators who genuinely want
+                # the old block-on-dup mode opt in via KALI_AUDIT_DEDUP_BLOCK.
+                # `--force` still suppresses the warning entirely.
                 print(
                     f"warning: dedup hit — equivalent command-run id={superseded_by_id} "
-                    f"is still in flight; pass --force to bypass.",
+                    f"is still in flight.",
                     file=sys.stderr,
                 )
-                return KaliResult(
-                    run_id=run_id,
-                    status="superseded",
-                    return_code=None,
-                    stdout_path=str(stdout_path),
-                    stderr_path=str(stderr_path),
-                    duration_ms=0,
-                    peak_rss_bytes=None,
-                    stdout_preview="",
-                    stderr_preview="",
-                    timed_out=False,
-                    partial_results=False,
-                )
+                if _dedup_block_enabled():
+                    print(
+                        f"warning: {_DEDUP_BLOCK_ENV} is set; refusing to run. "
+                        "Pass --force to bypass.",
+                        file=sys.stderr,
+                    )
+                    return KaliResult(
+                        run_id=run_id,
+                        status="superseded",
+                        return_code=None,
+                        stdout_path=str(stdout_path),
+                        stderr_path=str(stderr_path),
+                        duration_ms=0,
+                        peak_rss_bytes=None,
+                        stdout_preview="",
+                        stderr_preview="",
+                        timed_out=False,
+                        partial_results=False,
+                    )
         except AssessError as exc:
             print(
                 f"warning: pre-exec audit POST failed: {exc}; continuing without audit row.",
@@ -940,7 +937,11 @@ def add_required_kali_flags(parser) -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Bypass the dedup window check.",
+        help=(
+            "Suppress the dedup warning entirely and skip the supersede record. "
+            "Default behavior is warn-and-continue (set "
+            "KALI_AUDIT_DEDUP_BLOCK=1 to restore the old block-on-dup mode)."
+        ),
     )
     parser.add_argument(
         "--strace",
@@ -1035,8 +1036,7 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
         "container_name": getattr(args, "container_name", _DEFAULT_CONTAINER_NAME),
     }
     if explicit_dir:
-        from pathlib import Path as _Path
-        kwargs["engagement_dir"] = _Path(explicit_dir).expanduser().resolve()
+        kwargs["engagement_dir"] = Path(explicit_dir).expanduser().resolve()
     return kwargs
 
 
