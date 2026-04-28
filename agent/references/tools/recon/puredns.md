@@ -10,9 +10,9 @@ puredns is a wrapper around massdns + a wildcard filter — it has no resolver o
 **Host-CPU and Docker-stability note.** DNS bruteforce is the dominant host-CPU and host-network spike in the engagement runtime — see `agent/skills/subdomain-enumeration/SKILL.md` "Host-CPU note" for the full mechanism. massdns sends thousands of UDP queries per second; the host kernel's per-packet network-stack overhead is amplified well beyond what `--cpus` cgroup limits constrain (cgroup CPU limits the userland process, not the host's kernel networking path). Aggressive puredns rate-limits have crashed Docker on standard laptop hardware. Default to `polite-residential` everywhere; step up to `bursty-OK` only on private/lab resolvers AND with explicit operator opt-in.
 
 ```bash
-aith assess kali exec -- which massdns puredns \
-  --technique RECON --intent "massdns/puredns preflight" \
-  --probe-kind fingerprint --phase recon --timeout 30
+aith assess kali exec --technique HEALTH --intent "massdns/puredns preflight" \
+  --probe-kind fingerprint --phase recon --timeout 30 -- \
+  which massdns puredns
 ```
 
 `runtime-full/Dockerfile` installs massdns from the kali apt repo; if it's missing in a running container the image is drifting and the runtime needs a `aith runtime restart` after rebuild — do NOT swap to a degraded fallback.

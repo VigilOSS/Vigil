@@ -140,7 +140,7 @@ option that produces a clean signal (no JA3 mismatch, no proxy artifact, no
 TLS fingerprint drift).
 
 **How to set up.** Capture the runtime egress IP via
-`aith assess kali exec -- curl -s https://api.ipify.org`. Email or message
+`aith assess kali exec --technique HEALTH --intent "capture runtime egress IP" --probe-kind fingerprint --phase recon --timeout 30 -- curl -s https://api.ipify.org`. Email or message
 the program contact with the IP and the engagement scope. Wait for
 confirmation before retesting. Record the request via
 `aith assess dispatch record-decision --kind egress_decision --choice allowlist-requested --payload-json '{"egress_ip": "...", "program_contact": "..."}'`
@@ -188,7 +188,7 @@ Chromium, real Firefox) presents a legitimate browser TLS fingerprint and
 defeats the JA3 block without changing the egress IP.
 
 **How to set up.** The runtime image carries Playwright and a headless
-Chromium binary. Drive it via `aith assess kali exec -- python3 -m
+Chromium binary. Drive it via `aith assess kali exec --technique HEALTH --intent "browser TLS fingerprint verification" --probe-kind fingerprint --phase recon --timeout 300 -- python3 -m
 playwright_runner` (or the Katana wrapper, which forwards traffic through
 a Chromium TLS stack). Verify by re-running the egress reputation script
 through the Katana / browser path.

@@ -1,7 +1,7 @@
 # curl
 
 **Purpose:** HTTP request crafting and testing
-For live target requests during an engagement, execute `curl` via `aith assess kali exec -- curl ...` with the standard audit-flag set (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`).
+For live target requests during an engagement, execute `curl` via `aith assess kali exec --technique <enum> --intent "<why>" --probe-kind <kind> --phase <phase> --timeout <seconds> -- curl ...` with the standard audit-flag set.
 
 ## GET Requests
 

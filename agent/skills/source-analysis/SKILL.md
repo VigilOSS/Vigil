@@ -70,7 +70,7 @@ done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_secrets.txt
 Use LinkFinder and SecretFinder as the primary extraction pass. Fall back to manual grep
 for edge cases they miss (inline scripts, dynamically loaded chunks, non-standard patterns).
 When scanning saved artifacts for secrets, invoke `trufflehog filesystem` via
-`aith assess kali exec -- trufflehog filesystem ... --technique INFO-DISCLOSURE --intent "secret scan on saved JS/source-map artifacts" --probe-kind fingerprint --phase recon --timeout 600`
+`aith assess kali exec --technique INFO-DISCLOSURE --intent "secret scan on saved JS/source-map artifacts" --probe-kind fingerprint --phase recon --timeout 600 -- trufflehog filesystem ...`
 against `/engagements/$ENGAGEMENT_KEY/...` paths so the runtime-owned install is used consistently
 and the run lands in the audit pipeline.
 

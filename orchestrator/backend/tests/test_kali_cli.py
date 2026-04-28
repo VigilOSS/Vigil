@@ -623,7 +623,6 @@ def _stub_container_helpers(monkeypatch):
     monkeypatch.setattr(kali, "_read_container_pid", lambda *_a, **_k: None)
     monkeypatch.setattr(kali, "_kill_in_container", lambda *_a, **_k: None)
     monkeypatch.setattr(kali, "_cleanup_container_pid_file", lambda *_a, **_k: None)
-    monkeypatch.setattr(kali, "_pkill_in_container_by_argv", lambda *_a, **_k: False)
     yield
 
 
@@ -926,17 +925,12 @@ def test_b1_timeout_cascade_kills_in_container_pid_then_host_pgid(
     assert len(cleanups) == 1
 
 
-def test_b1_timeout_without_pid_file_falls_back_to_host_kill(
+def test_b1_timeout_without_pid_file_uses_host_kill_only(
     monkeypatch, fake_engagement, capsys
 ):
     """B1 edge: when the wrapper hadn't written the pid file yet (race) or
     the container is gone (read fails), the helper must log a warning and
     still issue the host-side process-group kill cascade rather than crash.
-
-    The fallback path also tries ``docker exec pkill -f <argv-fingerprint>``
-    so a SIGTERM-trapping tool whose pid file is missing still receives a
-    cross-namespace signal rather than only the host-side ``os.killpg`` that
-    cannot reach the in-container process.
     """
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
@@ -950,13 +944,13 @@ def test_b1_timeout_without_pid_file_falls_back_to_host_kill(
         "_kill_in_container",
         lambda container, pid, sig: docker_kills.append((sig, pid)),
     )
-    pkill_calls: list[tuple[list[str], str]] = []
 
-    def fake_pkill(container, argv, sig):
-        pkill_calls.append((list(argv), sig))
-        return True  # report a match so the cascade knows the fallback worked
+    def fail_if_pkill_fallback_runs(*_args, **_kwargs):
+        raise AssertionError("timeout cleanup must not use argv-based pkill fallback")
 
-    monkeypatch.setattr(kali, "_pkill_in_container_by_argv", fake_pkill)
+    monkeypatch.setattr(
+        kali, "_pkill_in_container_by_argv", fail_if_pkill_fallback_runs, raising=False
+    )
 
     host_signals: list[int] = []
     monkeypatch.setattr(kali.os, "killpg", lambda pgid, sig: host_signals.append(sig))
@@ -991,14 +985,8 @@ def test_b1_timeout_without_pid_file_falls_back_to_host_kill(
 
     err = capsys.readouterr().err
     assert "in-container pid file missing" in err
-    assert "falling back to docker exec pkill" in err
+    assert "pkill" not in err
     assert docker_kills == []  # no pid-targeted in-container kill possible
-    # The pkill fallback fired with the user-command argv as the fingerprint
-    # and at least the SIGTERM leg ran (SIGKILL leg is conditional on the
-    # SIGTERM grace expiring, which this test does not exercise).
-    assert pkill_calls, "pkill fallback must run when no pid file exists"
-    assert pkill_calls[0][0] == ["nuclei", "-l", "hosts.txt"]
-    assert pkill_calls[0][1] == "TERM"
     assert signal.SIGTERM in host_signals  # host-side cascade still fired
 
 
@@ -1636,6 +1624,7 @@ def test_contract_kali_root_lists_verbs():
     rendered = contracts.render_contract("kali")
     assert "nmap-scan" in rendered
     assert "nuclei" in rendered
+    assert "asnmap" in rendered
     assert "--phase" in rendered
 
 
@@ -1645,6 +1634,20 @@ def test_contract_kali_per_verb_renders_examples():
     assert "nmap-scan" in rendered
     assert "Examples" in rendered
     assert "--technique" in rendered
+
+
+def test_contract_kali_asnmap_is_registered():
+    contracts = _import("assess.lib.contracts")
+    rendered = contracts.render_contract("kali asnmap")
+    assert "kali asnmap" in rendered
+    assert "aith assess kali asnmap" in rendered
+
+
+def test_contract_kali_exec_does_not_advertise_removed_strace():
+    contracts = _import("assess.lib.contracts")
+    rendered = contracts.render_contract("kali exec")
+    assert "--strace" not in rendered
+    assert "-- <command...>" in rendered
 
 
 def test_contract_command_supports_two_arg_form(capsys):
@@ -2974,4 +2977,3 @@ def test_read_safely_seeks_to_end_for_true_tail(tmp_path):
     assert "line 000800" not in preview, (
         "_read_safely must not include the middle of the file (only head + tail)"
     )
-

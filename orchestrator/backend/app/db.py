@@ -39,6 +39,23 @@ def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
     return {row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
+def _has_unique_index_on_columns(
+    connection: sqlite3.Connection, table_name: str, columns: tuple[str, ...]
+) -> bool:
+    for row in connection.execute(f"PRAGMA index_list({table_name})"):
+        index_name = str(row[1])
+        is_unique = bool(row[2])
+        if not is_unique:
+            continue
+        indexed_columns = tuple(
+            str(info[2])
+            for info in connection.execute(f"PRAGMA index_info({index_name})")
+        )
+        if indexed_columns == columns:
+            return True
+    return False
+
+
 def _append_notes(existing: str, incoming: str) -> str:
     if not incoming:
         return existing
@@ -1078,6 +1095,16 @@ def init_db() -> None:
         # above already includes the columns, so _table_columns returns them
         # and the ALTER is skipped).
         cmdrun_columns = _table_columns(connection, "assessment_command_runs")
+        if cmdrun_columns and "run_uuid" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN run_uuid TEXT")
+            connection.execute(
+                """
+                UPDATE assessment_command_runs
+                SET run_uuid = 'legacy-' || id
+                WHERE run_uuid IS NULL OR run_uuid = ''
+                """
+            )
+            cmdrun_columns = _table_columns(connection, "assessment_command_runs")
         if cmdrun_columns and "tool_bin" not in cmdrun_columns:
             connection.execute(
                 "ALTER TABLE assessment_command_runs ADD COLUMN tool_bin TEXT NOT NULL DEFAULT ''"
@@ -1153,6 +1180,13 @@ def init_db() -> None:
         if cmdrun_columns and "partial_results" not in cmdrun_columns:
             connection.execute(
                 "ALTER TABLE assessment_command_runs ADD COLUMN partial_results INTEGER NOT NULL DEFAULT 0"
+            )
+        if not _has_unique_index_on_columns(
+            connection, "assessment_command_runs", ("run_uuid",)
+        ):
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_assessment_command_runs_run_uuid "
+                "ON assessment_command_runs(run_uuid) WHERE run_uuid IS NOT NULL"
             )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_created "

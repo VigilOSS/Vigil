@@ -3,7 +3,7 @@
 **Purpose:** Classify URLs by vulnerability-parameter patterns using pre-baked JSON pattern
 files. Bug-bounty staple for triaging large historical URL corpora (gau, waybackurls, katana).
 
-**In this repo**: primary classifier in gau-triage Step 3. Invoke via `aith assess kali exec -- gf ...` with the standard audit-flag set.
+**In this repo**: primary classifier in gau-triage Step 3. Invoke via `aith assess kali exec --technique RECON --intent "<why>" --probe-kind fingerprint --phase recon --timeout <seconds> -- gf ...` with the standard audit-flag set.
 
 ## Install layout
 

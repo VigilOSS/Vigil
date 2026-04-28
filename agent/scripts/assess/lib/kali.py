@@ -77,7 +77,6 @@ from .kali_runtime_exec import (
     _cleanup_container_pid_file,
     _container_pid_file,
     _kill_in_container,
-    _pkill_in_container_by_argv,
     _read_container_pid,
 )
 from .kali_tool_naming import (
@@ -256,22 +255,16 @@ def kali_exec(
                 # we can also send ``docker exec kill`` directly at the user
                 # command across the namespace boundary.
                 container_pid = _read_container_pid(container_name, run_uuid)
-                pkill_used = False
                 if container_pid is not None:
                     _kill_in_container(container_name, container_pid, "TERM")
                 else:
-                    # B1 race fallback: the wrapper may not have written the
-                    # pid file yet (host-side SIGTERM raced the wrapper) or the
-                    # write failed. Use ``pkill -f`` against the user-command
-                    # argv as a coarse but cross-namespace kill that still
-                    # reaches SIGTERM-trapping tools. Host-side ``os.killpg``
-                    # below cannot cross the PID namespace boundary on its own.
-                    pkill_used = _pkill_in_container_by_argv(
-                        container_name, cmd, "TERM"
-                    )
+                    # If the exact PID is unavailable, avoid argv-pattern
+                    # cleanup. `pkill -f` can match sibling agent runs inside
+                    # the shared runtime container; host-side kill plus
+                    # sweep-orphans is safer than a broad in-container signal.
                     print(
                         f"warning: in-container pid file missing for run {run_uuid}; "
-                        f"falling back to docker exec pkill -f (matched={pkill_used}).",
+                        "using host process-group cleanup only.",
                         file=sys.stderr,
                     )
                 try:
@@ -284,12 +277,6 @@ def kali_exec(
                 except subprocess.TimeoutExpired:
                     if container_pid is not None:
                         _kill_in_container(container_name, container_pid, "KILL")
-                    elif pkill_used:
-                        # SIGKILL via pkill against the same argv fingerprint;
-                        # if the fingerprint matched on TERM it should match
-                        # again here. We do not gate on its previous match
-                        # because a sibling PID may have spawned in the grace.
-                        _pkill_in_container_by_argv(container_name, cmd, "KILL")
                     try:
                         pgid = os.getpgid(process.pid)
                         os.killpg(pgid, signal.SIGKILL)
@@ -424,7 +411,6 @@ __all__ = [
     "_cleanup_container_pid_file",
     "_container_pid_file",
     "_kill_in_container",
-    "_pkill_in_container_by_argv",
     "_read_container_pid",
     # Tool-name derivation (from kali_tool_naming)
     "_SHELL_BINARIES",

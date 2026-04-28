@@ -158,7 +158,7 @@ If the app checks that a cookie value matches a form parameter:
 ## Useful Curl for Testing
 
 ```bash
-# For live testing, run `curl` via `aith assess kali exec -- curl ...` with the standard audit-flag set so the request lands in the audit pipeline.
+# For live testing, run `curl` via `aith assess kali exec --technique CSRF --intent "<why>" --probe-kind payload --phase <phase> --timeout <seconds> -- curl ...` so the request lands in the audit pipeline.
 # Keep explicit Cookie overrides only when replaying a victim session on purpose.
 # Check if endpoint accepts requests without CSRF token
 curl -s -X POST http://target.example/api/action \

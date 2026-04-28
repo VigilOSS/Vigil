@@ -1,4 +1,4 @@
-"""Tests for the Kali MCP command-run audit API."""
+"""Tests for the aith assess command-run audit API."""
 from __future__ import annotations
 
 import json
@@ -79,6 +79,27 @@ def _base_payload(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def _unique_run_uuid_indexes(connection: sqlite3.Connection) -> list[str]:
+    names: list[str] = []
+    for row in connection.execute("PRAGMA index_list(assessment_command_runs)"):
+        index_name = str(row[1])
+        if not bool(row[2]):
+            continue
+        indexed_columns = [
+            str(info[2])
+            for info in connection.execute(f"PRAGMA index_info({index_name})")
+        ]
+        if indexed_columns == ["run_uuid"]:
+            names.append(index_name)
+    return names
+
+
+def test_fresh_command_runs_schema_has_single_run_uuid_unique_index(client, isolate_settings):
+    db_path = db_module.database_path()
+    with sqlite3.connect(str(db_path)) as connection:
+        assert len(_unique_run_uuid_indexes(connection)) == 1
 
 
 def test_record_and_list_command_run_round_trips(client, isolate_settings):
@@ -1341,3 +1362,118 @@ def test_pre_existing_rows_keep_status_completed_default_after_alter(client, iso
     assert len(rows) == 1
     assert rows[0]["status"] == "completed"
 
+
+def test_legacy_command_runs_without_run_uuid_are_backfilled(client, isolate_settings):
+    """Legacy DBs created before run_uuid existed must be migrated in place.
+
+    The backend now queries and inserts assessment_command_runs.run_uuid before
+    writing artifacts. Without an additive migration, old local DBs fail on the
+    first post-upgrade command run.
+    """
+    _write_engagement(isolate_settings["engagements_dir"])
+    db_path = db_module.database_path()
+    db_path.unlink(missing_ok=True)
+    with sqlite3.connect(str(db_path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE engagements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL UNIQUE,
+                target TEXT NOT NULL,
+                status TEXT NOT NULL,
+                engagement_root TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO engagements (id, key, target, status, engagement_root)
+            VALUES (1, ?, 'https://example.com', 'in_progress', ?)
+            """,
+            (ENGAGEMENT_KEY, str(isolate_settings["engagements_dir"] / ENGAGEMENT_KEY)),
+        )
+        connection.execute(
+            """
+            CREATE TABLE assessment_command_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                command TEXT NOT NULL,
+                argv_json TEXT NOT NULL DEFAULT '[]',
+                tool_name TEXT NOT NULL,
+                tool_bin TEXT NOT NULL DEFAULT '',
+                route TEXT NOT NULL DEFAULT '',
+                agent_name TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                audit_source TEXT NOT NULL DEFAULT 'header',
+                status TEXT NOT NULL DEFAULT 'completed',
+                return_code INTEGER,
+                timed_out INTEGER NOT NULL DEFAULT 0,
+                success INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                command_hash TEXT NOT NULL,
+                stdout_sha256 TEXT NOT NULL DEFAULT '',
+                stderr_sha256 TEXT NOT NULL DEFAULT '',
+                stdout_preview TEXT NOT NULL DEFAULT '',
+                stderr_preview TEXT NOT NULL DEFAULT '',
+                output_retention_status TEXT NOT NULL DEFAULT 'retained',
+                stdout_suppression_reason TEXT NOT NULL DEFAULT '',
+                stderr_suppression_reason TEXT NOT NULL DEFAULT '',
+                stdout_artifact_ref TEXT NOT NULL DEFAULT '',
+                stderr_artifact_ref TEXT NOT NULL DEFAULT '',
+                stdout_bytes INTEGER NOT NULL DEFAULT 0,
+                stderr_bytes INTEGER NOT NULL DEFAULT 0,
+                indexed_for_embeddings_at TEXT,
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO assessment_command_runs (
+                id, engagement_id, command, argv_json, tool_name, tool_bin, route,
+                agent_name, phase, audit_source, status, return_code, timed_out,
+                success, started_at, completed_at, duration_ms, command_hash,
+                stdout_preview, notes
+            ) VALUES (
+                1, 1, 'legacy nmap', '[]', 'nmap_scan', 'nmap', '',
+                'legacy-agent', 'recon', 'header', 'completed', 0, 0,
+                1, '2026-04-17T12:00:00Z', '2026-04-17T12:00:01Z',
+                1000, 'hash', 'legacy', ''
+            )
+            """
+        )
+        connection.commit()
+
+    db_module.init_db()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(assessment_command_runs)")
+        }
+        assert "run_uuid" in columns
+        assert len(_unique_run_uuid_indexes(connection)) == 1
+        row = connection.execute(
+            "SELECT run_uuid FROM assessment_command_runs WHERE id = 1"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "legacy-1"
+
+    created = state_manager.record_command_run(
+        1,
+        command="nmap -sV 127.0.0.1",
+        argv=["nmap", "-sV", "127.0.0.1"],
+        tool_name="nmap",
+        agent_name="recon-specialist",
+        phase="recon",
+        started_at="2026-04-17T12:01:00Z",
+        completed_at="2026-04-17T12:01:01Z",
+        run_uuid="fresh-run",
+        status="completed",
+    )
+    assert created["run_uuid"] == "fresh-run"

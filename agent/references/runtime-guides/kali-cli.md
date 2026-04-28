@@ -56,9 +56,9 @@ sibling specialists' jobs are not touched.
 ### Synchronous `aith assess kali exec` — `run_uuid` PID file
 
 Synchronous `kali exec` runs and every typed verb write the in-container
-PID to `/tmp/aith-pid-<run_uuid>` for the duration of the run. The
-`run_uuid` is the audit row's id — pull it from `list-command-runs` if
-you need to signal a still-running synchronous call from another shell:
+PID to `/tmp/aith-pid-<run_uuid>.pid` for the duration of the run. The
+`run_uuid` is the audit row's run UUID — pull it from `list-command-runs`
+if you need to signal a still-running synchronous call from another shell:
 
 ```bash
 # Find the running call (look for status=running).
@@ -66,9 +66,9 @@ aith assess list-command-runs --q ffuf --json | jq -r '.[]
   | select(.status=="running") | .run_uuid'
 
 # Signal only that run.
-aith assess kali exec --technique RECON --intent "stop ffuf cleanly" \
+aith assess kali exec --technique META --intent "stop ffuf cleanly" \
   --probe-kind cleanup --phase recon --timeout 30 -- \
-  kill -TERM "$(cat /tmp/aith-pid-<run_uuid>)"
+  sh -c 'kill -TERM "$(cat /tmp/aith-pid-<run_uuid>.pid)"'
 ```
 
 This signals exactly one in-container PID — sibling agents' ffuf or
