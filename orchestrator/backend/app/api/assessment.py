@@ -143,7 +143,20 @@ class CommandRunFinalize(BaseModel):
     duplicate terminal PATCHes can be detected and rejected with 409 instead
     of silently overwriting the first finalize."""
 
-    status: Literal["running", "completed", "failed", "timed_out", "killed", "lost"]
+    # ``aborted-dedup`` finalizes a row that was created on a dedup hit but
+    # whose subprocess never ran (CLI block-mode). The row is durably recorded
+    # for audit-truth: the operator can see "we would have run this command
+    # but a peer was already in flight" without polluting `running`-state
+    # sweepers.
+    status: Literal[
+        "running",
+        "completed",
+        "failed",
+        "timed_out",
+        "killed",
+        "lost",
+        "aborted-dedup",
+    ]
     return_code: int | None = None
     ended_at: datetime
     duration_ms: int | None = Field(default=None, ge=0)

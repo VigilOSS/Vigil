@@ -1029,12 +1029,15 @@ def test_finalize_patch_running_to_terminal_succeeds(client, isolate_settings):
     assert body.get("noop") is not True
 
 
-def test_dedup_window_returns_predecessor_without_inserting_new_row(client, isolate_settings):
-    """B3: Two identical (command, argv) POSTs inside the dedup window with
-    force=False: the second POST early-returns the predecessor row's id with
-    dedup_skipped=true and does NOT insert a new row. Without this, the new
-    row would be stuck at status='running' forever because the CLI early-returns
-    on the dedup path and never PATCHes finalize."""
+def test_dedup_window_inserts_new_row_linked_to_predecessor(client, isolate_settings):
+    """ISSUE-003: Two identical (command, argv) POSTs inside the dedup window
+    with force=False MUST insert a new row whose ``superseded_by_id`` points at
+    the predecessor. The previous row-merge behavior (returning the predecessor's
+    id without inserting) collapsed two real subprocess executions into one
+    audit row under the CLI's warn-and-continue default — the audit pipeline
+    then lied about coverage. New behavior: dedup is a relationship between
+    rows, not a row-merge, so ``list-command-runs`` reflects every execution
+    attempt."""
     _write_engagement(isolate_settings["engagements_dir"])
     payload = _base_payload(
         command="nmap -p 22 10.0.0.1",
@@ -1047,19 +1050,26 @@ def test_dedup_window_returns_predecessor_without_inserting_new_row(client, isol
     second = _post(client, payload)
     assert second.status_code == 201, second.text
     second_row = second.json()
-    assert second_row["id"] == first_row["id"]
-    assert second_row["superseded_by_id"] == first_row["id"]
-    assert second_row.get("dedup_skipped") is True
+    assert second_row["id"] != first_row["id"], (
+        "dedup hit must insert a NEW row, not return the predecessor's id"
+    )
+    assert second_row["superseded_by_id"] == first_row["id"], (
+        "dedup hit must populate superseded_by_id pointing at the predecessor"
+    )
+    assert second_row.get("dedup_predecessor_id") == first_row["id"], (
+        "dedup_predecessor_id is the no-subprocess hint surface for the CLI"
+    )
 
     listing = client.get(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs"
     ).json()
-    assert len(listing) == 1, "dedup-skipped POST must not insert an orphan row"
+    assert len(listing) == 2, "dedup hit must insert a row, not skip the insert"
 
 
-def test_dedup_force_flag_inserts_linked_row(client, isolate_settings):
-    """force=True is the deliberate-retry escape hatch: the new row IS
-    inserted with superseded_by_id set so the supersession audit lands."""
+def test_dedup_force_flag_inserts_unlinked_row(client, isolate_settings):
+    """force=True is the deliberate-retry escape hatch: a new row is inserted
+    and ``superseded_by_id`` is NOT set — the operator declared this is an
+    independent retry, not a peer of the in-flight predecessor."""
     _write_engagement(isolate_settings["engagements_dir"])
     payload = _base_payload(
         command="nmap -p 22 10.0.0.1",
@@ -1073,8 +1083,10 @@ def test_dedup_force_flag_inserts_linked_row(client, isolate_settings):
     response = _post(client, forced_payload)
     assert response.status_code == 201, response.text
     second_row = response.json()
-    assert second_row["superseded_by_id"] is None
-    assert second_row.get("dedup_skipped") is not True
+    assert second_row["superseded_by_id"] is None, (
+        "force=True must suppress the dedup relationship — operator deliberate retry"
+    )
+    assert second_row.get("dedup_predecessor_id") is None
     assert second_row["id"] != first_row["id"]
 
     listing = client.get(

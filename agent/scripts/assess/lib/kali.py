@@ -710,6 +710,13 @@ def kali_exec(
                 # toward `--force` as a habit. Operators who genuinely want
                 # the old block-on-dup mode opt in via KALI_AUDIT_DEDUP_BLOCK.
                 # `--force` still suppresses the warning entirely.
+                #
+                # Audit-truth contract (ISSUE-003): the backend now ALWAYS
+                # inserts a fresh row on dedup hit and links it to the
+                # predecessor via ``superseded_by_id``. ``run_id`` here is the
+                # NEW row's id, so the finalize PATCH below will target our
+                # own row — not collapse two executions into one as the old
+                # row-merge behavior did.
                 print(
                     f"warning: dedup hit — equivalent command-run id={superseded_by_id} "
                     f"is still in flight.",
@@ -721,6 +728,36 @@ def kali_exec(
                         "Pass --force to bypass.",
                         file=sys.stderr,
                     )
+                    # Block-mode: the new row exists in the database and must
+                    # land in a terminal status so sweep-orphans does not pick
+                    # it up. ``aborted-dedup`` records "we would have run but
+                    # a peer was already in flight" — distinct from `killed`
+                    # (which implies a subprocess actually ran) and from
+                    # `superseded` which is reserved for intel rows.
+                    if run_id is not None:
+                        try:
+                            _patch_finalize(
+                                client,
+                                run_id=run_id,
+                                status="aborted-dedup",
+                                return_code=None,
+                                ended_at_iso=_utcnow_iso(),
+                                duration_ms=0,
+                                stdout_preview="",
+                                stderr_preview="",
+                                timed_out=False,
+                                partial_results=False,
+                                peak_rss_bytes=None,
+                                cpu_user_seconds=None,
+                                cpu_system_seconds=None,
+                                strace_path=None,
+                            )
+                        except AssessError as exc:
+                            print(
+                                f"warning: aborted-dedup finalize PATCH failed: {exc}; "
+                                "row may stay running and need orphan sweep.",
+                                file=sys.stderr,
+                            )
                     return KaliResult(
                         run_id=run_id,
                         status="superseded",
