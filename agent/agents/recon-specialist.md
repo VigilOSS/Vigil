@@ -131,10 +131,13 @@ Strong kill signals:
 
 ## Pre-Output Coverage Self-Check
 
-Before producing output, verify against this checklist. Each item maps to a mandatory
-methodology step — if a step did not run, the corresponding item is a hard fail, not a
-soft "noted gap." STOP your output and either rerun the missing step or declare the
-specific blocker in `#### Coverage Gaps` so the operator can re-dispatch with depth.
+Before producing output, verify against this checklist. Each item maps to a methodology
+step. If a step did not run, declare it explicitly under `#### Coverage Gaps` with the
+reason and the dispatch-mode authorization (if any). The operator decides whether to
+re-dispatch — your job is to surface the gap honestly, not to silently complete with
+partial coverage. The dispatch-mode escape hatch in the Load First section above defines
+which skips are pre-authorized; everything else is a real gap and belongs in
+`#### Coverage Gaps`.
 
 ### Methodology Tool Sequence (mandatory; fail loudly)
 - [ ] **wafw00f** ran first against every live in-scope host; WAF tier recorded and
@@ -160,8 +163,15 @@ specific blocker in `#### Coverage Gaps` so the operator can re-dispatch with de
   no trigger match" so the absence is intentional, not forgotten.
 
 ### Trust Boundary Checkpoints
+
+Operator-side rules live here; mechanics live in the skills. The egress reputation check
+procedure (curl loop, `egress_block_pct` math, the four mitigation options, and the
+re-sample loop) is owned by `agent/skills/web-recon/SKILL.md` Step 0b and the
+`agent/references/runtime-guides/cdn-ip-blocking.md` reference; this role file just
+verifies it ran and the right durable rows were written.
+
 - [ ] **Vendor-SaaS hosts warned to the operator with a scope_decision row recorded.** Any host whose CNAME / rDNS shape, banner, or HTTP fingerprint matches a vendor-managed SaaS platform (per `agent/scripts/assess/lib/scope.py:host_is_vendor_saas`) has been surfaced to the operator with a one-line warning AND a scope_decision row written via `aith assess dispatch record-decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user`. The warning is informational (default-permissive); the operator decides in/out/partial scope and updates the row. Hosts authored as an explicit literal in `scope.json` skip the warning — the literal is already an in-scope decision.
-- [ ] **Egress reputation check run after subdomain-enum + httpx populated `live_hosts.txt`.** Step 0b of `agent/skills/web-recon/SKILL.md` ran. If `egress_block_pct > 50`, the dispatch paused, re-sampled five minutes later, and only surfaced the Egress reputation checkpoint when the second sample stayed >50%. Continuing through nmap/ffuf/nuclei from a confirmed blocked egress is a hard failure of this dispatch.
+- [ ] **Egress reputation check run after subdomain-enum + httpx populated `live_hosts.txt`.** Procedure ran per `agent/skills/web-recon/SKILL.md` Step 0b. If `egress_block_pct > 50`, the skill's re-sample-and-checkpoint loop fired and the four-option choice was recorded via `aith assess dispatch record-decision --kind egress_decision`. Hosts that returned 100% 403 were written to `$DIR/scans/egress_blocked_hosts.txt` so subsequent ingestion defers them with `cluster_key=deferred:egress-blocked`. Continuing through nmap/ffuf/nuclei from a confirmed blocked egress wastes the dispatch — declare it in `#### Coverage Gaps` instead.
 
 ### Network Layer
 - [ ] All non-web services identified and triaged (SSH, FTP, SMTP, database, custom)
@@ -180,15 +190,13 @@ SAN list spanning multiple tenants; rDNS resolves a host to a known shared platf
 shapes that show none of those signals, the checks are pure overhead — declare the
 "no shared-frontend signal" rationale in `#### Coverage Gaps` and skip without penalty.
 
-- [ ] **Multi-time DNS resolution run** (5 samples × 10s spacing via `for i in 1 2 3 4 5;
-  do dig +short $host A; sleep 10; done | sort -u`); split-VIP detected if the unique-IP
-  count is >= 2, and each unique IP probed independently for cert / banner / open-port
-  differences. Procedure in `agent/references/tools/recon/openssl-sans.md` step 4.
-- [ ] **Cross-host SAN collision check run** (`for h in $HOSTS; do openssl s_client ... |
-  x509 -ext subjectAltName | grep -oE 'DNS:[^,]+' | sort -u; done | sort | uniq -c | sort
-  -rn`); shared multi-tenant certs flagged for tenant-identity disclosure analysis, and
-  every count >= 2 entry recorded as an intel-note plus fed back as Phase 1a subdomain
-  expansion seeds. Procedure in `agent/references/tools/recon/openssl-sans.md` step 2.
+The probe procedures (multi-time DNS loop, cross-host SAN collision counter, vhost-cert
+mismatch detector) live in `agent/skills/tls-vhost-correlation/SKILL.md` and the paired
+recipe at `agent/references/tools/recon/openssl-sans.md`. Load that skill when the
+shared-frontend trigger fires.
+
+- [ ] **Multi-time DNS resolution run** when a shared-frontend signal fired. Split-VIP detected if the unique-IP count is >= 2, and each unique IP probed independently for cert / banner / open-port differences. Procedure: `agent/skills/tls-vhost-correlation/SKILL.md` "Multi-time DNS resolution" + `agent/references/tools/recon/openssl-sans.md` step 4.
+- [ ] **Cross-host SAN collision check run** when a shared-frontend signal fired. Shared multi-tenant certs flagged for tenant-identity disclosure analysis; every collision (count >= 2) recorded as an intel-note and fed back as a Phase 1a subdomain expansion seed. Procedure: `agent/skills/tls-vhost-correlation/SKILL.md` "Cross-host SAN collision detection" + `agent/references/tools/recon/openssl-sans.md` step 2.
 
 ### Web Technology Layer
 - [ ] Server software and version identified (or confirmed hidden behind proxy)

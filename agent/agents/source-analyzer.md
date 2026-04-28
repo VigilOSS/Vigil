@@ -103,23 +103,30 @@ Before producing output, verify you extracted from every source available:
       version's exact patch level for CVE matching.
 
 ### Vendor-Platform Deep-Enumeration and CSP Re-baseline
+
+The mechanics for both checks below — when they fire, the exact probes, the per-vendor
+playbooks, and the IDOR-boundedness test — live in the skills. Load
+`agent/skills/source-analysis/SKILL.md` §6b (vendor-product CSP/CORS re-baseline + deep-enum
+handoff) and `agent/skills/vendor-platform-enum/SKILL.md` (Salesforce Aura / ServiceNow
+GlideRecord / Drupal JSON:API / Pexip admin-API playbooks) when the source-map fingerprint
+flags a vendor multi-tenant platform. The role-side rule is the trigger: when the trigger
+fires, run the matching skill's procedure in the same dispatch — surfacing one anonymous
+read primitive without sweeping the namespace misses the systemic exposure.
+
 - [ ] **Vendor-platform deep-enum playbook run when one Salesforce / ServiceNow / Drupal /
-      Pexip leak is found in source-map fingerprint.** When the source-map fingerprint or
-      the `sources[]` paths inside the .map files match a vendor multi-tenant platform
-      AND any anonymous read primitive surfaces from the source analysis (a route the
-      bundle calls without `Authorization`, a hardcoded admin path, an exposed
-      `getRecordWithFields` endpoint), the same dispatch ran the matching deep-enum
-      playbook from `agent/skills/vendor-platform-enum/SKILL.md` (namespace enumeration,
-      tenant-singleton reads, chain-walks, IDOR boundedness test). Stopping at the first
-      leak misses the full anonymous-readable namespace.
+      Pexip leak is found in source-map fingerprint.** Trigger: source-map fingerprint or
+      `sources[]` paths match a vendor multi-tenant platform AND any anonymous read
+      primitive surfaces from the source analysis. Procedure (namespace enumeration,
+      tenant-singleton reads, chain-walks, IDOR boundedness test) lives in
+      `agent/skills/vendor-platform-enum/SKILL.md`; stopping at the first leak misses the
+      full anonymous-readable namespace.
 - [ ] **Vendor-template CSP / CORS re-baseline check run when a vendor-product fingerprint
-      matches.** Headers re-pulled and grepped for installer-template placeholder
-      literals (`https://example.com`, `localhost`, `placeholder`, etc. — full set in
-      `agent/references/payloads/csp-default-grep.md`); `'unsafe-inline'` + `'unsafe-eval'`
-      combination check run inside `script-src`; overly-broad wildcards
-      (`*.amazonaws.com`, `https:` alone, `data:`, `blob:` in `script-src`) flagged. When
-      one item fires, the vendor's published "production hardening checklist" was
-      retrieved and cross-checked.
+      matches.** Trigger: a fingerprinted vendor product (Salesforce Communities,
+      ServiceNow, Drupal, Pexip, Cisco appliance). Procedure (header re-pull + placeholder
+      literal grep + `'unsafe-inline'` + `'unsafe-eval'` combo check + overly-broad
+      wildcard check + vendor hardening-checklist cross-reference) lives in
+      `agent/skills/source-analysis/SKILL.md` §6b "Vendor-product CSP / CORS re-baseline";
+      payload regex set lives in `agent/references/payloads/csp-default-grep.md`.
 
 ### Coverage Gaps
 For any analysis you could NOT complete (minified code too opaque, files behind auth, etc.),

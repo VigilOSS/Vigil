@@ -26,7 +26,11 @@ class AssessmentClient:
     MAX_RETRIES = 3
     BACKOFF_BASE = 1  # seconds
 
-    def __init__(self, base_url: str, engagement_key: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        engagement_key: str,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.engagement_key = engagement_key
         parsed = urlparse(self.base_url)

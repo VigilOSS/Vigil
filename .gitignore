@@ -15,4 +15,9 @@ agent/engagements/*
 !agent/engagements/.gitkeep
 CLAUDE-REVIEW.md
 CODEX-FINDINGS.md
-build/
+
+# Build artifacts (note: `**/*.egg-info/` is already covered above; `**/build/`
+# catches build/ at any path including the repo root)
+**/build/
+prev-issues.md
+potentially-updated-issues.md

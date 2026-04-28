@@ -4,10 +4,10 @@ Use when `aith assess kali --help` errors, a verb fails unexpectedly, or an audi
 
 ## Diagnosis
 
-1. **Local readiness and live state.** `aith doctor` and `aith status`. `aith doctor` checks dtach reachability inside the runtime, the orchestrator backend on `127.0.0.1:18000`, and the engagement directory layout. `aith status` shows the configured runtime resource tier and live cgroup state.
+1. **Local readiness and live state.** `aith doctor` and `aith status`. `aith doctor` checks dtach reachability inside the runtime, the orchestrator backend on the configured base URL, the engagement directory layout, and orphaned `<run_uuid>.failed-audit` markers per engagement under `scans/kali/` (a non-empty marker list means the pre-exec audit POST failed for those runs and the operator should investigate connectivity). `aith status` shows the configured runtime resource tier and live cgroup state.
 2. **Runtime container state.** `aith runtime status` confirms the container is up, the image ID matches the configured tag, and the `/engagements` bind mount is current.
 3. **Configured resource tier.** `aith runtime resources` prints the tier (`Lab/CTF` / `Standard` / `Heavy` / `Comfortable`) and the live cgroup values from inside the container (`/sys/fs/cgroup/memory.max`, `cpu.max`). When OOM events show up in audit rows, this is the first thing to check.
-4. **Engagement context.** If `aith assess kali --help` errors with an engagement-not-found message, run `aith engagement list` to confirm `ENGAGEMENT_DIR` is set and the engagement has a backend record. The CLI reads `engagement.json` and `.orchestrator.env` from the engagement directory; missing or stale either one breaks the audit POST.
+4. **Engagement context.** If `aith assess kali --help` errors with an engagement-not-found message, run `aith engagement list` to confirm `ENGAGEMENT_DIR` is set and the engagement has a backend record. The CLI reads `engagement.json` from the engagement directory; missing or stale `engagement.json` breaks the audit POST. The orchestrator base URL is resolved through `ORCHESTRATOR_BASE_URL` (env var, highest precedence), then a per-engagement `.orchestrator.env`, then `aith config get orchestrator_base_url`, then the hardcoded default `http://127.0.0.1:18000`. To change the port persistently without editing code or env files, run `aith config set orchestrator_base_url http://127.0.0.1:<port>`.
 5. **Restart the runtime if unhealthy.** `aith runtime restart` recreates the container with the current image and bind mount. No engagement data moves; only the container is replaced.
 6. **Inspect runtime logs when needed.** `aith logs runtime --lines 120` tails container stdout/stderr.
 
@@ -125,7 +125,7 @@ catching a sibling agent's later parallel run of the same binary.
 After install or an image rebuild, the canonical smoke test is:
 
 ```bash
-aith assess kali --help                       # lists all 15 verbs
+aith assess kali --help                       # lists all 20 verbs
 aith assess kali nmap-scan --help             # shows the typed flag set
 aith assess contract kali nmap-scan           # canonical schema + helper defaults + example
 aith runtime status                           # container up, image current, mount current

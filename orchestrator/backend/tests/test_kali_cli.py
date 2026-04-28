@@ -623,6 +623,7 @@ def _stub_container_helpers(monkeypatch):
     monkeypatch.setattr(kali, "_read_container_pid", lambda *_a, **_k: None)
     monkeypatch.setattr(kali, "_kill_in_container", lambda *_a, **_k: None)
     monkeypatch.setattr(kali, "_cleanup_container_pid_file", lambda *_a, **_k: None)
+    monkeypatch.setattr(kali, "_pkill_in_container_by_argv", lambda *_a, **_k: False)
     yield
 
 
@@ -711,6 +712,15 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
     assert payload["working_dir"]
     assert payload["scope_version"]
     assert payload["auth_context"] == "cookies"
+    # P1 schema fix: the CLI must propagate its engagement-wide run_uuid into
+    # the POST so the backend's `run_uuid` column matches the wrapper pid file
+    # key (`/tmp/aith-pid-<run_uuid>.pid`). Without this, sweep-orphans cannot
+    # find the pid file from the DB column and falls back to regex-parsing
+    # stdout_path — which breaks when the artifact dir is reconfigured.
+    assert payload.get("run_uuid"), "CLI must propagate run_uuid into POST"
+    # The run_uuid the CLI generated should also appear in the stdout_path so
+    # legacy regex consumers keep working.
+    assert payload["run_uuid"] in payload["stdout_path"]
 
     # Finalize PATCH followed.
     assert len(fake_client.patches) == 1
@@ -828,6 +838,13 @@ def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_enga
     assert '&& exec "$@"' in wrapper
     assert "|| (echo" in wrapper and "PID write to" in wrapper and "failed" in wrapper
     assert wrapper.count('exec "$@"') == 2
+    # B1 race fix: `sync` between the pid-file write and `exec` flushes the
+    # dirent so the host helper's `docker exec cat` cannot race and see an
+    # empty file even when the in-container process is alive.
+    assert "&& sync &&" in wrapper, (
+        "wrapper must sync the pid-file write before exec to prevent the host "
+        "helper racing on an empty dirent"
+    )
     # ``sh`` placeholder makes ``$@`` skip the script-name positional.
     assert argv[6] == "sh"
     assert argv[7:] == ["nmap", "-sV", "10.0.0.1"]
@@ -914,7 +931,13 @@ def test_b1_timeout_without_pid_file_falls_back_to_host_kill(
 ):
     """B1 edge: when the wrapper hadn't written the pid file yet (race) or
     the container is gone (read fails), the helper must log a warning and
-    still issue the host-side process-group kill cascade rather than crash."""
+    still issue the host-side process-group kill cascade rather than crash.
+
+    The fallback path also tries ``docker exec pkill -f <argv-fingerprint>``
+    so a SIGTERM-trapping tool whose pid file is missing still receives a
+    cross-namespace signal rather than only the host-side ``os.killpg`` that
+    cannot reach the in-container process.
+    """
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -927,6 +950,14 @@ def test_b1_timeout_without_pid_file_falls_back_to_host_kill(
         "_kill_in_container",
         lambda container, pid, sig: docker_kills.append((sig, pid)),
     )
+    pkill_calls: list[tuple[list[str], str]] = []
+
+    def fake_pkill(container, argv, sig):
+        pkill_calls.append((list(argv), sig))
+        return True  # report a match so the cascade knows the fallback worked
+
+    monkeypatch.setattr(kali, "_pkill_in_container_by_argv", fake_pkill)
+
     host_signals: list[int] = []
     monkeypatch.setattr(kali.os, "killpg", lambda pgid, sig: host_signals.append(sig))
     monkeypatch.setattr(kali.os, "getpgid", lambda pid: pid)
@@ -960,8 +991,15 @@ def test_b1_timeout_without_pid_file_falls_back_to_host_kill(
 
     err = capsys.readouterr().err
     assert "in-container pid file missing" in err
-    assert docker_kills == []  # no in-container kill possible
-    assert signal.SIGTERM in host_signals  # but host-side cascade still fired
+    assert "falling back to docker exec pkill" in err
+    assert docker_kills == []  # no pid-targeted in-container kill possible
+    # The pkill fallback fired with the user-command argv as the fingerprint
+    # and at least the SIGTERM leg ran (SIGKILL leg is conditional on the
+    # SIGTERM grace expiring, which this test does not exercise).
+    assert pkill_calls, "pkill fallback must run when no pid file exists"
+    assert pkill_calls[0][0] == ["nuclei", "-l", "hosts.txt"]
+    assert pkill_calls[0][1] == "TERM"
+    assert signal.SIGTERM in host_signals  # host-side cascade still fired
 
 
 @pytest.mark.integration
@@ -1041,6 +1079,85 @@ def test_b1_orphan_cleanup_via_live_runtime():
         f"aith stdout: {proc.stdout}\naith stderr: {proc.stderr}\n"
         f"pgrep stdout: {pgrep.stdout}"
     )
+
+
+@pytest.mark.integration
+def test_b1_timeout_kills_sigterm_trapping_in_container_pid():
+    """B1 SIGKILL-fallback acceptance test against a SIGTERM-trapping victim.
+    Spawns ``trap '' TERM; exec sleep 600`` so only the cascade's SIGKILL leg
+    (``docker exec kill -9`` against the wrapper-recorded PID) can reap it."""
+    import shutil
+    import time as _time
+
+    if shutil.which("docker") is None:
+        pytest.skip("docker CLI not on PATH")
+    container = "security-research"
+    health = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{container}$"],
+        check=False, capture_output=True, text=True, timeout=10,
+    )
+    if container not in (health.stdout or "").splitlines():
+        pytest.skip(f"runtime container '{container}' is not running")
+    aith = shutil.which("aith")
+    if aith is None:
+        pytest.skip("aith CLI not on PATH")
+
+    def _ls_pid_files() -> set[str]:
+        r = subprocess.run(
+            ["docker", "exec", container, "sh", "-c",
+             "ls /tmp/aith-pid-*.pid 2>/dev/null || true"],
+            check=False, capture_output=True, text=True, timeout=10,
+        )
+        return {ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()}
+
+    before = _ls_pid_files()
+    proc = subprocess.run(
+        [aith, "assess", "kali", "exec",
+         "--technique", "RECON",
+         "--intent", "B1 SIGKILL-fallback acceptance test",
+         "--probe-kind", "fingerprint", "--phase", "recon", "--timeout", "5",
+         "--", "bash", "-c", "trap '' TERM; exec sleep 600"],
+        check=False, capture_output=True, text=True, timeout=90,
+    )
+    _time.sleep(3)  # grace for cascade's final wait + pid-file unlink
+
+    new_pid_files = _ls_pid_files() - before
+    leftover_pids: list[tuple[str, str]] = []
+    for pid_path in new_pid_files:
+        cat = subprocess.run(
+            ["docker", "exec", container, "cat", pid_path],
+            check=False, capture_output=True, text=True, timeout=5,
+        )
+        leftover_pids.append((pid_path, (cat.stdout or "").strip()))
+    pgrep = subprocess.run(
+        ["docker", "exec", container, "pgrep", "-f", "sleep 600"],
+        check=False, capture_output=True, text=True, timeout=10,
+    )
+    survivors = [ln for ln in (pgrep.stdout or "").splitlines() if ln.strip()]
+
+    # Clean up FIRST so the shared runtime stays repeatable even on failure.
+    if survivors:
+        subprocess.run(["docker", "exec", container, "pkill", "-9", "-f", "sleep 600"],
+                       check=False, capture_output=True, timeout=10)
+    for pid_path, _ in leftover_pids:
+        subprocess.run(["docker", "exec", container, "rm", "-f", pid_path],
+                       check=False, capture_output=True, timeout=10)
+
+    assert not survivors, (
+        f"SIGTERM-trapping victim survived the cascade — SIGKILL leg broken.\n"
+        f"aith stdout: {proc.stdout}\naith stderr: {proc.stderr}\n"
+        f"pgrep stdout: {pgrep.stdout}"
+    )
+    for pid_path, recorded in leftover_pids:
+        if not recorded:
+            continue
+        alive = subprocess.run(
+            ["docker", "exec", container, "kill", "-0", recorded],
+            check=False, capture_output=True, timeout=5,
+        )
+        assert alive.returncode != 0, (
+            f"pid file {pid_path} still points to live PID {recorded} after timeout"
+        )
 
 
 def test_kali_exec_dedup_warns_and_returns_early_without_force(
@@ -2552,6 +2669,7 @@ def _setup_sweep_test(monkeypatch, fake_engagement, rows):
             engagement_dir=str(fake_engagement),
             engagement_key=fake_engagement.name,
             agent_root=str(fake_engagement.parent.parent),
+            
         )
 
     monkeypatch.setattr(sweep, "load_config", fake_load_config)
@@ -2747,6 +2865,49 @@ def test_sweep_orphans_handles_missing_pid_file_as_dead(monkeypatch, fake_engage
     for _, payload in fake_client.patches:
         assert payload["status"] == "lost"
         assert payload["return_code"] is None
+
+
+def test_sweep_orphans_uses_db_run_uuid_when_present(monkeypatch, fake_engagement):
+    """P1 schema fix: ``run_uuid`` is the DB column on assessment_command_runs;
+    sweep-orphans must prefer that column over parsing the stdout_path regex.
+    The regex is kept only as a fallback for legacy rows pre-plumbing.
+
+    Set up a row where the DB column carries one uuid and stdout_path carries
+    a DIFFERENT uuid (simulating a custom artifact dir or legacy layout) — the
+    sweep must lookup the pid file using the DB-column value.
+    """
+    db_uuid = "ffff9999"
+    legacy_path_uuid = "0000aaaa"  # what the regex would have returned
+    row = _orphan_row(row_id=42, age_seconds=7200, run_uuid=legacy_path_uuid)
+    row["run_uuid"] = db_uuid  # canonical source — this is what sweep should use
+    rows = [row]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    cat_args: list[str] = []
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[3] == "cat":
+            cat_args.append(argv[-1])
+            # Pid file missing — return non-zero to skip kill -0 and finalize as lost.
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        if argv[3] == "kill":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    # The cat call must have asked for the DB-column uuid's pid file, not the
+    # legacy regex value. This is the load-bearing assertion of the P1 fix.
+    assert cat_args, "sweep must look up at least one pid file"
+    assert cat_args[0] == f"/tmp/aith-pid-{db_uuid}.pid"
+    assert legacy_path_uuid not in cat_args[0]
 
 
 def test_sweep_orphans_respects_max_age_threshold(monkeypatch, fake_engagement):

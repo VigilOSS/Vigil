@@ -216,6 +216,24 @@ exposed.
 - [ ] Check if `<script>` tags loading from third-party domains use SRI hashes
 - [ ] Test if missing SRI allows content injection via compromised CDN
 
+## Output Contract
+
+The skill produces these structured sections in the source-analyzer's return payload.
+Backend writes (`record-finding`, `record-intel`, `record-surface`,
+`ingest-endpoints`, `record-handoff`) are the durable record; this contract names what
+each markdown section should hold so downstream specialists can parse the output
+consistently.
+
+| Section | Holds |
+|---|---|
+| `#### Summary` | One-paragraph headline: bundles analyzed, route count extracted, secret-scan hits, vendor-platform fingerprint hits, app-version pinned. |
+| `#### Findings` | Decisive findings the source pass already proved (e.g., a live API key with non-empty value, a secret string verified against a third-party endpoint). Each must also be recorded via `aith assess record-finding`. |
+| `#### Surface Candidates` | Requestable endpoints, API bases, hidden routes, GraphQL endpoints, admin paths extracted from JS / source maps / inline config — each surfaced via `aith assess record-surface` and ingested via `aith assess ingest-endpoints "$DIR/cases.db" source-analysis`. |
+| `#### Secrets` | Secret-scan hits (API keys, JWT samples, AWS access-key prefixes, internal hostnames, tokens) with confidence and matched pattern. Confirmed-live secrets escalate to `#### Findings`; unverified hits stay here as leads. |
+| `#### Backend Hypotheses` | Inferred backend shape from frontend evidence — auth role checks, feature flags, internal-only branches, tenant IDs, callback routes, proxy base paths, debugging toggles. Drives the next-step list for vulnerability-analyst dispatch. |
+| `#### Intelligence` | Tech components from bundle fingerprinting, vendor-product fingerprints (Salesforce / ServiceNow / Drupal / Pexip), APP_VERSION / BUILD_HASH / Sentry-release constants for osint-analyst triangulation, vendor-template CSP / CORS placeholder hits — each row landed via `aith assess record-intel <type>`. |
+| `#### Coverage Gaps` | Bundles too minified to analyze, files behind auth, source-maps not present, vendor-platform deep-enum trigger fired but the matching playbook could not run. The operator reads this section to decide whether to re-dispatch. |
+
 ## Extended Resources
 
 - `agent/references/payloads/info-disclosure-probes.md` — standard probe endpoints, metadata paths, and environment file paths

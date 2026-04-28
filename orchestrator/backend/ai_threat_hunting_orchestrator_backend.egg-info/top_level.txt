@@ -1,4 +1,0 @@
-app
-data
-scripts
-tests

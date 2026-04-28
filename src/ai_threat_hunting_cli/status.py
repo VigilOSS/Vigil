@@ -15,7 +15,7 @@ from .config import get_config_value
 from .engagements import list_engagements
 from .oob import oob_status
 from .orchestrator import orchestrator_status
-from .paths import resolve_orchestrator_base_url
+from .paths import engagements_root, resolve_orchestrator_base_url
 from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
 
 
@@ -124,6 +124,7 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
         checks.append(Check("orchestrator-health", "OK" if _orchestrator_healthy(install_root) else "FAIL"))
     backup = latest_backup(install_root)
     checks.append(Check("backup-latest", "OK" if backup else "MISSING", str(backup.path) if backup else ""))
+    checks.append(_failed_audit_marker_check(install_root))
     checks.append(Check("oob.frp_token", "OK" if os.environ.get("AI_THREAT_HUNTING_FRP_TOKEN") or get_config_value("oob.frp_token") else "MISSING"))
     return checks
 
@@ -162,3 +163,57 @@ def _orchestrator_healthy(install_root: Path) -> bool:
             return response.status == 200
     except OSError:
         return False
+
+
+def list_failed_audit_markers(engagement_dir: Path) -> list[Path]:
+    """Return ``<run_uuid>.failed-audit`` markers under ``scans/kali/`` for one engagement.
+
+    Each marker is written by ``agent/scripts/assess/lib/kali.py`` when the
+    pre-exec audit POST to the orchestrator backend fails — the assess CLI
+    keeps running the subprocess so the operator sees results, but the audit
+    row never lands. A pile of these on a long engagement signals silent
+    coverage drift, so any surface that wants to nag the operator (doctor,
+    a future cleanup verb) can call this helper.
+
+    Returns the markers sorted newest-first by mtime so callers can show the
+    most recent ones without re-sorting. Missing directories return ``[]``.
+    """
+    marker_dir = engagement_dir / "scans" / "kali"
+    if not marker_dir.is_dir():
+        return []
+    markers = [path for path in marker_dir.glob("*.failed-audit") if path.is_file()]
+    markers.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return markers
+
+
+def _failed_audit_marker_check(install_root: Path) -> Check:
+    """Surface orphaned ``<run_uuid>.failed-audit`` markers across engagements.
+
+    The marker is the only on-disk signal that an ``aith assess kali`` run
+    proceeded without a backend audit row. Nothing else inspects them —
+    ``sweep-orphans`` ignores them, the runtime never re-tries the POST —
+    so they accumulate silently. Surface a WARN with per-engagement counts
+    plus the most recent marker paths (capped at 5 per engagement) so the
+    operator can decide whether to investigate or sweep.
+    """
+    root = engagements_root(install_root)
+    if not root.is_dir():
+        return Check("failed-audit-markers", "OK", "no engagements directory")
+    per_engagement: list[tuple[Path, list[Path]]] = []
+    total = 0
+    for eng_dir in sorted(root.glob("*")):
+        if not eng_dir.is_dir() or not (eng_dir / "scope.json").is_file():
+            continue
+        markers = list_failed_audit_markers(eng_dir)
+        if markers:
+            per_engagement.append((eng_dir, markers))
+            total += len(markers)
+    if total == 0:
+        return Check("failed-audit-markers", "OK", "no orphaned markers")
+    parts: list[str] = [f"{total} orphaned marker(s) across {len(per_engagement)} engagement(s)"]
+    for eng_dir, markers in per_engagement:
+        recent = markers[:5]
+        recent_paths = ", ".join(str(path) for path in recent)
+        suffix = f" (+{len(markers) - len(recent)} more)" if len(markers) > len(recent) else ""
+        parts.append(f"{eng_dir.name}: {len(markers)} — {recent_paths}{suffix}")
+    return Check("failed-audit-markers", "WARN", "; ".join(parts))

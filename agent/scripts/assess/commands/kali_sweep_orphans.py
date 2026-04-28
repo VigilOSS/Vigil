@@ -7,9 +7,12 @@ them alone (the in-container PID is still alive) or finalizes them to
 ``status=lost`` (the PID is gone or the wrapper pid file is missing).
 
 The wrapper shell in ``kali.py:_build_docker_exec`` writes the in-container
-PID to ``/tmp/aith-pid-<run_uuid>.pid``. The ``run_uuid`` is not stored as a
-column on the row, so we parse it out of ``stdout_path`` (which is shaped
-``scans/kali/<run_uuid>.out``). See ``_run_uuid_from_stdout_path``.
+PID to ``/tmp/aith-pid-<run_uuid>.pid``. The canonical source of ``run_uuid``
+is the DB column on ``assessment_command_runs`` (CLI-generated, written into
+the row via the pre-exec POST). The legacy regex parse against ``stdout_path``
+(``scans/kali/<run_uuid>.out``) is kept as a fallback for rows written before
+the CLI propagated ``run_uuid`` into the POST payload — see
+``_resolve_run_uuid``.
 """
 from __future__ import annotations
 
@@ -111,13 +114,14 @@ def _row_age_seconds(row: dict, now: _dt.datetime) -> float | None:
 
 
 def _run_uuid_from_stdout_path(stdout_path: str | None) -> str | None:
-    """Extract the engagement-wide ``run_uuid`` from the recorded stdout path.
+    """Legacy fallback: parse ``run_uuid`` out of ``stdout_path``.
 
     The wrapper in ``kali.py:_build_docker_exec`` writes the in-container PID
     to ``/tmp/aith-pid-<run_uuid>.pid`` and ``stdout_path`` is recorded as
-    ``<eng-dir>/scans/kali/<run_uuid>.out``. We do not store ``run_uuid`` as
-    a column on the row, so this regex parse against the path is the only way
-    to recover the identifier the pid file was keyed under.
+    ``<eng-dir>/scans/kali/<run_uuid>.out``. ``run_uuid`` is now the canonical
+    DB column (``assessment_command_runs.run_uuid``), but rows written before
+    that plumbing existed only carry it implicitly via ``stdout_path``. This
+    helper is kept as a fallback for those legacy rows.
 
     Returns None when the path is missing, empty, or does not match the
     expected layout (legacy rows, custom paths). Callers treat None as "pid
@@ -130,6 +134,21 @@ def _run_uuid_from_stdout_path(stdout_path: str | None) -> str | None:
     if not match:
         return None
     return match.group("run_uuid")
+
+
+def _resolve_run_uuid(row: dict) -> str | None:
+    """Pick ``run_uuid`` from the DB column when present, else fall back to
+    parsing ``stdout_path``. The DB column is the primary source because it
+    is independent of the artifact-dir layout — the regex returns None for
+    any row whose stdout_path was reconfigured to a non-default location.
+
+    The fallback exists for rows written before the CLI propagated
+    ``run_uuid`` into the POST payload; once those rows finalize naturally
+    or are reaped here, the fallback becomes dead code."""
+    direct = row.get("run_uuid")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    return _run_uuid_from_stdout_path(row.get("stdout_path"))
 
 
 def _container_pid_file(run_uuid: str) -> str:
@@ -252,7 +271,7 @@ def run(args) -> None:
                     )
                 continue
 
-            run_uuid = _run_uuid_from_stdout_path(row.get("stdout_path"))
+            run_uuid = _resolve_run_uuid(row)
             container_pid: int | None = None
             if run_uuid:
                 container_pid = _read_container_pid(args.container_name, run_uuid)

@@ -11,7 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .paths import engagements_root, resolve_orchestrator_base_url, resolve_orchestrator_data_dir
+from .paths import (
+    DEFAULT_ORCHESTRATOR_BASE_URL,
+    engagements_root,
+    resolve_orchestrator_base_url,
+    resolve_orchestrator_data_dir,
+)
 
 AUTH_MODES = {"none", "manual", "auth_json", "proxy_capture"}
 ENGAGEMENT_TYPES = {"web", "code", "both"}
@@ -193,10 +198,25 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     # agent/scripts/assess/lib/kali.py (`_resolve_agent_name`) so the env file
     # only carries `ORCHESTRATOR_BASE_URL`; specialists still override
     # AGENT_NAME=<role> in their dispatch wrapper.
-    (eng_dir / ".orchestrator.env").write_text(
-        "ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000\n",
-        encoding="utf-8",
-    )
+    #
+    # Only seed `.orchestrator.env` when an explicit override is in effect.
+    # The default base URL falls through `resolve_orchestrator_base_url`
+    # (env var → engagement env file → `aith config get orchestrator_base_url`
+    # → hardcoded default), so writing the default into the file would just
+    # confuse operators reading it ("do I edit this to change the port?").
+    # When an override IS configured (via env var or `aith config`), we
+    # snapshot it into the engagement file so the launcher re-exports it.
+    resolved_base_url = resolve_orchestrator_base_url(install_root, eng_dir)
+    if resolved_base_url and resolved_base_url != DEFAULT_ORCHESTRATOR_BASE_URL:
+        (eng_dir / ".orchestrator.env").write_text(
+            f"ORCHESTRATOR_BASE_URL={resolved_base_url}\n",
+            encoding="utf-8",
+        )
+    else:
+        # Touch an empty file so launcher loops that test ``-f`` don't trip
+        # on a missing path. The launcher's grep falls through to the
+        # default when the file has no ORCHESTRATOR_BASE_URL line.
+        (eng_dir / ".orchestrator.env").write_text("", encoding="utf-8")
     _init_cases_db(agent_root, eng_dir)
 
     client_kind = _install_client_kind(agent_root)
