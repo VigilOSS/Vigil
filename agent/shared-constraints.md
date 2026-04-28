@@ -87,19 +87,23 @@ What to do instead — track the lifecycle of every process you spawn and stop
 only the one you started:
 
 - **Long-running probes — use the job lifecycle.** `aith assess kali job
-  start --intent "<text>" -- <verb> ...` returns a job id and writes an
-  audit row. Stop it cleanly with `aith assess kali job stop <id>`. The
-  job worker SIGTERMs the in-container PID it owns; sibling jobs stay
+  start --technique <enum> --intent "<text>" --probe-kind <kind> --phase
+  <phase> --timeout <seconds> -- <verb> ...` returns a job id and writes
+  an audit row. Stop it cleanly with `aith assess kali job stop <id>`.
+  The job worker SIGTERMs the in-container PID it owns; sibling jobs stay
   alive.
 - **Synchronous `aith assess kali exec` runs — use the run-uuid PID file.**
   Every audit row carries a `run_uuid`. The runtime writes the
   in-container PID to `/tmp/aith-pid-<run_uuid>` for the duration of the
-  run, so cleanup is `aith assess kali exec -- kill -TERM $(cat
-  /tmp/aith-pid-<run_uuid>)`. This signals only your run, not sibling
+  run, so cleanup is `aith assess kali exec --technique META --intent
+  "terminate tracked runtime pid" --probe-kind cleanup --phase <phase>
+  --timeout 30 -- sh -c 'kill -TERM "$(cat
+  /tmp/aith-pid-<run_uuid>.pid)"'`. This signals only your run, not sibling
   runs of the same binary.
 - **Last-resort hygiene for hours-long parallel runs — copy the binary
-  per agent.** `aith assess kali exec -- cp /usr/bin/nmap
-  /usr/local/bin/nmap-${AGENT_NAME}` so a later `pkill -f
+  per agent.** `aith assess kali exec --technique META --intent
+  "create per-agent nmap copy" --probe-kind cleanup --phase <phase>
+  --timeout 30 -- cp /usr/bin/nmap /usr/local/bin/nmap-${AGENT_NAME}` so a later `pkill -f
   nmap-${AGENT_NAME}` only matches your processes. Prefer the job
   lifecycle; reach for this only when two specialists genuinely need
   multi-hour parallel sweeps of the same heavy binary.
@@ -119,7 +123,7 @@ truthful instead of degrading to a stale env-var default.
   `SSRF`, `XSS`, `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`,
   `RFI`, `OPEN-REDIRECT`, `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`,
   `RATE-LIMIT`, `INFO-DISCLOSURE`, `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`,
-  `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `OTHER`. Derive it from the skill you
+  `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `META`, `HEALTH`, `LOG-READ`, `OTHER`. Derive it from the skill you
   loaded: for skills whose name maps 1:1 to an enum value (`ssrf-testing` →
   `SSRF`, `sqli-testing` → `SQLI`, `command-injection` → `CMDI`, etc.), use that
   mapping. When the mapping isn't obvious (e.g. `aws-iam-privesc`,
@@ -178,7 +182,7 @@ When exploitation requires a listener, tunnel, or OOB callback:
 2. Reference `agent/references/offensive-tactics/shell-handling.md` for shell listener commands
 3. Reference `agent/references/offensive-tactics/frp-tunneling.md` for tunnel exposure and OOB callback setup
 4. Wait for operator confirmation before proceeding with steps that depend on the listener/tunnel
-5. After the operator confirms, verify connection by tailing log files via `aith assess kali exec -- cat /data/<log-path>` so the read is recorded in the audit pipeline
+5. After the operator confirms, verify connection by tailing log files via `aith assess kali exec --technique LOG-READ --intent "read listener or OOB log" --probe-kind fingerprint --phase <phase> --timeout 30 -- cat /data/<log-path>` so the read is recorded in the audit pipeline
 
 Agents CAN read log files via `aith assess kali exec` to check for activity (use `--probe-kind fingerprint --technique RECON` since reading a log file is observation, not a payload):
 - `/data/shell-*.log` — shell session I/O (verify shell connected)
@@ -473,7 +477,7 @@ Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are 
 
 Agents READ these files (never write). When `.oob_url` is missing, fall back to time-based detection and note the substitution in your output. When `.listener_url` is missing and exploitation needs one, record a blocked technique via `aith assess post blocked-techniques <json-file>` instead of attempting to bind a port yourself.
 
-Hit-checking and log paths (`/data/oob/clients/<name>.log`, `/data/oob/server.log`, `/data/shell-*.log`, `/data/oob/frpc.log`) are documented in `agent/references/offensive-tactics/frp-tunneling.md` and `agent/references/offensive-tactics/shell-handling.md`. Read them via `aith assess kali exec -- cat /data/<log-path>` so the read is audit-recorded.
+Hit-checking and log paths (`/data/oob/clients/<name>.log`, `/data/oob/server.log`, `/data/shell-*.log`, `/data/oob/frpc.log`) are documented in `agent/references/offensive-tactics/frp-tunneling.md` and `agent/references/offensive-tactics/shell-handling.md`. Read them via `aith assess kali exec --technique LOG-READ --intent "read listener or OOB log" --probe-kind fingerprint --phase <phase> --timeout 30 -- cat /data/<log-path>` so the read is audit-recorded.
 
 ---
 

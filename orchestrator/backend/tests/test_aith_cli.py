@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 repo_root = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(repo_root))
 sys.path.insert(0, str(repo_root / "src"))
 
 
@@ -192,8 +193,8 @@ def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
 
 
 def test_runtime_start_grants_sys_ptrace_capability(tmp_path: Path) -> None:
-    """B2: --strace inside the container needs CAP_SYS_PTRACE; the docker-run argv
-    must request it explicitly so ptrace operations don't fail with EPERM."""
+    """B2: runtime diagnostic tooling needs CAP_SYS_PTRACE; the docker-run argv
+    must request it explicitly so ptrace operations do not fail with EPERM."""
     from ai_threat_hunting_cli.docker import DockerResult
     from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
 
@@ -392,7 +393,9 @@ def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeyp
     assert env["AI_THREAT_HUNTING_INSTALL_DIR"] == str(install_root.resolve())
 
 
-def test_orchestrator_start_builds_frontend_even_when_backend_already_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_orchestrator_start_builds_frontend_then_errors_when_backend_already_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from ai_threat_hunting_cli import orchestrator as orchestrator_module
 
     install_root = tmp_path / "install"
@@ -412,9 +415,17 @@ def test_orchestrator_start_builds_frontend_even_when_backend_already_running(tm
     monkeypatch.setattr(orchestrator_module.subprocess, "run", fake_run)
     monkeypatch.setattr(orchestrator_module, "_pid_running", lambda path: True)
 
-    orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
 
     assert calls == [["npm", "install"], ["npm", "run", "build"]]
+    message = str(excinfo.value)
+    assert "Orchestrator is already running" in message
+    assert "PID: 123" in message
+    assert str(pid_file) in message
+    assert "http://127.0.0.1:18000" in message
+    assert "aith orchestrator restart" in message
+    assert "aith logs orchestrator" in message
 
 
 def test_orchestrator_health_wait_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -605,6 +616,40 @@ def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pyte
     # _check_runtime_ulimits and warns to stderr when low.
 
 
+def test_runtime_start_rejects_already_running_container_with_clear_message(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(
+                0,
+                f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n",
+                "",
+            )
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "exec", "security-research"] and argv[-1] == "ulimit -n; ulimit -u":
+            return DockerResult(0, "1048576\nunlimited\n", "")
+        return DockerResult(0, "", "")
+
+    with pytest.raises(SystemExit) as excinfo:
+        start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
+
+    message = str(excinfo.value)
+    assert "Runtime container is already running" in message
+    assert "container: security-research" in message
+    assert "aith runtime status" in message
+    assert "aith runtime restart" in message
+
+
 def test_check_runtime_ulimits_warns_when_below_threshold(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     from ai_threat_hunting_cli.docker import DockerResult
     from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
@@ -625,7 +670,12 @@ def test_check_runtime_ulimits_warns_when_below_threshold(tmp_path: Path, capsys
             return DockerResult(0, "8192\n4096\n", "")
         return DockerResult(0, "", "")
 
-    start_runtime(RuntimeOptions(install_root=install_root, recreate=False), runner=runner, validate_tools=False)
+    start_runtime(
+        RuntimeOptions(install_root=install_root, recreate=False),
+        runner=runner,
+        validate_tools=False,
+        allow_existing=True,
+    )
     err = capsys.readouterr().err
     assert "WARN: dockerd default ulimits are low" in err
     assert "nofile=8192" in err
@@ -652,7 +702,12 @@ def test_check_runtime_ulimits_silent_when_limits_ok(tmp_path: Path, capsys: pyt
             return DockerResult(0, "1048576\nunlimited\n", "")
         return DockerResult(0, "", "")
 
-    start_runtime(RuntimeOptions(install_root=install_root, recreate=False), runner=runner, validate_tools=False)
+    start_runtime(
+        RuntimeOptions(install_root=install_root, recreate=False),
+        runner=runner,
+        validate_tools=False,
+        allow_existing=True,
+    )
     assert "WARN" not in capsys.readouterr().err
 
 
@@ -676,7 +731,12 @@ def test_check_runtime_ulimits_silent_on_exec_failure(tmp_path: Path, capsys: py
             return DockerResult(1, "", "exec failed")
         return DockerResult(0, "", "")
 
-    start_runtime(RuntimeOptions(install_root=install_root, recreate=False), runner=runner, validate_tools=False)
+    start_runtime(
+        RuntimeOptions(install_root=install_root, recreate=False),
+        runner=runner,
+        validate_tools=False,
+        allow_existing=True,
+    )
     assert "WARN" not in capsys.readouterr().err
 
 

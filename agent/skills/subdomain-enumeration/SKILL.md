@@ -20,9 +20,9 @@ origin: AI Threat Hunting
 Before any active step, confirm every binary in the chain is reachable inside the runtime — puredns silently fails when massdns is missing (zero output, no error, exit code 0), and a dnsx fallback against a typical bruteforce wordlist will spike container CPU before stabilizing. Run the preflight once at the top of Phase 1a:
 
 ```bash
-aith assess kali exec -- which alterx asnmap bbot cero dnsx massdns puredns shuffledns subfinder \
-  --technique RECON --intent "subdomain-enum tooling preflight" \
-  --probe-kind fingerprint --phase recon --timeout 60
+aith assess kali exec --technique HEALTH --intent "subdomain-enum tooling preflight" \
+  --probe-kind fingerprint --phase recon --timeout 60 -- \
+  which alterx asnmap bbot cero dnsx massdns puredns shuffledns subfinder
 ```
 
 If any binary is missing, do NOT silently fall back — pause active enumeration and dispatch a runtime fix:

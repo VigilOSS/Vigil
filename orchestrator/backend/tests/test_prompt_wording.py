@@ -2142,6 +2142,48 @@ def test_subdomain_enum_preflight_binary_order_is_alphabetical():
     )
 
 
+def test_raw_kali_exec_examples_put_audit_flags_before_separator():
+    """Raw `kali exec` examples must put audit flags before the `--` separator.
+
+    argparse treats everything after `--` as the user command, so examples such
+    as `aith assess kali exec -- tail ... --technique RECON` fail before a row
+    is recorded. Pin the source corpus plus rendered wrappers against that
+    regression.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    paths = [
+        repo_root / "agent" / "operator-core.md",
+        repo_root / "agent" / "AGENTS.md",
+        repo_root / "agent" / "CLAUDE.md",
+        repo_root / "agent" / "shared-constraints.md",
+    ]
+    for subdir in ("agents", "skills", "references"):
+        paths.extend(sorted((repo_root / "agent" / subdir).rglob("*.md")))
+
+    invalid_raw_separator = re.compile(r"aith assess kali exec\s+--\s+(?!technique\b)")
+    offenders: list[str] = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if invalid_raw_separator.search(line):
+                offenders.append(f"{path}:{lineno}: {line.strip()}")
+
+    assert not offenders, (
+        "`aith assess kali exec` examples must put audit flags before the raw "
+        "`-- <command>` separator.\n" + "\n".join(offenders)
+    )
+
+
+def test_shared_constraints_lists_non_attack_kali_techniques():
+    repo_root = Path(__file__).resolve().parents[3]
+    shared = (repo_root / "agent" / "shared-constraints.md").read_text(encoding="utf-8")
+    for technique in ("META", "HEALTH", "LOG-READ"):
+        assert technique in shared, (
+            "shared-constraints.md must list the operator-side technique enum "
+            f"{technique}; otherwise agents fall back to OTHER for valid maintenance runs"
+        )
+
+
 def test_scan_type_pseudo_values_removed_from_skills():
     """F1 drift guard — `--scan-type top-1000` / `full-tcp` / `udp-top` /
     `targeted` / `ports-only` were old skill-text drift values that the

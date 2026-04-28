@@ -16,6 +16,7 @@ class OrchestratorOptions:
     port: int = 18000
     build: bool = False
     foreground: bool = False
+    allow_existing: bool = False
 
 
 def start_orchestrator(options: OrchestratorOptions) -> None:
@@ -30,8 +31,11 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
         _build_frontend(install_root)
 
     if _pid_running(pid_file):
-        print(f"orchestrator already running: pid {pid_file.read_text(encoding='utf-8').strip()}")
-        return
+        pid = pid_file.read_text(encoding="utf-8").strip()
+        if options.allow_existing:
+            print(f"orchestrator\talready running\tpid={pid}")
+            return
+        raise SystemExit(_already_running_message(pid_file, pid, options.host, options.port))
 
     env = {
         **os.environ,
@@ -80,6 +84,17 @@ def stop_orchestrator(install_root: Path) -> None:
 def orchestrator_status(install_root: Path) -> str:
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
     return "running" if _pid_running(pid_file) else "stopped"
+
+
+def _already_running_message(pid_file: Path, pid: str, host: str, port: int) -> str:
+    return (
+        "Orchestrator is already running.\n"
+        f"  PID: {pid}\n"
+        f"  PID file: {pid_file}\n"
+        f"  URL: http://{host}:{port}\n"
+        "Use `aith orchestrator status` or `aith logs orchestrator` to inspect it.\n"
+        "Use `aith orchestrator restart` to restart it, or `aith orchestrator stop` to stop it."
+    )
 
 
 def _build_frontend(install_root: Path) -> None:

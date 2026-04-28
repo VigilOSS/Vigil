@@ -2,16 +2,13 @@
 
 Owns the side-effect-heavy plumbing that sits between the host helper and
 the runtime container: building the wrapper shell that records the in-
-container PID, reading that PID back through ``docker exec``, and the kill
-cascade that has to cross the PID namespace boundary on timeout. The
-wrapper-shell semantics and the B1 race fallback (``pkill -f`` against an
-argv fingerprint) live here because they are a single coherent
-responsibility — the host-side ``os.killpg`` cascade in the orchestrator
-just complements these helpers.
+container PID, reading that PID back through ``docker exec``, and exact-PID
+cleanup that has to cross the PID namespace boundary on timeout. The
+host-side ``os.killpg`` cascade in the orchestrator complements these
+helpers when the PID file is unavailable.
 """
 from __future__ import annotations
 
-import re
 import subprocess
 
 from .client import AssessError
@@ -118,41 +115,6 @@ def _kill_in_container(container_name: str, pid: int, signal_name: str) -> None:
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return
-
-
-def _pkill_in_container_by_argv(
-    container_name: str, argv: list[str], signal_name: str
-) -> bool:
-    """Fallback when no pid file exists: ``pkill -f <fingerprint>`` against an
-    argv-derived match string. Returns True if pkill matched at least one
-    process (exit code 0), False otherwise. Used when the wrapper raced with
-    SIGTERM and the pid file is missing — without this fallback, SIGTERM-
-    trapping tools (sqlmap, nuclei) survive a kill cascade that only knows
-    about the host-side ``docker exec`` client.
-
-    The fingerprint is the joined argv of the user command. ``pkill -f``
-    matches on the full command line so a single distinguishable token (the
-    binary plus its first arg, typically a target URL or input list) is
-    enough. We do NOT include shell wrapper tokens — those would also match
-    every other concurrently-running aith run inside the container."""
-    if not argv:
-        return False
-    # Build a fingerprint: first two tokens are usually `<binary> <distinguishing-arg>`
-    # which is unique enough to avoid collateral damage. Avoid shell quoting
-    # nightmares by feeding pkill a plain string; pkill -f matches a regex
-    # against /proc/*/cmdline so we escape regex metacharacters.
-    head = " ".join(argv[: min(2, len(argv))])
-    fingerprint = re.escape(head)
-    try:
-        result = subprocess.run(
-            ["docker", "exec", container_name, "pkill", f"-{signal_name}", "-f", fingerprint],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
 
 
 def _cleanup_container_pid_file(container_name: str, run_uuid: str) -> None:

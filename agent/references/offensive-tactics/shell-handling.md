@@ -61,16 +61,16 @@ aith runtime shell-exec "tmux kill-session -t shell-4444"
 
 ### Log file tailing (LLM visibility)
 
-Agents observe shell output by reading log files via `aith assess kali exec --` — not by attaching to tmux:
+Agents observe shell output by reading log files via `aith assess kali exec` with audit flags before the raw `--` separator — not by attaching to tmux:
 ```bash
 # Via aith assess kali exec — the read lands in the audit pipeline:
-aith assess kali exec -- tail -100 /data/shell-4444.log \
-  --technique RECON --intent "tail shell session log" \
-  --probe-kind fingerprint --phase exploit --timeout 30
+aith assess kali exec --technique LOG-READ --intent "tail shell session log" \
+  --probe-kind fingerprint --phase exploit --timeout 30 -- \
+  tail -100 /data/shell-4444.log
 
-aith assess kali exec -- cat /data/shell-4444.log \
-  --technique RECON --intent "read full shell session log" \
-  --probe-kind fingerprint --phase exploit --timeout 30
+aith assess kali exec --technique LOG-READ --intent "read full shell session log" \
+  --probe-kind fingerprint --phase exploit --timeout 30 -- \
+  cat /data/shell-4444.log
 ```
 
 Log files under `/data/` persist across tmux restarts because `/data` is the
@@ -125,8 +125,8 @@ Agents **MUST NOT:**
 - Kill or restart existing listener or tunnel sessions
 
 Agents **CAN:**
-- Read listener log files (`aith assess kali exec -- tail /data/shell-*.log ...`) so the read lands in the audit pipeline
-- Read OOB callback logs (`aith assess kali exec -- tail /data/oob/clients/<name>.log ...` or `aith assess kali exec -- tail /data/oob/server.log ...`) to check for hits — same audit-pipeline rule
+- Read listener log files (`aith assess kali exec --technique LOG-READ ... -- tail /data/shell-*.log`) so the read lands in the audit pipeline
+- Read OOB callback logs (`aith assess kali exec --technique LOG-READ ... -- tail /data/oob/clients/<name>.log` or `aith assess kali exec --technique LOG-READ ... -- tail /data/oob/server.log`) to check for hits — same audit-pipeline rule
 - Provide reverse shell payloads for the operator to deploy
 - Verify that a shell connected by checking log output
 - Provide authorized runtime commands such as `aith runtime shell-exec "tmux send-keys -t shell-4444 'whoami' Enter"` for the operator to run

@@ -143,6 +143,7 @@ KALI_VERBS: tuple[str, ...] = (
     "whatweb",
     "cero",
     "alterx",
+    "asnmap",
     "bbot",
     "exec",
     "job",
@@ -154,7 +155,6 @@ _KALI_COMMON_NOTES: tuple[str, ...] = (
     "Every kali verb requires --technique, --intent, --probe-kind, --phase, and --timeout. The CLI rejects calls missing any of these before it ever reaches the backend.",
     "--phase is REQUIRED — pass the phase the dispatch was authorized for, not scope.json.current_phase. Allowed: recon, collect, consume-test, verify, exploit, report, code-ingest, code-classify, code-hunt, code-verify, plus the half-phase tags recon-pivot and exploit-recon.",
     "--destructive marks a write/edit/delete on the target (POST/PUT/PATCH/DELETE, file upload, account creation). Read-only probes leave it off.",
-    "--strace wraps the run in `strace -e trace=network,write,unlink` and pins the artifact path on the audit row. Use for high-stakes destructive runs.",
     "--force bypasses the dedup window. Use only when re-running an identical command intentionally is the right call.",
     "--extra-args \"<string>\" is an optional raw-passthrough on every typed verb. The string is shlex-split and appended to the underlying tool argv after the typed-flag-derived args. Use sparingly for long-tail flags the typed verb does not model — the audit row still records the full final argv. --destructive still applies when extra args toggle a destructive mode.",
 )
@@ -169,6 +169,11 @@ _KALI_COMMON_MISTAKES: tuple[tuple[str, str], ...] = (
 
 
 def _kali_invocation(verb: str) -> tuple[str, ...]:
+    if verb == "exec":
+        return (
+            "aith assess kali exec --technique <enum> --intent \"<one-liner>\" "
+            "--probe-kind <kind> --phase <phase> --timeout 1800 -- <command...>",
+        )
     return (
         f"aith assess kali {verb} --technique <enum> --intent \"<one-liner>\" "
         f"--probe-kind <kind> --phase <phase> --timeout 1800 [verb-flags]",
@@ -810,6 +815,10 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Default invocation uses alterx built-in patterns; pass -p '{{sub}}-{{word}}.{{suffix}}' (repeatable) only when the engagement justifies a custom pattern.",
         "Output is a stream of candidate FQDNs; pipe to puredns or write to file via -o.",
     ),
+    "asnmap": (
+        "ASN/domain/org to CIDR mapper. Use it to feed owned CIDR ranges into `cero` for TLS SAN discovery that CT logs miss.",
+        "Pass at least one of -d, -l, -asn, or -org. The wrapper rejects empty invocations before running the tool.",
+    ),
     "bbot": (
         "Multi-module recon scanner. Canonical passive subdomain invocation: `bbot -t <target> -p subdomain-enum -rf passive`. Add modules with -m or presets with -p; gate active modules behind --allow-deadly + --destructive.",
         "--allow-deadly requires --destructive — bbot's deadly modules perform real attacks (fuzzing, brute-force, exploit). The CLI hard-fails if --allow-deadly is passed without --destructive so the audit row stays truthful.",
@@ -824,7 +833,7 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     ),
     "sweep-orphans": (
         "Host-side reconciler for `assessment_command_runs` rows stuck in status=running past --max-age-seconds. Run after a backend restart, host crash, or any window where finalize PATCHes may have failed.",
-        "Liveness probe is `docker exec <container> kill -0 <pid>` against the wrapper-recorded pid file at /tmp/aith-pid-<run_uuid>.pid. The run_uuid is parsed from the row's stdout_path because the column is not stored on the row.",
+        "Liveness probe is `docker exec <container> kill -0 <pid>` against the wrapper-recorded pid file at /tmp/aith-pid-<run_uuid>.pid. The run_uuid comes from the row's run_uuid column, with stdout_path parsing kept only for older rows.",
         "Rows whose PID is alive are left alone (still-running). Rows whose PID is dead OR whose pid file is missing are finalized to status=lost via PATCH command-runs/{id}.",
         "Use --dry-run first to inspect candidates without writing — a thorough sweep is cheap, an incorrect finalize is not.",
         "Unlike target-facing verbs, sweep-orphans does not take --technique/--intent/--probe-kind/--phase/--timeout — it is a maintenance command, not a probe.",
@@ -856,6 +865,11 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
     "alterx": (
         {
             "command": "aith assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt -limit 200000 -o /engagements/$ENGAGEMENT_KEY/scans/perms.txt --technique RECON --intent 'permutation candidate generation from passive subs' --probe-kind fingerprint --phase recon --timeout 600",
+        },
+    ),
+    "asnmap": (
+        {
+            "command": "aith assess kali asnmap -d example.com -silent -o /engagements/$ENGAGEMENT_KEY/scans/asnmap_cidrs.txt --technique OSINT --intent 'map target-owned CIDRs for TLS SAN sweep' --probe-kind fingerprint --phase recon --timeout 600",
         },
     ),
     "bbot": (

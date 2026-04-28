@@ -146,7 +146,7 @@ Agents should:
 1. Read `$DIR/.oob_url`.
 2. Ask the operator to list engagements and start a named client with an explicit key: `aith engagement list --json` then `aith oob client start <name> --engagement <engagement-key> --agent <agent-name>`.
 3. Use the unique client callback URL in payloads.
-4. Check `/data/oob/clients/<name>.log` through `aith assess kali exec -- tail -50 /data/oob/clients/<name>.log --technique RECON --intent "tail OOB client log" --probe-kind fingerprint --phase <current> --timeout 30` (so the read lands in the audit pipeline) or ask the operator for `aith oob client logs`.
+4. Check `/data/oob/clients/<name>.log` through `aith assess kali exec --technique LOG-READ --intent "tail OOB client log" --probe-kind fingerprint --phase <current> --timeout 30 -- tail -50 /data/oob/clients/<name>.log` (so the read lands in the audit pipeline) or ask the operator for `aith oob client logs`.
 
 If OOB is unavailable, agents should fall back to time-based detection and state that OOB proof was
 not available.

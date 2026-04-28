@@ -1,8 +1,8 @@
 # gobuster
 
 **Purpose:** Directory, DNS, and vhost brute-forcing
-For live engagement targets, run Gobuster via `aith assess kali exec -- gobuster ...` with the standard audit-flag set.
-Long-running gobuster sweeps should use `aith assess kali job start --container-name security-research -- gobuster ...` so they survive across calling-shell exit.
+For live engagement targets, run Gobuster via `aith assess kali exec --technique RECON --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> -- gobuster ...` with the standard audit-flag set.
+Long-running gobuster sweeps should use `aith assess kali job start --technique RECON --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> -- gobuster ...` so they survive across calling-shell exit.
 
 ## Directory Mode
 

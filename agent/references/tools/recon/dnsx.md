@@ -28,12 +28,13 @@ aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.
 For tight-RAM containers (Lab/CTF tier, `AITH_RUNTIME_MEMORY_GB=2`), wrap with `GOMAXPROCS=1 nice -n 10` to bound goroutine CPU usage:
 
 ```bash
-aith assess kali exec -- env GOMAXPROCS=1 nice -n 10 \
+aith assess kali exec --technique RECON \
+  --intent "tight-RAM dnsx profile (GOMAXPROCS=1 nice -n 10)" \
+  --probe-kind baseline --phase recon --timeout 1800 -- \
+  env GOMAXPROCS=1 nice -n 10 \
   dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates.txt \
   -rl 100 -t 20 -retry 3 -timeout 5 -silent \
-  -o /engagements/$ENGAGEMENT_KEY/scans/dnsx_low.txt \
-  --technique RECON --intent "tight-RAM dnsx profile (GOMAXPROCS=1 nice -n 10)" \
-  --probe-kind baseline --phase recon --timeout 1800
+  -o /engagements/$ENGAGEMENT_KEY/scans/dnsx_low.txt
 ```
 
 ## Rate-limit profiles

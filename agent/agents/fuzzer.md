@@ -99,14 +99,14 @@ the payload that triggered it:
 
 ```bash
 # Preferred — correlated hits only
-aith assess kali exec -- tail -50 /data/oob/clients/<name>.log \
-  --technique RECON --intent "tail OOB client log for callback hits" \
-  --probe-kind fingerprint --phase consume-test --timeout 30
+aith assess kali exec --technique LOG-READ --intent "tail OOB client log for callback hits" \
+  --probe-kind fingerprint --phase consume-test --timeout 30 -- \
+  tail -50 /data/oob/clients/<name>.log
 
 # Raw server log (noisy)
-aith assess kali exec -- tail -50 /data/oob/server.log \
-  --technique RECON --intent "tail raw OOB server log for debugging" \
-  --probe-kind fingerprint --phase consume-test --timeout 30
+aith assess kali exec --technique LOG-READ --intent "tail raw OOB server log for debugging" \
+  --probe-kind fingerprint --phase consume-test --timeout 30 -- \
+  tail -50 /data/oob/server.log
 ```
 
 If `$DIR/.oob_url` was provided in your dispatch context, include the callback URL in blind

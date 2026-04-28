@@ -35,7 +35,13 @@ def build_runtime(install_root: Path, *, variant: str = "full", dev: bool = Fals
     docker.require_success(runner(argv), argv)
 
 
-def start_runtime(options: RuntimeOptions, *, runner: docker.Runner = docker.run_command, validate_tools: bool = True) -> None:
+def start_runtime(
+    options: RuntimeOptions,
+    *,
+    runner: docker.Runner = docker.run_command,
+    validate_tools: bool = True,
+    allow_existing: bool = False,
+) -> None:
     install_root = options.install_root.expanduser().resolve()
     data_dir = Path(os.environ.get("KALI_MCP_DATA_DIR", install_root / ".runtime-data"))
     engagements_dir = install_root / "agent" / "engagements"
@@ -51,6 +57,8 @@ def start_runtime(options: RuntimeOptions, *, runner: docker.Runner = docker.run
         if validate_tools:
             _validate_tools(options.container_name, runner=runner)
         _check_runtime_ulimits(options.container_name, runner=runner)
+        if not allow_existing:
+            raise SystemExit(_already_running_message(options.container_name, install_root))
         return
 
     if docker.container_exists(options.container_name, runner=runner):
@@ -102,6 +110,16 @@ def stop_runtime(container_name: str = "security-research", *, runner: docker.Ru
 
 def runtime_status(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> str:
     return "running" if docker.container_running(container_name, runner=runner) else "stopped"
+
+
+def _already_running_message(container_name: str, install_root: Path) -> str:
+    return (
+        "Runtime container is already running.\n"
+        f"  container: {container_name}\n"
+        f"  install root: {install_root}\n"
+        "Use `aith runtime status` or `aith runtime resources` to inspect it.\n"
+        "Use `aith runtime restart` to recreate it, or `aith runtime stop` to stop it."
+    )
 
 
 def runtime_mounts_ok(install_root: Path, container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> bool:

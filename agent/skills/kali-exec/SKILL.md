@@ -308,13 +308,13 @@ aith assess kali whatweb https://www.example.com -a 3 \
 
 ```bash
 # Escape hatch — same audit-metadata flags as a typed verb.
-aith assess kali exec -- \
+aith assess kali exec --technique AUTH \
+  --intent "hydra ssh brute, small wordlist, throttled" \
+  --probe-kind payload --phase exploit --timeout 3600 --destructive -- \
   hydra -L /engagements/$ENGAGEMENT_KEY/wordlists/users.txt \
         -P /engagements/$ENGAGEMENT_KEY/wordlists/passes-small.txt \
         -t 4 -f -o /engagements/$ENGAGEMENT_KEY/scans/hydra_ssh.txt \
-        ssh://target.example.com \
-  --technique AUTH --intent "hydra ssh brute, small wordlist, throttled" \
-  --probe-kind payload --phase exploit --timeout 3600 --destructive
+        ssh://target.example.com
 ```
 
 ### `kali job`
@@ -354,8 +354,8 @@ When you know what you want to learn, this lookup gets you to the right verb wit
 - "Crawl a JS-heavy SPA?" → `kali katana -u <url> -jc -jsl`.
 - "Harvest historical URLs without touching the target?" → `kali gau <domain> --subs`.
 - "Enumerate subdomains?" → `kali subfinder -d <domain> -all` then `kali puredns resolve` then `kali dnsx`.
-- "Run a tool not in the typed surface?" → `kali exec -- <command...>` with the same audit flags.
-- "Run something that needs to outlive my shell?" → `kali job start --container-name security-research -- <command...>`.
+- "Run a tool not in the typed surface?" → `kali exec --technique <enum> --intent "<why>" --probe-kind <kind> --phase <phase> --timeout <seconds> -- <command...>`.
+- "Run something that needs to outlive my shell?" → `kali job start --technique <enum> --intent "<why>" --probe-kind <kind> --phase <phase> --timeout <seconds> -- <command...>`.
 
 ## Coverage check before probing
 
