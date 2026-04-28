@@ -28,6 +28,12 @@ from assess.lib.config import load_config
 _DEFAULT_CONTAINER_NAME = "security-research"
 _DEFAULT_MAX_AGE_SECONDS = 3600
 
+# Statuses that are still in-flight (worth probing for liveness). Anything else
+# is terminal and the row should be skipped silently — its outcome is already
+# recorded, so finalizing it again would be a no-op at best and a destructive
+# overwrite at worst (e.g., flipping a recorded ``completed`` to ``lost``).
+_RUNNING_STATUSES = frozenset({"running", "queued"})
+
 # stdout_path is recorded as ``<engagement-dir>/scans/kali/<run_uuid>.out``.
 # We accept any prefix so tests and engagements with custom mount points still
 # match — only the trailing ``scans/kali/<run_uuid>.out`` segment is load-
@@ -173,7 +179,15 @@ def _pid_alive_in_container(container_name: str, pid: int) -> bool:
 
 
 def _list_running_rows(client: AssessmentClient) -> list[dict]:
-    """Page through ``GET command-runs?status=running`` and return every row."""
+    """Page through ``GET command-runs?status=running`` and return every row.
+
+    The CLI sends ``status=running`` server-side as a forward-compatible hint —
+    the backend currently ignores it (``list_command_runs`` does not yet filter
+    on status), so we apply the same filter client-side as a fallback. Without
+    the client-side filter every terminal row is returned and the per-row
+    decision logic prints misleading ``would-finalize`` lines for rows it will
+    actually skip.
+    """
     rows: list[dict] = []
     limit = 1000
     offset = 0
@@ -223,6 +237,21 @@ def run(args) -> None:
                 continue
             summary["checked"] += 1
 
+            # Client-side status filter as a fallback for the unfiltered GET
+            # response (see ``_list_running_rows``). Rows already in a terminal
+            # state are not candidates for finalize; print a ``would-skip``
+            # line so the dry-run output never claims it would finalize a row
+            # whose outcome is already recorded.
+            existing_status = str(row.get("status") or "").strip().lower()
+            if existing_status not in _RUNNING_STATUSES:
+                summary["skipped"] += 1
+                if args.dry_run:
+                    print(
+                        f"would-skip id={row_id} reason=already-terminal "
+                        f"status={existing_status or 'unknown'}"
+                    )
+                continue
+
             run_uuid = _run_uuid_from_stdout_path(row.get("stdout_path"))
             container_pid: int | None = None
             if run_uuid:
@@ -242,7 +271,7 @@ def run(args) -> None:
 
             # PID file missing OR pid is gone — treat the row as lost.
             if args.dry_run:
-                summary["skipped"] += 1
+                summary["finalized"] += 1
                 reason = "pid-file-missing" if run_uuid is None or container_pid is None else "pid-dead"
                 print(
                     f"would-finalize id={row_id} age={int(age_seconds)} "

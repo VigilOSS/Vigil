@@ -1154,17 +1154,25 @@ def test_dedup_warns_and_continues_by_default(
 
     Sibling of `test_kali_exec_dedup_warns_and_returns_early_without_force`,
     asserting the same default policy with a slightly different shape: this
-    one verifies the finalize PATCH happens and result.status reflects the
-    actual subprocess exit, not a synthetic supersede status.
+    one verifies (a) the backend POST returned a NEW row id (not the
+    predecessor's), (b) the CLI's finalize PATCH targets that new row, and
+    (c) the resulting KaliResult.run_id is the new row's id — distinct from
+    the predecessor's. This is the audit-truthfulness assertion for ISSUE-003.
     """
     monkeypatch.delenv("KALI_AUDIT_DEDUP_BLOCK", raising=False)
 
     kali = _setup_fake_config(monkeypatch, fake_engagement)
 
+    PREDECESSOR_ID = 20
+    NEW_ROW_ID = 21
+
     class _DedupClient(_FakeClient):
         def post(self, endpoint, payload):
             self.posts.append((endpoint, payload))
-            return {"id": 21, "superseded_by_id": 20}
+            # Backend always inserts a new row on dedup hit and links it to
+            # the predecessor via superseded_by_id. Returned id is the NEW
+            # row's id so the CLI's finalize PATCH lands on its own row.
+            return {"id": NEW_ROW_ID, "superseded_by_id": PREDECESSOR_ID}
 
     fake_client = _DedupClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1188,14 +1196,28 @@ def test_dedup_warns_and_continues_by_default(
 
     err = capsys.readouterr().err
     assert "dedup hit" in err, "dedup warning must still hit stderr"
-    assert "equivalent command-run id=20" in err
+    assert f"equivalent command-run id={PREDECESSOR_ID}" in err
     assert result.status == "completed", "subprocess must run despite dedup hit"
     assert result.return_code == 0
-    # Finalize PATCH must have fired for the run that did actually execute.
+    # ISSUE-003 audit-truth assertion: the run_id we report is the NEW row's
+    # id, NOT the predecessor's. Two parallel subprocess executions => two
+    # rows in the database, even when the second one was a dedup-hit retry.
+    assert result.run_id == NEW_ROW_ID, (
+        "warn-and-continue must surface the new row id, not the predecessor's"
+    )
+    assert result.run_id != PREDECESSOR_ID
+    # Exactly one pre-exec POST went out, and it was for the new row.
+    assert len(fake_client.posts) == 1
+    # Finalize PATCH targets the NEW row, not the predecessor — this is the
+    # bug the previous implementation had (it patched the predecessor's row,
+    # invisibly overwriting the in-flight peer's eventual finalize).
     assert any(
-        ep == "command-runs/21" and payload.get("status") == "completed"
+        ep == f"command-runs/{NEW_ROW_ID}" and payload.get("status") == "completed"
         for ep, payload in fake_client.patches
-    ), "finalize PATCH must follow warn-and-continue execution"
+    ), "finalize PATCH must target the new row, not the predecessor"
+    assert not any(
+        ep == f"command-runs/{PREDECESSOR_ID}" for ep, _ in fake_client.patches
+    ), "warn-and-continue must NOT patch the predecessor's row"
 
 
 def test_dedup_block_env_var_restores_block_mode(
@@ -1203,19 +1225,24 @@ def test_dedup_block_env_var_restores_block_mode(
 ):
     """`KALI_AUDIT_DEDUP_BLOCK=1` opts back into the original block-on-dup mode.
 
-    Operators who explicitly want a hard block on dedup hits set the env var;
-    the CLI then early-returns with status=superseded and never spawns the
-    subprocess. `--force` still bypasses (covered separately), but absent
-    `--force` the run is suppressed exactly like the pre-fix behavior.
+    Under the ISSUE-003 model, the backend ALWAYS inserts a new row on dedup
+    hit (even in block mode) and the CLI is responsible for finalizing it
+    when no subprocess will run. The CLI early-returns with status=superseded,
+    never spawns the subprocess, but DOES patch the new row to ``aborted-dedup``
+    so it lands in a terminal state and ``sweep-orphans`` won't pick it up.
+    `--force` still bypasses (covered separately).
     """
     monkeypatch.setenv("KALI_AUDIT_DEDUP_BLOCK", "1")
 
     kali = _setup_fake_config(monkeypatch, fake_engagement)
 
+    PREDECESSOR_ID = 30
+    NEW_ROW_ID = 31
+
     class _DedupClient(_FakeClient):
         def post(self, endpoint, payload):
             self.posts.append((endpoint, payload))
-            return {"id": 31, "superseded_by_id": 30}
+            return {"id": NEW_ROW_ID, "superseded_by_id": PREDECESSOR_ID}
 
     fake_client = _DedupClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1246,12 +1273,86 @@ def test_dedup_block_env_var_restores_block_mode(
     assert result.status == "superseded", (
         "KALI_AUDIT_DEDUP_BLOCK=1 must restore early-return semantics"
     )
+    assert result.run_id == NEW_ROW_ID, (
+        "block-mode result must surface the new row's id (not the predecessor's) "
+        "so caller telemetry can trace the would-have-run audit row"
+    )
     assert "dedup hit" in err
     assert "KALI_AUDIT_DEDUP_BLOCK" in err, (
         "block-mode message should name the opt-in env var so operators "
         "know how to disable it"
     )
     assert popen_called == [], "subprocess must not run under block-on-dup mode"
+    # ISSUE-003: a new row IS inserted by the backend even in block mode, so
+    # the CLI must finalize it to a terminal status to keep sweep-orphans clean.
+    assert len(fake_client.posts) == 1, (
+        "block-mode still POSTs once so the audit row is created"
+    )
+    assert any(
+        ep == f"command-runs/{NEW_ROW_ID}" and payload.get("status") == "aborted-dedup"
+        for ep, payload in fake_client.patches
+    ), (
+        "block-mode must finalize the new row to aborted-dedup so it lands "
+        "in a terminal status and sweep-orphans does not flag it"
+    )
+
+
+def test_dedup_force_does_not_set_superseded_by_id(monkeypatch, fake_engagement, capsys):
+    """`--force` is the deliberate-retry escape hatch.
+
+    Two separate guarantees ride on it:
+    1. The CLI does NOT emit the dedup warning to stderr (operator opted in).
+    2. The backend POST receives ``force=True`` so the new row's
+       ``superseded_by_id`` is NOT set — operator declared this is an
+       independent retry, not a peer of the in-flight predecessor.
+    """
+    monkeypatch.delenv("KALI_AUDIT_DEDUP_BLOCK", raising=False)
+
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+
+    captured_payloads: list[dict] = []
+
+    class _ForceClient(_FakeClient):
+        def post(self, endpoint, payload):
+            captured_payloads.append(payload)
+            self.posts.append((endpoint, payload))
+            # Mirror the backend's behavior: when force=True the response has
+            # superseded_by_id=None even if a predecessor exists.
+            sup = None if payload.get("force") else 40
+            return {"id": 41, "superseded_by_id": sup}
+
+    fake_client = _ForceClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
+    )
+
+    result = kali.kali_exec(
+        ["nmap", "-p", "22", "10.0.0.4"],
+        technique="RECON",
+        intent="force retry",
+        probe_kind="fingerprint",
+        phase="recon",
+        timeout=30,
+        agent_name="recon-specialist",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        force=True,
+        tool_name="nmap",
+    )
+
+    assert result.status == "completed"
+    err = capsys.readouterr().err
+    assert "dedup hit" not in err, (
+        "--force must suppress the warning entirely — operator deliberate retry"
+    )
+    # The CLI sent force=True in the pre-exec POST so the backend skips
+    # _find_dedup_predecessor and superseded_by_id stays NULL on the new row.
+    assert len(captured_payloads) == 1
+    assert captured_payloads[0].get("force") is True, (
+        "CLI must propagate --force into the pre-exec POST payload"
+    )
 
 
 def test_kali_exec_dedup_force_bypasses_check(monkeypatch, fake_engagement):
@@ -2656,10 +2757,24 @@ def test_sweep_orphans_skips_alive_rows(monkeypatch, fake_engagement):
     assert fake_client.patches == []
 
 
-def test_sweep_orphans_dry_run_does_not_patch(monkeypatch, fake_engagement):
+def test_sweep_orphans_dry_run_does_not_patch(monkeypatch, capsys, fake_engagement):
     """--dry-run lists candidates and the planned action but never PATCHes,
-    even when the row would otherwise be finalized."""
-    rows = [_orphan_row(row_id=99, age_seconds=7200, run_uuid="cccc3333")]
+    even when the row would otherwise be finalized.
+
+    Also asserts the per-row decision logic does not print ``would-finalize``
+    for rows whose status is already terminal (ISSUE-004): those rows must
+    print ``would-skip`` because they would never be finalized by a non-dry
+    sweep either.
+    """
+    rows = [
+        _orphan_row(row_id=99, age_seconds=7200, run_uuid="cccc3333"),
+        # A row already in a terminal state — must not produce a misleading
+        # ``would-finalize`` line; the sweep would skip it on a real run.
+        {
+            **_orphan_row(row_id=42, age_seconds=7200, run_uuid="dddd4444"),
+            "status": "completed",
+        },
+    ]
     sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
 
     def fake_subprocess_run(argv, **kwargs):
@@ -2680,6 +2795,54 @@ def test_sweep_orphans_dry_run_does_not_patch(monkeypatch, fake_engagement):
 
     # Dry-run never writes — finalize PATCH must not be issued.
     assert fake_client.patches == []
+
+    out = capsys.readouterr().out
+    # The running-status row gets a would-finalize line; the terminal row
+    # must NOT — that lie is exactly the bug ISSUE-004 documented.
+    assert "would-finalize id=99" in out
+    assert "would-finalize id=42" not in out
+    # Terminal rows surface as a would-skip line so the operator can see
+    # why the sweep declined to act.
+    assert "would-skip id=42" in out
+    assert "reason=already-terminal" in out
+
+
+def test_sweep_orphans_filters_to_running_status_serverside(
+    monkeypatch, fake_engagement
+):
+    """The GET request must include ``status=running`` so the backend can
+    serve only the in-flight rows once it grows server-side filtering.
+
+    Until the backend supports the filter, the CLI also applies the same
+    filter client-side (covered by ``test_sweep_orphans_dry_run_does_not_patch``);
+    sending the query param now keeps the cutover painless when the backend
+    catches up.
+    """
+    rows = [_orphan_row(row_id=1, age_seconds=7200, run_uuid="eeee5555")]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[3] == "cat":
+            return SimpleNamespace(returncode=0, stdout="100\n", stderr="")
+        if argv[3] == "kill":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=True,
+    ))
+
+    # The first GET must scope to status=running so the backend can short-
+    # circuit the scan once it supports the filter.
+    assert fake_client.gets, "expected at least one GET against command-runs"
+    first = fake_client.gets[0]
+    assert first.startswith("command-runs?")
+    assert "status=running" in first
 
 
 def test_sweep_orphans_handles_missing_pid_file_as_dead(monkeypatch, fake_engagement):

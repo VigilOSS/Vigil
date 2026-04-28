@@ -184,7 +184,18 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     _write_auth_scaffold(eng_dir, "none" if options.engagement_type == "code" else options.auth_mode, created_at)
     _write_json(eng_dir / "sessions" / "index.json", [])
     _write_json(eng_dir / "agent-registry.json", [])
-    (eng_dir / ".orchestrator.env").write_text("ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000\n", encoding="utf-8")
+    # The launcher reads both ORCHESTRATOR_BASE_URL and AGENT_NAME out of this
+    # file via grep (preserving the legacy ORCHESTRATOR_BASE_URL contract: the
+    # last file's value wins, with parent-shell exports taking precedence).
+    # AGENT_NAME=operator gives `aith assess kali` something to use without
+    # forcing the operator to remember --agent-name for tier-pick smoke /
+    # runtime health / credential validation work. Specialists override this
+    # by exporting AGENT_NAME=<role> in the dispatch wrapper before launching,
+    # so the default does not bleed into specialist contexts.
+    (eng_dir / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000\nAGENT_NAME=operator\n",
+        encoding="utf-8",
+    )
     _init_cases_db(agent_root, eng_dir)
 
     client_kind = _install_client_kind(agent_root)
@@ -193,7 +204,100 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         _write_codex_config(agent_root, eng_dir)
     _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
     _emit_bootstrap_scope_summary(scope)
+    _verify_backend_install_root(install_root, eng_dir)
     return CreatedEngagement(key=key, path=eng_dir)
+
+
+def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> None:
+    """Detect install-root mismatch between this CLI and the running orchestrator.
+
+    The orchestrator picks ``settings.install_dir`` at startup time from
+    ``$AI_THREAT_HUNTING_INSTALL_DIR`` and cannot retarget at runtime. When
+    the operator runs ``aith --root /custom/path engagement create ...`` against
+    a backend that was started with a *different* install root, the new
+    engagement directory is invisible to ``sync_engagements()`` — every
+    subsequent ``aith assess`` call will write audit data to a backend that
+    cannot see the engagement, silently dropping recon evidence.
+
+    Strategy:
+      - If the backend is unreachable (offline / not started yet), do nothing.
+        Local-only workflows are valid and ``aith engagement create`` should
+        succeed when the orchestrator is intentionally down.
+      - If the backend is reachable AND its install_root matches ours, force a
+        re-sync so the new engagement is registered immediately.
+      - If the backend is reachable AND its install_root differs, abort with
+        the recovery message — the operator must restart the orchestrator
+        against the matching install root before the engagement is usable.
+    """
+    import http.client
+    import json as _json
+    from urllib.parse import urlparse
+
+    base_url = resolve_orchestrator_base_url(install_root, eng_dir)
+    parsed = urlparse(base_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    prefix = (parsed.path or "").rstrip("/")
+
+    backend_install_root: str | None = None
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=2)
+        conn.request("GET", f"{prefix}/admin/install-root")
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8", errors="replace")
+        conn.close()
+        if resp.status == 200:
+            payload = _json.loads(body)
+            backend_install_root = str(payload.get("install_root") or "")
+        elif resp.status == 404:
+            # Older orchestrator without /admin/install-root — fall back to a
+            # plain force-sync attempt; if that also 404s, treat as unreachable.
+            print(
+                f"[aith] orchestrator at {base_url} does not expose /admin/install-root "
+                "(older build). Skipping install-root drift check; "
+                "restart the orchestrator after upgrading to validate.",
+                file=sys.stderr,
+            )
+            return
+        else:
+            print(
+                f"[aith] orchestrator at {base_url} returned HTTP {resp.status} "
+                "for /admin/install-root; skipping install-root drift check.",
+                file=sys.stderr,
+            )
+            return
+    except (OSError, _json.JSONDecodeError):
+        # Backend unreachable or unparseable — local-only workflows are valid,
+        # so engagement creation should still succeed.
+        return
+
+    expected = str(install_root.expanduser().resolve())
+    if backend_install_root and Path(backend_install_root).resolve() != Path(expected).resolve():
+        raise SystemExit(
+            "\n".join(
+                [
+                    f"Engagement created at {eng_dir}, but the running orchestrator does not know about it.",
+                    f"  The orchestrator was started against install_root={backend_install_root}",
+                    f"  This engagement is at install_root={expected}",
+                    "",
+                    "Recover by:",
+                    f"  aith --root {expected} orchestrator restart",
+                    f"  aith --root {expected} assess fetch summary --engagement-dir {eng_dir}",
+                ]
+            )
+        )
+
+    # Install roots match — force a re-sync so the new engagement is visible
+    # to the backend immediately, without waiting for the next implicit trigger.
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=2)
+        conn.request("POST", f"{prefix}/admin/sync-engagements")
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+    except OSError:
+        # Sync race conditions are non-fatal — the next implicit sync covers it.
+        pass
 
 
 def _emit_bootstrap_scope_summary(scope: dict[str, object]) -> None:
@@ -421,6 +525,22 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
 
 def _write_launcher(agent_root: Path, eng_dir: Path, client: str, permission_arg: str) -> None:
     extra = f" {permission_arg}" if permission_arg else ""
+    # The launcher exports operator-side env from the per-engagement
+    # .orchestrator.env (and the install-root .env / .orchestrator.env
+    # fallbacks). Precedence rules differ between the two exported keys:
+    #
+    # - ORCHESTRATOR_BASE_URL: parent-shell export wins over file values; among
+    #   file values the LAST file wins (install-root .env overrides per-eng).
+    #   Original contract preserved verbatim — operators rely on the install-
+    #   root .env to repoint the URL after `aith install --root <other>`.
+    #
+    # - AGENT_NAME: parent-shell export wins; among file values the FIRST hit
+    #   wins (per-engagement .orchestrator.env beats fallbacks). The default
+    #   we plant there is `operator`, used by `aith assess kali` for tier-pick
+    #   smoke / runtime health / credential validation work the operator
+    #   executes directly. Specialist dispatch wrappers export AGENT_NAME
+    #   before launching, so the default does not bleed into specialist
+    #   contexts.
     script = f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -439,6 +559,18 @@ if [[ -z "${{ORCHESTRATOR_BASE_URL:-}}" ]]; then
       candidate="$(grep -E '^ORCHESTRATOR_BASE_URL=' "$env_file" | tail -n1 | cut -d= -f2- || true)"
       if [[ -n "$candidate" ]]; then
         export ORCHESTRATOR_BASE_URL="${{candidate%/}}"
+      fi
+    fi
+  done
+fi
+
+if [[ -z "${{AGENT_NAME:-}}" ]]; then
+  for env_file in "$ENGAGEMENT_DIR/.orchestrator.env" "$AI_THREAT_HUNTING_INSTALL_DIR/.orchestrator.env" "$AI_THREAT_HUNTING_INSTALL_DIR/.env"; do
+    if [[ -f "$env_file" ]]; then
+      candidate="$(grep -E '^AGENT_NAME=' "$env_file" | tail -n1 | cut -d= -f2- || true)"
+      if [[ -n "$candidate" ]]; then
+        export AGENT_NAME="$candidate"
+        break
       fi
     fi
   done

@@ -3935,12 +3935,20 @@ def record_command_run(
     with get_connection() as connection:
         # Dedup-at-write-time: if an in-flight row exists with the same
         # (command, argv_json) for this engagement inside the configurable
-        # window, the CLI's default (force=False) returns the predecessor
-        # row without inserting — otherwise the new row stays stuck at
-        # status='running' because the CLI early-returns and never PATCHes
-        # finalize. With force=True we insert the row and link it via
-        # superseded_by_id so the operator's deliberate retry still records
-        # the supersession audit.
+        # window, ALWAYS insert a new row but link it to the predecessor via
+        # ``superseded_by_id`` so the supersession is a relationship between
+        # two rows rather than a row-merge. ``force=True`` is the deliberate-
+        # retry escape hatch that suppresses both the warning (CLI-side) and
+        # the supersede link (here) — operator says "I know there's a peer,
+        # run it anyway as an independent retry."
+        #
+        # Audit-truthfulness rationale: the previous behavior returned the
+        # predecessor's row id on dedup hit. Under the CLI's warn-and-continue
+        # default the second subprocess still ran, so two executions collapsed
+        # to one audit row and ``list-command-runs`` lied about coverage. By
+        # always inserting we get one row per execution attempt; readers that
+        # want to filter to "primary" runs can join on
+        # ``superseded_by_id IS NULL``.
         superseded_by_id: int | None = None
         if not force:
             superseded_by_id = _find_dedup_predecessor(
@@ -3950,20 +3958,6 @@ def record_command_run(
                 argv_json=argv_json_value,
                 window_seconds=_dedup_window_seconds(),
             )
-            if superseded_by_id is not None:
-                _remove_written_command_run_artifacts(
-                    str(stdout_retention["artifact_ref"] or ""),
-                    str(stderr_retention["artifact_ref"] or ""),
-                )
-                predecessor_row = connection.execute(
-                    "SELECT * FROM assessment_command_runs WHERE id = ?",
-                    (superseded_by_id,),
-                ).fetchone()
-                assert predecessor_row is not None
-                serialized = _serialize_command_run(predecessor_row, include_output=True)
-                serialized["superseded_by_id"] = superseded_by_id
-                serialized["dedup_skipped"] = True
-                return serialized
         try:
             cursor = connection.execute(
                 """
@@ -4060,10 +4054,25 @@ def record_command_run(
             (cursor.lastrowid,),
         ).fetchone()
         assert row is not None
-        return _serialize_command_run(row, include_output=True)
+        serialized = _serialize_command_run(row, include_output=True)
+        # Surface the dedup relationship to the caller so the CLI can decide
+        # whether to warn-and-continue (default) or honour KALI_AUDIT_DEDUP_BLOCK
+        # and finalize the new row to ``aborted-dedup`` without spawning a
+        # subprocess. ``superseded_by_id`` already lives on the row payload;
+        # ``dedup_predecessor_id`` is a separate hint surface so consumers can
+        # tell "this row was inserted as a dedup peer" without re-querying the
+        # predecessor row to check its status.
+        if superseded_by_id is not None:
+            serialized["dedup_predecessor_id"] = superseded_by_id
+        return serialized
 
 
-_FINALIZE_TERMINAL_STATUSES = {"completed", "failed", "timed_out", "killed", "lost"}
+# ``aborted-dedup`` is the terminal status for a row whose subprocess never
+# ran because KALI_AUDIT_DEDUP_BLOCK was set on the CLI side and the backend
+# returned a dedup-linked new row. Distinct from ``superseded`` (an intel
+# concept) and from ``killed`` (a process-was-running status); ``aborted-dedup``
+# means "this row exists for audit completeness but no subprocess executed."
+_FINALIZE_TERMINAL_STATUSES = {"completed", "failed", "timed_out", "killed", "lost", "aborted-dedup"}
 _FINALIZE_ALLOWED_STATUSES = _FINALIZE_TERMINAL_STATUSES | {"running"}
 
 
