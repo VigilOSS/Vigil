@@ -6,8 +6,6 @@ This repository contains the operator prompts, Kali runtime image, engagement sc
 
 - `agent/docker/runtime-full/Dockerfile`
   Primary full Kali runtime image. This is the only supported runtime for target-facing execution.
-- `docker/kali-mcp-runtime/`
-  Shared audit-enum module imported by the host-side `aith assess kali` CLI.
 - `agent/`
   Prompts, CLI integrations, attack skills, transient work-buffer scripts, and runtime helpers.
 - `orchestrator/`

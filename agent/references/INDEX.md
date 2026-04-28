@@ -301,6 +301,7 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 | `runtime-guides/cdn-ip-blocking.md` | CDN/edge IP-reputation block detection signals (403 + reference codes, TCP reset, 000-status), the egress reputation curl script, four mitigation options (program allowlist / residential proxy / browser-based tool / accept-gap), give-up-vs-escalate rule, and the `aith assess ingest-endpoints --egress-blocked-hosts` cross-reference |
 | `handoff-protocols.md` | Agent-to-agent handoff rules and expected downstream actions |
 | `subdomain-enumeration.md` | Subdomain enumeration (when `*.domain` in hosts), prioritization, and sliding-window execution rules |
+| `recon/rate-calibration.md` | Per-target rate calibration table (Cloud-fronted / Origin / WAF-protected / High-friction / Vendor SaaS) plus the runtime-tier × DNS-profile matrix and the concurrent-nmap-procs cap. Recon-class roles load on first use; extracted from `shared-constraints.md` §14 to keep the every-specialist load lighter |
 
 ## reporting/ — Disclosure & Reporting Formats
 

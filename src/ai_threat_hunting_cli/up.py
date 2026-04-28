@@ -177,7 +177,7 @@ def _resolve_optional_engagement(install_root: Path, options: UpOptions) -> Path
 def _runtime_image_inputs(install_root: Path) -> list[Path]:
     return [
         install_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
-        install_root / "docker" / "kali-mcp-runtime",
+        install_root / "agent" / "scripts" / "assess" / "lib" / "audit_enums.py",
         install_root / "docker" / "callback_listener.py",
         install_root / "docker" / "start-callback.sh",
     ]

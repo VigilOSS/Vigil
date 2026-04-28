@@ -105,7 +105,7 @@ RUN ln -sf /usr/share/wordlists /wordlists && \
 
 # Lightweight image is dev-only; massdns/cero/alterx/asnmap/bbot/shuffledns omitted to keep iteration fast.
 RUN mkdir -p /opt/mcp-tools /data
-COPY docker/kali-mcp-runtime/audit_enums.py /opt/mcp-tools/audit_enums.py
+COPY agent/scripts/assess/lib/audit_enums.py /opt/mcp-tools/audit_enums.py
 
 WORKDIR /engagement
 ENTRYPOINT ["/usr/bin/tini","--"]

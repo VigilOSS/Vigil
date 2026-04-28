@@ -146,6 +146,7 @@ KALI_VERBS: tuple[str, ...] = (
     "bbot",
     "exec",
     "job",
+    "sweep-orphans",
 )
 
 
@@ -585,6 +586,8 @@ def contract_names() -> list[str]:
     names.extend(f"record-intel {intel_type}" for intel_type in sorted(INTEL_TYPES))
     names.append("kali")
     names.extend(f"kali {verb}" for verb in KALI_VERBS)
+    names.append("dispatch")
+    names.extend(f"dispatch {verb}" for verb in DISPATCH_VERBS)
     return sorted(names)
 
 
@@ -597,6 +600,11 @@ def get_contract(name: str) -> CommandContract | None:
     if name.startswith("kali "):
         _, _, verb = name.partition(" ")
         return _kali_verb_contract(verb)
+    if name == "dispatch":
+        return _dispatch_root_contract()
+    if name.startswith("dispatch "):
+        _, _, verb = name.partition(" ")
+        return _dispatch_verb_contract(verb)
     return _CONTRACTS.get(name)
 
 
@@ -814,6 +822,13 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Long-running probes go through `aith assess kali job start ...`. The dtach session is parented by tini so it survives the calling shell.",
         "Subcommands: start | status | tail | stop | list.",
     ),
+    "sweep-orphans": (
+        "Host-side reconciler for `assessment_command_runs` rows stuck in status=running past --max-age-seconds. Run after a backend restart, host crash, or any window where finalize PATCHes may have failed.",
+        "Liveness probe is `docker exec <container> kill -0 <pid>` against the wrapper-recorded pid file at /tmp/aith-pid-<run_uuid>.pid. The run_uuid is parsed from the row's stdout_path because the column is not stored on the row.",
+        "Rows whose PID is alive are left alone (still-running). Rows whose PID is dead OR whose pid file is missing are finalized to status=lost via PATCH command-runs/{id}.",
+        "Use --dry-run first to inspect candidates without writing — a thorough sweep is cheap, an incorrect finalize is not.",
+        "Unlike target-facing verbs, sweep-orphans does not take --technique/--intent/--probe-kind/--phase/--timeout — it is a maintenance command, not a probe.",
+    ),
 }
 
 
@@ -856,6 +871,14 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
             "command": "aith assess kali job status 42",
         },
     ),
+    "sweep-orphans": (
+        {
+            "command": "aith assess kali sweep-orphans --dry-run",
+        },
+        {
+            "command": "aith assess kali sweep-orphans --max-age-seconds 1800 --container-name security-research",
+        },
+    ),
 }
 
 
@@ -889,8 +912,40 @@ def _kali_root_contract() -> CommandContract:
 def _kali_verb_contract(verb: str) -> CommandContract | None:
     if verb not in KALI_VERBS:
         return None
-    notes = _KALI_COMMON_NOTES + _KALI_VERB_NOTES.get(verb, ())
     examples = _KALI_VERB_EXAMPLES.get(verb, ())
+
+    # `sweep-orphans` is a host-side reconciler, not a target-facing probe —
+    # it skips the audit-flag set entirely and has its own flag surface, so
+    # composing the standard invocation/author-fields/common-mistakes block
+    # would mislead the operator. Document its actual surface instead.
+    if verb == "sweep-orphans":
+        return CommandContract(
+            name="kali sweep-orphans",
+            summary=(
+                "Reconcile assessment_command_runs rows stuck in status=running "
+                "past a threshold age by probing the in-container PID and "
+                "finalizing dead rows to status=lost."
+            ),
+            schema_name="argparse + CommandRunFinalize backend model",
+            preferred_invocations=(
+                "aith assess kali sweep-orphans --dry-run",
+                "aith assess kali sweep-orphans --max-age-seconds 3600",
+                "aith assess kali sweep-orphans --container-name security-research",
+            ),
+            author_supplied_fields=(
+                "--max-age-seconds <int> (default 3600)",
+                "--container-name <name> (default security-research)",
+                "--dry-run (optional, list candidates without writing)",
+            ),
+            notes=_KALI_VERB_NOTES.get(verb, ()),
+            common_mistakes=(
+                ("--phase", "sweep-orphans is host-side maintenance and does not take audit flags"),
+                ("--technique", "sweep-orphans is host-side maintenance and does not take audit flags"),
+            ),
+            examples=examples,
+        )
+
+    notes = _KALI_COMMON_NOTES + _KALI_VERB_NOTES.get(verb, ())
     invocation = _kali_invocation(verb)
     author_fields: tuple[str, ...] = (
         "--technique <enum>",
@@ -1021,3 +1076,120 @@ def _looks_like_verification_payload(payload: Any | None) -> bool:
     if verification_keys.intersection(payload):
         return True
     return payload.get("workflow_status") == "false_positive"
+
+
+# ---------------------------------------------------------------------------
+# dispatch namespace contracts
+#
+# Most dispatch verbs are work-buffer SQL primitives (stats, fetch, done, ...)
+# documented inline by `aith assess dispatch <db> --help`. The contract
+# surface is reserved for verbs whose output shape matters to other agents —
+# render-handoff is the first such verb because the rendered blob is meant to
+# be pasted verbatim into the next dispatch prompt and we want operators to
+# discover the helper rather than freelance their own handoff format.
+# ---------------------------------------------------------------------------
+
+DISPATCH_VERBS: tuple[str, ...] = ("render-handoff",)
+
+
+def _dispatch_root_contract() -> CommandContract:
+    return CommandContract(
+        name="dispatch",
+        summary=(
+            "SQLite work-buffer dispatch engine plus operator-glue helpers "
+            "(render-handoff for cross-dispatch continuity)."
+        ),
+        schema_name="(per-action argparse; render-handoff reads agent-registry.json)",
+        preferred_invocations=(
+            "aith assess dispatch <db_path> stats|fetch|done|...",
+            "aith assess dispatch render-handoff <agent-id>",
+            "aith assess contract dispatch render-handoff",
+        ),
+        author_supplied_fields=(
+            "<db_path> (cases.db) for work-buffer actions",
+            "<action> (e.g. stats, fetch, done, render-handoff)",
+            "action-specific positional args",
+        ),
+        notes=(
+            "Work-buffer actions (stats/fetch/done/peek/defer-cluster/defer-items/error/"
+            "reset-stale/retry-errors/migrate/requeue) require <db_path> as the first "
+            "positional. Operator-glue actions (render-handoff) do not.",
+            "render-handoff is the canonical source of cross-dispatch continuity blobs — "
+            "operators paste its output into the next dispatch prompt instead of "
+            "transcript excerpts so the prompt stays bounded.",
+            f"Verbs with their own contract entries: {', '.join(DISPATCH_VERBS)}.",
+        ),
+        common_mistakes=(
+            (
+                "transcript paste",
+                "use `aith assess dispatch render-handoff <prior-agent-id>` and paste the "
+                "rendered blob verbatim — the helper pulls findings, artifacts, and "
+                "credentials from durable state so the prompt stays small",
+            ),
+        ),
+    )
+
+
+def _dispatch_verb_contract(verb: str) -> CommandContract | None:
+    if verb == "render-handoff":
+        return CommandContract(
+            name="dispatch render-handoff",
+            summary=(
+                "Render a bounded handoff blob for a prior dispatch's agent_id, "
+                "pulled from agent-registry.json and the assessment backend."
+            ),
+            schema_name="(reads $DIR/agent-registry.json + GET /findings/{slug})",
+            preferred_invocations=(
+                "aith assess dispatch render-handoff <agent-id>",
+                "aith assess dispatch render-handoff <agent-id> --max-lines 60",
+                "aith assess dispatch render-handoff <agent-id> --include-evidence",
+            ),
+            author_supplied_fields=(
+                "<agent-id> (the prior dispatch's agent_id from $DIR/agent-registry.json)",
+            ),
+            helper_defaults=(
+                ("--max-lines", "40 (hard cap; findings list collapses with '... and N more')"),
+                ("--include-evidence", "off (one short evidence excerpt per finding when set)"),
+                ("--engagement-dir", "resolved from --engagement-dir / $ENGAGEMENT_DIR / cwd"),
+                ("scope", "registry entry's role, task, finding_slugs, skill_loaded, "
+                          "scope_host, dispatched_at, status, working_artifacts, next_step"),
+                ("credentials filter", "fetched only for vulnerability-analyst and "
+                                       "exploit-developer roles, filtered by source_name"),
+            ),
+            notes=(
+                "Exit 2 when the agent-id is not present in $DIR/agent-registry.json — "
+                "the registry is the durable record of who was dispatched, so a missing "
+                "entry means the prior dispatch never appended (or the id was mistyped).",
+                "404 on a finding slug is rendered inline as 'slug missing' rather than "
+                "failing the whole render — the operator may have killed a finding "
+                "between dispatch and handoff time.",
+                "The next-step line is always emitted; when the registry entry has no "
+                "next_step the line reads 'not recorded — set explicitly in this "
+                "dispatch' so the new dispatch prompt cannot silently drop it.",
+                "Cross-reference: agent/operator-core.md 'Cross-Dispatch Continuity' and "
+                "agent/references/runtime-guides/subagent-registry.md.",
+            ),
+            common_mistakes=(
+                (
+                    "transcript excerpts in dispatch prompt",
+                    "render-handoff replaces operator discretion with a deterministic "
+                    "blob; paste its output instead of copy-pasting from the prior "
+                    "agent's transcript",
+                ),
+                (
+                    "raising --max-lines past ~80",
+                    "the cap exists to keep the prompt bounded — if the blob is too "
+                    "small, narrow the registry's finding_slugs list rather than "
+                    "widening the cap",
+                ),
+            ),
+            examples=(
+                {
+                    "command": "aith assess dispatch render-handoff a424a88b02054913d",
+                },
+                {
+                    "command": "aith assess dispatch render-handoff a424a88b02054913d --max-lines 60 --include-evidence",
+                },
+            ),
+        )
+    return None

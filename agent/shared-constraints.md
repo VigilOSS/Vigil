@@ -153,10 +153,15 @@ truthful instead of degrading to a stale env-var default.
   `code-ingest`, `code-classify`, `code-hunt`, `code-verify`, plus the
   half-phase tags `recon-pivot` (mid-engagement recon on newly-surfaced host)
   and `exploit-recon` (additional fingerprinting during exploit phase).
-- **`--force`** — bypass the dedup-window check. The CLI hashes
-  `(command, argv_json)` and warns/blocks duplicates within
-  `KALI_CLI_DEDUP_WINDOW_SECONDS` (default 30s). Use only when re-running a
-  near-duplicate is intentional.
+- **`--force`** — suppress the dedup-warning log and skip the supersede
+  check entirely. Default behavior is warn-and-continue (set
+  `KALI_AUDIT_DEDUP_BLOCK=1` env var to restore the old block-on-dup mode).
+  The CLI hashes `(command, argv_json)` and warns when an identical command
+  ran within `KALI_AUDIT_DEDUP_WINDOW_SECONDS` (default 30s); under the
+  default policy the warning fires but the command still executes, so
+  parallel specialists racing on the same wildcard list don't hard-block
+  each other. Pass `--force` when you also want to suppress the warning
+  for an intentional retry.
 - **`--strace`** — wrap in `strace -e trace=network,write,unlink`. Use for
   `--probe-kind exploit` or `--destructive` so the audit row records network
   egress and disk writes.
@@ -495,29 +500,24 @@ Prose intel that doesn't fit a structured row goes to `record-intel note` — it
 
 ---
 
-## 14. Per-Target Rate Calibration Table
+## 14. Per-Target Rate Calibration
 
-Operators set per-target rate calibration before dispatch; specialists pull values from this table rather than guessing. Vendor names appear as **trait-match examples**, not canonical categories — pick the row on the trait, not the brand.
+Recon-class roles (recon-specialist, surface-collector, osint-analyst when
+running active enumeration) load **`agent/references/recon/rate-calibration.md`**
+on first use — that file owns the trait-row table (Cloud-fronted / Origin /
+WAF-protected / High-friction / Vendor SaaS), the runtime-tier × DNS-profile
+matrix, and the concurrent-nmap-procs cap. Tier-selection prose and the
+step-down rules live in `agent/operator-core.md` "Recon Dispatch Resource
+Policy"; the operator picks the trait row before dispatch and the specialist
+applies it.
 
-| Target trait | nmap profile | dir-fuzz rate | nuclei | DNS brute (puredns rl) | concurrent nmap procs |
-|---|---|---|---|---|---|
-| Cloud-fronted (any major CDN/edge — examples: Cloudflare, Akamai, Fastly, CloudFront) | `-T3 --max-rate 100` | 50–100 req/s | `--rate-limit 100-150 -bs 25 -c 25` | 800 (polite-CDN-fronted-target) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-| Origin / single-server (no CDN, no WAF) | `-T2 --max-rate 30` | 5–10 req/s | `--rate-limit 30 -bs 10 -c 10` | 2500 (polite-residential) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-| WAF-protected (any vendor WAF tier — Cloudflare WAF, Akamai App & API, F5 ASM, AWS WAF, Imperva) | `-T2 --max-rate 30` | 1–3 req/s | `--rate-limit 30 -bs 10 -c 10` | 800 (polite-CDN-fronted-target) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-| High-friction policy / regulated (`.gov`, `.mil`, finance, healthcare) | `-T2 --max-rate 50 --host-timeout 1500s` | ≤2 req/s | `--rate-limit 30 -bs 10 -c 10` | 800 (polite-CDN-fronted-target) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-| Vendor SaaS (e.g., Salesforce, ServiceNow, StatusPage, Auth0, Okta) | `-T3 --max-rate 60` | 20 req/s | `--rate-limit 60 -bs 15 -c 15` | 800 (polite-CDN-fronted-target — vendor-controlled DNS, lower rate) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-
-The DNS-brute column matches the canonical SKILL profile names in `agent/skills/subdomain-enumeration/SKILL.md` "Docker-resource-safe profiles". Available profiles per runtime tier (read `aith runtime resources` to confirm the active tier):
-
-| Runtime tier | `polite-CDN-fronted-target` (cautious 800) | `polite-residential` (2500) | `bursty-OK` (5000) |
-|---|---|---|---|
-| Standard | available | available | NOT available |
-| Heavy | available | available | available (opt-in via `--intent`) |
-| Comfortable | available | available | available (default-eligible for trait rows that allow it) |
-
-`bursty-OK` is never the matrix default; selection requires an explicit operator note in `--intent`.
-
-The "concurrent nmap procs" column scales with the runtime tier: Standard = 2, Heavy = 4, Comfortable = 8. Consolidation is the rule — prefer one `nmap -iL hosts.txt` over N parallel `nmap host` invocations (see `agent/skills/port-scanning/SKILL.md` "Process consolidation"); the cap governs split-by-profile parallel sweeps when consolidation is genuinely impractical.
+Non-recon roles (vulnerability-analyst, source-analyzer, fuzzer,
+exploit-developer, report-writer) do not need rate-calibration values on every
+dispatch — they consume per-call rate hints from the dispatch context, not
+from this table. Loading the trait table on every specialist dispatch was a
+token tax for roles that never used it; this pointer keeps shared-constraints
+lighter for the 80% case while preserving direct linkage for the recon-class
+roles that do.
 
 ---
 

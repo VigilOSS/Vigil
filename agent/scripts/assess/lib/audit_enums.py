@@ -1,25 +1,24 @@
-"""Shared enums for the Kali MCP command-audit metadata fields.
+"""Shared enums for `aith assess kali` command-audit metadata fields.
 
 Single source of truth for ``technique`` and ``probe_kind`` valid values.
-Imported by both the server-side header capture (for soft validation +
-warning logs) and the client-side FastMCP decorator (for ``Literal`` type
-hints so the emitted JSON Schema advertises the valid values to MCP
-clients / LLM callers).
+Consumed by:
 
-Enum values are **additive**. Both the backend API and the server-side
-capture use soft validation (log warning, store verbatim) so adding a
-new technique does not require a runtime redeploy to stop rejecting
-rows. The only place these tuples are a hard contract is the
-``Literal`` type hint on the ``@mcp.tool`` decorator — adding a value
-there changes the schema surface and therefore needs a client rebuild.
+- ``agent/scripts/assess/lib/kali.py`` for host-side CLI flag validation.
+- ``agent/scripts/assess/commands/list_command_runs.py`` for the
+  ``--technique`` / ``--probe-kind`` argparse choices.
+- The runtime container image (copied to ``/opt/mcp-tools/audit_enums.py``
+  for legacy in-container scripts that still import it).
+
+Enum values are **additive**. Both the backend API and the host-side CLI
+use soft validation (warn-and-continue when a row carries an out-of-enum
+value) so adding a new technique does not require a runtime redeploy.
 """
 from __future__ import annotations
 
 
-# 26-value curated enum of vulnerability classes (25 specific classes plus
-# the `OTHER` escape hatch). See plan file for rationale on each value.
-# Ordering is stable so the emitted JSON Schema and CLI help text are
-# deterministic across builds.
+# 29-value curated enum of vulnerability classes (28 specific classes plus
+# the ``OTHER`` escape hatch). Ordering is stable so the emitted CLI help
+# text is deterministic across builds.
 TECHNIQUE_ENUM: tuple[str, ...] = (
     "SSRF",
     "XSS",

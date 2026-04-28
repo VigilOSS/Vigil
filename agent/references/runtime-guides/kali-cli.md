@@ -118,7 +118,7 @@ catching a sibling agent's later parallel run of the same binary.
 | `dedup window` warning blocks the call | Same `(command, argv_json)` ran within `KALI_CLI_DEDUP_WINDOW_SECONDS` (default 30s) | Either wait the window out, or pass `--force` if the re-run is intentional. Don't bypass dedup as a habit — the warning is catching accidental double-dispatch |
 | Container not running | Runtime stopped (manual stop, OOM kill, host restart) | `aith runtime start`. If the container repeatedly OOMs, check `aith runtime resources` and bump the tier |
 | `nikto: -h reserved by argparse` confusion | Trying to use `-h` as the target host | Use `--host <h>` instead — argparse reserves `-h` for help, so the typed wrapper exposes the target as `--host`. The underlying nikto invocation builds `nikto -h <host>` correctly |
-| Stale orphan rows in `assessment_command_runs` | A previous run was killed by host OOM or the container was force-stopped before the CLI could finalize the row | Documented as a follow-up — `aith assess kali sweep-orphans` is the planned helper. Until it lands, the row stays in `running` status until manually patched via `aith assess patch command-runs/<id>` |
+| Stale orphan rows in `assessment_command_runs` | A previous run was killed by host OOM, the container was force-stopped before the CLI could finalize the row, or a finalize PATCH failed mid-flight | Run `aith assess kali sweep-orphans --dry-run` to inspect candidates, then `aith assess kali sweep-orphans` to finalize dead rows to `status=lost`. The sweep probes the in-container PID via `kill -0` and only touches rows whose process is gone or whose pid file is missing |
 
 ## Verifying the vocabulary
 
@@ -133,6 +133,22 @@ aith runtime resources                        # configured tier matches expectat
 ```
 
 If all five succeed, the CLI is healthy. If any fail, walk the diagnosis steps above starting at `aith doctor`.
+
+## When to run `kali sweep-orphans`
+
+`aith assess kali sweep-orphans` reconciles `assessment_command_runs` rows that
+are stuck in `status=running` past a threshold age (default 3600s). Rows enter
+this state when a finalize PATCH fails mid-flight — typical causes are a
+backend restart between the pre-exec POST and the finalize PATCH, a host crash
+mid-run, an OOM kill of the runtime container, or a network blip during the
+final HTTP call. The sweep probes the in-container PID via
+`docker exec <container> kill -0 <pid>` against the wrapper-recorded pid file
+at `/tmp/aith-pid-<run_uuid>.pid`. Live processes are left alone; rows whose
+PID is gone or whose pid file is missing are PATCH-finalized to
+`status=lost`. Run it after any backend restart or host crash, or
+periodically on long engagements where small failure rates accumulate. Use
+`--dry-run` first to inspect candidates without writing — the sweep is
+cheap to inspect and never finalizes a row whose process is still alive.
 
 ## See also
 

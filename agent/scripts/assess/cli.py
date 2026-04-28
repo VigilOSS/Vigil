@@ -148,6 +148,7 @@ def main(argv: list[str] | None = None) -> None:
         kali_puredns,
         kali_sqlmap,
         kali_subfinder,
+        kali_sweep_orphans,
         kali_wafw00f,
         kali_whatweb,
         kill_finding,
@@ -253,6 +254,7 @@ def main(argv: list[str] | None = None) -> None:
         kali_puredns,
         kali_sqlmap,
         kali_subfinder,
+        kali_sweep_orphans,
         kali_wafw00f,
         kali_whatweb,
     ):

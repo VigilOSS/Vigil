@@ -1095,6 +1095,19 @@ def test_b1_orphan_cleanup_via_live_runtime():
 def test_kali_exec_dedup_warns_and_returns_early_without_force(
     monkeypatch, fake_engagement, capsys
 ):
+    """Default behavior on dedup hit is warn-and-continue.
+
+    The previous semantics (early-return with status=superseded, requiring
+    `--force` to bypass) pushed operators toward `--force` as a habit because
+    parallel specialists racing on the same wildcard list inside the 30s
+    window were hard-blocked. The new default emits the same warning to
+    stderr but lets the command run to completion. The hard-block path is
+    still reachable via the KALI_AUDIT_DEDUP_BLOCK env var (covered in the
+    sibling test below).
+    """
+    # Make sure no inherited env opts back into the old block-on-dup mode.
+    monkeypatch.delenv("KALI_AUDIT_DEDUP_BLOCK", raising=False)
+
     kali = _setup_fake_config(monkeypatch, fake_engagement)
 
     class _DedupClient(_FakeClient):
@@ -1107,11 +1120,12 @@ def test_kali_exec_dedup_warns_and_returns_early_without_force(
     monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
 
     popen_called = []
-    monkeypatch.setattr(
-        kali.subprocess,
-        "Popen",
-        lambda *a, **k: popen_called.append(True) or _FakePopen(returncode=0),
-    )
+
+    def _fake_popen(*args, **kwargs):
+        popen_called.append(True)
+        return _FakePopen(returncode=0)
+
+    monkeypatch.setattr(kali.subprocess, "Popen", _fake_popen)
 
     result = kali.kali_exec(
         ["nmap", "-p", "22", "10.0.0.1"],
@@ -1125,9 +1139,119 @@ def test_kali_exec_dedup_warns_and_returns_early_without_force(
         engagement_key=fake_engagement.name,
         tool_name="nmap",
     )
-    assert result.status == "superseded"
-    assert "dedup hit" in capsys.readouterr().err
-    assert popen_called == [], "subprocess must not run when dedup blocked"
+    err = capsys.readouterr().err
+    assert result.status == "completed", (
+        "warn-and-continue is the new default; dedup hit must not early-return"
+    )
+    assert "dedup hit" in err
+    assert popen_called, "subprocess must run under warn-and-continue default"
+
+
+def test_dedup_warns_and_continues_by_default(
+    monkeypatch, fake_engagement, capsys
+):
+    """The dedup warning text lands on stderr but the command runs to completion.
+
+    Sibling of `test_kali_exec_dedup_warns_and_returns_early_without_force`,
+    asserting the same default policy with a slightly different shape: this
+    one verifies the finalize PATCH happens and result.status reflects the
+    actual subprocess exit, not a synthetic supersede status.
+    """
+    monkeypatch.delenv("KALI_AUDIT_DEDUP_BLOCK", raising=False)
+
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+
+    class _DedupClient(_FakeClient):
+        def post(self, endpoint, payload):
+            self.posts.append((endpoint, payload))
+            return {"id": 21, "superseded_by_id": 20}
+
+    fake_client = _DedupClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
+    )
+
+    result = kali.kali_exec(
+        ["nmap", "-p", "80", "10.0.0.2"],
+        technique="RECON",
+        intent="parallel-specialist race",
+        probe_kind="fingerprint",
+        phase="recon",
+        timeout=30,
+        agent_name="recon-specialist",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        tool_name="nmap",
+    )
+
+    err = capsys.readouterr().err
+    assert "dedup hit" in err, "dedup warning must still hit stderr"
+    assert "equivalent command-run id=20" in err
+    assert result.status == "completed", "subprocess must run despite dedup hit"
+    assert result.return_code == 0
+    # Finalize PATCH must have fired for the run that did actually execute.
+    assert any(
+        ep == "command-runs/21" and payload.get("status") == "completed"
+        for ep, payload in fake_client.patches
+    ), "finalize PATCH must follow warn-and-continue execution"
+
+
+def test_dedup_block_env_var_restores_block_mode(
+    monkeypatch, fake_engagement, capsys
+):
+    """`KALI_AUDIT_DEDUP_BLOCK=1` opts back into the original block-on-dup mode.
+
+    Operators who explicitly want a hard block on dedup hits set the env var;
+    the CLI then early-returns with status=superseded and never spawns the
+    subprocess. `--force` still bypasses (covered separately), but absent
+    `--force` the run is suppressed exactly like the pre-fix behavior.
+    """
+    monkeypatch.setenv("KALI_AUDIT_DEDUP_BLOCK", "1")
+
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+
+    class _DedupClient(_FakeClient):
+        def post(self, endpoint, payload):
+            self.posts.append((endpoint, payload))
+            return {"id": 31, "superseded_by_id": 30}
+
+    fake_client = _DedupClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+
+    popen_called: list[bool] = []
+
+    def _fake_popen(*args, **kwargs):
+        popen_called.append(True)
+        return _FakePopen(returncode=0)
+
+    monkeypatch.setattr(kali.subprocess, "Popen", _fake_popen)
+
+    result = kali.kali_exec(
+        ["nmap", "-p", "443", "10.0.0.3"],
+        technique="RECON",
+        intent="block-mode dup probe",
+        probe_kind="fingerprint",
+        phase="recon",
+        timeout=30,
+        agent_name="recon-specialist",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        tool_name="nmap",
+    )
+
+    err = capsys.readouterr().err
+    assert result.status == "superseded", (
+        "KALI_AUDIT_DEDUP_BLOCK=1 must restore early-return semantics"
+    )
+    assert "dedup hit" in err
+    assert "KALI_AUDIT_DEDUP_BLOCK" in err, (
+        "block-mode message should name the opt-in env var so operators "
+        "know how to disable it"
+    )
+    assert popen_called == [], "subprocess must not run under block-on-dup mode"
 
 
 def test_kali_exec_dedup_force_bypasses_check(monkeypatch, fake_engagement):
@@ -2390,3 +2514,238 @@ def test_cero_only_domains_toggle_maps_to_dash_d(monkeypatch):
     assert cmd[0] == "cero"
     assert "-d" in cmd  # the toggle, not a target
     assert "198.51.100.0/24" in cmd
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# kali sweep-orphans — host-side reconciler for stuck `running` audit rows
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _FakeSweepClient:
+    """Captures GET pages and PATCH calls for the sweep-orphans tests.
+
+    ``rows`` is the list returned by the first ``GET command-runs?...`` page;
+    later pages return empty so paging exits cleanly. ``patches`` records each
+    finalize call so tests can assert payload shape and call count.
+    """
+
+    def __init__(self, rows):
+        self._rows = list(rows)
+        self.gets: list[str] = []
+        self.patches: list[tuple[str, dict]] = []
+
+    def get(self, endpoint):
+        self.gets.append(endpoint)
+        if len(self.gets) == 1:
+            return list(self._rows)
+        return []
+
+    def patch(self, endpoint, payload, *, accept_409: bool = False):
+        self.patches.append((endpoint, payload))
+        return {"id": int(endpoint.split("/")[-1]), "status": payload.get("status")}
+
+    def close(self):
+        return None
+
+
+def _orphan_row(
+    *,
+    row_id: int,
+    age_seconds: int,
+    run_uuid: str | None = "abcd1234",
+):
+    """Build a minimal command-run row with started_at = (now - age_seconds).
+
+    When run_uuid is None, stdout_path is set to a value the regex does NOT
+    match — exercising the "pid file unknown" fallback path.
+    """
+    import datetime as _dt
+
+    started = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=age_seconds)
+    started_iso = started.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if run_uuid is None:
+        stdout_path = "/legacy/no-uuid-here.txt"
+    else:
+        stdout_path = f"/engagements/x/scans/kali/{run_uuid}.out"
+    return {
+        "id": row_id,
+        "status": "running",
+        "started_at": started_iso,
+        "stdout_path": stdout_path,
+        "stderr_path": stdout_path.replace(".out", ".err").replace(".txt", ".err.txt"),
+    }
+
+
+def _setup_sweep_test(monkeypatch, fake_engagement, rows):
+    """Wire load_config, AssessmentClient, and subprocess.run for a sweep run."""
+    sweep = _import("assess.commands.kali_sweep_orphans")
+
+    def fake_load_config(_flag):
+        return SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        )
+
+    monkeypatch.setattr(sweep, "load_config", fake_load_config)
+    fake_client = _FakeSweepClient(rows)
+    monkeypatch.setattr(sweep, "AssessmentClient", lambda *a, **k: fake_client)
+    return sweep, fake_client
+
+
+def test_sweep_orphans_finalizes_dead_rows_to_lost(monkeypatch, fake_engagement):
+    """Happy path — a stuck row whose in-container PID is dead is PATCHed
+    to status=lost with ended_at set and return_code=null."""
+    rows = [_orphan_row(row_id=42, age_seconds=7200, run_uuid="aaaa1111")]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    # PID file is readable, but kill -0 fails — the wrapper recorded a PID
+    # whose process has since exited.
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[:3] == ["docker", "exec", "security-research"] and argv[3] == "cat":
+            return SimpleNamespace(returncode=0, stdout="9999\n", stderr="")
+        if argv[:3] == ["docker", "exec", "security-research"] and argv[3] == "kill":
+            assert argv[4] == "-0"
+            assert argv[5] == "9999"
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    assert len(fake_client.patches) == 1
+    endpoint, payload = fake_client.patches[0]
+    assert endpoint == "command-runs/42"
+    assert payload["status"] == "lost"
+    assert payload["return_code"] is None
+    assert payload["ended_at"]
+    assert payload["timed_out"] is False
+
+
+def test_sweep_orphans_skips_alive_rows(monkeypatch, fake_engagement):
+    """A stuck-but-alive row stays running — kill -0 returning 0 means the
+    process is still going, so the sweep does not PATCH it."""
+    rows = [_orphan_row(row_id=7, age_seconds=7200, run_uuid="bbbb2222")]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[3] == "cat":
+            return SimpleNamespace(returncode=0, stdout="12345\n", stderr="")
+        if argv[3] == "kill":
+            # kill -0 succeeds → process is alive
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    # No PATCH issued because the row was still-running.
+    assert fake_client.patches == []
+
+
+def test_sweep_orphans_dry_run_does_not_patch(monkeypatch, fake_engagement):
+    """--dry-run lists candidates and the planned action but never PATCHes,
+    even when the row would otherwise be finalized."""
+    rows = [_orphan_row(row_id=99, age_seconds=7200, run_uuid="cccc3333")]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[3] == "cat":
+            return SimpleNamespace(returncode=0, stdout="500\n", stderr="")
+        if argv[3] == "kill":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=True,
+    ))
+
+    # Dry-run never writes — finalize PATCH must not be issued.
+    assert fake_client.patches == []
+
+
+def test_sweep_orphans_handles_missing_pid_file_as_dead(monkeypatch, fake_engagement):
+    """A row whose in-container pid file is missing (cat returncode != 0) is
+    treated as dead and finalized to status=lost. Same outcome when the
+    stdout_path does not match the run_uuid pattern at all (legacy layout)."""
+    rows = [
+        _orphan_row(row_id=11, age_seconds=7200, run_uuid="dddd4444"),
+        _orphan_row(row_id=12, age_seconds=7200, run_uuid=None),
+    ]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_subprocess_run(argv, **kwargs):
+        # Pid file missing — cat returns non-zero with empty stdout.
+        if argv[3] == "cat":
+            return SimpleNamespace(returncode=1, stdout="", stderr="No such file")
+        # kill -0 should NOT be called when the pid is unknown — but harden
+        # the test against future refactors by treating it as dead anyway.
+        if argv[3] == "kill":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    # Both rows finalized to lost.
+    assert {endpoint for endpoint, _ in fake_client.patches} == {
+        "command-runs/11",
+        "command-runs/12",
+    }
+    for _, payload in fake_client.patches:
+        assert payload["status"] == "lost"
+        assert payload["return_code"] is None
+
+
+def test_sweep_orphans_respects_max_age_threshold(monkeypatch, fake_engagement):
+    """A row that is younger than --max-age-seconds is NOT a candidate even
+    when its status is running — newly-started rows must not be reaped just
+    because a sweep happens to run mid-flight."""
+    rows = [_orphan_row(row_id=1, age_seconds=60, run_uuid="eeee5555")]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    calls = {"count": 0}
+
+    def fake_subprocess_run(argv, **kwargs):
+        calls["count"] += 1
+        # Should never be called — the row is too fresh to be a candidate.
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    # No subprocess call (no liveness probe) and no PATCH because the row
+    # was below the threshold.
+    assert calls["count"] == 0
+    assert fake_client.patches == []
+

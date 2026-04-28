@@ -27,13 +27,28 @@ artifacts directly under `/engagements/$ENGAGEMENT_KEY/scans/` (the host sees th
 `$ENGAGEMENT_DIR/scans/`). Reserve `/tmp` for transient scratch files that do not need to survive
 the container, because anything under `/tmp` disappears on container recreate.
 
+> **Audit envelope is mandatory.** Every command in sections 1–6 below is illustrative shell —
+> execution wraps each network probe in `aith assess kali exec --` with the audit envelope
+> (`--technique OSINT --intent "<purpose>" --probe-kind fingerprint --phase recon --timeout N`).
+> The bare `searchsploit`/`theHarvester`/`bbot`/`curl`/`whois`/`dig`/`amass`/`gau`/`waymore`
+> invocations shown without the wrap are *examples of the underlying tool argv*; running them
+> on the host bypasses the audit pipeline that downstream specialists rely on as a coverage map.
+> Use `--technique OSINT` for passive external-source lookups (CT logs, public APIs, registries),
+> `--technique RECON` only when the probe sends traffic at the assessed target's own
+> infrastructure (theHarvester DNS resolution, bbot active modules). Each wrapped invocation
+> below shows the canonical form; pattern-match it for any tool that doesn't appear here yet.
+
 ### 1. CVE & Exploit Lookup
 
 Pull the tech stack from the backend (`aith assess list-intel tech-component`) — for each component+version:
 
-    # Exploit-DB local search
-    searchsploit "<component> <version>"
-    searchsploit -j "<component> <version>" | jq '.RESULTS_EXPLOIT[]'
+```bash
+# Exploit-DB local search (canonical wrapped form — copy this for every other tool below)
+aith assess kali exec \
+  --technique OSINT --intent "searchsploit lookup for <component> <version>" \
+  --probe-kind fingerprint --phase recon --timeout 60 -- \
+  searchsploit -j "<component> <version>"
+```
 
     # NVD API (rate limit: 5 req/30s without API key)
     curl -s "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=<component>+<version>&resultsPerPage=10" \
@@ -51,7 +66,15 @@ Pull the tech stack from the backend (`aith assess list-intel tech-component`) �
 
 Pull emails and domains from the backend (`aith assess list-intel email` and `aith assess list-intel domain`):
 
-    # theHarvester — email and subdomain enumeration
+```bash
+# theHarvester wrapped form — note --technique RECON when modules touch target DNS.
+aith assess kali exec \
+  --technique RECON --intent "theHarvester email + subdomain enum on <domain>" \
+  --probe-kind fingerprint --phase recon --timeout 1800 -- \
+  theHarvester -d <domain> -b all -f /engagements/$ENGAGEMENT_KEY/scans/osint_harvester.json
+```
+
+    # theHarvester — email and subdomain enumeration (illustrative argv — wrap as above)
     theHarvester -d <domain> -b all -f scans/osint_harvester.json
 
     # h8mail — breach lookup for discovered emails
@@ -69,7 +92,15 @@ Pull emails and domains from the backend (`aith assess list-intel email` and `ai
 
 Pull domains from the backend (`aith assess list-intel domain`):
 
-    # WHOIS
+```bash
+# WHOIS wrapped form (illustrative — every tool in this section follows the same wrap pattern).
+aith assess kali exec \
+  --technique OSINT --intent "WHOIS lookup for <domain>" \
+  --probe-kind fingerprint --phase recon --timeout 60 -- \
+  whois <domain>
+```
+
+    # WHOIS (illustrative argv — wrap as above)
     whois <domain> | tee scans/osint_whois.txt
 
     # Certificate transparency
@@ -104,7 +135,16 @@ Pull domains from the backend (`aith assess list-intel domain`):
 
 Pull people and org facts from the backend (`aith assess list-intel person` and `aith assess list-intel org-fact`):
 
-    # theHarvester — people and email enumeration
+```bash
+# theHarvester social wrapped form. Use --technique OSINT here — the
+# linkedin/google modules query third-party search APIs, not the target.
+aith assess kali exec \
+  --technique OSINT --intent "theHarvester linkedin/google enumeration for <domain>" \
+  --probe-kind fingerprint --phase recon --timeout 1200 -- \
+  theHarvester -d <domain> -b linkedin,google -f /engagements/$ENGAGEMENT_KEY/scans/osint_social.json
+```
+
+    # theHarvester — people and email enumeration (illustrative argv — wrap as above)
     theHarvester -d <domain> -b linkedin,google -f scans/osint_social.json
 
     # bbot recursive recon (modular, JSON output, pipeline-friendly)

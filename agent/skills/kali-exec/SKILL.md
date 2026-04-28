@@ -22,7 +22,7 @@ Skills should point you at `aith assess contract kali <verb>` for field tables i
 
 ## Verb menu
 
-19 verbs total: 17 typed and 2 fallback. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles.
+20 verbs total: 17 typed, 2 fallback, and 1 host-side maintenance command. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles; the maintenance command reconciles stuck audit rows.
 
 | Verb | Use | Paired reference |
 |------|-----|------------------|
@@ -45,6 +45,7 @@ Skills should point you at `aith assess contract kali <verb>` for field tables i
 | `kali whatweb` | Deep web technology fingerprinting. | `references/tools/recon/whatweb.md` |
 | `kali exec <cmd>` | Raw passthrough for tools not yet typed. Same audit metadata flags. | `references/runtime-guides/kali-cli.md` |
 | `kali job <start\|status\|tail\|stop\|list>` | Async-job lifecycle for long scans (nmap+scripts, sqlmap, nuclei sweep, dirb, gobuster, ffuf large wordlists). | `references/runtime-guides/kali-cli.md` |
+| `kali sweep-orphans` | Host-side reconciler for `assessment_command_runs` rows stuck in `status=running` past `--max-age-seconds` (default 3600s). Probes the in-container PID via `kill -0`; finalizes dead rows to `status=lost`. No audit flags — it is maintenance, not a probe. | `references/runtime-guides/kali-cli.md` |
 
 `kali exec` is the escape hatch — use it for tools the typed surface does not yet model (dirb, gobuster, hydra, john, hashcat, custom scripts, etc.) and pass the same audit-metadata flags as a typed verb. `kali job` is the supervisor — see the sync-vs-async decision below.
 
@@ -82,7 +83,7 @@ The CLI fails closed when these are missing. Pass them explicitly — there is n
 | `--phase <enum>` | The phase the dispatch was authorized for. | REQUIRED. See "Phase tags" below — pass the dispatch phase, not `scope.json.current_phase`. |
 | `--timeout <seconds>` | Wall-clock budget. | Required. Default suggestion: 1800 for synchronous probes; longer budgets must use `kali job start`. |
 | `--destructive` | Flag for writes/deletes. | Off by default. Set when the command does POST/PUT/PATCH/DELETE, file upload, account creation, config change, or any state-modifying shell exec on the target. |
-| `--force` | Bypass dedup-window check. | The CLI hashes `(command, argv_json)` and warns/blocks duplicates within `KALI_CLI_DEDUP_WINDOW_SECONDS` (default 30s). Use `--force` only when re-running a near-duplicate is intentional. |
+| `--force` | Suppress the dedup-warning log and skip the supersede check entirely. Default behavior is warn-and-continue (set `KALI_AUDIT_DEDUP_BLOCK=1` env var to restore the old block-on-dup mode). | The CLI hashes `(command, argv_json)` and warns when an identical command ran within `KALI_AUDIT_DEDUP_WINDOW_SECONDS` (default 30s). The default policy is warn-and-continue so parallel specialists racing on the same wildcard list don't hard-block each other. Use `--force` only when you also want to suppress the warning (for an intentional retry). |
 | `--strace` | Wrap in `strace -e trace=network,write,unlink`. | Optional. Use for `--probe-kind exploit` or `--destructive` so the audit row records network egress and disk writes. The strace artifact spills to the same `scans/kali/` directory as stdout/stderr. |
 
 `--engagement-key` and `--agent-name` are auto-derived from `${ENGAGEMENT_DIR}/engagement.json` and the dispatching role context — do not pass them manually unless correcting an inferred value.
@@ -107,7 +108,7 @@ The half-phase tags exist because the audit row must reflect what the dispatch w
 
 ## Cross-reference: rate-limit calibration
 
-Per-target rate guidance (Cloud-fronted, Origin, WAF-protected, vendor-SaaS, high-friction) lives in `agent/shared-constraints.md` "Per-Target Rate Calibration Table". Tier-pick prose stays in `agent/operator-core.md` "Recon Dispatch Resource Policy".
+Per-target rate guidance (Cloud-fronted, Origin, WAF-protected, vendor-SaaS, high-friction) lives in `agent/references/recon/rate-calibration.md` (loaded by recon-class roles on first use). Tier-pick prose stays in `agent/operator-core.md` "Recon Dispatch Resource Policy".
 
 ## Examples per verb
 
@@ -433,3 +434,5 @@ Every typed verb and `kali exec` writes an audit row with `command`, `argv`, `to
 ## Troubleshooting and runtime errors
 
 When `aith assess kali --help` errors or a verb fails unexpectedly, see `agent/references/runtime-guides/kali-cli.md` for diagnosis steps (runtime status, dtach reachability, dedup-window, common error messages).
+
+When you see audit rows stuck in `status=running` long after their tool would have finished — typical after a backend restart, host crash mid-run, or a network blip during the finalize PATCH — run `aith assess kali sweep-orphans --dry-run` to inspect candidates, then re-run without `--dry-run` to finalize dead rows to `status=lost`. The sweep is non-destructive for live processes (it leaves still-running rows untouched), so a periodic sweep is safe even when nothing looks broken.
