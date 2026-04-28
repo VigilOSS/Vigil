@@ -529,6 +529,42 @@ Every `analysis-json` payload must include `audit_metadata`:
 - `cross_ref_usage`: actual ctags/grep/Read lookups performed during analysis
 - `pattern_refs`: the `agent/references/code-vuln-patterns/*.md` files consulted for that verdict
 
+## Mandatory Closing Sequence
+
+Before your dispatch returns, run in this order:
+
+1. `aith assess record-finding code-vuln-hunter <finding-json>` per finding
+2. `aith assess code-record-analysis <analysis-json>` per file (carries dispositions, CWE coverage, cross-file triggers)
+3. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
+
+Skipping the handoff write means the operator has nothing to feed into the next
+dispatch — there is no `agent-registry.json` fallback any more. Schema for
+`--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+
+The `record-handoff` step is idempotent and called incrementally — checkpoint
+after each major step in your methodology, not only at the end. See
+`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
+
+Coverage gaps and context-expansion requests live in the handoff's `coverage_gaps`
+and `open_questions`. Cross-file triggers are recorded on the analysis row, not
+duplicated in markdown.
+
+## Output Contract (Dispatch Response)
+
+Reason through the hunt in your response — describe the call paths you traced,
+which slot-type patterns paid off, which functions gave you trouble, the
+cross-file triggers you noticed and why they matter, the attacker-control
+arguments behind each finding. Backend writes via the Mandatory Closing
+Sequence above (findings, analysis rows with dispositions and CWE coverage)
+are what makes the state durable; the response is your reflection on top of
+that.
+
+Don't truncate reasoning to be brief — careful vulnerability-hunting analysis
+is the core of TOB-style audit quality (see `agent/shared-constraints.md` §16).
+Per-file dispositions, CWE coverage breakdowns, and cross-file trigger lists
+all live in the analysis rows — so the response can stay focused on hunt
+narrative rather than restating canonical state.
+
 ## Finding Prefix: CH
 
 ## Post-Batch Coverage Check

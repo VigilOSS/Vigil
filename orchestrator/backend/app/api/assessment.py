@@ -127,7 +127,6 @@ class CommandRunRecordRequest(BaseModel):
     working_dir: str | None = Field(default=None, max_length=1024)
     scope_version: str | None = Field(default=None, max_length=128)
     auth_context: str | None = Field(default=None, max_length=128)
-    strace_path: str | None = Field(default=None, max_length=1024)
     timeout_seconds_requested: int | None = Field(default=None, ge=0)
     force: bool = False
 
@@ -143,11 +142,6 @@ class CommandRunFinalize(BaseModel):
     duplicate terminal PATCHes can be detected and rejected with 409 instead
     of silently overwriting the first finalize."""
 
-    # ``aborted-dedup`` finalizes a row that was created on a dedup hit but
-    # whose subprocess never ran (CLI block-mode). The row is durably recorded
-    # for audit-truth: the operator can see "we would have run this command
-    # but a peer was already in flight" without polluting `running`-state
-    # sweepers.
     status: Literal[
         "running",
         "completed",
@@ -155,7 +149,6 @@ class CommandRunFinalize(BaseModel):
         "timed_out",
         "killed",
         "lost",
-        "aborted-dedup",
     ]
     return_code: int | None = None
     ended_at: datetime
@@ -167,7 +160,6 @@ class CommandRunFinalize(BaseModel):
     peak_rss_bytes: int | None = Field(default=None, ge=0)
     cpu_user_seconds: float | None = Field(default=None, ge=0)
     cpu_system_seconds: float | None = Field(default=None, ge=0)
-    strace_path: str | None = Field(default=None, max_length=1024)
 
 
 class JobCreate(BaseModel):
@@ -671,7 +663,6 @@ async def patch_command_run(
         peak_rss_bytes=request.peak_rss_bytes,
         cpu_user_seconds=request.cpu_user_seconds,
         cpu_system_seconds=request.cpu_system_seconds,
-        strace_path=request.strace_path,
     )
     if not record.get("noop"):
         await _broadcast(engagement.key, "command_run", record)
@@ -994,4 +985,293 @@ async def create_blocked_technique(engagement_key: str, request: BlockedTechniqu
         provenance=request.provenance,
     )
     await _broadcast(engagement.key, "blocked_technique", record)
+    return record
+
+
+# ── Round 9: dispatch / handoff / decision endpoints ──────────────────────
+
+
+_DISPATCH_STATUS = Literal["in-progress", "completed", "failed", "aborted", "blocked"]
+_PERMISSION = Literal[
+    "artifact-only",
+    "passive-probe",
+    "target-facing",
+    "target-facing-destructive",
+]
+_DISPATCH_MODE = Literal[
+    "hypothesis-driven",
+    "item-iterating",
+    "deep-manual",
+    "variant-rotation",
+]
+_REASONING = Literal["low", "medium", "high"]
+_CONFIDENCE = Literal["low", "medium", "high"]
+
+
+class DispatchCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str = Field(min_length=1, max_length=256)
+    agent_role: str = Field(min_length=1, max_length=128)
+    task: str | None = Field(default=None, max_length=4096)
+    skill_loaded: str | None = Field(default=None, max_length=512)
+    scope_host: str | None = Field(default=None, max_length=512)
+    dispatched_at: str | None = Field(default=None, max_length=64)
+    status: _DISPATCH_STATUS = "in-progress"
+    model: str | None = Field(default=None, max_length=128)
+    reasoning: _REASONING | None = None
+    permission: _PERMISSION | None = None
+    command_budget: int | None = Field(default=None, ge=0)
+    output_schema: str | None = Field(default=None, max_length=512)
+    dispatch_mode: _DISPATCH_MODE | None = None
+    files_allowed: list[str] | None = None
+    finding_slugs: list[str] | None = None
+
+
+class DispatchUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: _DISPATCH_STATUS | None = None
+    completed_at: str | None = Field(default=None, max_length=64)
+    finding_slugs: list[str] | None = None
+
+
+class HandoffCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str = Field(min_length=1, max_length=256)
+    agent_role: str = Field(min_length=1, max_length=128)
+    phase: str | None = Field(default=None, max_length=64)
+    summary: str = Field(min_length=1, max_length=2000)
+    confidence: _CONFIDENCE | None = None
+    finding_slugs: list[str] | None = None
+    coverage_gaps: list[dict[str, Any]] | None = None
+    next_steps: list[dict[str, Any]] | None = None
+    runtime_issues: list[dict[str, Any]] | None = None
+    working_artifacts: list[dict[str, Any]] | None = None
+    open_questions: list[str] | None = None
+    recommended_next_agent: str | None = Field(default=None, max_length=128)
+    extras: dict[str, Any] | None = None
+
+
+class HandoffUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str | None = Field(default=None, min_length=1, max_length=2000)
+    phase: str | None = Field(default=None, max_length=64)
+    confidence: _CONFIDENCE | None = None
+    finding_slugs: list[str] | None = None
+    coverage_gaps: list[dict[str, Any]] | None = None
+    next_steps: list[dict[str, Any]] | None = None
+    runtime_issues: list[dict[str, Any]] | None = None
+    working_artifacts: list[dict[str, Any]] | None = None
+    open_questions: list[str] | None = None
+    recommended_next_agent: str | None = Field(default=None, max_length=128)
+    extras: dict[str, Any] | None = None
+
+
+class DecisionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # ``kind`` is intentionally NOT a Literal — operators may add new
+    # checkpoint kinds (scope_decision, egress_decision, dispatch_blocked,
+    # license_decision, ...) without a backend redeploy. The CLI helper layer
+    # validates the well-known shapes; the table just stores the bytes.
+    kind: str = Field(min_length=1, max_length=128)
+    payload: dict[str, Any]
+    surfaced_to_user: bool = False
+
+
+class DecisionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resolved: bool | None = None
+    resolution: dict[str, Any] | None = None
+    surfaced_to_user: bool | None = None
+
+
+@router.post("/dispatches", status_code=status.HTTP_201_CREATED)
+async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.record_dispatch(
+        engagement.id,
+        agent_id=request.agent_id,
+        agent_role=request.agent_role,
+        task=request.task,
+        skill_loaded=request.skill_loaded,
+        scope_host=request.scope_host,
+        dispatched_at=request.dispatched_at,
+        status_value=request.status,
+        model=request.model,
+        reasoning=request.reasoning,
+        permission=request.permission,
+        command_budget=request.command_budget,
+        output_schema=request.output_schema,
+        dispatch_mode=request.dispatch_mode,
+        files_allowed=request.files_allowed,
+        finding_slugs=request.finding_slugs,
+    )
+    await _broadcast(engagement.key, "dispatch", record)
+    return record
+
+
+@router.get("/dispatches")
+def get_dispatches(
+    engagement_key: str,
+    role: str = "",
+    status_value: str = Query(default="", alias="status"),
+    since: str = "",
+    task_q: str = "",
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_dispatches(
+        engagement.id,
+        role=role,
+        status_value=status_value,
+        since=since,
+        task_q=task_q,
+        limit=limit,
+    )
+
+
+@router.get("/dispatches/{agent_id}")
+def get_dispatch_endpoint(engagement_key: str, agent_id: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_dispatch(engagement.id, agent_id)
+
+
+@router.patch("/dispatches/{agent_id}")
+async def patch_dispatch(
+    engagement_key: str,
+    agent_id: str,
+    request: DispatchUpdate,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.update_dispatch(
+        engagement.id,
+        agent_id=agent_id,
+        status_value=request.status,
+        completed_at=request.completed_at,
+        finding_slugs=request.finding_slugs,
+    )
+    await _broadcast(engagement.key, "dispatch", record)
+    return record
+
+
+@router.post("/dispatch-handoffs", status_code=status.HTTP_201_CREATED)
+async def create_handoff(engagement_key: str, request: HandoffCreate) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.record_handoff(
+        engagement.id,
+        agent_id=request.agent_id,
+        agent_role=request.agent_role,
+        summary=request.summary,
+        phase=request.phase,
+        confidence=request.confidence,
+        finding_slugs=request.finding_slugs,
+        coverage_gaps=request.coverage_gaps,
+        next_steps=request.next_steps,
+        runtime_issues=request.runtime_issues,
+        working_artifacts=request.working_artifacts,
+        open_questions=request.open_questions,
+        recommended_next_agent=request.recommended_next_agent,
+        extras=request.extras,
+    )
+    await _broadcast(engagement.key, "dispatch_handoff", record)
+    return record
+
+
+@router.get("/dispatch-handoffs")
+def get_handoffs(
+    engagement_key: str,
+    role: str = "",
+    since: str = "",
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_handoffs(
+        engagement.id,
+        role=role,
+        since=since,
+        limit=limit,
+    )
+
+
+@router.get("/dispatch-handoffs/{agent_id}")
+def get_handoff_endpoint(engagement_key: str, agent_id: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_handoff(engagement.id, agent_id)
+
+
+@router.patch("/dispatch-handoffs/{agent_id}")
+async def patch_handoff(
+    engagement_key: str,
+    agent_id: str,
+    request: HandoffUpdate,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.update_handoff(
+        engagement.id,
+        agent_id=agent_id,
+        summary=request.summary,
+        phase=request.phase,
+        confidence=request.confidence,
+        finding_slugs=request.finding_slugs,
+        coverage_gaps=request.coverage_gaps,
+        next_steps=request.next_steps,
+        runtime_issues=request.runtime_issues,
+        working_artifacts=request.working_artifacts,
+        open_questions=request.open_questions,
+        recommended_next_agent=request.recommended_next_agent,
+        extras=request.extras,
+    )
+    await _broadcast(engagement.key, "dispatch_handoff", record)
+    return record
+
+
+@router.post("/dispatch-decisions", status_code=status.HTTP_201_CREATED)
+async def create_decision(engagement_key: str, request: DecisionCreate) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.record_decision(
+        engagement.id,
+        kind=request.kind,
+        payload=request.payload,
+        surfaced_to_user=request.surfaced_to_user,
+    )
+    await _broadcast(engagement.key, "dispatch_decision", record)
+    return record
+
+
+@router.get("/dispatch-decisions")
+def get_decisions(
+    engagement_key: str,
+    kind: str = "",
+    resolved: bool | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_decisions(
+        engagement.id,
+        kind=kind,
+        resolved=resolved,
+        limit=limit,
+    )
+
+
+@router.patch("/dispatch-decisions/{decision_id}")
+async def patch_decision(
+    engagement_key: str,
+    decision_id: int,
+    request: DecisionUpdate,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.update_decision(
+        engagement.id,
+        decision_id=int(decision_id),
+        resolved=request.resolved,
+        resolution=request.resolution,
+        surfaced_to_user=request.surfaced_to_user,
+    )
+    await _broadcast(engagement.key, "dispatch_decision", record)
     return record

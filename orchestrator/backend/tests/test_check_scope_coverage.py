@@ -120,6 +120,10 @@ class FakeClient:
     must not call those endpoints, and a regression that re-adds the call
     should fail the test suite loudly rather than silently receive an
     empty list.
+
+    Round 9: ``list_decisions`` stands in for the new
+    assessment_dispatch_decisions table — vendor-SaaS scope decisions used
+    to live in ``$DIR/agent-registry.json`` and now come from the backend.
     """
 
     def __init__(
@@ -127,10 +131,12 @@ class FakeClient:
         *,
         services: list[dict[str, Any]] | None = None,
         surfaces: list[dict[str, Any]] | None = None,
+        decisions: list[dict[str, Any]] | None = None,
         endpoint_handler=None,
     ) -> None:
         self._services = services or []
         self._surfaces = surfaces or []
+        self._decisions = decisions or []
         self._endpoint_handler = endpoint_handler
         self.calls: list[str] = []
 
@@ -146,6 +152,13 @@ class FakeClient:
             return self._surfaces
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
+    def list_decisions(self, **filters: Any) -> list[dict[str, Any]]:
+        rows = list(self._decisions)
+        kind = filters.get("kind")
+        if kind:
+            rows = [r for r in rows if r.get("kind") == kind]
+        return rows
+
     def close(self) -> None:
         return None
 
@@ -156,16 +169,19 @@ def _patch_client(
     *,
     services=None,
     surfaces=None,
+    decisions=None,
     endpoint_handler=None,
 ) -> list[FakeClient]:
     fake_services = services or []
     fake_surfaces = surfaces or []
+    fake_decisions = decisions or []
     created: list[FakeClient] = []
 
     def _factory(base_url: str, engagement_key: str) -> FakeClient:
         client = FakeClient(
             services=fake_services,
             surfaces=fake_surfaces,
+            decisions=fake_decisions,
             endpoint_handler=endpoint_handler,
         )
         created.append(client)
@@ -194,6 +210,7 @@ def _run(
     *,
     services=None,
     surfaces=None,
+    decisions=None,
     endpoint_handler=None,
     require_stage: str | None = None,
     as_json: bool = True,
@@ -206,6 +223,7 @@ def _run(
         module,
         services=services,
         surfaces=surfaces,
+        decisions=decisions,
         endpoint_handler=endpoint_handler,
     )
     module.run(
@@ -977,27 +995,29 @@ def test_vendor_saas_blocks_phase_advance_under_wildcard_expansion(monkeypatch, 
         for msg in report["overall_gaps"]
     )
 
-    # Recording a scope_decision for the host clears the gate.
-    registry_path = eng / "agent-registry.json"
-    registry_path.write_text(
-        json.dumps(
-            [
-                {
-                    "kind": "scope_decision",
-                    "host": "vendor-saas-platform.example.test",
-                    "vendor": "vendor-saas-platform",
-                    "choice": "in_scope",
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
+    # Recording a scope_decision in the backend clears the gate. Round 9: the
+    # decision lives in assessment_dispatch_decisions, not in
+    # $DIR/agent-registry.json.
+    decisions = [
+        {
+            "id": 1,
+            "kind": "scope_decision",
+            "payload": {
+                "host": "vendor-saas-platform.example.test",
+                "vendor": "vendor-saas-platform",
+                "choice": "in_scope",
+            },
+            "surfaced_to_user": True,
+            "resolved": False,
+        }
+    ]
 
     _run(
         monkeypatch,
         eng,
         services=services,
         surfaces=surfaces,
+        decisions=decisions,
         require_stage="enum",
     )
     report = json.loads(capsys.readouterr().out)

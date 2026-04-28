@@ -4,9 +4,11 @@ Replaces dispatcher.sh with parameterized SQL.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import sys
+from typing import Any
 
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
@@ -17,21 +19,65 @@ from assess.lib.params import extract_url_path, extract_query_params, extract_pa
 # Actions that don't need a cases.db (work-buffer SQLite). When the first
 # positional arg matches one of these names, we treat it as the action and
 # leave db_path empty rather than forcing the operator to pass a useless path.
-# render-handoff is operator-glue for cross-dispatch continuity (Fix #7) — it
-# pulls from $DIR/agent-registry.json and the backend, never the work buffer.
-_DBLESS_ACTIONS = ("render-handoff",)
+# Round 9: register/update-status/list/get/record-decision/record-handoff and
+# render-handoff all read/write the orchestrator backend, not the work buffer.
+_DBLESS_ACTIONS = (
+    "render-handoff",
+    "register",
+    "update-status",
+    "list",
+    "get",
+    "record-decision",
+    "record-handoff",
+)
+
+
+def _utcnow_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _split_csv(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [token.strip() for token in value.split(",") if token.strip()]
+
+
+def _load_json_arg(value: str | None) -> Any:
+    """Read a `--*-json` flag that may be inline JSON or a path to a JSON file."""
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.startswith("@") or text.startswith("/") or text.endswith(".json"):
+        candidate = text[1:] if text.startswith("@") else text
+        try:
+            with open(candidate, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except FileNotFoundError:
+            # Fall through and try parsing as inline JSON.
+            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"ERROR: failed to read JSON from {candidate}: {exc}", file=sys.stderr)
+            sys.exit(1)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        print(f"ERROR: invalid JSON: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("dispatch", help="Work-buffer dispatch engine")
-    p.add_argument("db_path", help="Path to cases.db")
+    p.add_argument("db_path", help="Path to cases.db (or DBLESS action name)")
     p.add_argument(
         "action",
         nargs="?",
         default="",
         help=(
             "stats|fetch|fetch-by-priority|peek|defer-cluster|defer-items|done|error|"
-            "reset-stale|retry-errors|migrate|requeue|render-handoff"
+            "reset-stale|retry-errors|migrate|requeue|render-handoff|register|"
+            "update-status|list|get|record-decision|record-handoff"
         ),
     )
     p.add_argument("extra", nargs="*", help="Action-specific arguments")
@@ -62,6 +108,87 @@ def register(subparsers) -> None:
         help="render-handoff: include one short evidence excerpt per finding slug. Off by "
         "default to keep the handoff blob bounded.",
     )
+
+    # Round 9: dispatch / handoff / decision shared flags. Some are reused
+    # across multiple verbs (e.g. --agent-id, --agent-role for register and
+    # record-handoff); keeping them on the parent dispatch parser avoids
+    # rebuilding subparser plumbing while every action's run handler picks
+    # only the flags it cares about.
+    p.add_argument("--agent-id", dest="agent_id", default=None,
+                   help="(register / update-status / get / record-handoff) Dispatch agent_id.")
+    p.add_argument("--agent-role", dest="agent_role", default=None,
+                   help="(register / record-handoff) Specialist role.")
+    p.add_argument("--task", dest="task", default=None, help="(register) Task description.")
+    p.add_argument("--skill", dest="skill", default=None, help="(register) Skill path the specialist loads.")
+    p.add_argument("--scope-host", dest="scope_host", default=None, help="(register) Scope host.")
+    p.add_argument("--model", dest="dispatch_model", default=None, help="(register) Model name.")
+    p.add_argument("--reasoning", dest="reasoning", default=None,
+                   choices=("low", "medium", "high"), help="(register) Reasoning level.")
+    p.add_argument("--permission", dest="permission", default=None,
+                   choices=("artifact-only", "passive-probe", "target-facing", "target-facing-destructive"),
+                   help="(register) Authorization level.")
+    p.add_argument("--command-budget", dest="command_budget", default=None, type=int,
+                   help="(register) Upper bound on aith assess kali ... calls.")
+    p.add_argument("--output-schema", dest="output_schema", default=None,
+                   help="(register) Expected output payload shape.")
+    p.add_argument("--dispatch-mode", dest="dispatch_mode_arg", default=None,
+                   choices=("hypothesis-driven", "item-iterating", "deep-manual", "variant-rotation"),
+                   help="(register) Dispatch loop shape.")
+    p.add_argument("--files-allowed", dest="files_allowed", default=None,
+                   help="(register) Comma-separated list of files the specialist may read.")
+    p.add_argument("--from-json", dest="from_json", default=None,
+                   help="(register / record-handoff) Path to JSON payload (overrides flag-based fields).")
+    p.add_argument("--status", dest="dispatch_status", default=None,
+                   choices=("in-progress", "completed", "failed", "aborted", "blocked"),
+                   help="(update-status / list) Dispatch lifecycle status.")
+    p.add_argument("--completed-at", dest="completed_at", default=None,
+                   help="(update-status) ISO timestamp; defaults to now() when --status is terminal.")
+    p.add_argument("--finding-slugs", dest="finding_slugs", default=None,
+                   help="(update-status / record-handoff) Comma-separated slugs.")
+    p.add_argument("--role", dest="filter_role", default=None,
+                   help="(list) Filter by agent_role.")
+    p.add_argument("--since", dest="filter_since", default=None,
+                   help="(list) Filter by dispatched_at >= ISO timestamp.")
+    p.add_argument("--task-q", dest="task_q", default=None,
+                   help="(list) Substring match against task field.")
+    p.add_argument("--limit", dest="dispatch_limit", default=None, type=int,
+                   help="(list) Result limit (default 100).")
+    # record-decision / record-handoff
+    p.add_argument("--kind", dest="decision_kind", default=None,
+                   help="(record-decision) Decision kind: scope_decision|egress_decision|dispatch_blocked|...")
+    p.add_argument("--payload-json", dest="payload_json", default=None,
+                   help="(record-decision) Decision payload (inline JSON or path).")
+    p.add_argument("--surfaced-to-user", dest="surfaced_to_user", action="store_true",
+                   help="(record-decision) Mark decision as user-facing.")
+    p.add_argument("--host", dest="decision_host", default=None,
+                   help="(record-decision scope_decision shorthand) Host name.")
+    p.add_argument("--vendor", dest="decision_vendor", default=None,
+                   help="(record-decision scope_decision shorthand) Vendor name.")
+    p.add_argument("--choice", dest="decision_choice", default=None,
+                   help="(record-decision shorthand) User choice / decision label.")
+    p.add_argument("--note", dest="decision_note", default=None,
+                   help="(record-decision shorthand) Free-text note attached to payload.")
+    p.add_argument("--phase", dest="decision_phase", default=None,
+                   help="(record-decision dispatch_blocked shorthand) Phase tag.")
+    # record-handoff flag-based payload
+    p.add_argument("--summary", dest="hf_summary", default=None,
+                   help="(record-handoff) Required summary text (≤2000 chars).")
+    p.add_argument("--confidence", dest="hf_confidence", default=None,
+                   choices=("low", "medium", "high"), help="(record-handoff) Confidence level.")
+    p.add_argument("--next-step", dest="hf_next_steps", action="append", default=None,
+                   help="(record-handoff) Next-step action; repeat to add multiple.")
+    p.add_argument("--coverage-gap", dest="hf_coverage_gaps", action="append", default=None,
+                   help="(record-handoff) '<area>: <reason>' coverage-gap entry; repeatable.")
+    p.add_argument("--runtime-issue", dest="hf_runtime_issues", action="append", default=None,
+                   help="(record-handoff) '<kind>: <detail>' runtime-issue entry; repeatable.")
+    p.add_argument("--working-artifact", dest="hf_working_artifacts", action="append", default=None,
+                   help="(record-handoff) Path to a working artifact; repeatable.")
+    p.add_argument("--open-question", dest="hf_open_questions", action="append", default=None,
+                   help="(record-handoff) Open question; repeatable.")
+    p.add_argument("--recommended-next-agent", dest="hf_recommended_next_agent", default=None,
+                   help="(record-handoff) Suggested next role.")
+    p.add_argument("--extras-json", dest="hf_extras_json", default=None,
+                   help="(record-handoff) Extras dict (inline JSON or path).")
     p.set_defaults(func=run)
 
 
@@ -92,6 +219,24 @@ def run(args) -> None:
 
     if action == "render-handoff":
         _render_handoff(args, extra)
+        return
+    if action == "register":
+        _register_dispatch(args)
+        return
+    if action == "update-status":
+        _update_dispatch_status(args, extra)
+        return
+    if action == "list":
+        _list_dispatches(args)
+        return
+    if action == "get":
+        _get_dispatch(args, extra)
+        return
+    if action == "record-decision":
+        _record_decision(args)
+        return
+    if action == "record-handoff":
+        _record_handoff(args)
         return
 
     if not db_path:
@@ -189,8 +334,11 @@ def run(args) -> None:
     else:
         print(f"Unknown action: {action}", file=sys.stderr)
         print(
-            "Actions: stats, peek, fetch, fetch-by-priority, defer-cluster, "
-            "defer-items, done, error, reset-stale, retry-errors, migrate, requeue",
+            "Work-buffer actions: stats, peek, fetch, fetch-by-priority, "
+            "defer-cluster, defer-items, done, error, reset-stale, retry-errors, "
+            "migrate, requeue\n"
+            "Dispatch actions (no cases.db): register, update-status, list, get, "
+            "render-handoff, record-decision, record-handoff",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -736,9 +884,10 @@ def _requeue(db_path: str) -> None:
 # transcripts because it's fast and the dispatch prompt arrives bloated.
 #
 # render-handoff replaces that discretion with a deterministic emitter that
-# pulls from durable state ($DIR/agent-registry.json + the assessment backend)
-# and emits a markdown blob the operator pastes verbatim into the next
-# dispatch prompt. The output is hard-capped at --max-lines (default 40); the
+# pulls from durable state (the orchestrator's assessment_dispatches +
+# assessment_dispatch_handoffs tables) and emits a markdown blob the operator
+# pastes verbatim into the next dispatch prompt. The output is hard-capped
+# at --max-lines (default 40); the
 # findings list collapses to "... and N more" before any fixed sections drop.
 # ---------------------------------------------------------------------------
 
@@ -746,10 +895,14 @@ def _requeue(db_path: str) -> None:
 def _render_handoff(args, extra: list[str]) -> None:
     """Emit a bounded markdown handoff blob for a prior dispatch.
 
-    Reads ``$DIR/agent-registry.json`` for the entry whose ``agent_id``
-    matches the given id, then enriches with backend finding records and
-    optional credential rows so the operator can paste the result into the
-    next dispatch prompt without copying transcript excerpts.
+    Round 9: reads from the orchestrator backend (assessment_dispatches +
+    assessment_dispatch_handoffs) instead of the legacy
+    ``$DIR/agent-registry.json`` file. The handoff payload provides
+    summary / coverage gaps / next steps / runtime issues / working artifacts
+    / open questions / extras; the dispatch row provides metadata (role,
+    task, skill_loaded, scope_host, dispatched_at, status). 404 on the
+    handoff exits 2; 404 on the dispatch row is non-fatal — the renderer
+    still produces output from the handoff.
     """
     if not extra:
         print(
@@ -770,48 +923,73 @@ def _render_handoff(args, extra: list[str]) -> None:
     max_lines = max(1, int(getattr(args, "max_lines", 40) or 40))
     include_evidence = bool(getattr(args, "include_evidence", False))
 
-    # Resolve engagement directory the same way other helper-owned commands do
-    # (config layer): CLI --engagement-dir, then $ENGAGEMENT_DIR, then cwd if
-    # it contains scope.json.
     cfg = load_config(getattr(args, "engagement_dir", None))
-    registry_path = os.path.join(cfg.engagement_dir, "agent-registry.json")
-    entry = _registry_lookup(registry_path, agent_id)
-    if entry is None:
-        print(
-            f"render-handoff: agent-id '{agent_id}' not found in "
-            f"{registry_path}; the registry is the durable record of who was "
-            f"dispatched, so a missing entry means the prior dispatch never "
-            f"appended (or the id was mistyped).",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    role = str(entry.get("role") or "<unknown role>")
-    task = str(entry.get("task") or "<unrecorded task>")
-    skill_loaded = entry.get("skill_loaded") or entry.get("skill") or ""
-    scope_host = entry.get("scope_host") or ""
-    dispatched_at = entry.get("dispatched_at") or entry.get("timestamp") or ""
-    status = entry.get("status") or ""
-    finding_slugs = entry.get("finding_slugs") or entry.get("findings") or []
-    if not isinstance(finding_slugs, list):
-        finding_slugs = [finding_slugs]
-    finding_slugs = [str(s).strip() for s in finding_slugs if str(s).strip()]
-
-    next_step = entry.get("next_step")
-    if not isinstance(next_step, str):
-        next_step = ""
-    next_step = next_step.strip()
-
-    working_artifacts = entry.get("working_artifacts") or []
-    if not isinstance(working_artifacts, list):
-        working_artifacts = [working_artifacts]
-    working_artifacts = [str(p).strip() for p in working_artifacts if str(p).strip()]
-
-    # Per-slug enrichment from the backend. Tolerate 404s gracefully — the
-    # operator may have killed a finding between dispatch and handoff render.
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    finding_rows: list[dict] = []
     try:
+        handoff = client.get_handoff(agent_id)
+        if handoff is None:
+            print(
+                f"render-handoff: agent-id '{agent_id}' has no recorded handoff in the backend "
+                f"(GET dispatch-handoffs/{agent_id} -> 404). Specialist dispatches should call "
+                f"`aith assess dispatch record-handoff` before exiting; a missing handoff means "
+                f"the prior dispatch never wrote one (or the id was mistyped).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        dispatch = client.get_dispatch(agent_id)  # 404 -> None, render with handoff-only data
+        # ── Pull metadata from dispatch row when present, fall back to the
+        # handoff itself otherwise.
+        if dispatch is not None:
+            role = str(dispatch.get("agent_role") or handoff.get("agent_role") or "<unknown role>")
+            task = str(dispatch.get("task") or "<unrecorded task>")
+            skill_loaded = dispatch.get("skill_loaded") or ""
+            scope_host = dispatch.get("scope_host") or ""
+            dispatched_at = dispatch.get("dispatched_at") or ""
+            dispatch_status = dispatch.get("status") or ""
+        else:
+            role = str(handoff.get("agent_role") or "<unknown role>")
+            task = "<unrecorded task>"
+            skill_loaded = ""
+            scope_host = ""
+            dispatched_at = handoff.get("created_at") or ""
+            dispatch_status = "(dispatch row missing)"
+
+        # Handoff payload extraction. JSON columns deserialize to lists/dicts
+        # in the state-manager serializer; treat anything else defensively.
+        finding_slugs = handoff.get("finding_slugs") or []
+        if not isinstance(finding_slugs, list):
+            finding_slugs = []
+        finding_slugs = [str(s).strip() for s in finding_slugs if str(s).strip()]
+
+        next_steps = handoff.get("next_steps") or []
+        if not isinstance(next_steps, list):
+            next_steps = []
+        coverage_gaps = handoff.get("coverage_gaps") or []
+        if not isinstance(coverage_gaps, list):
+            coverage_gaps = []
+        runtime_issues = handoff.get("runtime_issues") or []
+        if not isinstance(runtime_issues, list):
+            runtime_issues = []
+        working_artifacts_payload = handoff.get("working_artifacts") or []
+        if not isinstance(working_artifacts_payload, list):
+            working_artifacts_payload = []
+        open_questions = handoff.get("open_questions") or []
+        if not isinstance(open_questions, list):
+            open_questions = []
+        recommended_next_agent = str(handoff.get("recommended_next_agent") or "")
+        summary = str(handoff.get("summary") or "")
+        confidence = str(handoff.get("confidence") or "")
+
+        # Per-slug enrichment from the backend. Tolerate 404s — the operator
+        # may have killed a finding between dispatch and handoff render.
+        # ISSUE-010 fix: the previous fallback emitted "non-dict response" when
+        # GET findings/{slug} responded with anything other than a dict, which
+        # confused operators because the same wording fired for both "slug
+        # missing" and "backend returned a list / unexpected payload". The
+        # 404 path now emits "slug missing in backend (deleted or never
+        # recorded)" explicitly, distinct from "fetch error: <reason>".
+        finding_rows: list[dict] = []
         for slug in finding_slugs:
             try:
                 row = client.get(f"findings/{slug}")
@@ -819,9 +997,6 @@ def _render_handoff(args, extra: list[str]) -> None:
                 if "HTTP 404" in str(exc):
                     finding_rows.append({"slug": slug, "_missing": True})
                     continue
-                # Any other error: surface but continue so the operator gets
-                # the rest of the blob. Network blips shouldn't fail the
-                # whole render.
                 finding_rows.append({"slug": slug, "_error": str(exc).splitlines()[0]})
                 continue
             if isinstance(row, dict):
@@ -837,11 +1012,6 @@ def _render_handoff(args, extra: list[str]) -> None:
             except AssessError:
                 creds = []
             if isinstance(creds, list):
-                # The credentials table doesn't carry a formal agent_id
-                # column, so we filter by source_name == role as the closest
-                # available signal. Operators who need stricter tracking can
-                # widen the filter later; this is enough to surface "the
-                # vulnerability-analyst dispatch captured 2 cred rows".
                 credential_rows = [
                     c for c in creds
                     if isinstance(c, dict) and (c.get("source_name") or "") == role
@@ -849,22 +1019,19 @@ def _render_handoff(args, extra: list[str]) -> None:
     finally:
         client.close()
 
-    # Local-disk presence check for working artifacts. The convention is that
-    # tools live under $DIR/tools/, but the registry may record other paths
-    # under $DIR/scans/ or $DIR/downloads/ — resolve every entry against the
-    # engagement dir so the operator catches references to deleted files.
+    # Local-disk presence check for working artifacts. The new payload uses
+    # objects with a 'path' key; tolerate plain strings for forward-compat.
     artifact_states: list[tuple[str, str]] = []
-    for path in working_artifacts:
-        if os.path.isabs(path):
-            full = path
+    for entry in working_artifacts_payload:
+        if isinstance(entry, dict):
+            raw_path = str(entry.get("path") or "").strip()
         else:
-            full = os.path.join(cfg.engagement_dir, path)
-        artifact_states.append((path, "present" if os.path.exists(full) else "missing"))
+            raw_path = str(entry).strip()
+        if not raw_path:
+            continue
+        full = raw_path if os.path.isabs(raw_path) else os.path.join(cfg.engagement_dir, raw_path)
+        artifact_states.append((raw_path, "present" if os.path.exists(full) else "missing"))
 
-    # Build the rendered blob, then truncate the findings tail if the line
-    # budget would be exceeded. The fixed sections (header + meta + next step)
-    # are always preserved; only the findings list collapses, since that is
-    # the unbounded axis.
     blob = _render_handoff_blob(
         agent_id=agent_id,
         role=role,
@@ -872,37 +1039,21 @@ def _render_handoff(args, extra: list[str]) -> None:
         skill_loaded=skill_loaded,
         scope_host=scope_host,
         dispatched_at=dispatched_at,
-        status=status,
+        status=dispatch_status,
+        summary=summary,
+        confidence=confidence,
         finding_rows=finding_rows,
+        coverage_gaps=coverage_gaps,
+        next_steps=next_steps,
+        open_questions=open_questions,
         artifact_states=artifact_states,
+        runtime_issues=runtime_issues,
+        recommended_next_agent=recommended_next_agent,
         credential_rows=credential_rows,
-        next_step=next_step,
         include_evidence=include_evidence,
         max_lines=max_lines,
     )
     print(blob)
-
-
-def _registry_lookup(registry_path: str, agent_id: str) -> dict | None:
-    """Return the registry entry whose agent_id matches, or None.
-
-    Tolerates a missing or malformed registry — the helper should fail with a
-    clear "agent-id not found" rather than crashing the operator's terminal
-    on a JSON parse error.
-    """
-    try:
-        with open(registry_path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except FileNotFoundError:
-        return None
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, list):
-        return None
-    for entry in data:
-        if isinstance(entry, dict) and str(entry.get("agent_id") or "").strip() == agent_id:
-            return entry
-    return None
 
 
 def _render_handoff_blob(
@@ -914,21 +1065,27 @@ def _render_handoff_blob(
     scope_host: str,
     dispatched_at: str,
     status: str,
+    summary: str,
+    confidence: str,
     finding_rows: list[dict],
+    coverage_gaps: list[dict],
+    next_steps: list[dict],
+    open_questions: list,
     artifact_states: list[tuple[str, str]],
+    runtime_issues: list[dict],
+    recommended_next_agent: str,
     credential_rows: list[dict],
-    next_step: str,
     include_evidence: bool,
     max_lines: int,
 ) -> str:
     """Build the markdown handoff blob with the documented section order.
 
-    The section order matches the spec in operator-core.md "Cross-Dispatch
-    Continuity": header, prior task, skill loaded, scope host, dispatched at,
-    findings recorded, working artifacts, credentials captured, next step.
-    The next-step line is always emitted (even when blank) so the new
-    dispatch prompt sees an explicit "set this in the next prompt" reminder
-    if the prior agent did not record one.
+    Round 9 section order: header / summary / confidence / findings /
+    coverage gaps / next steps / open questions / working artifacts /
+    runtime issues / recommended next agent. Trim policy on overflow:
+    findings list collapses first ("... and N more"), then runtime_issues,
+    then working_artifacts. Summary, next_steps, coverage_gaps are NEVER
+    trimmed (they are the load-bearing handoff content).
     """
     head = [
         f"#### Handoff from {role} dispatch {agent_id}",
@@ -938,35 +1095,175 @@ def _render_handoff_blob(
         f"- **Dispatched at:** {dispatched_at or '(unknown)'} (status: {status or 'unknown'})",
     ]
 
+    summary_lines = _summary_section(summary, confidence)
     finding_lines = _findings_section(finding_rows, include_evidence=include_evidence)
-    artifact_lines = _artifacts_section(artifact_states)
+    coverage_lines = _coverage_gaps_section(coverage_gaps)
+    next_steps_lines = _next_steps_section(next_steps)
+    open_questions_lines = _open_questions_section(open_questions)
+    recommended_line = _recommended_next_agent_section(recommended_next_agent)
     credentials_line = _credentials_section(credential_rows)
-    next_step_line = _next_step_section(next_step)
 
-    fixed_section_count = (
-        len(head)
-        + 1  # findings header line
-        + len(artifact_lines)
-        + 1  # credentials line
-        + 1  # next step line
+    # Compose the line list. Trim order: findings → runtime_issues →
+    # artifacts. Summary, coverage_gaps, next_steps stay intact.
+    def _compose(findings_kept: list[str], findings_dropped: int,
+                 artifacts_kept: list[tuple[str, str]],
+                 runtime_kept: list[dict], runtime_dropped: int,
+                 artifacts_dropped: int) -> list[str]:
+        out: list[str] = []
+        out.extend(head)
+        out.extend(summary_lines)
+        out.append("- **Findings recorded:**")
+        out.extend(findings_kept)
+        if findings_dropped > 0:
+            out.append(f"  - ... and {findings_dropped} more")
+        out.extend(coverage_lines)
+        out.extend(next_steps_lines)
+        out.extend(open_questions_lines)
+        artifacts_section_lines = _artifacts_section(artifacts_kept)
+        out.extend(artifacts_section_lines)
+        if artifacts_dropped > 0:
+            out.append(f"  - ... and {artifacts_dropped} more")
+        runtime_section_lines = _runtime_issues_section(runtime_kept)
+        out.extend(runtime_section_lines)
+        if runtime_dropped > 0:
+            out.append(f"  - ... and {runtime_dropped} more")
+        out.append(recommended_line)
+        out.append(credentials_line)
+        return out
+
+    composed = _compose(finding_lines, 0, artifact_states, runtime_issues, 0, 0)
+    if len(composed) <= max_lines:
+        return "\n".join(composed)
+
+    # First-pass trim: findings.
+    overhead_no_findings = len(_compose([], len(finding_lines), artifact_states, runtime_issues, 0, 0))
+    findings_budget = max(1, max_lines - (overhead_no_findings - 1))
+    findings_kept, findings_dropped = _truncate_findings(finding_lines, findings_budget)
+    composed = _compose(findings_kept, findings_dropped, artifact_states, runtime_issues, 0, 0)
+    if len(composed) <= max_lines:
+        return "\n".join(composed)
+
+    # Second-pass trim: runtime issues.
+    overhead_no_runtime = len(
+        _compose(findings_kept, findings_dropped, artifact_states, [], len(runtime_issues), 0)
     )
+    runtime_budget = max(0, max_lines - overhead_no_runtime)
+    runtime_kept = runtime_issues[:runtime_budget]
+    runtime_dropped = max(0, len(runtime_issues) - runtime_budget)
+    composed = _compose(
+        findings_kept, findings_dropped, artifact_states, runtime_kept, runtime_dropped, 0
+    )
+    if len(composed) <= max_lines:
+        return "\n".join(composed)
 
-    # Reserve room for the fixed scaffolding plus at least one finding row
-    # (or the "(none recorded)" placeholder) so the cap can never produce a
-    # blob that omits the findings header entirely.
-    findings_budget = max(1, max_lines - fixed_section_count)
-    finding_body, truncated_count = _truncate_findings(finding_lines, findings_budget)
+    # Third-pass trim: working artifacts.
+    overhead_no_artifacts = len(
+        _compose(findings_kept, findings_dropped, [], runtime_kept, runtime_dropped, len(artifact_states))
+    )
+    artifacts_budget = max(0, max_lines - overhead_no_artifacts)
+    artifacts_kept = artifact_states[:artifacts_budget]
+    artifacts_dropped = max(0, len(artifact_states) - artifacts_budget)
+    composed = _compose(
+        findings_kept,
+        findings_dropped,
+        artifacts_kept,
+        runtime_kept,
+        runtime_dropped,
+        artifacts_dropped,
+    )
+    return "\n".join(composed)
 
-    lines: list[str] = []
-    lines.extend(head)
-    lines.append("- **Findings recorded:**")
-    lines.extend(finding_body)
-    if truncated_count > 0:
-        lines.append(f"  - ... and {truncated_count} more")
-    lines.extend(artifact_lines)
-    lines.append(credentials_line)
-    lines.append(next_step_line)
-    return "\n".join(lines)
+
+def _summary_section(summary: str, confidence: str) -> list[str]:
+    text = summary.strip() if summary else ""
+    lines: list[str] = ["- **Summary:**"]
+    if not text:
+        lines.append("  - (none recorded)")
+    else:
+        for chunk in text.splitlines() or [text]:
+            chunk = chunk.rstrip()
+            if chunk:
+                lines.append(f"  {chunk}")
+    if confidence:
+        lines.append(f"- **Confidence:** {confidence}")
+    return lines
+
+
+def _coverage_gaps_section(rows: list) -> list[str]:
+    lines = ["- **Coverage gaps:**"]
+    if not rows:
+        lines.append("  - (none recorded)")
+        return lines
+    for row in rows:
+        if isinstance(row, dict):
+            area = str(row.get("area") or "<area>")
+            reason = str(row.get("reason") or "")
+            followup = str(row.get("recommended_followup") or row.get("followup") or "")
+            tail = f" — {reason}" if reason else ""
+            if followup:
+                tail += f" (next: {followup})"
+            lines.append(f"  - {area}{tail}")
+        else:
+            lines.append(f"  - {row}")
+    return lines
+
+
+def _next_steps_section(rows: list) -> list[str]:
+    lines = ["- **Next steps:**"]
+    if not rows:
+        lines.append("  - (none recorded — set explicitly in this dispatch)")
+        return lines
+    for row in rows:
+        if isinstance(row, dict):
+            action = str(row.get("action") or "<action>")
+            target = str(row.get("target") or "")
+            agent = str(row.get("recommended_agent") or "")
+            rationale = str(row.get("rationale") or "")
+            extras = []
+            if target:
+                extras.append(f"target={target}")
+            if agent:
+                extras.append(f"agent={agent}")
+            if rationale:
+                extras.append(rationale)
+            tail = f" ({'; '.join(extras)})" if extras else ""
+            lines.append(f"  - {action}{tail}")
+        else:
+            lines.append(f"  - {row}")
+    return lines
+
+
+def _open_questions_section(rows: list) -> list[str]:
+    if not rows:
+        return []
+    lines = ["- **Open questions:**"]
+    for row in rows:
+        lines.append(f"  - {row}")
+    return lines
+
+
+def _runtime_issues_section(rows: list) -> list[str]:
+    if not rows:
+        return []
+    lines = ["- **Runtime issues:**"]
+    for row in rows:
+        if isinstance(row, dict):
+            kind = str(row.get("kind") or "<kind>")
+            detail = str(row.get("detail") or "")
+            severity = str(row.get("severity") or "")
+            tail = f" — {detail}" if detail else ""
+            if severity:
+                tail += f" [severity={severity}]"
+            lines.append(f"  - {kind}{tail}")
+        else:
+            lines.append(f"  - {row}")
+    return lines
+
+
+def _recommended_next_agent_section(value: str) -> str:
+    if not value:
+        return "- **Recommended next agent:** (none recorded)"
+    return f"- **Recommended next agent:** {value}"
 
 
 def _findings_section(finding_rows: list[dict], *, include_evidence: bool) -> list[str]:
@@ -1022,15 +1319,6 @@ def _credentials_section(credential_rows: list[dict]) -> str:
     return f"- **Credentials captured:** {count} rows (ids: {ids or 'unknown'})"
 
 
-def _next_step_section(next_step: str) -> str:
-    """Always-present next-step line so the new dispatch can't silently drop it."""
-    if not next_step:
-        return (
-            "- **Next step (per registry):** not recorded — set explicitly in this dispatch"
-        )
-    return f"- **Next step (per registry):** {next_step}"
-
-
 def _truncate_findings(
     lines: list[str], budget: int
 ) -> tuple[list[str], int]:
@@ -1073,3 +1361,308 @@ def _truncate_findings(
             i += 1
         break
     return kept, truncated
+
+
+# ---------------------------------------------------------------------------
+# Round 9: register / update-status / list / get / record-decision /
+# record-handoff — replace the legacy $DIR/agent-registry.json file with
+# backend-table writes via the orchestrator API.
+# ---------------------------------------------------------------------------
+
+
+def _client_for(args) -> tuple[AssessmentClient, Any]:
+    cfg = load_config(getattr(args, "engagement_dir", None))
+    return AssessmentClient(cfg.base_url, cfg.engagement_key), cfg
+
+
+def _build_register_payload(args) -> dict:
+    payload: dict[str, Any] = {}
+    if getattr(args, "from_json", None):
+        loaded = _load_json_arg(args.from_json)
+        if not isinstance(loaded, dict):
+            print("register --from-json: file must contain a JSON object", file=sys.stderr)
+            sys.exit(1)
+        payload.update(loaded)
+    # CLI flags override / supplement the JSON payload.
+    cli_fields = {
+        "agent_id": getattr(args, "agent_id", None),
+        "agent_role": getattr(args, "agent_role", None),
+        "task": getattr(args, "task", None),
+        "skill_loaded": getattr(args, "skill", None),
+        "scope_host": getattr(args, "scope_host", None),
+        "model": getattr(args, "dispatch_model", None),
+        "reasoning": getattr(args, "reasoning", None),
+        "permission": getattr(args, "permission", None),
+        "command_budget": getattr(args, "command_budget", None),
+        "output_schema": getattr(args, "output_schema", None),
+        "dispatch_mode": getattr(args, "dispatch_mode_arg", None),
+    }
+    for k, v in cli_fields.items():
+        if v is not None:
+            payload[k] = v
+    files_allowed = _split_csv(getattr(args, "files_allowed", None))
+    if files_allowed:
+        payload["files_allowed"] = files_allowed
+    finding_slugs = _split_csv(getattr(args, "finding_slugs", None))
+    if finding_slugs:
+        payload["finding_slugs"] = finding_slugs
+    if not payload.get("agent_id"):
+        print("register: --agent-id is required (or include 'agent_id' in --from-json)", file=sys.stderr)
+        sys.exit(1)
+    if not payload.get("agent_role"):
+        print("register: --agent-role is required (or include 'agent_role' in --from-json)", file=sys.stderr)
+        sys.exit(1)
+    return payload
+
+
+def _register_dispatch(args) -> None:
+    payload = _build_register_payload(args)
+    client, _ = _client_for(args)
+    try:
+        row = client.record_dispatch(payload)
+    finally:
+        client.close()
+    print(json.dumps({
+        "id": row.get("id"),
+        "agent_id": row.get("agent_id"),
+        "status": row.get("status"),
+    }, ensure_ascii=False))
+
+
+def _update_dispatch_status(args, extra: list[str]) -> None:
+    agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
+    if not agent_id:
+        print("Usage: aith assess dispatch update-status <agent-id> --status ...", file=sys.stderr)
+        sys.exit(1)
+    patch: dict[str, Any] = {}
+    if getattr(args, "dispatch_status", None):
+        patch["status"] = args.dispatch_status
+        if args.dispatch_status in ("completed", "failed", "aborted", "blocked"):
+            patch["completed_at"] = getattr(args, "completed_at", None) or _utcnow_iso()
+    elif getattr(args, "completed_at", None):
+        patch["completed_at"] = args.completed_at
+    finding_slugs = _split_csv(getattr(args, "finding_slugs", None))
+    if finding_slugs:
+        patch["finding_slugs"] = finding_slugs
+    if not patch:
+        print(
+            "update-status: pass at least one of --status, --completed-at, --finding-slugs",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    client, _ = _client_for(args)
+    try:
+        row = client.update_dispatch(agent_id, patch)
+    finally:
+        client.close()
+    print(json.dumps(row, ensure_ascii=False))
+
+
+def _list_dispatches(args) -> None:
+    filters: dict[str, Any] = {}
+    role = getattr(args, "filter_role", None)
+    if role:
+        filters["role"] = role
+    status_value = getattr(args, "dispatch_status", None)
+    if status_value:
+        filters["status"] = status_value
+    since = getattr(args, "filter_since", None)
+    if since:
+        filters["since"] = since
+    task_q = getattr(args, "task_q", None)
+    if task_q:
+        filters["task_q"] = task_q
+    limit = getattr(args, "dispatch_limit", None)
+    if limit:
+        filters["limit"] = int(limit)
+    client, _ = _client_for(args)
+    try:
+        rows = client.list_dispatches(**filters)
+    finally:
+        client.close()
+    for row in rows:
+        print(json.dumps(row, ensure_ascii=False))
+
+
+def _get_dispatch(args, extra: list[str]) -> None:
+    agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
+    if not agent_id:
+        print("Usage: aith assess dispatch get <agent-id>", file=sys.stderr)
+        sys.exit(1)
+    client, _ = _client_for(args)
+    try:
+        row = client.get_dispatch(agent_id)
+    finally:
+        client.close()
+    if row is None:
+        print(f"get: agent_id '{agent_id}' not found", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps(row, ensure_ascii=False))
+
+
+def _record_decision(args) -> None:
+    kind = getattr(args, "decision_kind", None)
+    if not kind:
+        print("record-decision: --kind is required", file=sys.stderr)
+        sys.exit(1)
+    payload_json = getattr(args, "payload_json", None)
+    if payload_json:
+        loaded = _load_json_arg(payload_json)
+        if not isinstance(loaded, dict):
+            print("record-decision --payload-json: must produce a JSON object", file=sys.stderr)
+            sys.exit(1)
+        payload = dict(loaded)
+    else:
+        # Build payload from friendly flags. The fields we collect depend on
+        # the kind, but we do not enforce strict per-kind shape — the backend
+        # accepts any dict. Operators can always fall back to --payload-json.
+        payload = {}
+        host = getattr(args, "decision_host", None)
+        vendor = getattr(args, "decision_vendor", None)
+        choice = getattr(args, "decision_choice", None)
+        note = getattr(args, "decision_note", None)
+        phase = getattr(args, "decision_phase", None)
+        if host:
+            payload["host"] = host
+        if vendor:
+            payload["vendor"] = vendor
+        if choice:
+            payload["choice"] = choice
+        if note:
+            payload["note"] = note
+        if phase:
+            payload["phase"] = phase
+        if not payload:
+            print(
+                "record-decision: pass --payload-json or at least one of "
+                "--host/--vendor/--choice/--note/--phase",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    body = {
+        "kind": kind,
+        "payload": payload,
+        "surfaced_to_user": bool(getattr(args, "surfaced_to_user", False)),
+    }
+    client, _ = _client_for(args)
+    try:
+        row = client.record_decision(body)
+    finally:
+        client.close()
+    print(json.dumps(row, ensure_ascii=False))
+
+
+def _build_handoff_payload(args) -> dict:
+    if getattr(args, "from_json", None):
+        loaded = _load_json_arg(args.from_json)
+        if not isinstance(loaded, dict):
+            print("record-handoff --from-json: file must contain a JSON object", file=sys.stderr)
+            sys.exit(1)
+        # When --from-json is given we honour it as the authoritative shape,
+        # but we still backfill agent_id/agent_role/summary from CLI flags so
+        # operators can mix-and-match conveniently.
+        for key, val in (
+            ("agent_id", getattr(args, "agent_id", None)),
+            ("agent_role", getattr(args, "agent_role", None)),
+            ("summary", getattr(args, "hf_summary", None)),
+        ):
+            if val and not loaded.get(key):
+                loaded[key] = val
+        return loaded
+
+    payload: dict[str, Any] = {}
+    agent_id = getattr(args, "agent_id", None)
+    agent_role = getattr(args, "agent_role", None)
+    summary = getattr(args, "hf_summary", None)
+    if not agent_id or not agent_role or not summary:
+        print(
+            "record-handoff: --agent-id, --agent-role, and --summary are required "
+            "(or pass --from-json with a payload that supplies them)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    payload["agent_id"] = agent_id
+    payload["agent_role"] = agent_role
+    payload["summary"] = summary
+    if getattr(args, "hf_confidence", None):
+        payload["confidence"] = args.hf_confidence
+    finding_slugs = _split_csv(getattr(args, "finding_slugs", None))
+    if finding_slugs:
+        payload["finding_slugs"] = finding_slugs
+    next_steps_raw = getattr(args, "hf_next_steps", None) or []
+    if next_steps_raw:
+        payload["next_steps"] = [{"action": item} for item in next_steps_raw]
+    coverage_raw = getattr(args, "hf_coverage_gaps", None) or []
+    if coverage_raw:
+        coverage_rows = []
+        for item in coverage_raw:
+            area, _, reason = item.partition(":")
+            coverage_rows.append({"area": area.strip(), "reason": reason.strip()})
+        payload["coverage_gaps"] = coverage_rows
+    runtime_raw = getattr(args, "hf_runtime_issues", None) or []
+    if runtime_raw:
+        runtime_rows = []
+        for item in runtime_raw:
+            kind_part, _, detail = item.partition(":")
+            runtime_rows.append({
+                "kind": kind_part.strip(),
+                "detail": detail.strip(),
+                "severity": "info",
+            })
+        payload["runtime_issues"] = runtime_rows
+    artifacts_raw = getattr(args, "hf_working_artifacts", None) or []
+    if artifacts_raw:
+        payload["working_artifacts"] = [{"path": p} for p in artifacts_raw]
+    open_qs = getattr(args, "hf_open_questions", None) or []
+    if open_qs:
+        payload["open_questions"] = list(open_qs)
+    if getattr(args, "hf_recommended_next_agent", None):
+        payload["recommended_next_agent"] = args.hf_recommended_next_agent
+    extras_json = getattr(args, "hf_extras_json", None)
+    if extras_json:
+        loaded = _load_json_arg(extras_json)
+        if not isinstance(loaded, dict):
+            print("record-handoff --extras-json: must produce a JSON object", file=sys.stderr)
+            sys.exit(1)
+        payload["extras"] = loaded
+    return payload
+
+
+def _record_handoff(args) -> None:
+    # If both --from-json and flag-based content are given, honour --from-json
+    # but warn so the operator notices they're mixing modes (the JSON wins).
+    has_flag_based = any(
+        getattr(args, name, None)
+        for name in (
+            "hf_summary",
+            "hf_confidence",
+            "hf_next_steps",
+            "hf_coverage_gaps",
+            "hf_runtime_issues",
+            "hf_working_artifacts",
+            "hf_open_questions",
+            "hf_recommended_next_agent",
+            "hf_extras_json",
+        )
+    )
+    if getattr(args, "from_json", None) and has_flag_based:
+        print(
+            "record-handoff: --from-json is set and flag-based content was also "
+            "supplied; flag-based fields are ignored except as fallback for "
+            "agent_id / agent_role / summary.",
+            file=sys.stderr,
+        )
+    payload = _build_handoff_payload(args)
+    client, _ = _client_for(args)
+    try:
+        # Idempotent by design: agents call record-handoff after every major
+        # step in their methodology, so the same (engagement, agent_id) tuple
+        # collides on each subsequent call. The client retries the POST as a
+        # PATCH on 409 transparently.
+        row = client.record_handoff(payload, upsert=True)
+    finally:
+        client.close()
+    print(json.dumps({
+        "id": row.get("id"),
+        "agent_id": row.get("agent_id"),
+    }, ensure_ascii=False))

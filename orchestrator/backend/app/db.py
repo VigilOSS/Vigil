@@ -404,6 +404,9 @@ _ENGAGEMENT_SCOPED_TABLES = {
     "intel_notes",
     "intel_search_index",
     "activity_entries",
+    "assessment_dispatches",
+    "assessment_dispatch_handoffs",
+    "assessment_dispatch_decisions",
 }
 
 
@@ -1057,7 +1060,6 @@ def init_db() -> None:
                 scope_version TEXT,
                 auth_context TEXT,
                 superseded_by_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
-                strace_path TEXT,
                 timeout_seconds_requested INTEGER,
                 partial_results INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1099,9 +1101,15 @@ def init_db() -> None:
                 "ALTER TABLE assessment_command_runs ADD COLUMN destructive INTEGER"
             )
         # Wave-1 cutover migrations: pre-exec lifecycle, output spill paths,
-        # resource snapshot, scope/auth context, dedup linkage, optional
-        # strace pointer, and the agent-supplied timeout. All NULL/safe-default
-        # so legacy rows continue to validate.
+        # resource snapshot, scope/auth context, dedup linkage, and the
+        # agent-supplied timeout. All NULL/safe-default so legacy rows
+        # continue to validate.
+        #
+        # Note: there is no schema-version mechanism. Round 9 dropped the
+        # ``strace_path`` column entirely; existing DBs that still carry the
+        # column keep it as a vestigial NULL TEXT (SQLite does not reliably
+        # support DROP COLUMN). Fresh DBs created against this schema do not
+        # have it. Code paths must not read or write the field either way.
         if cmdrun_columns and "status" not in cmdrun_columns:
             connection.execute(
                 "ALTER TABLE assessment_command_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"
@@ -1128,8 +1136,10 @@ def init_db() -> None:
         # INTEGER column; new schema gets the REFERENCES via CREATE TABLE.
         if cmdrun_columns and "superseded_by_id" not in cmdrun_columns:
             connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN superseded_by_id INTEGER")
-        if cmdrun_columns and "strace_path" not in cmdrun_columns:
-            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN strace_path TEXT")
+        # Round 9 dropped ``strace_path``; we deliberately do NOT re-add the
+        # column on legacy DBs (SQLite cannot DROP COLUMN reliably, so a
+        # vestigial NULL column on existing files is the migration). Fresh DBs
+        # created against the new schema simply do not have the column.
         if cmdrun_columns and "timeout_seconds_requested" not in cmdrun_columns:
             connection.execute(
                 "ALTER TABLE assessment_command_runs ADD COLUMN timeout_seconds_requested INTEGER"
@@ -1903,6 +1913,98 @@ def init_db() -> None:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_activity_entries_actor "
             "ON activity_entries(engagement_id, actor_kind, actor_name)"
+        )
+
+        # Round 9: dispatch tracking moved off the engagement filesystem
+        # (legacy ``$DIR/agent-registry.json``) and into the orchestrator. Three
+        # tables — dispatches (the audit row of who was dispatched), handoffs
+        # (the structured payload the agent returned to the operator), and
+        # decisions (scope/egress/dispatch-blocked checkpoints surfaced to the
+        # user). Constraint enforcement on status/confidence/kind lives in the
+        # Pydantic layer so we can evolve enums without a schema rebuild.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_dispatches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL,
+                agent_role TEXT NOT NULL,
+                task TEXT,
+                skill_loaded TEXT,
+                scope_host TEXT,
+                dispatched_at TEXT NOT NULL,
+                completed_at TEXT,
+                status TEXT NOT NULL,
+                model TEXT,
+                reasoning TEXT,
+                permission TEXT,
+                command_budget INTEGER,
+                output_schema TEXT,
+                dispatch_mode TEXT,
+                files_allowed_json TEXT,
+                finding_slugs_json TEXT,
+                UNIQUE(engagement_id, agent_id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_at "
+            "ON assessment_dispatches(engagement_id, dispatched_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_role "
+            "ON assessment_dispatches(engagement_id, agent_role)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_status "
+            "ON assessment_dispatches(engagement_id, status)"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_dispatch_handoffs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL,
+                agent_role TEXT NOT NULL,
+                phase TEXT,
+                summary TEXT NOT NULL,
+                confidence TEXT,
+                finding_slugs_json TEXT,
+                coverage_gaps_json TEXT,
+                next_steps_json TEXT,
+                runtime_issues_json TEXT,
+                working_artifacts_json TEXT,
+                open_questions_json TEXT,
+                recommended_next_agent TEXT,
+                extras_json TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(engagement_id, agent_id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_handoffs_engagement_at "
+            "ON assessment_dispatch_handoffs(engagement_id, created_at DESC)"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_dispatch_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                surfaced_to_user INTEGER NOT NULL DEFAULT 0,
+                resolved INTEGER NOT NULL DEFAULT 0,
+                resolution_json TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_decisions_engagement_kind "
+            "ON assessment_dispatch_decisions(engagement_id, kind)"
         )
 
         # FTS5 virtual tables + rebuild-on-drift guard follow the pattern

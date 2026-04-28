@@ -1089,7 +1089,15 @@ def _looks_like_verification_payload(payload: Any | None) -> bool:
 # discover the helper rather than freelance their own handoff format.
 # ---------------------------------------------------------------------------
 
-DISPATCH_VERBS: tuple[str, ...] = ("render-handoff",)
+DISPATCH_VERBS: tuple[str, ...] = (
+    "render-handoff",
+    "register",
+    "update-status",
+    "list",
+    "get",
+    "record-decision",
+    "record-handoff",
+)
 
 
 def _dispatch_root_contract() -> CommandContract:
@@ -1097,26 +1105,33 @@ def _dispatch_root_contract() -> CommandContract:
         name="dispatch",
         summary=(
             "SQLite work-buffer dispatch engine plus operator-glue helpers "
-            "(render-handoff for cross-dispatch continuity)."
+            "(register / update-status / list / get / record-decision / "
+            "record-handoff / render-handoff for cross-dispatch continuity)."
         ),
-        schema_name="(per-action argparse; render-handoff reads agent-registry.json)",
+        schema_name="(per-action argparse; backend-backed via assessment_dispatches / _dispatch_handoffs / _dispatch_decisions)",
         preferred_invocations=(
             "aith assess dispatch <db_path> stats|fetch|done|...",
+            "aith assess dispatch register --agent-id <id> --agent-role <role> ...",
+            "aith assess dispatch update-status <agent-id> --status completed",
+            "aith assess dispatch list [--role <role>] [--status <status>]",
             "aith assess dispatch render-handoff <agent-id>",
             "aith assess contract dispatch render-handoff",
         ),
         author_supplied_fields=(
             "<db_path> (cases.db) for work-buffer actions",
-            "<action> (e.g. stats, fetch, done, render-handoff)",
+            "<action> (e.g. stats, fetch, done, register, render-handoff, ...)",
             "action-specific positional args",
         ),
         notes=(
             "Work-buffer actions (stats/fetch/done/peek/defer-cluster/defer-items/error/"
             "reset-stale/retry-errors/migrate/requeue) require <db_path> as the first "
-            "positional. Operator-glue actions (render-handoff) do not.",
-            "render-handoff is the canonical source of cross-dispatch continuity blobs — "
-            "operators paste its output into the next dispatch prompt instead of "
-            "transcript excerpts so the prompt stays bounded.",
+            "positional. Operator-glue actions (register, update-status, list, get, "
+            "record-decision, record-handoff, render-handoff) do not.",
+            "Round 9: dispatch state lives in the orchestrator backend, not in "
+            "$DIR/agent-registry.json. Use `register` to log a dispatch, `update-status` "
+            "to mark it complete, `record-handoff` to durably record the agent's exit "
+            "payload, and `render-handoff` to assemble the blob the next dispatch prompt "
+            "pastes verbatim.",
             f"Verbs with their own contract entries: {', '.join(DISPATCH_VERBS)}.",
         ),
         common_mistakes=(
@@ -1125,6 +1140,11 @@ def _dispatch_root_contract() -> CommandContract:
                 "use `aith assess dispatch render-handoff <prior-agent-id>` and paste the "
                 "rendered blob verbatim — the helper pulls findings, artifacts, and "
                 "credentials from durable state so the prompt stays small",
+            ),
+            (
+                "writing to $DIR/agent-registry.json",
+                "the file is no longer read or written; use `aith assess dispatch register` "
+                "and `record-handoff` to write to the orchestrator backend instead",
             ),
         ),
     )
@@ -1136,38 +1156,41 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             name="dispatch render-handoff",
             summary=(
                 "Render a bounded handoff blob for a prior dispatch's agent_id, "
-                "pulled from agent-registry.json and the assessment backend."
+                "pulled from the assessment backend (dispatch + handoff rows) plus "
+                "per-slug finding fetches."
             ),
-            schema_name="(reads $DIR/agent-registry.json + GET /findings/{slug})",
+            schema_name="(reads GET dispatch-handoffs/{agent_id} + GET dispatches/{agent_id} + GET findings/{slug})",
             preferred_invocations=(
                 "aith assess dispatch render-handoff <agent-id>",
                 "aith assess dispatch render-handoff <agent-id> --max-lines 60",
                 "aith assess dispatch render-handoff <agent-id> --include-evidence",
             ),
             author_supplied_fields=(
-                "<agent-id> (the prior dispatch's agent_id from $DIR/agent-registry.json)",
+                "<agent-id> (the prior dispatch's agent_id from `aith assess dispatch list`)",
             ),
             helper_defaults=(
                 ("--max-lines", "40 (hard cap; findings list collapses with '... and N more')"),
                 ("--include-evidence", "off (one short evidence excerpt per finding when set)"),
                 ("--engagement-dir", "resolved from --engagement-dir / $ENGAGEMENT_DIR / cwd"),
-                ("scope", "registry entry's role, task, finding_slugs, skill_loaded, "
-                          "scope_host, dispatched_at, status, working_artifacts, next_step"),
+                ("scope", "handoff payload's summary / coverage_gaps / next_steps / "
+                          "runtime_issues / working_artifacts / open_questions / "
+                          "recommended_next_agent / extras"),
                 ("credentials filter", "fetched only for vulnerability-analyst and "
                                        "exploit-developer roles, filtered by source_name"),
             ),
             notes=(
-                "Exit 2 when the agent-id is not present in $DIR/agent-registry.json — "
-                "the registry is the durable record of who was dispatched, so a missing "
-                "entry means the prior dispatch never appended (or the id was mistyped).",
-                "404 on a finding slug is rendered inline as 'slug missing' rather than "
-                "failing the whole render — the operator may have killed a finding "
-                "between dispatch and handoff time.",
-                "The next-step line is always emitted; when the registry entry has no "
-                "next_step the line reads 'not recorded — set explicitly in this "
-                "dispatch' so the new dispatch prompt cannot silently drop it.",
-                "Cross-reference: agent/operator-core.md 'Cross-Dispatch Continuity' and "
-                "agent/references/runtime-guides/subagent-registry.md.",
+                "Exit 2 when the handoff for the given agent-id does not exist in the "
+                "backend (404 on dispatch-handoffs/{agent_id}). Specialist dispatches "
+                "are expected to write a handoff before exiting; a missing handoff "
+                "means the dispatch never wrote one (or the id was mistyped).",
+                "404 on a finding slug is rendered inline as 'slug missing in backend' "
+                "rather than failing the whole render — the operator may have killed a "
+                "finding between dispatch and handoff time. This wording is distinct "
+                "from 'fetch error: <reason>' so the operator can tell the two cases "
+                "apart (ISSUE-010 fix).",
+                "The dispatch row is fetched best-effort — when missing, the renderer "
+                "falls back to whatever metadata the handoff row carries.",
+                "Cross-reference: agent/operator-core.md 'Cross-Dispatch Continuity'.",
             ),
             common_mistakes=(
                 (

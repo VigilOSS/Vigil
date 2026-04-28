@@ -833,55 +833,6 @@ def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_enga
     assert argv[7:] == ["nmap", "-sV", "10.0.0.1"]
 
 
-def test_b1_docker_exec_wrapper_with_strace_keeps_pid_capture(
-    monkeypatch, fake_engagement
-):
-    """B1 + L18: when ``--strace`` is set, the wrapper still records the
-    container-side PID before exec-ing strace. The strace artifact path and
-    the pid file must share the same ``run_uuid`` so audit ↔ pid file ↔
-    strace artifact key on a single identifier."""
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
-
-    captured: dict = {}
-
-    def fake_popen(argv, **kwargs):
-        captured["argv"] = argv
-        return _FakePopen(returncode=0)
-
-    monkeypatch.setattr(kali.subprocess, "Popen", fake_popen)
-
-    kali.kali_exec(
-        ["curl", "-sS", "https://example.com/"],
-        technique="RECON",
-        intent="b1 wrapper shape with strace",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=30,
-        agent_name="recon-specialist",
-        engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
-        strace=True,
-        tool_name="curl",
-    )
-    wrapper = captured["argv"][5]
-    assert "echo $$ > /tmp/aith-pid-" in wrapper
-    assert "strace -f -e trace=network,write,unlink" in wrapper
-    assert "exec strace " in wrapper
-    # Race-protected wrapper: succeed branch and fallback branch both exec strace.
-    assert wrapper.count("exec strace") == 2
-    assert "|| (echo" in wrapper and "PID write to" in wrapper
-    # Same UUID body in both file paths so the operator can correlate them.
-    import re
-
-    pid_match = re.search(r"/tmp/aith-pid-([0-9a-f]+)\.pid", wrapper)
-    strace_match = re.search(r"/tmp/aith-strace-([0-9a-f]+)\.log", wrapper)
-    assert pid_match is not None and strace_match is not None
-    assert pid_match.group(1) == strace_match.group(1)
-
-
 def test_b1_timeout_cascade_kills_in_container_pid_then_host_pgid(
     monkeypatch, fake_engagement
 ):
@@ -1100,14 +1051,9 @@ def test_kali_exec_dedup_warns_and_returns_early_without_force(
     The previous semantics (early-return with status=superseded, requiring
     `--force` to bypass) pushed operators toward `--force` as a habit because
     parallel specialists racing on the same wildcard list inside the 30s
-    window were hard-blocked. The new default emits the same warning to
-    stderr but lets the command run to completion. The hard-block path is
-    still reachable via the KALI_AUDIT_DEDUP_BLOCK env var (covered in the
-    sibling test below).
+    window were hard-blocked. Round 9: the warning is the only behavior;
+    block-on-dup mode (KALI_AUDIT_DEDUP_BLOCK) was removed.
     """
-    # Make sure no inherited env opts back into the old block-on-dup mode.
-    monkeypatch.delenv("KALI_AUDIT_DEDUP_BLOCK", raising=False)
-
     kali = _setup_fake_config(monkeypatch, fake_engagement)
 
     class _DedupClient(_FakeClient):
@@ -1159,8 +1105,6 @@ def test_dedup_warns_and_continues_by_default(
     (c) the resulting KaliResult.run_id is the new row's id — distinct from
     the predecessor's. This is the audit-truthfulness assertion for ISSUE-003.
     """
-    monkeypatch.delenv("KALI_AUDIT_DEDUP_BLOCK", raising=False)
-
     kali = _setup_fake_config(monkeypatch, fake_engagement)
 
     PREDECESSOR_ID = 20
@@ -1220,83 +1164,6 @@ def test_dedup_warns_and_continues_by_default(
     ), "warn-and-continue must NOT patch the predecessor's row"
 
 
-def test_dedup_block_env_var_restores_block_mode(
-    monkeypatch, fake_engagement, capsys
-):
-    """`KALI_AUDIT_DEDUP_BLOCK=1` opts back into the original block-on-dup mode.
-
-    Under the ISSUE-003 model, the backend ALWAYS inserts a new row on dedup
-    hit (even in block mode) and the CLI is responsible for finalizing it
-    when no subprocess will run. The CLI early-returns with status=superseded,
-    never spawns the subprocess, but DOES patch the new row to ``aborted-dedup``
-    so it lands in a terminal state and ``sweep-orphans`` won't pick it up.
-    `--force` still bypasses (covered separately).
-    """
-    monkeypatch.setenv("KALI_AUDIT_DEDUP_BLOCK", "1")
-
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-
-    PREDECESSOR_ID = 30
-    NEW_ROW_ID = 31
-
-    class _DedupClient(_FakeClient):
-        def post(self, endpoint, payload):
-            self.posts.append((endpoint, payload))
-            return {"id": NEW_ROW_ID, "superseded_by_id": PREDECESSOR_ID}
-
-    fake_client = _DedupClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
-
-    popen_called: list[bool] = []
-
-    def _fake_popen(*args, **kwargs):
-        popen_called.append(True)
-        return _FakePopen(returncode=0)
-
-    monkeypatch.setattr(kali.subprocess, "Popen", _fake_popen)
-
-    result = kali.kali_exec(
-        ["nmap", "-p", "443", "10.0.0.3"],
-        technique="RECON",
-        intent="block-mode dup probe",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=30,
-        agent_name="recon-specialist",
-        engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
-        tool_name="nmap",
-    )
-
-    err = capsys.readouterr().err
-    assert result.status == "superseded", (
-        "KALI_AUDIT_DEDUP_BLOCK=1 must restore early-return semantics"
-    )
-    assert result.run_id == NEW_ROW_ID, (
-        "block-mode result must surface the new row's id (not the predecessor's) "
-        "so caller telemetry can trace the would-have-run audit row"
-    )
-    assert "dedup hit" in err
-    assert "KALI_AUDIT_DEDUP_BLOCK" in err, (
-        "block-mode message should name the opt-in env var so operators "
-        "know how to disable it"
-    )
-    assert popen_called == [], "subprocess must not run under block-on-dup mode"
-    # ISSUE-003: a new row IS inserted by the backend even in block mode, so
-    # the CLI must finalize it to a terminal status to keep sweep-orphans clean.
-    assert len(fake_client.posts) == 1, (
-        "block-mode still POSTs once so the audit row is created"
-    )
-    assert any(
-        ep == f"command-runs/{NEW_ROW_ID}" and payload.get("status") == "aborted-dedup"
-        for ep, payload in fake_client.patches
-    ), (
-        "block-mode must finalize the new row to aborted-dedup so it lands "
-        "in a terminal status and sweep-orphans does not flag it"
-    )
-
-
 def test_dedup_force_does_not_set_superseded_by_id(monkeypatch, fake_engagement, capsys):
     """`--force` is the deliberate-retry escape hatch.
 
@@ -1306,8 +1173,6 @@ def test_dedup_force_does_not_set_superseded_by_id(monkeypatch, fake_engagement,
        ``superseded_by_id`` is NOT set — operator declared this is an
        independent retry, not a peer of the in-flight predecessor.
     """
-    monkeypatch.delenv("KALI_AUDIT_DEDUP_BLOCK", raising=False)
-
     kali = _setup_fake_config(monkeypatch, fake_engagement)
 
     captured_payloads: list[dict] = []
@@ -2911,4 +2776,41 @@ def test_sweep_orphans_respects_max_age_threshold(monkeypatch, fake_engagement):
     # was below the threshold.
     assert calls["count"] == 0
     assert fake_client.patches == []
+
+
+def test_read_safely_seeks_to_end_for_true_tail(tmp_path):
+    """ISSUE-007: ``_read_safely`` must seek to the file end when the file
+    is larger than max_bytes.
+
+    The previous implementation read ``max_bytes + 1`` bytes from the START
+    and treated the second half as "tail" — meaning for files >32K the "tail"
+    was actually bytes 16K-32K rather than the actual last bytes of the
+    file. Operators investigating a long-running scan saw the same head as
+    the tail, missing every late-process error message.
+    """
+    kali = _import("assess.lib.kali")
+    path = tmp_path / "long.out"
+    # ~100KB of marker lines; tail must contain late lines (e.g. line 099XXX)
+    # while early lines (line 000500) must NOT appear in the tail half.
+    line_count = 5000
+    text = "".join(f"line {i:06d}: padding aaaa bbbb cccc\n" for i in range(line_count))
+    path.write_text(text, encoding="utf-8")
+    assert path.stat().st_size > 32_768  # precondition for the bug
+
+    preview = kali._read_safely(path)
+    last_line_marker = f"line {line_count - 1:06d}"
+    assert last_line_marker in preview, (
+        f"_read_safely must include the actual end of the file; missing {last_line_marker!r}"
+    )
+    # The tail half must reach the actual end. We also assert the preview
+    # contains the truncation banner so the operator knows bytes were elided.
+    assert "[truncated" in preview
+    assert "from middle of" in preview
+    # An early line that is NOT in the head budget (16K) should not appear.
+    # Each line is ~30 bytes; 16K / 30 ~= 545 lines, so line 000800 is past
+    # the head budget but well before the tail half — it must not be in the
+    # preview at all.
+    assert "line 000800" not in preview, (
+        "_read_safely must not include the middle of the file (only head + tail)"
+    )
 

@@ -118,6 +118,37 @@ Per-file variant check status:
 aith assess record-finding code-variant-hunter <finding-json>
 ```
 
+## Mandatory Closing Sequence
+
+Before your dispatch returns, run in this order:
+
+1. `aith assess record-finding code-variant-hunter <finding-json>` per variant finding (each with `links.variant_of` pointing at the parent slug)
+2. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps (verifier dispatch on the new variants), runtime issues, working artifacts, open questions, and role-specific extras (`parent_finding`, `variants_found`, `files_scanned`)
+
+Skipping the handoff write means the operator has nothing to feed into the next
+dispatch — there is no `agent-registry.json` fallback any more. Schema for
+`--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+
+The `record-handoff` step is idempotent and called incrementally — checkpoint
+after each major step in your methodology, not only at the end. See
+`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
+
+## Output Contract (Dispatch Response)
+
+Reason through the variant scan in your response — describe the abstraction
+level you scanned at, which patterns generalized cleanly, where the parent
+pattern broke down, what severity adjustments each variant warranted. Backend
+writes via the Mandatory Closing Sequence above (variant findings linked via
+`variant_of`) are what makes the state durable; the response is your reflection
+on top of that.
+
+Don't truncate reasoning to be brief — careful variant-scanning analysis
+directly improves how systematically the codebase is covered (see
+`agent/shared-constraints.md` §16). Per-file scan-result tables and
+variant-by-variant detail live in the finding rows and handoff extras — so the
+response can stay focused on variant-pattern reasoning rather than restating
+canonical state.
+
 ## Finding Prefix: CV
 
 ## Key Principles

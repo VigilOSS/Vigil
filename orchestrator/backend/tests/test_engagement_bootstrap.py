@@ -370,13 +370,14 @@ def test_aith_start_codex_exports_engagement_environment(tmp_path: Path) -> None
     assert "ORCHESTRATOR_BASE_URL=https://override.example.test" in launch.stdout
 
 
-def test_aith_engagement_create_writes_agent_name_operator_to_env_file(tmp_path: Path) -> None:
-    """AGENT_NAME=operator default lands in the per-engagement env file.
+def test_aith_engagement_create_does_not_write_agent_name_to_env_file(tmp_path: Path) -> None:
+    """Round 9: AGENT_NAME is NOT planted in the per-engagement env file.
 
-    Without this, the operator's first `aith assess kali` call fails with
-    ``--agent-name is required (or set AGENT_NAME)`` — operator-executed
-    work (tier-pick smoke, runtime health, credential validation) has no
-    default identity to record in the audit row.
+    The default-to-"operator" fallback now lives in
+    ``agent/scripts/assess/lib/kali.py:_resolve_agent_name`` so the operator's
+    first ``aith assess kali`` call records ``operator`` without any env-file
+    plumbing. Specialist dispatch wrappers still export AGENT_NAME=<role>
+    explicitly when they launch a subagent.
     """
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
@@ -394,17 +395,18 @@ def test_aith_engagement_create_writes_agent_name_operator_to_env_file(tmp_path:
 
     env_text = (created.path / ".orchestrator.env").read_text(encoding="utf-8")
     env_lines = [line.strip() for line in env_text.splitlines() if line.strip()]
-    assert "AGENT_NAME=operator" in env_lines, (
-        "Expected AGENT_NAME=operator default in per-engagement .orchestrator.env so "
-        "operator-executed `aith assess kali` calls have a sane default agent identity."
+    assert not any(line.startswith("AGENT_NAME=") for line in env_lines), (
+        "Round 9 dropped AGENT_NAME from .orchestrator.env; the kali.py helper "
+        "now defaults to 'operator' when neither the flag nor an env var is set."
     )
 
 
-def test_aith_launchers_source_env_file_for_agent_name(tmp_path: Path) -> None:
-    """start_claude.sh and start_codex.sh export AGENT_NAME from the env file.
+def test_aith_launchers_do_not_export_agent_name_default(tmp_path: Path) -> None:
+    """Round 9: start_*.sh launchers no longer source AGENT_NAME from env files.
 
-    Verifies the bash-side env-file plumbing actually exports AGENT_NAME so
-    the LLM session inherits it.
+    The default-to-"operator" behavior moved into kali.py; the launcher only
+    handles ORCHESTRATOR_BASE_URL now. Specialist dispatch wrappers continue
+    to override AGENT_NAME explicitly.
     """
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
@@ -420,55 +422,22 @@ def test_aith_launchers_source_env_file_for_agent_name(tmp_path: Path) -> None:
         )
     )
 
-    # Both launchers must read AGENT_NAME out of the env file. We grep the
-    # script text for the env-file iteration block, then run each launcher
-    # against a fake `claude` / `codex` shim that prints the inherited value.
     for client in ("claude", "codex"):
         launcher = created.path / f"start_{client}.sh"
         script_text = launcher.read_text(encoding="utf-8")
-        assert "AGENT_NAME" in script_text, (
-            f"Expected start_{client}.sh to reference AGENT_NAME so the env-file "
-            "value is exported into the LLM session"
-        )
-        assert ".orchestrator.env" in script_text, (
-            f"Expected start_{client}.sh to source per-engagement .orchestrator.env"
-        )
-
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    for client in ("claude", "codex"):
-        (bin_dir / client).write_text(
-            "#!/usr/bin/env bash\n"
-            f'printf "AGENT_NAME=%s\\n" "${{AGENT_NAME:-}}"\n',
-            encoding="utf-8",
-        )
-        os.chmod(bin_dir / client, 0o755)
-
-    base_env = {key: value for key, value in os.environ.items() if key != "AGENT_NAME"}
-    base_env["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
-
-    for client in ("claude", "codex"):
-        launch = subprocess.run(
-            [str(created.path / f"start_{client}.sh")],
-            text=True,
-            capture_output=True,
-            check=True,
-            cwd=str(created.path),
-            env=base_env,
-        )
-        assert "AGENT_NAME=operator" in launch.stdout, (
-            f"start_{client}.sh did not export AGENT_NAME=operator from the "
-            f"engagement env file. stdout was: {launch.stdout!r}"
+        assert "AGENT_NAME" not in script_text, (
+            f"Round 9: start_{client}.sh must NOT plant AGENT_NAME — the kali.py "
+            f"default handles it. Specialist wrappers override it explicitly."
         )
 
 
 def test_aith_launchers_respect_explicit_agent_name_override(tmp_path: Path) -> None:
-    """A parent-shell AGENT_NAME export is not clobbered by the env-file default.
+    """A parent-shell AGENT_NAME export still flows through to the LLM session.
 
     Specialist dispatch wrappers export AGENT_NAME=<role> before launching the
-    LLM. The launcher's env-file source pass must yield to that explicit value
-    so dispatched specialists don't get the operator default routed into their
-    audit rows.
+    LLM. Even though Round 9 dropped the launcher-side env-file plumbing, the
+    parent-shell export still inherits naturally because we use ``exec`` in
+    the launcher.
     """
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
@@ -506,4 +475,3 @@ def test_aith_launchers_respect_explicit_agent_name_override(tmp_path: Path) -> 
         env=env_with_override,
     )
     assert "AGENT_NAME=vulnerability-analyst" in launch.stdout
-    assert "AGENT_NAME=operator" not in launch.stdout

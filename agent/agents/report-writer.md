@@ -159,9 +159,31 @@ Each finding class has a minimum evidence bar. If the evidence does not meet thi
 | Information Disclosure | The specific sensitive data exposed, with confirmation it is not intentionally public. |
 | CSRF | State change on victim's account triggered from attacker-controlled origin, with before/after proof. |
 
-## Output Contract
+## Mandatory Closing Sequence
 
-Write the full report to `$ENGAGEMENT_DIR/report.md` with these sections:
+Report-writer is a special case — its primary output is the report file under
+`$ENGAGEMENT_DIR/report.md`, not finding/intel/surface writes. Even so, the
+closing sequence is:
+
+1. Write `report.md` with the structure below
+2. Run the 12-step self-review in `agent/skills/report-generation/SKILL.md`
+3. In review-and-fix QA mode, run the QA checklist and fix report-local issues
+4. In publish mode, emit `report.generated`, mark included findings `reported`, update scope.json phase to `complete`
+5. `aith assess dispatch record-handoff --from-json <path>` to capture summary, runtime issues, working artifacts (point at `report.md`), open questions, and role-specific extras (`qa_status`, `findings_in_report`)
+
+Skipping the handoff write means the operator has nothing to feed into the next
+dispatch — there is no `agent-registry.json` fallback any more. Schema for
+`--from-json`: `agent/references/runtime-guides/handoff-schema.md`. The handoff
+`working_artifacts` MUST list `report.md` so the renderer surfaces present/missing
+state.
+
+The `record-handoff` step is idempotent and called incrementally — checkpoint
+after each major step in your methodology, not only at the end. See
+`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
+
+## Report File Structure
+
+`$ENGAGEMENT_DIR/report.md` carries these sections:
 
 - `## Executive Summary` — severity counts, posture narrative, top recommendation
 - `## Methodology` — approach, phases, tools, limitations
@@ -170,6 +192,22 @@ Write the full report to `$ENGAGEMENT_DIR/report.md` with these sections:
 - `## Coverage Summary` — metrics from the assessment summary endpoint
 - `## Finding Cross-Reference` — table mapping report IDs to backend slugs
 - `## Appendix` — tool output, timeline, scope verification
+
+## Output Contract
+
+Reason through the report pass in your response — describe the executive
+narrative, which findings you led with, how you framed the attack-chain story,
+which severity defenses were tightest, what the QA pass surfaced. The report
+deliverable itself lives at `$ENGAGEMENT_DIR/report.md`; backend writes via the
+Mandatory Closing Sequence above (and the publish-mode lifecycle updates) are
+what makes the rest of the state durable. The response is your reflection on
+top of all that.
+
+Don't truncate reasoning to be brief — careful narrative analysis directly
+improves report-draft quality (see `agent/shared-constraints.md` §16). QA
+detail and any `QA BLOCKED` reasons live in the handoff `coverage_gaps` and
+`runtime_issues` — so the response can stay focused on report-writing
+judgments rather than restating canonical state.
 
 ## After Writing the Report
 

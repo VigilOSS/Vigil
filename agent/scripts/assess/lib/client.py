@@ -190,6 +190,104 @@ class AssessmentClient:
         except json.JSONDecodeError:
             return {"raw": resp_body}
 
+    # ── Round 9: dispatch / handoff / decision helpers ────────────────────
+
+    def record_dispatch(self, payload: dict) -> dict:
+        return self.post("dispatches", payload)
+
+    def update_dispatch(self, agent_id: str, patch: dict) -> dict:
+        return self.patch(f"dispatches/{agent_id}", patch)
+
+    def get_dispatch(self, agent_id: str) -> dict | None:
+        try:
+            row = self.get(f"dispatches/{agent_id}")
+        except AssessError as exc:
+            if "HTTP 404" in str(exc):
+                return None
+            raise
+        return row if isinstance(row, dict) else None
+
+    def list_dispatches(self, **filters: Any) -> list[dict]:
+        query = _build_query(filters)
+        endpoint = "dispatches" if not query else f"dispatches?{query}"
+        rows = self.get(endpoint)
+        return rows if isinstance(rows, list) else []
+
+    # HandoffUpdate (the PATCH body) forbids `agent_id` (it's in the URL) and
+    # `agent_role` (immutable once the row exists). Everything else round-trips.
+    _HANDOFF_PATCHABLE_FIELDS = (
+        "summary",
+        "phase",
+        "confidence",
+        "finding_slugs",
+        "coverage_gaps",
+        "next_steps",
+        "runtime_issues",
+        "working_artifacts",
+        "open_questions",
+        "recommended_next_agent",
+        "extras",
+    )
+
+    def record_handoff(self, payload: dict, *, upsert: bool = False) -> dict:
+        """POST a handoff row.
+
+        When ``upsert`` is True, an HTTP 409 (existing row collision on
+        ``(engagement, agent_id)``) is caught and re-issued as a PATCH against
+        the existing row, so callers can checkpoint the same agent_id
+        repeatedly without bookkeeping. Latest write wins.
+        """
+        if not upsert:
+            return self.post("dispatch-handoffs", payload)
+        try:
+            return self.post("dispatch-handoffs", payload)
+        except AssessError as exc:
+            if "HTTP 409" not in str(exc):
+                raise
+            agent_id = payload.get("agent_id")
+            if not agent_id:
+                # Backend ought never to 409 without an agent_id, but if the
+                # caller forgot it the upsert can't address the prior row.
+                raise
+            # PATCH only with the patchable fields; HandoffUpdate forbids
+            # agent_id (URL-bound) and agent_role (immutable). Omitted fields
+            # leave the existing row unchanged.
+            patch = {
+                k: v for k, v in payload.items()
+                if k in self._HANDOFF_PATCHABLE_FIELDS
+            }
+            return self.update_handoff(str(agent_id), patch)
+
+    def update_handoff(self, agent_id: str, patch: dict) -> dict:
+        return self.patch(f"dispatch-handoffs/{agent_id}", patch)
+
+    def get_handoff(self, agent_id: str) -> dict | None:
+        try:
+            row = self.get(f"dispatch-handoffs/{agent_id}")
+        except AssessError as exc:
+            if "HTTP 404" in str(exc):
+                return None
+            raise
+        return row if isinstance(row, dict) else None
+
+    def list_handoffs(self, **filters: Any) -> list[dict]:
+        query = _build_query(filters)
+        endpoint = "dispatch-handoffs" if not query else f"dispatch-handoffs?{query}"
+        rows = self.get(endpoint)
+        return rows if isinstance(rows, list) else []
+
+    def record_decision(self, payload: dict) -> dict:
+        return self.post("dispatch-decisions", payload)
+
+    def update_decision(self, decision_id: int, patch: dict) -> dict:
+        return self.patch(f"dispatch-decisions/{int(decision_id)}", patch)
+
+    def list_decisions(self, **filters: Any) -> list[dict]:
+        query = _build_query(filters)
+        endpoint = "dispatch-decisions" if not query else f"dispatch-decisions?{query}"
+        rows = self.get(endpoint)
+        return rows if isinstance(rows, list) else []
+
     def post_event(self, payload: dict) -> dict | None:
         """POST /events. Fire-and-forget: warn on failure, never raise."""
         try:
@@ -210,6 +308,21 @@ class AssessmentClient:
     def close(self) -> None:
         """Close the underlying connection."""
         self._reset_conn()
+
+
+def _build_query(filters: dict[str, Any]) -> str:
+    """Build a URL query string from a filters dict, dropping None/empty values."""
+    from urllib.parse import urlencode
+
+    cleaned: dict[str, str] = {}
+    for k, v in filters.items():
+        if v is None or v == "":
+            continue
+        if isinstance(v, bool):
+            cleaned[k] = "true" if v else "false"
+        else:
+            cleaned[k] = str(v)
+    return urlencode(cleaned)
 
 
 def _format_validation_error(resp_body: str) -> str:
