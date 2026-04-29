@@ -155,6 +155,65 @@ def test_aith_engagement_create_force_syncs_on_matching_install_root(tmp_path: P
         assert "/admin/sync-engagements" in handler.sync_calls
 
 
+def test_verify_backend_install_root_uses_https_connection_for_https_base_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTPS orchestrator URLs must use TLS-capable http.client connections
+    or drift detection silently skips both admin checks."""
+    import http.client
+
+    from ai_threat_hunting_cli import engagements as engagement_module
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    eng_dir = install_root / "agent" / "engagements" / "eng-1"
+    eng_dir.mkdir(parents=True)
+    requests: list[tuple[str, str, int, str]] = []
+
+    class _Response:
+        def __init__(self, status_code: int, payload: dict[str, object] | None = None):
+            self.status = status_code
+            self._body = json.dumps(payload or {}).encode("utf-8")
+
+        def read(self) -> bytes:
+            return self._body
+
+    class _HttpsConnection:
+        def __init__(self, host: str, port: int, timeout: int):
+            self.host = host
+            self.port = port
+            self.timeout = timeout
+            self.method = ""
+            self.path = ""
+
+        def request(self, method: str, path: str) -> None:
+            self.method = method
+            self.path = path
+            requests.append((method, self.host, self.port, path))
+
+        def getresponse(self) -> _Response:
+            if self.method == "GET":
+                return _Response(200, {"install_root": str(install_root.resolve())})
+            return _Response(200, {"synced": True})
+
+        def close(self) -> None:
+            return None
+
+    def fail_plain_http(*args, **kwargs):
+        raise AssertionError("HTTPS base URLs must not use HTTPConnection")
+
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "https://orchestrator.example.test:9443/prefix/")
+    monkeypatch.setattr(http.client, "HTTPConnection", fail_plain_http)
+    monkeypatch.setattr(http.client, "HTTPSConnection", _HttpsConnection)
+
+    engagement_module._verify_backend_install_root(install_root, eng_dir)
+
+    assert requests == [
+        ("GET", "orchestrator.example.test", 9443, "/prefix/admin/install-root"),
+        ("POST", "orchestrator.example.test", 9443, "/prefix/admin/sync-engagements"),
+    ]
+
+
 def test_aith_engagement_create_skips_drift_check_when_backend_unreachable(tmp_path: Path, monkeypatch) -> None:
     """Local-only / offline workflows must still succeed: when the backend is
     not running, `aith engagement create` should complete without raising."""

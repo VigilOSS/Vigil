@@ -4205,7 +4205,7 @@ def finalize_command_run(
 # ── Assessment job lifecycle ────────────────────────────────────────
 
 
-_JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost"}
+_JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost", "stop_failed"}
 _JOB_VALID_STATUSES = {"queued", "running", *_JOB_TERMINAL_STATUSES}
 
 

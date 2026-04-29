@@ -30,6 +30,7 @@ def _build_docker_exec(
     *,
     container_name: str,
     run_uuid: str,
+    working_dir: str | None = None,
 ) -> list[str]:
     """Wrap the user command in a tiny shell that records the in-container
     PID before ``exec``-ing the real command.
@@ -62,16 +63,23 @@ def _build_docker_exec(
         f'echo $$ > {pid_file} && sync && {tail} || '
         f'(echo "aith: PID write to {pid_file} failed (errno=$?); proceeding without pid-file" >&2; {tail})'
     )
-    return [
+    docker_argv = [
         "docker",
         "exec",
-        container_name,
-        "sh",
-        "-c",
-        wrapper,
-        "sh",
-        *cmd,
     ]
+    if working_dir:
+        docker_argv.extend(["-w", working_dir])
+    docker_argv.extend(
+        [
+            container_name,
+            "sh",
+            "-c",
+            wrapper,
+            "sh",
+            *cmd,
+        ]
+    )
+    return docker_argv
 
 
 def _read_container_pid(container_name: str, run_uuid: str) -> int | None:

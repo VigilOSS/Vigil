@@ -32,11 +32,12 @@
         "completed",
         "failed",
         "killed",
-        "lost"
+        "lost",
+        "stop_failed"
       ],
       "title": "Status",
       "type": "string",
-      "description": "Job lifecycle state. queued: row written, dtach not yet attached. running: dtach attached, worker live. completed/failed/killed/lost: terminal states."
+      "description": "Job lifecycle state. queued: row written, dtach not yet attached. running: dtach attached, worker live. completed/failed/killed/lost/stop_failed: terminal states."
     },
     "started_at": {
       "format": "date-time",

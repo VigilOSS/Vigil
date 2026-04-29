@@ -742,15 +742,24 @@ def test_supersede_intel_collision_with_natural_key_returns_409(
     assert created.status_code == 201, created.text
     intel_id = created.json()["id"]
 
-    # Same natural key (component, version) → service helper raises 409.
+    # Same natural key (component, version) -> service helper raises 409
+    # without first upserting the target row.
     collision = client.post(
         f"{INTEL_BASE}/tech-components/{intel_id}/supersede",
         json={
-            "payload": {"component": "vendor-saas-platform", "version": "1.0.0"},
+            "payload": {
+                "component": "vendor-saas-platform",
+                "version": "1.0.0",
+                "source_name": "should-not-be-written",
+            },
             "rationale": "Wrong call — should have been update-intel",
         },
     )
     assert collision.status_code == 409, collision.text
+    row = client.get(f"{INTEL_BASE}/tech-components").json()[0]
+    assert row["id"] == intel_id
+    assert row["source_name"] == "wappalyzer"
+    assert row["superseded_by_id"] is None
 
 
 def test_update_intel_unknown_id_returns_404(client, isolate_settings):

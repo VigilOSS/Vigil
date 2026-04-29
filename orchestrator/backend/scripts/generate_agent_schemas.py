@@ -278,8 +278,8 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "ID of the assessment_command_runs row that initiated this dtach-supervised job.",
                     },
                     "status": {
-                        "enum": ["queued", "running", "completed", "failed", "killed", "lost"],
-                        "description": "Job lifecycle state. queued: row written, dtach not yet attached. running: dtach attached, worker live. completed/failed/killed/lost: terminal states.",
+                        "enum": ["queued", "running", "completed", "failed", "killed", "lost", "stop_failed"],
+                        "description": "Job lifecycle state. queued: row written, dtach not yet attached. running: dtach attached, worker live. completed/failed/killed/lost/stop_failed: terminal states.",
                     },
                     "started_at": {"description": "ISO8601 timestamp when the dtach worker first attached."},
                     "ended_at": {"description": "ISO8601 timestamp when the dtach worker exited or was killed."},

@@ -172,6 +172,7 @@ def kali_exec(
         cmd,
         container_name=container_name,
         run_uuid=run_uuid,
+        working_dir=f"/engagements/{eng_key}",
     )
 
     client = AssessmentClient(cfg.base_url, eng_key)

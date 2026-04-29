@@ -141,6 +141,8 @@ def start_job(
             "docker",
             "exec",
             "-d",
+            "-w",
+            f"/engagements/{cfg.engagement_key}",
             container_name,
             "dtach",
             "-n",

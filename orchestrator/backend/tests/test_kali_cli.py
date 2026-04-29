@@ -720,6 +720,8 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
     # The run_uuid the CLI generated should also appear in the stdout_path so
     # legacy regex consumers keep working.
     assert payload["run_uuid"] in payload["stdout_path"]
+    assert "-w" in popen_call["argv"]
+    assert popen_call["argv"][popen_call["argv"].index("-w") + 1] == f"/engagements/{fake_engagement.name}"
 
     # Finalize PATCH followed.
     assert len(fake_client.patches) == 1
@@ -826,10 +828,12 @@ def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_enga
         tool_name="nmap",
     )
     argv = captured["argv"]
-    # Shape: docker exec <container> sh -c '<wrapper>' sh <user-cmd...>
-    assert argv[:3] == ["docker", "exec", "security-research"]
-    assert argv[3:5] == ["sh", "-c"]
-    wrapper = argv[5]
+    # Shape: docker exec -w <engagement-mount> <container> sh -c '<wrapper>' sh <user-cmd...>
+    assert argv[:2] == ["docker", "exec"]
+    assert argv[2:4] == ["-w", f"/engagements/{fake_engagement.name}"]
+    container_index = argv.index("security-research")
+    assert argv[container_index + 1:container_index + 3] == ["sh", "-c"]
+    wrapper = argv[container_index + 3]
     assert wrapper.startswith("echo $$ > /tmp/aith-pid-"), wrapper
     # The PID-write race fix wraps the original `echo $$ > pidfile; exec "$@"`
     # in `&&`/`||` so a failed write logs to stderr and still execs. Both
@@ -845,8 +849,8 @@ def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_enga
         "helper racing on an empty dirent"
     )
     # ``sh`` placeholder makes ``$@`` skip the script-name positional.
-    assert argv[6] == "sh"
-    assert argv[7:] == ["nmap", "-sV", "10.0.0.1"]
+    assert argv[container_index + 4] == "sh"
+    assert argv[container_index + 5:] == ["nmap", "-sV", "10.0.0.1"]
 
 
 def test_b1_timeout_cascade_kills_in_container_pid_then_host_pgid(
@@ -1577,6 +1581,9 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
     assert fake_client.patches[0][1]["status"] == "running"
     # docker exec -d dtach ... was invoked.
     assert any("dtach" in arg for argv in seen_argv for arg in argv)
+    dtach_argv = next(argv for argv in seen_argv if "dtach" in argv)
+    assert "-w" in dtach_argv
+    assert dtach_argv[dtach_argv.index("-w") + 1] == f"/engagements/{fake_engagement.name}"
 
 
 def test_job_stop_patches_killed(monkeypatch, fake_engagement):
@@ -1878,6 +1885,66 @@ def test_kali_job_start_warns_when_timeout_omitted(
     )
     err = capsys.readouterr().err
     assert "timeout" in err.lower() and "24h" in err.lower()
+
+
+@pytest.mark.parametrize(
+    ("argv", "helper_name", "expected_call"),
+    [
+        (["status", "7"], "job_status", {"job_id": 7}),
+        (["tail", "7"], "job_tail", {"job_id": 7, "follow": False}),
+        (["stop", "7"], "job_stop", {"job_id": 7, "container_name": "security-research"}),
+        (["list", "--status", "running"], "job_list", {"status_value": "running", "parent_run_id": None}),
+    ],
+)
+def test_kali_job_actions_thread_explicit_engagement_dir(
+    monkeypatch, fake_engagement, capsys, argv, helper_name, expected_call
+):
+    """Every kali job action must use the explicit --engagement-dir root flag
+    instead of falling back to cwd/env for backend engagement resolution."""
+    cli = _import("assess.cli")
+    mod = _import("assess.commands.kali_job")
+    cfg = SimpleNamespace(
+        base_url="http://127.0.0.1:18000",
+        engagement_dir=str(fake_engagement),
+        engagement_key=fake_engagement.name,
+        agent_root=str(fake_engagement.parent.parent),
+    )
+    captured: dict = {}
+
+    def fake_load_config(flag):
+        captured["load_config_flag"] = flag
+        return cfg
+
+    monkeypatch.setattr(mod, "load_config", fake_load_config, raising=False)
+
+    def fake_job_status(job_id, *, config=None):
+        captured["call"] = {"job_id": job_id, "config": config}
+        return {"id": job_id, "status": "running"}
+
+    def fake_job_tail(job_id, *, follow=False, config=None):
+        captured["call"] = {"job_id": job_id, "follow": follow, "config": config}
+
+    def fake_job_stop(job_id, *, container_name="security-research", config=None):
+        captured["call"] = {"job_id": job_id, "container_name": container_name, "config": config}
+        return {"id": job_id, "status": "killed"}
+
+    def fake_job_list(*, status_value=None, parent_run_id=None, config=None):
+        captured["call"] = {"status_value": status_value, "parent_run_id": parent_run_id, "config": config}
+        return [{"id": 7, "status": status_value or "running"}]
+
+    monkeypatch.setattr(mod, "job_status", fake_job_status)
+    monkeypatch.setattr(mod, "job_tail", fake_job_tail)
+    monkeypatch.setattr(mod, "job_stop", fake_job_stop)
+    monkeypatch.setattr(mod, "job_list", fake_job_list)
+
+    cli.main(["--engagement-dir", str(fake_engagement), "kali", "job", *argv])
+
+    assert captured["load_config_flag"] == str(fake_engagement)
+    call = captured["call"]
+    assert call.pop("config") is cfg
+    assert call == expected_call
+    if argv[0] != "tail":
+        assert capsys.readouterr().out
 
 
 def test_kali_job_start_rejects_unknown_technique(monkeypatch, fake_engagement):
@@ -2182,7 +2249,9 @@ def test_pre_exec_wrapper_handles_pid_write_failure(monkeypatch, fake_engagement
         engagement_key=fake_engagement.name,
         tool_name="nmap",
     )
-    wrapper = captured["argv"][5]
+    argv = captured["argv"]
+    container_index = argv.index("security-research")
+    wrapper = argv[container_index + 3]
     # Both happy and failure paths exec the user command.
     assert wrapper.count('exec "$@"') == 2
     assert "&& exec" in wrapper
@@ -2428,6 +2497,54 @@ def test_alterx_estimate_flag_appended(monkeypatch):
     cmd = captured["cmd"]
     assert "-estimate" in cmd
     assert "-en" in cmd  # -enrich shorthand
+
+
+def test_alterx_domain_mode_uses_dash_d(monkeypatch):
+    """Single-domain alterx mode must pass `-d <domain>` to alterx; `-l`
+    is the list-file flag and treats the domain string as a path."""
+    cli = _import("assess.cli")
+    kali = _import("assess.lib.kali")
+
+    captured: dict = {}
+
+    def fake_kali_exec(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        return kali.KaliResult(
+            run_id=1,
+            status="completed",
+            return_code=0,
+            stdout_path="/tmp/x.out",
+            stderr_path="/tmp/x.err",
+            duration_ms=10,
+            peak_rss_bytes=None,
+            stdout_preview="",
+            stderr_preview="",
+            timed_out=False,
+            partial_results=False,
+        )
+
+    mod = _import("assess.commands.kali_alterx")
+    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+
+    cli.main(
+        [
+            "kali",
+            "alterx",
+            "-d",
+            "example.com",
+            "--technique",
+            "RECON",
+            "--intent",
+            "alterx domain mode",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--timeout",
+            "120",
+        ]
+    )
+    assert captured["cmd"][:3] == ["alterx", "-d", "example.com"]
 
 
 def test_dnsx_timeout_flag_passes_through(monkeypatch):
