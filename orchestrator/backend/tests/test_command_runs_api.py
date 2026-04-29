@@ -125,6 +125,34 @@ def test_record_and_list_command_run_round_trips(client, isolate_settings):
     assert rows[0]["id"] == created["id"]
 
 
+def test_job_patch_accepts_stop_failed_terminal_status(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+
+    created = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
+        json={
+            "status": "running",
+            "audit_metadata": {"technique": "RECON", "intent": "long sweep"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    job_id = created.json()["id"]
+
+    stopped = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{job_id}",
+        json={"status": "stop_failed"},
+    )
+
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["status"] == "stop_failed"
+    listed = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
+        params={"status": "stop_failed"},
+    )
+    assert listed.status_code == 200
+    assert [row["id"] for row in listed.json()] == [job_id]
+
+
 def test_list_command_runs_filters_by_phase_agent_tool_and_success(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
     assert _post(client, _base_payload()).status_code == 201

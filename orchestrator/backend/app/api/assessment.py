@@ -171,7 +171,7 @@ class JobCreate(BaseModel):
     """
 
     parent_command_run_id: int | None = Field(default=None, ge=1)
-    status: Literal["queued", "running", "completed", "failed", "killed", "lost"] = "queued"
+    status: Literal["queued", "running", "completed", "failed", "killed", "lost", "stop_failed"] = "queued"
     started_at: datetime | None = None
     ended_at: datetime | None = None
     exit_code: int | None = None
@@ -182,7 +182,7 @@ class JobCreate(BaseModel):
 
 
 class JobUpdate(BaseModel):
-    status: Literal["queued", "running", "completed", "failed", "killed", "lost"] | None = None
+    status: Literal["queued", "running", "completed", "failed", "killed", "lost", "stop_failed"] | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
     exit_code: int | None = None
@@ -201,7 +201,7 @@ class JobRecord(BaseModel):
     id: int
     engagement_id: int
     parent_command_run_id: int | None = None
-    status: Literal["queued", "running", "completed", "failed", "killed", "lost"]
+    status: Literal["queued", "running", "completed", "failed", "killed", "lost", "stop_failed"]
     started_at: datetime | None = None
     ended_at: datetime | None = None
     exit_code: int | None = None

@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from assess.lib.client import AssessError
+from assess.lib.config import load_config
 from assess.lib.kali import (
     ALLOWED_PHASES,
     PROBE_KIND_ENUM,
@@ -140,6 +141,7 @@ def _run_start(args) -> None:
         "target_host": args.target_host,
         "timeout_seconds_requested": int(timeout_value),
     }
+    cfg = _load_job_config(args)
     explicit_dir = getattr(args, "engagement_dir", None)
     engagement_dir = Path(explicit_dir).expanduser().resolve() if explicit_dir else None
     record = start_job(
@@ -148,22 +150,32 @@ def _run_start(args) -> None:
         container_name=args.container_name,
         parent_command_run_id=args.parent_command_run_id,
         engagement_dir=engagement_dir,
+        config=cfg,
     )
     print(json.dumps(record, indent=2, ensure_ascii=False))
 
 
+def _load_job_config(args):
+    explicit_dir = getattr(args, "engagement_dir", None)
+    return load_config(str(explicit_dir) if explicit_dir else None)
+
+
 def _run_status(args) -> None:
-    print(json.dumps(job_status(args.job_id), indent=2, ensure_ascii=False))
+    cfg = _load_job_config(args)
+    print(json.dumps(job_status(args.job_id, config=cfg), indent=2, ensure_ascii=False))
 
 
 def _run_tail(args) -> None:
-    job_tail(args.job_id, follow=bool(args.follow))
+    cfg = _load_job_config(args)
+    job_tail(args.job_id, follow=bool(args.follow), config=cfg)
 
 
 def _run_stop(args) -> None:
-    print(json.dumps(job_stop(args.job_id, container_name=args.container_name), indent=2, ensure_ascii=False))
+    cfg = _load_job_config(args)
+    print(json.dumps(job_stop(args.job_id, container_name=args.container_name, config=cfg), indent=2, ensure_ascii=False))
 
 
 def _run_list(args) -> None:
-    rows = job_list(status_value=args.status, parent_run_id=args.parent_run_id)
+    cfg = _load_job_config(args)
+    rows = job_list(status_value=args.status, parent_run_id=args.parent_run_id, config=cfg)
     print(json.dumps(rows, indent=2, ensure_ascii=False))

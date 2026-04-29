@@ -259,10 +259,11 @@ def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> None:
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     prefix = (parsed.path or "").rstrip("/")
+    connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
 
     backend_install_root: str | None = None
     try:
-        conn = http.client.HTTPConnection(host, port, timeout=2)
+        conn = connection_cls(host, port, timeout=2)
         conn.request("GET", f"{prefix}/admin/install-root")
         resp = conn.getresponse()
         body = resp.read().decode("utf-8", errors="replace")
@@ -311,7 +312,7 @@ def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> None:
     # Install roots match — force a re-sync so the new engagement is visible
     # to the backend immediately, without waiting for the next implicit trigger.
     try:
-        conn = http.client.HTTPConnection(host, port, timeout=2)
+        conn = connection_cls(host, port, timeout=2)
         conn.request("POST", f"{prefix}/admin/sync-engagements")
         resp = conn.getresponse()
         resp.read()

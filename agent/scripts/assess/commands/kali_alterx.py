@@ -90,7 +90,7 @@ def run(args) -> None:
     if args.input_list:
         cmd.extend(["-l", args.input_list])
     elif args.domain:
-        cmd.extend(["-l", args.domain])
+        cmd.extend(["-d", args.domain])
     for pattern in args.patterns or []:
         cmd.extend(["-p", pattern])
     if args.pattern_file:
