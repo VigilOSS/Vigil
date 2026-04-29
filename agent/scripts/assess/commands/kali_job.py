@@ -4,7 +4,7 @@ Subcommands:
 - start  — write `assessment_jobs` queued row, spawn dtach session, mark running.
 - status — fetch a job row by id.
 - tail   — tail the spilled stdout file.
-- stop   — send Ctrl-C through dtach and PATCH status=killed.
+- stop   — terminate the recorded PID and PATCH killed/stop_failed/lost.
 - list   — list jobs, optionally filtered by status / parent_command_run_id.
 """
 from __future__ import annotations
@@ -93,7 +93,10 @@ def register(subparsers) -> None:
     tail_p.add_argument("--follow", action="store_true")
     tail_p.set_defaults(func=_run_tail)
 
-    stop_p = job_sub.add_parser("stop", help="Send Ctrl-C and PATCH status=killed.")
+    stop_p = job_sub.add_parser(
+        "stop",
+        help="Terminate the recorded PID and PATCH killed/stop_failed/lost.",
+    )
     stop_p.add_argument("job_id", type=int)
     stop_p.add_argument("--container-name", dest="container_name", default="security-research")
     stop_p.set_defaults(func=_run_stop)

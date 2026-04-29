@@ -214,6 +214,62 @@ def test_verify_backend_install_root_uses_https_connection_for_https_base_url(
     ]
 
 
+def test_verify_backend_install_root_force_syncs_when_install_root_endpoint_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Older backends can lack /admin/install-root but still expose the sync
+    endpoint, so a 404 should only skip drift comparison, not immediate sync."""
+    import http.client
+
+    from ai_threat_hunting_cli import engagements as engagement_module
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    eng_dir = install_root / "agent" / "engagements" / "eng-1"
+    eng_dir.mkdir(parents=True)
+    requests: list[tuple[str, str, int, str]] = []
+
+    class _Response:
+        def __init__(self, status_code: int, payload: dict[str, object] | None = None):
+            self.status = status_code
+            self._body = json.dumps(payload or {}).encode("utf-8")
+
+        def read(self) -> bytes:
+            return self._body
+
+    class _HttpConnection:
+        def __init__(self, host: str, port: int, timeout: int):
+            self.host = host
+            self.port = port
+            self.timeout = timeout
+            self.method = ""
+            self.path = ""
+
+        def request(self, method: str, path: str) -> None:
+            self.method = method
+            self.path = path
+            requests.append((method, self.host, self.port, path))
+
+        def getresponse(self) -> _Response:
+            if self.method == "GET":
+                return _Response(404)
+            return _Response(200, {"synced": True})
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://orchestrator.example.test:8080/prefix/")
+    monkeypatch.setattr(http.client, "HTTPConnection", _HttpConnection)
+
+    engagement_module._verify_backend_install_root(install_root, eng_dir)
+
+    assert requests == [
+        ("GET", "orchestrator.example.test", 8080, "/prefix/admin/install-root"),
+        ("POST", "orchestrator.example.test", 8080, "/prefix/admin/sync-engagements"),
+    ]
+    assert "does not expose /admin/install-root" in capsys.readouterr().err
+
+
 def test_aith_engagement_create_skips_drift_check_when_backend_unreachable(tmp_path: Path, monkeypatch) -> None:
     """Local-only / offline workflows must still succeed: when the backend is
     not running, `aith engagement create` should complete without raising."""

@@ -280,7 +280,6 @@ def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> None:
                 "restart the orchestrator after upgrading to validate.",
                 file=sys.stderr,
             )
-            return
         else:
             print(
                 f"[aith] orchestrator at {base_url} returned HTTP {resp.status} "
