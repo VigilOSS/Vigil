@@ -1536,16 +1536,19 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
     class _JobClient(_FakeClient):
         def post(self, endpoint, payload):
             self.posts.append((endpoint, payload))
-            return {"id": 14, "status": "queued"}
+            self.row = {
+                "id": 14,
+                "status": "queued",
+                "dtach_socket_path": None,
+                "stdout_path": None,
+                "stderr_path": None,
+            }
+            return self.row.copy()
 
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
-            return {
-                "id": 14,
-                "status": payload.get("status"),
-                "dtach_socket_path": payload.get("dtach_socket_path"),
-                "stdout_path": payload.get("stdout_path"),
-            }
+            self.row.update(payload)
+            return self.row.copy()
 
     fake_client = _JobClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1576,14 +1579,103 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
     # POST /jobs landed.
     assert fake_client.posts and fake_client.posts[0][0] == "jobs"
     assert fake_client.posts[0][1]["status"] == "queued"
-    # PATCH /jobs/14 transitioned to running.
+    # PATCH /jobs/14 first persisted paths before any process is spawned.
     assert fake_client.patches and fake_client.patches[0][0] == "jobs/14"
-    assert fake_client.patches[0][1]["status"] == "running"
+    assert fake_client.patches[0][1]["dtach_socket_path"].startswith("/tmp/aith-jobs/")
+    assert fake_client.patches[0][1]["stdout_path"].endswith(".out")
+    assert fake_client.patches[0][1]["stderr_path"].endswith(".err")
+    assert "status" not in fake_client.patches[0][1]
+    # The final PATCH only transitions the already-manageable row to running.
+    assert fake_client.patches[1] == ("jobs/14", {"status": "running"})
     # docker exec -d dtach ... was invoked.
     assert any("dtach" in arg for argv in seen_argv for arg in argv)
     dtach_argv = next(argv for argv in seen_argv if "dtach" in argv)
     assert "-w" in dtach_argv
     assert dtach_argv[dtach_argv.index("-w") + 1] == f"/engagements/{fake_engagement.name}"
+
+
+def test_job_start_persists_paths_and_cleans_up_when_running_patch_fails(
+    monkeypatch, fake_engagement
+):
+    kali_jobs = _import("assess.lib.kali_jobs")
+    from assess.lib.client import AssessError
+
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    events: list[tuple[str, object]] = []
+
+    class _FailRunningPatchClient(_FakeClient):
+        def post(self, endpoint, payload):
+            self.posts.append((endpoint, payload))
+            return {"id": 14, "status": "queued"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            events.append(("patch", payload.copy()))
+            if payload.get("status") == "running":
+                raise AssessError("backend down during running patch")
+            return {"id": 14, "status": "queued", **payload}
+
+    fake_client = _FailRunningPatchClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda name: None)
+    monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda name, path: None)
+
+    cleanup_calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda container, path: 4242)
+    monkeypatch.setattr(
+        kali_jobs,
+        "_signal_job_pid",
+        lambda container, pid, signal_name: cleanup_calls.append(
+            ("signal", signal_name, pid)
+        ),
+    )
+    monkeypatch.setattr(
+        kali_jobs,
+        "_wait_for_pid_exit",
+        lambda container, pid, **kwargs: cleanup_calls.append(
+            ("wait", kwargs["timeout_seconds"])
+        )
+        or True,
+    )
+
+    def fake_run(argv, **kwargs):
+        events.append(("run", list(argv)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kali_jobs.subprocess, "run", fake_run)
+
+    with pytest.raises(AssessError, match="backend down during running patch"):
+        kali_jobs.start_job(
+            ["nuclei", "-l", "hosts.txt"],
+            audit_meta={
+                "technique": "RECON",
+                "intent": "long sweep",
+                "probe_kind": "fingerprint",
+                "phase": "recon",
+            },
+            container_name="security-research",
+        )
+
+    first_patch = events[0]
+    assert first_patch[0] == "patch"
+    assert first_patch[1]["dtach_socket_path"].startswith("/tmp/aith-jobs/")
+    assert first_patch[1]["stdout_path"].endswith(".out")
+    assert first_patch[1]["stderr_path"].endswith(".err")
+    assert first_patch[1].get("status") != "running"
+    assert events[1][0] == "run"
+    assert events[2] == ("patch", {"status": "running"})
+    assert cleanup_calls[0] == ("signal", "TERM", 4242)
 
 
 def test_job_stop_patches_killed(monkeypatch, fake_engagement):
@@ -1610,6 +1702,9 @@ def test_job_stop_patches_killed(monkeypatch, fake_engagement):
     fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: 4343)
+    monkeypatch.setattr(kali_jobs, "_signal_job_pid", lambda *a, **k: None)
+    monkeypatch.setattr(kali_jobs, "_wait_for_pid_exit", lambda *a, **k: True)
     monkeypatch.setattr(
         kali_jobs.subprocess,
         "run",
@@ -1619,6 +1714,81 @@ def test_job_stop_patches_killed(monkeypatch, fake_engagement):
     record = kali_jobs.job_stop(22, container_name="security-research")
     assert record["status"] == "killed"
     assert fake_client.patches[0] == ("jobs/22", {"status": "killed"})
+
+
+def test_job_stop_records_stop_failed_when_pid_missing(monkeypatch, fake_engagement):
+    kali_jobs = _import("assess.lib.kali_jobs")
+    from assess.lib.client import AssessError
+
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    class _StopClient(_FakeClient):
+        def get(self, endpoint):
+            return {"id": 25, "dtach_socket_path": "/tmp/aith-jobs/missing-pid.sock"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            return {"id": 25, "status": payload["status"]}
+
+    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: None)
+
+    dtach_interrupts: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        dtach_interrupts.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kali_jobs.subprocess, "run", fake_run)
+
+    with pytest.raises(AssessError, match="PID.*not available"):
+        kali_jobs.job_stop(25, container_name="security-research")
+
+    assert dtach_interrupts
+    assert ("jobs/25", {"status": "stop_failed"}) in fake_client.patches
+
+
+def test_job_stop_records_lost_when_container_not_running(monkeypatch, fake_engagement):
+    kali_jobs = _import("assess.lib.kali_jobs")
+
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    class _StopClient(_FakeClient):
+        def get(self, endpoint):
+            return {"id": 26, "dtach_socket_path": "/tmp/aith-jobs/gone.sock"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            return {"id": 26, "status": payload["status"]}
+
+    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: False)
+
+    record = kali_jobs.job_stop(26, container_name="security-research")
+
+    assert record["status"] == "lost"
+    assert fake_client.patches == [("jobs/26", {"status": "lost"})]
 
 
 # ──────────────────────────────────────────────────────────────────────────
