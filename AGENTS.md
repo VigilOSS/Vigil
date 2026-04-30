@@ -26,11 +26,8 @@ cd agent
 ./scripts/render-operator-prompts.sh repo
 ```
 
-Validate prompt wording and renderer drift with:
-
-```bash
-uv run --directory orchestrator/backend pytest tests/test_prompt_wording.py
-```
+After rerendering, review the generated prompt diffs directly. The repository does not
+maintain tests that assert markdown prompt/doc wording, headings, or exact strings.
 
 # Assess schema regeneration
 
@@ -100,9 +97,18 @@ editing so the change stays coherent across layers:
 5. The owning `aith assess` helper command and its tests
 6. Generated operator wrappers after rerendering
 
-If a change affects prompt generation, rerender and run `tests/test_prompt_wording.py`.
+If a change affects prompt generation, rerender and review the generated wrapper diffs.
 If a change affects CLI ownership or lifecycle behavior, run the relevant backend CLI and API tests,
-not just the prompt test.
+not markdown wording tests.
+
+## Markdown prompt/doc testing policy
+
+Do not add or maintain repository tests that assert `.md` prompt/doc wording, headings, or exact
+strings. Markdown prompts and docs are authored prose; brittle wording tests turn normal prompt
+editing into fixture maintenance and encourage preserving stale phrasing instead of improving the
+instructions. Keep durable contracts in code-owned surfaces instead: CLI helpers, backend request
+models, schema generation, API/service behavior, and tests for those executable contracts. For
+prompt/doc changes, rerender generated artifacts when required and review the markdown diffs.
 
 # Orchestrator backend
 

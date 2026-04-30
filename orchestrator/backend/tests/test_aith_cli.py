@@ -1003,6 +1003,34 @@ def test_config_set_get_and_unset_uses_config_env(tmp_path: Path, monkeypatch: p
     assert "oob.domain" not in capsys.readouterr().out
 
 
+def test_oob_status_json_reports_effective_domain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ai_threat_hunting_cli import main as main_module
+    from ai_threat_hunting_cli.docker import DockerResult
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("AI_THREAT_HUNTING_CONFIG", str(config_path))
+
+    main_module.main(["config", "set", "oob.domain", "oob.example.test"])
+    capsys.readouterr()
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "", "")
+        return DockerResult(0, "", "")
+
+    monkeypatch.setattr(main_module, "docker_run_command", runner)
+
+    main_module.main(["oob", "status", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "stopped"
+    assert payload["domain"] == "oob.example.test"
+
+
 def test_logs_routes_to_centralized_targets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import main as main_module
 

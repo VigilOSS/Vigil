@@ -42,7 +42,7 @@ Keep it light:
 - `agent/scripts/render-operator-prompts.sh` - prompt renderer. Why: generates the committed operator-facing wrappers from `operator-core.md` plus hardcoded roster templates. `CLAUDE.md` and `AGENTS.md` share one template and are byte-identical outputs.
 - `agent/AGENTS.md` and `agent/CLAUDE.md` - generated operator wrappers. Why: committed outputs, not source-of-truth.
 - `agent/.codex/config.toml` - Codex project hook config. Why: wires Codex `PreToolUse`/`PostToolUse` events to the shared hook scripts.
-- `agent/.codex/agents/` and `agent/.claude/agents/` - generated agent wrappers. Why: thin client-specific entrypoints that should stay derived from the source prompts.
+- `agent/.codex/agents/` and `agent/.claude/agents/` - generated agent definitions. Why: client-specific committed outputs embed canonical specialist prompt bodies from `agent/agents/*.md`; edit source prompts and rerender instead of editing these directly.
 
 ### Runtime and CLI
 
@@ -75,15 +75,15 @@ Keep it light:
 
 Prompt changes are NOT prompt-only when the prompts define artifacts that the backend stores or the CLI processes. Key coupling points:
 
-- **`guidance_hypotheses`** — defined in architect prompts, stored in `code_analysis_queue.guidance_hypotheses_json` (db.py), normalized by `code_dispatch.py`, validated by `QueueItemRecord` / `RequeueItemRecord` (code_analysis.py API), and hydrated in service fetch/requeue logic. Keep it as `list[str]`: structured requeue trigger context now lives separately in `code_analysis_queue.cross_file_triggers_json`, so changes to either payload shape require backend + CLI + prompt/test updates together.
+- **`guidance_hypotheses`** — defined in architect prompts, stored in `code_analysis_queue.guidance_hypotheses_json` (db.py), normalized by `code_dispatch.py`, validated by `QueueItemRecord` / `RequeueItemRecord` (code_analysis.py API), and hydrated in service fetch/requeue logic. Keep it as `list[str]`: structured requeue trigger context now lives separately in `code_analysis_queue.cross_file_triggers_json`, so changes to either payload shape require backend + CLI updates together, plus prompt diff review.
 - **`call-graph.json` / `attack-hypotheses.json`** — filesystem artifacts written by Phase 1, consumed by Phase 2 dispatch context and Phase 3 agents. Removing them breaks operator-core-code.md dispatch instructions and agent pre-work checklists.
 - **`file-analysis-queue.json`** — filesystem artifact loaded into backend via `code-dispatch queue`. Schema must match `QueueItemRecord` fields or normalization fails.
 - **General rule:** if a prompt instructs an agent to produce structured output that an `aith assess` command consumes, or that the backend stores/serves, the prompt and the consumer are coupled. Check both sides before changing either.
-- **Reactive nuclei rule + Phase 1a/1b/1c structure** — `agent/operator-core.md` "Reactive Nuclei on URL Discovery" and the Phase 1 sub-phases (1a wildcard enum, 1b parallel recon+source, 1c reactive nuclei sweep) couple to `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode" for mechanics; the operator rule points at the skill rather than duplicating the `nuclei` invocation so both stay in sync. Phase 1/2 exit gates run `aith assess check-scope-coverage --require-stage enum|collection`; dropping the gate call in `operator-core.md` silently disables the phase boundary check. `orchestrator/backend/tests/test_prompt_wording.py` locks both the headers and the gate invocations in place.
+- **Reactive nuclei rule + Phase 1a/1b/1c structure** — `agent/operator-core.md` "Reactive Nuclei on URL Discovery" and the Phase 1 sub-phases (1a wildcard enum, 1b parallel recon+source, 1c reactive nuclei sweep) couple to `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode" for mechanics; the operator rule points at the skill rather than duplicating the `nuclei` invocation so both stay in sync. Phase 1/2 exit gates run `aith assess check-scope-coverage --require-stage enum|collection`; dropping the gate call in `operator-core.md` silently disables the phase boundary check. Prompt and doc wording are reviewed through markdown diffs rather than repository tests; executable CLI/API contracts should be covered by their owning backend tests.
 
 ### Sync rules worth remembering
 
-- `agent/operator-core.md` -> `agent/AGENTS.md`, `agent/CLAUDE.md`, `agent/.codex/agents/*`, `agent/.claude/agents/*` via `agent/scripts/render-operator-prompts.sh`.
+- `agent/operator-core.md` -> `agent/AGENTS.md`, `agent/CLAUDE.md` via `agent/scripts/render-operator-prompts.sh`; `agent/agents/*.md` -> `agent/.codex/agents/*`, `agent/.claude/agents/*` through the same renderer.
 - `orchestrator/backend/app/api/assessment.py` and `orchestrator/backend/app/api/code_analysis.py` -> backend-backed `agent/schemas/*.json` via `orchestrator/backend/scripts/generate_agent_schemas.py`.
 - Backend state is canonical for findings, coverage, services, and chains; readable artifacts are produced on demand via `export-findings` and `export-surfaces`.
 - `agent/scripts/assess/commands/code_index.py` writes per-file JSON under `tools/analysis-state/structural-index/` and writes `structural-index-manifest.json` beside that directory. `code_index_sync.py` pushes structural metadata (total_functions, total_entry_points, total_sinks, total_exports) from those index files to `code_files` rows in the backend via `POST code/files/bulk-structural-metadata`.
@@ -131,7 +131,7 @@ When adding new patchable code-analysis fields or structural metadata totals:
 - `orchestrator/backend/app/services/state_manager.py` - assessment domain logic. Why: normalization, dedupe/upsert behavior, exploit/coverage/report readiness projections, finding lifecycle projection, transition ledgering, and summary rollups are business rules, not CRUD.
 - `orchestrator/backend/app/services/code_analysis.py` - code-analysis domain logic. Why: queue claiming/completion, needs-context flow, result recording, triggers, structural-metadata batch updates, and coverage rules are workflow logic.
 - `orchestrator/backend/app/ws.py` - in-process websocket broadcaster. Why: fans API mutations out to the UI without external messaging infrastructure.
-- `orchestrator/backend/tests/` - backend contract tests. Why: pins engagement bootstrap, websocket behavior, prompt rendering, CLI/backend contracts, runtime-image tooling contracts (`test_runtime_tooling_contract.py` static-checks the subdomain-enum binary set in `runtime-full/Dockerfile` and live-checks via `docker exec` under the `integration` mark), and code-analysis workflow rules.
+- `orchestrator/backend/tests/` - backend contract tests. Why: pins engagement bootstrap, websocket behavior, CLI/backend contracts, runtime-image tooling contracts (`test_runtime_tooling_contract.py` static-checks the subdomain-enum binary set in `runtime-full/Dockerfile` and live-checks via `docker exec` under the `integration` mark), and code-analysis workflow rules. Markdown prompt/doc wording is reviewed through generated diffs, not backend tests.
 
 ## orchestrator/frontend
 

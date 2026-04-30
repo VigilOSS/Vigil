@@ -37,11 +37,18 @@ uv tool install --editable .
 
 # Install or upgrade the working root
 aith install ~/security-research
+
+# Build and start the local stack. If OOB is configured but the FRP token is
+# missing, this prompts once and stores it in `aith config`.
+aith up
 ```
 
 Each install contains both Claude Code and Codex workflow files. The install root holds the shared prompt source tree, generated client wrappers, runtime assets, and orchestrator state while each client keeps its own entrypoint.
 
-The shared Kali runtime is not per-engagement. Start it once with `aith runtime start`; target-facing tool execution happens via `aith assess kali ...` subcommands which call into the container via `docker exec`. Within a single install, multiple engagements may exist under `agent/engagements/`.
+The shared Kali runtime is not per-engagement. Start the local stack once with
+`aith up`; target-facing tool execution happens via `aith assess kali ...`
+subcommands which call into the container via `docker exec`. Within a single
+install, multiple engagements may exist under `agent/engagements/`.
 
 Use one lead operator per engagement at a time unless you are deliberately coordinating a dual-client run through backend state. Both clients share the same durable orchestrator state, but filesystem artifacts under an engagement directory are still ordinary files.
 
@@ -358,7 +365,10 @@ Universal ctags produces richer tag data (signatures, kinds, line numbers) and s
 
 Tunnels (frp), listeners (pwncat-vl), and OOB callback servers (interactsh) are **OPERATOR-CONTROLLED** shared infrastructure. Agents provide commands but never start them.
 
-Configure OOB once, then let `aith oob start` create or verify the shared frp/interactsh sessions:
+Configure OOB once, then let `aith oob start` create or verify the shared frp/interactsh sessions.
+The FRP token is required for OOB. `aith up` prompts for it on first startup when it is missing
+and stores the value in `aith config`; non-interactive installs should set it first with
+`aith config set oob.frp_token <token>` or `AI_THREAT_HUNTING_FRP_TOKEN`.
 
 ```bash
 aith config set oob.frp_host researcher.example
@@ -366,8 +376,10 @@ aith config set oob.frp_port 7000
 aith config set oob.domain researcher.example
 aith config set oob.frp_token <token>
 aith oob start
+aith oob status --json
 aith engagement list --json
 aith oob client start example-agent --engagement <engagement-key> --agent vulnerability-analyst
+aith oob client logs example-agent --lines 80
 aith oob test
 ```
 

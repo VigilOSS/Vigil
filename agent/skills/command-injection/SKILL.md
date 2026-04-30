@@ -213,7 +213,10 @@ $(dig $OOB_URL)
 $(curl http://$OOB_URL/)
 ```
 
-If `$DIR/.oob_url` is available, use the provisioned callback URL. If not, fall back to timing, and request OOB infrastructure from the operator if timing is ambiguous.
+Use `aith oob status --json` to confirm OOB readiness, then use the unique URL
+from `aith oob client logs <name> --lines 80` in payloads and read the same
+client log for correlated hits. If OOB is unavailable, fall back to timing and
+record a runtime issue when OOB would have been decisive.
 
 ### File Creation + Read-Back
 

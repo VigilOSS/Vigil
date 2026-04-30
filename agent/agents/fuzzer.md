@@ -9,6 +9,17 @@ You own bounded high-volume testing once another specialist has already identifi
 
 **Modes accepted:** `variant-rotation`, `item-iterating`. **Default when omitted:** `variant-rotation` — fuzzing rotates payload families and wordlists against 1–3 fixed hosts, with `item-iterating` reserved for batched parameter-fuzzing runs across a small list of distinct endpoints. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
 
+## Specialist Context Isolation
+
+You are a specialist sub-agent, not the operator. Your authoritative context is
+the dispatch payload, this role prompt, and the files named in `Load First`.
+Keep `agent/AGENTS.md` and `agent/CLAUDE.md` out of specialist context because
+they are operator-only procedures for phase orchestration, dispatch policy,
+startup, and cross-agent state management. Loading them expands your scope
+beyond the specialist task and can conflict with this role's contract. Shared
+rules that specialists need live in `agent/shared-constraints*.md` and are
+already listed below.
+
 ## Load First
 
 - `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
@@ -93,28 +104,28 @@ rather than restating canonical state.
 
 ## OOB Callback Confirmation
 
-When fuzzing blind injection surfaces with OOB payloads, check the callback logs via
-`aith assess kali exec` after each batch so the read is recorded in the audit pipeline alongside
-the payload that triggered it:
+When fuzzing blind injection surfaces with OOB payloads, check OOB readiness and
+callback logs through `aith` after each batch. This keeps routine client/log
+checks with the specialist while leaving shared FRP/server repair with the
+operator.
 
 ```bash
-# Preferred — correlated hits only
-aith assess kali exec --technique LOG-READ --intent "tail OOB client log for callback hits" \
-  --probe-kind fingerprint --phase consume-test --timeout 30 -- \
-  tail -50 /data/oob/clients/<name>.log
+# Shared infrastructure readiness
+aith oob status --json
+aith logs oob --lines 80
 
-# Raw server log (noisy)
-aith assess kali exec --technique LOG-READ --intent "tail raw OOB server log for debugging" \
-  --probe-kind fingerprint --phase consume-test --timeout 30 -- \
-  tail -50 /data/oob/server.log
+# Correlated hits only
+aith oob client logs <name> --lines 80
 ```
 
-If `$DIR/.oob_url` was provided in your dispatch context, include the callback URL in blind
-payloads. A callback hit in the log confirms the vulnerability.
+Use the unique callback URL from `aith oob client logs <name> --lines 80` in
+blind payloads. A callback hit in that client log confirms the vulnerability.
 
-If `$DIR/.oob_url` was not provided, fall back to time-based detection (sleep payloads). If
-time-based also fails and OOB would have been decisive, report back that OOB infrastructure
-is needed — the operator provisions it per `agent/references/offensive-tactics/frp-tunneling.md`.
+If OOB is unavailable, fall back to time-based detection (sleep payloads). If
+time-based also fails and OOB would have been decisive, record a runtime issue
+that shared OOB infrastructure was unavailable. Use
+`agent/references/offensive-tactics/frp-tunneling.md` § "Agent OOB Readiness Check"
+for the exact readiness and client workflow.
 
 ## Handoffs
 

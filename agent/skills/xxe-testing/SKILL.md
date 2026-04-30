@@ -17,7 +17,7 @@ origin: AI Threat Hunting
 - `curl` (send crafted XML)
 - Burp Suite Repeater
 - XXEinjector
-- OOB callback server (operator-provisioned — read `$DIR/.oob_url` if available; falls back to time-based detection)
+- OOB callback client (verify with `aith oob status --json`, get the unique URL and check hits with `aith oob client logs <name>`; fall back to time-based detection when unavailable)
 
 ## Methodology
 
