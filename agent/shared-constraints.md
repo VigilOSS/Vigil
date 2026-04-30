@@ -171,28 +171,38 @@ pass them manually unless correcting an inferred value.
 
 ---
 
-## 2a. Listeners, Tunnels & OOB Are Operator-Controlled
+## 2a. Listener, Tunnel, and OOB Responsibility
 
-Agents must NOT start pwncat-vl, frp tunnels, chisel listeners, `nc -lvp`, `socat` listeners,
-interactsh servers, or any other network listener process. These are shared infrastructure that
-the operator manages.
+Shared listener infrastructure belongs to the operator because a listener, tunnel, or
+interactsh server is global runtime state that can break other specialists if it is
+started, restarted, or reconfigured mid-engagement.
 
-When exploitation requires a listener, tunnel, or OOB callback:
-1. Provide the exact commands in your output using `# MANUAL:` annotation
-2. Reference `agent/references/offensive-tactics/shell-handling.md` for shell listener commands
-3. Reference `agent/references/offensive-tactics/frp-tunneling.md` for tunnel exposure and OOB callback setup
-4. Wait for operator confirmation before proceeding with steps that depend on the listener/tunnel
-5. After the operator confirms, verify connection by tailing log files via `aith assess kali exec --technique LOG-READ --intent "read listener or OOB log" --probe-kind fingerprint --phase <phase> --timeout 30 -- cat /data/<log-path>` so the read is recorded in the audit pipeline
+Agents do their own readiness and evidence checks through `aith`:
+1. Inspect shared OOB state with `aith oob status --json` before blind payload work.
+   `server=true` and `frpc=true` means shared OOB infrastructure is ready.
+2. Inspect infrastructure logs with `aith logs oob --lines 80` when status is
+   partial, callbacks are missing, or FRP/auth health is unclear.
+3. Start, list, read, and stop named per-agent clients with `aith oob client
+   start|list|logs|stop`. Per-agent interactsh clients are correlation handles,
+   not shared tunnel infrastructure, so specialists can manage them directly.
+4. Check correlated callback hits with `aith oob client logs <name> --lines 80`.
+   Use `aith logs oob --lines 80` only for raw server/FRP debugging.
 
-Agents CAN read log files via `aith assess kali exec` to check for activity (use `--probe-kind fingerprint --technique RECON` since reading a log file is observation, not a payload):
-- `/data/shell-*.log` — shell session I/O (verify shell connected)
-- `/data/oob/clients/<name>.log` — correlated interactsh callback hits (preferred for confirming blind vulns — filters unrelated traffic)
-- `/data/oob/server.log` — raw interactsh log (noisy; use only when client log is unavailable)
-- `/data/oob/frpc.log` — tunnel connection status
+When exploitation requires a reverse-shell listener or tunnel exposure:
+1. Provide the exact listener or tunnel commands in your output using `# MANUAL:`
+   annotation, because the operator owns shared listener processes.
+2. Reference `agent/references/offensive-tactics/shell-handling.md` for shell
+   listener commands.
+3. Reference `agent/references/offensive-tactics/frp-tunneling.md` for OOB
+   readiness, per-agent clients, tunnel exposure, and log interpretation.
+4. Proceed after the listener URL file or `aith oob` client is available; do not
+   block on the operator for checks that `aith oob status`, `aith logs oob`, or
+   `aith oob client logs` can answer directly.
 
-Full OOB setup, verification, and log interpretation: `agent/references/offensive-tactics/frp-tunneling.md`
-
-Agents CANNOT start, stop, or restart listener, tunnel, or OOB processes.
+Agents MUST NOT start, stop, or restart shared listener, tunnel, or OOB server
+processes: pwncat-vl listeners, frp tunnels, chisel listeners, `nc -lvp`, `socat`
+listeners, `frpc`, `oob-server`, interactsh servers, or equivalent network
+listener processes.
 
 ---
 
@@ -468,16 +478,33 @@ Engagement artifacts live at one physical location on disk but have two names de
 
 ---
 
-## 12. Listener URL Contract
+## 12. Listener and OOB Callback Contract
 
-Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are operator-controlled (see §2a). The dispatch context delivers their URLs through two well-known files:
+Listeners (pwncat-vl) and tunnel exposure are operator-controlled (see §2a).
+The dispatch context delivers reverse-shell callback targets through one
+well-known file:
 
 - `$DIR/.listener_url` — present when the operator has provisioned a reverse-shell listener / tunnel address. Read it to learn where shells should call back.
-- `$DIR/.oob_url` — present when the operator has provisioned an interactsh server. Read it to embed an OOB callback host in payloads.
 
-Agents READ these files (never write). When `.oob_url` is missing, fall back to time-based detection and note the substitution in your output. When `.listener_url` is missing and exploitation needs one, record a blocked technique via `aith assess post blocked-techniques <json-file>` instead of attempting to bind a port yourself.
+Agents READ `.listener_url` (never write it). When `.listener_url` is missing
+and exploitation needs one, record a blocked technique via `aith assess post
+blocked-techniques <json-file>` instead of attempting to bind a port yourself.
 
-Hit-checking and log paths (`/data/oob/clients/<name>.log`, `/data/oob/server.log`, `/data/shell-*.log`, `/data/oob/frpc.log`) are documented in `agent/references/offensive-tactics/frp-tunneling.md` and `agent/references/offensive-tactics/shell-handling.md`. Read them via `aith assess kali exec --technique LOG-READ --intent "read listener or OOB log" --probe-kind fingerprint --phase <phase> --timeout 30 -- cat /data/<log-path>` so the read is audit-recorded.
+OOB callback domains are not engagement files. Get readiness and the configured
+base domain from `aith oob status --json`; create or reuse a named correlation
+client with `aith oob client start <name> --engagement <key> --agent <agent>`;
+read the unique callback URL and hits with `aith oob client logs <name> --lines
+80`. If OOB is unavailable, fall back to time-based detection and note the
+substitution in your output.
+
+Hit-checking is handled through the CLI surfaces that own those logs:
+- OOB client evidence: `aith oob client logs <name> --lines 80`
+- OOB infrastructure debugging: `aith logs oob --lines 80`
+- Shell listener session output: `aith runtime shell-exec "tail -80 /data/shell-<name>.log"`
+
+Record the result in the relevant finding, probe-run, or handoff after reading
+logs; the log command itself is infrastructure observation, while durable
+engagement state still belongs in the backend.
 
 ---
 

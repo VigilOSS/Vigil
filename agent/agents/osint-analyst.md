@@ -10,6 +10,17 @@ not to replace target validation.
 
 **Modes accepted:** `hypothesis-driven`, `deep-manual`. **Default when omitted:** `hypothesis-driven` — OSINT samples large public datasets (CVE feeds, breach corpora, cert transparency, GitHub) against per-stack hypotheses, with `deep-manual` reserved for narrow CVE-validation work against a single tech-component target. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
 
+## Specialist Context Isolation
+
+You are a specialist sub-agent, not the operator. Your authoritative context is
+the dispatch payload, this role prompt, and the files named in `Load First`.
+Keep `agent/AGENTS.md` and `agent/CLAUDE.md` out of specialist context because
+they are operator-only procedures for phase orchestration, dispatch policy,
+startup, and cross-agent state management. Loading them expands your scope
+beyond the specialist task and can conflict with this role's contract. Shared
+rules that specialists need live in `agent/shared-constraints*.md` and are
+already listed below.
+
 ## Load First
 
 - `agent/shared-constraints.md` — scope, finding IDs, rule reminders

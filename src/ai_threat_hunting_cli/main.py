@@ -63,11 +63,10 @@ def _print_post_install(result: InstallResult) -> None:
     else:
         print("Install complete. Next steps:")
         print(f"  1. Configure tokens and API keys in {root / '.env'}")
-        print(f"  2. aith runtime build           # build the Kali runtime image")
-        print(f"  3. aith runtime start           # start the runtime container")
-        print(f"  4. aith orchestrator start      # start the orchestrator backend")
-        print(f"  5. aith engagement create <target>  # create your first engagement")
-        print(f"  6. aith assess kali --help      # discover target-facing CLI verbs")
+        print(f"  2. Optional OOB: aith config set oob.frp_token <token>")
+        print(f"  3. aith up                      # build/start runtime, orchestrator, and OOB")
+        print(f"  4. aith engagement create <target>  # create your first engagement")
+        print(f"  5. aith assess kali --help      # discover target-facing CLI verbs")
     print()
 
 
@@ -635,11 +634,14 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
         stop_oob(runner=docker_run_command)
         start_oob(options, runner=docker_run_command)
     elif args.oob_command == "status":
-        payload = oob_status(runner=docker_run_command)
+        payload = oob_status(oob_domain=options.oob_domain, runner=docker_run_command)
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
-            print(f"{payload['state']}\tserver={payload['server']}\tfrpc={payload['frpc']}\tclients={len(payload['clients'])}")
+            print(
+                f"{payload['state']}\tserver={payload['server']}\tfrpc={payload['frpc']}"
+                f"\tclients={len(payload['clients'])}\tdomain={payload['domain']}"
+            )
     elif args.oob_command == "test":
         test_oob(options, runner=docker_run_command)
     elif args.oob_command == "client":

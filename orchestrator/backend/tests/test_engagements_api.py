@@ -742,6 +742,45 @@ def test_coverage_patch_normalizes_tested_to_covered_and_refreshes_service_statu
     assert summary.json()["service_coverage_gaps"] == []
 
 
+def test_summary_vendor_saas_decision_reads_dispatch_decisions(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    ingest = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/request-observations",
+        json={
+            "url": "https://tenant.auth0.com/login",
+            "discovery_source": "recon",
+        },
+    )
+    assert ingest.status_code == 201, ingest.text
+
+    summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
+    assert summary.status_code == 200, summary.text
+    pending = {
+        row["host"]: row["vendor"]
+        for row in summary.json()["vendor_saas_hosts_pending_decision"]
+    }
+    assert pending.get("tenant.auth0.com") == "auth0"
+
+    decision = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/dispatch-decisions",
+        json={
+            "kind": "scope_decision",
+            "payload": {
+                "host": "tenant.auth0.com",
+                "vendor": "auth0",
+                "choice": "in_scope",
+            },
+            "surfaced_to_user": True,
+        },
+    )
+    assert decision.status_code == 201, decision.text
+
+    summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["vendor_saas_hosts_pending_decision"] == []
+
+
 def test_repeat_request_observation_preserves_stronger_coverage_status(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 

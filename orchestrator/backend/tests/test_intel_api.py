@@ -371,6 +371,44 @@ def test_cve_validation_status_rejects_old_dropped_value(client, isolate_setting
     assert response.status_code == 422
 
 
+def test_update_cve_attempted_blocked_persists_details_block_reason(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/cves",
+        json={
+            "cve_id": "CVE-2024-99005",
+            "affected_component": "tomcat",
+            "validation_status": "poc_available_unverified",
+        },
+    )
+    assert created.status_code == 201, created.text
+    intel_id = created.json()["id"]
+
+    missing_reason = client.patch(
+        f"{INTEL_BASE}/cves/{intel_id}",
+        json={"payload": {"validation_status": "attempted_blocked"}},
+    )
+    assert missing_reason.status_code == 400, missing_reason.text
+    assert "block_reason" in missing_reason.text
+
+    patched = client.patch(
+        f"{INTEL_BASE}/cves/{intel_id}",
+        json={
+            "payload": {
+                "validation_status": "attempted_blocked",
+                "details": {"block_reason": "Exploit path blocked by upstream WAF"},
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["validation_status"] == "attempted_blocked"
+    assert body["details"]["block_reason"] == "Exploit path blocked by upstream WAF"
+
+
 # ──────────────────────────────────────────────────────────────
 # dns-records
 # ──────────────────────────────────────────────────────────────
@@ -684,6 +722,34 @@ def test_update_intel_patches_existing_row_and_rejects_unknown_field(
     assert bad.status_code == 400, bad.text
 
 
+def test_update_intel_natural_key_collision_returns_409(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+
+    first = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "vendor-saas-platform", "version": "1.0.0", "source_name": "wappalyzer"},
+    )
+    assert first.status_code == 201, first.text
+    second = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "vendor-saas-platform", "version": "2.0.0", "source_name": "manual"},
+    )
+    assert second.status_code == 201, second.text
+    second_id = second.json()["id"]
+
+    collision = client.patch(
+        f"{INTEL_BASE}/tech-components/{second_id}",
+        json={"payload": {"version": "1.0.0"}},
+    )
+    assert collision.status_code == 409, collision.text
+    assert "natural key" in collision.text
+
+    rows = client.get(f"{INTEL_BASE}/tech-components").json()
+    by_id = {row["id"]: row for row in rows}
+    assert by_id[second_id]["version"] == "2.0.0"
+    assert by_id[second_id]["source_name"] == "manual"
+
+
 def test_supersede_intel_marks_old_row_and_filters_from_list(
     client, isolate_settings
 ):
@@ -760,6 +826,78 @@ def test_supersede_intel_collision_with_natural_key_returns_409(
     assert row["id"] == intel_id
     assert row["source_name"] == "wappalyzer"
     assert row["superseded_by_id"] is None
+
+
+def test_supersede_cve_requires_full_natural_key(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/cves",
+        json={
+            "cve_id": "CVE-2025-1111",
+            "affected_component": "openssl",
+            "source_name": "nvd",
+        },
+    )
+    assert created.status_code == 201, created.text
+    intel_id = created.json()["id"]
+
+    missing_component = client.post(
+        f"{INTEL_BASE}/cves/{intel_id}/supersede",
+        json={
+            "payload": {
+                "cve_id": "CVE-2025-1111",
+                "source_name": "operator-review",
+            },
+            "rationale": "Should not create an empty-component replacement",
+        },
+    )
+    assert missing_component.status_code == 400, missing_component.text
+    assert "affected_component" in missing_component.text
+
+    rows = client.get(f"{INTEL_BASE}/cves").json()
+    assert len(rows) == 1
+    assert rows[0]["id"] == intel_id
+    assert rows[0]["affected_component"] == "openssl"
+    assert rows[0]["superseded_by_id"] is None
+
+
+def test_supersede_cve_attempted_blocked_persists_details_block_reason(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/cves",
+        json={
+            "cve_id": "CVE-2025-2222",
+            "affected_component": "spring",
+            "validation_status": "version_match",
+        },
+    )
+    assert created.status_code == 201, created.text
+    intel_id = created.json()["id"]
+
+    superseded = client.post(
+        f"{INTEL_BASE}/cves/{intel_id}/supersede",
+        json={
+            "payload": {
+                "cve_id": "CVE-2025-2222",
+                "affected_component": "spring-cloud-gateway",
+                "validation_status": "attempted_blocked",
+                "details": {"block_reason": "Exploit route requires unavailable admin role"},
+            },
+            "rationale": "Component scope refined during exploit review",
+        },
+    )
+    assert superseded.status_code == 201, superseded.text
+    body = superseded.json()
+    assert body["current"]["validation_status"] == "attempted_blocked"
+    assert (
+        body["current"]["details"]["block_reason"]
+        == "Exploit route requires unavailable admin role"
+    )
+    assert body["superseded"]["superseded_by_id"] == body["current"]["id"]
 
 
 def test_update_intel_unknown_id_returns_404(client, isolate_settings):
@@ -869,7 +1007,8 @@ def test_supersede_intel_dns_record_missing_compound_key_returns_400(
     )
     intel_id = created.json()["id"]
 
-    # Compound natural key (record_type, name) — omitting either must surface 400.
+    # Compound natural key (record_type, name, value) — omitting any part
+    # must surface 400.
     missing_name = client.post(
         f"{INTEL_BASE}/dns-records/{intel_id}/supersede",
         json={"payload": {"record_type": "A"}},

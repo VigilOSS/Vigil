@@ -149,13 +149,17 @@ export function SurfacesTab({ engagementKey, surfaces, onSurfaceUpdated }: Surfa
   const resolveSurfaceStatus = useCallback(
     async (status: SurfacePatchPayload["status"]) => {
       if (!selected || !status) return;
+      const submittedRationale = resolutionRationale.trim();
+      if (!submittedRationale) {
+        setResolutionError("Rationale is required to change surface status.");
+        return;
+      }
       setResolutionError(null);
       setPendingResolution(status);
-      const submittedRationale = resolutionRationale;
       try {
         const updated = await patchAssessmentSurface(engagementKey, selected.id, {
           status,
-          rationale: submittedRationale || undefined,
+          rationale: submittedRationale,
         });
         setSelected(updated);
         mergeLocalSurface(updated);
@@ -214,6 +218,7 @@ export function SurfacesTab({ engagementKey, surfaces, onSurfaceUpdated }: Surfa
   const [sourceFilters, setSourceFilters] = useState<Set<string>>(new Set());
 
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const canSubmitResolution = resolutionRationale.trim().length > 0;
 
   useEffect(() => {
     let cancelled = false;
@@ -631,11 +636,11 @@ export function SurfacesTab({ engagementKey, surfaces, onSurfaceUpdated }: Surfa
                 <p className="section-title">Resolve status</p>
                 <p className="meta-text" style={{ margin: "0 0 8px" }}>
                   Resolve a discovered surface to covered, not_applicable, or deferred.
-                  The rationale is appended to the existing audit trail.
+                  A non-empty rationale is required and appended to the existing audit trail.
                 </p>
                 <textarea
                   rows={2}
-                  placeholder="Rationale (optional, appended to the audit trail)"
+                  placeholder="Required rationale appended to the audit trail"
                   value={resolutionRationale}
                   onChange={(e) => setResolutionRationale(e.target.value)}
                   style={{
@@ -652,7 +657,8 @@ export function SurfacesTab({ engagementKey, surfaces, onSurfaceUpdated }: Surfa
                       key={s}
                       type="button"
                       className={`filter-chip ${pendingResolution === s ? "is-active" : ""}`}
-                      disabled={pendingResolution != null}
+                      disabled={pendingResolution != null || !canSubmitResolution}
+                      title={!canSubmitResolution ? "Enter rationale to change status" : undefined}
                       onClick={() => void resolveSurfaceStatus(s)}
                     >
                       {pendingResolution === s ? "Saving…" : `Mark ${s}`}

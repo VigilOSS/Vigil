@@ -3091,19 +3091,16 @@ def _host_from_endpoint(endpoint: str | None) -> str:
 
 
 def vendor_saas_hosts_pending_decision(engagement_id: int) -> list[dict[str, str]]:
-    """Return vendor-SaaS-flagged hosts that have no scope_decision activity entry.
+    """Return vendor-SaaS-flagged hosts that have no scope_decision record.
 
     A vendor-SaaS host is one whose recorded service endpoint or surface
     target descriptor matches a vendor SaaS suffix (Salesforce, ServiceNow,
     StatusPage, GovDelivery, AwsConnect, Auth0, Okta, Zendesk, Freshdesk,
     Intercom). The Vendor-SaaS scope checkpoint records the operator's
-    choice as an activity entry with ``task_name='scope_decision'`` and the
-    host appearing inside ``summary``; hosts that lack that record block
-    the Phase 1 advance gate and surface in the frontend overview banner.
-
-    The projection deliberately does NOT consult ``$DIR/agent-registry.json``
-    on disk — the backend is the source of truth, and the CLI mirrors the
-    decision into an activity entry whenever a checkpoint is recorded.
+    choice as an ``assessment_dispatch_decisions`` row with
+    ``kind='scope_decision'`` and ``payload.host`` set to the vendor host.
+    Hosts that lack that record block the Phase 1 advance gate and surface
+    in the frontend overview banner.
     """
     engagement = _engagement_or_404(engagement_id)
     pending: dict[str, str] = {}
@@ -3117,36 +3114,26 @@ def vendor_saas_hosts_pending_decision(engagement_id: int) -> list[dict[str, str
             "SELECT target_descriptor FROM assessment_surfaces WHERE engagement_id = ?",
             (engagement.id,),
         ).fetchall()
-        # Activity entries carry the operator's narrative log. A
-        # ``scope_decision`` for a vendor-SaaS host shows up either in
-        # ``title`` (e.g. ``scope_decision: foo.salesforce.com``), the
-        # ``action`` text, or in ``metadata_json`` as a JSON blob carrying
-        # ``{"kind": "scope_decision", "host": "..."}``. We match liberally
-        # across all three fields so a future writer that picks any of them
-        # still satisfies the gate.
         decision_rows = connection.execute(
             """
-            SELECT title, action, result, body_markdown, metadata_json
-            FROM activity_entries
+            SELECT payload_json
+            FROM assessment_dispatch_decisions
             WHERE engagement_id = ?
-              AND (
-                title LIKE '%scope_decision%'
-                OR action LIKE '%scope_decision%'
-                OR result LIKE '%scope_decision%'
-                OR body_markdown LIKE '%scope_decision%'
-                OR metadata_json LIKE '%scope_decision%'
-              )
+              AND kind = 'scope_decision'
             """,
             (engagement.id,),
         ).fetchall()
     for row in decision_rows:
-        for value in row:
-            if not isinstance(value, str):
-                continue
-            for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
-                normalized = token.rstrip(".").lower()
-                if _host_is_vendor_saas(normalized):
-                    decided.add(normalized)
+        raw = row["payload_json"] if "payload_json" in row.keys() else row[0]
+        try:
+            payload = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        host = _host_from_endpoint(str(payload.get("host") or payload.get("target") or ""))
+        if _host_is_vendor_saas(host):
+            decided.add(host)
     for row in service_rows:
         host = _host_from_endpoint(str(row["endpoint"] if "endpoint" in row.keys() else row[0]))
         vendor = _host_is_vendor_saas(host)

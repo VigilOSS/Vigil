@@ -20,7 +20,7 @@ NoSQL injection in 2025 primarily targets MongoDB through Mongoose/Express apps 
 ## Tools
 
 - `curl` (manual injection probing and payload delivery)
-- OOB callback server (operator-provisioned for blind confirmation)
+- OOB callback client (verify readiness with `aith oob status --json`; check hits with `aith oob client logs <name>`)
 - Browser DevTools (observe JSON request bodies and responses)
 
 ---

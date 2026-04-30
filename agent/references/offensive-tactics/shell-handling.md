@@ -59,18 +59,19 @@ aith runtime shell-exec "tail -50 /data/shell-4444.log"
 aith runtime shell-exec "tmux kill-session -t shell-4444"
 ```
 
-### Log file tailing (LLM visibility)
+### Log file visibility
 
-Agents observe shell output by reading log files via `aith assess kali exec` with audit flags before the raw `--` separator — not by attaching to tmux:
+Agents observe shell output through `aith runtime shell-exec` because shell
+listeners are shared runtime infrastructure, not target-facing probes. Record
+the important result afterward in the finding, probe-run, or handoff so the
+backend remains the durable source of engagement state.
+
 ```bash
-# Via aith assess kali exec — the read lands in the audit pipeline:
-aith assess kali exec --technique LOG-READ --intent "tail shell session log" \
-  --probe-kind fingerprint --phase exploit --timeout 30 -- \
-  tail -100 /data/shell-4444.log
+# Recent shell session output
+aith runtime shell-exec "tail -100 /data/shell-4444.log"
 
-aith assess kali exec --technique LOG-READ --intent "read full shell session log" \
-  --probe-kind fingerprint --phase exploit --timeout 30 -- \
-  cat /data/shell-4444.log
+# Full shell session output
+aith runtime shell-exec "cat /data/shell-4444.log"
 ```
 
 Log files under `/data/` persist across tmux restarts because `/data` is the
@@ -125,8 +126,9 @@ Agents **MUST NOT:**
 - Kill or restart existing listener or tunnel sessions
 
 Agents **CAN:**
-- Read listener log files (`aith assess kali exec --technique LOG-READ ... -- tail /data/shell-*.log`) so the read lands in the audit pipeline
-- Read OOB callback logs (`aith assess kali exec --technique LOG-READ ... -- tail /data/oob/clients/<name>.log` or `aith assess kali exec --technique LOG-READ ... -- tail /data/oob/server.log`) to check for hits — same audit-pipeline rule
+- Read listener log files with `aith runtime shell-exec "tail -80 /data/shell-<name>.log"`, then record the meaningful result in the backend
+- Read correlated OOB hits with `aith oob client logs <name> --lines 80`
+- Read raw OOB infrastructure logs with `aith logs oob --lines 80`
 - Provide reverse shell payloads for the operator to deploy
 - Verify that a shell connected by checking log output
 - Provide authorized runtime commands such as `aith runtime shell-exec "tmux send-keys -t shell-4444 'whoami' Enter"` for the operator to run

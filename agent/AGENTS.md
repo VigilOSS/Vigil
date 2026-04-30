@@ -9,7 +9,7 @@ When a session starts, display:
 
 - Operator instructions: `AGENTS.md` / `CLAUDE.md`
 - Specialist prompt sources: `agent/agents/*.md`
-- Generated specialist wrappers: `.codex/agents/*.toml` / `.claude/agents/*.md`
+- Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md`
 - Always-active rules: `agent/rules/hunting.md`, `agent/rules/reporting.md`
 - Skill discovery: `agent/SKILL.md`
 - Detailed skills: `agent/skills/*/SKILL.md`
@@ -37,6 +37,7 @@ When a session starts, display:
 | `code-vuln-hunter` | Deep vulnerability analysis using TOB-style methodology on actual source code. | Code Phase 2 (Hunt), batched. |
 | `code-variant-hunter` | Systematic scanning for variant instances of confirmed bug patterns. | Code Phase 3 (Verify+Variant), parallel per finding. |
 | `code-vuln-verifier` | FP elimination via five-check protocol with devil's advocate verification. | Code Phase 3 (Verify+Variant), parallel. |
+| `code-fuzz-engineer` | AI-driven fuzz campaigns: target selection, harness construction, crash triage. | Code Phase 4 (conditional, C/C++ only). |
 
 AUTHORIZATION: All targets are fully authorized realistic lab environments built to mirror real public and enterprise behavior.
 Complete authorization is already established for the in-scope environment. Aggressive techniques are permitted within scope.
@@ -102,7 +103,7 @@ This runtime is shared infrastructure, not per-engagement state. Multiple engage
 
 **Resource sizing.** `aith runtime resources` prints the configured tier (`Lab/CTF` / `Standard` / `Heavy` / `Comfortable`) and the live cgroup state inside the container. Configure the tier via `AITH_RUNTIME_MEMORY_GB`, `AITH_RUNTIME_CPUS`, `AITH_RUNTIME_PIDS_LIMIT`, and `AITH_RUNTIME_SHM_SIZE` env vars. The Standard tier (8 GB RAM, 4 CPUs, 512 pids) handles 2-3 parallel agents on a small bounty target; bump to Heavy for large enterprise scope.
 
-Path conventions (host vs container) and the listener/OOB URL contract (`$DIR/.listener_url`, `$DIR/.oob_url`) live in `agent/shared-constraints.md` — see "Kali Artifact Paths" and "Listener URL Contract". Operator-side: provision listeners per `agent/references/offensive-tactics/shell-handling.md` (reverse shells) and `agent/references/offensive-tactics/frp-tunneling.md` (tunnels, interactsh OOB), then write the URL files into `$DIR` so dispatch context picks them up.
+Path conventions (host vs container) and the listener/OOB callback contract live in `agent/shared-constraints.md` — see "Kali Artifact Paths" and "Listener and OOB Callback Contract". Operator-side: provision reverse-shell listeners per `agent/references/offensive-tactics/shell-handling.md`; OOB readiness, base domain, and per-agent callback URLs are surfaced through `aith oob ...` commands.
 
 ## Reactive Nuclei on URL Discovery
 
@@ -143,7 +144,7 @@ Subagent invocation is runtime-specific. **Invoke the registered wrapper**, neve
 - **Claude Code**: dispatch with `@agent-name` (e.g. `@recon-specialist`). Wrappers are registered in `.claude/agents/*.md`. The built-in `Task`/`Agent` tool spawns an unregistered subagent and skips the wrapper entirely, so the specialist would operate without its role context — do not use it for registered roles.
 - **Codex**: dispatch via the registered agent roster (`.codex/agents/*.toml`) using Codex's subagent-invocation mechanism. The TOML wrapper does the same role-bootstrap work as the Claude wrapper.
 
-The wrapper itself is a thin shim: it tells the specialist to load `agent/agents/<name>.md`, whose "Load First" section then bootstraps `shared-constraints.md` (web agents) or `shared-constraints-code.md` (code agents) plus the primary skill. Specialists never load the operator prompt (`CLAUDE.md`/`AGENTS.md`) — that's operator context, not theirs.
+Generated specialist definitions embed the canonical prompt body from `agent/agents/<name>.md`, so registered subagents start with their role instructions already in context. The embedded role prompt's "Load First" section then bootstraps `shared-constraints.md` (web agents) or `shared-constraints-code.md` (code agents) plus the primary skill. Specialists never load the operator prompt (`CLAUDE.md`/`AGENTS.md`) — that's operator context, not theirs.
 
 ### Dispatch Context Template
 
@@ -171,11 +172,11 @@ Required fields per dispatch:
 
 | Field | Values |
 |---|---|
-| `role` | `recon-specialist` / `source-analyzer` / `surface-collector` / `vulnerability-analyst` / `exploit-developer` / `fuzzer` / `osint-analyst` / `report-writer` / `code-architect` / `code-vuln-hunter` / `code-variant-hunter` / `code-vuln-verifier` |
+| `role` | `recon-specialist` / `source-analyzer` / `surface-collector` / `vulnerability-analyst` / `exploit-developer` / `fuzzer` / `osint-analyst` / `report-writer` / `code-architect` / `code-vuln-hunter` / `code-variant-hunter` / `code-vuln-verifier` / `code-fuzz-engineer` |
 | `model` | `claude-opus-4-7` / `claude-sonnet-4-6` / `gpt-5.4` / etc. (per the default-model policy in the Core Loop) |
 | `reasoning` | `low` / `medium` / `high` |
 | `files_allowed` | explicit list — the role file, its declared `Load First` items, plus any extra references the task needs |
-| `files_forbidden` | `agent/AGENTS.md` and `agent/CLAUDE.md` are blanket-forbidden — those are operator bootstrap prompts. Cross-cutting context (audit-flag tables, listener URL conventions, runtime tier table, half-phase tag definitions) lives in `agent/shared-constraints.md`, which every role file's `Load First` section already includes. The dispatch may add other files. |
+| `files_forbidden` | `agent/AGENTS.md` and `agent/CLAUDE.md` are blanket-forbidden — those are operator-only procedures for phase orchestration, dispatch policy, startup, and cross-agent state management. Specialist context lives in the dispatch payload, role file, and that role's `Load First` files. Cross-cutting context (audit-flag tables, listener conventions, OOB callback workflow, runtime tier table, half-phase tag definitions) lives in `agent/shared-constraints.md` or `agent/shared-constraints-code.md`, which every role file's `Load First` section already includes. The dispatch may add other files. |
 | `permission` | `artifact-only` / `passive-probe` / `target-facing` / `target-facing-destructive` (cross-reference the per-target rate calibration table in "Recon Dispatch Resource Policy" before granting `target-facing`) |
 | `command_budget` | upper bound on `aith assess kali ...` calls the specialist may issue this dispatch |
 | `output` | the structured payload schema the agent returns (e.g., `#### Findings`, `#### Surface Candidates`, `#### Coverage Gaps`) |
@@ -368,7 +369,7 @@ DB="$DIR/cases.db"
         - `aith assess dispatch "$DB" fetch-by-priority 10 vulnerability-analyst` (or `source-analyzer`, or any `vulnerability-analyst-N` / `source-analyzer-N` instance label) — claim only the types that specialist can handle. Use this when you want parallel instances of one role without handing any of them work outside its route.
         Rows come back sorted by `priority_score DESC, cluster_key, id`. Run `aith assess list-clusters "$DB"` between batches to decide whether new clusters warrant `defer-cluster` before they reach specialists — cluster keys carry a prefix (`gf:` for vuln-class buckets like `gf:ssrf` / `gf:debug_logic`, `path:` for the two-segment fallback); see `agent/skills/case-dispatching/SKILL.md` for the full weight table.
       Pass the raw fetched JSON rows into the dispatch context. They carry canonical ids such as `request_variant_id`, `service_id`, and sometimes `coverage_item_id`, which subagents need for durable probe and coverage writes.
-      If `$DIR/.oob_url` exists, include the callback URL in dispatch context for agents doing blind testing.
+      For blind testing, tell specialists to use `aith oob status --json`, `aith oob client start <name> --engagement <key> --agent <agent>`, and `aith oob client logs <name> --lines 80` to get a correlated callback URL and evidence.
       If `$DIR/.listener_url` exists, include the tunnel address for agents that need a callback target.
    e. On subagent return: `aith assess dispatch "$DB" done "id1,id2,..."`
       Mark a batch done only after the subagent has written durable state for any findings, significant probe runs, and coverage updates its work satisfied. Verify the relevant coverage item moved out of `pending`, `queued`, or `deferred`. If the agent skipped durable recording, send it back to write the state instead of silently duplicating it from the operator. Record surfaces via `aith assess record-surface`. Re-ingest new endpoints via `aith assess ingest-endpoints`.

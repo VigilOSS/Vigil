@@ -13,7 +13,7 @@ from . import docker
 from .backup import latest_backup
 from .config import get_config_value
 from .engagements import list_engagements
-from .oob import oob_status
+from .oob import DEFAULT_OOB_DOMAIN, oob_status
 from .orchestrator import orchestrator_status
 from .paths import engagements_root, resolve_orchestrator_base_url
 from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
@@ -33,6 +33,11 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
     mitm_running = docker.container_running("security-research-proxy", runner=runner)
     backup = latest_backup(install_root)
     oob_token_configured = bool(os.environ.get("AI_THREAT_HUNTING_FRP_TOKEN") or get_config_value("oob.frp_token"))
+    oob_domain = (
+        os.environ.get("AI_THREAT_HUNTING_OOB_DOMAIN")
+        or get_config_value("oob.domain", DEFAULT_OOB_DOMAIN)
+        or DEFAULT_OOB_DOMAIN
+    )
     return {
         "install_root": str(install_root),
         "install_exists": install_root.exists(),
@@ -53,7 +58,7 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
             "image_exists": docker.image_exists("security-research-proxy:latest", runner=runner),
             "ca_volume": docker.volume_exists("mitmproxy-ca", runner=runner),
         },
-        "oob": oob_status(runner=runner) | {"frp_token_configured": oob_token_configured},
+        "oob": oob_status(oob_domain=oob_domain, runner=runner) | {"frp_token_configured": oob_token_configured},
         "backup": {
             "latest": str(backup.path) if backup else None,
             "modified_at": backup.modified_at if backup else None,
@@ -89,7 +94,7 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
             )
         print(f"runtime-tier\t{configured_str}{live_str}")
     print(f"mitmproxy\t{mitmproxy['state']}\tca_volume={mitmproxy['ca_volume']}")  # type: ignore[index]
-    print(f"oob\t{oob['state']}\tclients={len(oob['clients'])}")  # type: ignore[index]
+    print(f"oob\t{oob['state']}\tclients={len(oob['clients'])}\tdomain={oob.get('domain') or '-'}")  # type: ignore[index]
     print(f"backup\t{backup['latest'] or '-'}")  # type: ignore[index]
 
 
