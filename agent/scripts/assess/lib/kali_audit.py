@@ -92,8 +92,9 @@ def _resolve_agent_name(explicit: str | None) -> str:
     Precedence: explicit flag > $AGENT_NAME > $AITH_AGENT_NAME > "operator".
     The default lets the operator run mechanical pipeline checks (tier-pick
     smoke, runtime health, credential validation) without remembering to set
-    --agent-name. Specialist dispatch wrappers export AGENT_NAME=<role>
-    explicitly, so the default never bleeds into specialist contexts.
+    --agent-name. Specialist dispatch wrappers are responsible for exporting
+    AGENT_NAME=<role>; if that wrapper context is absent, the caller should
+    pass --agent-name explicitly to avoid operator misattribution.
     """
     if explicit:
         return explicit

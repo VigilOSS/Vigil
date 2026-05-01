@@ -588,8 +588,7 @@ def _vendor_saas_hosts_pending_decision(
     Walks every host present in services / surfaces / work_items, classifies
     each via :func:`host_is_vendor_saas`, and excludes any host that already
     carries a ``scope_decision`` row in the orchestrator's
-    ``assessment_dispatch_decisions`` table (Round 9 — was previously
-    ``$DIR/agent-registry.json``). Output is sorted by host string for
+    ``assessment_dispatch_decisions`` table. Output is sorted by host string for
     deterministic output.
     """
     seen: dict[str, str] = {}

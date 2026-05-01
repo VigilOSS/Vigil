@@ -895,9 +895,8 @@ def _requeue(db_path: str) -> None:
 def _render_handoff(args, extra: list[str]) -> None:
     """Emit a bounded markdown handoff blob for a prior dispatch.
 
-    Round 9: reads from the orchestrator backend (assessment_dispatches +
-    assessment_dispatch_handoffs) instead of the legacy
-    ``$DIR/agent-registry.json`` file. The handoff payload provides
+    Reads from the orchestrator backend (assessment_dispatches +
+    assessment_dispatch_handoffs). The handoff payload provides
     summary / coverage gaps / next steps / runtime issues / working artifacts
     / open questions / extras; the dispatch row provides metadata (role,
     task, skill_loaded, scope_host, dispatched_at, status). 404 on the
@@ -1364,9 +1363,8 @@ def _truncate_findings(
 
 
 # ---------------------------------------------------------------------------
-# Round 9: register / update-status / list / get / record-decision /
-# record-handoff — replace the legacy $DIR/agent-registry.json file with
-# backend-table writes via the orchestrator API.
+# Dispatch operator-glue verbs: register / update-status / list / get /
+# record-decision / record-handoff — backend-table writes via the orchestrator API.
 # ---------------------------------------------------------------------------
 
 

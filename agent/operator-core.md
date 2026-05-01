@@ -253,7 +253,7 @@ The blob already carries:
 - Credential ids captured by the prior dispatch (vulnerability-analyst / exploit-developer roles only)
 - The next-step list the prior dispatch recorded — each `next_step` entry names an action, target, recommended_agent, and rationale
 
-**DEDUP** uses the dispatches table — `aith assess dispatch list --task-q "<keyword>"` shows prior dispatches against the same objective. Replaces the old `agent-registry.json` scan.
+**DEDUP** uses the dispatches table — `aith assess dispatch list --task-q "<keyword>"` shows prior dispatches against the same objective.
 
 **Decision rows** — vendor-SaaS scope warnings, egress-block decisions, and dispatch-blocked records all live in the dispatch_decisions table:
 
@@ -264,8 +264,6 @@ aith assess dispatch record-decision --kind dispatch_blocked --phase recon --rea
 ```
 
 Bypassing the renderer to paste transcript excerpts is the failure mode this helper exists to prevent: full transcript pastes crowd out the objective and inflate context linearly across long chains, while the renderer's blob stays bounded and pulls canonical state from the backend. Durable content (findings, intel, activity entries, credentials) lives in the backend; the dispatch prompt carries pointers plus the bounded handoff blob.
-
-The previous `agent-registry.json` file is removed entirely. All dispatch tracking, handoff content, and decision rows live in the backend tables.
 
 **Sub-agent halts.** Claude Code sub-agents halt when they approach context exhaustion (~200K tokens). The harness returns control to the operator with a `use SendMessage to continue this agent` hint. SendMessage-based resume requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` (a persistent-agent-teams feature, not what this workflow uses). When a sub-agent halts, the most recent `record-handoff` checkpoint in the backend is the canonical record of what was done; specialists are prompted to checkpoint after each major step (`agent/references/runtime-guides/handoff-schema.md` "Checkpointing"). Re-dispatch a continuation with the rendered handoff blob as input.
 

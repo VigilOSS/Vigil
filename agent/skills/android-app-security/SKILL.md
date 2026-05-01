@@ -31,6 +31,7 @@ Use four app-level attackers: network observer with proxy control, co-installed 
 
 ### 3. Static Triage
 
+- Preflight runtime tooling with the generic audited route: `aith assess kali exec --technique HEALTH --intent "Android APK tooling inventory" --probe-kind fingerprint --phase code-ingest --timeout 60 -- which apktool jadx adb bundletool apksigner`. Use `HEALTH` for tool inventory — unknown technique tags are rejected before an audit row is written, so invented tags like `TOOL-INVENTORY` create no records and leave coverage gaps.
 - Decode resources and manifest with `apktool`; decompile Java/Kotlin with `jadx`.
 - Inspect `AndroidManifest.xml`, exported activities/services/receivers/providers, permissions, app links, deep links, pending intents, backup settings, debuggability, network security config, and SDK-added components.
 - Search decompiled code for API bases, auth logic, WebView setup, crypto primitives, Keystore calls, root/emulator checks, JNI registration, native library loading, logging, and feature flags.

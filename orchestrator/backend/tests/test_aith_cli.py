@@ -2006,7 +2006,7 @@ def test_actor_kind_warn_on_non_log_subcommand(
 # Round 9 — `aith assess dispatch render-handoff` tests against the backend
 #
 # The renderer now reads from the orchestrator's assessment_dispatches and
-# assessment_dispatch_handoffs tables (no more $DIR/agent-registry.json).
+# assessment_dispatch_handoffs tables.
 # These tests stub the AssessmentClient calls so we exercise the rendering
 # logic without standing up the real backend.
 # ---------------------------------------------------------------------------

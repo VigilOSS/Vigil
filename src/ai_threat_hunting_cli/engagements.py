@@ -188,16 +188,15 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     _write_report(eng_dir, options.engagement_type, name=name, target=target_normalized, repos=repos, date_label=date_label)
     _write_auth_scaffold(eng_dir, "none" if options.engagement_type == "code" else options.auth_mode, created_at)
     _write_json(eng_dir / "sessions" / "index.json", [])
-    # Round 9: dispatch tracking + handoff content moved into the orchestrator
-    # backend (assessment_dispatches / assessment_dispatch_handoffs /
-    # assessment_dispatch_decisions). The legacy `agent-registry.json` file is
-    # no longer initialized at engagement create — operators write via
-    # `aith assess dispatch register|record-handoff|record-decision` instead.
+    # Dispatch tracking + handoff content live in the orchestrator backend
+    # (assessment_dispatches / assessment_dispatch_handoffs /
+    # assessment_dispatch_decisions). Write via
+    # `aith assess dispatch register|record-handoff|record-decision`.
     #
-    # AGENT_NAME defaulting to "operator" is now handled in
-    # agent/scripts/assess/lib/kali.py (`_resolve_agent_name`) so the env file
-    # only carries `ORCHESTRATOR_BASE_URL`; specialists still override
-    # AGENT_NAME=<role> in their dispatch wrapper.
+    # AGENT_NAME defaulting to "operator" is handled in
+    # agent/scripts/assess/lib/kali_audit.py (`_resolve_agent_name`) so the env
+    # file only carries `ORCHESTRATOR_BASE_URL`; specialist dispatch wrappers
+    # must export AGENT_NAME=<role> or pass --agent-name explicitly.
     #
     # Only seed `.orchestrator.env` when an explicit override is in effect.
     # The default base URL falls through `resolve_orchestrator_base_url`
@@ -552,12 +551,13 @@ def _write_launcher(agent_root: Path, eng_dir: Path, client: str, permission_arg
     # verbatim: parent-shell export wins over file values; among file values
     # the LAST file wins (install-root .env overrides per-eng).
     #
-    # AGENT_NAME is no longer exported here. The kali.py helper now defaults
+    # AGENT_NAME is no longer exported here. The kali helper now defaults
     # to "operator" when neither --agent-name nor $AGENT_NAME / $AITH_AGENT_NAME
     # is set, so operator-executed mechanical pipeline work (tier-pick smoke,
     # runtime health, credential validation) still records the right
     # agent_name without the launcher poking the env. Specialist dispatch
-    # wrappers continue to export AGENT_NAME=<role> before launching.
+    # wrappers must export AGENT_NAME=<role> before launching or pass
+    # --agent-name explicitly in their commands.
     script = f"""#!/usr/bin/env bash
 set -euo pipefail
 

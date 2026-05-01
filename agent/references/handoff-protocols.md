@@ -18,8 +18,7 @@ artifacts, open questions, and role-specific extras. This row is canonical for "
 was done, what's missing, what's next" — schema in
 `agent/references/runtime-guides/handoff-schema.md`. The operator pulls a bounded
 markdown blob via `aith assess dispatch render-handoff <agent-id>` and pastes it into
-the next dispatch's prompt. The previous `agent-registry.json` is gone; this is the
-canonical mechanism.
+the next dispatch's prompt.
 
 ## Skill Passing Protocol
 

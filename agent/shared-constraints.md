@@ -128,7 +128,9 @@ truthful instead of degrading to a stale env-var default.
   `SSRF`, `sqli-testing` → `SQLI`, `command-injection` → `CMDI`, etc.), use that
   mapping. When the mapping isn't obvious (e.g. `aws-iam-privesc`,
   `container-escape-detection`, `graphql-testing`), the skill file names the
-  correct value at the top.
+  correct value at the top. Use `HEALTH` for runtime/tool inventory commands
+  such as `which jadx apktool`. The CLI rejects unknown tags before writing an
+  audit row so bad prompt vocabulary does not pollute command-history filters.
 - **`--intent "<text>"`** — a ≤200-char one-liner describing what this specific
   command is trying to accomplish. Replaces the `echo "=== label ==="` pattern.
 - **`--probe-kind <kind>`** — the kind of work this command represents:
@@ -165,9 +167,11 @@ truthful instead of degrading to a stale env-var default.
   `--force` only to suppress the warning text; it does not change run
   behavior or backend state.
 
-`--engagement-key` and `--agent-name` are auto-derived from
-`${ENGAGEMENT_DIR}/engagement.json` and the dispatching role context — do not
-pass them manually unless correcting an inferred value.
+`--engagement-key` is derived from `${ENGAGEMENT_DIR}/engagement.json`.
+`--agent-name` resolves from the explicit flag, `$AGENT_NAME`, `$AITH_AGENT_NAME`,
+then `operator`. Specialist dispatch wrappers must export `AGENT_NAME=<role>`;
+if that context is missing, pass `--agent-name <role>` explicitly because a
+silent `operator` attribution breaks coverage ownership.
 
 ---
 
@@ -199,10 +203,11 @@ When exploitation requires a reverse-shell listener or tunnel exposure:
    block on the operator for checks that `aith oob status`, `aith logs oob`, or
    `aith oob client logs` can answer directly.
 
-Agents MUST NOT start, stop, or restart shared listener, tunnel, or OOB server
-processes: pwncat-vl listeners, frp tunnels, chisel listeners, `nc -lvp`, `socat`
-listeners, `frpc`, `oob-server`, interactsh servers, or equivalent network
-listener processes.
+Starting, stopping, or restarting shared listener, tunnel, and OOB server processes
+belongs to the operator — these are global runtime state whose disruption breaks
+other concurrent specialists: pwncat-vl listeners, frp tunnels, chisel listeners,
+`nc -lvp`, `socat` listeners, `frpc`, `oob-server`, interactsh servers, or
+equivalent network listener processes.
 
 ---
 
@@ -585,8 +590,7 @@ the canonical record of it.
    questions, and any specialty extras.
 
 Step 4 is the canonical "what was done / what's missing / what's next" record.
-Skipping it means the operator has no structured record to feed into the next
-dispatch — there is no `agent-registry.json` fallback any more.
+Skipping it means the operator has no structured record to feed into the next dispatch.
 
 Step 4's `record-handoff` is idempotent — call it incrementally after each
 major step in your methodology, not only at the end. See

@@ -77,7 +77,7 @@ The CLI fails closed when these are missing. Pass them explicitly — there is n
 
 | Flag | Purpose | Notes |
 |------|---------|-------|
-| `--technique <enum>` | Vulnerability class this command tests, OR the operator-side category for non-attack runs. | Allowed values: `SSRF`, `XSS`, `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`, `RFI`, `OPEN-REDIRECT`, `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`, `RATE-LIMIT`, `INFO-DISCLOSURE`, `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `META`, `HEALTH`, `LOG-READ`, `OTHER`. Pick the enum the skill maps to (`sqli-testing` → `SQLI`); use `META` for operator-side dispatch metadata, registry writes, and scope decisions; `HEALTH` for runtime health checks (smoke test, version probes, container-status); `LOG-READ` for reading existing artifacts/log files (no new probes); `OTHER` only when no specific class fits. |
+| `--technique <enum>` | Vulnerability class this command tests, OR the operator-side category for non-attack runs. | Allowed values: `SSRF`, `XSS`, `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`, `RFI`, `OPEN-REDIRECT`, `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`, `RATE-LIMIT`, `INFO-DISCLOSURE`, `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `META`, `HEALTH`, `LOG-READ`, `OTHER`. Pick the enum the skill maps to (`sqli-testing` → `SQLI`); use `META` for operator-side dispatch metadata, registry writes, and scope decisions; `HEALTH` for runtime health checks and tool inventory (`which jadx apktool`, version probes, container-status); `LOG-READ` for reading existing artifacts/log files (no new probes); `OTHER` only when no specific class fits. Unknown tags are rejected before an audit row is written. |
 | `--intent "<text>"` | ≤200-char one-liner of purpose. | Replaces the old `echo "=== label ==="` pattern. The intent is what makes `list-command-runs --q <keyword>` searchable across an engagement. |
 | `--probe-kind <kind>` | What the command represents. | One of `fingerprint` (learning the target, no payload) / `baseline` (vanilla control request, for diff) / `payload` (crafted attack payload testing a hypothesis) / `exploit` (attacker-outcome proof) / `replay` (captured primitive on a new surface) / `cleanup` (undoing target-side changes). |
 | `--phase <enum>` | The phase the dispatch was authorized for. | REQUIRED. See "Phase tags" below — pass the dispatch phase, not `scope.json.current_phase`. |
@@ -85,7 +85,7 @@ The CLI fails closed when these are missing. Pass them explicitly — there is n
 | `--destructive` | Flag for writes/deletes. | Off by default. Set when the command does POST/PUT/PATCH/DELETE, file upload, account creation, config change, or any state-modifying shell exec on the target. |
 | `--force` | Suppress the dedup-warning log for an intentional retry. | The CLI hashes `(command, argv_json)` and warns when an identical command ran within `KALI_AUDIT_DEDUP_WINDOW_SECONDS` (default 30s), but the new command always executes — the backend records a fresh audit row regardless, with `superseded_by_id` linking it to the predecessor when applicable. `--force` suppresses only the warning text; it does not change run behavior or backend state. |
 
-`--engagement-key` and `--agent-name` are auto-derived from `${ENGAGEMENT_DIR}/engagement.json` and the dispatching role context — do not pass them manually unless correcting an inferred value.
+`--engagement-key` is derived from `${ENGAGEMENT_DIR}/engagement.json`. `--agent-name` resolves from the explicit flag, `$AGENT_NAME`, `$AITH_AGENT_NAME`, then `operator`. Specialists should normally inherit `AGENT_NAME=<role>` from their dispatch wrapper; if that context is absent or suspicious, pass `--agent-name <role>` explicitly so the audit row is not misattributed to `operator`.
 
 ## Phase tags (including half-phase tags)
 
@@ -215,11 +215,12 @@ aith assess kali sqlmap \
   --probe-kind payload --phase consume-test --timeout 1800
 
 # Long sqlmap dump — switch to async because dump can run for hours.
-aith assess kali job start --container-name security-research -- \
-  sqlmap -u "https://www.example.com/api/users?id=1" \
-  --technique=BEUSTQ --level 5 --risk 3 --batch --dump \
+aith assess kali job start \
   --technique SQLI --intent "deep sqlmap dump on /api/users?id" \
-  --probe-kind exploit --phase exploit --timeout 28800 --destructive
+  --probe-kind exploit --phase exploit --timeout 28800 --destructive \
+  --container-name security-research -- \
+  sqlmap -u "https://www.example.com/api/users?id=1" \
+  --technique=BEUSTQ --level 5 --risk 3 --batch --dump
 ```
 
 ### `kali subfinder` / `kali puredns` / `kali dnsx`
@@ -321,13 +322,14 @@ aith assess kali exec --technique AUTH \
 
 ```bash
 # Start a long async run.
-aith assess kali job start --container-name security-research -- \
+aith assess kali job start \
+  --technique CVE-VALIDATION --intent "full http/ nuclei sweep across engagement" \
+  --probe-kind fingerprint --phase recon --timeout 21600 \
+  --container-name security-research -- \
   nuclei -l /engagements/$ENGAGEMENT_KEY/scans/all_live.txt \
          -t http/ -severity medium,high,critical \
          -rate-limit 100 -c 25 -bs 25 -jsonl \
-         -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_full.jsonl \
-  --technique CVE-VALIDATION --intent "full http/ nuclei sweep across engagement" \
-  --probe-kind fingerprint --phase recon --timeout 21600
+         -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_full.jsonl
 
 # Poll status and tail output.
 aith assess kali job status 42
@@ -354,6 +356,7 @@ When you know what you want to learn, this lookup gets you to the right verb wit
 - "Crawl a JS-heavy SPA?" → `kali katana -u <url> -jc -jsl`.
 - "Harvest historical URLs without touching the target?" → `kali gau <domain> --subs`.
 - "Enumerate subdomains?" → `kali subfinder -d <domain> -all` then `kali puredns resolve` then `kali dnsx`.
+- "Inventory runtime tools or versions?" → `kali exec --technique HEALTH --intent "tooling inventory" --probe-kind fingerprint --phase <phase> --timeout 60 -- which <tool...>`.
 - "Run a tool not in the typed surface?" → `kali exec --technique <enum> --intent "<why>" --probe-kind <kind> --phase <phase> --timeout <seconds> -- <command...>`.
 - "Run something that needs to outlive my shell?" → `kali job start --technique <enum> --intent "<why>" --probe-kind <kind> --phase <phase> --timeout <seconds> -- <command...>`.
 

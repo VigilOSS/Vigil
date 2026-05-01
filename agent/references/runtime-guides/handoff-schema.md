@@ -18,8 +18,7 @@ prompt by `aith assess dispatch render-handoff <agent-id>`.
   emits a markdown blob hard-capped at `--max-lines` (default 40). The next agent
   rebuilds its mental model from finding slugs, artifact paths, and the next-step
   list — not from a transcript paste.
-- **There is no JSON-file fallback.** The previous `$DIR/agent-registry.json` is gone;
-  the backend dispatch tables are canonical. Skipping the handoff write means the
+- **The backend dispatch tables are canonical.** Skipping the handoff write means the
   operator has nothing to feed into the next dispatch.
 
 ## Schema

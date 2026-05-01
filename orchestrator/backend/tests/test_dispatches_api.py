@@ -1,7 +1,6 @@
-"""Round 9: contract tests for the new ``assessment_dispatches`` API.
+"""Contract tests for the ``assessment_dispatches`` API.
 
-POST + GET + LIST + PATCH coverage. The dispatch row replaces the legacy
-``$DIR/agent-registry.json`` audit trail; the sibling tables
+POST + GET + LIST + PATCH coverage. The sibling tables
 (``assessment_dispatch_handoffs`` and ``assessment_dispatch_decisions``) have
 their own files. UNIQUE(engagement_id, agent_id) enforcement → 409 on dup.
 404 on missing agent_id. List filters: role, status, since, task_q, limit.

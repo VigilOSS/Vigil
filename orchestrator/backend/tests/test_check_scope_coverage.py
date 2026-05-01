@@ -121,9 +121,8 @@ class FakeClient:
     should fail the test suite loudly rather than silently receive an
     empty list.
 
-    Round 9: ``list_decisions`` stands in for the new
-    assessment_dispatch_decisions table — vendor-SaaS scope decisions used
-    to live in ``$DIR/agent-registry.json`` and now come from the backend.
+    ``list_decisions`` stands in for the assessment_dispatch_decisions table —
+    vendor-SaaS scope decisions come from the backend.
     """
 
     def __init__(
@@ -995,9 +994,8 @@ def test_vendor_saas_blocks_phase_advance_under_wildcard_expansion(monkeypatch, 
         for msg in report["overall_gaps"]
     )
 
-    # Recording a scope_decision in the backend clears the gate. Round 9: the
-    # decision lives in assessment_dispatch_decisions, not in
-    # $DIR/agent-registry.json.
+    # Recording a scope_decision in the backend clears the gate — the
+    # decision lives in assessment_dispatch_decisions.
     decisions = [
         {
             "id": 1,

@@ -32,13 +32,13 @@ already listed below.
 
 Before starting any work, verify:
 
-1. You loaded `agent/shared-constraints.md`
-2. You loaded the osint-recon skill (`agent/skills/osint-recon/SKILL.md`)
-3. You read the skill's `## Extended Resources` section and loaded the listed reference files
-4. You have the dispatch context (target domain, tech stack, phase, task objective, prior intel)
-5. You checked command history as a coverage map — `aith assess list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what OSINT has already been pulled on this domain/stack so your next queries pick angles that haven't been covered — different data source (whois vs cert.sh vs shodan vs github dorking), different CVE year range, different product/version pivot, different subsidiary/acquired-domain relationship. The only query to skip is an identical lookup against identical input; any variant is new intelligence coverage. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output contains what you need. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+- [ ] You loaded `agent/shared-constraints.md`
+- [ ] You loaded the osint-recon skill (`agent/skills/osint-recon/SKILL.md`)
+- [ ] You read the skill's `## Extended Resources` section and loaded the listed reference files
+- [ ] You have the dispatch context (target domain, tech stack, phase, task objective, prior intel)
+- [ ] You checked command history as a coverage map — `aith assess list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what OSINT has already been pulled on this domain/stack so your next queries pick angles that haven't been covered — different data source (whois vs cert.sh vs shodan vs github dorking), different CVE year range, different product/version pivot, different subsidiary/acquired-domain relationship. The only query to skip is an identical lookup against identical input; any variant is new intelligence coverage. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output contains what you need. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
-If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your intelligence quality will be significantly lower.
+If any item is unchecked, STOP and load it now. Working without the skill and its references means working without methodology — your intelligence quality will be significantly lower.
 
 ## Responsibilities
 
@@ -86,8 +86,7 @@ Before your dispatch returns, run in this order:
 3. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (`cve_matches`, `high_value_cve_matches`, `intel_rows`, `github_orgs_enumerated`)
 
 Skipping the handoff write means the operator has nothing to feed into the next
-dispatch — there is no `agent-registry.json` fallback any more. Schema for
-`--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
 The `record-handoff` step is idempotent and called incrementally — checkpoint
 after each major step in your methodology, not only at the end. See

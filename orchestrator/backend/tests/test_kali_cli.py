@@ -1427,17 +1427,42 @@ def test_kali_exec_rejects_unknown_technique(monkeypatch, fake_engagement):
     monkeypatch.setattr(kali, "AssessmentClient", _FakeClient)
     with pytest.raises(Exception) as exc:
         kali.kali_exec(
-            ["nmap", "10.0.0.1"],
-            technique="MADE-UP-NOT-IN-ENUM",
-            intent="probe",
-            probe_kind="fingerprint",
-            phase="recon",
+            ["which", "apkeep"],
+            technique="TOOL-INVENTORY",
+            intent="mobile APK tooling inventory",
+            probe_kind="baseline",
+            phase="code-ingest",
             timeout=60,
-            agent_name="recon-specialist",
+            agent_name=None,
             engagement_dir=fake_engagement,
             engagement_key=fake_engagement.name,
         )
     assert "TECHNIQUE_ENUM" in str(exc.value) or "technique" in str(exc.value).lower()
+
+
+def test_kali_exec_defaults_missing_agent_name_to_operator(monkeypatch, fake_engagement):
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.delenv("AGENT_NAME", raising=False)
+    monkeypatch.delenv("AITH_AGENT_NAME", raising=False)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(kali.subprocess, "Popen", lambda *_a, **_k: _FakePopen(returncode=0))
+
+    result = kali.kali_exec(
+        ["which", "apkeep"],
+        technique="HEALTH",
+        intent="mobile APK tooling inventory",
+        probe_kind="baseline",
+        phase="code-ingest",
+        timeout=60,
+        agent_name=None,
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+    )
+
+    assert result.status == "completed"
+    assert fake_client.posts[0][1]["agent_name"] == "operator"
 
 
 def test_kali_exec_rejects_missing_phase(monkeypatch, fake_engagement):
