@@ -4529,8 +4529,7 @@ def get_command_run(engagement_id: int, command_run_id: int) -> dict[str, Any]:
 
 # ── Round 9: dispatch / handoff / decision tables ────────────────────────
 #
-# These three CRUD helper sets replace the legacy ``$DIR/agent-registry.json``
-# file. Each helper follows the existing intel-table pattern: validate the
+# These three CRUD helper sets follow the existing intel-table pattern: validate the
 # engagement up front, do JSON serialize/deserialize at the boundary, raise
 # 404/409 with HTTPException so the API layer can surface them directly.
 

@@ -19,9 +19,8 @@ from assess.lib.scope import (
 def _vendor_saas_decided_hosts(cfg: Config) -> set[str]:
     """Return the set of hosts already carrying a recorded scope decision.
 
-    Round 9: the Vendor-SaaS scope checkpoint now records its choice in the
-    orchestrator backend (``assessment_dispatch_decisions`` with
-    ``kind='scope_decision'``) instead of ``$DIR/agent-registry.json``. A
+    The Vendor-SaaS scope checkpoint records its choice in the orchestrator
+    backend (``assessment_dispatch_decisions`` with ``kind='scope_decision'``). A
     failed fetch returns the empty set so the warning fires conservatively
     (better to over-warn than miss a host the operator has not yet decided
     on).

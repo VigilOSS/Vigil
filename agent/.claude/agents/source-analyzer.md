@@ -32,13 +32,13 @@ already listed below.
 
 Before starting any target-facing work, verify:
 
-1. You loaded `agent/shared-constraints.md`
-2. You loaded the source-analysis skill (`agent/skills/source-analysis/SKILL.md`)
-3. You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
-4. You have the dispatch context (target URL, phase, task objective, prior findings)
-5. You know the backend write paths for what you discover: requestable endpoints go through `aith assess ingest-endpoints "$DIR/cases.db" source-analysis`, durable surface candidates go through `aith assess record-surface ...`, and confirmed findings go through `aith assess record-finding ...`
+- [ ] You loaded `agent/shared-constraints.md`
+- [ ] You loaded the source-analysis skill (`agent/skills/source-analysis/SKILL.md`)
+- [ ] You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
+- [ ] You have the dispatch context (target URL, phase, task objective, prior findings)
+- [ ] You know the backend write paths for what you discover: requestable endpoints go through `aith assess ingest-endpoints "$DIR/cases.db" source-analysis`, durable surface candidates go through `aith assess record-surface ...`, and confirmed findings go through `aith assess record-finding ...`
 
-If any of these are missing, STOP and load them now. Working without the skill and its references means working without methodology — your source analysis quality will be significantly lower.
+If any item is unchecked, STOP and load it now. Working without the skill and its references means working without methodology — your source analysis quality will be significantly lower.
 
 ## Why Source Analysis Completeness Matters
 
@@ -154,8 +154,7 @@ Before your dispatch returns, run in this order:
 5. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `routes_extracted`, `secrets_found`, `app_version`)
 
 Skipping the handoff write means the operator has nothing to feed into the next
-dispatch — there is no `agent-registry.json` fallback any more. Schema for
-`--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
 The `record-handoff` step is idempotent and called incrementally — checkpoint
 after each major step in your methodology, not only at the end. See

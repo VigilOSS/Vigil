@@ -68,7 +68,7 @@ Keep it light:
 - `agent/docker/runtime-full/Dockerfile` - primary runtime image. Why: supported target-facing tool surface.
 - `agent/docker/runtime-lightweight/Dockerfile` - development-only runtime image. Why: faster Dockerfile iteration, not an operator runtime.
 - `agent/docker/docker-compose.yml` - local runtime composition. Why: runtime and mitmproxy images can be built together for development.
-- `agent/scripts/hooks/scope-check.sh` and `agent/scripts/hooks/post-tool-log.sh` - Claude/Codex host hook scripts. Why: `scope-check.sh` blocks unsafe host-side target traffic before Bash runs, and `post-tool-log.sh` records selected tool activity through `aith assess log` into backend `activity_entries`.
+- `agent/scripts/hooks/scope-check.sh` and `agent/scripts/hooks/post-tool-log.sh` - Claude/Codex host hook scripts. Why: `scope-check.sh` blocks obviously destructive host commands before Bash runs, and `post-tool-log.sh` records selected tool activity through `aith assess log` into backend `activity_entries`.
 - `agent/engagements/` - engagement artifact root. Why: container for run state; map the directory role, not per-engagement contents.
 
 ### Prompt-to-backend coupling

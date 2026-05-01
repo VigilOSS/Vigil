@@ -2172,7 +2172,7 @@ def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
             "cwe_id": "CWE-120",
             "slot_type": "NETWORK-INPUT",
             "notes": "Needs manual review",
-            "cwe_coverage": [{"family": "buffer-overflow", "effort": 75}],
+            "cwe_coverage": _network_input_coverage(default_effort=80),
             "cross_file_triggers": [
                 {
                     "file_path": "src/helpers.py",
@@ -2186,7 +2186,7 @@ def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
     result = result_response.json()
     assert result["queue_item_id"] is None
     assert result["file_id"] == parser_file["id"]
-    assert result["cwe_coverage"] == [{"family": "buffer-overflow", "effort": 75}]
+    assert result["cwe_coverage"] == _network_input_coverage(default_effort=80)
     assert result["cross_file_triggers"] == [
         {
             "file_path": "src/helpers.py",
@@ -2194,6 +2194,63 @@ def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
             "vuln_class": "buffer-overflow",
         }
     ]
+
+    file_row = client.get(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
+    )
+    assert file_row.status_code == 200
+    assert file_row.json()["analysis_status"] == "analyzed"
+
+    coverage = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage.status_code == 200
+    coverage_payload = coverage.json()
+    assert coverage_payload["by_classification"]["critical"]["analyzed"] == 1
+    assert coverage_payload["gate"]["passed"] is False
+    assert coverage_payload["trigger_summary"]["pending"] == 1
+
+    cwe_detail = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}&detail=cwe"
+    )
+    assert cwe_detail.status_code == 200
+    parser_detail = next(f for f in cwe_detail.json()["files"] if f["file_id"] == parser_file["id"])
+    assert parser_detail["cwe_coverage"]
+    assert next(e for e in parser_detail["cwe_coverage"] if e["family"] == "web-app-injection")["effort"] == 80
+
+
+def test_direct_analysis_result_without_queue_can_satisfy_coverage_gate(client, isolate_settings):
+    engagement_key = "2026-04-04-direct-result-coverage"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="direct-coverage-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+
+    result_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json={
+            "file_id": parser_file["id"],
+            "agent_name": "code-vuln-hunter",
+            "function_name": "parse_message",
+            "hypothesis": "All applicable network-input families were reviewed.",
+            "evidence": "Direct static pass covered parser entry chains.",
+            "disposition": "clean",
+            "confidence": "high",
+            "slot_type": "NETWORK-INPUT",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+        },
+    )
+    assert result_response.status_code == 201
+
+    coverage = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage.status_code == 200
+    payload = coverage.json()
+    assert payload["by_classification"]["critical"]["analyzed"] == 1
+    assert payload["confidence"]["unresolved_needs_context"] == 0
+    assert payload["gate"]["passed"] is True
 
 
 def test_analysis_results_dedupe_cross_file_triggers_across_writers(client, isolate_settings):

@@ -44,14 +44,14 @@ already listed below.
 
 Before starting any target-facing work, verify:
 
-1. You loaded `agent/shared-constraints.md`
-2. You loaded the mandatory skill set: `agent/skills/web-recon/SKILL.md`, `agent/skills/port-scanning/SKILL.md`, and the rate-calibration reference at `agent/references/recon/rate-calibration.md`. The lazy-load skills `agent/skills/nuclei-scanning/SKILL.md` and `agent/skills/directory-fuzzing/SKILL.md` load on first use (when the recon sequence reaches step 5 or step 6 respectively). Add `agent/skills/subdomain-enumeration/SKILL.md` only when scope.json `hosts` contains `*.domain` entries (Phase 1a).
-3. You read each skill's `## Extended Resources` section and loaded the listed payload/checklist references — including `agent/references/tools/recon/nmap.md`, `agent/references/tools/recon/wafw00f.md`, `agent/references/tools/recon/nikto.md`, and `agent/references/tools/fuzzing/ffuf.md`.
-4. You read `scope.json` and confirmed the in-scope hosts plus the active `exploit_policy` before making any target-facing decisions
-5. You have the dispatch context (target URL, phase, task objective, prior findings)
-6. You checked command history as a coverage map — `aith assess list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Pick angles that haven't been covered — different nmap scripts, a different wordlist, different subdomain sources, different VHost probes. The only probe to skip is an identical command against identical input; any variant is new coverage. Before citing a prior run, fetch its preview with `get-command-run <id>` — `success=true` only means `return_code=0`. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+- [ ] You loaded `agent/shared-constraints.md`
+- [ ] You loaded the mandatory skill set: `agent/skills/web-recon/SKILL.md`, `agent/skills/port-scanning/SKILL.md`, and the rate-calibration reference at `agent/references/recon/rate-calibration.md`. The lazy-load skills `agent/skills/nuclei-scanning/SKILL.md` and `agent/skills/directory-fuzzing/SKILL.md` load on first use (when the recon sequence reaches step 5 or step 6 respectively). Add `agent/skills/subdomain-enumeration/SKILL.md` only when scope.json `hosts` contains `*.domain` entries (Phase 1a).
+- [ ] You read each skill's `## Extended Resources` section and loaded the listed payload/checklist references — including `agent/references/tools/recon/nmap.md`, `agent/references/tools/recon/wafw00f.md`, `agent/references/tools/recon/nikto.md`, and `agent/references/tools/fuzzing/ffuf.md`.
+- [ ] You read `scope.json` and confirmed the in-scope hosts plus the active `exploit_policy` before making any target-facing decisions
+- [ ] You have the dispatch context (target URL, phase, task objective, prior findings)
+- [ ] You checked command history as a coverage map — `aith assess list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Pick angles that haven't been covered — different nmap scripts, a different wordlist, different subdomain sources, different VHost probes. The only probe to skip is an identical command against identical input; any variant is new coverage. Before citing a prior run, fetch its preview with `get-command-run <id>` — `success=true` only means `return_code=0`. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
-If any item is missing, STOP and load it. Without the skills and references your recon quality drops and downstream specialists cannot test what your pass missed.
+If any item is unchecked, STOP and load it. Without the skills and references your recon quality drops and downstream specialists cannot test what your pass missed.
 
 ## Why Recon Completeness Matters
 
@@ -265,8 +265,7 @@ Before your dispatch returns, run in this order:
 4. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `live_host_count`, `egress_block_pct`, `wildcard_subs_resolved`)
 
 Skipping the handoff write means the operator has nothing to feed into the next
-dispatch — there is no `agent-registry.json` fallback any more. The handoff row IS
-the next dispatch's input. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+dispatch. The handoff row IS the next dispatch's input. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
 The `record-handoff` step is idempotent and called incrementally — checkpoint
 after each major step in your methodology, not only at the end. See

@@ -1955,8 +1955,7 @@ def init_db() -> None:
             "ON activity_entries(engagement_id, actor_kind, actor_name)"
         )
 
-        # Round 9: dispatch tracking moved off the engagement filesystem
-        # (legacy ``$DIR/agent-registry.json``) and into the orchestrator. Three
+        # Dispatch tracking lives in the orchestrator. Three
         # tables — dispatches (the audit row of who was dispatched), handoffs
         # (the structured payload the agent returned to the operator), and
         # decisions (scope/egress/dispatch-blocked checkpoints surfaced to the

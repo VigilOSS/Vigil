@@ -43,7 +43,7 @@ def test_scope_check_allows_local_only_command(tmp_path: Path) -> None:
     assert result.returncode == 0
 
 
-def test_scope_check_blocks_in_scope_host_side_target_command(tmp_path: Path) -> None:
+def test_scope_check_allows_host_side_target_command(tmp_path: Path) -> None:
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text(
@@ -53,11 +53,10 @@ def test_scope_check_blocks_in_scope_host_side_target_command(tmp_path: Path) ->
 
     result = _run_scope_check('python3 -c "print(1)" https://target.example/admin', engagement_dir)
 
-    assert result.returncode == 2
-    assert "aith assess kali" in result.stderr.lower()
+    assert result.returncode == 0
 
 
-def test_scope_check_blocks_removed_host_side_helper_path(tmp_path: Path) -> None:
+def test_scope_check_allows_audited_kali_exec_with_raw_tool_name(tmp_path: Path) -> None:
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text(
@@ -65,23 +64,24 @@ def test_scope_check_blocks_removed_host_side_helper_path(tmp_path: Path) -> Non
         encoding="utf-8",
     )
 
-    result = _run_scope_check("source scripts/lib/container.sh && run_tool nmap -sV target.example", engagement_dir)
+    result = _run_scope_check(
+        "aith assess kali exec --technique HEALTH --intent tooling --probe-kind fingerprint --phase recon --timeout 30 -- curl -sS https://target.example",
+        engagement_dir,
+    )
 
-    assert result.returncode == 2
-    assert "aith assess kali" in result.stderr.lower()
+    assert result.returncode == 0
 
 
-def test_scope_check_blocks_when_scope_metadata_is_missing(tmp_path: Path) -> None:
+def test_scope_check_allows_when_scope_metadata_is_missing(tmp_path: Path) -> None:
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
 
     result = _run_scope_check('python3 -c "print(1)" https://target.example/admin', engagement_dir)
 
-    assert result.returncode == 2
-    assert "scope metadata is missing" in result.stderr.lower()
+    assert result.returncode == 0
 
 
-def test_scope_check_blocks_explicitly_out_of_scope_host(tmp_path: Path) -> None:
+def test_scope_check_allows_explicitly_out_of_scope_host(tmp_path: Path) -> None:
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text(
@@ -98,8 +98,27 @@ def test_scope_check_blocks_explicitly_out_of_scope_host(tmp_path: Path) -> None
 
     result = _run_scope_check('python3 -c "print(1)" https://admin.target.example/panel', engagement_dir)
 
+    assert result.returncode == 0
+
+
+def test_scope_check_blocks_recursive_force_delete(tmp_path: Path) -> None:
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+
+    result = _run_scope_check("rm -rf /tmp/aith-engagement-scratch", engagement_dir)
+
     assert result.returncode == 2
-    assert "explicitly out of scope" in result.stderr.lower()
+    assert "recursive delete" in result.stderr.lower()
+
+
+def test_scope_check_blocks_destructive_disk_operation(tmp_path: Path) -> None:
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+
+    result = _run_scope_check("sudo dd if=/dev/zero of=/dev/disk4 bs=1m", engagement_dir)
+
+    assert result.returncode == 2
+    assert "disk operation" in result.stderr.lower()
 
 
 # ---------------------------------------------------------------------------

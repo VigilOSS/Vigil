@@ -84,7 +84,10 @@ def add_required_kali_flags(parser) -> None:
         "--agent-name",
         dest="kali_agent_name",
         default=None,
-        help="Dispatching agent name (defaults to $AGENT_NAME / $AITH_AGENT_NAME / 'operator').",
+        help=(
+            "Dispatching agent name. Defaults to $AGENT_NAME / $AITH_AGENT_NAME / "
+            "'operator'; specialists should pass this explicitly if wrapper env is missing."
+        ),
     )
     parser.add_argument(
         "--container-name",

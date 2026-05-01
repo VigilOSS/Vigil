@@ -9,9 +9,10 @@ Consumed by:
 - The runtime container image (copied to ``/opt/mcp-tools/audit_enums.py``
   for legacy in-container scripts that still import it).
 
-Enum values are **additive**. Both the backend API and the host-side CLI
-use soft validation (warn-and-continue when a row carries an out-of-enum
-value) so adding a new technique does not require a runtime redeploy.
+Enum values are **additive**. The host-side CLI fails closed when a caller
+uses an out-of-enum value so prompt drift is caught before an audit row is
+written. The backend stores plain TEXT for forward compatibility with older
+or externally-written rows.
 """
 from __future__ import annotations
 

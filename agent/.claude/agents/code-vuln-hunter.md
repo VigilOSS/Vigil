@@ -549,8 +549,7 @@ Before your dispatch returns, run in this order:
 3. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
 
 Skipping the handoff write means the operator has nothing to feed into the next
-dispatch — there is no `agent-registry.json` fallback any more. Schema for
-`--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
 The `record-handoff` step is idempotent and called incrementally — checkpoint
 after each major step in your methodology, not only at the end. See

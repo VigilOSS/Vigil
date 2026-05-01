@@ -1,8 +1,7 @@
 # Subagent Dispatch Registry — Backend Tables
 
 Dispatch tracking, structured handoffs, and decision rows live in three backend
-tables. The previous `$DIR/agent-registry.json` file is removed; the operator and
-specialists interact with these tables exclusively via `aith assess dispatch ...`
+tables. The operator and specialists interact with these tables via `aith assess dispatch ...`
 CLI verbs.
 
 | Table | Owner | CLI verbs | Purpose |

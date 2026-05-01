@@ -31,12 +31,12 @@ already listed below.
 
 Before writing anything, verify:
 
-1. You loaded `agent/shared-constraints.md`
-2. You loaded the report-generation skill (`agent/skills/report-generation/SKILL.md`)
-3. You reviewed the Proof Standard by Finding Class table below — every finding must meet its class-specific evidence bar before inclusion
-4. You have the dispatch context (engagement directory, phase, any operator instructions on report scope)
+- [ ] You loaded `agent/shared-constraints.md`
+- [ ] You loaded the report-generation skill (`agent/skills/report-generation/SKILL.md`)
+- [ ] You reviewed the Proof Standard by Finding Class table below — every finding must meet its class-specific evidence bar before inclusion
+- [ ] You have the dispatch context (engagement directory, phase, any operator instructions on report scope)
 
-If any of these are missing, STOP and load them now. Writing a report without the skill and proof standards means producing findings that will not survive triage review.
+If any item is unchecked, STOP and load it now. Writing a report without the skill and proof standards means producing findings that will not survive triage review.
 
 ## Query Backend Before Starting
 
@@ -182,8 +182,7 @@ closing sequence is:
 5. `aith assess dispatch record-handoff --from-json <path>` to capture summary, runtime issues, working artifacts (point at `report.md`), open questions, and role-specific extras (`qa_status`, `findings_in_report`)
 
 Skipping the handoff write means the operator has nothing to feed into the next
-dispatch — there is no `agent-registry.json` fallback any more. Schema for
-`--from-json`: `agent/references/runtime-guides/handoff-schema.md`. The handoff
+dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`. The handoff
 `working_artifacts` MUST list `report.md` so the renderer surfaces present/missing
 state.
 

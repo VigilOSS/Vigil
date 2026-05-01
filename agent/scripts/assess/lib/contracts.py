@@ -153,6 +153,8 @@ KALI_VERBS: tuple[str, ...] = (
 
 _KALI_COMMON_NOTES: tuple[str, ...] = (
     "Every kali verb requires --technique, --intent, --probe-kind, --phase, and --timeout. The CLI rejects calls missing any of these before it ever reaches the backend.",
+    "--technique must be one of TECHNIQUE_ENUM; use HEALTH for runtime/tool inventory, META for operator-side metadata, LOG-READ for artifact reads, and OTHER only when no specific class fits.",
+    "--agent-name resolves from the explicit flag, $AGENT_NAME, $AITH_AGENT_NAME, then operator. Specialists must ensure AGENT_NAME is exported by their wrapper or pass --agent-name <role> explicitly.",
     "--phase is REQUIRED — pass the phase the dispatch was authorized for, not scope.json.current_phase. Allowed: recon, collect, consume-test, verify, exploit, report, code-ingest, code-classify, code-hunt, code-verify, plus the half-phase tags recon-pivot and exploit-recon.",
     "--destructive marks a write/edit/delete on the target (POST/PUT/PATCH/DELETE, file upload, account creation). Read-only probes leave it off.",
     "--force bypasses the dedup window. Use only when re-running an identical command intentionally is the right call.",
@@ -879,7 +881,7 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
     ),
     "job": (
         {
-            "command": "aith assess kali job start --technique RECON --intent 'long nuclei sweep' --probe-kind fingerprint --phase recon -- nuclei -l targets.txt -t http/cves/",
+            "command": "aith assess kali job start --technique CVE-VALIDATION --intent 'long nuclei sweep' --probe-kind fingerprint --phase recon --timeout 21600 -- nuclei -l targets.txt -t http/cves/",
         },
         {
             "command": "aith assess kali job status 42",
@@ -1141,8 +1143,7 @@ def _dispatch_root_contract() -> CommandContract:
             "reset-stale/retry-errors/migrate/requeue) require <db_path> as the first "
             "positional. Operator-glue actions (register, update-status, list, get, "
             "record-decision, record-handoff, render-handoff) do not.",
-            "Round 9: dispatch state lives in the orchestrator backend, not in "
-            "$DIR/agent-registry.json. Use `register` to log a dispatch, `update-status` "
+            "Dispatch state lives in the orchestrator backend. Use `register` to log a dispatch, `update-status` "
             "to mark it complete, `record-handoff` to durably record the agent's exit "
             "payload, and `render-handoff` to assemble the blob the next dispatch prompt "
             "pastes verbatim.",
@@ -1154,11 +1155,6 @@ def _dispatch_root_contract() -> CommandContract:
                 "use `aith assess dispatch render-handoff <prior-agent-id>` and paste the "
                 "rendered blob verbatim — the helper pulls findings, artifacts, and "
                 "credentials from durable state so the prompt stays small",
-            ),
-            (
-                "writing to $DIR/agent-registry.json",
-                "the file is no longer read or written; use `aith assess dispatch register` "
-                "and `record-handoff` to write to the orchestrator backend instead",
             ),
         ),
     )
