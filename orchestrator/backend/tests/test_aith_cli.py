@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shutil
 import sqlite3
 import subprocess
@@ -592,17 +593,25 @@ def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Pat
             self.killed = True
 
     fake_process = FakeProcess()
+    signals_sent: list[tuple[int, signal.Signals]] = []
 
-    def fake_popen(*_: object, **__: object) -> FakeProcess:
+    def fake_popen(*_: object, **kwargs: object) -> FakeProcess:
+        assert kwargs["start_new_session"] is True
+        assert kwargs["stdin"] is not None
         return fake_process
 
+    def fake_killpg(pid: int, sig: signal.Signals) -> None:
+        signals_sent.append((pid, sig))
+
     monkeypatch.setattr(orchestrator_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orchestrator_module.os, "killpg", fake_killpg)
     monkeypatch.setattr(orchestrator_module, "_wait_for_health", lambda *_, **__: False)
 
     with pytest.raises(SystemExit, match="did not become healthy"):
         orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
 
-    assert fake_process.terminated is True
+    assert signals_sent == [(4321, signal.SIGTERM)]
+    assert fake_process.terminated is False
     assert fake_process.killed is False
     assert not pid_file.exists()
 
