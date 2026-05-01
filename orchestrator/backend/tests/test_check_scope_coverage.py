@@ -214,6 +214,7 @@ def _run(
     require_stage: str | None = None,
     as_json: bool = True,
     verbose: bool = False,
+    strict_vendor_saas: bool = False,
 ) -> FakeClient | None:
     module = _load_module()
     _patch_config(monkeypatch, module, engagement_dir)
@@ -231,6 +232,7 @@ def _run(
             require_stage=require_stage,
             as_json=as_json,
             verbose=verbose,
+            strict_vendor_saas=strict_vendor_saas,
         )
     )
     return clients[0] if clients else None
@@ -944,7 +946,7 @@ def _patch_vendor_saas_suffix(monkeypatch, label: str, suffix: str) -> None:
     )
 
 
-def test_vendor_saas_blocks_phase_advance_under_wildcard_expansion(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeypatch, tmp_path: Path, capsys) -> None:
     """A vendor-SaaS host that surfaced under wildcard expansion (NOT an
     explicit literal in scope.json) blocks the gate until a scope_decision
     is recorded.
@@ -975,7 +977,27 @@ def test_vendor_saas_blocks_phase_advance_under_wildcard_expansion(monkeypatch, 
         {"target_descriptor": "https://vendor-saas-platform.example.test/api/health"},
     ]
 
-    # Without a recorded scope_decision, --require-stage enum must fail.
+    # Without strict mode, an undecided vendor-SaaS discovery is reported for
+    # operator visibility but does not fail the stage gate.
+    _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is True, report
+    pending = {row["host"]: row["vendor"] for row in report["vendor_saas_pending_decision"]}
+    assert pending.get("vendor-saas-platform.example.test") == "vendor-saas-platform"
+    assert report["strict_vendor_saas"] is False
+    assert not any(
+        "vendor-saas" in msg and "vendor-saas-platform.example.test" in msg
+        for msg in report["overall_gaps"]
+    )
+
+    # Strict mode restores the phase gate when an engagement wants vendor-SaaS
+    # ambiguity to block progress.
     with pytest.raises(SystemExit) as excinfo:
         _run(
             monkeypatch,
@@ -983,10 +1005,12 @@ def test_vendor_saas_blocks_phase_advance_under_wildcard_expansion(monkeypatch, 
             services=services,
             surfaces=surfaces,
             require_stage="enum",
+            strict_vendor_saas=True,
         )
     assert excinfo.value.code == 1
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is False, report
+    assert report["strict_vendor_saas"] is True
     pending = {row["host"]: row["vendor"] for row in report["vendor_saas_pending_decision"]}
     assert pending.get("vendor-saas-platform.example.test") == "vendor-saas-platform"
     assert any(
@@ -1061,5 +1085,4 @@ def test_vendor_saas_explicit_literal_in_scope_skips_gate(monkeypatch, tmp_path:
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
     assert report["vendor_saas_pending_decision"] == []
-
 

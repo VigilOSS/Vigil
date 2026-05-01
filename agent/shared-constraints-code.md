@@ -140,6 +140,10 @@ input file generation, sanitizer invocation, unit-test repro command, or debugge
 to confirm the bug. The goal is reproduction without rediscovery: another analyst should be able to
 rerun the proof from `notes` plus the referenced source files alone.
 
+Coverage finding counts (`aith assess list-findings` with a count flag or equivalent)
+intentionally include only findings whose `canonical_location` starts with `file:` — web
+findings with URL-based locations are excluded from code-analysis queue accounting.
+
 ---
 
 ## 5. No Theoretical Findings
@@ -230,6 +234,11 @@ files are auditable and avoid shell escaping damage.
 Do not hardcode absolute paths. Set `ENGAGEMENT_DIR` before calling assess helpers, or pass
 `--engagement-dir` when the helper supports it.
 
+Shell-quote Java and Kotlin identifiers that contain `$` (anonymous classes, lambda
+names, generated accessors — e.g. `com.example.Auth$$Lambda$1`): wrap in single quotes
+or escape the `$` when passing to `grep`, `aith`, or shell commands to prevent variable
+interpolation.
+
 ---
 
 ## 10. Recording Format
@@ -264,3 +273,23 @@ Code-specific fields:
   }
 }
 ```
+
+---
+
+## 11. Mandatory Closing Sequence
+
+Before your dispatch returns, run in this order:
+
+1. `aith assess record-finding <role> <finding-json>` for each confirmed finding.
+2. `aith assess code-record-analysis <analysis-json>` for each queue item disposition.
+3. `aith assess dispatch record-handoff --from-json <path>` — use the exact
+   `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the
+   operator placed at the top of your dispatch prompt. The handoff row is keyed on
+   `agent_id`; using a different value creates an orphaned row the operator cannot render.
+4. `aith assess dispatch render-handoff <agent_id>` — self-check before exiting.
+   A 404 means the `agent_id` did not match the registered dispatch.
+
+`update-status` is operator-only — do not call it.
+
+`record-handoff` is idempotent; checkpoint after each major phase of work, not only at the end.
+Schema: `agent/references/runtime-guides/handoff-schema.md`.

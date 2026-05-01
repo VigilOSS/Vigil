@@ -181,6 +181,7 @@ closing sequence is:
 3. In review-and-fix QA mode, run the QA checklist and fix report-local issues
 4. In publish mode, emit `report.generated`, mark included findings `reported`, update scope.json phase to `complete`
 5. `aith assess dispatch record-handoff --from-json <path>` to capture summary, runtime issues, working artifacts (point at `report.md`), open questions, and role-specific extras (`qa_status`, `findings_in_report`)
+6. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`. The handoff

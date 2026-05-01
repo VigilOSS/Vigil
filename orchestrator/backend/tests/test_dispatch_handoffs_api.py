@@ -40,6 +40,18 @@ def _seed(client, isolate_settings) -> None:
     assert response.status_code == 200, response.text
 
 
+def _register_dispatch(client, *, agent_id: str, agent_role: str) -> None:
+    response = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": agent_id,
+            "agent_role": agent_role,
+            "task": f"handoff test for {agent_id}",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+
 def _full_payload(agent_id: str = "HF-001", **overrides):
     payload = {
         "agent_id": agent_id,
@@ -62,6 +74,7 @@ def _full_payload(agent_id: str = "HF-001", **overrides):
 
 def test_handoff_post_get_round_trip(client, isolate_settings) -> None:
     _seed(client, isolate_settings)
+    _register_dispatch(client, agent_id="HF-001", agent_role="vulnerability-analyst")
 
     resp = client.post(f"{BASE}/dispatch-handoffs", json=_full_payload())
     assert resp.status_code == 201, resp.text
@@ -77,6 +90,11 @@ def test_handoff_post_get_round_trip(client, isolate_settings) -> None:
     fetched = resp.json()
     assert fetched["working_artifacts"][0]["path"].endswith("EX-001-payload.sql")
     assert fetched["recommended_next_agent"] == "exploit-developer"
+
+    activity = client.get(f"/engagements/{ENGAGEMENT_KEY}/activity-entries", params={"q": "record-handoff"})
+    assert activity.status_code == 200, activity.text
+    titles = {row["title"] for row in activity.json()["items"]}
+    assert "dispatch record-handoff" in titles
 
 
 def test_handoff_summary_required_and_bounded(client, isolate_settings) -> None:
@@ -95,6 +113,7 @@ def test_handoff_summary_required_and_bounded(client, isolate_settings) -> None:
     assert huge.status_code == 422
 
     # 2000 chars exactly is fine
+    _register_dispatch(client, agent_id="MAX", agent_role="recon-specialist")
     ok = client.post(f"{BASE}/dispatch-handoffs", json={
         "agent_id": "MAX", "agent_role": "recon-specialist", "summary": "x" * 2000,
     })
@@ -104,6 +123,7 @@ def test_handoff_summary_required_and_bounded(client, isolate_settings) -> None:
 def test_handoff_duplicate_returns_409_and_patch_updates(client, isolate_settings) -> None:
     _seed(client, isolate_settings)
     payload = _full_payload(agent_id="HF-DUP")
+    _register_dispatch(client, agent_id="HF-DUP", agent_role="vulnerability-analyst")
     assert client.post(f"{BASE}/dispatch-handoffs", json=payload).status_code == 201
     dup = client.post(f"{BASE}/dispatch-handoffs", json=payload)
     assert dup.status_code == 409, dup.text
@@ -128,6 +148,7 @@ def test_handoff_list_filters(client, isolate_settings) -> None:
         _full_payload(agent_id="L2", agent_role="vulnerability-analyst"),
     ]
     for r in rows:
+        _register_dispatch(client, agent_id=r["agent_id"], agent_role=r["agent_role"])
         assert client.post(f"{BASE}/dispatch-handoffs", json=r).status_code == 201
 
     resp = client.get(f"{BASE}/dispatch-handoffs", params={"role": "recon-specialist"})
@@ -140,3 +161,28 @@ def test_handoff_404_on_missing(client, isolate_settings) -> None:
     assert resp.status_code == 404
     resp = client.patch(f"{BASE}/dispatch-handoffs/missing", json={"summary": "x"})
     assert resp.status_code == 404
+
+
+def test_handoff_requires_registered_dispatch(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+
+    resp = client.post(
+        f"{BASE}/dispatch-handoffs",
+        json=_full_payload(agent_id="UNREGISTERED", agent_role="vulnerability-analyst"),
+    )
+
+    assert resp.status_code == 404, resp.text
+    assert "dispatch not found" in resp.text
+
+
+def test_handoff_rejects_role_mismatch(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+    _register_dispatch(client, agent_id="ROLE-MISMATCH", agent_role="recon-specialist")
+
+    resp = client.post(
+        f"{BASE}/dispatch-handoffs",
+        json=_full_payload(agent_id="ROLE-MISMATCH", agent_role="vulnerability-analyst"),
+    )
+
+    assert resp.status_code == 409, resp.text
+    assert "agent_role mismatch" in resp.text

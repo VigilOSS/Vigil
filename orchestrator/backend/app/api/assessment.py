@@ -7,6 +7,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..services import activity as activity_service
 from ..services import state_manager
 from ..services.engagements import get_engagement_or_404
 from ..ws import broadcaster
@@ -411,6 +412,31 @@ async def _broadcast(engagement_key: str, record_type: str, payload: dict[str, A
     )
 
 
+def _audit_assessment_mutation(
+    engagement_id: int,
+    *,
+    title: str,
+    action: str,
+    actor_name: str = "aith-assess",
+    result: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Best-effort activity row for backend state writes made by assess helpers."""
+    try:
+        activity_service.record_activity_entry(
+            engagement_id,
+            actor_kind="system",
+            actor_name=actor_name or "aith-assess",
+            title=title,
+            action=action,
+            result=result,
+            metadata=metadata or {},
+        )
+    except Exception:
+        # Activity visibility must never make the underlying assessment write fail.
+        return
+
+
 @router.get("/summary")
 def get_assessment_summary(engagement_key: str) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
@@ -799,6 +825,14 @@ async def merge_findings_endpoint(engagement_key: str, request: MergeFindingsReq
         reason=request.reason,
         source_name=request.source_name,
     )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="merge-findings",
+        action=f"{request.source_slug} -> {request.target_slug}",
+        actor_name=request.source_name,
+        result=request.reason or "",
+        metadata={"source_slug": request.source_slug, "target_slug": request.target_slug},
+    )
     await _broadcast(engagement.key, "finding_merge", record)
     return record
 
@@ -828,6 +862,14 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
         service_id=request.service_id,
         surface_id=request.surface_id,
         links=[item.model_dump() for item in request.links],
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="record-finding",
+        action=f"finding={record.get('slug', request.slug)} severity={record.get('severity', request.severity)}",
+        actor_name=request.source_name,
+        result=record.get("workflow_status", request.workflow_status) or "",
+        metadata={"finding_slug": record.get("slug", request.slug), "source_name": request.source_name},
     )
     await _broadcast(engagement.key, "finding", record)
     return record
@@ -860,6 +902,14 @@ async def patch_finding(
         transition_reason_text=request.reason_text,
         transition_artifact_ref=request.artifact_ref,
     )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="update-finding",
+        action=f"finding={finding_slug}",
+        actor_name=request.source_name,
+        result=request.reason_code or request.reason_text or "",
+        metadata={"finding_slug": finding_slug},
+    )
     await _broadcast(engagement.key, "finding_patch", record)
     return record
 
@@ -884,6 +934,14 @@ async def verify_finding(
         provenance=request.provenance,
         artifact_ref=request.artifact_ref,
         new_severity=request.new_severity,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="verify-finding",
+        action=f"finding={finding_slug} disposition={request.disposition}",
+        actor_name=request.source_name,
+        result=request.reason_code or request.reason_text or request.disposition,
+        metadata={"finding_slug": finding_slug, "disposition": request.disposition},
     )
     await _broadcast(engagement.key, "finding_verify", record)
     return record
@@ -1117,6 +1175,14 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
         files_allowed=request.files_allowed,
         finding_slugs=request.finding_slugs,
     )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="dispatch register",
+        action=f"agent_id={request.agent_id} role={request.agent_role}",
+        actor_name=request.agent_role,
+        result=request.status,
+        metadata={"agent_id": request.agent_id, "agent_role": request.agent_role},
+    )
     await _broadcast(engagement.key, "dispatch", record)
     return record
 
@@ -1161,6 +1227,14 @@ async def patch_dispatch(
         completed_at=request.completed_at,
         finding_slugs=request.finding_slugs,
     )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="dispatch update-status",
+        action=f"agent_id={agent_id}",
+        actor_name=agent_id,
+        result=request.status or "",
+        metadata={"agent_id": agent_id, "finding_slugs": request.finding_slugs or []},
+    )
     await _broadcast(engagement.key, "dispatch", record)
     return record
 
@@ -1183,6 +1257,14 @@ async def create_handoff(engagement_key: str, request: HandoffCreate) -> dict[st
         open_questions=request.open_questions,
         recommended_next_agent=request.recommended_next_agent,
         extras=request.extras,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="dispatch record-handoff",
+        action=f"agent_id={request.agent_id} role={request.agent_role}",
+        actor_name=request.agent_role,
+        result=request.summary,
+        metadata={"agent_id": request.agent_id, "agent_role": request.agent_role},
     )
     await _broadcast(engagement.key, "dispatch_handoff", record)
     return record
@@ -1232,6 +1314,14 @@ async def patch_handoff(
         recommended_next_agent=request.recommended_next_agent,
         extras=request.extras,
     )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="dispatch update-handoff",
+        action=f"agent_id={agent_id}",
+        actor_name=agent_id,
+        result=request.summary or "",
+        metadata={"agent_id": agent_id},
+    )
     await _broadcast(engagement.key, "dispatch_handoff", record)
     return record
 
@@ -1244,6 +1334,13 @@ async def create_decision(engagement_key: str, request: DecisionCreate) -> dict[
         kind=request.kind,
         payload=request.payload,
         surfaced_to_user=request.surfaced_to_user,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="dispatch record-decision",
+        action=f"kind={request.kind}",
+        result="surfaced_to_user" if request.surfaced_to_user else "",
+        metadata={"kind": request.kind, "surfaced_to_user": request.surfaced_to_user},
     )
     await _broadcast(engagement.key, "dispatch_decision", record)
     return record
@@ -1278,6 +1375,13 @@ async def patch_decision(
         resolved=request.resolved,
         resolution=request.resolution,
         surfaced_to_user=request.surfaced_to_user,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="dispatch update-decision",
+        action=f"decision_id={decision_id}",
+        result="resolved" if request.resolved else "",
+        metadata={"decision_id": int(decision_id)},
     )
     await _broadcast(engagement.key, "dispatch_decision", record)
     return record

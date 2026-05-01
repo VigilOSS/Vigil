@@ -275,6 +275,7 @@ Before your dispatch returns, run in this order:
 4. `aith assess record-intel note <intel-json>` for each attack hypothesis (so the hunter inherits them as intel notes)
 5. `aith assess record-finding code-architect <finding-json>` for each architectural finding (rare — only when an obvious vulnerability is visible from project structure)
 6. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
+7. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.

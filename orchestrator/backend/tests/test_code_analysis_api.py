@@ -465,6 +465,20 @@ def test_analysis_completion_rolls_up_file_coverage(client, isolate_settings):
     assert payload["by_classification"]["critical"]["analyzed"] == 1
     assert payload["gate"]["passed"] is True
 
+    activity = client.get(
+        f"/engagements/{engagement_key}/activity-entries",
+        params={"q": "code-record-analysis"},
+    )
+    assert activity.status_code == 200, activity.text
+    assert any(row["title"] == "code-record-analysis" for row in activity.json()["items"])
+
+    activity = client.get(
+        f"/engagements/{engagement_key}/activity-entries",
+        params={"q": "code-dispatch"},
+    )
+    assert activity.status_code == 200, activity.text
+    assert any(row["title"] == "code-dispatch done" for row in activity.json()["items"])
+
 
 def test_coverage_gate_stays_closed_until_queue_items_are_completed(client, isolate_settings):
     engagement_key = "2026-04-04-code-gate"

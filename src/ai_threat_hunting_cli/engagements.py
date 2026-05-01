@@ -19,8 +19,9 @@ from .paths import (
 )
 
 AUTH_MODES = {"none", "manual", "auth_json", "proxy_capture"}
-ENGAGEMENT_TYPES = {"web", "code", "both"}
+ENGAGEMENT_TYPES = {"web", "code", "both", "android"}
 EXPLOIT_POLICIES = {"pause", "full_send", "selected"}
+ANDROID_DYNAMIC_MODES = {"static_only", "device", "emulator"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,9 @@ class CreateEngagementOptions:
     auth_mode: str = "none"
     exploit_policy: str = "pause"
     repos: list[str] = field(default_factory=list)
+    artifacts: list[str] = field(default_factory=list)
+    android_package: str | None = None
+    dynamic_mode: str = "static_only"
     skip_permissions: bool = False
 
 
@@ -85,11 +89,13 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     root.mkdir(parents=True, exist_ok=True)
 
     if options.engagement_type not in ENGAGEMENT_TYPES:
-        raise SystemExit("--type must be one of: web, code, both")
+        raise SystemExit("--type must be one of: web, code, both, android")
     if options.auth_mode not in AUTH_MODES:
         raise SystemExit("--auth-mode must be one of: none, manual, auth_json, proxy_capture")
     if options.exploit_policy not in EXPLOIT_POLICIES:
         raise SystemExit("--exploit-policy must be one of: pause, full_send, selected")
+    if options.dynamic_mode not in ANDROID_DYNAMIC_MODES:
+        raise SystemExit("--dynamic-mode must be one of: static_only, device, emulator")
 
     _snapshot_orchestrator_database(install_root)
 
@@ -109,9 +115,17 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         if not hosts:
             hosts = [hostname]
 
+    artifacts = [str(Path(raw).expanduser()) for raw in options.artifacts]
     name = options.name or (options.target if options.engagement_type == "code" else None)
+    if options.engagement_type == "android" and not name:
+        if options.android_package:
+            name = options.android_package
+        elif artifacts:
+            name = Path(artifacts[0]).name
     if options.engagement_type in {"code", "both"} and not name:
         raise SystemExit("code and both engagements require --name")
+    if options.engagement_type == "android" and not name:
+        raise SystemExit("android engagements require --name, --package-name, or --apk")
 
     if options.engagement_type == "web":
         label = slug(hostname)
@@ -126,7 +140,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     key = eng_dir.name
 
     subdirs = ["tools", "downloads", "scans", "pids", "sessions"]
-    if options.engagement_type in {"code", "both"}:
+    if options.engagement_type in {"code", "both", "android"}:
         subdirs.append("source")
     for subdir in subdirs:
         (eng_dir / subdir).mkdir()
@@ -148,6 +162,34 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
             "current_phase": "ingest",
         }
         manifest = {"key": key, "name": name, "target": name, "repos": repos, "created_at": created_at}
+    elif options.engagement_type == "android":
+        scope = {
+            "engagement_type": "android",
+            "mobile_platform": "android",
+            "scope_mode": "artifact-only",
+            "name": name,
+            "android_package": options.android_package or "",
+            "artifacts": artifacts,
+            "hosts": [],
+            "backend_hosts": hosts,
+            "dynamic_mode": options.dynamic_mode,
+            "exploit_policy": options.exploit_policy,
+            "exploit_review_state": "pending",
+            "approved_targets": [],
+            "source_repos": [],
+            "status": "in_progress",
+            "current_phase": "ingest",
+        }
+        manifest = {
+            "key": key,
+            "name": name,
+            "target": name,
+            "mobile_platform": "android",
+            "android_package": options.android_package or "",
+            "artifacts": artifacts,
+            "dynamic_mode": options.dynamic_mode,
+            "created_at": created_at,
+        }
     elif options.engagement_type == "web":
         scope = {
             "engagement_type": "web",
@@ -186,7 +228,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     _write_json(eng_dir / "scope.json", scope)
     _write_json(eng_dir / "engagement.json", manifest)
     _write_report(eng_dir, options.engagement_type, name=name, target=target_normalized, repos=repos, date_label=date_label)
-    _write_auth_scaffold(eng_dir, "none" if options.engagement_type == "code" else options.auth_mode, created_at)
+    _write_auth_scaffold(eng_dir, "none" if options.engagement_type in {"code", "android"} else options.auth_mode, created_at)
     _write_json(eng_dir / "sessions" / "index.json", [])
     # Dispatch tracking + handoff content live in the orchestrator backend
     # (assessment_dispatches / assessment_dispatch_handoffs /
@@ -454,6 +496,9 @@ def _write_report(eng_dir: Path, engagement_type: str, *, name: str | None, targ
         lines.append(f"- **Name**: {name}")
         display = ", ".join(repo["path"] for repo in repos) if repos else "(none - add source to ./source/)"
         lines.append(f"- **Repositories**: {display}")
+    elif engagement_type == "android":
+        lines.append(f"- **Name**: {name}")
+        lines.append("- **Scope Mode**: Android artifact-only")
     elif engagement_type == "web":
         lines.append(f"- **Target**: {target}")
     else:

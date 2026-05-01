@@ -147,6 +147,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Dump per-entry detail rows even when the summary passes (default: compact)",
     )
+    p.add_argument(
+        "--strict-vendor-saas",
+        dest="strict_vendor_saas",
+        action="store_true",
+        help=(
+            "Fail the coverage gate on undecided vendor-SaaS discoveries. "
+            "Without this flag, pending vendor-SaaS decisions are reported "
+            "but do not block phase advance."
+        ),
+    )
     p.set_defaults(func=run)
 
 
@@ -231,7 +241,8 @@ def run(args: argparse.Namespace) -> None:
     )
 
     overall_gaps = _collect_overall_gaps(report_entries, args.require_stage)
-    if vendor_saas_pending and args.require_stage is not None:
+    strict_vendor_saas = bool(getattr(args, "strict_vendor_saas", False))
+    if vendor_saas_pending and args.require_stage is not None and strict_vendor_saas:
         for host, vendor in vendor_saas_pending:
             overall_gaps.append(
                 f"vendor-saas: {host} (vendor={vendor}) has no scope_decision recorded "
@@ -247,6 +258,7 @@ def run(args: argparse.Namespace) -> None:
         "vendor_saas_pending_decision": [
             {"host": host, "vendor": vendor} for host, vendor in vendor_saas_pending
         ],
+        "strict_vendor_saas": strict_vendor_saas,
         "ready": ready,
     }
 

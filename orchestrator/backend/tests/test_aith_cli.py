@@ -35,9 +35,16 @@ def _write_marker_database(path: Path, value: str) -> None:
         connection.execute("INSERT INTO marker (value) VALUES (?)", (value,))
 
 
-def test_engagement_create_web_writes_scope_launchers_and_list_entry(tmp_path: Path) -> None:
+def _isolate_orchestrator_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://127.0.0.1:9")
+
+
+def test_engagement_create_web_writes_scope_launchers_and_list_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement, list_engagements
 
+    _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
 
@@ -75,6 +82,116 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(tmp_path: P
     assert rows[0].target == "https://app.example.com"
 
 
+def test_engagement_create_android_uses_artifact_only_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement, list_engagements
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+    apk_path = tmp_path / "keeper.xapk"
+
+    created = create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="android",
+            artifacts=[str(apk_path)],
+            android_package="com.callpod.android_apps.keeper",
+            dynamic_mode="static_only",
+            hosts=["api.keepersecurity.com"],
+            skip_permissions=True,
+        )
+    )
+
+    scope = json.loads((created.path / "scope.json").read_text(encoding="utf-8"))
+    manifest = json.loads((created.path / "engagement.json").read_text(encoding="utf-8"))
+
+    assert scope["engagement_type"] == "android"
+    assert scope["mobile_platform"] == "android"
+    assert scope["scope_mode"] == "artifact-only"
+    assert scope["hosts"] == []
+    assert scope["backend_hosts"] == ["api.keepersecurity.com"]
+    assert scope["android_package"] == "com.callpod.android_apps.keeper"
+    assert scope["artifacts"] == [str(apk_path)]
+    assert scope["current_phase"] == "ingest"
+    assert manifest["target"] == "com.callpod.android_apps.keeper"
+    assert (created.path / "source").is_dir()
+    assert (created.path / "cases.db").exists()
+    assert list_engagements(install_root)[0].target == "com.callpod.android_apps.keeper"
+
+
+def test_engagement_create_android_cli_accepts_package_positional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "--type",
+            "android",
+            "com.callpod.android_apps.keeper",
+            "--no-prompt",
+        ]
+    )
+
+    created_path = Path(capsys.readouterr().out.strip())
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["engagement_type"] == "android"
+    assert scope["scope_mode"] == "artifact-only"
+    assert scope["hosts"] == []
+    assert scope["android_package"] == "com.callpod.android_apps.keeper"
+
+
+def test_engagement_create_android_cli_infers_apk_without_interactive_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+    apk_path = tmp_path / "keeper.apk"
+
+    class _InteractiveStdin:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(main_module.sys, "stdin", _InteractiveStdin())
+    monkeypatch.setattr(
+        main_module,
+        "_prompt_choice",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected prompt")),
+    )
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "--apk",
+            str(apk_path),
+            "--exploit-policy",
+            "pause",
+        ]
+    )
+
+    created_path = Path(capsys.readouterr().out.strip())
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["engagement_type"] == "android"
+    assert scope["artifacts"] == [str(apk_path)]
+    assert scope["hosts"] == []
+
+
 def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
 
@@ -84,6 +201,7 @@ def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkey
     default_data = install_root / "orchestrator" / "backend" / "data"
     _write_marker_database(custom_data / "orchestrator.sqlite3", "custom")
     _write_marker_database(default_data / "orchestrator.sqlite3", "default")
+    _isolate_orchestrator_url(monkeypatch)
     monkeypatch.delenv("AI_THREAT_HUNTING_DATA_DIR", raising=False)
     monkeypatch.setenv("REDTEAM_ORCHESTRATOR_DATA_DIR", str(custom_data))
 
@@ -340,6 +458,7 @@ def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pyt
 def test_mitmproxy_start_without_arg_uses_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import main as main_module
 
+    _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
     engagement = install_root / "agent" / "engagements" / "eng-1"
     engagement.mkdir(parents=True)
@@ -526,6 +645,7 @@ def test_assess_kali_help_lists_every_typed_verb(capsys: pytest.CaptureFixture[s
 def test_main_assess_passthrough_only_applies_to_top_level_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import main as main_module
 
+    _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
 
@@ -841,9 +961,10 @@ def test_runtime_shell_exec_strips_separator_and_quotes_multiple_parts(monkeypat
     assert calls == [["docker", "exec", "security-research", "sh", "-lc", "printf %s 'a b'"]]
 
 
-def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path) -> None:
+def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import main as main_module
 
+    _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
 
@@ -2437,6 +2558,100 @@ def _run_dispatch_verb(monkeypatch, action: str, *, extra=None, **flags):
     args_dict.update(flags)
     module.run(SimpleNamespace(**args_dict))
     return fake
+
+
+def _dispatch_args(action: str, *, db_path: str | None = None, extra=None, **flags) -> SimpleNamespace:
+    args_dict = {
+        "db_path": action if db_path is None else db_path,
+        "action": "" if db_path is None else action,
+        "extra": list(extra or []),
+        "reason": "",
+        "by": "status",
+        "max_lines": 40,
+        "include_evidence": False,
+        "engagement_dir": None,
+        "agent_id": None,
+        "agent_role": None,
+        "task": None,
+        "skill": None,
+        "scope_host": None,
+        "dispatch_model": None,
+        "reasoning": None,
+        "permission": None,
+        "command_budget": None,
+        "output_schema": None,
+        "dispatch_mode_arg": None,
+        "files_allowed": None,
+        "from_json": None,
+        "dispatch_status": None,
+        "completed_at": None,
+        "finding_slugs": None,
+        "filter_role": None,
+        "filter_since": None,
+        "task_q": None,
+        "dispatch_limit": None,
+        "decision_kind": None,
+        "payload_json": None,
+        "surfaced_to_user": False,
+        "decision_host": None,
+        "decision_vendor": None,
+        "decision_choice": None,
+        "decision_note": None,
+        "decision_phase": None,
+        "hf_summary": None,
+        "hf_confidence": None,
+        "hf_next_steps": None,
+        "hf_coverage_gaps": None,
+        "hf_runtime_issues": None,
+        "hf_working_artifacts": None,
+        "hf_open_questions": None,
+        "hf_recommended_next_agent": None,
+        "hf_extras_json": None,
+    }
+    args_dict.update(flags)
+    return SimpleNamespace(**args_dict)
+
+
+def test_dispatch_backend_actions_reject_cases_db_prefix(capsys: pytest.CaptureFixture[str]) -> None:
+    module = _load_dispatch_module()
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(_dispatch_args("record-handoff", db_path="cases.db"))
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "must not take a cases.db path" in err
+    assert "aith assess dispatch record-handoff" in err
+
+
+def test_dispatch_record_handoff_from_json_rejects_agent_id_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_dispatch_module()
+    payload_path = tmp_path / "handoff.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "agent_id": "stale-local-name",
+                "agent_role": "recon-specialist",
+                "summary": "checkpoint from a local artifact",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            _dispatch_args(
+                "record-handoff",
+                from_json=str(payload_path),
+                agent_id="actual-agent-id",
+            )
+        )
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "does not match explicit --agent-id 'actual-agent-id'" in err
 
 
 def test_dispatch_register_writes_payload(

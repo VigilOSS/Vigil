@@ -68,8 +68,22 @@ def _load_json_arg(value: str | None) -> Any:
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("dispatch", help="Work-buffer dispatch engine")
-    p.add_argument("db_path", help="Path to cases.db (or DBLESS action name)")
+    p = subparsers.add_parser(
+        "dispatch",
+        help="Work-buffer dispatch engine plus backend dispatch registry helpers",
+        usage=(
+            "aith assess dispatch <backend-action> [args...] OR "
+            "aith assess dispatch <cases.db> <work-buffer-action> [args...]"
+        ),
+    )
+    p.add_argument(
+        "db_path",
+        metavar="action_or_db",
+        help=(
+            "Backend action name (register/update-status/list/get/record-decision/"
+            "record-handoff/render-handoff) OR path to cases.db for work-buffer actions"
+        ),
+    )
     p.add_argument(
         "action",
         nargs="?",
@@ -209,9 +223,18 @@ def run(args) -> None:
         action = db_path
         db_path = ""
 
+    if action in _DBLESS_ACTIONS and db_path:
+        print(
+            f"ERROR: dispatch {action} is a backend registry action and must not take a cases.db path.\n"
+            f"Use: aith assess dispatch {action} {' '.join(extra)}".rstrip(),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     if not action:
         print(
-            "Usage: aith assess dispatch <db> <action> [...]\n"
+            "Usage: aith assess dispatch <backend-action> [args...]\n"
+            "       aith assess dispatch <cases.db> <work-buffer-action> [...]\n"
             "       aith assess dispatch render-handoff <agent-id> [--max-lines N] [--include-evidence]",
             file=sys.stderr,
         )
@@ -1557,15 +1580,25 @@ def _build_handoff_payload(args) -> dict:
             print("record-handoff --from-json: file must contain a JSON object", file=sys.stderr)
             sys.exit(1)
         # When --from-json is given we honour it as the authoritative shape,
-        # but we still backfill agent_id/agent_role/summary from CLI flags so
-        # operators can mix-and-match conveniently.
+        # but explicit identity flags are integrity checks. A mismatch usually
+        # means the handoff is about to be written under a label that the
+        # operator cannot retrieve by the actual spawned agent id.
         for key, val in (
             ("agent_id", getattr(args, "agent_id", None)),
             ("agent_role", getattr(args, "agent_role", None)),
             ("summary", getattr(args, "hf_summary", None)),
         ):
-            if val and not loaded.get(key):
-                loaded[key] = val
+            if not val:
+                continue
+            existing = loaded.get(key)
+            if existing and str(existing) != str(val):
+                print(
+                    f"record-handoff: --from-json {key}={existing!r} does not match "
+                    f"explicit --{key.replace('_', '-')} {val!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            loaded[key] = val
         return loaded
 
     payload: dict[str, Any] = {}

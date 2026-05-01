@@ -585,19 +585,19 @@ the canonical record of it.
 1. `aith assess record-finding <role> <finding-json>` per finding.
 2. `aith assess record-intel <type> <intel-json>` per intel row.
 3. `aith assess record-surface <surface-json>` per surface candidate.
-4. `aith assess dispatch record-handoff --from-json <path>` to capture
-   summary, coverage gaps, next steps, runtime issues, working artifacts, open
-   questions, and any specialty extras.
+4. `aith assess dispatch record-handoff --from-json <path>` — use the exact
+   `agent_id`, `agent_role`, and `phase` values from the **Runtime Identity block**
+   the operator placed at the top of your dispatch prompt. The handoff row is keyed
+   on `agent_id`; using a different value creates an orphaned row the operator cannot render.
+5. `aith assess dispatch render-handoff <agent_id>` — run after step 4 as a self-check.
+   Exit only after the render succeeds. A 404 means the `agent_id` in step 4 did not
+   match the registered dispatch.
 
-Step 4 is the canonical "what was done / what's missing / what's next" record.
-Skipping it means the operator has no structured record to feed into the next dispatch.
+`update-status` is operator-only — do not call it; the operator marks the dispatch
+complete after your return.
 
-Step 4's `record-handoff` is idempotent — call it incrementally after each
-major step in your methodology, not only at the end. See
-`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for the
-pattern and per-role cadence.
-
-Schema for the `--from-json` payload: `agent/references/runtime-guides/handoff-schema.md`.
+`record-handoff` is idempotent — call it as a checkpoint after each major step, not
+only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md` "Checkpointing".
 
 ### Reasoning quality > response brevity
 

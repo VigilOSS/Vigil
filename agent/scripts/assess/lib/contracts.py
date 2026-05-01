@@ -1129,6 +1129,7 @@ def _dispatch_root_contract() -> CommandContract:
             "aith assess dispatch <db_path> stats|fetch|done|...",
             "aith assess dispatch register --agent-id <id> --agent-role <role> ...",
             "aith assess dispatch update-status <agent-id> --status completed",
+            "aith assess dispatch record-handoff --agent-id <id> --agent-role <role> --summary '...'",
             "aith assess dispatch list [--role <role>] [--status <status>]",
             "aith assess dispatch render-handoff <agent-id>",
             "aith assess contract dispatch render-handoff",
@@ -1142,7 +1143,7 @@ def _dispatch_root_contract() -> CommandContract:
             "Work-buffer actions (stats/fetch/done/peek/defer-cluster/defer-items/error/"
             "reset-stale/retry-errors/migrate/requeue) require <db_path> as the first "
             "positional. Operator-glue actions (register, update-status, list, get, "
-            "record-decision, record-handoff, render-handoff) do not.",
+            "record-decision, record-handoff, render-handoff) reject a cases.db prefix.",
             "Dispatch state lives in the orchestrator backend. Use `register` to log a dispatch, `update-status` "
             "to mark it complete, `record-handoff` to durably record the agent's exit "
             "payload, and `render-handoff` to assemble the blob the next dispatch prompt "
@@ -1155,6 +1156,12 @@ def _dispatch_root_contract() -> CommandContract:
                 "use `aith assess dispatch render-handoff <prior-agent-id>` and paste the "
                 "rendered blob verbatim — the helper pulls findings, artifacts, and "
                 "credentials from durable state so the prompt stays small",
+            ),
+            (
+                "stale local DB syntax",
+                "backend dispatch actions use `aith assess dispatch record-handoff ...`; "
+                "`aith assess dispatch cases.db record-handoff ...` is rejected so handoffs "
+                "cannot be written to the wrong state surface",
             ),
         ),
     )

@@ -125,13 +125,16 @@ def main(argv: list[str] | None = None) -> None:
     engagement_sub.add_parser("list").add_argument("--json", action="store_true")
     create_p = engagement_sub.add_parser("create")
     create_p.add_argument("target_or_name", nargs="?")
-    create_p.add_argument("--type", choices=["web", "code", "both"], default=None)
+    create_p.add_argument("--type", choices=["web", "code", "both", "android"], default=None)
     create_p.add_argument("--name")
     create_p.add_argument("--target")
     create_p.add_argument("--hosts")
     create_p.add_argument("--auth-mode", choices=["none", "manual", "auth_json", "proxy_capture"], default=None)
     create_p.add_argument("--exploit-policy", choices=["pause", "full_send", "selected"], default=None)
     create_p.add_argument("--repo", action="append", default=[])
+    create_p.add_argument("--apk", action="append", default=[], help="Android APK/AAB/XAPK artifact path")
+    create_p.add_argument("--package-name", help="Android package name, for example com.example.app")
+    create_p.add_argument("--dynamic-mode", choices=["static_only", "device", "emulator"], default="static_only")
     create_p.add_argument("--skip-permissions", action="store_true")
     create_p.add_argument("--no-prompt", action="store_true")
     path_p = engagement_sub.add_parser("path")
@@ -422,14 +425,30 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         engagement_type = args.type
         positional = args.target_or_name
         if engagement_type is None:
-            if not args.no_prompt and sys.stdin.isatty() and not positional and not args.hosts and not args.repo:
-                engagement_type = _prompt_choice("Engagement type", "web", ["web", "code", "both"])
+            if not args.no_prompt and sys.stdin.isatty() and not positional and not args.hosts and not args.repo and not args.apk:
+                engagement_type = _prompt_choice("Engagement type", "web", ["web", "code", "both", "android"])
             else:
-                engagement_type = "web" if (args.hosts or (positional and _looks_like_web_target(positional))) else "code"
+                engagement_type = (
+                    "android"
+                    if (args.apk or (positional and _looks_like_android_artifact(positional)))
+                    else "web" if (args.hosts or (positional and _looks_like_web_target(positional)))
+                    else "code"
+                )
         target = args.target
         name = args.name
+        artifacts = list(args.apk or [])
+        android_package = args.package_name
         if positional:
-            if engagement_type == "code" and not name:
+            if engagement_type == "android" and _looks_like_android_artifact(positional):
+                if positional not in artifacts:
+                    artifacts.insert(0, positional)
+                if not name:
+                    name = Path(positional).name
+            elif engagement_type == "android":
+                android_package = android_package or positional
+                if not name:
+                    name = positional
+            elif engagement_type == "code" and not name:
                 name = positional
             elif not target:
                 target = positional
@@ -438,6 +457,8 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
             if engagement_type in {"web", "both"} and not target and not hosts:
                 target = input("Target URL or host: ").strip()
             if engagement_type in {"code", "both"} and not name:
+                name = input("Engagement name: ").strip()
+            if engagement_type == "android" and not name and not args.package_name and not artifacts:
                 name = input("Engagement name: ").strip()
             if engagement_type in {"web", "both"} and args.auth_mode is None:
                 args.auth_mode = _prompt_choice("Auth mode", "none", ["none", "auth_json", "manual", "proxy_capture"])
@@ -455,6 +476,9 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
                 auth_mode=auth_mode,
                 exploit_policy=exploit_policy,
                 repos=args.repo,
+                artifacts=artifacts,
+                android_package=android_package,
+                dynamic_mode=args.dynamic_mode,
                 skip_permissions=args.skip_permissions,
             )
         )
@@ -497,6 +521,10 @@ def _looks_like_web_target(value: str) -> bool:
         return True
     except ValueError:
         return "." in host
+
+
+def _looks_like_android_artifact(value: str) -> bool:
+    return Path(value).suffix.lower() in {".apk", ".aab", ".xapk", ".apks"}
 
 
 def _orchestrator(args: argparse.Namespace, install_root: Path) -> None:

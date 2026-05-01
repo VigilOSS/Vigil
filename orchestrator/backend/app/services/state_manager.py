@@ -4767,6 +4767,23 @@ def record_handoff(
         )
     created_at = _utcnow_iso_dispatch()
     with get_connection() as connection:
+        dispatch_row = connection.execute(
+            "SELECT agent_role FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, agent_id),
+        ).fetchone()
+        if dispatch_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"dispatch not found for handoff agent_id={agent_id!r}",
+            )
+        if str(dispatch_row["agent_role"]) != str(agent_role):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"agent_role mismatch: handoff agent_role={agent_role!r} does not match registered "
+                    f"dispatch role={dispatch_row['agent_role']!r}"
+                ),
+            )
         existing = connection.execute(
             "SELECT id FROM assessment_dispatch_handoffs WHERE engagement_id = ? AND agent_id = ?",
             (engagement.id, agent_id),
@@ -4829,6 +4846,15 @@ def update_handoff(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
+        dispatch_row = connection.execute(
+            "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, agent_id),
+        ).fetchone()
+        if dispatch_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"dispatch not found for handoff agent_id={agent_id!r}",
+            )
         existing = connection.execute(
             "SELECT * FROM assessment_dispatch_handoffs WHERE engagement_id = ? AND agent_id = ?",
             (engagement.id, agent_id),

@@ -72,6 +72,7 @@ Before your dispatch returns, run in this order:
 2. `aith assess record-surface <surface-json>` for any new surface fuzzing uncovered (newly-evidenced parameter, hidden directory, etc.)
 3. `aith assess ingest-endpoints "$DIR/cases.db" fuzzer` for newly discovered paths
 4. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at the raw fuzzer hit log under `$DIR/scans/fuzzer/`), and role-specific extras (`payloads_tried`, `hits`, `hit_ratio`)
+5. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
