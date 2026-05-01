@@ -157,6 +157,23 @@ Every dispatch must include:
   - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `aith assess fetch` — pass all B candidates (chain-target endpoints) through, since pre-filtering hides chain opportunities
   - For `report-writer`: no finding context needed — the agent queries `report-findings?mode=final` for final reports or `report-findings?mode=draft` for interim reports
 
+### Runtime Identity Block
+
+Every dispatch prompt must include a Runtime Identity block so the specialist can use the exact values in its closing sequence:
+
+```
+## Runtime Identity
+agent_id: <actual-id-from-register-or-spawn>
+agent_role: <role>
+authorized_phase: <phase>
+```
+
+The operator obtains `agent_id` by:
+- **Claude Code**: use the id passed to `dispatch register --agent-id <id>` — choose a unique string per dispatch (e.g. `recon-a3f9`).
+- **Codex**: use the id returned by `spawn_agent`.
+
+Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting. A 404 from render-handoff means the `agent_id` in the handoff does not match the registered dispatch.
+
 ### Specialist Dispatch Contract
 
 Every dispatch declares an explicit contract. The contract is what bounds the specialist's
@@ -262,7 +279,7 @@ If any gate fails, dispatch a new agent (or re-dispatch the same role) with the 
 
 Every dispatch launches a fresh agent — treat each dispatch as a clean-room environment that inherits only what the operator explicitly hands it. Session tokens, discovered endpoints, partial PoC steps, and next-step plans travel through the dispatch prompt and durable state (backend records, engagement files), because the harness rebuilds subagent context from those sources on each launch.
 
-**Specialist closing sequence** — every specialist writes a structured handoff before its dispatch returns: `aith assess dispatch record-handoff --from-json <path>`. The handoff captures summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras. This row is canonical for "what was done, what's missing, what's next" — schema in `agent/references/runtime-guides/handoff-schema.md`.
+**Specialist closing sequence** — every specialist writes a structured handoff before its dispatch returns: (1) `aith assess dispatch record-handoff --from-json <path>` using the `agent_id` from the Runtime Identity block, then (2) `aith assess dispatch render-handoff <agent_id>` as a self-check — exit only after the render succeeds (404 → `agent_id` mismatch). The handoff captures summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras. This row is canonical for "what was done, what's missing, what's next" — schema in `agent/references/runtime-guides/handoff-schema.md`.
 
 **Operator dispatch tracking** — when the operator launches a specialist, register the dispatch:
 

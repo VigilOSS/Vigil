@@ -356,14 +356,22 @@ aith assess code-record-analysis <analysis-json>
 # Preview the exact completion payload before committing queue history when unsure
 aith assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
 
+# cwe-coverage-json must be a file path, not inline JSON. Create it before the done call:
+cat > /tmp/cwe_<item-id>.json <<'JSON'
+[{"cwe": "CWE-122", "chains_traced": 3, "chains_total": 3, "verdict": "clean"}]
+JSON
+
 # Mark one file done with structured cwe_coverage after the payload is correct
-aith assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"]
+aith assess code-dispatch done <item-id> <clean|finding|suspicious> /tmp/cwe_<item-id>.json ["notes"]
 
 # Record any findings
 aith assess record-finding code-vuln-hunter <finding-json>
 
 # Process cross-file triggers (if analysis returned any)
 aith assess code-dispatch requeue-triggers <triggers-json>
+
+# Before fetching the next batch, reset items stuck in-progress:
+aith assess code-dispatch reset-stale 10
 ```
 
 Use `code-dispatch done` with one of `clean`, `finding`, or `suspicious`, because the queue
@@ -848,6 +856,23 @@ Every code analysis dispatch must include:
   manifest, threat model, call graph — fuzz engineer reads these directly), source repo root,
   build system type, compiler availability, existing fuzzer inventory paths, CWE pattern refs
   (buffer-overflow, integer-overflow, use-after-free, uninitialized-memory, fuzz-harness-patterns)
+
+### Runtime Identity Block
+
+Every code-analysis dispatch prompt must include a Runtime Identity block so the specialist can use the exact values in its closing sequence:
+
+```
+## Runtime Identity
+agent_id: <actual-id-from-register-or-spawn>
+agent_role: <role>
+authorized_phase: <phase>
+```
+
+The operator obtains `agent_id` by:
+- **Claude Code**: use the id passed to `dispatch register --agent-id <id>` — choose a unique string per dispatch (e.g. `hunt-b7c2`).
+- **Codex**: use the id returned by `spawn_agent`.
+
+Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting.
 
 ### Pre-Dispatch Checklist
 

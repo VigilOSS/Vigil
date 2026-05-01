@@ -263,6 +263,7 @@ Before your dispatch returns, run in this order:
 2. `aith assess record-intel <type> <intel-json>` for each intel row (already required)
 3. `aith assess record-surface <surface-json>` for each surface candidate (already required)
 4. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `live_host_count`, `egress_block_pct`, `wildcard_subs_resolved`)
+5. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. The handoff row IS the next dispatch's input. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.

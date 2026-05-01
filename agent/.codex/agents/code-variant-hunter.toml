@@ -134,6 +134,7 @@ Before your dispatch returns, run in this order:
 
 1. `aith assess record-finding code-variant-hunter <finding-json>` per variant finding (each with `links.variant_of` pointing at the parent slug)
 2. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps (verifier dispatch on the new variants), runtime issues, working artifacts, open questions, and role-specific extras (`parent_finding`, `variants_found`, `files_scanned`)
+3. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.

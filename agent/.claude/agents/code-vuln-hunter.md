@@ -547,6 +547,7 @@ Before your dispatch returns, run in this order:
 1. `aith assess record-finding code-vuln-hunter <finding-json>` per finding
 2. `aith assess code-record-analysis <analysis-json>` per file (carries dispositions, CWE coverage, cross-file triggers)
 3. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
+4. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.

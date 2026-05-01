@@ -445,6 +445,8 @@ cat > /tmp/handoff-recon-a3f9.json <<'JSON'
 JSON
 
 aith assess dispatch record-handoff --from-json /tmp/handoff-recon-a3f9.json
+# Self-check: confirm the row is readable before exiting (404 → agent_id mismatch)
+aith assess dispatch render-handoff a3f9
 ```
 
 For simple cases (one or two findings, no nested fields), flag-based alternatives

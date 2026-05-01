@@ -195,6 +195,16 @@ Finding JSON must include:
 
 All findings from fuzz campaigns use the CF prefix: `CF-001`, `CF-002`, etc.
 
+## Mandatory Closing Sequence
+
+Before your dispatch returns, run in this order:
+
+1. `aith assess record-finding code-fuzz-engineer <finding-json>` for each confirmed crash finding.
+2. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (harness paths, crash inputs, campaign configs), open questions, and role-specific extras (`crash_count`, `harnesses_written`, `campaigns_run`, `false_positive_count`). Use the exact `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the operator placed at the top of your dispatch prompt.
+3. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+
+`record-handoff` is idempotent — checkpoint after each major campaign stage, not only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md`.
+
 ## Handoffs
 
 - **code-vuln-verifier** (via operator): True findings from crash triage are passed to the

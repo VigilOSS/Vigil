@@ -34,6 +34,10 @@ def _copy_agent_fixture(agent_root: Path, sandbox_root: Path, *, client: str) ->
     shutil.copy2(agent_root / "SKILL.md", sandbox_root / "SKILL.md")
 
 
+def _isolate_orchestrator_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://127.0.0.1:9")
+
+
 class _StubBackendHandler(BaseHTTPRequestHandler):
     """Tiny in-process backend that mimics /admin/install-root + /admin/sync-engagements
     so the install-root drift fail-fast logic in `aith engagement create` can be
@@ -294,7 +298,8 @@ def test_aith_engagement_create_skips_drift_check_when_backend_unreachable(tmp_p
     assert (created.path / "scope.json").exists()
 
 
-def test_aith_engagement_create_writes_explicit_web_scope(tmp_path: Path) -> None:
+def test_aith_engagement_create_writes_explicit_web_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_orchestrator_url(monkeypatch)
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
     sandbox_root = install_root / "agent"
@@ -332,7 +337,8 @@ def test_aith_engagement_create_writes_explicit_web_scope(tmp_path: Path) -> Non
     assert (created.path / ".codex" / "config.toml").exists()
 
 
-def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path) -> None:
+def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate_orchestrator_url(monkeypatch)
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
     sandbox_root = install_root / "agent"
@@ -371,8 +377,9 @@ def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path) -> Non
     assert not (created.path / "start_codex.sh").exists()
 
 
-def test_aith_engagement_create_emits_scope_summary(tmp_path: Path, capsys) -> None:
+def test_aith_engagement_create_emits_scope_summary(tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
     """Bootstrap should print a one-line scope summary."""
+    _isolate_orchestrator_url(monkeypatch)
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
     sandbox_root = install_root / "agent"
@@ -395,10 +402,11 @@ def test_aith_engagement_create_emits_scope_summary(tmp_path: Path, capsys) -> N
 
 
 def test_aith_engagement_create_no_warning_under_wildcard_only_scope(
-    tmp_path: Path, capsys
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Wildcard scope admits the bare apex (HackerOne / Bugcrowd / VDP convention),
     so bootstrap emits no apex warning."""
+    _isolate_orchestrator_url(monkeypatch)
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
     sandbox_root = install_root / "agent"
@@ -419,8 +427,11 @@ def test_aith_engagement_create_no_warning_under_wildcard_only_scope(
     assert "wildcard-only entries lacking explicit apex" not in err
 
 
-def test_aith_engagement_create_no_warning_when_apex_listed_alongside_wildcard(tmp_path: Path, capsys) -> None:
+def test_aith_engagement_create_no_warning_when_apex_listed_alongside_wildcard(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """No warning when both apex and wildcard are listed (operator-confirmed apex inclusion)."""
+    _isolate_orchestrator_url(monkeypatch)
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
     sandbox_root = install_root / "agent"
@@ -485,7 +496,9 @@ def test_aith_start_codex_exports_engagement_environment(tmp_path: Path) -> None
     assert "ORCHESTRATOR_BASE_URL=https://override.example.test" in launch.stdout
 
 
-def test_aith_engagement_create_does_not_write_agent_name_to_env_file(tmp_path: Path) -> None:
+def test_aith_engagement_create_does_not_write_agent_name_to_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Round 9: AGENT_NAME is NOT planted in the per-engagement env file.
 
     The default-to-"operator" fallback now lives in
@@ -494,6 +507,7 @@ def test_aith_engagement_create_does_not_write_agent_name_to_env_file(tmp_path: 
     plumbing. Specialist dispatch wrappers still export AGENT_NAME=<role>
     explicitly when they launch a subagent.
     """
+    _isolate_orchestrator_url(monkeypatch)
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
     sandbox_root = install_root / "agent"
@@ -516,13 +530,14 @@ def test_aith_engagement_create_does_not_write_agent_name_to_env_file(tmp_path: 
     )
 
 
-def test_aith_launchers_do_not_export_agent_name_default(tmp_path: Path) -> None:
+def test_aith_launchers_do_not_export_agent_name_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Round 9: start_*.sh launchers no longer source AGENT_NAME from env files.
 
     The default-to-"operator" behavior moved into kali.py; the launcher only
     handles ORCHESTRATOR_BASE_URL now. Specialist dispatch wrappers continue
     to override AGENT_NAME explicitly.
     """
+    _isolate_orchestrator_url(monkeypatch)
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
     sandbox_root = install_root / "agent"
@@ -546,7 +561,9 @@ def test_aith_launchers_do_not_export_agent_name_default(tmp_path: Path) -> None
         )
 
 
-def test_aith_launchers_respect_explicit_agent_name_override(tmp_path: Path) -> None:
+def test_aith_launchers_respect_explicit_agent_name_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A parent-shell AGENT_NAME export still flows through to the LLM session.
 
     Specialist dispatch wrappers export AGENT_NAME=<role> before launching the
@@ -554,6 +571,7 @@ def test_aith_launchers_respect_explicit_agent_name_override(tmp_path: Path) -> 
     parent-shell export still inherits naturally because we use ``exec`` in
     the launcher.
     """
+    _isolate_orchestrator_url(monkeypatch)
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"
     sandbox_root = install_root / "agent"

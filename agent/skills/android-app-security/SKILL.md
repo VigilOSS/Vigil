@@ -31,11 +31,20 @@ Use four app-level attackers: network observer with proxy control, co-installed 
 
 ### 3. Static Triage
 
-- Preflight runtime tooling with the generic audited route: `aith assess kali exec --technique HEALTH --intent "Android APK tooling inventory" --probe-kind fingerprint --phase code-ingest --timeout 60 -- which apktool jadx adb bundletool apksigner`. Use `HEALTH` for tool inventory — unknown technique tags are rejected before an audit row is written, so invented tags like `TOOL-INVENTORY` create no records and leave coverage gaps.
-- Decode resources and manifest with `apktool`; decompile Java/Kotlin with `jadx`.
+- Preflight runtime tooling: `aith assess kali exec --technique HEALTH --intent "Android APK tooling inventory" --probe-kind fingerprint --phase code-ingest --timeout 60 -- which apktool jadx aapt2 apkid apkeep adb bundletool apksigner`. Use `HEALTH` for tool inventory — unknown tags are rejected before an audit row is written. If `apkeep` is present, use it for Play Store APK acquisition (`apkeep -a <package> -d apk .`); otherwise pull via `adb` from an authorized device or request a direct download.
+- Decode resources and manifest with `apktool`; decompile Java/Kotlin with `jadx`. When `jadx` fails or produces empty output on coroutine-heavy or state-machine code (Kotlin suspend functions, generated lambda classes), fall back to the `apktool` smali output — read the smali directly and note the decompiler gap. When line mapping is absent in jadx output, use `line: null` in finding `canonical_location` (e.g. `file:com/example/Auth.java:null`) rather than guessing a line number.
 - Inspect `AndroidManifest.xml`, exported activities/services/receivers/providers, permissions, app links, deep links, pending intents, backup settings, debuggability, network security config, and SDK-added components.
 - Search decompiled code for API bases, auth logic, WebView setup, crypto primitives, Keystore calls, root/emulator checks, JNI registration, native library loading, logging, and feature flags.
 - Inventory `.so` libraries by ABI and send parser, crypto, compression, media, and RASP libraries to native analysis.
+
+### Dynamic Mode Declaration
+
+Before dynamic analysis, declare the test environment:
+- **Device**: physical owned/authorized Android device (required for Play Integrity, hardware-backed Keystore, NFC, and anti-emulator bypasses)
+- **Emulator/AVD**: Android Virtual Device (sufficient for most API-level and storage tests; not valid for hardware-backed attestation or root-detection bypass)
+- **Static-only**: no dynamic analysis available for this dispatch
+
+Record the mode in the handoff `extras` field (`{"dynamic_mode": "device"|"emulator"|"static-only"}`). If `static-only`, note any dynamic gaps in `coverage_gaps`.
 
 ### 4. Dynamic Triage
 

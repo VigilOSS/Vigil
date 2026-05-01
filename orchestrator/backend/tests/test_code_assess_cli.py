@@ -964,6 +964,32 @@ def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypa
     assert excinfo.value.code == 1
 
 
+def test_code_dispatch_reset_stale_rejects_zero_before_backend(monkeypatch, tmp_path, capsys):
+    module = _load_code_dispatch_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise AssertionError("reset-stale 0 must not call the backend")
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(SimpleNamespace(action="reset-stale", extra=["0"], engagement_dir=tmp_path))
+
+    assert excinfo.value.code == 1
+    assert "minutes >= 1" in capsys.readouterr().err
+
+
 def test_post_accepts_inline_json_payload(monkeypatch, capsys):
     module = _load_post_module()
 

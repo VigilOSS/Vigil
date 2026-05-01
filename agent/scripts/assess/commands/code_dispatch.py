@@ -72,7 +72,11 @@ def run(args) -> None:
         if not extra:
             print("Usage: code-dispatch reset-stale <minutes>", file=sys.stderr)
             sys.exit(1)
-        _reset_stale(cfg, int(extra[0]))
+        minutes = int(extra[0])
+        if minutes < 1:
+            print("ERROR: code-dispatch reset-stale requires minutes >= 1", file=sys.stderr)
+            sys.exit(1)
+        _reset_stale(cfg, minutes)
     elif action == "queue":
         if not extra:
             print("Usage: code-dispatch queue <queue-items-json-file>", file=sys.stderr)
