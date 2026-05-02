@@ -101,7 +101,7 @@ The `code-index` command:
 Output: `tools/analysis-state/structural-index/` directory with per-file JSON + manifest.
 
 ```bash
-jq '.current_phase = "classify-map"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+aith assess transition-phase classify-map
 ```
 
 Exit: All files inventoried. ctags symbol index generated if ctags is available. Structural index generated. Transition to Phase 1.
@@ -188,7 +188,7 @@ in the call graph become blind spots for every downstream phase. Missing files i
 become permanently invisible to the analysis pipeline.
 
 ```bash
-jq '.current_phase = "hunt"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+aith assess transition-phase hunt
 ```
 
 Exit: Every file classified. Threat model recorded. Call graph recorded with entry-point chains.
@@ -511,7 +511,7 @@ confirmed findings, not investigation of incomplete ones.
 **Phase 2 exit:** both 2A and 2B gates pass, AND no unresolved suspicious findings remain.
 
 ```bash
-jq '.current_phase = "verify-variant"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+aith assess transition-phase verify-variant
 ```
 
 Exit: All critical/high files analyzed with effort thresholds met. CWE coverage gaps closed
@@ -647,7 +647,7 @@ aith assess merge-finding <source-slug> <target-slug> "<reason>"
 
 **Phase 3 exit:**
 ```bash
-jq '.current_phase = "fuzz"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+aith assess transition-phase fuzz
 ```
 
 Exit: All findings verified. Variant scan complete. Transition to Phase 4 (Fuzz) if the
@@ -797,7 +797,7 @@ ls tools/fuzz-state/reports/*-triage.json
 - [ ] Campaign summary written to `tools/fuzz-state/reports/campaign-summary.json`
 
 ```bash
-jq '.current_phase = "complete"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+aith assess transition-phase complete
 ```
 
 **Report dispatch:**

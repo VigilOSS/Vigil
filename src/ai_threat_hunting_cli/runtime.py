@@ -49,7 +49,12 @@ def start_runtime(
     engagements_dir.mkdir(parents=True, exist_ok=True)
 
     if not docker.image_exists(options.image, runner=runner):
-        raise SystemExit(f"Missing runtime image: {options.image}. Run `aith runtime build` first.")
+        raise SystemExit(
+            f"Missing runtime image: {options.image}. Run `aith runtime build` first.\n"
+            "The runtime is only needed for target-facing Kali tools. Backend state reads/writes "
+            "use the orchestrator service; run `aith orchestrator status` or "
+            "`aith orchestrator start` if that is what you need."
+        )
 
     if docker.container_running(options.container_name, runner=runner) and not options.recreate:
         _validate_image_current(options, runner=runner)

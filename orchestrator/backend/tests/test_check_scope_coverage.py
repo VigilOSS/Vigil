@@ -1025,7 +1025,7 @@ def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeyp
             "id": 1,
             "kind": "scope_decision",
             "payload": {
-                "host": "vendor-saas-platform.example.test",
+                "target": "vendor-saas-platform.example.test",
                 "vendor": "vendor-saas-platform",
                 "choice": "in_scope",
             },
@@ -1085,4 +1085,3 @@ def test_vendor_saas_explicit_literal_in_scope_skips_gate(monkeypatch, tmp_path:
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
     assert report["vendor_saas_pending_decision"] == []
-

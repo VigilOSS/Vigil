@@ -311,6 +311,30 @@ def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
     assert "ORCHESTRATOR_BASE_URL=http://host.docker.internal:18000" in run_command
 
 
+def test_runtime_start_missing_image_points_to_orchestrator_for_backend_state(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    install_root = tmp_path / "install"
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(1, "", "missing")
+        if argv[:4] == ["docker", "inspect", "--type", "image"]:
+            return DockerResult(1, "", "missing")
+        if argv[:3] == ["docker", "images", "-q"]:
+            return DockerResult(0, "", "")
+        return DockerResult(0, "", "")
+
+    with pytest.raises(SystemExit) as exc_info:
+        start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
+
+    message = str(exc_info.value)
+    assert "Missing runtime image" in message
+    assert "aith runtime build" in message
+    assert "aith orchestrator status" in message
+
+
 def test_runtime_start_grants_sys_ptrace_capability(tmp_path: Path) -> None:
     """B2: runtime diagnostic tooling needs CAP_SYS_PTRACE; the docker-run argv
     must request it explicitly so ptrace operations do not fail with EPERM."""
@@ -2457,7 +2481,7 @@ class _CapturingClient:
 
     def record_dispatch(self, payload: dict) -> dict:
         self.recorded.append(payload)
-        row = {"id": 1, "agent_id": payload.get("agent_id"), "status": payload.get("status", "in-progress")}
+        row = {"id": 1, **payload, "status": payload.get("status", "in-progress")}
         self.dispatches_by_id[row["agent_id"]] = row
         return row
 
@@ -2683,6 +2707,109 @@ def test_dispatch_register_writes_payload(
     assert body["status"] == "in-progress"
     assert fake.recorded[0]["agent_role"] == "vulnerability-analyst"
     assert fake.recorded[0]["dispatch_mode"] == "item-iterating"
+
+
+def test_dispatch_register_warns_on_structured_overlap(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_dispatch_module()
+    fake = _CapturingClient()
+    fake.dispatches_by_id["AG-OLD"] = {
+        "id": 1,
+        "agent_id": "AG-OLD",
+        "agent_role": "vulnerability-analyst",
+        "status": "in-progress",
+        "finding_slugs": ["VA-001"],
+        "task": "Older exploitation attempt",
+    }
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+
+    module.run(
+        _dispatch_args(
+            "register",
+            agent_id="AG-NEW",
+            agent_role="vulnerability-analyst",
+            task="Follow-up exploitation attempt",
+            finding_slugs="VA-001",
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "WARN dispatch register" in err
+    assert "same finding_slugs: VA-001" in err
+    assert fake.recorded[0]["agent_id"] == "AG-NEW"
+
+
+def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_dispatch_module()
+    fake = _CapturingClient()
+    fake.dispatches_by_id["AG-OLD"] = {
+        "id": 1,
+        "agent_id": "AG-OLD",
+        "agent_role": "vulnerability-analyst",
+        "status": "in-progress",
+        "scope_host": "app.example.test",
+        "permission": "target-facing",
+        "dispatch_mode": "hypothesis-driven",
+        "task": "Review password reset flows",
+    }
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+
+    module.run(
+        _dispatch_args(
+            "register",
+            agent_id="AG-NEW",
+            agent_role="vulnerability-analyst",
+            scope_host="app.example.test",
+            permission="target-facing",
+            dispatch_mode_arg="hypothesis-driven",
+            task="Review account deletion flows",
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "WARN dispatch register" not in err
+    assert fake.recorded[0]["agent_id"] == "AG-NEW"
+
+
+def test_dispatch_abort_duplicate_marks_row_and_records_decision(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "abort-duplicate",
+        extra=["AG-DUP"],
+        replacement_agent_id="AG-KEEP",
+        reason="same exploit review was registered twice",
+    )
+
+    assert fake.patches[0][0] == "AG-DUP"
+    assert fake.patches[0][1]["status"] == "aborted"
+    decision = fake.decisions_recorded[0]
+    assert decision["kind"] == "dispatch_duplicate"
+    assert decision["payload"]["replacement_agent_id"] == "AG-KEEP"
 
 
 def test_dispatch_update_status_marks_completed(

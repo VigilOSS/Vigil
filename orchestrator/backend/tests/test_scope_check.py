@@ -270,6 +270,45 @@ def test_filter_scope_streams_stdin(monkeypatch, tmp_path: Path, capsys) -> None
     ]
 
 
+def test_filter_scope_allows_same_file_output(monkeypatch, tmp_path: Path) -> None:
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text(
+        json.dumps({"hosts": ["target.example"]}),
+        encoding="utf-8",
+    )
+    input_file = engagement_dir / "input.txt"
+    input_file.write_text(
+        "https://target.example/a\nhttps://other.example/b\nhttps://target.example/c\n",
+        encoding="utf-8",
+    )
+
+    module = _load_filter_scope_module()
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir_flag=None: SimpleNamespace(
+            engagement_dir=str(engagement_dir),
+            engagement_key="eng",
+            base_url="http://example.test",
+        ),
+    )
+    monkeypatch.setattr(module, "_vendor_saas_decided_hosts", lambda _cfg: set())
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=str(engagement_dir),
+            input_file=str(input_file),
+            output=str(input_file),
+        )
+    )
+
+    assert input_file.read_text(encoding="utf-8").splitlines() == [
+        "https://target.example/a",
+        "https://target.example/c",
+    ]
+
+
 def test_idn_apex_a_label_url_matches_u_label_scope(monkeypatch, tmp_path: Path, capsys) -> None:
     """U-label scope entries must match A-label (punycode) URLs and vice versa."""
     engagement_dir = tmp_path / "engagement"

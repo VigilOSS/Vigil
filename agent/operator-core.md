@@ -322,7 +322,7 @@ DB="$DIR/cases.db"
    - **Review clusters, defer low-signal ones** — `aith assess list-clusters "$DIR/cases.db"` prints cluster counts, max/avg priority, and representative URLs. Any cluster that is clearly not worth specialist attention (e.g., 10k static-asset URLs, out-of-scope-adjacent paths, already-covered admin endpoints) gets deferred with `aith assess dispatch "$DIR/cases.db" defer-cluster <cluster_key> --reason "…"` before Phase 3 begins — leaving low-signal clusters pending pollutes the priority queue and forces specialists to re-triage what the operator already judged.
    Surface-collector records surfaces via `aith assess record-surface` and findings via `aith assess record-finding` before returning.
    **Phase 2 exit gate.** Run `aith assess check-scope-coverage --require-stage collection`. Every scoped entry must have collection evidence — a recorded surface or a work-buffer row under its host. If an entry has neither, redispatch surface-collector against it or mark the entry deferred in `scope.json` before advancing. Skipping this gate lets scope-entries drift into Phase 3 with zero work in the buffer.
-   Update scope.json phase to `consume-test` when ingestion is complete.
+   Transition phase: `aith assess transition-phase consume-test` (checks work-buffer, scope coverage).
 3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
    a. **Nuclei coverage audit** (once, before the work-buffer loop) — audit what Phase 1/2 reactive sweeps already covered and run nuclei only against gaps. Do not blindly re-sweep: if every in-scope live host already received the reactive template set, this step prints a coverage summary and advances.
       1. Build the coverage set: `aith assess list-command-runs --q nuclei --tool-bin nuclei` → jq-extract each prior run's input-list path and template tag(s).
@@ -370,7 +370,7 @@ DB="$DIR/cases.db"
       `aith assess merge-finding <source-slug> <target-slug> "<reason>"`
    f. **Chain-only primitives stay in the normal finding table**: when a finding is real only as part of a proved or expected escalation path, update it with `aith assess update-finding <slug> ...` so `details.chain_required`, `details.chain_rationale`, and `details.required_followup` are populated. Do not invent a chain-specific workflow status.
    g. **Exit gate**: all HIGH/CRITICAL findings have a verification disposition. If the reviewer kills >50% of findings, review whether Phase 3 agents are producing speculative findings — tighten dispatch context for future engagements.
-   Update scope.json phase to `exploit` when verification completes.
+   Transition phase: `aith assess transition-phase exploit` (checks unverified high/critical findings).
 5. **EXPLOIT** →
    a. Dispatch osint-analyst with `agent/skills/osint-recon/SKILL.md` — intelligence gathering is always permitted regardless of `exploit_policy`. Feed the tech stack, domains, and people data via `aith assess list-intel tech-component`, `aith assess list-intel domain`, and `aith assess list-intel person` (or `aith assess fetch intel` for the summary).
    b. Respect `exploit_policy` from `scope.json` for exploit-developer dispatch. Use `aith assess review-exploits` to inspect the current backend candidate set and `aith assess check-exploit-gate` before launching work:
@@ -384,13 +384,15 @@ DB="$DIR/cases.db"
 7. **REPORT** → keep reporting inside the existing `report` phase; use a draft → QA → publish gate so the report is reviewed before lifecycle state changes.
    a. **Draft:** for a final report, run `aith assess check-report-readiness` first and resolve blockers before dispatch. Dispatch `report-writer` in draft-generation mode. Report-writer queries the backend directly for `report-findings?mode=final` on final reports or `report-findings?mode=draft` on interim reports, plus `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — let it self-serve rather than manually assembling findings context, since manual assembly risks stale or incomplete data. Draft-generation mode writes `report.md`, runs the 12-step self-review in `agent/skills/report-generation/SKILL.md`, fixes any local report issues it finds, and returns the completed checklist. It does not emit `report.generated` or mark findings `reported`.
    b. **QA and fix:** dispatch a fresh `report-writer` in review-and-fix mode with `$DIR/report.md` plus the same backend context. The QA writer checks every item in the 12-step post-generation checklist against the rendered report and backend `report-findings` output, fixes report-local issues directly, and returns `QA PASS` only when every checklist item passes. If a failure requires new evidence or backend finding changes, it returns `QA BLOCKED` with exact finding slugs and required operator action.
-   c. **Publish:** only after `QA PASS`, emit the `report.generated` event, update included findings to `reported`, and update scope.json phase to `complete`. Publication before QA passes creates false workflow state, so keep `reported` transitions behind this gate.
+   c. **Publish:** only after `QA PASS`, emit the `report.generated` event, update included findings to `reported`, and transition phase: `aith assess transition-phase complete`. Publication before QA passes creates false workflow state, so keep `reported` transitions behind this gate.
 
-After each phase update scope.json:
+After each phase, use the guarded transition helper:
 ```bash
-jq '.current_phase = "<next>"' \
-    "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+aith assess transition-phase <next-phase>
 ```
+The helper validates preconditions (scope coverage, work-buffer state, verification completeness,
+report readiness) and refuses the transition when blockers exist. Pass `--force` to override
+when the operator has reviewed and accepted the gap. Raw `jq` phase edits bypass these checks.
 
 ## Recon Dispatch Resource Policy
 

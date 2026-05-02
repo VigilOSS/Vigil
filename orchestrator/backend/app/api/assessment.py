@@ -116,10 +116,10 @@ class CommandRunRecordRequest(BaseModel):
     intent: str | None = Field(default=None, max_length=4096)
     probe_kind: str | None = Field(default=None, max_length=64)
     destructive: bool | None = None
-    # Wave-1 cutover fields. status defaults to running because the new CLI
-    # writes the row pre-exec; legacy MCP rows that did not transit this
-    # endpoint default to completed via the column-level DB DEFAULT.
-    status: Literal["queued", "running", "completed", "failed", "timed_out", "killed", "lost"] = "running"
+    # Wave-1 cutover fields. New CLI pre-exec writes pass status=running
+    # explicitly. Legacy one-shot posts may omit status while carrying terminal
+    # fields; the service layer infers the terminal status in that case.
+    status: Literal["queued", "running", "completed", "failed", "timed_out", "killed", "lost"] | None = None
     stdout_path: str | None = Field(default=None, max_length=1024)
     stderr_path: str | None = Field(default=None, max_length=1024)
     peak_rss_bytes: int | None = Field(default=None, ge=0)

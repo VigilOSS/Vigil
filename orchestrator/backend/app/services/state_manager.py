@@ -2404,6 +2404,60 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 }
             )
 
+    for row in candidates:
+        if row.get("verification_state") != "verified":
+            continue
+        if row.get("verification_disposition") not in {"confirmed", "downgraded"}:
+            continue
+        slug = row.get("slug", "")
+        title = row.get("title", "")
+        details = _json_object(row.get("details_json", "{}"))
+        missing_fields: list[str] = []
+        if not details.get("cvss_score") and details.get("cvss_score") != 0:
+            missing_fields.append("cvss_score")
+        if not details.get("cvss_vector"):
+            missing_fields.append("cvss_vector")
+        if not details.get("steps_to_reproduce"):
+            missing_fields.append("steps_to_reproduce")
+        if not details.get("remediation"):
+            missing_fields.append("remediation")
+        if not details.get("impact"):
+            missing_fields.append("impact")
+        if not details.get("evidence"):
+            missing_fields.append("evidence")
+        if missing_fields:
+            blockers.append(
+                {
+                    "kind": "finding_field_quality",
+                    "slug": slug,
+                    "title": title,
+                    "detail": f"missing structured fields: {', '.join(missing_fields)}",
+                }
+            )
+        cvss_score = details.get("cvss_score")
+        severity = str(row.get("severity", "")).lower()
+        if cvss_score is not None and severity:
+            try:
+                score = float(cvss_score)
+            except (TypeError, ValueError):
+                score = -1
+            expected = (
+                "critical" if score >= 9.0
+                else "high" if score >= 7.0
+                else "medium" if score >= 4.0
+                else "low" if score >= 0.1
+                else "info"
+            )
+            if score >= 0 and severity != expected:
+                blockers.append(
+                    {
+                        "kind": "severity_cvss_mismatch",
+                        "slug": slug,
+                        "title": title,
+                        "detail": f"severity={severity} but cvss_score={score} expects {expected}",
+                    }
+                )
+
     duplicate_groups: dict[tuple[str, str], list[str]] = {}
     root_cause_groups: dict[str, list[str]] = {}
     for row in candidates:
@@ -3813,7 +3867,7 @@ def record_command_run(
     intent: str | None = None,
     probe_kind: str | None = None,
     destructive: bool | int | None = None,
-    status: str = "running",
+    status: str | None = None,
     stdout_path: str | None = None,
     stderr_path: str | None = None,
     peak_rss_bytes: int | None = None,
@@ -3915,7 +3969,12 @@ def record_command_run(
     else:
         destructive_value = 1 if bool(destructive) else 0
 
-    status_value = (status or "running").strip() or "running"
+    status_value = _infer_command_run_status(
+        status,
+        return_code=return_code,
+        timed_out=timed_out,
+        success=success,
+    )
     argv_json_value = json.dumps(list(argv) if argv else [], ensure_ascii=False)
 
     with get_connection() as connection:
@@ -4048,6 +4107,27 @@ def record_command_run(
         if superseded_by_id is not None:
             serialized["dedup_predecessor_id"] = superseded_by_id
         return serialized
+
+
+def _infer_command_run_status(
+    status_value: str | None,
+    *,
+    return_code: int | None,
+    timed_out: bool,
+    success: bool | None,
+) -> str:
+    explicit = (status_value or "").strip()
+    if explicit:
+        return explicit
+    if timed_out:
+        return "timed_out"
+    if return_code is not None:
+        return "completed" if return_code == 0 else "failed"
+    if success is True:
+        return "completed"
+    if success is False:
+        return "failed"
+    return "running"
 
 
 _FINALIZE_TERMINAL_STATUSES = {"completed", "failed", "timed_out", "killed", "lost"}

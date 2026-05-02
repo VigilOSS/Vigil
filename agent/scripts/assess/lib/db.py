@@ -95,6 +95,8 @@ def _apply_work_items_per_host_view(conn: sqlite3.Connection) -> None:
         SELECT
             lower(
                 CASE
+                    WHEN host_authority LIKE '[%]%' AND instr(host_authority, ']') > 0
+                        THEN substr(host_authority, 2, instr(host_authority, ']') - 2)
                     WHEN instr(host_authority, ':') > 0
                         THEN substr(host_authority, 1, instr(host_authority, ':') - 1)
                     ELSE host_authority

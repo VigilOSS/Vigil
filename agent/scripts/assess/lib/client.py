@@ -133,7 +133,17 @@ class AssessmentClient:
                     time.sleep(self.BACKOFF_BASE * (2 ** attempt))
                     continue
 
-        raise AssessError(f"Failed after {retries} attempts: {last_error}")
+        raise AssessError(
+            f"Failed after {retries} attempts: {last_error}\n"
+            f"{self._orchestrator_hint()}"
+        )
+
+    def _orchestrator_hint(self) -> str:
+        return (
+            "Hint: `aith assess` backend reads/writes require the orchestrator backend, "
+            "not the Kali runtime. Run `aith orchestrator status` or "
+            f"`aith orchestrator start`, and verify ORCHESTRATOR_BASE_URL={self.base_url!r}."
+        )
 
     def get(self, endpoint: str) -> Any:
         """GET /assessment/{endpoint}."""
