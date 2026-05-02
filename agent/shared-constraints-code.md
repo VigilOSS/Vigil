@@ -280,7 +280,7 @@ Code-specific fields:
 
 Before your dispatch returns, run in this order:
 
-1. `aith assess record-finding <role> <finding-json>` for each confirmed finding.
+1. `aith assess record-finding <agent-name> <finding-json>` for each confirmed finding.
 2. `aith assess code-record-analysis <analysis-json>` for each queue item disposition.
 3. `aith assess dispatch record-handoff --from-json <path>` — use the exact
    `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the

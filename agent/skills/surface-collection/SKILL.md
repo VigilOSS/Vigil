@@ -237,7 +237,7 @@ Before returning to the operator:
 
 **Record surfaces** for all high-signal discoveries:
 ```bash
-aith assess record-surface <surface-type> <url> <source> \
+aith assess record-surface <type> <target> <source> \
   --rationale "<why this is high-signal>" \
   --status discovered
 ```

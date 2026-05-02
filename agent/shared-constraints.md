@@ -523,7 +523,7 @@ aith assess record-intel <type> <json-file>
 
 Valid `<type>` values: `tech-component`, `person`, `email`, `domain`, `cve`, `dns-record`, `social-profile`, `breach-record`, `org-fact`, `note`.
 
-Run `aith assess contract record-intel <type>` before authoring the JSON — intel schemas are strict (`additionalProperties=false`) and reject guessed aliases like `source` when the schema says `source_name`.
+Run `aith assess contract record-intel <type>` before authoring the JSON — intel schemas are strict (`additionalProperties=false`) and reject unknown fields.
 
 The backend deduplicates per-engagement on natural keys: tech stack on Component (+ Version), people on Name, emails on Address, domains on Identity + Kind, CVEs on `cve_id`. Credentials live in the assessment domain (`assessment_credentials`); use `aith assess post credentials`, not `record-intel`.
 
@@ -582,7 +582,7 @@ the canonical record of it.
 
 ### Mandatory closing sequence (every specialist runs this before returning)
 
-1. `aith assess record-finding <role> <finding-json>` per finding.
+1. `aith assess record-finding <agent-name> <finding-json>` per finding.
 2. `aith assess record-intel <type> <intel-json>` per intel row.
 3. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` per surface candidate.
 4. `aith assess dispatch record-handoff --from-json <path>` — use the exact
