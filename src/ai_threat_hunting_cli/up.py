@@ -51,7 +51,7 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
     else:
         print("mitmproxy image\tcurrent")
 
-    start_orchestrator(OrchestratorOptions(install_root=install_root))
+    start_orchestrator(OrchestratorOptions(install_root=install_root, allow_existing=True))
     _start_mitmproxy_if_needed(install_root, options, runner=runner)
     _start_oob_if_needed(install_root, runner=runner)
 
@@ -82,7 +82,7 @@ def _start_or_restart_runtime(
         return
 
     print("runtime\talready running")
-    start_runtime(runtime_options, runner=runner)
+    start_runtime(runtime_options, runner=runner, allow_existing=True)
 
 
 def _confirm_runtime_restart(options: UpOptions) -> bool:
@@ -177,7 +177,7 @@ def _resolve_optional_engagement(install_root: Path, options: UpOptions) -> Path
 def _runtime_image_inputs(install_root: Path) -> list[Path]:
     return [
         install_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
-        install_root / "docker" / "kali-mcp-runtime",
+        install_root / "agent" / "scripts" / "assess" / "lib" / "audit_enums.py",
         install_root / "docker" / "callback_listener.py",
         install_root / "docker" / "start-callback.sh",
     ]

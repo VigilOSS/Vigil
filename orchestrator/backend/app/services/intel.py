@@ -19,6 +19,7 @@ which is why all writes go through the helpers in this module.
 from __future__ import annotations
 
 import json
+import sqlite3
 from contextlib import contextmanager
 from typing import Any, Iterable, Iterator
 from urllib.parse import urlparse
@@ -371,6 +372,11 @@ def record_cve(
     _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    details_payload = _validate_cve_details(details)
+    _validate_cve_attempted_blocked(
+        validation_status=validation_status,
+        details=details_payload,
+    )
     values = {
         "cve_id": cve_id,
         "affected_component": affected_component,
@@ -383,7 +389,7 @@ def record_cve(
         "validation_status": validation_status,
         "linked_finding_slug": linked_finding_slug,
         "notes": notes,
-        "details_json": _json_text(details),
+        "details_json": _json_text(details_payload),
         "provenance_json": _json_text(provenance),
     }
     with _use_connection(_conn) as connection:
@@ -730,7 +736,8 @@ _INTEL_UPDATABLE_FIELDS: dict[str, set[str]] = {
     "cve": {
         "cve_id", "affected_component", "affected_version_range", "cvss_score",
         "cvss_vector", "cwe_id", "poc_available", "source_name",
-        "validation_status", "linked_finding_slug", "notes", "provenance",
+        "validation_status", "linked_finding_slug", "notes", "details",
+        "provenance",
     },
     "dns-record": {
         "record_type", "name", "value", "first_seen", "last_seen",
@@ -775,13 +782,13 @@ _INTEL_FTS_ENTITY_TYPE: dict[str, str] = {
 # Mirrors the per-table ``UNIQUE(engagement_id, …)`` constraint declared in
 # ``db.py`` and the ``min_length`` Field markers in ``intel_schemas.py``.
 _INTEL_NATURAL_KEY_FIELDS: dict[str, tuple[str, ...]] = {
-    "tech-component": ("component",),
+    "tech-component": ("component", "version"),
     "person": ("name",),
     "email": ("address",),
-    "domain": ("identity",),
-    "cve": ("cve_id",),
-    "dns-record": ("record_type", "name"),
-    "social-profile": ("subject_kind", "platform"),
+    "domain": ("identity", "kind"),
+    "cve": ("cve_id", "affected_component"),
+    "dns-record": ("record_type", "name", "value"),
+    "social-profile": ("subject_kind", "subject_ref", "platform", "handle"),
     "breach-record": ("subject", "breach_name"),
     "org-fact": ("fact_key",),
     "note": ("title",),
@@ -907,6 +914,8 @@ def _coerce_update_values(
     for column, value in cleaned.items():
         if column == "provenance":
             column_values["provenance_json"] = _json_text(value)
+        elif column == "details":
+            column_values["details_json"] = _json_text(value)
         elif column == "tags":
             column_values["tags_json"] = _json_list_text(value)
         elif column == "poc_available":
@@ -914,6 +923,47 @@ def _coerce_update_values(
         else:
             column_values[column] = value
     return column_values
+
+
+def _validate_cve_details(details: Any) -> dict[str, Any]:
+    if details is None:
+        return {}
+    if not isinstance(details, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="details must be an object on intel/cve",
+        )
+    block_reason = details.get("block_reason")
+    if block_reason is not None:
+        if not isinstance(block_reason, str):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="details.block_reason must be a string",
+            )
+        if len(block_reason) > 500:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="details.block_reason exceeds 500 characters",
+            )
+    return details
+
+
+def _validate_cve_attempted_blocked(
+    *,
+    validation_status: Any,
+    details: Any,
+) -> None:
+    details_payload = _validate_cve_details(details)
+    if validation_status == "attempted_blocked":
+        block_reason = details_payload.get("block_reason")
+        if not isinstance(block_reason, str) or not block_reason.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "details.block_reason is required when "
+                    "validation_status='attempted_blocked'"
+                ),
+            )
 
 
 def _fetch_intel_row(
@@ -1030,14 +1080,37 @@ def update_intel(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"intel/{intel_type} id={intel_id} not found",
             )
+        if intel_type == "cve":
+            existing_payload = _post_process_intel_row("cve", existing)
+            _validate_cve_attempted_blocked(
+                validation_status=payload.get(
+                    "validation_status",
+                    existing_payload.get("validation_status", "unverified"),
+                ),
+                details=payload.get("details", existing_payload.get("details", {})),
+            )
         assignments = ", ".join(f"{col} = ?" for col in column_values)
         params = list(column_values.values())
         params.extend([engagement.id, intel_id])
-        connection.execute(
-            f"UPDATE {table} SET {assignments}, updated_at = CURRENT_TIMESTAMP "
-            f"WHERE engagement_id = ? AND id = ?",
-            tuple(params),
-        )
+        try:
+            connection.execute(
+                f"UPDATE {table} SET {assignments}, updated_at = CURRENT_TIMESTAMP "
+                f"WHERE engagement_id = ? AND id = ?",
+                tuple(params),
+            )
+        except sqlite3.IntegrityError as exc:
+            if "UNIQUE constraint failed" in str(exc):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"intel/{intel_type} update conflicts with an existing "
+                        "record's natural key"
+                    ),
+                ) from exc
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"invalid intel/{intel_type} update",
+            ) from exc
         updated = _fetch_intel_row(connection, table, engagement.id, intel_id)
         assert updated is not None
         # Refresh FTS shadow row so search hits the latest body.
@@ -1124,6 +1197,11 @@ def supersede_intel(
                 f"supersede payload missing required field: "
                 f"{', '.join(missing)}"
             ),
+        )
+    if intel_type == "cve":
+        _validate_cve_attempted_blocked(
+            validation_status=kwargs.get("validation_status", "unverified"),
+            details=kwargs.get("details", {}),
         )
 
     with get_connection() as connection:

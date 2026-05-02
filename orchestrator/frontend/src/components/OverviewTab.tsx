@@ -104,8 +104,9 @@ export function OverviewTab({ events, assessmentSummary, findings, chains, chain
             ))}
           </ul>
           <p className="meta-text">
-            Surface a numbered checkpoint (in-scope / out-of-scope / partial-scope) before recon
-            dispatch; record the decision in <code>$DIR/agent-registry.json</code>.
+            Surface the numbered checkpoint when recon identifies vendor-managed SaaS; record the
+            choice as a backend scope_decision row with{" "}
+            <code>aith assess dispatch record-decision --kind scope_decision</code>.
           </p>
         </section>
       )}

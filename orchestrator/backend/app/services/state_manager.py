@@ -2404,6 +2404,60 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 }
             )
 
+    for row in candidates:
+        if row.get("verification_state") != "verified":
+            continue
+        if row.get("verification_disposition") not in {"confirmed", "downgraded"}:
+            continue
+        slug = row.get("slug", "")
+        title = row.get("title", "")
+        details = _json_object(row.get("details_json", "{}"))
+        missing_fields: list[str] = []
+        if not details.get("cvss_score") and details.get("cvss_score") != 0:
+            missing_fields.append("cvss_score")
+        if not details.get("cvss_vector"):
+            missing_fields.append("cvss_vector")
+        if not details.get("steps_to_reproduce"):
+            missing_fields.append("steps_to_reproduce")
+        if not details.get("remediation"):
+            missing_fields.append("remediation")
+        if not details.get("impact"):
+            missing_fields.append("impact")
+        if not details.get("evidence"):
+            missing_fields.append("evidence")
+        if missing_fields:
+            blockers.append(
+                {
+                    "kind": "finding_field_quality",
+                    "slug": slug,
+                    "title": title,
+                    "detail": f"missing structured fields: {', '.join(missing_fields)}",
+                }
+            )
+        cvss_score = details.get("cvss_score")
+        severity = str(row.get("severity", "")).lower()
+        if cvss_score is not None and severity:
+            try:
+                score = float(cvss_score)
+            except (TypeError, ValueError):
+                score = -1
+            expected = (
+                "critical" if score >= 9.0
+                else "high" if score >= 7.0
+                else "medium" if score >= 4.0
+                else "low" if score >= 0.1
+                else "info"
+            )
+            if score >= 0 and severity != expected:
+                blockers.append(
+                    {
+                        "kind": "severity_cvss_mismatch",
+                        "slug": slug,
+                        "title": title,
+                        "detail": f"severity={severity} but cvss_score={score} expects {expected}",
+                    }
+                )
+
     duplicate_groups: dict[tuple[str, str], list[str]] = {}
     root_cause_groups: dict[str, list[str]] = {}
     for row in candidates:
@@ -3091,19 +3145,16 @@ def _host_from_endpoint(endpoint: str | None) -> str:
 
 
 def vendor_saas_hosts_pending_decision(engagement_id: int) -> list[dict[str, str]]:
-    """Return vendor-SaaS-flagged hosts that have no scope_decision activity entry.
+    """Return vendor-SaaS-flagged hosts that have no scope_decision record.
 
     A vendor-SaaS host is one whose recorded service endpoint or surface
     target descriptor matches a vendor SaaS suffix (Salesforce, ServiceNow,
     StatusPage, GovDelivery, AwsConnect, Auth0, Okta, Zendesk, Freshdesk,
     Intercom). The Vendor-SaaS scope checkpoint records the operator's
-    choice as an activity entry with ``task_name='scope_decision'`` and the
-    host appearing inside ``summary``; hosts that lack that record block
-    the Phase 1 advance gate and surface in the frontend overview banner.
-
-    The projection deliberately does NOT consult ``$DIR/agent-registry.json``
-    on disk — the backend is the source of truth, and the CLI mirrors the
-    decision into an activity entry whenever a checkpoint is recorded.
+    choice as an ``assessment_dispatch_decisions`` row with
+    ``kind='scope_decision'`` and ``payload.host`` set to the vendor host.
+    Hosts that lack that record block the Phase 1 advance gate and surface
+    in the frontend overview banner.
     """
     engagement = _engagement_or_404(engagement_id)
     pending: dict[str, str] = {}
@@ -3117,36 +3168,26 @@ def vendor_saas_hosts_pending_decision(engagement_id: int) -> list[dict[str, str
             "SELECT target_descriptor FROM assessment_surfaces WHERE engagement_id = ?",
             (engagement.id,),
         ).fetchall()
-        # Activity entries carry the operator's narrative log. A
-        # ``scope_decision`` for a vendor-SaaS host shows up either in
-        # ``title`` (e.g. ``scope_decision: foo.salesforce.com``), the
-        # ``action`` text, or in ``metadata_json`` as a JSON blob carrying
-        # ``{"kind": "scope_decision", "host": "..."}``. We match liberally
-        # across all three fields so a future writer that picks any of them
-        # still satisfies the gate.
         decision_rows = connection.execute(
             """
-            SELECT title, action, result, body_markdown, metadata_json
-            FROM activity_entries
+            SELECT payload_json
+            FROM assessment_dispatch_decisions
             WHERE engagement_id = ?
-              AND (
-                title LIKE '%scope_decision%'
-                OR action LIKE '%scope_decision%'
-                OR result LIKE '%scope_decision%'
-                OR body_markdown LIKE '%scope_decision%'
-                OR metadata_json LIKE '%scope_decision%'
-              )
+              AND kind = 'scope_decision'
             """,
             (engagement.id,),
         ).fetchall()
     for row in decision_rows:
-        for value in row:
-            if not isinstance(value, str):
-                continue
-            for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
-                normalized = token.rstrip(".").lower()
-                if _host_is_vendor_saas(normalized):
-                    decided.add(normalized)
+        raw = row["payload_json"] if "payload_json" in row.keys() else row[0]
+        try:
+            payload = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        host = _host_from_endpoint(str(payload.get("host") or payload.get("target") or ""))
+        if _host_is_vendor_saas(host):
+            decided.add(host)
     for row in service_rows:
         host = _host_from_endpoint(str(row["endpoint"] if "endpoint" in row.keys() else row[0]))
         vendor = _host_is_vendor_saas(host)
@@ -3826,7 +3867,7 @@ def record_command_run(
     intent: str | None = None,
     probe_kind: str | None = None,
     destructive: bool | int | None = None,
-    status: str = "running",
+    status: str | None = None,
     stdout_path: str | None = None,
     stderr_path: str | None = None,
     peak_rss_bytes: int | None = None,
@@ -3835,7 +3876,6 @@ def record_command_run(
     working_dir: str | None = None,
     scope_version: str | None = None,
     auth_context: str | None = None,
-    strace_path: str | None = None,
     timeout_seconds_requested: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -3929,18 +3969,31 @@ def record_command_run(
     else:
         destructive_value = 1 if bool(destructive) else 0
 
-    status_value = (status or "running").strip() or "running"
+    status_value = _infer_command_run_status(
+        status,
+        return_code=return_code,
+        timed_out=timed_out,
+        success=success,
+    )
     argv_json_value = json.dumps(list(argv) if argv else [], ensure_ascii=False)
 
     with get_connection() as connection:
         # Dedup-at-write-time: if an in-flight row exists with the same
         # (command, argv_json) for this engagement inside the configurable
-        # window, the CLI's default (force=False) returns the predecessor
-        # row without inserting — otherwise the new row stays stuck at
-        # status='running' because the CLI early-returns and never PATCHes
-        # finalize. With force=True we insert the row and link it via
-        # superseded_by_id so the operator's deliberate retry still records
-        # the supersession audit.
+        # window, ALWAYS insert a new row but link it to the predecessor via
+        # ``superseded_by_id`` so the supersession is a relationship between
+        # two rows rather than a row-merge. ``force=True`` is the deliberate-
+        # retry escape hatch that suppresses both the warning (CLI-side) and
+        # the supersede link (here) — operator says "I know there's a peer,
+        # run it anyway as an independent retry."
+        #
+        # Audit-truthfulness rationale: the previous behavior returned the
+        # predecessor's row id on dedup hit. Under the CLI's warn-and-continue
+        # default the second subprocess still ran, so two executions collapsed
+        # to one audit row and ``list-command-runs`` lied about coverage. By
+        # always inserting we get one row per execution attempt; readers that
+        # want to filter to "primary" runs can join on
+        # ``superseded_by_id IS NULL``.
         superseded_by_id: int | None = None
         if not force:
             superseded_by_id = _find_dedup_predecessor(
@@ -3950,20 +4003,6 @@ def record_command_run(
                 argv_json=argv_json_value,
                 window_seconds=_dedup_window_seconds(),
             )
-            if superseded_by_id is not None:
-                _remove_written_command_run_artifacts(
-                    str(stdout_retention["artifact_ref"] or ""),
-                    str(stderr_retention["artifact_ref"] or ""),
-                )
-                predecessor_row = connection.execute(
-                    "SELECT * FROM assessment_command_runs WHERE id = ?",
-                    (superseded_by_id,),
-                ).fetchone()
-                assert predecessor_row is not None
-                serialized = _serialize_command_run(predecessor_row, include_output=True)
-                serialized["superseded_by_id"] = superseded_by_id
-                serialized["dedup_skipped"] = True
-                return serialized
         try:
             cursor = connection.execute(
                 """
@@ -3981,7 +4020,7 @@ def record_command_run(
                     stdout_path, stderr_path,
                     peak_rss_bytes, cpu_user_seconds, cpu_system_seconds,
                     working_dir, scope_version, auth_context,
-                    superseded_by_id, strace_path, timeout_seconds_requested
+                    superseded_by_id, timeout_seconds_requested
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
@@ -3996,7 +4035,7 @@ def record_command_run(
                     ?, ?,
                     ?, ?, ?,
                     ?, ?, ?,
-                    ?, ?, ?
+                    ?, ?
                 )
                 """,
                 (
@@ -4043,7 +4082,6 @@ def record_command_run(
                     scope_version,
                     auth_context,
                     superseded_by_id,
-                    strace_path,
                     timeout_seconds_requested,
                 ),
             )
@@ -4060,7 +4098,36 @@ def record_command_run(
             (cursor.lastrowid,),
         ).fetchone()
         assert row is not None
-        return _serialize_command_run(row, include_output=True)
+        serialized = _serialize_command_run(row, include_output=True)
+        # Surface the dedup relationship to the caller so the CLI can warn-
+        # and-continue. ``superseded_by_id`` already lives on the row payload;
+        # ``dedup_predecessor_id`` is a separate hint surface so consumers can
+        # tell "this row was inserted as a dedup peer" without re-querying the
+        # predecessor row to check its status.
+        if superseded_by_id is not None:
+            serialized["dedup_predecessor_id"] = superseded_by_id
+        return serialized
+
+
+def _infer_command_run_status(
+    status_value: str | None,
+    *,
+    return_code: int | None,
+    timed_out: bool,
+    success: bool | None,
+) -> str:
+    explicit = (status_value or "").strip()
+    if explicit:
+        return explicit
+    if timed_out:
+        return "timed_out"
+    if return_code is not None:
+        return "completed" if return_code == 0 else "failed"
+    if success is True:
+        return "completed"
+    if success is False:
+        return "failed"
+    return "running"
 
 
 _FINALIZE_TERMINAL_STATUSES = {"completed", "failed", "timed_out", "killed", "lost"}
@@ -4082,7 +4149,6 @@ def finalize_command_run(
     peak_rss_bytes: int | None = None,
     cpu_user_seconds: float | None = None,
     cpu_system_seconds: float | None = None,
-    strace_path: str | None = None,
 ) -> dict[str, Any]:
     """Apply a status update to a pre-exec command-run row.
 
@@ -4161,9 +4227,6 @@ def finalize_command_run(
         if cpu_system_seconds is not None:
             sets.append("cpu_system_seconds = ?")
             values.append(float(cpu_system_seconds))
-        if strace_path is not None:
-            sets.append("strace_path = ?")
-            values.append(strace_path)
         sets.append("partial_results = ?")
         values.append(1 if partial_results else 0)
         values.append(command_run_id)
@@ -4209,7 +4272,7 @@ def finalize_command_run(
 # ── Assessment job lifecycle ────────────────────────────────────────
 
 
-_JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost"}
+_JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost", "stop_failed"}
 _JOB_VALID_STATUSES = {"queued", "running", *_JOB_TERMINAL_STATUSES}
 
 
@@ -4542,3 +4605,557 @@ def get_command_run(engagement_id: int, command_run_id: int) -> dict[str, Any]:
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="command run not found")
     return _serialize_command_run(row, include_output=True)
+
+
+# ── Round 9: dispatch / handoff / decision tables ────────────────────────
+#
+# These three CRUD helper sets follow the existing intel-table pattern: validate the
+# engagement up front, do JSON serialize/deserialize at the boundary, raise
+# 404/409 with HTTPException so the API layer can surface them directly.
+
+
+def _utcnow_iso_dispatch() -> str:
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _serialize_dispatch(row) -> dict[str, Any]:
+    data = dict(row)
+    for col in ("files_allowed_json", "finding_slugs_json"):
+        raw = data.pop(col, None) or ""
+        key = col[: -len("_json")]
+        if raw:
+            try:
+                data[key] = json.loads(raw)
+            except json.JSONDecodeError:
+                data[key] = None
+        else:
+            data[key] = None
+    return data
+
+
+def record_dispatch(
+    engagement_id: int,
+    *,
+    agent_id: str,
+    agent_role: str,
+    task: str | None = None,
+    skill_loaded: str | None = None,
+    scope_host: str | None = None,
+    dispatched_at: str | None = None,
+    status_value: str = "in-progress",
+    model: str | None = None,
+    reasoning: str | None = None,
+    permission: str | None = None,
+    command_budget: int | None = None,
+    output_schema: str | None = None,
+    dispatch_mode: str | None = None,
+    files_allowed: list[str] | None = None,
+    finding_slugs: list[str] | None = None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    if not (agent_id or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="agent_id is required")
+    dispatched_value = dispatched_at or _utcnow_iso_dispatch()
+    files_json = json.dumps(list(files_allowed)) if files_allowed is not None else None
+    findings_json = json.dumps(list(finding_slugs)) if finding_slugs is not None else None
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, agent_id),
+        ).fetchone()
+        if existing is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"dispatch with agent_id={agent_id!r} already exists for this engagement",
+            )
+        cursor = connection.execute(
+            """
+            INSERT INTO assessment_dispatches (
+                engagement_id, agent_id, agent_role, task, skill_loaded, scope_host,
+                dispatched_at, status, model, reasoning, permission, command_budget,
+                output_schema, dispatch_mode, files_allowed_json, finding_slugs_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                engagement.id,
+                agent_id,
+                agent_role,
+                task,
+                skill_loaded,
+                scope_host,
+                dispatched_value,
+                status_value,
+                model,
+                reasoning,
+                permission,
+                command_budget,
+                output_schema,
+                dispatch_mode,
+                files_json,
+                findings_json,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM assessment_dispatches WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+    assert row is not None
+    return _serialize_dispatch(row)
+
+
+def update_dispatch(
+    engagement_id: int,
+    *,
+    agent_id: str,
+    status_value: str | None = None,
+    completed_at: str | None = None,
+    finding_slugs: list[str] | None = None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT * FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, agent_id),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="dispatch not found")
+        sets: list[str] = []
+        values: list[Any] = []
+        if status_value is not None:
+            sets.append("status = ?")
+            values.append(status_value)
+        if completed_at is not None:
+            sets.append("completed_at = ?")
+            values.append(completed_at)
+        if finding_slugs is not None:
+            sets.append("finding_slugs_json = ?")
+            values.append(json.dumps(list(finding_slugs)))
+        if not sets:
+            return _serialize_dispatch(existing)
+        values.extend([engagement.id, agent_id])
+        connection.execute(
+            f"UPDATE assessment_dispatches SET {', '.join(sets)} WHERE engagement_id = ? AND agent_id = ?",
+            tuple(values),
+        )
+        row = connection.execute(
+            "SELECT * FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, agent_id),
+        ).fetchone()
+    assert row is not None
+    return _serialize_dispatch(row)
+
+
+def get_dispatch(engagement_id: int, agent_id: str) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, agent_id),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="dispatch not found")
+    return _serialize_dispatch(row)
+
+
+def list_dispatches(
+    engagement_id: int,
+    *,
+    role: str = "",
+    status_value: str = "",
+    since: str = "",
+    task_q: str = "",
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    where = ["engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    if role:
+        where.append("agent_role = ?")
+        params.append(role)
+    if status_value:
+        where.append("status = ?")
+        params.append(status_value)
+    if since:
+        where.append("dispatched_at >= ?")
+        params.append(since)
+    if task_q:
+        where.append("task LIKE ?")
+        params.append(f"%{task_q}%")
+    params.append(int(limit))
+    query = (
+        f"SELECT * FROM assessment_dispatches WHERE {' AND '.join(where)} "
+        "ORDER BY dispatched_at DESC, id DESC LIMIT ?"
+    )
+    with get_connection() as connection:
+        rows = connection.execute(query, tuple(params)).fetchall()
+    return [_serialize_dispatch(row) for row in rows]
+
+
+def _serialize_handoff(row) -> dict[str, Any]:
+    data = dict(row)
+    for col in (
+        "finding_slugs_json",
+        "coverage_gaps_json",
+        "next_steps_json",
+        "runtime_issues_json",
+        "working_artifacts_json",
+        "open_questions_json",
+        "extras_json",
+    ):
+        raw = data.pop(col, None) or ""
+        key = col[: -len("_json")]
+        if raw:
+            try:
+                data[key] = json.loads(raw)
+            except json.JSONDecodeError:
+                data[key] = None
+        else:
+            data[key] = None
+    return data
+
+
+_HANDOFF_SUMMARY_MAX = 2000
+
+
+def record_handoff(
+    engagement_id: int,
+    *,
+    agent_id: str,
+    agent_role: str,
+    summary: str,
+    phase: str | None = None,
+    confidence: str | None = None,
+    finding_slugs: list[str] | None = None,
+    coverage_gaps: list[dict[str, Any]] | None = None,
+    next_steps: list[dict[str, Any]] | None = None,
+    runtime_issues: list[dict[str, Any]] | None = None,
+    working_artifacts: list[dict[str, Any]] | None = None,
+    open_questions: list[str] | None = None,
+    recommended_next_agent: str | None = None,
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    if not (agent_id or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="agent_id is required")
+    if not (summary or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="summary is required")
+    if len(summary) > _HANDOFF_SUMMARY_MAX:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"summary exceeds {_HANDOFF_SUMMARY_MAX} characters",
+        )
+    created_at = _utcnow_iso_dispatch()
+    with get_connection() as connection:
+        dispatch_row = connection.execute(
+            "SELECT agent_role FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, agent_id),
+        ).fetchone()
+        if dispatch_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"dispatch not found for handoff agent_id={agent_id!r}",
+            )
+        if str(dispatch_row["agent_role"]) != str(agent_role):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"agent_role mismatch: handoff agent_role={agent_role!r} does not match registered "
+                    f"dispatch role={dispatch_row['agent_role']!r}"
+                ),
+            )
+        existing = connection.execute(
+            "SELECT id FROM assessment_dispatch_handoffs WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, agent_id),
+        ).fetchone()
+        if existing is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"handoff with agent_id={agent_id!r} already exists; PATCH to update",
+            )
+        cursor = connection.execute(
+            """
+            INSERT INTO assessment_dispatch_handoffs (
+                engagement_id, agent_id, agent_role, phase, summary, confidence,
+                finding_slugs_json, coverage_gaps_json, next_steps_json,
+                runtime_issues_json, working_artifacts_json, open_questions_json,
+                recommended_next_agent, extras_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                engagement.id,
+                agent_id,
+                agent_role,
+                phase,
+                summary,
+                confidence,
+                json.dumps(list(finding_slugs)) if finding_slugs is not None else None,
+                json.dumps(list(coverage_gaps)) if coverage_gaps is not None else None,
+                json.dumps(list(next_steps)) if next_steps is not None else None,
+                json.dumps(list(runtime_issues)) if runtime_issues is not None else None,
+                json.dumps(list(working_artifacts)) if working_artifacts is not None else None,
+                json.dumps(list(open_questions)) if open_questions is not None else None,
+                recommended_next_agent,
+                json.dumps(extras) if extras is not None else None,
+                created_at,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM assessment_dispatch_handoffs WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+    assert row is not None
+    return _serialize_handoff(row)
+
+
+def update_handoff(
+    engagement_id: int,
+    *,
+    agent_id: str,
+    summary: str | None = None,
+    phase: str | None = None,
+    confidence: str | None = None,
+    finding_slugs: list[str] | None = None,
+    coverage_gaps: list[dict[str, Any]] | None = None,
+    next_steps: list[dict[str, Any]] | None = None,
+    runtime_issues: list[dict[str, Any]] | None = None,
+    working_artifacts: list[dict[str, Any]] | None = None,
+    open_questions: list[str] | None = None,
+    recommended_next_agent: str | None = None,
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        dispatch_row = connection.execute(
+            "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, agent_id),
+        ).fetchone()
+        if dispatch_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"dispatch not found for handoff agent_id={agent_id!r}",
+            )
+        existing = connection.execute(
+            "SELECT * FROM assessment_dispatch_handoffs WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, agent_id),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="handoff not found")
+        sets: list[str] = []
+        values: list[Any] = []
+        if summary is not None:
+            if not summary.strip():
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="summary cannot be empty")
+            if len(summary) > _HANDOFF_SUMMARY_MAX:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"summary exceeds {_HANDOFF_SUMMARY_MAX} characters",
+                )
+            sets.append("summary = ?")
+            values.append(summary)
+        if phase is not None:
+            sets.append("phase = ?")
+            values.append(phase)
+        if confidence is not None:
+            sets.append("confidence = ?")
+            values.append(confidence)
+        if finding_slugs is not None:
+            sets.append("finding_slugs_json = ?")
+            values.append(json.dumps(list(finding_slugs)))
+        if coverage_gaps is not None:
+            sets.append("coverage_gaps_json = ?")
+            values.append(json.dumps(list(coverage_gaps)))
+        if next_steps is not None:
+            sets.append("next_steps_json = ?")
+            values.append(json.dumps(list(next_steps)))
+        if runtime_issues is not None:
+            sets.append("runtime_issues_json = ?")
+            values.append(json.dumps(list(runtime_issues)))
+        if working_artifacts is not None:
+            sets.append("working_artifacts_json = ?")
+            values.append(json.dumps(list(working_artifacts)))
+        if open_questions is not None:
+            sets.append("open_questions_json = ?")
+            values.append(json.dumps(list(open_questions)))
+        if recommended_next_agent is not None:
+            sets.append("recommended_next_agent = ?")
+            values.append(recommended_next_agent)
+        if extras is not None:
+            sets.append("extras_json = ?")
+            values.append(json.dumps(extras))
+        if not sets:
+            return _serialize_handoff(existing)
+        values.extend([engagement.id, agent_id])
+        connection.execute(
+            f"UPDATE assessment_dispatch_handoffs SET {', '.join(sets)} WHERE engagement_id = ? AND agent_id = ?",
+            tuple(values),
+        )
+        row = connection.execute(
+            "SELECT * FROM assessment_dispatch_handoffs WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, agent_id),
+        ).fetchone()
+    assert row is not None
+    return _serialize_handoff(row)
+
+
+def get_handoff(engagement_id: int, agent_id: str) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM assessment_dispatch_handoffs WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, agent_id),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="handoff not found")
+    return _serialize_handoff(row)
+
+
+def list_handoffs(
+    engagement_id: int,
+    *,
+    role: str = "",
+    since: str = "",
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    where = ["engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    if role:
+        where.append("agent_role = ?")
+        params.append(role)
+    if since:
+        where.append("created_at >= ?")
+        params.append(since)
+    params.append(int(limit))
+    query = (
+        f"SELECT * FROM assessment_dispatch_handoffs WHERE {' AND '.join(where)} "
+        "ORDER BY created_at DESC, id DESC LIMIT ?"
+    )
+    with get_connection() as connection:
+        rows = connection.execute(query, tuple(params)).fetchall()
+    return [_serialize_handoff(row) for row in rows]
+
+
+def _serialize_decision(row) -> dict[str, Any]:
+    data = dict(row)
+    raw = data.pop("payload_json", None) or "{}"
+    try:
+        data["payload"] = json.loads(raw)
+    except json.JSONDecodeError:
+        data["payload"] = None
+    raw_resolution = data.pop("resolution_json", None) or ""
+    if raw_resolution:
+        try:
+            data["resolution"] = json.loads(raw_resolution)
+        except json.JSONDecodeError:
+            data["resolution"] = None
+    else:
+        data["resolution"] = None
+    if "surfaced_to_user" in data:
+        data["surfaced_to_user"] = bool(data["surfaced_to_user"])
+    if "resolved" in data:
+        data["resolved"] = bool(data["resolved"])
+    return data
+
+
+def record_decision(
+    engagement_id: int,
+    *,
+    kind: str,
+    payload: dict[str, Any],
+    surfaced_to_user: bool = False,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    if not (kind or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="kind is required")
+    created_at = _utcnow_iso_dispatch()
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO assessment_dispatch_decisions (
+                engagement_id, kind, payload_json, surfaced_to_user, resolved,
+                resolution_json, created_at
+            ) VALUES (?, ?, ?, ?, 0, NULL, ?)
+            """,
+            (
+                engagement.id,
+                kind,
+                json.dumps(payload or {}),
+                1 if surfaced_to_user else 0,
+                created_at,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM assessment_dispatch_decisions WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+    assert row is not None
+    return _serialize_decision(row)
+
+
+def list_decisions(
+    engagement_id: int,
+    *,
+    kind: str = "",
+    resolved: bool | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    where = ["engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    if kind:
+        where.append("kind = ?")
+        params.append(kind)
+    if resolved is not None:
+        where.append("resolved = ?")
+        params.append(1 if resolved else 0)
+    params.append(int(limit))
+    query = (
+        f"SELECT * FROM assessment_dispatch_decisions WHERE {' AND '.join(where)} "
+        "ORDER BY created_at DESC, id DESC LIMIT ?"
+    )
+    with get_connection() as connection:
+        rows = connection.execute(query, tuple(params)).fetchall()
+    return [_serialize_decision(row) for row in rows]
+
+
+def update_decision(
+    engagement_id: int,
+    *,
+    decision_id: int,
+    resolved: bool | None = None,
+    resolution: dict[str, Any] | None = None,
+    surfaced_to_user: bool | None = None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT * FROM assessment_dispatch_decisions WHERE engagement_id = ? AND id = ?",
+            (engagement.id, decision_id),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="decision not found")
+        sets: list[str] = []
+        values: list[Any] = []
+        if resolved is not None:
+            sets.append("resolved = ?")
+            values.append(1 if resolved else 0)
+        if resolution is not None:
+            sets.append("resolution_json = ?")
+            values.append(json.dumps(resolution))
+        if surfaced_to_user is not None:
+            sets.append("surfaced_to_user = ?")
+            values.append(1 if surfaced_to_user else 0)
+        if not sets:
+            return _serialize_decision(existing)
+        values.extend([engagement.id, decision_id])
+        connection.execute(
+            f"UPDATE assessment_dispatch_decisions SET {', '.join(sets)} WHERE engagement_id = ? AND id = ?",
+            tuple(values),
+        )
+        row = connection.execute(
+            "SELECT * FROM assessment_dispatch_decisions WHERE engagement_id = ? AND id = ?",
+            (engagement.id, decision_id),
+        ).fetchone()
+    assert row is not None
+    return _serialize_decision(row)

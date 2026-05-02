@@ -711,6 +711,17 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
     assert payload["working_dir"]
     assert payload["scope_version"]
     assert payload["auth_context"] == "cookies"
+    # P1 schema fix: the CLI must propagate its engagement-wide run_uuid into
+    # the POST so the backend's `run_uuid` column matches the wrapper pid file
+    # key (`/tmp/aith-pid-<run_uuid>.pid`). Without this, sweep-orphans cannot
+    # find the pid file from the DB column and falls back to regex-parsing
+    # stdout_path — which breaks when the artifact dir is reconfigured.
+    assert payload.get("run_uuid"), "CLI must propagate run_uuid into POST"
+    # The run_uuid the CLI generated should also appear in the stdout_path so
+    # legacy regex consumers keep working.
+    assert payload["run_uuid"] in payload["stdout_path"]
+    assert "-w" in popen_call["argv"]
+    assert popen_call["argv"][popen_call["argv"].index("-w") + 1] == f"/engagements/{fake_engagement.name}"
 
     # Finalize PATCH followed.
     assert len(fake_client.patches) == 1
@@ -817,10 +828,12 @@ def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_enga
         tool_name="nmap",
     )
     argv = captured["argv"]
-    # Shape: docker exec <container> sh -c '<wrapper>' sh <user-cmd...>
-    assert argv[:3] == ["docker", "exec", "security-research"]
-    assert argv[3:5] == ["sh", "-c"]
-    wrapper = argv[5]
+    # Shape: docker exec -w <engagement-mount> <container> sh -c '<wrapper>' sh <user-cmd...>
+    assert argv[:2] == ["docker", "exec"]
+    assert argv[2:4] == ["-w", f"/engagements/{fake_engagement.name}"]
+    container_index = argv.index("security-research")
+    assert argv[container_index + 1:container_index + 3] == ["sh", "-c"]
+    wrapper = argv[container_index + 3]
     assert wrapper.startswith("echo $$ > /tmp/aith-pid-"), wrapper
     # The PID-write race fix wraps the original `echo $$ > pidfile; exec "$@"`
     # in `&&`/`||` so a failed write logs to stderr and still execs. Both
@@ -828,58 +841,16 @@ def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_enga
     assert '&& exec "$@"' in wrapper
     assert "|| (echo" in wrapper and "PID write to" in wrapper and "failed" in wrapper
     assert wrapper.count('exec "$@"') == 2
-    # ``sh`` placeholder makes ``$@`` skip the script-name positional.
-    assert argv[6] == "sh"
-    assert argv[7:] == ["nmap", "-sV", "10.0.0.1"]
-
-
-def test_b1_docker_exec_wrapper_with_strace_keeps_pid_capture(
-    monkeypatch, fake_engagement
-):
-    """B1 + L18: when ``--strace`` is set, the wrapper still records the
-    container-side PID before exec-ing strace. The strace artifact path and
-    the pid file must share the same ``run_uuid`` so audit ↔ pid file ↔
-    strace artifact key on a single identifier."""
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
-
-    captured: dict = {}
-
-    def fake_popen(argv, **kwargs):
-        captured["argv"] = argv
-        return _FakePopen(returncode=0)
-
-    monkeypatch.setattr(kali.subprocess, "Popen", fake_popen)
-
-    kali.kali_exec(
-        ["curl", "-sS", "https://example.com/"],
-        technique="RECON",
-        intent="b1 wrapper shape with strace",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=30,
-        agent_name="recon-specialist",
-        engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
-        strace=True,
-        tool_name="curl",
+    # B1 race fix: `sync` between the pid-file write and `exec` flushes the
+    # dirent so the host helper's `docker exec cat` cannot race and see an
+    # empty file even when the in-container process is alive.
+    assert "&& sync &&" in wrapper, (
+        "wrapper must sync the pid-file write before exec to prevent the host "
+        "helper racing on an empty dirent"
     )
-    wrapper = captured["argv"][5]
-    assert "echo $$ > /tmp/aith-pid-" in wrapper
-    assert "strace -f -e trace=network,write,unlink" in wrapper
-    assert "exec strace " in wrapper
-    # Race-protected wrapper: succeed branch and fallback branch both exec strace.
-    assert wrapper.count("exec strace") == 2
-    assert "|| (echo" in wrapper and "PID write to" in wrapper
-    # Same UUID body in both file paths so the operator can correlate them.
-    import re
-
-    pid_match = re.search(r"/tmp/aith-pid-([0-9a-f]+)\.pid", wrapper)
-    strace_match = re.search(r"/tmp/aith-strace-([0-9a-f]+)\.log", wrapper)
-    assert pid_match is not None and strace_match is not None
-    assert pid_match.group(1) == strace_match.group(1)
+    # ``sh`` placeholder makes ``$@`` skip the script-name positional.
+    assert argv[container_index + 4] == "sh"
+    assert argv[container_index + 5:] == ["nmap", "-sV", "10.0.0.1"]
 
 
 def test_b1_timeout_cascade_kills_in_container_pid_then_host_pgid(
@@ -958,12 +929,13 @@ def test_b1_timeout_cascade_kills_in_container_pid_then_host_pgid(
     assert len(cleanups) == 1
 
 
-def test_b1_timeout_without_pid_file_falls_back_to_host_kill(
+def test_b1_timeout_without_pid_file_uses_host_kill_only(
     monkeypatch, fake_engagement, capsys
 ):
     """B1 edge: when the wrapper hadn't written the pid file yet (race) or
     the container is gone (read fails), the helper must log a warning and
-    still issue the host-side process-group kill cascade rather than crash."""
+    still issue the host-side process-group kill cascade rather than crash.
+    """
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -976,6 +948,14 @@ def test_b1_timeout_without_pid_file_falls_back_to_host_kill(
         "_kill_in_container",
         lambda container, pid, sig: docker_kills.append((sig, pid)),
     )
+
+    def fail_if_pkill_fallback_runs(*_args, **_kwargs):
+        raise AssertionError("timeout cleanup must not use argv-based pkill fallback")
+
+    monkeypatch.setattr(
+        kali, "_pkill_in_container_by_argv", fail_if_pkill_fallback_runs, raising=False
+    )
+
     host_signals: list[int] = []
     monkeypatch.setattr(kali.os, "killpg", lambda pgid, sig: host_signals.append(sig))
     monkeypatch.setattr(kali.os, "getpgid", lambda pid: pid)
@@ -1009,8 +989,9 @@ def test_b1_timeout_without_pid_file_falls_back_to_host_kill(
 
     err = capsys.readouterr().err
     assert "in-container pid file missing" in err
-    assert docker_kills == []  # no in-container kill possible
-    assert signal.SIGTERM in host_signals  # but host-side cascade still fired
+    assert "pkill" not in err
+    assert docker_kills == []  # no pid-targeted in-container kill possible
+    assert signal.SIGTERM in host_signals  # host-side cascade still fired
 
 
 @pytest.mark.integration
@@ -1092,9 +1073,96 @@ def test_b1_orphan_cleanup_via_live_runtime():
     )
 
 
+@pytest.mark.integration
+def test_b1_timeout_kills_sigterm_trapping_in_container_pid():
+    """B1 SIGKILL-fallback acceptance test against a SIGTERM-trapping victim.
+    Spawns ``trap '' TERM; exec sleep 600`` so only the cascade's SIGKILL leg
+    (``docker exec kill -9`` against the wrapper-recorded PID) can reap it."""
+    import shutil
+    import time as _time
+
+    if shutil.which("docker") is None:
+        pytest.skip("docker CLI not on PATH")
+    container = "security-research"
+    health = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{container}$"],
+        check=False, capture_output=True, text=True, timeout=10,
+    )
+    if container not in (health.stdout or "").splitlines():
+        pytest.skip(f"runtime container '{container}' is not running")
+    aith = shutil.which("aith")
+    if aith is None:
+        pytest.skip("aith CLI not on PATH")
+
+    def _ls_pid_files() -> set[str]:
+        r = subprocess.run(
+            ["docker", "exec", container, "sh", "-c",
+             "ls /tmp/aith-pid-*.pid 2>/dev/null || true"],
+            check=False, capture_output=True, text=True, timeout=10,
+        )
+        return {ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()}
+
+    before = _ls_pid_files()
+    proc = subprocess.run(
+        [aith, "assess", "kali", "exec",
+         "--technique", "RECON",
+         "--intent", "B1 SIGKILL-fallback acceptance test",
+         "--probe-kind", "fingerprint", "--phase", "recon", "--timeout", "5",
+         "--", "bash", "-c", "trap '' TERM; exec sleep 600"],
+        check=False, capture_output=True, text=True, timeout=90,
+    )
+    _time.sleep(3)  # grace for cascade's final wait + pid-file unlink
+
+    new_pid_files = _ls_pid_files() - before
+    leftover_pids: list[tuple[str, str]] = []
+    for pid_path in new_pid_files:
+        cat = subprocess.run(
+            ["docker", "exec", container, "cat", pid_path],
+            check=False, capture_output=True, text=True, timeout=5,
+        )
+        leftover_pids.append((pid_path, (cat.stdout or "").strip()))
+    pgrep = subprocess.run(
+        ["docker", "exec", container, "pgrep", "-f", "sleep 600"],
+        check=False, capture_output=True, text=True, timeout=10,
+    )
+    survivors = [ln for ln in (pgrep.stdout or "").splitlines() if ln.strip()]
+
+    # Clean up FIRST so the shared runtime stays repeatable even on failure.
+    if survivors:
+        subprocess.run(["docker", "exec", container, "pkill", "-9", "-f", "sleep 600"],
+                       check=False, capture_output=True, timeout=10)
+    for pid_path, _ in leftover_pids:
+        subprocess.run(["docker", "exec", container, "rm", "-f", pid_path],
+                       check=False, capture_output=True, timeout=10)
+
+    assert not survivors, (
+        f"SIGTERM-trapping victim survived the cascade — SIGKILL leg broken.\n"
+        f"aith stdout: {proc.stdout}\naith stderr: {proc.stderr}\n"
+        f"pgrep stdout: {pgrep.stdout}"
+    )
+    for pid_path, recorded in leftover_pids:
+        if not recorded:
+            continue
+        alive = subprocess.run(
+            ["docker", "exec", container, "kill", "-0", recorded],
+            check=False, capture_output=True, timeout=5,
+        )
+        assert alive.returncode != 0, (
+            f"pid file {pid_path} still points to live PID {recorded} after timeout"
+        )
+
+
 def test_kali_exec_dedup_warns_and_returns_early_without_force(
     monkeypatch, fake_engagement, capsys
 ):
+    """Default behavior on dedup hit is warn-and-continue.
+
+    The previous semantics (early-return with status=superseded, requiring
+    `--force` to bypass) pushed operators toward `--force` as a habit because
+    parallel specialists racing on the same wildcard list inside the 30s
+    window were hard-blocked. Round 9: the warning is the only behavior;
+    block-on-dup mode (KALI_AUDIT_DEDUP_BLOCK) was removed.
+    """
     kali = _setup_fake_config(monkeypatch, fake_engagement)
 
     class _DedupClient(_FakeClient):
@@ -1107,11 +1175,12 @@ def test_kali_exec_dedup_warns_and_returns_early_without_force(
     monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
 
     popen_called = []
-    monkeypatch.setattr(
-        kali.subprocess,
-        "Popen",
-        lambda *a, **k: popen_called.append(True) or _FakePopen(returncode=0),
-    )
+
+    def _fake_popen(*args, **kwargs):
+        popen_called.append(True)
+        return _FakePopen(returncode=0)
+
+    monkeypatch.setattr(kali.subprocess, "Popen", _fake_popen)
 
     result = kali.kali_exec(
         ["nmap", "-p", "22", "10.0.0.1"],
@@ -1125,9 +1194,139 @@ def test_kali_exec_dedup_warns_and_returns_early_without_force(
         engagement_key=fake_engagement.name,
         tool_name="nmap",
     )
-    assert result.status == "superseded"
-    assert "dedup hit" in capsys.readouterr().err
-    assert popen_called == [], "subprocess must not run when dedup blocked"
+    err = capsys.readouterr().err
+    assert result.status == "completed", (
+        "warn-and-continue is the new default; dedup hit must not early-return"
+    )
+    assert "dedup hit" in err
+    assert popen_called, "subprocess must run under warn-and-continue default"
+
+
+def test_dedup_warns_and_continues_by_default(
+    monkeypatch, fake_engagement, capsys
+):
+    """The dedup warning text lands on stderr but the command runs to completion.
+
+    Sibling of `test_kali_exec_dedup_warns_and_returns_early_without_force`,
+    asserting the same default policy with a slightly different shape: this
+    one verifies (a) the backend POST returned a NEW row id (not the
+    predecessor's), (b) the CLI's finalize PATCH targets that new row, and
+    (c) the resulting KaliResult.run_id is the new row's id — distinct from
+    the predecessor's. This is the audit-truthfulness assertion for ISSUE-003.
+    """
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+
+    PREDECESSOR_ID = 20
+    NEW_ROW_ID = 21
+
+    class _DedupClient(_FakeClient):
+        def post(self, endpoint, payload):
+            self.posts.append((endpoint, payload))
+            # Backend always inserts a new row on dedup hit and links it to
+            # the predecessor via superseded_by_id. Returned id is the NEW
+            # row's id so the CLI's finalize PATCH lands on its own row.
+            return {"id": NEW_ROW_ID, "superseded_by_id": PREDECESSOR_ID}
+
+    fake_client = _DedupClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
+    )
+
+    result = kali.kali_exec(
+        ["nmap", "-p", "80", "10.0.0.2"],
+        technique="RECON",
+        intent="parallel-specialist race",
+        probe_kind="fingerprint",
+        phase="recon",
+        timeout=30,
+        agent_name="recon-specialist",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        tool_name="nmap",
+    )
+
+    err = capsys.readouterr().err
+    assert "dedup hit" in err, "dedup warning must still hit stderr"
+    assert f"equivalent command-run id={PREDECESSOR_ID}" in err
+    assert result.status == "completed", "subprocess must run despite dedup hit"
+    assert result.return_code == 0
+    # ISSUE-003 audit-truth assertion: the run_id we report is the NEW row's
+    # id, NOT the predecessor's. Two parallel subprocess executions => two
+    # rows in the database, even when the second one was a dedup-hit retry.
+    assert result.run_id == NEW_ROW_ID, (
+        "warn-and-continue must surface the new row id, not the predecessor's"
+    )
+    assert result.run_id != PREDECESSOR_ID
+    # Exactly one pre-exec POST went out, and it was for the new row.
+    assert len(fake_client.posts) == 1
+    # Finalize PATCH targets the NEW row, not the predecessor — this is the
+    # bug the previous implementation had (it patched the predecessor's row,
+    # invisibly overwriting the in-flight peer's eventual finalize).
+    assert any(
+        ep == f"command-runs/{NEW_ROW_ID}" and payload.get("status") == "completed"
+        for ep, payload in fake_client.patches
+    ), "finalize PATCH must target the new row, not the predecessor"
+    assert not any(
+        ep == f"command-runs/{PREDECESSOR_ID}" for ep, _ in fake_client.patches
+    ), "warn-and-continue must NOT patch the predecessor's row"
+
+
+def test_dedup_force_does_not_set_superseded_by_id(monkeypatch, fake_engagement, capsys):
+    """`--force` is the deliberate-retry escape hatch.
+
+    Two separate guarantees ride on it:
+    1. The CLI does NOT emit the dedup warning to stderr (operator opted in).
+    2. The backend POST receives ``force=True`` so the new row's
+       ``superseded_by_id`` is NOT set — operator declared this is an
+       independent retry, not a peer of the in-flight predecessor.
+    """
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+
+    captured_payloads: list[dict] = []
+
+    class _ForceClient(_FakeClient):
+        def post(self, endpoint, payload):
+            captured_payloads.append(payload)
+            self.posts.append((endpoint, payload))
+            # Mirror the backend's behavior: when force=True the response has
+            # superseded_by_id=None even if a predecessor exists.
+            sup = None if payload.get("force") else 40
+            return {"id": 41, "superseded_by_id": sup}
+
+    fake_client = _ForceClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
+    )
+
+    result = kali.kali_exec(
+        ["nmap", "-p", "22", "10.0.0.4"],
+        technique="RECON",
+        intent="force retry",
+        probe_kind="fingerprint",
+        phase="recon",
+        timeout=30,
+        agent_name="recon-specialist",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        force=True,
+        tool_name="nmap",
+    )
+
+    assert result.status == "completed"
+    err = capsys.readouterr().err
+    assert "dedup hit" not in err, (
+        "--force must suppress the warning entirely — operator deliberate retry"
+    )
+    # The CLI sent force=True in the pre-exec POST so the backend skips
+    # _find_dedup_predecessor and superseded_by_id stays NULL on the new row.
+    assert len(captured_payloads) == 1
+    assert captured_payloads[0].get("force") is True, (
+        "CLI must propagate --force into the pre-exec POST payload"
+    )
 
 
 def test_kali_exec_dedup_force_bypasses_check(monkeypatch, fake_engagement):
@@ -1228,17 +1427,42 @@ def test_kali_exec_rejects_unknown_technique(monkeypatch, fake_engagement):
     monkeypatch.setattr(kali, "AssessmentClient", _FakeClient)
     with pytest.raises(Exception) as exc:
         kali.kali_exec(
-            ["nmap", "10.0.0.1"],
-            technique="MADE-UP-NOT-IN-ENUM",
-            intent="probe",
-            probe_kind="fingerprint",
-            phase="recon",
+            ["which", "apkeep"],
+            technique="TOOL-INVENTORY",
+            intent="mobile APK tooling inventory",
+            probe_kind="baseline",
+            phase="code-ingest",
             timeout=60,
-            agent_name="recon-specialist",
+            agent_name=None,
             engagement_dir=fake_engagement,
             engagement_key=fake_engagement.name,
         )
     assert "TECHNIQUE_ENUM" in str(exc.value) or "technique" in str(exc.value).lower()
+
+
+def test_kali_exec_defaults_missing_agent_name_to_operator(monkeypatch, fake_engagement):
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.delenv("AGENT_NAME", raising=False)
+    monkeypatch.delenv("AITH_AGENT_NAME", raising=False)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(kali.subprocess, "Popen", lambda *_a, **_k: _FakePopen(returncode=0))
+
+    result = kali.kali_exec(
+        ["which", "apkeep"],
+        technique="HEALTH",
+        intent="mobile APK tooling inventory",
+        probe_kind="baseline",
+        phase="code-ingest",
+        timeout=60,
+        agent_name=None,
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+    )
+
+    assert result.status == "completed"
+    assert fake_client.posts[0][1]["agent_name"] == "operator"
 
 
 def test_kali_exec_rejects_missing_phase(monkeypatch, fake_engagement):
@@ -1337,16 +1561,19 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
     class _JobClient(_FakeClient):
         def post(self, endpoint, payload):
             self.posts.append((endpoint, payload))
-            return {"id": 14, "status": "queued"}
+            self.row = {
+                "id": 14,
+                "status": "queued",
+                "dtach_socket_path": None,
+                "stdout_path": None,
+                "stderr_path": None,
+            }
+            return self.row.copy()
 
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
-            return {
-                "id": 14,
-                "status": payload.get("status"),
-                "dtach_socket_path": payload.get("dtach_socket_path"),
-                "stdout_path": payload.get("stdout_path"),
-            }
+            self.row.update(payload)
+            return self.row.copy()
 
     fake_client = _JobClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1377,11 +1604,103 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
     # POST /jobs landed.
     assert fake_client.posts and fake_client.posts[0][0] == "jobs"
     assert fake_client.posts[0][1]["status"] == "queued"
-    # PATCH /jobs/14 transitioned to running.
+    # PATCH /jobs/14 first persisted paths before any process is spawned.
     assert fake_client.patches and fake_client.patches[0][0] == "jobs/14"
-    assert fake_client.patches[0][1]["status"] == "running"
+    assert fake_client.patches[0][1]["dtach_socket_path"].startswith("/tmp/aith-jobs/")
+    assert fake_client.patches[0][1]["stdout_path"].endswith(".out")
+    assert fake_client.patches[0][1]["stderr_path"].endswith(".err")
+    assert "status" not in fake_client.patches[0][1]
+    # The final PATCH only transitions the already-manageable row to running.
+    assert fake_client.patches[1] == ("jobs/14", {"status": "running"})
     # docker exec -d dtach ... was invoked.
     assert any("dtach" in arg for argv in seen_argv for arg in argv)
+    dtach_argv = next(argv for argv in seen_argv if "dtach" in argv)
+    assert "-w" in dtach_argv
+    assert dtach_argv[dtach_argv.index("-w") + 1] == f"/engagements/{fake_engagement.name}"
+
+
+def test_job_start_persists_paths_and_cleans_up_when_running_patch_fails(
+    monkeypatch, fake_engagement
+):
+    kali_jobs = _import("assess.lib.kali_jobs")
+    from assess.lib.client import AssessError
+
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    events: list[tuple[str, object]] = []
+
+    class _FailRunningPatchClient(_FakeClient):
+        def post(self, endpoint, payload):
+            self.posts.append((endpoint, payload))
+            return {"id": 14, "status": "queued"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            events.append(("patch", payload.copy()))
+            if payload.get("status") == "running":
+                raise AssessError("backend down during running patch")
+            return {"id": 14, "status": "queued", **payload}
+
+    fake_client = _FailRunningPatchClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda name: None)
+    monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda name, path: None)
+
+    cleanup_calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda container, path: 4242)
+    monkeypatch.setattr(
+        kali_jobs,
+        "_signal_job_pid",
+        lambda container, pid, signal_name: cleanup_calls.append(
+            ("signal", signal_name, pid)
+        ),
+    )
+    monkeypatch.setattr(
+        kali_jobs,
+        "_wait_for_pid_exit",
+        lambda container, pid, **kwargs: cleanup_calls.append(
+            ("wait", kwargs["timeout_seconds"])
+        )
+        or True,
+    )
+
+    def fake_run(argv, **kwargs):
+        events.append(("run", list(argv)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kali_jobs.subprocess, "run", fake_run)
+
+    with pytest.raises(AssessError, match="backend down during running patch"):
+        kali_jobs.start_job(
+            ["nuclei", "-l", "hosts.txt"],
+            audit_meta={
+                "technique": "RECON",
+                "intent": "long sweep",
+                "probe_kind": "fingerprint",
+                "phase": "recon",
+            },
+            container_name="security-research",
+        )
+
+    first_patch = events[0]
+    assert first_patch[0] == "patch"
+    assert first_patch[1]["dtach_socket_path"].startswith("/tmp/aith-jobs/")
+    assert first_patch[1]["stdout_path"].endswith(".out")
+    assert first_patch[1]["stderr_path"].endswith(".err")
+    assert first_patch[1].get("status") != "running"
+    assert events[1][0] == "run"
+    assert events[2] == ("patch", {"status": "running"})
+    assert cleanup_calls[0] == ("signal", "TERM", 4242)
 
 
 def test_job_stop_patches_killed(monkeypatch, fake_engagement):
@@ -1408,6 +1727,9 @@ def test_job_stop_patches_killed(monkeypatch, fake_engagement):
     fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: 4343)
+    monkeypatch.setattr(kali_jobs, "_signal_job_pid", lambda *a, **k: None)
+    monkeypatch.setattr(kali_jobs, "_wait_for_pid_exit", lambda *a, **k: True)
     monkeypatch.setattr(
         kali_jobs.subprocess,
         "run",
@@ -1417,6 +1739,81 @@ def test_job_stop_patches_killed(monkeypatch, fake_engagement):
     record = kali_jobs.job_stop(22, container_name="security-research")
     assert record["status"] == "killed"
     assert fake_client.patches[0] == ("jobs/22", {"status": "killed"})
+
+
+def test_job_stop_records_stop_failed_when_pid_missing(monkeypatch, fake_engagement):
+    kali_jobs = _import("assess.lib.kali_jobs")
+    from assess.lib.client import AssessError
+
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    class _StopClient(_FakeClient):
+        def get(self, endpoint):
+            return {"id": 25, "dtach_socket_path": "/tmp/aith-jobs/missing-pid.sock"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            return {"id": 25, "status": payload["status"]}
+
+    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: None)
+
+    dtach_interrupts: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        dtach_interrupts.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kali_jobs.subprocess, "run", fake_run)
+
+    with pytest.raises(AssessError, match="PID.*not available"):
+        kali_jobs.job_stop(25, container_name="security-research")
+
+    assert dtach_interrupts
+    assert ("jobs/25", {"status": "stop_failed"}) in fake_client.patches
+
+
+def test_job_stop_records_lost_when_container_not_running(monkeypatch, fake_engagement):
+    kali_jobs = _import("assess.lib.kali_jobs")
+
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    class _StopClient(_FakeClient):
+        def get(self, endpoint):
+            return {"id": 26, "dtach_socket_path": "/tmp/aith-jobs/gone.sock"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            return {"id": 26, "status": payload["status"]}
+
+    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: False)
+
+    record = kali_jobs.job_stop(26, container_name="security-research")
+
+    assert record["status"] == "lost"
+    assert fake_client.patches == [("jobs/26", {"status": "lost"})]
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1429,6 +1826,7 @@ def test_contract_kali_root_lists_verbs():
     rendered = contracts.render_contract("kali")
     assert "nmap-scan" in rendered
     assert "nuclei" in rendered
+    assert "asnmap" in rendered
     assert "--phase" in rendered
 
 
@@ -1438,6 +1836,20 @@ def test_contract_kali_per_verb_renders_examples():
     assert "nmap-scan" in rendered
     assert "Examples" in rendered
     assert "--technique" in rendered
+
+
+def test_contract_kali_asnmap_is_registered():
+    contracts = _import("assess.lib.contracts")
+    rendered = contracts.render_contract("kali asnmap")
+    assert "kali asnmap" in rendered
+    assert "aith assess kali asnmap" in rendered
+
+
+def test_contract_kali_exec_does_not_advertise_removed_strace():
+    contracts = _import("assess.lib.contracts")
+    rendered = contracts.render_contract("kali exec")
+    assert "--strace" not in rendered
+    assert "-- <command...>" in rendered
 
 
 def test_contract_command_supports_two_arg_form(capsys):
@@ -1668,6 +2080,66 @@ def test_kali_job_start_warns_when_timeout_omitted(
     )
     err = capsys.readouterr().err
     assert "timeout" in err.lower() and "24h" in err.lower()
+
+
+@pytest.mark.parametrize(
+    ("argv", "helper_name", "expected_call"),
+    [
+        (["status", "7"], "job_status", {"job_id": 7}),
+        (["tail", "7"], "job_tail", {"job_id": 7, "follow": False}),
+        (["stop", "7"], "job_stop", {"job_id": 7, "container_name": "security-research"}),
+        (["list", "--status", "running"], "job_list", {"status_value": "running", "parent_run_id": None}),
+    ],
+)
+def test_kali_job_actions_thread_explicit_engagement_dir(
+    monkeypatch, fake_engagement, capsys, argv, helper_name, expected_call
+):
+    """Every kali job action must use the explicit --engagement-dir root flag
+    instead of falling back to cwd/env for backend engagement resolution."""
+    cli = _import("assess.cli")
+    mod = _import("assess.commands.kali_job")
+    cfg = SimpleNamespace(
+        base_url="http://127.0.0.1:18000",
+        engagement_dir=str(fake_engagement),
+        engagement_key=fake_engagement.name,
+        agent_root=str(fake_engagement.parent.parent),
+    )
+    captured: dict = {}
+
+    def fake_load_config(flag):
+        captured["load_config_flag"] = flag
+        return cfg
+
+    monkeypatch.setattr(mod, "load_config", fake_load_config, raising=False)
+
+    def fake_job_status(job_id, *, config=None):
+        captured["call"] = {"job_id": job_id, "config": config}
+        return {"id": job_id, "status": "running"}
+
+    def fake_job_tail(job_id, *, follow=False, config=None):
+        captured["call"] = {"job_id": job_id, "follow": follow, "config": config}
+
+    def fake_job_stop(job_id, *, container_name="security-research", config=None):
+        captured["call"] = {"job_id": job_id, "container_name": container_name, "config": config}
+        return {"id": job_id, "status": "killed"}
+
+    def fake_job_list(*, status_value=None, parent_run_id=None, config=None):
+        captured["call"] = {"status_value": status_value, "parent_run_id": parent_run_id, "config": config}
+        return [{"id": 7, "status": status_value or "running"}]
+
+    monkeypatch.setattr(mod, "job_status", fake_job_status)
+    monkeypatch.setattr(mod, "job_tail", fake_job_tail)
+    monkeypatch.setattr(mod, "job_stop", fake_job_stop)
+    monkeypatch.setattr(mod, "job_list", fake_job_list)
+
+    cli.main(["--engagement-dir", str(fake_engagement), "kali", "job", *argv])
+
+    assert captured["load_config_flag"] == str(fake_engagement)
+    call = captured["call"]
+    assert call.pop("config") is cfg
+    assert call == expected_call
+    if argv[0] != "tail":
+        assert capsys.readouterr().out
 
 
 def test_kali_job_start_rejects_unknown_technique(monkeypatch, fake_engagement):
@@ -1943,6 +2415,25 @@ def test_assessment_client_patch_accept_409_returns_canonical_row(monkeypatch):
     assert captured[0][2]["accept_409"] is True
 
 
+def test_assessment_client_connection_failure_suggests_orchestrator(monkeypatch):
+    from assess.lib import client as client_mod
+
+    c = client_mod.AssessmentClient("http://127.0.0.1:18000", "engagement-key")
+
+    def fail_conn(*_args, **_kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(c, "_get_conn", fail_conn)
+
+    with pytest.raises(client_mod.AssessError) as exc_info:
+        c.get("summary")
+
+    message = str(exc_info.value)
+    assert "aith orchestrator status" in message
+    assert "aith orchestrator start" in message
+    assert "not the Kali runtime" in message
+
+
 def test_pre_exec_wrapper_handles_pid_write_failure(monkeypatch, fake_engagement):
     """P1 narrowing: the wrapper must succeed-or-log-and-still-exec so a
     failed pid-file write (ENOSPC / read-only /tmp) doesn't strand the user
@@ -1972,7 +2463,9 @@ def test_pre_exec_wrapper_handles_pid_write_failure(monkeypatch, fake_engagement
         engagement_key=fake_engagement.name,
         tool_name="nmap",
     )
-    wrapper = captured["argv"][5]
+    argv = captured["argv"]
+    container_index = argv.index("security-research")
+    wrapper = argv[container_index + 3]
     # Both happy and failure paths exec the user command.
     assert wrapper.count('exec "$@"') == 2
     assert "&& exec" in wrapper
@@ -2220,6 +2713,54 @@ def test_alterx_estimate_flag_appended(monkeypatch):
     assert "-en" in cmd  # -enrich shorthand
 
 
+def test_alterx_domain_mode_uses_dash_d(monkeypatch):
+    """Single-domain alterx mode must pass `-d <domain>` to alterx; `-l`
+    is the list-file flag and treats the domain string as a path."""
+    cli = _import("assess.cli")
+    kali = _import("assess.lib.kali")
+
+    captured: dict = {}
+
+    def fake_kali_exec(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        return kali.KaliResult(
+            run_id=1,
+            status="completed",
+            return_code=0,
+            stdout_path="/tmp/x.out",
+            stderr_path="/tmp/x.err",
+            duration_ms=10,
+            peak_rss_bytes=None,
+            stdout_preview="",
+            stderr_preview="",
+            timed_out=False,
+            partial_results=False,
+        )
+
+    mod = _import("assess.commands.kali_alterx")
+    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+
+    cli.main(
+        [
+            "kali",
+            "alterx",
+            "-d",
+            "example.com",
+            "--technique",
+            "RECON",
+            "--intent",
+            "alterx domain mode",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--timeout",
+            "120",
+        ]
+    )
+    assert captured["cmd"][:3] == ["alterx", "-d", "example.com"]
+
+
 def test_dnsx_timeout_flag_passes_through(monkeypatch):
     """F6 — `kali dnsx -timeout 5` translates to dnsx `-timeout 5`."""
     cli = _import("assess.cli")
@@ -2390,3 +2931,380 @@ def test_cero_only_domains_toggle_maps_to_dash_d(monkeypatch):
     assert cmd[0] == "cero"
     assert "-d" in cmd  # the toggle, not a target
     assert "198.51.100.0/24" in cmd
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# kali sweep-orphans — host-side reconciler for stuck `running` audit rows
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _FakeSweepClient:
+    """Captures GET pages and PATCH calls for the sweep-orphans tests.
+
+    ``rows`` is the list returned by the first ``GET command-runs?...`` page;
+    later pages return empty so paging exits cleanly. ``patches`` records each
+    finalize call so tests can assert payload shape and call count.
+    """
+
+    def __init__(self, rows):
+        self._rows = list(rows)
+        self.gets: list[str] = []
+        self.patches: list[tuple[str, dict]] = []
+
+    def get(self, endpoint):
+        self.gets.append(endpoint)
+        if len(self.gets) == 1:
+            return list(self._rows)
+        return []
+
+    def patch(self, endpoint, payload, *, accept_409: bool = False):
+        self.patches.append((endpoint, payload))
+        return {"id": int(endpoint.split("/")[-1]), "status": payload.get("status")}
+
+    def close(self):
+        return None
+
+
+def _orphan_row(
+    *,
+    row_id: int,
+    age_seconds: int,
+    run_uuid: str | None = "abcd1234",
+):
+    """Build a minimal command-run row with started_at = (now - age_seconds).
+
+    When run_uuid is None, stdout_path is set to a value the regex does NOT
+    match — exercising the "pid file unknown" fallback path.
+    """
+    import datetime as _dt
+
+    started = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=age_seconds)
+    started_iso = started.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if run_uuid is None:
+        stdout_path = "/legacy/no-uuid-here.txt"
+    else:
+        stdout_path = f"/engagements/x/scans/kali/{run_uuid}.out"
+    return {
+        "id": row_id,
+        "status": "running",
+        "started_at": started_iso,
+        "stdout_path": stdout_path,
+        "stderr_path": stdout_path.replace(".out", ".err").replace(".txt", ".err.txt"),
+    }
+
+
+def _setup_sweep_test(monkeypatch, fake_engagement, rows):
+    """Wire load_config, AssessmentClient, and subprocess.run for a sweep run."""
+    sweep = _import("assess.commands.kali_sweep_orphans")
+
+    def fake_load_config(_flag):
+        return SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+            
+        )
+
+    monkeypatch.setattr(sweep, "load_config", fake_load_config)
+    fake_client = _FakeSweepClient(rows)
+    monkeypatch.setattr(sweep, "AssessmentClient", lambda *a, **k: fake_client)
+    return sweep, fake_client
+
+
+def test_sweep_orphans_finalizes_dead_rows_to_lost(monkeypatch, fake_engagement):
+    """Happy path — a stuck row whose in-container PID is dead is PATCHed
+    to status=lost with ended_at set and return_code=null."""
+    rows = [_orphan_row(row_id=42, age_seconds=7200, run_uuid="aaaa1111")]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    # PID file is readable, but kill -0 fails — the wrapper recorded a PID
+    # whose process has since exited.
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[:3] == ["docker", "exec", "security-research"] and argv[3] == "cat":
+            return SimpleNamespace(returncode=0, stdout="9999\n", stderr="")
+        if argv[:3] == ["docker", "exec", "security-research"] and argv[3] == "kill":
+            assert argv[4] == "-0"
+            assert argv[5] == "9999"
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    assert len(fake_client.patches) == 1
+    endpoint, payload = fake_client.patches[0]
+    assert endpoint == "command-runs/42"
+    assert payload["status"] == "lost"
+    assert payload["return_code"] is None
+    assert payload["ended_at"]
+    assert payload["timed_out"] is False
+
+
+def test_sweep_orphans_skips_alive_rows(monkeypatch, fake_engagement):
+    """A stuck-but-alive row stays running — kill -0 returning 0 means the
+    process is still going, so the sweep does not PATCH it."""
+    rows = [_orphan_row(row_id=7, age_seconds=7200, run_uuid="bbbb2222")]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[3] == "cat":
+            return SimpleNamespace(returncode=0, stdout="12345\n", stderr="")
+        if argv[3] == "kill":
+            # kill -0 succeeds → process is alive
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    # No PATCH issued because the row was still-running.
+    assert fake_client.patches == []
+
+
+def test_sweep_orphans_dry_run_does_not_patch(monkeypatch, capsys, fake_engagement):
+    """--dry-run lists candidates and the planned action but never PATCHes,
+    even when the row would otherwise be finalized.
+
+    Also asserts the per-row decision logic does not print ``would-finalize``
+    for rows whose status is already terminal (ISSUE-004): those rows must
+    print ``would-skip`` because they would never be finalized by a non-dry
+    sweep either.
+    """
+    rows = [
+        _orphan_row(row_id=99, age_seconds=7200, run_uuid="cccc3333"),
+        # A row already in a terminal state — must not produce a misleading
+        # ``would-finalize`` line; the sweep would skip it on a real run.
+        {
+            **_orphan_row(row_id=42, age_seconds=7200, run_uuid="dddd4444"),
+            "status": "completed",
+        },
+    ]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[3] == "cat":
+            return SimpleNamespace(returncode=0, stdout="500\n", stderr="")
+        if argv[3] == "kill":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=True,
+    ))
+
+    # Dry-run never writes — finalize PATCH must not be issued.
+    assert fake_client.patches == []
+
+    out = capsys.readouterr().out
+    # The running-status row gets a would-finalize line; the terminal row
+    # must NOT — that lie is exactly the bug ISSUE-004 documented.
+    assert "would-finalize id=99" in out
+    assert "would-finalize id=42" not in out
+    # Terminal rows surface as a would-skip line so the operator can see
+    # why the sweep declined to act.
+    assert "would-skip id=42" in out
+    assert "reason=already-terminal" in out
+
+
+def test_sweep_orphans_filters_to_running_status_serverside(
+    monkeypatch, fake_engagement
+):
+    """The GET request must include ``status=running`` so the backend can
+    serve only the in-flight rows once it grows server-side filtering.
+
+    Until the backend supports the filter, the CLI also applies the same
+    filter client-side (covered by ``test_sweep_orphans_dry_run_does_not_patch``);
+    sending the query param now keeps the cutover painless when the backend
+    catches up.
+    """
+    rows = [_orphan_row(row_id=1, age_seconds=7200, run_uuid="eeee5555")]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[3] == "cat":
+            return SimpleNamespace(returncode=0, stdout="100\n", stderr="")
+        if argv[3] == "kill":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=True,
+    ))
+
+    # The first GET must scope to status=running so the backend can short-
+    # circuit the scan once it supports the filter.
+    assert fake_client.gets, "expected at least one GET against command-runs"
+    first = fake_client.gets[0]
+    assert first.startswith("command-runs?")
+    assert "status=running" in first
+
+
+def test_sweep_orphans_handles_missing_pid_file_as_dead(monkeypatch, fake_engagement):
+    """A row whose in-container pid file is missing (cat returncode != 0) is
+    treated as dead and finalized to status=lost. Same outcome when the
+    stdout_path does not match the run_uuid pattern at all (legacy layout)."""
+    rows = [
+        _orphan_row(row_id=11, age_seconds=7200, run_uuid="dddd4444"),
+        _orphan_row(row_id=12, age_seconds=7200, run_uuid=None),
+    ]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_subprocess_run(argv, **kwargs):
+        # Pid file missing — cat returns non-zero with empty stdout.
+        if argv[3] == "cat":
+            return SimpleNamespace(returncode=1, stdout="", stderr="No such file")
+        # kill -0 should NOT be called when the pid is unknown — but harden
+        # the test against future refactors by treating it as dead anyway.
+        if argv[3] == "kill":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    # Both rows finalized to lost.
+    assert {endpoint for endpoint, _ in fake_client.patches} == {
+        "command-runs/11",
+        "command-runs/12",
+    }
+    for _, payload in fake_client.patches:
+        assert payload["status"] == "lost"
+        assert payload["return_code"] is None
+
+
+def test_sweep_orphans_uses_db_run_uuid_when_present(monkeypatch, fake_engagement):
+    """P1 schema fix: ``run_uuid`` is the DB column on assessment_command_runs;
+    sweep-orphans must prefer that column over parsing the stdout_path regex.
+    The regex is kept only as a fallback for legacy rows pre-plumbing.
+
+    Set up a row where the DB column carries one uuid and stdout_path carries
+    a DIFFERENT uuid (simulating a custom artifact dir or legacy layout) — the
+    sweep must lookup the pid file using the DB-column value.
+    """
+    db_uuid = "ffff9999"
+    legacy_path_uuid = "0000aaaa"  # what the regex would have returned
+    row = _orphan_row(row_id=42, age_seconds=7200, run_uuid=legacy_path_uuid)
+    row["run_uuid"] = db_uuid  # canonical source — this is what sweep should use
+    rows = [row]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    cat_args: list[str] = []
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[3] == "cat":
+            cat_args.append(argv[-1])
+            # Pid file missing — return non-zero to skip kill -0 and finalize as lost.
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        if argv[3] == "kill":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    # The cat call must have asked for the DB-column uuid's pid file, not the
+    # legacy regex value. This is the load-bearing assertion of the P1 fix.
+    assert cat_args, "sweep must look up at least one pid file"
+    assert cat_args[0] == f"/tmp/aith-pid-{db_uuid}.pid"
+    assert legacy_path_uuid not in cat_args[0]
+
+
+def test_sweep_orphans_respects_max_age_threshold(monkeypatch, fake_engagement):
+    """A row that is younger than --max-age-seconds is NOT a candidate even
+    when its status is running — newly-started rows must not be reaped just
+    because a sweep happens to run mid-flight."""
+    rows = [_orphan_row(row_id=1, age_seconds=60, run_uuid="eeee5555")]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    calls = {"count": 0}
+
+    def fake_subprocess_run(argv, **kwargs):
+        calls["count"] += 1
+        # Should never be called — the row is too fresh to be a candidate.
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    # No subprocess call (no liveness probe) and no PATCH because the row
+    # was below the threshold.
+    assert calls["count"] == 0
+    assert fake_client.patches == []
+
+
+def test_read_safely_seeks_to_end_for_true_tail(tmp_path):
+    """ISSUE-007: ``_read_safely`` must seek to the file end when the file
+    is larger than max_bytes.
+
+    The previous implementation read ``max_bytes + 1`` bytes from the START
+    and treated the second half as "tail" — meaning for files >32K the "tail"
+    was actually bytes 16K-32K rather than the actual last bytes of the
+    file. Operators investigating a long-running scan saw the same head as
+    the tail, missing every late-process error message.
+    """
+    kali = _import("assess.lib.kali")
+    path = tmp_path / "long.out"
+    # ~100KB of marker lines; tail must contain late lines (e.g. line 099XXX)
+    # while early lines (line 000500) must NOT appear in the tail half.
+    line_count = 5000
+    text = "".join(f"line {i:06d}: padding aaaa bbbb cccc\n" for i in range(line_count))
+    path.write_text(text, encoding="utf-8")
+    assert path.stat().st_size > 32_768  # precondition for the bug
+
+    preview = kali._read_safely(path)
+    last_line_marker = f"line {line_count - 1:06d}"
+    assert last_line_marker in preview, (
+        f"_read_safely must include the actual end of the file; missing {last_line_marker!r}"
+    )
+    # The tail half must reach the actual end. We also assert the preview
+    # contains the truncation banner so the operator knows bytes were elided.
+    assert "[truncated" in preview
+    assert "from middle of" in preview
+    # An early line that is NOT in the head budget (16K) should not appear.
+    # Each line is ~30 bytes; 16K / 30 ~= 545 lines, so line 000800 is past
+    # the head budget but well before the tail half — it must not be in the
+    # preview at all.
+    assert "line 000800" not in preview, (
+        "_read_safely must not include the middle of the file (only head + tail)"
+    )

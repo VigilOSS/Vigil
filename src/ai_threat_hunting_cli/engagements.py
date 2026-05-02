@@ -11,11 +11,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .paths import engagements_root, resolve_orchestrator_base_url, resolve_orchestrator_data_dir
+from .paths import (
+    DEFAULT_ORCHESTRATOR_BASE_URL,
+    engagements_root,
+    resolve_orchestrator_base_url,
+    resolve_orchestrator_data_dir,
+)
 
 AUTH_MODES = {"none", "manual", "auth_json", "proxy_capture"}
-ENGAGEMENT_TYPES = {"web", "code", "both"}
+ENGAGEMENT_TYPES = {"web", "code", "both", "android"}
 EXPLOIT_POLICIES = {"pause", "full_send", "selected"}
+ANDROID_DYNAMIC_MODES = {"static_only", "device", "emulator"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +34,9 @@ class CreateEngagementOptions:
     auth_mode: str = "none"
     exploit_policy: str = "pause"
     repos: list[str] = field(default_factory=list)
+    artifacts: list[str] = field(default_factory=list)
+    android_package: str | None = None
+    dynamic_mode: str = "static_only"
     skip_permissions: bool = False
 
 
@@ -80,11 +89,13 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     root.mkdir(parents=True, exist_ok=True)
 
     if options.engagement_type not in ENGAGEMENT_TYPES:
-        raise SystemExit("--type must be one of: web, code, both")
+        raise SystemExit("--type must be one of: web, code, both, android")
     if options.auth_mode not in AUTH_MODES:
         raise SystemExit("--auth-mode must be one of: none, manual, auth_json, proxy_capture")
     if options.exploit_policy not in EXPLOIT_POLICIES:
         raise SystemExit("--exploit-policy must be one of: pause, full_send, selected")
+    if options.dynamic_mode not in ANDROID_DYNAMIC_MODES:
+        raise SystemExit("--dynamic-mode must be one of: static_only, device, emulator")
 
     _snapshot_orchestrator_database(install_root)
 
@@ -104,9 +115,17 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         if not hosts:
             hosts = [hostname]
 
+    artifacts = [str(Path(raw).expanduser()) for raw in options.artifacts]
     name = options.name or (options.target if options.engagement_type == "code" else None)
+    if options.engagement_type == "android" and not name:
+        if options.android_package:
+            name = options.android_package
+        elif artifacts:
+            name = Path(artifacts[0]).name
     if options.engagement_type in {"code", "both"} and not name:
         raise SystemExit("code and both engagements require --name")
+    if options.engagement_type == "android" and not name:
+        raise SystemExit("android engagements require --name, --package-name, or --apk")
 
     if options.engagement_type == "web":
         label = slug(hostname)
@@ -121,7 +140,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     key = eng_dir.name
 
     subdirs = ["tools", "downloads", "scans", "pids", "sessions"]
-    if options.engagement_type in {"code", "both"}:
+    if options.engagement_type in {"code", "both", "android"}:
         subdirs.append("source")
     for subdir in subdirs:
         (eng_dir / subdir).mkdir()
@@ -143,6 +162,34 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
             "current_phase": "ingest",
         }
         manifest = {"key": key, "name": name, "target": name, "repos": repos, "created_at": created_at}
+    elif options.engagement_type == "android":
+        scope = {
+            "engagement_type": "android",
+            "mobile_platform": "android",
+            "scope_mode": "artifact-only",
+            "name": name,
+            "android_package": options.android_package or "",
+            "artifacts": artifacts,
+            "hosts": [],
+            "backend_hosts": hosts,
+            "dynamic_mode": options.dynamic_mode,
+            "exploit_policy": options.exploit_policy,
+            "exploit_review_state": "pending",
+            "approved_targets": [],
+            "source_repos": [],
+            "status": "in_progress",
+            "current_phase": "ingest",
+        }
+        manifest = {
+            "key": key,
+            "name": name,
+            "target": name,
+            "mobile_platform": "android",
+            "android_package": options.android_package or "",
+            "artifacts": artifacts,
+            "dynamic_mode": options.dynamic_mode,
+            "created_at": created_at,
+        }
     elif options.engagement_type == "web":
         scope = {
             "engagement_type": "web",
@@ -181,10 +228,36 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     _write_json(eng_dir / "scope.json", scope)
     _write_json(eng_dir / "engagement.json", manifest)
     _write_report(eng_dir, options.engagement_type, name=name, target=target_normalized, repos=repos, date_label=date_label)
-    _write_auth_scaffold(eng_dir, "none" if options.engagement_type == "code" else options.auth_mode, created_at)
+    _write_auth_scaffold(eng_dir, "none" if options.engagement_type in {"code", "android"} else options.auth_mode, created_at)
     _write_json(eng_dir / "sessions" / "index.json", [])
-    _write_json(eng_dir / "agent-registry.json", [])
-    (eng_dir / ".orchestrator.env").write_text("ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000\n", encoding="utf-8")
+    # Dispatch tracking + handoff content live in the orchestrator backend
+    # (assessment_dispatches / assessment_dispatch_handoffs /
+    # assessment_dispatch_decisions). Write via
+    # `aith assess dispatch register|record-handoff|record-decision`.
+    #
+    # AGENT_NAME defaulting to "operator" is handled in
+    # agent/scripts/assess/lib/kali_audit.py (`_resolve_agent_name`) so the env
+    # file only carries `ORCHESTRATOR_BASE_URL`; specialist dispatch wrappers
+    # must export AGENT_NAME=<role> or pass --agent-name explicitly.
+    #
+    # Only seed `.orchestrator.env` when an explicit override is in effect.
+    # The default base URL falls through `resolve_orchestrator_base_url`
+    # (env var → engagement env file → `aith config get orchestrator_base_url`
+    # → hardcoded default), so writing the default into the file would just
+    # confuse operators reading it ("do I edit this to change the port?").
+    # When an override IS configured (via env var or `aith config`), we
+    # snapshot it into the engagement file so the launcher re-exports it.
+    resolved_base_url = resolve_orchestrator_base_url(install_root, eng_dir)
+    if resolved_base_url and resolved_base_url != DEFAULT_ORCHESTRATOR_BASE_URL:
+        (eng_dir / ".orchestrator.env").write_text(
+            f"ORCHESTRATOR_BASE_URL={resolved_base_url}\n",
+            encoding="utf-8",
+        )
+    else:
+        # Touch an empty file so launcher loops that test ``-f`` don't trip
+        # on a missing path. The launcher's grep falls through to the
+        # default when the file has no ORCHESTRATOR_BASE_URL line.
+        (eng_dir / ".orchestrator.env").write_text("", encoding="utf-8")
     _init_cases_db(agent_root, eng_dir)
 
     client_kind = _install_client_kind(agent_root)
@@ -193,7 +266,100 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         _write_codex_config(agent_root, eng_dir)
     _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
     _emit_bootstrap_scope_summary(scope)
+    _verify_backend_install_root(install_root, eng_dir)
     return CreatedEngagement(key=key, path=eng_dir)
+
+
+def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> None:
+    """Detect install-root mismatch between this CLI and the running orchestrator.
+
+    The orchestrator picks ``settings.install_dir`` at startup time from
+    ``$AI_THREAT_HUNTING_INSTALL_DIR`` and cannot retarget at runtime. When
+    the operator runs ``aith --root /custom/path engagement create ...`` against
+    a backend that was started with a *different* install root, the new
+    engagement directory is invisible to ``sync_engagements()`` — every
+    subsequent ``aith assess`` call will write audit data to a backend that
+    cannot see the engagement, silently dropping recon evidence.
+
+    Strategy:
+      - If the backend is unreachable (offline / not started yet), do nothing.
+        Local-only workflows are valid and ``aith engagement create`` should
+        succeed when the orchestrator is intentionally down.
+      - If the backend is reachable AND its install_root matches ours, force a
+        re-sync so the new engagement is registered immediately.
+      - If the backend is reachable AND its install_root differs, abort with
+        the recovery message — the operator must restart the orchestrator
+        against the matching install root before the engagement is usable.
+    """
+    import http.client
+    import json as _json
+    from urllib.parse import urlparse
+
+    base_url = resolve_orchestrator_base_url(install_root, eng_dir)
+    parsed = urlparse(base_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    prefix = (parsed.path or "").rstrip("/")
+    connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+
+    backend_install_root: str | None = None
+    try:
+        conn = connection_cls(host, port, timeout=2)
+        conn.request("GET", f"{prefix}/admin/install-root")
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8", errors="replace")
+        conn.close()
+        if resp.status == 200:
+            payload = _json.loads(body)
+            backend_install_root = str(payload.get("install_root") or "")
+        elif resp.status == 404:
+            # Older orchestrator without /admin/install-root — fall back to a
+            # plain force-sync attempt; if that also 404s, treat as unreachable.
+            print(
+                f"[aith] orchestrator at {base_url} does not expose /admin/install-root "
+                "(older build). Skipping install-root drift check; "
+                "restart the orchestrator after upgrading to validate.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[aith] orchestrator at {base_url} returned HTTP {resp.status} "
+                "for /admin/install-root; skipping install-root drift check.",
+                file=sys.stderr,
+            )
+            return
+    except (OSError, _json.JSONDecodeError):
+        # Backend unreachable or unparseable — local-only workflows are valid,
+        # so engagement creation should still succeed.
+        return
+
+    expected = str(install_root.expanduser().resolve())
+    if backend_install_root and Path(backend_install_root).resolve() != Path(expected).resolve():
+        raise SystemExit(
+            "\n".join(
+                [
+                    f"Engagement created at {eng_dir}, but the running orchestrator does not know about it.",
+                    f"  The orchestrator was started against install_root={backend_install_root}",
+                    f"  This engagement is at install_root={expected}",
+                    "",
+                    "Recover by:",
+                    f"  aith --root {expected} orchestrator restart",
+                    f"  aith --root {expected} assess fetch summary --engagement-dir {eng_dir}",
+                ]
+            )
+        )
+
+    # Install roots match — force a re-sync so the new engagement is visible
+    # to the backend immediately, without waiting for the next implicit trigger.
+    try:
+        conn = connection_cls(host, port, timeout=2)
+        conn.request("POST", f"{prefix}/admin/sync-engagements")
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+    except OSError:
+        # Sync race conditions are non-fatal — the next implicit sync covers it.
+        pass
 
 
 def _emit_bootstrap_scope_summary(scope: dict[str, object]) -> None:
@@ -330,6 +496,9 @@ def _write_report(eng_dir: Path, engagement_type: str, *, name: str | None, targ
         lines.append(f"- **Name**: {name}")
         display = ", ".join(repo["path"] for repo in repos) if repos else "(none - add source to ./source/)"
         lines.append(f"- **Repositories**: {display}")
+    elif engagement_type == "android":
+        lines.append(f"- **Name**: {name}")
+        lines.append("- **Scope Mode**: Android artifact-only")
     elif engagement_type == "web":
         lines.append(f"- **Target**: {target}")
     else:
@@ -421,6 +590,19 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
 
 def _write_launcher(agent_root: Path, eng_dir: Path, client: str, permission_arg: str) -> None:
     extra = f" {permission_arg}" if permission_arg else ""
+    # The launcher exports operator-side env from the per-engagement
+    # .orchestrator.env (and the install-root .env / .orchestrator.env
+    # fallbacks). The legacy contract for ORCHESTRATOR_BASE_URL is preserved
+    # verbatim: parent-shell export wins over file values; among file values
+    # the LAST file wins (install-root .env overrides per-eng).
+    #
+    # AGENT_NAME is no longer exported here. The kali helper now defaults
+    # to "operator" when neither --agent-name nor $AGENT_NAME / $AITH_AGENT_NAME
+    # is set, so operator-executed mechanical pipeline work (tier-pick smoke,
+    # runtime health, credential validation) still records the right
+    # agent_name without the launcher poking the env. Specialist dispatch
+    # wrappers must export AGENT_NAME=<role> before launching or pass
+    # --agent-name explicitly in their commands.
     script = f"""#!/usr/bin/env bash
 set -euo pipefail
 

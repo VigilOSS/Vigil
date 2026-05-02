@@ -122,6 +122,7 @@ def main(argv: list[str] | None = None) -> None:
         code_record_analysis,
         code_record_modules,
         code_record_threat_model,
+        code_size_summary,
         dispatch,
         emit_event,
         export_findings,
@@ -148,6 +149,7 @@ def main(argv: list[str] | None = None) -> None:
         kali_puredns,
         kali_sqlmap,
         kali_subfinder,
+        kali_sweep_orphans,
         kali_wafw00f,
         kali_whatweb,
         kill_finding,
@@ -172,6 +174,7 @@ def main(argv: list[str] | None = None) -> None:
         supersede_intel,
         update_finding,
         update_intel,
+        transition_phase,
         validate_dispatch_contract,
         verify_finding,
     )
@@ -224,7 +227,9 @@ def main(argv: list[str] | None = None) -> None:
         code_dispatch,
         code_record_analysis,
         code_coverage,
+        code_size_summary,
         contract,
+        transition_phase,
         validate_dispatch_contract,
     ):
         mod.register(sub)
@@ -253,6 +258,7 @@ def main(argv: list[str] | None = None) -> None:
         kali_puredns,
         kali_sqlmap,
         kali_subfinder,
+        kali_sweep_orphans,
         kali_wafw00f,
         kali_whatweb,
     ):

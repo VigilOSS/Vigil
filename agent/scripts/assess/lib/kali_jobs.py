@@ -88,7 +88,7 @@ def start_job(
     parent_command_run_id: int | None = None,
     config: Config | None = None,
 ) -> dict[str, Any]:
-    """POST a queued `assessment_jobs` row, spawn the dtach session, mark it running.
+    """POST a queued row, persist job paths, spawn dtach, mark it running.
 
     Returns the backend job record (with `dtach_socket_path` populated).
     """
@@ -108,6 +108,7 @@ def start_job(
     stdout_path, stderr_path = _job_paths(eng_dir, job_uuid)
 
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    spawned = False
     try:
         created = client.post(
             "jobs",
@@ -128,6 +129,14 @@ def start_job(
         container_stderr = (
             f"/engagements/{cfg.engagement_key}/scans/kali/jobs/{stderr_path.name}"
         )
+        client.patch(
+            f"jobs/{job_id}",
+            {
+                "dtach_socket_path": socket_path,
+                "stdout_path": str(stdout_path),
+                "stderr_path": str(stderr_path),
+            },
+        )
         joined = " ".join(shlex.quote(part) for part in cmd)
         # Record the user-command PID before exec so `job_stop` can address
         # the process across the container PID namespace boundary. ``exec``
@@ -141,6 +150,8 @@ def start_job(
             "docker",
             "exec",
             "-d",
+            "-w",
+            f"/engagements/{cfg.engagement_key}",
             container_name,
             "dtach",
             "-n",
@@ -151,6 +162,7 @@ def start_job(
         ]
         try:
             subprocess.run(dtach_argv, check=True, capture_output=True, text=True, timeout=10)
+            spawned = True
         except subprocess.CalledProcessError as exc:
             client.patch(
                 f"jobs/{job_id}",
@@ -162,14 +174,13 @@ def start_job(
 
         updated = client.patch(
             f"jobs/{job_id}",
-            {
-                "status": "running",
-                "dtach_socket_path": socket_path,
-                "stdout_path": str(stdout_path),
-                "stderr_path": str(stderr_path),
-            },
+            {"status": "running"},
         )
         return updated
+    except Exception:
+        if spawned:
+            _cleanup_spawned_job(container_name, socket_path, pid_file)
+        raise
     finally:
         client.close()
 
@@ -291,6 +302,39 @@ def _wait_for_pid_exit(
         time.sleep(poll_interval)
 
 
+def _interrupt_dtach_session(container_name: str, socket_path: str) -> None:
+    try:
+        subprocess.run(
+            [
+                "docker",
+                "exec",
+                container_name,
+                "sh",
+                "-c",
+                f"printf '\\003' | dtach -p {shlex.quote(socket_path)} || true",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return
+
+
+def _cleanup_spawned_job(container_name: str, socket_path: str, pid_file: str) -> None:
+    """Best-effort cleanup for a just-spawned dtach job before start_job re-raises."""
+    pid = _read_job_pid(container_name, pid_file)
+    if pid is None:
+        _interrupt_dtach_session(container_name, socket_path)
+        return
+
+    _signal_job_pid(container_name, pid, "TERM")
+    if _wait_for_pid_exit(container_name, pid, timeout_seconds=2.0):
+        return
+    _signal_job_pid(container_name, pid, "KILL")
+    _wait_for_pid_exit(container_name, pid, timeout_seconds=2.0)
+
+
 def job_stop(
     job_id: int,
     *,
@@ -308,35 +352,35 @@ def job_stop(
     job_uuid_stem = sock.stem  # `<uuid>` from `<uuid>.sock`
     pid_file = _job_pid_file(job_uuid_stem)
 
-    confirmed_dead = False
-    final_status = "killed"
+    final_status = "lost"
+    failure_message: str | None = None
     if _container_running(container_name):
         pid = _read_job_pid(container_name, pid_file)
         if pid is None:
             # No pid file → fall back to the dtach Ctrl-C path so trapped
-            # foreground tools at least get a SIGINT.
-            subprocess.run(
-                [
-                    "docker",
-                    "exec",
-                    container_name,
-                    "sh",
-                    "-c",
-                    f"printf '\\003' | dtach -p {shlex.quote(socket_path)} || true",
-                ],
-                check=False,
-                capture_output=True,
-                timeout=5,
+            # foreground tools at least get a SIGINT, but do not report
+            # killed because there is no PID to verify.
+            _interrupt_dtach_session(container_name, socket_path)
+            final_status = "stop_failed"
+            failure_message = (
+                f"job {job_id}: PID file {pid_file} is not available; sent a best-effort "
+                "dtach interrupt but could not verify process exit. status=stop_failed "
+                "recorded. Investigate the runtime."
             )
-            confirmed_dead = True  # best-effort: we can't verify without a PID
         else:
             _signal_job_pid(container_name, pid, "TERM")
             confirmed_dead = _wait_for_pid_exit(container_name, pid, timeout_seconds=10.0)
             if not confirmed_dead:
                 _signal_job_pid(container_name, pid, "KILL")
                 confirmed_dead = _wait_for_pid_exit(container_name, pid, timeout_seconds=5.0)
-            if not confirmed_dead:
+            if confirmed_dead:
+                final_status = "killed"
+            else:
                 final_status = "stop_failed"
+                failure_message = (
+                    f"job {job_id}: SIGTERM + SIGKILL both failed to terminate the in-container "
+                    "process; status=stop_failed recorded. Investigate the runtime."
+                )
 
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
@@ -344,8 +388,5 @@ def job_stop(
     finally:
         client.close()
     if final_status == "stop_failed":
-        raise AssessError(
-            f"job {job_id}: SIGTERM + SIGKILL both failed to terminate the in-container "
-            "process; status=stop_failed recorded. Investigate the runtime."
-        )
+        raise AssessError(failure_message or f"job {job_id}: stop failed")
     return record_out

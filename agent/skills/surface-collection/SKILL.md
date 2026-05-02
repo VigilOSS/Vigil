@@ -56,7 +56,7 @@ aith assess kali katana \
 
 **TLS handling:** Katana does not provide a TLS-verification-skip flag in the runtime this
 repo builds. If a target only responds behind an invalid or self-signed certificate, use
-`aith assess kali exec -- curl -k` for spot validation and continue with other collection
+`aith assess kali exec --technique RECON --intent "spot-validate invalid TLS response" --probe-kind baseline --phase collect --timeout 60 -- curl -k` for spot validation and continue with other collection
 sources instead of relying on Katana to bypass TLS checks.
 
 **Auth-aware crawl:** If `auth.json` has `use_for_requests` set to `true` and `state` set
@@ -237,7 +237,7 @@ Before returning to the operator:
 
 **Record surfaces** for all high-signal discoveries:
 ```bash
-aith assess record-surface <surface-type> <url> <source> \
+aith assess record-surface <type> <target> <source> \
   --rationale "<why this is high-signal>" \
   --status discovered
 ```

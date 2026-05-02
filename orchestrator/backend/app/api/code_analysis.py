@@ -5,6 +5,7 @@ from typing import Any, Literal, TypeAlias
 from fastapi import APIRouter, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..services import activity as activity_service
 from ..services import code_analysis
 from ..services.engagements import get_engagement_or_404
 from ..ws import broadcaster
@@ -204,6 +205,29 @@ async def _broadcast(engagement_key: str, record_type: str, payload: dict[str, A
     )
 
 
+def _audit_code_mutation(
+    engagement_id: int,
+    *,
+    title: str,
+    action: str,
+    actor_name: str = "aith-assess",
+    result: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    try:
+        activity_service.record_activity_entry(
+            engagement_id,
+            actor_kind="system",
+            actor_name=actor_name or "aith-assess",
+            title=title,
+            action=action,
+            result=result,
+            metadata=metadata or {},
+        )
+    except Exception:
+        return
+
+
 # ---------------------------------------------------------------------------
 # Repository endpoints
 # ---------------------------------------------------------------------------
@@ -383,6 +407,13 @@ async def complete_queue_items(engagement_key: str, request: QueueCompleteReques
         notes=request.notes,
         cwe_coverage=request.cwe_coverage,
     )
+    _audit_code_mutation(
+        engagement.id,
+        title="code-dispatch done",
+        action=f"item_ids={request.item_ids} disposition={request.disposition}",
+        result=request.notes,
+        metadata={"item_ids": request.item_ids, "disposition": request.disposition},
+    )
     await _broadcast(engagement.key, "queue_done", record)
     return record
 
@@ -429,6 +460,12 @@ async def requeue_triggered_files(engagement_key: str, request: RequeueRequest) 
         engagement.id,
         items=[item.model_dump() for item in request.items],
     )
+    _audit_code_mutation(
+        engagement.id,
+        title="code-dispatch requeue-triggers",
+        action=f"count={len(request.items)}",
+        metadata={"count": len(request.items)},
+    )
     await _broadcast(engagement.key, "queue_requeue", record)
     return record
 
@@ -441,6 +478,19 @@ async def requeue_triggered_files(engagement_key: str, request: RequeueRequest) 
 async def create_analysis_result(engagement_key: str, request: AnalysisResultRecord) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     record = code_analysis.create_analysis_result(engagement.id, request.model_dump())
+    _audit_code_mutation(
+        engagement.id,
+        title="code-record-analysis",
+        action=f"file_id={request.file_id} function={request.function_name or '(file)'}",
+        actor_name=request.agent_name,
+        result=request.disposition,
+        metadata={
+            "file_id": request.file_id,
+            "queue_item_id": request.queue_item_id,
+            "finding_slug": request.finding_slug,
+            "disposition": request.disposition,
+        },
+    )
     await _broadcast(engagement.key, "analysis_result", record)
     return record
 

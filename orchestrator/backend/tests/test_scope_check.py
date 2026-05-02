@@ -43,7 +43,7 @@ def test_scope_check_allows_local_only_command(tmp_path: Path) -> None:
     assert result.returncode == 0
 
 
-def test_scope_check_blocks_in_scope_host_side_target_command(tmp_path: Path) -> None:
+def test_scope_check_allows_host_side_target_command(tmp_path: Path) -> None:
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text(
@@ -53,11 +53,10 @@ def test_scope_check_blocks_in_scope_host_side_target_command(tmp_path: Path) ->
 
     result = _run_scope_check('python3 -c "print(1)" https://target.example/admin', engagement_dir)
 
-    assert result.returncode == 2
-    assert "aith assess kali" in result.stderr.lower()
+    assert result.returncode == 0
 
 
-def test_scope_check_blocks_removed_host_side_helper_path(tmp_path: Path) -> None:
+def test_scope_check_allows_audited_kali_exec_with_raw_tool_name(tmp_path: Path) -> None:
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text(
@@ -65,23 +64,24 @@ def test_scope_check_blocks_removed_host_side_helper_path(tmp_path: Path) -> Non
         encoding="utf-8",
     )
 
-    result = _run_scope_check("source scripts/lib/container.sh && run_tool nmap -sV target.example", engagement_dir)
+    result = _run_scope_check(
+        "aith assess kali exec --technique HEALTH --intent tooling --probe-kind fingerprint --phase recon --timeout 30 -- curl -sS https://target.example",
+        engagement_dir,
+    )
 
-    assert result.returncode == 2
-    assert "aith assess kali" in result.stderr.lower()
+    assert result.returncode == 0
 
 
-def test_scope_check_blocks_when_scope_metadata_is_missing(tmp_path: Path) -> None:
+def test_scope_check_allows_when_scope_metadata_is_missing(tmp_path: Path) -> None:
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
 
     result = _run_scope_check('python3 -c "print(1)" https://target.example/admin', engagement_dir)
 
-    assert result.returncode == 2
-    assert "scope metadata is missing" in result.stderr.lower()
+    assert result.returncode == 0
 
 
-def test_scope_check_blocks_explicitly_out_of_scope_host(tmp_path: Path) -> None:
+def test_scope_check_allows_explicitly_out_of_scope_host(tmp_path: Path) -> None:
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text(
@@ -98,8 +98,27 @@ def test_scope_check_blocks_explicitly_out_of_scope_host(tmp_path: Path) -> None
 
     result = _run_scope_check('python3 -c "print(1)" https://admin.target.example/panel', engagement_dir)
 
+    assert result.returncode == 0
+
+
+def test_scope_check_blocks_recursive_force_delete(tmp_path: Path) -> None:
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+
+    result = _run_scope_check("rm -rf /tmp/aith-engagement-scratch", engagement_dir)
+
     assert result.returncode == 2
-    assert "explicitly out of scope" in result.stderr.lower()
+    assert "recursive delete" in result.stderr.lower()
+
+
+def test_scope_check_blocks_destructive_disk_operation(tmp_path: Path) -> None:
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+
+    result = _run_scope_check("sudo dd if=/dev/zero of=/dev/disk4 bs=1m", engagement_dir)
+
+    assert result.returncode == 2
+    assert "disk operation" in result.stderr.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -140,8 +159,7 @@ def _run_filter_scope(monkeypatch, engagement_dir: Path, lines: list[str], capsy
         lambda engagement_dir_flag=None: SimpleNamespace(
             engagement_dir=str(engagement_dir),
             engagement_key="eng",
-            base_url="http://example.test",
-        ),
+            base_url="http://example.test",),
     )
     module.run(
         SimpleNamespace(
@@ -205,8 +223,7 @@ def test_filter_scope_streams_stdin(monkeypatch, tmp_path: Path, capsys) -> None
         lambda engagement_dir_flag=None: SimpleNamespace(
             engagement_dir=str(engagement_dir),
             engagement_key="eng",
-            base_url="http://example.test",
-        ),
+            base_url="http://example.test",),
     )
 
     consumed: list[str] = []
@@ -250,6 +267,45 @@ def test_filter_scope_streams_stdin(monkeypatch, tmp_path: Path, capsys) -> None
         "https://target.example/a\n",
         "https://target.example/b\n",
         "https://target.example/c\n",
+    ]
+
+
+def test_filter_scope_allows_same_file_output(monkeypatch, tmp_path: Path) -> None:
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text(
+        json.dumps({"hosts": ["target.example"]}),
+        encoding="utf-8",
+    )
+    input_file = engagement_dir / "input.txt"
+    input_file.write_text(
+        "https://target.example/a\nhttps://other.example/b\nhttps://target.example/c\n",
+        encoding="utf-8",
+    )
+
+    module = _load_filter_scope_module()
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir_flag=None: SimpleNamespace(
+            engagement_dir=str(engagement_dir),
+            engagement_key="eng",
+            base_url="http://example.test",
+        ),
+    )
+    monkeypatch.setattr(module, "_vendor_saas_decided_hosts", lambda _cfg: set())
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=str(engagement_dir),
+            input_file=str(input_file),
+            output=str(input_file),
+        )
+    )
+
+    assert input_file.read_text(encoding="utf-8").splitlines() == [
+        "https://target.example/a",
+        "https://target.example/c",
     ]
 
 
@@ -419,13 +475,12 @@ def _ingest_setup(
         lambda engagement_dir_flag=None: SimpleNamespace(
             engagement_dir=str(engagement_dir),
             engagement_key="eng",
-            base_url="http://example.test",
-        ),
+            base_url="http://example.test",),
     )
     monkeypatch.setattr(module, "auth_active_context", lambda eng_dir: "anonymous")
 
     fake = _FakeIngestClient()
-    monkeypatch.setattr(module, "AssessmentClient", lambda base, key: fake)
+    monkeypatch.setattr(module, "AssessmentClient", lambda *args, **kwargs: fake)
 
     args = SimpleNamespace(
         engagement_dir=str(engagement_dir),

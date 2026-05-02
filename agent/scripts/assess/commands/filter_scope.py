@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
-from assess.lib.config import load_config
+from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.config import Config, load_config
 from assess.lib.scope import (
     host_from_token,
     host_in_scope,
@@ -16,39 +16,29 @@ from assess.lib.scope import (
 )
 
 
-def _vendor_saas_decided_hosts(engagement_dir: str) -> set[str]:
+def _vendor_saas_decided_hosts(cfg: Config) -> set[str]:
     """Return the set of hosts already carrying a recorded scope decision.
 
-    The Vendor-SaaS scope checkpoint records the user's choice in
-    ``$DIR/agent-registry.json`` as ``{kind: "scope_decision", host: ...}``.
-    Once a host has a decision row, the filter no longer needs to warn about
-    it. A missing or unparseable registry returns the empty set so the
-    warning fires conservatively (better to over-warn than miss a host the
-    operator has not yet decided on).
+    The Vendor-SaaS scope checkpoint records its choice in the orchestrator
+    backend (``assessment_dispatch_decisions`` with ``kind='scope_decision'``). A
+    failed fetch returns the empty set so the warning fires conservatively
+    (better to over-warn than miss a host the operator has not yet decided
+    on).
     """
-    registry_path = Path(engagement_dir) / "agent-registry.json"
-    if not registry_path.is_file():
-        return set()
+    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
-        raw = registry_path.read_text(encoding="utf-8")
-    except OSError:
-        return set()
-    if not raw.strip():
-        return set()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return set()
+        try:
+            rows = client.list_decisions(kind="scope_decision")
+        except AssessError:
+            return set()
+    finally:
+        client.close()
     decisions: set[str] = set()
-    rows = data if isinstance(data, list) else data.get("entries") if isinstance(data, dict) else None
-    if not isinstance(rows, list):
-        return set()
     for row in rows:
         if not isinstance(row, dict):
             continue
-        if str(row.get("kind") or "").strip() != "scope_decision":
-            continue
-        host = row.get("host")
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        host = payload.get("host") or payload.get("target")
         if isinstance(host, str) and host.strip():
             decisions.add(host.strip().rstrip(".").lower())
     return decisions
@@ -80,16 +70,24 @@ def run(args: argparse.Namespace) -> None:
     entries = scope_entries(scope)
 
     warned_vendor_hosts: set[str] = set()
-    decided_hosts = _vendor_saas_decided_hosts(cfg.engagement_dir)
+    decided_hosts = _vendor_saas_decided_hosts(cfg)
 
     output_handle = None
+    output_buffer: list[str] | None = None
+    output_path: Path | None = None
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_handle = output_path.open("w", encoding="utf-8")
+        input_path = Path(args.input_file) if args.input_file != "-" else None
+        if input_path is not None and input_path.resolve() == output_path.resolve():
+            output_buffer = []
+        else:
+            output_handle = output_path.open("w", encoding="utf-8")
 
     def _emit(line: str) -> None:
-        if output_handle is not None:
+        if output_buffer is not None:
+            output_buffer.append(line)
+        elif output_handle is not None:
             output_handle.write(line)
         else:
             sys.stdout.write(line)
@@ -122,6 +120,8 @@ def run(args: argparse.Namespace) -> None:
     finally:
         if output_handle is not None:
             output_handle.close()
+        if output_buffer is not None and output_path is not None:
+            output_path.write_text("".join(output_buffer), encoding="utf-8")
 
 
 def _iter_lines(input_file: str):

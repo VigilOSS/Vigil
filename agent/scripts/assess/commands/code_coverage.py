@@ -227,7 +227,10 @@ def _print_structural_verification(files: list[dict]) -> None:
         for g in gaps:
             print(g)
     else:
-        print("All indexed files have full function coverage.")
+        # max(functions_analyzed) across CWE families matches total_functions,
+        # but overlapping functions between families are not deduplicated —
+        # this is count-based coverage, not identity-based.
+        print("All indexed files report function-count coverage matching structural index.")
 
 
 def _check_effort_gaps(files: list[dict]) -> bool:

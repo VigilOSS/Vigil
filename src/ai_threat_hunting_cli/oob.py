@@ -49,9 +49,14 @@ def stop_oob(container_name: str = "security-research", *, runner: docker.Runner
         _run_exec(container_name, f"tmux kill-session -t {shlex.quote(session)} 2>/dev/null || true", runner=runner, check=False)
 
 
-def oob_status(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> dict[str, object]:
+def oob_status(
+    container_name: str = "security-research",
+    *,
+    oob_domain: str | None = None,
+    runner: docker.Runner = docker.run_command,
+) -> dict[str, object]:
     if not docker.container_running(container_name, runner=runner):
-        return {"state": "stopped", "server": False, "frpc": False, "clients": []}
+        return {"state": "stopped", "server": False, "frpc": False, "clients": [], "domain": oob_domain}
     server = _tmux_has_session(container_name, "oob-server", runner=runner)
     frpc = _tmux_has_session(container_name, "frpc", runner=runner)
     clients = list_oob_clients(container_name, runner=runner)
@@ -66,6 +71,7 @@ def oob_status(container_name: str = "security-research", *, runner: docker.Runn
         "server": server,
         "frpc": frpc,
         "clients": clients,
+        "domain": oob_domain,
     }
 
 

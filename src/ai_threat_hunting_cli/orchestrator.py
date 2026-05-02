@@ -16,6 +16,7 @@ class OrchestratorOptions:
     port: int = 18000
     build: bool = False
     foreground: bool = False
+    allow_existing: bool = False
 
 
 def start_orchestrator(options: OrchestratorOptions) -> None:
@@ -30,8 +31,11 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
         _build_frontend(install_root)
 
     if _pid_running(pid_file):
-        print(f"orchestrator already running: pid {pid_file.read_text(encoding='utf-8').strip()}")
-        return
+        pid = pid_file.read_text(encoding="utf-8").strip()
+        if options.allow_existing:
+            print(f"orchestrator\talready running\tpid={pid}")
+            return
+        raise SystemExit(_already_running_message(pid_file, pid, options.host, options.port))
 
     env = {
         **os.environ,
@@ -52,8 +56,16 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
     if options.foreground:
         os.chdir(install_root)
         os.execvpe("uv", argv, env)
-    with log_file.open("ab") as log:
-        process = subprocess.Popen(argv, cwd=install_root, env=env, stdout=log, stderr=subprocess.STDOUT)
+    with log_file.open("ab") as log, open(os.devnull, "rb") as stdin:
+        process = subprocess.Popen(
+            argv,
+            cwd=install_root,
+            env=env,
+            stdin=stdin,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
     pid_file.write_text(f"{process.pid}\n", encoding="utf-8")
     if not _wait_for_health(options.host, options.port, process=process):
         _terminate_process(process)
@@ -67,7 +79,10 @@ def stop_orchestrator(install_root: Path) -> None:
         return
     try:
         pid = int(pid_file.read_text(encoding="utf-8").strip())
-        os.kill(pid, signal.SIGTERM)
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            os.kill(pid, signal.SIGTERM)
         for _ in range(20):
             if not _pid_alive(pid):
                 break
@@ -80,6 +95,17 @@ def stop_orchestrator(install_root: Path) -> None:
 def orchestrator_status(install_root: Path) -> str:
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
     return "running" if _pid_running(pid_file) else "stopped"
+
+
+def _already_running_message(pid_file: Path, pid: str, host: str, port: int) -> str:
+    return (
+        "Orchestrator is already running.\n"
+        f"  PID: {pid}\n"
+        f"  PID file: {pid_file}\n"
+        f"  URL: http://{host}:{port}\n"
+        "Use `aith orchestrator status` or `aith logs orchestrator` to inspect it.\n"
+        "Use `aith orchestrator restart` to restart it, or `aith orchestrator stop` to stop it."
+    )
 
 
 def _build_frontend(install_root: Path) -> None:
@@ -141,17 +167,29 @@ def _latest_frontend_input_mtime(frontend_dir: Path) -> float | None:
 def _terminate_process(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
-    process.terminate()
+    _terminate_process_group(process, signal.SIGTERM)
     try:
         process.wait(timeout=5)
         return
     except subprocess.TimeoutExpired:
         pass
-    process.kill()
+    _terminate_process_group(process, signal.SIGKILL)
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         pass
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+    try:
+        os.killpg(process.pid, sig)
+    except ProcessLookupError:
+        return
+    except OSError:
+        if sig == signal.SIGTERM:
+            process.terminate()
+        else:
+            process.kill()
 
 
 def _pid_running(pid_file: Path) -> bool:

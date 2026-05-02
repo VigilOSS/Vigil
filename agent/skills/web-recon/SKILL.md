@@ -112,7 +112,7 @@ Map the WAF identity to a rate-limit tier before starting nmap/httpx/ffuf/nuclei
   `-T3 --max-rate 100 --max-retries 2 --host-timeout 300s`, ffuf `-rate 10`, nuclei
   `-rate-limit 25` and `-c 10`.
 
-Full table and detection commands: `agent/references/tools/recon/wafw00f.md`. The canonical per-target rate calibration table is in `agent/shared-constraints.md` "Per-Target Rate Calibration Table" — the values above pull from that table.
+Full table and detection commands: `agent/references/tools/recon/wafw00f.md`. The canonical per-target rate calibration table is in `agent/references/recon/rate-calibration.md` — the values above pull from that table.
 
 ### Step 0b — Egress reputation check (run after subdomain-enum + httpx populate live_hosts.txt, before nmap)
 
@@ -341,55 +341,27 @@ engagement's discovered surface.
 
 ### Step 8a — TLS / SAN / vhost cross-host
 
-The per-host TLS-grab in step 8 (and the `nmap` / `httpx` SAN extraction in steps 1-2)
-records SANs *per host*. The cross-host view is what flags shared multi-tenant
-certs, vhost-cert mismatches, and split-VIP load-balanced clusters — none of which
-the per-host tools surface on their own. Run this step before leaving Phase 1 so
-the SAN-discovered subdomains feed back into Phase 1a / Phase 3.
+When the per-host TLS-grab in step 8 (and the SAN extraction inside `nmap` / `httpx`
+in steps 1-2) surfaces signals of shared multi-tenant infrastructure — a SAN list
+spanning multiple tenants, a CDN/edge fingerprint, an rDNS pointing at a shared
+platform — load `agent/skills/tls-vhost-correlation/SKILL.md` and run its three
+sub-procedures: Multi-time DNS resolution (split-VIP detection), Cross-host SAN
+collision detection, and vhost-cert mismatch detection. The cross-host view flags
+shared multi-tenant certs, vhost-cert mismatches, and split-VIP load-balanced
+clusters — none of which the per-host tools surface on their own. Run before leaving
+Phase 1 so SAN-discovered subdomains feed back into Phase 1a / Phase 3.
 
-The detailed recipes — per-host SAN extraction loop, the cross-host collision
-counter (`for h in $HOSTS; do echo | timeout 10 openssl s_client ... | openssl x509
--noout -ext subjectAltName | grep -oE 'DNS:[^,]+' | sort -u; done | sort | uniq -c
-| sort -rn`), the vhost-cert match check, and the dnsx confirmation pass — live
-in `agent/references/tools/recon/openssl-sans.md`. The three sub-steps below are
-the methodology summary; mechanics live in the recipe.
-
-#### Multi-time DNS resolution (split-VIP detection)
+Methodology and recipes live in
+[`agent/skills/tls-vhost-correlation/SKILL.md`](../tls-vhost-correlation/SKILL.md).
+The load-bearing patterns it uses:
 
 ```bash
-aith assess kali exec --technique RECON --intent "multi-time DNS resolution — detect split-VIP load-balanced clusters" \
-  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
-  for i in 1 2 3 4 5; do dig +short TARGET_HOST A; sleep 60; done | sort -u
-'
+# Multi-time DNS resolution (split-VIP detection)
+for i in 1 2 3 4 5; do dig +short TARGET_HOST A; sleep 60; done | sort -u
 ```
 
-A single DNS lookup misses split-VIP load-balanced clusters — when a name
-resolves to a different IP across multiple resolutions, each unique IP can be
-probed independently and may serve different content / different cert / different
-rate-limit policy. Five samples spaced 60s apart land close to most rotation TTLs
-(30-300s) without burning host wall time. Two or more unique IPs across the
-sample set indicates split-VIP; capture each IP's cert via openssl `s_client
--connect <ip>:443 -servername <hostname>` because different cluster IPs sometimes
-carry different certs.
-
-#### Cross-host SAN collision detection
-
-Loop openssl s_client across the in-scope host list, extract each cert's SAN
-set, and count how many hosts share each SAN entry. A SAN that appears in two or
-more hosts' certs indicates a shared multi-tenant cert (one cert serving
-multiple tenant SANs) — a tenant-identity disclosure surface and a vhost-routing
-hint. The full collision-counter script lives in `openssl-sans.md` step 2;
-high-count entries are recorded as intel-notes and fed back as Phase 1a
-subdomain expansion seeds.
-
-#### vhost-cert mismatch detection
-
-For each in-scope host, compare the served cert's CN (and SAN list) against the
-requested hostname. Mismatches indicate a shared frontend serving a non-matching
-default cert — a frontend-misconfiguration signal that can leak adjacent tenant
-identities, plus the cert's actual CN / SANs are adjacent attack surface
-(record each as a follow-up subdomain candidate). Recipe: `openssl-sans.md`
-step 3.
+Plus the Cross-host SAN collision counter and the vhost-cert mismatch check —
+mechanics in `agent/references/tools/recon/openssl-sans.md`.
 
 ### Step 8b — Vendor-template CSP/CORS re-baseline check
 
@@ -517,6 +489,23 @@ aith assess kali exec --technique RECON --intent "OpenAPI / Swagger / GraphQL en
 - Surface candidates for operator ingestion
 - Coverage gaps when any mandatory step did not complete (record explicitly — the
   recon-specialist's pre-output self-check fails loudly when a mandatory step is missing)
+
+## Output Contract
+
+The skill produces these structured sections in the recon-specialist's return payload.
+Backend writes (`record-finding`, `record-intel`, `record-surface`, `record-handoff`) are
+the durable record; this contract names what each markdown section should hold so
+downstream specialists can parse the output consistently.
+
+| Section | Holds |
+|---|---|
+| `#### Summary` | One-paragraph engagement-level summary of what was scanned, the WAF tier picked, and the headline take (live host count, WAF tier, vendor-SaaS hits, egress block %). |
+| `#### Live Hosts` | Confirmed live in-scope hosts with status code, title, server banner, and tech-detect output. Source for downstream phases. |
+| `#### Findings` | Decisive findings the recon pass already proved (e.g., exposed admin panel, default-creds login, public bucket). Each must also be recorded via `aith assess record-finding`. |
+| `#### Surface Candidates` | Routes / endpoints / hosts evidenced by a real response or artifact, ready for `aith assess record-surface`. |
+| `#### Intelligence` | Tech components (framework, CMS, server, WAF, CDN), TLS / SAN intel, rDNS vendor identification, version strings, vendor-template CSP / CORS placeholders, build-version constants — each row landed via `aith assess record-intel <type>`. |
+| `#### Coverage Gaps` | Every mandatory step that did not complete, every conditional step that fired and why, every dispatch-mode-authorized skip with rationale, and every shared-frontend-trigger sub-procedure that was skipped because the trigger did not fire. The operator reads this section to decide whether to re-dispatch. |
+| `#### Recommended Phase 3 Ordering` | Risk-ranked surface clusters and the recommended specialist + skill for each. The handoff renderer feeds this to surface-collector and downstream specialists. |
 
 ## Extended Resources
 

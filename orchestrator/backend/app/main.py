@@ -5,6 +5,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
 from .api.activity import router as activity_router
+from .api.admin import router as admin_router
 from .api.artifacts import router as artifacts_router
 from .api.assessment import router as assessment_router
 from .api.code_analysis import router as code_analysis_router
@@ -43,6 +44,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.include_router(admin_router)
 app.include_router(engagements_router)
 app.include_router(events_router)
 app.include_router(artifacts_router)

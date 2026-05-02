@@ -1118,6 +1118,43 @@ def test_work_items_per_host_view_strips_explicit_port(tmp_path: Path) -> None:
     assert classify_lib.host_active_count(str(db_path), "example.com") == 3
 
 
+def test_work_items_per_host_view_preserves_ipv6_literal(tmp_path: Path) -> None:
+    classify_lib = _load_classify_lib_module()
+    db_path = _make_fresh_db(tmp_path)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executemany(
+            "INSERT INTO work_items (queue_key, method, url, url_path, type, source, status, priority_score) "
+            "VALUES (?, 'GET', ?, '/x', 'page', 'test', 'pending', 0)",
+            [
+                ("ipv6:1", "https://[2001:db8::1]:8443/api"),
+                ("ipv6:2", "https://[2001:db8::1]/other"),
+                ("ipv6:3", "https://[2001:db8::2]/x"),
+            ],
+        )
+        conn.commit()
+        rows = list(
+            conn.execute(
+                "SELECT host, active_count FROM work_items_per_host ORDER BY host"
+            )
+        )
+    finally:
+        conn.close()
+
+    rollup = dict(rows)
+    assert rollup == {"2001:db8::1": 2, "2001:db8::2": 1}, rollup
+    assert classify_lib.host_active_count(str(db_path), "2001:db8::1") == 2
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("DROP VIEW work_items_per_host")
+        conn.commit()
+    finally:
+        conn.close()
+    assert classify_lib.host_active_count(str(db_path), "2001:db8::1") == 2
+
+
 def test_egress_script_logic_handles_dead_hosts_and_empty_input() -> None:
     """B4/B5/B9 regression: the egress reputation bash script
 

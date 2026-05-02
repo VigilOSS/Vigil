@@ -41,7 +41,7 @@ def _load_proxy_addon_module():
 
 def test_kali_runtime_dockerfiles_package_audit_enum_module() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    required_copy = "COPY docker/kali-mcp-runtime/audit_enums.py /opt/mcp-tools/audit_enums.py"
+    required_copy = "COPY agent/scripts/assess/lib/audit_enums.py /opt/mcp-tools/audit_enums.py"
     for dockerfile in (
         repo_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
         repo_root / "agent" / "docker" / "runtime-lightweight" / "Dockerfile",

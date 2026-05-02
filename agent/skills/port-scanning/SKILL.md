@@ -102,7 +102,7 @@ Use `-iL hosts.txt` rather than N parallel `nmap host` invocations. Nmap's paral
 
 Split-by-profile parallel sweeps are allowed up to the runtime-tier cap (Standard 2 / Heavy 4 / Comfortable 8 — read `aith runtime resources`) when two disjoint scan profiles run against the same host list. If you need to split work across specialists for context-window reasons, split the host list into N files and run one `-iL` per specialist — never N per-host invocations.
 
-The trait-row table that drives the cap lives in `agent/shared-constraints.md` "Per-Target Rate Calibration Table"; tier-pick prose is in `agent/operator-core.md` "Recon Dispatch Resource Policy".
+The trait-row table that drives the cap lives in `agent/references/recon/rate-calibration.md`; tier-pick prose is in `agent/operator-core.md` "Recon Dispatch Resource Policy".
 
 ### 6. Per-host port-data presence assertion (mandatory before declaring batch complete)
 
@@ -336,6 +336,22 @@ grep "open" /engagements/$ENGAGEMENT_KEY/scans/nmap_targeted.txt | grep -v "filt
 - Per-host port-data assertion result — every host either passes or has a recorded
   kill-evidence intel-note
 - Non-web services to hand off for deeper testing
+
+## Output Contract
+
+The skill produces these structured sections in the recon-specialist's return payload.
+Backend writes (`record-finding`, `record-intel`, `record-surface`) are the durable
+record; this contract names what each markdown section should hold so downstream
+specialists can parse the output consistently.
+
+| Section | Holds |
+|---|---|
+| `#### Summary` | One-paragraph headline: hosts scanned, profile chosen, open-port total, port-data-assertion pass/fail count. |
+| `#### Open Services` | Per-host table of `host : port/proto : service : version : NSE notes`. The canonical port-and-service inventory feeding `record-surface` for non-web services and dispatch decisions for follow-on testing. |
+| `#### Findings` | Decisive findings already proved by the scan (default-creds via NSE, anonymous FTP, well-known-vuln NSE hit). Each must also be recorded via `aith assess record-finding`. |
+| `#### Surface Candidates` | Non-web services that warrant deeper triage (Redis, Elasticsearch, Docker API, MongoDB, exposed RDP, etc.) — each surfaced via `aith assess record-surface`. |
+| `#### Intelligence` | TLS SAN hosts surfaced from `ssl-cert` NSE, rDNS vendor identification for shared / CDN-fronted IPs, OS detection output, banner anomalies. Each row landed via `aith assess record-intel <type>`. |
+| `#### Coverage Gaps` | Every host the per-host port-data assertion flagged as a gap and the disposition (re-queued at slower retry profile, recorded as upstream-filtering kill-evidence, deferred). UDP coverage gaps. Hosts that hit the host-timeout. The operator uses this section to decide whether to re-dispatch a slower retry pass. |
 
 ## Extended Resources
 

@@ -7,7 +7,7 @@ Activate when scope.json `hosts` contains `*.domain` entries (e.g., `*.example.c
 Run the staged composition end-to-end via `aith assess kali ...`. Methodology and exact invocations live in `agent/skills/subdomain-enumeration/SKILL.md`; this doc is the prioritization/sliding-window companion.
 
 1. Identify which domains have `*.domain` entries in the `hosts` array.
-2. **Tooling preflight** — `aith assess kali exec -- which massdns puredns dnsx subfinder shuffledns alterx cero asnmap bbot`. Missing binaries → fix the runtime, do not silently degrade.
+2. **Tooling preflight** — `aith assess kali exec --technique HEALTH --intent "subdomain-enum tooling preflight" --probe-kind fingerprint --phase recon --timeout 60 -- which massdns puredns dnsx subfinder shuffledns alterx cero asnmap bbot`. Missing binaries → fix the runtime, do not silently degrade.
 3. Run the staged pipeline:
    - **Phase 0** — passive (`subfinder -all -recursive` + chaos + github-subdomains; optional bbot `subdomain-enum -rf passive` for deep coverage).
    - **Phase 1** — active brute (`puredns @ tier rate-limit, --wildcard-batch 100000, --wildcard-tests 30` for wildcard-heavy targets). Skip when Phase 0 returned >5000 subs or target is top-tier.

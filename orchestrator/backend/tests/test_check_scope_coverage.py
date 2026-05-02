@@ -120,6 +120,9 @@ class FakeClient:
     must not call those endpoints, and a regression that re-adds the call
     should fail the test suite loudly rather than silently receive an
     empty list.
+
+    ``list_decisions`` stands in for the assessment_dispatch_decisions table —
+    vendor-SaaS scope decisions come from the backend.
     """
 
     def __init__(
@@ -127,10 +130,12 @@ class FakeClient:
         *,
         services: list[dict[str, Any]] | None = None,
         surfaces: list[dict[str, Any]] | None = None,
+        decisions: list[dict[str, Any]] | None = None,
         endpoint_handler=None,
     ) -> None:
         self._services = services or []
         self._surfaces = surfaces or []
+        self._decisions = decisions or []
         self._endpoint_handler = endpoint_handler
         self.calls: list[str] = []
 
@@ -146,6 +151,13 @@ class FakeClient:
             return self._surfaces
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
+    def list_decisions(self, **filters: Any) -> list[dict[str, Any]]:
+        rows = list(self._decisions)
+        kind = filters.get("kind")
+        if kind:
+            rows = [r for r in rows if r.get("kind") == kind]
+        return rows
+
     def close(self) -> None:
         return None
 
@@ -156,16 +168,19 @@ def _patch_client(
     *,
     services=None,
     surfaces=None,
+    decisions=None,
     endpoint_handler=None,
 ) -> list[FakeClient]:
     fake_services = services or []
     fake_surfaces = surfaces or []
+    fake_decisions = decisions or []
     created: list[FakeClient] = []
 
     def _factory(base_url: str, engagement_key: str) -> FakeClient:
         client = FakeClient(
             services=fake_services,
             surfaces=fake_surfaces,
+            decisions=fake_decisions,
             endpoint_handler=endpoint_handler,
         )
         created.append(client)
@@ -194,10 +209,12 @@ def _run(
     *,
     services=None,
     surfaces=None,
+    decisions=None,
     endpoint_handler=None,
     require_stage: str | None = None,
     as_json: bool = True,
     verbose: bool = False,
+    strict_vendor_saas: bool = False,
 ) -> FakeClient | None:
     module = _load_module()
     _patch_config(monkeypatch, module, engagement_dir)
@@ -206,6 +223,7 @@ def _run(
         module,
         services=services,
         surfaces=surfaces,
+        decisions=decisions,
         endpoint_handler=endpoint_handler,
     )
     module.run(
@@ -214,6 +232,7 @@ def _run(
             require_stage=require_stage,
             as_json=as_json,
             verbose=verbose,
+            strict_vendor_saas=strict_vendor_saas,
         )
     )
     return clients[0] if clients else None
@@ -927,7 +946,7 @@ def _patch_vendor_saas_suffix(monkeypatch, label: str, suffix: str) -> None:
     )
 
 
-def test_vendor_saas_blocks_phase_advance_under_wildcard_expansion(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeypatch, tmp_path: Path, capsys) -> None:
     """A vendor-SaaS host that surfaced under wildcard expansion (NOT an
     explicit literal in scope.json) blocks the gate until a scope_decision
     is recorded.
@@ -958,7 +977,27 @@ def test_vendor_saas_blocks_phase_advance_under_wildcard_expansion(monkeypatch, 
         {"target_descriptor": "https://vendor-saas-platform.example.test/api/health"},
     ]
 
-    # Without a recorded scope_decision, --require-stage enum must fail.
+    # Without strict mode, an undecided vendor-SaaS discovery is reported for
+    # operator visibility but does not fail the stage gate.
+    _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is True, report
+    pending = {row["host"]: row["vendor"] for row in report["vendor_saas_pending_decision"]}
+    assert pending.get("vendor-saas-platform.example.test") == "vendor-saas-platform"
+    assert report["strict_vendor_saas"] is False
+    assert not any(
+        "vendor-saas" in msg and "vendor-saas-platform.example.test" in msg
+        for msg in report["overall_gaps"]
+    )
+
+    # Strict mode restores the phase gate when an engagement wants vendor-SaaS
+    # ambiguity to block progress.
     with pytest.raises(SystemExit) as excinfo:
         _run(
             monkeypatch,
@@ -966,10 +1005,12 @@ def test_vendor_saas_blocks_phase_advance_under_wildcard_expansion(monkeypatch, 
             services=services,
             surfaces=surfaces,
             require_stage="enum",
+            strict_vendor_saas=True,
         )
     assert excinfo.value.code == 1
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is False, report
+    assert report["strict_vendor_saas"] is True
     pending = {row["host"]: row["vendor"] for row in report["vendor_saas_pending_decision"]}
     assert pending.get("vendor-saas-platform.example.test") == "vendor-saas-platform"
     assert any(
@@ -977,27 +1018,28 @@ def test_vendor_saas_blocks_phase_advance_under_wildcard_expansion(monkeypatch, 
         for msg in report["overall_gaps"]
     )
 
-    # Recording a scope_decision for the host clears the gate.
-    registry_path = eng / "agent-registry.json"
-    registry_path.write_text(
-        json.dumps(
-            [
-                {
-                    "kind": "scope_decision",
-                    "host": "vendor-saas-platform.example.test",
-                    "vendor": "vendor-saas-platform",
-                    "choice": "in_scope",
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
+    # Recording a scope_decision in the backend clears the gate — the
+    # decision lives in assessment_dispatch_decisions.
+    decisions = [
+        {
+            "id": 1,
+            "kind": "scope_decision",
+            "payload": {
+                "target": "vendor-saas-platform.example.test",
+                "vendor": "vendor-saas-platform",
+                "choice": "in_scope",
+            },
+            "surfaced_to_user": True,
+            "resolved": False,
+        }
+    ]
 
     _run(
         monkeypatch,
         eng,
         services=services,
         surfaces=surfaces,
+        decisions=decisions,
         require_stage="enum",
     )
     report = json.loads(capsys.readouterr().out)
@@ -1043,5 +1085,3 @@ def test_vendor_saas_explicit_literal_in_scope_skips_gate(monkeypatch, tmp_path:
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
     assert report["vendor_saas_pending_decision"] == []
-
-

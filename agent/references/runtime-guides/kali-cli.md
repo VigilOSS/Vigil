@@ -4,10 +4,10 @@ Use when `aith assess kali --help` errors, a verb fails unexpectedly, or an audi
 
 ## Diagnosis
 
-1. **Local readiness and live state.** `aith doctor` and `aith status`. `aith doctor` checks dtach reachability inside the runtime, the orchestrator backend on `127.0.0.1:18000`, and the engagement directory layout. `aith status` shows the configured runtime resource tier and live cgroup state.
+1. **Local readiness and live state.** `aith doctor` and `aith status`. `aith doctor` checks dtach reachability inside the runtime, the orchestrator backend on the configured base URL, the engagement directory layout, and orphaned `<run_uuid>.failed-audit` markers per engagement under `scans/kali/` (a non-empty marker list means the pre-exec audit POST failed for those runs and the operator should investigate connectivity). `aith status` shows the configured runtime resource tier and live cgroup state.
 2. **Runtime container state.** `aith runtime status` confirms the container is up, the image ID matches the configured tag, and the `/engagements` bind mount is current.
 3. **Configured resource tier.** `aith runtime resources` prints the tier (`Lab/CTF` / `Standard` / `Heavy` / `Comfortable`) and the live cgroup values from inside the container (`/sys/fs/cgroup/memory.max`, `cpu.max`). When OOM events show up in audit rows, this is the first thing to check.
-4. **Engagement context.** If `aith assess kali --help` errors with an engagement-not-found message, run `aith engagement list` to confirm `ENGAGEMENT_DIR` is set and the engagement has a backend record. The CLI reads `engagement.json` and `.orchestrator.env` from the engagement directory; missing or stale either one breaks the audit POST.
+4. **Engagement context.** If `aith assess kali --help` errors with an engagement-not-found message, run `aith engagement list` to confirm `ENGAGEMENT_DIR` is set and the engagement has a backend record. The CLI reads `engagement.json` from the engagement directory; missing or stale `engagement.json` breaks the audit POST. The orchestrator base URL is resolved through `ORCHESTRATOR_BASE_URL` (env var, highest precedence), then a per-engagement `.orchestrator.env`, then `aith config get orchestrator_base_url`, then the hardcoded default `http://127.0.0.1:18000`. To change the port persistently without editing code or env files, run `aith config set orchestrator_base_url http://127.0.0.1:<port>`.
 5. **Restart the runtime if unhealthy.** `aith runtime restart` recreates the container with the current image and bind mount. No engagement data moves; only the container is replaced.
 6. **Inspect runtime logs when needed.** `aith logs runtime --lines 120` tails container stdout/stderr.
 
@@ -41,8 +41,8 @@ sweeps, ffuf with deep wordlists, multi-host puredns runs.
 JOB_ID=$(aith assess kali job start \
   --technique RECON --intent "phase 1 nmap full-tcp scan" \
   --probe-kind fingerprint --phase recon --timeout 7200 \
-  -- nmap-scan --target www.example.gov --ports full \
-     --output-prefix /engagements/$ENGAGEMENT_KEY/scans/nmap_full \
+  -- nmap -p- -sV --max-rate 200 -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_full \
+     www.example.gov \
   | jq -r '.job_id')
 
 # Stop cleanly when you're done — only this job's in-container PID is signaled.
@@ -56,9 +56,9 @@ sibling specialists' jobs are not touched.
 ### Synchronous `aith assess kali exec` — `run_uuid` PID file
 
 Synchronous `kali exec` runs and every typed verb write the in-container
-PID to `/tmp/aith-pid-<run_uuid>` for the duration of the run. The
-`run_uuid` is the audit row's id — pull it from `list-command-runs` if
-you need to signal a still-running synchronous call from another shell:
+PID to `/tmp/aith-pid-<run_uuid>.pid` for the duration of the run. The
+`run_uuid` is the audit row's run UUID — pull it from `list-command-runs`
+if you need to signal a still-running synchronous call from another shell:
 
 ```bash
 # Find the running call (look for status=running).
@@ -66,9 +66,9 @@ aith assess list-command-runs --q ffuf --json | jq -r '.[]
   | select(.status=="running") | .run_uuid'
 
 # Signal only that run.
-aith assess kali exec --technique RECON --intent "stop ffuf cleanly" \
+aith assess kali exec --technique META --intent "stop ffuf cleanly" \
   --probe-kind cleanup --phase recon --timeout 30 -- \
-  kill -TERM "$(cat /tmp/aith-pid-<run_uuid>)"
+  sh -c 'kill -TERM "$(cat /tmp/aith-pid-<run_uuid>.pid)"'
 ```
 
 This signals exactly one in-container PID — sibling agents' ffuf or
@@ -118,14 +118,14 @@ catching a sibling agent's later parallel run of the same binary.
 | `dedup window` warning blocks the call | Same `(command, argv_json)` ran within `KALI_CLI_DEDUP_WINDOW_SECONDS` (default 30s) | Either wait the window out, or pass `--force` if the re-run is intentional. Don't bypass dedup as a habit — the warning is catching accidental double-dispatch |
 | Container not running | Runtime stopped (manual stop, OOM kill, host restart) | `aith runtime start`. If the container repeatedly OOMs, check `aith runtime resources` and bump the tier |
 | `nikto: -h reserved by argparse` confusion | Trying to use `-h` as the target host | Use `--host <h>` instead — argparse reserves `-h` for help, so the typed wrapper exposes the target as `--host`. The underlying nikto invocation builds `nikto -h <host>` correctly |
-| Stale orphan rows in `assessment_command_runs` | A previous run was killed by host OOM or the container was force-stopped before the CLI could finalize the row | Documented as a follow-up — `aith assess kali sweep-orphans` is the planned helper. Until it lands, the row stays in `running` status until manually patched via `aith assess patch command-runs/<id>` |
+| Stale orphan rows in `assessment_command_runs` | A previous run was killed by host OOM, the container was force-stopped before the CLI could finalize the row, or a finalize PATCH failed mid-flight | Run `aith assess kali sweep-orphans --dry-run` to inspect candidates, then `aith assess kali sweep-orphans` to finalize dead rows to `status=lost`. The sweep probes the in-container PID via `kill -0` and only touches rows whose process is gone or whose pid file is missing |
 
 ## Verifying the vocabulary
 
 After install or an image rebuild, the canonical smoke test is:
 
 ```bash
-aith assess kali --help                       # lists all 15 verbs
+aith assess kali --help                       # lists all 20 verbs
 aith assess kali nmap-scan --help             # shows the typed flag set
 aith assess contract kali nmap-scan           # canonical schema + helper defaults + example
 aith runtime status                           # container up, image current, mount current
@@ -133,6 +133,22 @@ aith runtime resources                        # configured tier matches expectat
 ```
 
 If all five succeed, the CLI is healthy. If any fail, walk the diagnosis steps above starting at `aith doctor`.
+
+## When to run `kali sweep-orphans`
+
+`aith assess kali sweep-orphans` reconciles `assessment_command_runs` rows that
+are stuck in `status=running` past a threshold age (default 3600s). Rows enter
+this state when a finalize PATCH fails mid-flight — typical causes are a
+backend restart between the pre-exec POST and the finalize PATCH, a host crash
+mid-run, an OOM kill of the runtime container, or a network blip during the
+final HTTP call. The sweep probes the in-container PID via
+`docker exec <container> kill -0 <pid>` against the wrapper-recorded pid file
+at `/tmp/aith-pid-<run_uuid>.pid`. Live processes are left alone; rows whose
+PID is gone or whose pid file is missing are PATCH-finalized to
+`status=lost`. Run it after any backend restart or host crash, or
+periodically on long engagements where small failure rates accumulate. Use
+`--dry-run` first to inspect candidates without writing — the sweep is
+cheap to inspect and never finalizes a row whose process is still alive.
 
 ## See also
 

@@ -50,6 +50,18 @@ SUBDOMAIN_ENUM_BINARIES = (
 # xmllint (libxml2-utils package) for the Layer-2 XML XPath check.
 PORT_SCAN_BINARIES = ("xmllint",)
 
+# Android APK engagements preflight these tools before static/dynamic mobile
+# analysis so an APK-only review does not stall on first use.
+ANDROID_APK_BINARIES = (
+    "adb",
+    "aapt",
+    "apkeep",
+    "apktool",
+    "apksigner",
+    "bundletool",
+    "jadx",
+)
+
 
 def _dockerfile_has_install_line(text: str, binary: str) -> bool:
     """Return True iff the Dockerfile contains an actual install line for the
@@ -73,6 +85,14 @@ def _dockerfile_has_install_line(text: str, binary: str) -> bool:
             return True
     # xmllint ships with the libxml2-utils apt package — accept either form.
     if binary == "xmllint" and "libxml2-utils" in text:
+        return True
+    if re.search(rf"ARG APT_ANDROID_PACKAGES=.*\b{re.escape(binary)}\b", text):
+        return True
+    if binary == "adb" and "android-tools-adb" in text:
+        return True
+    if binary == "apkeep" and "apkeep-${apkeep_arch}-unknown-linux-gnu" in text:
+        return True
+    if binary == "bundletool" and "bundletool-all-${BUNDLETOOL_VERSION}.jar" in text:
         return True
     return False
 
@@ -115,6 +135,19 @@ def test_runtime_full_dockerfile_declares_port_scan_binaries():
     )
 
 
+def test_runtime_full_dockerfile_declares_android_apk_binaries():
+    """Android APK review needs acquisition, decompilation, signing metadata,
+    and optional device access tools available before dispatch starts."""
+    text = RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
+    missing = [
+        name for name in ANDROID_APK_BINARIES if not _dockerfile_has_install_line(text, name)
+    ]
+    assert not missing, (
+        "agent/docker/runtime-full/Dockerfile is missing install lines for Android APK tools: "
+        f"{missing}. Android artifact engagements preflight these binaries before analysis."
+    )
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI not installed on host")
 def test_runtime_full_container_has_subdomain_enum_binaries():
@@ -141,7 +174,7 @@ def test_runtime_full_container_has_subdomain_enum_binaries():
             "`aith runtime start` before running the integration tooling contract test"
         )
 
-    expected = (*SUBDOMAIN_ENUM_BINARIES, *PORT_SCAN_BINARIES)
+    expected = (*SUBDOMAIN_ENUM_BINARIES, *PORT_SCAN_BINARIES, *ANDROID_APK_BINARIES)
     proc = subprocess.run(
         ["docker", "exec", container, "which", *expected],
         capture_output=True,

@@ -135,4 +135,4 @@ If the fingerprint that triggered nikto does not match one of those plugins, the
 
 - All paths use `/engagements/$ENGAGEMENT_KEY/` because the runtime bind mounts engagement state there. Writing to `/tmp` loses output on container recreate.
 - `kali nikto` records its audit row before exec so a crashed run still has a row showing what was attempted. Stdout and stderr stream to `${ENGAGEMENT_DIR}/scans/kali/<run-id>.{out,err}` from line one.
-- For long sweeps (>30 minutes wall clock), wrap nikto in `aith assess kali job start --container-name security-research -- nikto ...` — the synchronous `kali nikto` call is killed cleanly on `--timeout` expiry.
+- For long sweeps (>30 minutes wall clock), wrap nikto in `aith assess kali job start --technique RECON --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> --container-name security-research -- nikto ...` — the synchronous `kali nikto` call is killed cleanly on `--timeout` expiry.

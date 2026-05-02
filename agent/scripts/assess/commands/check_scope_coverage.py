@@ -83,36 +83,25 @@ def _explicit_literal_scope_hosts(entries: list[dict[str, Any]]) -> set[str]:
     }
 
 
-def _vendor_saas_decided_hosts(engagement_dir: str) -> set[str]:
+def _vendor_saas_decided_hosts(client: AssessmentClient) -> set[str]:
     """Return the set of hosts that already carry a vendor-SaaS scope decision.
 
-    The Vendor-SaaS scope checkpoint records the user's choice in
-    ``$DIR/agent-registry.json`` as ``{kind: "scope_decision", host: ...}``.
-    Hosts in that set are excluded from the phase-advance gate.
+    Round 9: the Vendor-SaaS scope checkpoint records the user's choice in
+    the orchestrator backend's ``assessment_dispatch_decisions`` table with
+    ``kind='scope_decision'``. Hosts in that set are excluded from the
+    phase-advance gate. A backend failure returns the empty set (the gate
+    fires conservatively).
     """
-    registry_path = Path(engagement_dir) / "agent-registry.json"
-    if not registry_path.is_file():
-        return set()
     try:
-        raw = registry_path.read_text(encoding="utf-8")
-    except OSError:
-        return set()
-    if not raw.strip():
-        return set()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return set()
-    rows = data if isinstance(data, list) else data.get("entries") if isinstance(data, dict) else None
-    if not isinstance(rows, list):
+        rows = client.list_decisions(kind="scope_decision")
+    except AssessError:
         return set()
     decisions: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
             continue
-        if str(row.get("kind") or "").strip() != "scope_decision":
-            continue
-        host = row.get("host")
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        host = payload.get("host") or payload.get("target")
         if isinstance(host, str) and host.strip():
             decisions.add(host.strip().rstrip(".").lower())
     return decisions
@@ -158,6 +147,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Dump per-entry detail rows even when the summary passes (default: compact)",
     )
+    p.add_argument(
+        "--strict-vendor-saas",
+        dest="strict_vendor_saas",
+        action="store_true",
+        help=(
+            "Fail the coverage gate on undecided vendor-SaaS discoveries. "
+            "Without this flag, pending vendor-SaaS decisions are reported "
+            "but do not block phase advance."
+        ),
+    )
     p.set_defaults(func=run)
 
 
@@ -196,6 +195,7 @@ def run(args: argparse.Namespace) -> None:
         except AssessError as exc:
             print(f"check-scope-coverage: backend surfaces fetch failed: {exc}", file=sys.stderr)
             sys.exit(1)
+        decided_hosts = _vendor_saas_decided_hosts(client)
     finally:
         client.close()
 
@@ -232,7 +232,6 @@ def run(args: argparse.Namespace) -> None:
     # ambiguous case (the operator wrote ``*.example.test`` and a vendor
     # subdomain showed up under expansion). An explicit literal in scope.json
     # is already an unambiguous in-scope decision.
-    decided_hosts = _vendor_saas_decided_hosts(cfg.engagement_dir)
     explicit_literal_hosts = _explicit_literal_scope_hosts(entries)
     vendor_saas_pending = _vendor_saas_hosts_pending_decision(
         services=services_list,
@@ -242,10 +241,12 @@ def run(args: argparse.Namespace) -> None:
     )
 
     overall_gaps = _collect_overall_gaps(report_entries, args.require_stage)
-    if vendor_saas_pending and args.require_stage is not None:
+    strict_vendor_saas = bool(getattr(args, "strict_vendor_saas", False))
+    if vendor_saas_pending and args.require_stage is not None and strict_vendor_saas:
         for host, vendor in vendor_saas_pending:
             overall_gaps.append(
-                f"vendor-saas: {host} (vendor={vendor}) has no scope_decision in agent-registry.json"
+                f"vendor-saas: {host} (vendor={vendor}) has no scope_decision recorded "
+                f"(record via `aith assess dispatch record-decision --kind scope_decision --host {host} --vendor {vendor} --choice ...`)"
             )
     ready = not overall_gaps
 
@@ -257,6 +258,7 @@ def run(args: argparse.Namespace) -> None:
         "vendor_saas_pending_decision": [
             {"host": host, "vendor": vendor} for host, vendor in vendor_saas_pending
         ],
+        "strict_vendor_saas": strict_vendor_saas,
         "ready": ready,
     }
 
@@ -597,8 +599,9 @@ def _vendor_saas_hosts_pending_decision(
 
     Walks every host present in services / surfaces / work_items, classifies
     each via :func:`host_is_vendor_saas`, and excludes any host that already
-    carries a scope_decision row in ``agent-registry.json``. Output is sorted
-    by host string for deterministic output.
+    carries a ``scope_decision`` row in the orchestrator's
+    ``assessment_dispatch_decisions`` table. Output is sorted by host string for
+    deterministic output.
     """
     seen: dict[str, str] = {}
     for svc in services:
@@ -688,5 +691,7 @@ def _render_text(report: dict[str, Any], *, verbose: bool) -> None:
         for row in vendor_saas_pending:
             print(
                 f"  - {row['host']} (vendor={row['vendor']}) — record a "
-                f"scope_decision in agent-registry.json before recon dispatch"
+                f"scope_decision via `aith assess dispatch record-decision "
+                f"--kind scope_decision --host {row['host']} --vendor {row['vendor']} "
+                f"--choice ...` before recon dispatch"
             )

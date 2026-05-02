@@ -43,7 +43,7 @@ Pick `RID` (run id) as a timestamped slug, e.g. `RID=$(date -u +%Y%m%dT%H%M%SZ)`
 
 ## Pipeline
 
-Set up variables inside the runtime shell (e.g. `aith assess kali exec -- bash -c '...'` or
+Set up variables inside the runtime shell (e.g. `aith assess kali exec --technique META --intent "set up gau triage variables" --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '...'` or
 inside an interactive session opened with `aith runtime shell-exec`) — `$ENGAGEMENT_KEY` is
 exported by the engagement launcher and visible inside the container:
 

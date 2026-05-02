@@ -22,7 +22,7 @@ origin: AI Threat Hunting
 ## Tools
 
 - `curl` — manual SSRF probing and payload delivery
-- OOB callback server — operator-provisioned (see operator-core Listener & Callback Management)
+- OOB callback client — use `aith oob status --json` for readiness and `aith oob client logs <name>` for correlated hits
 - Gopherus — gopher protocol payload generation for Redis, MySQL, SMTP exploitation
 
 ---
@@ -49,10 +49,11 @@ Do not limit yourself to `url=`. The following parameter names and functional pa
 
 ### Step 2: Confirm with OOB Callback
 
-OOB callback is the fastest confirmation method. If you have a callback server, use it first.
+OOB callback is the fastest confirmation method. If `aith oob status --json`
+shows healthy shared infrastructure, use the named client URL first.
 
 ```bash
-# Use OOB callback URL from operator dispatch context
+# Use the unique URL from `aith oob client logs <name> --lines 80`
 ?url=http://$OOB_CALLBACK_URL/ssrf-confirm
 
 # If no OOB available, use timing differential:

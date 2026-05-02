@@ -299,6 +299,8 @@ def _per_host_budget_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             SELECT COUNT(*) FROM host_with_port
             WHERE lower(
                 CASE
+                    WHEN host_authority LIKE '[%]%' AND instr(host_authority, ']') > 0
+                        THEN substr(host_authority, 2, instr(host_authority, ']') - 2)
                     WHEN instr(host_authority, ':') > 0
                         THEN substr(host_authority, 1, instr(host_authority, ':') - 1)
                     ELSE host_authority

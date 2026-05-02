@@ -10,87 +10,9 @@ from __future__ import annotations
 import json
 from urllib.parse import quote, urlencode
 
+from assess.lib.audit_enums import PROBE_KIND_ENUM, TECHNIQUE_ENUM
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
-
-
-# Command-metadata enums. Kept in lock-step with
-# ``docker/kali-mcp-runtime/audit_enums.py`` — the MCP runtime is the
-# authoritative list, but the CLI lives outside the container's import
-# path so the values are copied here and guarded by an assertion at
-# module load. Enum drift is caught immediately rather than at
-# list-command-runs run-time.
-TECHNIQUE_ENUM: tuple[str, ...] = (
-    "SSRF",
-    "XSS",
-    "XXE",
-    "SQLI",
-    "NOSQLI",
-    "SSTI",
-    "RCE",
-    "CMDI",
-    "IDOR",
-    "LFI",
-    "RFI",
-    "OPEN-REDIRECT",
-    "AUTH",
-    "JWT",
-    "CSRF",
-    "CORS",
-    "REQUEST-SMUGGLING",
-    "RATE-LIMIT",
-    "INFO-DISCLOSURE",
-    "RECON",
-    "DISCOVERY",
-    "FUZZ",
-    "OSINT",
-    "CVE-VALIDATION",
-    "EXPLOIT-CHAIN",
-    "META",
-    "HEALTH",
-    "LOG-READ",
-    "OTHER",
-)
-
-PROBE_KIND_ENUM: tuple[str, ...] = (
-    "fingerprint",
-    "baseline",
-    "payload",
-    "exploit",
-    "replay",
-    "cleanup",
-)
-
-# Drift guard against docker/kali-mcp-runtime/audit_enums.py. The directory
-# has a hyphen so it isn't a valid Python package path; load the module via
-# its file path. Only the repo checkout is expected to have this file; the
-# guard no-ops cleanly in environments where the path is absent (e.g. an
-# installed copy that mirrors only the runtime container files).
-def _check_audit_enum_drift() -> None:
-    import importlib.util
-    from pathlib import Path
-
-    runtime_path = Path(__file__).resolve().parents[4] / "docker" / "kali-mcp-runtime" / "audit_enums.py"
-    if not runtime_path.is_file():
-        return
-    spec = importlib.util.spec_from_file_location("_kali_audit_enums_runtime", runtime_path)
-    if spec is None or spec.loader is None:
-        return
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    runtime_technique = tuple(getattr(module, "TECHNIQUE_ENUM", ()))
-    runtime_probe_kind = tuple(getattr(module, "PROBE_KIND_ENUM", ()))
-    assert runtime_technique == TECHNIQUE_ENUM, (
-        "list_command_runs TECHNIQUE_ENUM drifted from "
-        f"{runtime_path} — keep both in sync."
-    )
-    assert runtime_probe_kind == PROBE_KIND_ENUM, (
-        "list_command_runs PROBE_KIND_ENUM drifted from "
-        f"{runtime_path} — keep both in sync."
-    )
-
-
-_check_audit_enum_drift()
 
 
 def register(subparsers) -> None:

@@ -105,8 +105,13 @@ When the script reports `egress_block_pct > 50`, re-run the script after a
 five-minute pause; transient rate-limit shape often clears on its own and
 fires the sweep above the 50% line for one sample window. Only fire the
 four-way checkpoint below when the second sample also stays >50%. Record
-the chosen option in `$DIR/agent-registry.json` with
-`{kind: "egress_decision", blocked_pct: N, choice: "..."}`.
+the chosen option via:
+
+```bash
+aith assess dispatch record-decision --kind egress_decision \
+    --choice <option> --payload-json '{"blocked_pct": N}' \
+    --note "<one-line rationale>"
+```
 
 If a subset of hosts in the representative set returned 100% 403, write
 those host strings to `$DIR/scans/egress_blocked_hosts.txt` and pass the
@@ -135,15 +140,17 @@ option that produces a clean signal (no JA3 mismatch, no proxy artifact, no
 TLS fingerprint drift).
 
 **How to set up.** Capture the runtime egress IP via
-`aith assess kali exec -- curl -s https://api.ipify.org`. Email or message
+`aith assess kali exec --technique HEALTH --intent "capture runtime egress IP" --probe-kind fingerprint --phase recon --timeout 30 -- curl -s https://api.ipify.org`. Email or message
 the program contact with the IP and the engagement scope. Wait for
-confirmation before retesting. Record the request in
-`agent-registry.json` so a later operator can reproduce it.
+confirmation before retesting. Record the request via
+`aith assess dispatch record-decision --kind egress_decision --choice allowlist-requested --payload-json '{"egress_ip": "...", "program_contact": "..."}'`
+so a later operator can reproduce it.
 
 **Audit-pipeline considerations.** The audit row reflects the runtime egress
 IP only — the audit pipeline does not see the program's allowlist, so the
 audit story is the same whether the allowlist is in place or not. The
-operator records the allowlisting outcome in `agent-registry.json` and the
+operator records the allowlisting outcome via
+`aith assess dispatch record-decision` and the
 activity log; downstream specialists see clean responses again and treat
 them as the truth.
 
@@ -159,14 +166,15 @@ clean-IP VPS works when the target's reputation feed is conservative.
 runtime's standard `HTTPS_PROXY` / `HTTP_PROXY` env vars. Verify the egress
 IP shifted before re-running the egress reputation script. Document the
 proxy provider, the egress IP range, and the engagement-side authorization
-in `agent-registry.json`. Do not route exploitation traffic through a
+via `aith assess dispatch record-decision --kind egress_decision --choice residential-proxy --payload-json '{"provider": "...", "egress_range": "..."}'`.
+Do not route exploitation traffic through a
 proxy without explicit operator and program approval — proxy logs are
 out-of-pipeline and complicate the audit trail.
 
 **Audit-pipeline considerations.** The audit row records `aith assess kali`
 invocations regardless of proxy state, but the proxy provider's logs are
 outside the audit pipeline. Treat the proxy as a privileged egress; record
-the proxy config and the egress-IP-of-record in `agent-registry.json`.
+the proxy config and the egress-IP-of-record on the egress-decision row.
 Rate-limit through the proxy is the proxy provider's concern; cap concurrency
 and request rate on the runtime side anyway to stay under the residential-IP
 abuse threshold.
@@ -180,7 +188,7 @@ Chromium, real Firefox) presents a legitimate browser TLS fingerprint and
 defeats the JA3 block without changing the egress IP.
 
 **How to set up.** The runtime image carries Playwright and a headless
-Chromium binary. Drive it via `aith assess kali exec -- python3 -m
+Chromium binary. Drive it via `aith assess kali exec --technique HEALTH --intent "browser TLS fingerprint verification" --probe-kind fingerprint --phase recon --timeout 300 -- python3 -m
 playwright_runner` (or the Katana wrapper, which forwards traffic through
 a Chromium TLS stack). Verify by re-running the egress reputation script
 through the Katana / browser path.
@@ -200,9 +208,9 @@ browser path also fails. The engagement records the egress block as a
 Phase-3 blocker and ships the report with the documented gap; this is a
 real failure mode for some heavily-CDN-fronted programs.
 
-**How to set up.** Record `{kind: "egress_decision", blocked_pct: N,
-choice: "accept-gap"}` in `agent-registry.json` and write the gap into
-`agent/skills/report-generation` Phase-3 coverage notes via
+**How to set up.** Record the decision via
+`aith assess dispatch record-decision --kind egress_decision --choice accept-gap --payload-json '{"blocked_pct": N}' --surfaced-to-user`,
+write the gap into `agent/skills/report-generation` Phase-3 coverage notes via
 `aith assess record-intel note` so the report-writer surfaces it. Mark
 affected scope entries `status=deferred` in `scope.json` so the scope
 coverage gate accepts them as terminal.

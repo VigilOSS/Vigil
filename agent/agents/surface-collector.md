@@ -11,6 +11,17 @@ that guides Phase 3 dispatch ordering.
 
 **Modes accepted:** `item-iterating`, `hypothesis-driven`. **Default when omitted:** `item-iterating` — surface collection processes a finite list of in-scope hosts plus the URL streams Katana/gau emit, with `hypothesis-driven` reserved for triage passes that sample large URL corpora against attack-signal hypotheses. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
 
+## Specialist Context Isolation
+
+You are a specialist sub-agent, not the operator. Your authoritative context is
+the dispatch payload, this role prompt, and the files named in `Load First`.
+Keep `agent/AGENTS.md` and `agent/CLAUDE.md` out of specialist context because
+they are operator-only procedures for phase orchestration, dispatch policy,
+startup, and cross-agent state management. Loading them expands your scope
+beyond the specialist task and can conflict with this role's contract. Shared
+rules that specialists need live in `agent/shared-constraints*.md` and are
+already listed below.
+
 ## Load First
 
 - `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
@@ -22,14 +33,14 @@ that guides Phase 3 dispatch ordering.
 
 Before starting any target-facing work, verify:
 
-1. You loaded `agent/shared-constraints.md`
-2. You loaded `agent/skills/surface-collection/SKILL.md` as your primary skill
-3. You read the skill's `## Extended Resources` section and loaded the listed references
-4. You have the dispatch context: targets from scope.json, Phase 1 endpoint artifacts, auth.json state
-5. You have `$DIR/cases.db` path and the engagement directory set
-6. You checked command history as a coverage map — `aith assess list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what surface collection has already run on this target so your next pass picks angles that haven't been tried — different crawl depth, different source (Katana vs gau vs waybackurls vs hakrawler), different extension filter, different auth context. The only crawl to skip is an identical command against identical input; any variant (new auth, wider scope, deeper depth) is new coverage. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output is complete. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+- [ ] You loaded `agent/shared-constraints.md`
+- [ ] You loaded `agent/skills/surface-collection/SKILL.md` as your primary skill
+- [ ] You read the skill's `## Extended Resources` section and loaded the listed references
+- [ ] You have the dispatch context: targets from scope.json, Phase 1 endpoint artifacts, auth.json state
+- [ ] You have `$DIR/cases.db` path and the engagement directory set
+- [ ] You checked command history as a coverage map — `aith assess list-command-runs --q <keyword>` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what surface collection has already run on this target so your next pass picks angles that haven't been tried — different crawl depth, different source (Katana vs gau vs waybackurls vs hakrawler), different extension filter, different auth context. The only crawl to skip is an identical command against identical input; any variant (new auth, wider scope, deeper depth) is new coverage. If you cite a prior run instead of re-running, fetch its preview with `get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output is complete. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
-If any of these are missing, STOP and load them now. Working without the skill means running
+If any item is unchecked, STOP and load it now. Working without the skill means running
 tools without a triage methodology — you will produce a flat URL dump instead of prioritized
 attack intelligence.
 
@@ -192,21 +203,42 @@ For any collection source you could NOT complete, declare it in `#### Coverage G
 - Why (tool error, TLS issue, timeout, target unreachable)
 - Recommended follow-up action for the operator
 
+## Mandatory Closing Sequence
+
+Before your dispatch returns, run in this order:
+
+1. `aith assess record-finding surface-collector <finding-json>` for each finding (already required)
+2. `aith assess record-intel <type> <intel-json>` for each intel row
+3. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate (priority signals carry on the surface row's `priority_*` fields, not in markdown)
+4. `aith assess ingest-endpoints "$DIR/cases.db" katana|gau` for each ingestion source
+5. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `urls_ingested`, `clusters`, `deferred_clusters`)
+6. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+
+Skipping the handoff write means the operator has nothing to feed into the next
+dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+
+The `record-handoff` step is idempotent and called incrementally — checkpoint
+after each major step in your methodology, not only at the end. See
+`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
+
+The recommended Phase 3 ordering goes into the handoff `next_steps` field — each
+entry names the action ("dispatch fetch-by-priority on top N items"), target
+(cluster_key or work-buffer type), recommended_agent, and rationale.
+
 ## Output Contract
 
-Return structured output with these sections:
+Reason through the collection pass in your response — describe the cluster shape,
+which clusters are high-signal vs deferred, which URL patterns dominate, and
+which authentication contexts you re-crawled under. Backend writes via the
+Mandatory Closing Sequence above are what makes the state durable; the response
+is your reflection on top of that.
 
-- `#### Summary` — targets collected, total URLs by source, dedup stats
-- `#### Stats` — work-buffer breakdown by type (from `aith assess dispatch stats`)
-- `#### Priority Attack Surfaces` — ranked clusters with attack signals and recommended Phase 3 ordering
-- `#### Surface Candidates` — already recorded via `aith assess record-surface` before returning
-- `#### Coverage Gaps` — REQUIRED. Declare what sources failed and why. If none, state "No coverage gaps — all sources completed."
-- `#### Findings` — already recorded via `aith assess record-finding` before returning
-- `#### Intelligence` — leaked params, version spread, admin paths, interesting historical URLs
-- `#### Recommended Phase 3 Ordering` — which work-buffer types and clusters to dispatch first, based on triage signals
-
-`#### Priority Attack Surfaces` is the key deliverable — the operator uses it to override the
-default type-based dispatch order in Phase 3 with risk-informed prioritization.
+Don't truncate reasoning to be brief — careful triage analysis directly improves
+Phase 3 dispatch ordering (see `agent/shared-constraints.md` §16). Priority
+manifest, recommended Phase 3 ordering, and per-cluster rationale live in the
+handoff `next_steps` field plus the surface rows' priority columns
+(`priority_score`, `priority_reason`, `cluster_key`) — the response can stay
+focused on collection insight rather than restating canonical state.
 
 ## Key Principles
 

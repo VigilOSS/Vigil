@@ -87,19 +87,23 @@ What to do instead — track the lifecycle of every process you spawn and stop
 only the one you started:
 
 - **Long-running probes — use the job lifecycle.** `aith assess kali job
-  start --intent "<text>" -- <verb> ...` returns a job id and writes an
-  audit row. Stop it cleanly with `aith assess kali job stop <id>`. The
-  job worker SIGTERMs the in-container PID it owns; sibling jobs stay
+  start --technique <enum> --intent "<text>" --probe-kind <kind> --phase
+  <phase> --timeout <seconds> -- <verb> ...` returns a job id and writes
+  an audit row. Stop it cleanly with `aith assess kali job stop <id>`.
+  The job worker SIGTERMs the in-container PID it owns; sibling jobs stay
   alive.
 - **Synchronous `aith assess kali exec` runs — use the run-uuid PID file.**
   Every audit row carries a `run_uuid`. The runtime writes the
   in-container PID to `/tmp/aith-pid-<run_uuid>` for the duration of the
-  run, so cleanup is `aith assess kali exec -- kill -TERM $(cat
-  /tmp/aith-pid-<run_uuid>)`. This signals only your run, not sibling
+  run, so cleanup is `aith assess kali exec --technique META --intent
+  "terminate tracked runtime pid" --probe-kind cleanup --phase <phase>
+  --timeout 30 -- sh -c 'kill -TERM "$(cat
+  /tmp/aith-pid-<run_uuid>.pid)"'`. This signals only your run, not sibling
   runs of the same binary.
 - **Last-resort hygiene for hours-long parallel runs — copy the binary
-  per agent.** `aith assess kali exec -- cp /usr/bin/nmap
-  /usr/local/bin/nmap-${AGENT_NAME}` so a later `pkill -f
+  per agent.** `aith assess kali exec --technique META --intent
+  "create per-agent nmap copy" --probe-kind cleanup --phase <phase>
+  --timeout 30 -- cp /usr/bin/nmap /usr/local/bin/nmap-${AGENT_NAME}` so a later `pkill -f
   nmap-${AGENT_NAME}` only matches your processes. Prefer the job
   lifecycle; reach for this only when two specialists genuinely need
   multi-hour parallel sweeps of the same heavy binary.
@@ -119,12 +123,14 @@ truthful instead of degrading to a stale env-var default.
   `SSRF`, `XSS`, `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`,
   `RFI`, `OPEN-REDIRECT`, `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`,
   `RATE-LIMIT`, `INFO-DISCLOSURE`, `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`,
-  `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `OTHER`. Derive it from the skill you
+  `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `META`, `HEALTH`, `LOG-READ`, `OTHER`. Derive it from the skill you
   loaded: for skills whose name maps 1:1 to an enum value (`ssrf-testing` →
   `SSRF`, `sqli-testing` → `SQLI`, `command-injection` → `CMDI`, etc.), use that
   mapping. When the mapping isn't obvious (e.g. `aws-iam-privesc`,
   `container-escape-detection`, `graphql-testing`), the skill file names the
-  correct value at the top.
+  correct value at the top. Use `HEALTH` for runtime/tool inventory commands
+  such as `which jadx apktool`. The CLI rejects unknown tags before writing an
+  audit row so bad prompt vocabulary does not pollute command-history filters.
 - **`--intent "<text>"`** — a ≤200-char one-liner describing what this specific
   command is trying to accomplish. Replaces the `echo "=== label ==="` pattern.
 - **`--probe-kind <kind>`** — the kind of work this command represents:
@@ -153,42 +159,55 @@ truthful instead of degrading to a stale env-var default.
   `code-ingest`, `code-classify`, `code-hunt`, `code-verify`, plus the
   half-phase tags `recon-pivot` (mid-engagement recon on newly-surfaced host)
   and `exploit-recon` (additional fingerprinting during exploit phase).
-- **`--force`** — bypass the dedup-window check. The CLI hashes
-  `(command, argv_json)` and warns/blocks duplicates within
-  `KALI_CLI_DEDUP_WINDOW_SECONDS` (default 30s). Use only when re-running a
-  near-duplicate is intentional.
-- **`--strace`** — wrap in `strace -e trace=network,write,unlink`. Use for
-  `--probe-kind exploit` or `--destructive` so the audit row records network
-  egress and disk writes.
+- **`--force`** — suppress the dedup-warning log for an intentional retry.
+  The CLI hashes `(command, argv_json)` and warns when an identical command
+  ran within `KALI_AUDIT_DEDUP_WINDOW_SECONDS` (default 30s), but the new
+  command always executes — the backend records a fresh audit row regardless,
+  with `superseded_by_id` linking it to the predecessor when applicable. Pass
+  `--force` only to suppress the warning text; it does not change run
+  behavior or backend state.
 
-`--engagement-key` and `--agent-name` are auto-derived from
-`${ENGAGEMENT_DIR}/engagement.json` and the dispatching role context — do not
-pass them manually unless correcting an inferred value.
+`--engagement-key` is derived from `${ENGAGEMENT_DIR}/engagement.json`.
+`--agent-name` resolves from the explicit flag, `$AGENT_NAME`, `$AITH_AGENT_NAME`,
+then `operator`. Specialist dispatch wrappers must export `AGENT_NAME=<role>`;
+if that context is missing, pass `--agent-name <role>` explicitly because a
+silent `operator` attribution breaks coverage ownership.
 
 ---
 
-## 2a. Listeners, Tunnels & OOB Are Operator-Controlled
+## 2a. Listener, Tunnel, and OOB Responsibility
 
-Agents must NOT start pwncat-vl, frp tunnels, chisel listeners, `nc -lvp`, `socat` listeners,
-interactsh servers, or any other network listener process. These are shared infrastructure that
-the operator manages.
+Shared listener infrastructure belongs to the operator because a listener, tunnel, or
+interactsh server is global runtime state that can break other specialists if it is
+started, restarted, or reconfigured mid-engagement.
 
-When exploitation requires a listener, tunnel, or OOB callback:
-1. Provide the exact commands in your output using `# MANUAL:` annotation
-2. Reference `agent/references/offensive-tactics/shell-handling.md` for shell listener commands
-3. Reference `agent/references/offensive-tactics/frp-tunneling.md` for tunnel exposure and OOB callback setup
-4. Wait for operator confirmation before proceeding with steps that depend on the listener/tunnel
-5. After the operator confirms, verify connection by tailing log files via `aith assess kali exec -- cat /data/<log-path>` so the read is recorded in the audit pipeline
+Agents do their own readiness and evidence checks through `aith`:
+1. Inspect shared OOB state with `aith oob status --json` before blind payload work.
+   `server=true` and `frpc=true` means shared OOB infrastructure is ready.
+2. Inspect infrastructure logs with `aith logs oob --lines 80` when status is
+   partial, callbacks are missing, or FRP/auth health is unclear.
+3. Start, list, read, and stop named per-agent clients with `aith oob client
+   start|list|logs|stop`. Per-agent interactsh clients are correlation handles,
+   not shared tunnel infrastructure, so specialists can manage them directly.
+4. Check correlated callback hits with `aith oob client logs <name> --lines 80`.
+   Use `aith logs oob --lines 80` only for raw server/FRP debugging.
 
-Agents CAN read log files via `aith assess kali exec` to check for activity (use `--probe-kind fingerprint --technique RECON` since reading a log file is observation, not a payload):
-- `/data/shell-*.log` — shell session I/O (verify shell connected)
-- `/data/oob/clients/<name>.log` — correlated interactsh callback hits (preferred for confirming blind vulns — filters unrelated traffic)
-- `/data/oob/server.log` — raw interactsh log (noisy; use only when client log is unavailable)
-- `/data/oob/frpc.log` — tunnel connection status
+When exploitation requires a reverse-shell listener or tunnel exposure:
+1. Provide the exact listener or tunnel commands in your output using `# MANUAL:`
+   annotation, because the operator owns shared listener processes.
+2. Reference `agent/references/offensive-tactics/shell-handling.md` for shell
+   listener commands.
+3. Reference `agent/references/offensive-tactics/frp-tunneling.md` for OOB
+   readiness, per-agent clients, tunnel exposure, and log interpretation.
+4. Proceed after the listener URL file or `aith oob` client is available; do not
+   block on the operator for checks that `aith oob status`, `aith logs oob`, or
+   `aith oob client logs` can answer directly.
 
-Full OOB setup, verification, and log interpretation: `agent/references/offensive-tactics/frp-tunneling.md`
-
-Agents CANNOT start, stop, or restart listener, tunnel, or OOB processes.
+Starting, stopping, or restarting shared listener, tunnel, and OOB server processes
+belongs to the operator — these are global runtime state whose disruption breaks
+other concurrent specialists: pwncat-vl listeners, frp tunnels, chisel listeners,
+`nc -lvp`, `socat` listeners, `frpc`, `oob-server`, interactsh servers, or
+equivalent network listener processes.
 
 ---
 
@@ -362,7 +381,7 @@ via `aith assess record-finding` during your session. Do not defer recording to 
 
 ## 5. Surface Candidates
 
-When your output includes `#### Surface Candidates`, these must be synced by the operator:
+When your output includes `#### Surface Candidates`, record each one directly:
 ```
 aith assess record-surface <type> <target> <source> [--rationale TEXT] [--status STATUS]
 ```
@@ -464,22 +483,39 @@ Engagement artifacts live at one physical location on disk but have two names de
 
 ---
 
-## 12. Listener URL Contract
+## 12. Listener and OOB Callback Contract
 
-Listeners (pwncat-vl), tunnels (frp), and OOB callback servers (interactsh) are operator-controlled (see §2a). The dispatch context delivers their URLs through two well-known files:
+Listeners (pwncat-vl) and tunnel exposure are operator-controlled (see §2a).
+The dispatch context delivers reverse-shell callback targets through one
+well-known file:
 
 - `$DIR/.listener_url` — present when the operator has provisioned a reverse-shell listener / tunnel address. Read it to learn where shells should call back.
-- `$DIR/.oob_url` — present when the operator has provisioned an interactsh server. Read it to embed an OOB callback host in payloads.
 
-Agents READ these files (never write). When `.oob_url` is missing, fall back to time-based detection and note the substitution in your output. When `.listener_url` is missing and exploitation needs one, record a blocked technique via `aith assess post blocked-techniques <json-file>` instead of attempting to bind a port yourself.
+Agents READ `.listener_url` (never write it). When `.listener_url` is missing
+and exploitation needs one, record a blocked technique via `aith assess post
+blocked-techniques <json-file>` instead of attempting to bind a port yourself.
 
-Hit-checking and log paths (`/data/oob/clients/<name>.log`, `/data/oob/server.log`, `/data/shell-*.log`, `/data/oob/frpc.log`) are documented in `agent/references/offensive-tactics/frp-tunneling.md` and `agent/references/offensive-tactics/shell-handling.md`. Read them via `aith assess kali exec -- cat /data/<log-path>` so the read is audit-recorded.
+OOB callback domains are not engagement files. Get readiness and the configured
+base domain from `aith oob status --json`; create or reuse a named correlation
+client with `aith oob client start <name> --engagement <key> --agent <agent>`;
+read the unique callback URL and hits with `aith oob client logs <name> --lines
+80`. If OOB is unavailable, fall back to time-based detection and note the
+substitution in your output.
+
+Hit-checking is handled through the CLI surfaces that own those logs:
+- OOB client evidence: `aith oob client logs <name> --lines 80`
+- OOB infrastructure debugging: `aith logs oob --lines 80`
+- Shell listener session output: `aith runtime shell-exec "tail -80 /data/shell-<name>.log"`
+
+Record the result in the relevant finding, probe-run, or handoff after reading
+logs; the log command itself is infrastructure observation, while durable
+engagement state still belongs in the backend.
 
 ---
 
 ## 13. Intel Recording Rules
 
-When your output includes `#### Intelligence`, the operator translates each row into a structured JSON payload matching the relevant `schemas/intel-*.schema.json` and records it via:
+When your output includes `#### Intelligence`, write each row as a structured JSON file matching the relevant `schemas/intel-*.schema.json` and record it via:
 
 ```
 aith assess record-intel <type> <json-file>
@@ -487,7 +523,7 @@ aith assess record-intel <type> <json-file>
 
 Valid `<type>` values: `tech-component`, `person`, `email`, `domain`, `cve`, `dns-record`, `social-profile`, `breach-record`, `org-fact`, `note`.
 
-Run `aith assess contract record-intel <type>` before authoring the JSON — intel schemas are strict (`additionalProperties=false`) and reject guessed aliases like `source` when the schema says `source_name`.
+Run `aith assess contract record-intel <type>` before authoring the JSON — intel schemas are strict (`additionalProperties=false`) and reject unknown fields.
 
 The backend deduplicates per-engagement on natural keys: tech stack on Component (+ Version), people on Name, emails on Address, domains on Identity + Kind, CVEs on `cve_id`. Credentials live in the assessment domain (`assessment_credentials`); use `aith assess post credentials`, not `record-intel`.
 
@@ -495,29 +531,24 @@ Prose intel that doesn't fit a structured row goes to `record-intel note` — it
 
 ---
 
-## 14. Per-Target Rate Calibration Table
+## 14. Per-Target Rate Calibration
 
-Operators set per-target rate calibration before dispatch; specialists pull values from this table rather than guessing. Vendor names appear as **trait-match examples**, not canonical categories — pick the row on the trait, not the brand.
+Recon-class roles (recon-specialist, surface-collector, osint-analyst when
+running active enumeration) load **`agent/references/recon/rate-calibration.md`**
+on first use — that file owns the trait-row table (Cloud-fronted / Origin /
+WAF-protected / High-friction / Vendor SaaS), the runtime-tier × DNS-profile
+matrix, and the concurrent-nmap-procs cap. Tier-selection prose and the
+step-down rules live in `agent/operator-core.md` "Recon Dispatch Resource
+Policy"; the operator picks the trait row before dispatch and the specialist
+applies it.
 
-| Target trait | nmap profile | dir-fuzz rate | nuclei | DNS brute (puredns rl) | concurrent nmap procs |
-|---|---|---|---|---|---|
-| Cloud-fronted (any major CDN/edge — examples: Cloudflare, Akamai, Fastly, CloudFront) | `-T3 --max-rate 100` | 50–100 req/s | `--rate-limit 100-150 -bs 25 -c 25` | 800 (polite-CDN-fronted-target) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-| Origin / single-server (no CDN, no WAF) | `-T2 --max-rate 30` | 5–10 req/s | `--rate-limit 30 -bs 10 -c 10` | 2500 (polite-residential) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-| WAF-protected (any vendor WAF tier — Cloudflare WAF, Akamai App & API, F5 ASM, AWS WAF, Imperva) | `-T2 --max-rate 30` | 1–3 req/s | `--rate-limit 30 -bs 10 -c 10` | 800 (polite-CDN-fronted-target) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-| High-friction policy / regulated (`.gov`, `.mil`, finance, healthcare) | `-T2 --max-rate 50 --host-timeout 1500s` | ≤2 req/s | `--rate-limit 30 -bs 10 -c 10` | 800 (polite-CDN-fronted-target) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-| Vendor SaaS (e.g., Salesforce, ServiceNow, StatusPage, Auth0, Okta) | `-T3 --max-rate 60` | 20 req/s | `--rate-limit 60 -bs 15 -c 15` | 800 (polite-CDN-fronted-target — vendor-controlled DNS, lower rate) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-
-The DNS-brute column matches the canonical SKILL profile names in `agent/skills/subdomain-enumeration/SKILL.md` "Docker-resource-safe profiles". Available profiles per runtime tier (read `aith runtime resources` to confirm the active tier):
-
-| Runtime tier | `polite-CDN-fronted-target` (cautious 800) | `polite-residential` (2500) | `bursty-OK` (5000) |
-|---|---|---|---|
-| Standard | available | available | NOT available |
-| Heavy | available | available | available (opt-in via `--intent`) |
-| Comfortable | available | available | available (default-eligible for trait rows that allow it) |
-
-`bursty-OK` is never the matrix default; selection requires an explicit operator note in `--intent`.
-
-The "concurrent nmap procs" column scales with the runtime tier: Standard = 2, Heavy = 4, Comfortable = 8. Consolidation is the rule — prefer one `nmap -iL hosts.txt` over N parallel `nmap host` invocations (see `agent/skills/port-scanning/SKILL.md` "Process consolidation"); the cap governs split-by-profile parallel sweeps when consolidation is genuinely impractical.
+Non-recon roles (vulnerability-analyst, source-analyzer, fuzzer,
+exploit-developer, report-writer) do not need rate-calibration values on every
+dispatch — they consume per-call rate hints from the dispatch context, not
+from this table. Loading the trait table on every specialist dispatch was a
+token tax for roles that never used it; this pointer keeps shared-constraints
+lighter for the 80% case while preserving direct linkage for the recon-class
+roles that do.
 
 ---
 
@@ -531,3 +562,50 @@ The "concurrent nmap procs" column scales with the runtime tier: Standard = 2, H
 | Background PIDs | pids/ |
 
 Root: `scope.json`, `report.md`, `auth.json`, and the transient worker buffer only. Activity log and intel live in the orchestrator backend — query via `aith assess fetch activity-entries` and `aith assess list-intel`.
+
+---
+
+## 16. Output Hygiene — Backend Is Canonical
+
+The backend stores the canonical, queryable state of the engagement: findings in
+the findings table (`aith assess record-finding`), intel rows in `intel_*` tables
+(`record-intel`), surface candidates in the surfaces table (`record-surface`),
+credentials and attack chains in their tables, and the cross-cutting handoff
+(summary / coverage gaps / next steps / runtime issues / working artifacts /
+open questions / specialty extras) in `assessment_dispatch_handoffs`
+(`aith assess dispatch record-handoff --from-json <path>`).
+
+The operator queries those tables directly — `render-handoff <agent-id>`, `fetch
+findings`, `list-intel`, `list-clusters` — to assemble the next dispatch's
+context. The markdown response you return is your *reflection* on the work, not
+the canonical record of it.
+
+### Mandatory closing sequence (every specialist runs this before returning)
+
+1. `aith assess record-finding <agent-name> <finding-json>` per finding.
+2. `aith assess record-intel <type> <intel-json>` per intel row.
+3. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` per surface candidate.
+4. `aith assess dispatch record-handoff --from-json <path>` — use the exact
+   `agent_id`, `agent_role`, and `phase` values from the **Runtime Identity block**
+   the operator placed at the top of your dispatch prompt. The handoff row is keyed
+   on `agent_id`; using a different value creates an orphaned row the operator cannot render.
+5. `aith assess dispatch render-handoff <agent_id>` — run after step 4 as a self-check.
+   Exit only after the render succeeds. A 404 means the `agent_id` in step 4 did not
+   match the registered dispatch.
+
+`update-status` is operator-only — do not call it; the operator marks the dispatch
+complete after your return.
+
+`record-handoff` is idempotent — call it as a checkpoint after each major step, not
+only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md` "Checkpointing".
+
+### Reasoning quality > response brevity
+
+Reason fully through the work as you go — narrate observations between tool
+calls, work through hypotheses, summarize findings as you discover them. That's
+how Claude reasons well, and red-team work depends on careful reasoning. Don't
+truncate analysis to be brief.
+
+The point of §16 is not "be terse"; it's "don't let the markdown response
+*replace* the backend writes." Both can coexist: detailed reasoning in the
+response, structured state in the backend.
