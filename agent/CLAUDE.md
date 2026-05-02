@@ -401,10 +401,11 @@ DB="$DIR/cases.db"
    c. Dispatch `vulnerability-analyst` in review mode. The dispatch context must include:
       - The finding slugs, titles, and full payloads being reviewed
       - Target access (the reviewer re-tests via `aith assess kali ...`, not just reads the evidence text)
-      - Explicit instruction: "You are reviewing findings produced by other agents. Your job is adversarial — challenge the evidence, reproduce the PoC, and verify the claimed severity. Confirm, downgrade, or kill each finding with specific counter-evidence."
+      - Explicit instruction: "You are reviewing findings produced by other agents. Your job is adversarial — challenge the evidence, reproduce the PoC, and verify the claimed severity. Confirm, upgrade, downgrade, or kill each finding with specific counter-evidence."
       - The matching vuln-class skill from `agent/SKILL.md` for the findings under review
    d. For each reviewed finding, the reviewer produces a disposition:
       - **Confirmed** — evidence reproduced, severity accurate → `aith assess verify-finding <slug> --disposition confirmed --reason "..."`
+      - **Upgraded** — real issue but severity is *understated* based on reproduced evidence → `aith assess update-finding <slug> --severity <higher> --reason "severity upgrade: ..."` then `aith assess verify-finding <slug> --disposition confirmed --reason "..."`
       - **Downgraded** — real issue but severity overstated → `aith assess verify-finding <slug> --disposition downgraded --reason "..." --new-severity <lower>`
       - **Killed** — false positive, unreproducible, or stacked preconditions → `aith assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-5>`
    e. **Dedup pass**: check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker into the stronger:
