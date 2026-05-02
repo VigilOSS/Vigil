@@ -25,7 +25,7 @@ Always-active rules:
 - `agent/rules/reporting.md`
 
 Path convention:
-- When a shared prompt references `./scripts/...`, resolve it from the agent workspace root after `cd agent`
+- All assessment operations use `aith assess <subcommand>` from any directory.
 
 ## Core Loop -- Code Analysis Mode
 
@@ -261,10 +261,10 @@ using the available subagent budget.
 - **Batch theme** -- the logical module grouping from the file analysis queue. Files in the same
   batch share a module context, enabling cross-file reasoning within the batch.
 - **Slot types** -- the slot type annotations for each file from Phase 1 classification.
-- **Applicable vulnerability classes** -- copy `applicable_vuln_classes` from the backend queue
-  fetch payload when it is present. The backend computes this canonically from slot types, role,
-  and language. The hunter must evaluate every applicable class, not just the ones named in
-  hypotheses. Only if the backend field is missing, fall back to the mapping below:
+- **Applicable vulnerability classes** -- use the `applicable_vuln_classes` list from the backend
+  queue fetch payload. The backend computes this canonically from slot types, role, and language.
+  The hunter must evaluate every applicable class, not just the ones named in hypotheses.
+  Reference mapping:
 
   | Slot Type | Native (C/C++) | Managed (Python/JS/Java/Go) |
   |---|---|---|
