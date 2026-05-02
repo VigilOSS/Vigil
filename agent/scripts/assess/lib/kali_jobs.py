@@ -24,6 +24,7 @@ from .config import Config, load_config
 _DEFAULT_CONTAINER_NAME = "security-research"
 _DEFAULT_DTACH_DIR = "/tmp/aith-jobs"
 _JOB_PID_DIR = "/tmp/aith-jobs"
+_JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost", "stop_failed"}
 
 
 def _job_pid_file(job_uuid: str) -> str:
@@ -343,6 +344,11 @@ def job_stop(
 ) -> dict[str, Any]:
     cfg = config or load_config(None)
     record = job_status(job_id, config=cfg)
+    current_status = str(record.get("status") or "").strip()
+    if current_status in _JOB_TERMINAL_STATUSES:
+        raise AssessError(
+            f"job {job_id} is already terminal with status={current_status}; stop will not overwrite it"
+        )
     socket_path = record.get("dtach_socket_path") or ""
     if not socket_path:
         raise AssessError(f"job {job_id} has no dtach_socket_path recorded; cannot stop")
