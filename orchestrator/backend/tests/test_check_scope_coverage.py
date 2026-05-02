@@ -1025,7 +1025,7 @@ def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeyp
             "id": 1,
             "kind": "scope_decision",
             "payload": {
-                "target": "vendor-saas-platform.example.test",
+                "target": "https://vendor-saas-platform.example.test:8443/review",
                 "vendor": "vendor-saas-platform",
                 "choice": "in_scope",
             },

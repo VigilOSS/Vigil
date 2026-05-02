@@ -4400,13 +4400,26 @@ def update_job(
     sets.append("updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')")
     with get_connection() as connection:
         existing = connection.execute(
-            "SELECT id FROM assessment_jobs WHERE engagement_id = ? AND id = ?",
+            "SELECT * FROM assessment_jobs WHERE engagement_id = ? AND id = ?",
             (engagement.id, int(job_id)),
         ).fetchone()
         if existing is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="job not found",
+            )
+        existing_status = str(existing["status"] or "")
+        if (
+            status_value is not None
+            and existing_status in _JOB_TERMINAL_STATUSES
+            and status_value != existing_status
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "job already terminal",
+                    "existing": _serialize_job(existing),
+                },
             )
         values.extend([engagement.id, int(job_id)])
         connection.execute(

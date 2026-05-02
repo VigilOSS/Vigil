@@ -1741,6 +1741,42 @@ def test_job_stop_patches_killed(monkeypatch, fake_engagement):
     assert fake_client.patches[0] == ("jobs/22", {"status": "killed"})
 
 
+def test_job_stop_rejects_already_terminal_job(monkeypatch, fake_engagement):
+    kali_jobs = _import("assess.lib.kali_jobs")
+    from assess.lib.client import AssessError
+
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    class _StopClient(_FakeClient):
+        def get(self, endpoint):
+            return {"id": 22, "status": "completed", "dtach_socket_path": "/tmp/aith-jobs/abc.sock"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            return {"id": 22, "status": payload["status"]}
+
+    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+
+    signals: list[tuple] = []
+    monkeypatch.setattr(kali_jobs, "_signal_job_pid", lambda *args, **kwargs: signals.append(args))
+
+    with pytest.raises(AssessError, match="already terminal"):
+        kali_jobs.job_stop(22, container_name="security-research")
+
+    assert fake_client.patches == []
+    assert signals == []
+
+
 def test_job_stop_records_stop_failed_when_pid_missing(monkeypatch, fake_engagement):
     kali_jobs = _import("assess.lib.kali_jobs")
     from assess.lib.client import AssessError

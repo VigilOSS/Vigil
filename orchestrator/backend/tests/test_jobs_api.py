@@ -204,6 +204,49 @@ def test_patch_job_updates_terminal_status(client, isolate_settings):
     assert body["exit_code"] == 0
 
 
+def test_patch_job_rejects_terminal_status_overwrite(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
+        json={"status": "running"},
+    ).json()
+    completed = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
+        json={"status": "completed", "exit_code": 0},
+    )
+    assert completed.status_code == 200, completed.text
+
+    overwrite = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
+        json={"status": "killed"},
+    )
+
+    assert overwrite.status_code == 409
+    assert overwrite.json()["detail"]["existing"]["status"] == "completed"
+    current = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}"
+    ).json()
+    assert current["status"] == "completed"
+
+
+def test_patch_job_allows_terminal_artifact_update_without_status(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
+        json={"status": "completed"},
+    ).json()
+
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
+        json={"stdout_path": "/engagements/example/scans/kali/job.out"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["stdout_path"] == "/engagements/example/scans/kali/job.out"
+
+
 def test_patch_job_404_for_unknown(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
     response = client.patch(
@@ -257,5 +300,4 @@ def test_parent_command_run_cascade_set_null(client, isolate_settings):
     )
     assert response.status_code == 200
     assert response.json()["parent_command_run_id"] is None
-
 
