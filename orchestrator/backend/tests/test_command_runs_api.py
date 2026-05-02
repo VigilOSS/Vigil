@@ -125,6 +125,28 @@ def test_record_and_list_command_run_round_trips(client, isolate_settings):
     assert rows[0]["id"] == created["id"]
 
 
+def test_one_shot_command_run_without_status_infers_terminal_state(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+
+    payload = _base_payload(
+        command="nmap -sV 10.0.0.8",
+        argv=["nmap", "-sV", "10.0.0.8"],
+        return_code=0,
+        success=True,
+    )
+    first = _post(client, payload)
+    assert first.status_code == 201, first.text
+    first_row = first.json()
+    assert first_row["status"] == "completed"
+
+    second = _post(client, payload)
+    assert second.status_code == 201, second.text
+    second_row = second.json()
+    assert second_row["status"] == "completed"
+    assert second_row["superseded_by_id"] is None
+    assert second_row.get("dedup_predecessor_id") is None
+
+
 def test_job_patch_accepts_stop_failed_terminal_status(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
 

@@ -38,7 +38,7 @@ def _vendor_saas_decided_hosts(cfg: Config) -> set[str]:
         if not isinstance(row, dict):
             continue
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-        host = payload.get("host")
+        host = payload.get("host") or payload.get("target")
         if isinstance(host, str) and host.strip():
             decisions.add(host.strip().rstrip(".").lower())
     return decisions
@@ -73,13 +73,21 @@ def run(args: argparse.Namespace) -> None:
     decided_hosts = _vendor_saas_decided_hosts(cfg)
 
     output_handle = None
+    output_buffer: list[str] | None = None
+    output_path: Path | None = None
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_handle = output_path.open("w", encoding="utf-8")
+        input_path = Path(args.input_file) if args.input_file != "-" else None
+        if input_path is not None and input_path.resolve() == output_path.resolve():
+            output_buffer = []
+        else:
+            output_handle = output_path.open("w", encoding="utf-8")
 
     def _emit(line: str) -> None:
-        if output_handle is not None:
+        if output_buffer is not None:
+            output_buffer.append(line)
+        elif output_handle is not None:
             output_handle.write(line)
         else:
             sys.stdout.write(line)
@@ -112,6 +120,8 @@ def run(args: argparse.Namespace) -> None:
     finally:
         if output_handle is not None:
             output_handle.close()
+        if output_buffer is not None and output_path is not None:
+            output_path.write_text("".join(output_buffer), encoding="utf-8")
 
 
 def _iter_lines(input_file: str):

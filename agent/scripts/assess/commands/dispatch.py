@@ -25,6 +25,7 @@ _DBLESS_ACTIONS = (
     "render-handoff",
     "register",
     "update-status",
+    "abort-duplicate",
     "list",
     "get",
     "record-decision",
@@ -91,7 +92,7 @@ def register(subparsers) -> None:
         help=(
             "stats|fetch|fetch-by-priority|peek|defer-cluster|defer-items|done|error|"
             "reset-stale|retry-errors|migrate|requeue|render-handoff|register|"
-            "update-status|list|get|record-decision|record-handoff"
+            "update-status|abort-duplicate|list|get|record-decision|record-handoff"
         ),
     )
     p.add_argument("extra", nargs="*", help="Action-specific arguments")
@@ -152,6 +153,8 @@ def register(subparsers) -> None:
                    help="(register) Comma-separated list of files the specialist may read.")
     p.add_argument("--from-json", dest="from_json", default=None,
                    help="(register / record-handoff) Path to JSON payload (overrides flag-based fields).")
+    p.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true",
+                   help="(register) Suppress advisory warnings for active overlapping dispatch rows.")
     p.add_argument("--status", dest="dispatch_status", default=None,
                    choices=("in-progress", "completed", "failed", "aborted", "blocked"),
                    help="(update-status / list) Dispatch lifecycle status.")
@@ -159,6 +162,8 @@ def register(subparsers) -> None:
                    help="(update-status) ISO timestamp; defaults to now() when --status is terminal.")
     p.add_argument("--finding-slugs", dest="finding_slugs", default=None,
                    help="(update-status / record-handoff) Comma-separated slugs.")
+    p.add_argument("--replacement-agent-id", dest="replacement_agent_id", default=None,
+                   help="(abort-duplicate) Agent ID replacing the accidental duplicate.")
     p.add_argument("--role", dest="filter_role", default=None,
                    help="(list) Filter by agent_role.")
     p.add_argument("--since", dest="filter_since", default=None,
@@ -248,6 +253,9 @@ def run(args) -> None:
         return
     if action == "update-status":
         _update_dispatch_status(args, extra)
+        return
+    if action == "abort-duplicate":
+        _abort_duplicate_dispatch(args, extra)
         return
     if action == "list":
         _list_dispatches(args)
@@ -361,7 +369,7 @@ def run(args) -> None:
             "defer-cluster, defer-items, done, error, reset-stale, retry-errors, "
             "migrate, requeue\n"
             "Dispatch actions (no cases.db): register, update-status, list, get, "
-            "render-handoff, record-decision, record-handoff",
+            "abort-duplicate, render-handoff, record-decision, record-handoff",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1440,6 +1448,8 @@ def _register_dispatch(args) -> None:
     payload = _build_register_payload(args)
     client, _ = _client_for(args)
     try:
+        if not getattr(args, "allow_duplicate", False):
+            _warn_on_overlapping_dispatch(client, payload)
         row = client.record_dispatch(payload)
     finally:
         client.close()
@@ -1448,6 +1458,82 @@ def _register_dispatch(args) -> None:
         "agent_id": row.get("agent_id"),
         "status": row.get("status"),
     }, ensure_ascii=False))
+
+
+def _warn_on_overlapping_dispatch(client: AssessmentClient, payload: dict[str, Any]) -> None:
+    """Emit an advisory warning for exact structured overlap.
+
+    This intentionally does not block. Parallel dispatches often share a role,
+    host, or prose objective for legitimate reasons; only concrete overlap on
+    refs or an exact copied task gets surfaced.
+    """
+    role = str(payload.get("agent_role") or "")
+    if not role:
+        return
+    try:
+        rows = client.list_dispatches(role=role, status="in-progress", limit=1000)
+    except AssessError as exc:
+        print(f"WARN dispatch register: duplicate-overlap check skipped: {exc}", file=sys.stderr)
+        return
+    current_agent_id = str(payload.get("agent_id") or "")
+    overlaps: list[tuple[dict[str, Any], str]] = []
+    for row in rows:
+        if str(row.get("agent_id") or "") == current_agent_id:
+            continue
+        reason = _dispatch_overlap_reason(payload, row)
+        if reason:
+            overlaps.append((row, reason))
+    if not overlaps:
+        return
+    print(
+        "WARN dispatch register: active dispatch rows appear to overlap this dispatch. "
+        "Registration will continue; use --allow-duplicate to suppress this advisory "
+        "when the overlap is intentional.",
+        file=sys.stderr,
+    )
+    for row, reason in overlaps[:5]:
+        print(
+            f"  - {row.get('agent_id', '?')} ({row.get('agent_role', '?')}): {reason}",
+            file=sys.stderr,
+        )
+
+
+def _dispatch_overlap_reason(payload: dict[str, Any], row: dict[str, Any]) -> str:
+    finding_overlap = _set_overlap(payload.get("finding_slugs"), row.get("finding_slugs"))
+    if finding_overlap:
+        return "same finding_slugs: " + ",".join(sorted(finding_overlap))
+    file_overlap = _set_overlap(payload.get("files_allowed"), row.get("files_allowed"))
+    if file_overlap and _same_nonempty(payload, row, "dispatch_mode"):
+        return "same files_allowed under same dispatch_mode"
+    task = _norm_text(payload.get("task"))
+    if task and task == _norm_text(row.get("task")):
+        return "exact same task text"
+    return ""
+
+
+def _norm_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _same_nonempty(left: dict[str, Any], right: dict[str, Any], key: str) -> bool:
+    left_value = _norm_text(left.get(key))
+    return bool(left_value) and left_value == _norm_text(right.get(key))
+
+
+def _set_overlap(left: Any, right: Any) -> set[str]:
+    return _string_set(left) & _string_set(right)
+
+
+def _string_set(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        return set()
+    return {str(item).strip() for item in items if str(item).strip()}
 
 
 def _update_dispatch_status(args, extra: list[str]) -> None:
@@ -1477,6 +1563,37 @@ def _update_dispatch_status(args, extra: list[str]) -> None:
     finally:
         client.close()
     print(json.dumps(row, ensure_ascii=False))
+
+
+def _abort_duplicate_dispatch(args, extra: list[str]) -> None:
+    agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
+    replacement = (getattr(args, "replacement_agent_id", "") or "").strip()
+    reason = (getattr(args, "reason", "") or "").strip()
+    if not agent_id or not replacement or not reason:
+        print(
+            "Usage: aith assess dispatch abort-duplicate <agent-id> "
+            "--replacement-agent-id <agent-id> --reason TEXT",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    client, _ = _client_for(args)
+    now = _utcnow_iso()
+    try:
+        row = client.update_dispatch(agent_id, {"status": "aborted", "completed_at": now})
+        decision = client.record_decision(
+            {
+                "kind": "dispatch_duplicate",
+                "payload": {
+                    "aborted_agent_id": agent_id,
+                    "replacement_agent_id": replacement,
+                    "reason": reason,
+                },
+                "surfaced_to_user": False,
+            }
+        )
+    finally:
+        client.close()
+    print(json.dumps({"dispatch": row, "decision": decision}, ensure_ascii=False))
 
 
 def _list_dispatches(args) -> None:

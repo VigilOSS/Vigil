@@ -381,7 +381,7 @@ via `aith assess record-finding` during your session. Do not defer recording to 
 
 ## 5. Surface Candidates
 
-When your output includes `#### Surface Candidates`, these must be synced by the operator:
+When your output includes `#### Surface Candidates`, record each one directly:
 ```
 aith assess record-surface <type> <target> <source> [--rationale TEXT] [--status STATUS]
 ```
@@ -515,7 +515,7 @@ engagement state still belongs in the backend.
 
 ## 13. Intel Recording Rules
 
-When your output includes `#### Intelligence`, the operator translates each row into a structured JSON payload matching the relevant `schemas/intel-*.schema.json` and records it via:
+When your output includes `#### Intelligence`, write each row as a structured JSON file matching the relevant `schemas/intel-*.schema.json` and record it via:
 
 ```
 aith assess record-intel <type> <json-file>
@@ -584,7 +584,7 @@ the canonical record of it.
 
 1. `aith assess record-finding <role> <finding-json>` per finding.
 2. `aith assess record-intel <type> <intel-json>` per intel row.
-3. `aith assess record-surface <surface-json>` per surface candidate.
+3. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` per surface candidate.
 4. `aith assess dispatch record-handoff --from-json <path>` — use the exact
    `agent_id`, `agent_role`, and `phase` values from the **Runtime Identity block**
    the operator placed at the top of your dispatch prompt. The handoff row is keyed

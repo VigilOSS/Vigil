@@ -209,7 +209,7 @@ Before your dispatch returns, run in this order:
 
 1. `aith assess record-finding surface-collector <finding-json>` for each finding (already required)
 2. `aith assess record-intel <type> <intel-json>` for each intel row
-3. `aith assess record-surface <surface-json>` for each surface candidate (priority signals carry on the surface row's `priority_*` fields, not in markdown)
+3. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate (priority signals carry on the surface row's `priority_*` fields, not in markdown)
 4. `aith assess ingest-endpoints "$DIR/cases.db" katana|gau` for each ingestion source
 5. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `urls_ingested`, `clusters`, `deferred_clusters`)
 6. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).

@@ -2415,6 +2415,25 @@ def test_assessment_client_patch_accept_409_returns_canonical_row(monkeypatch):
     assert captured[0][2]["accept_409"] is True
 
 
+def test_assessment_client_connection_failure_suggests_orchestrator(monkeypatch):
+    from assess.lib import client as client_mod
+
+    c = client_mod.AssessmentClient("http://127.0.0.1:18000", "engagement-key")
+
+    def fail_conn(*_args, **_kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(c, "_get_conn", fail_conn)
+
+    with pytest.raises(client_mod.AssessError) as exc_info:
+        c.get("summary")
+
+    message = str(exc_info.value)
+    assert "aith orchestrator status" in message
+    assert "aith orchestrator start" in message
+    assert "not the Kali runtime" in message
+
+
 def test_pre_exec_wrapper_handles_pid_write_failure(monkeypatch, fake_engagement):
     """P1 narrowing: the wrapper must succeed-or-log-and-still-exec so a
     failed pid-file write (ENOSPC / read-only /tmp) doesn't strand the user
