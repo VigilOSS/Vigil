@@ -3131,7 +3131,17 @@ def test_record_handoff_client_upsert_falls_back_to_patch_on_409() -> None:
 
         def post(self, endpoint: str, payload: dict) -> dict:  # type: ignore[override]
             captured["posts"].append((endpoint, payload))
-            raise AssessError("HTTP 409:\nduplicate (engagement, agent_id)")
+            raise AssessError(
+                "HTTP 409:\n"
+                + json.dumps(
+                    {
+                        "detail": (
+                            "handoff with agent_id='AG-X' already exists; "
+                            "PATCH to update"
+                        )
+                    }
+                )
+            )
 
         def patch(self, endpoint: str, payload: dict, *, accept_409: bool = False) -> dict:  # type: ignore[override]
             captured["patches"].append((endpoint, payload))
@@ -3152,6 +3162,44 @@ def test_record_handoff_client_upsert_falls_back_to_patch_on_409() -> None:
     assert "agent_id" not in patch_body
     assert "agent_role" not in patch_body
     assert patch_body["summary"] == "v2"
+
+
+def test_record_handoff_client_upsert_does_not_patch_role_mismatch_409() -> None:
+    """Role-mismatch 409s are validation failures, not duplicate-row upserts."""
+    from agent.scripts.assess.lib.client import AssessError, AssessmentClient
+
+    captured: dict[str, object] = {"posts": [], "patches": []}
+
+    class _StubClient(AssessmentClient):
+        def __init__(self) -> None:
+            pass
+
+        def post(self, endpoint: str, payload: dict) -> dict:  # type: ignore[override]
+            captured["posts"].append((endpoint, payload))
+            raise AssessError(
+                "HTTP 409:\n"
+                + json.dumps(
+                    {
+                        "detail": (
+                            "agent_role mismatch: handoff agent_role='wrong' "
+                            "does not match registered dispatch role='right'"
+                        )
+                    }
+                )
+            )
+
+        def patch(self, endpoint: str, payload: dict, *, accept_409: bool = False) -> dict:  # type: ignore[override]
+            captured["patches"].append((endpoint, payload))
+            return {"id": 7, "agent_id": "AG-X", **payload}
+
+    stub = _StubClient()
+    with pytest.raises(AssessError, match="agent_role mismatch"):
+        stub.record_handoff(
+            {"agent_id": "AG-X", "agent_role": "wrong", "summary": "v2"},
+            upsert=True,
+        )
+    assert len(captured["posts"]) == 1
+    assert captured["patches"] == []
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -4136,6 +4136,7 @@ def _infer_command_run_status(
 
 _FINALIZE_TERMINAL_STATUSES = {"completed", "failed", "timed_out", "killed", "lost"}
 _FINALIZE_ALLOWED_STATUSES = _FINALIZE_TERMINAL_STATUSES | {"running"}
+_FINALIZE_MUTABLE_STATUSES = {"queued", "running"}
 
 
 def finalize_command_run(
@@ -4158,9 +4159,9 @@ def finalize_command_run(
 
     Idempotency contract (B4): a row already in a terminal state must not be
     overwritten — the second writer is signalled with HTTP 409 carrying the
-    existing row. A ``running``-to-``running`` PATCH is a refresh no-op that
-    surfaces ``noop=true`` so the caller can distinguish it from a fresh
-    write."""
+    existing row. ``queued`` and ``running`` are mutable pre-terminal states.
+    A ``running``-to-``running`` PATCH is a refresh no-op that surfaces
+    ``noop=true`` so the caller can distinguish it from a fresh write."""
     engagement = _engagement_or_404(engagement_id)
     if status_value not in _FINALIZE_ALLOWED_STATUSES:
         raise HTTPException(
@@ -4195,6 +4196,19 @@ def finalize_command_run(
             serialized = _serialize_command_run(existing_row, include_output=True)
             serialized["noop"] = True
             return serialized
+        if status_value == "running":
+            serialized = _serialize_command_run(existing_row, include_output=True)
+            serialized["noop"] = True
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        f"command run id={command_run_id} is status='{existing_status or 'unknown'}'; "
+                        "running refresh only applies to rows already in status='running'"
+                    ),
+                    "existing": serialized,
+                },
+            )
         success_flag = 1 if (status_value == "completed" and (return_code in (0, None) and not timed_out)) else 0
         if return_code is not None and return_code != 0:
             success_flag = 0
@@ -4233,14 +4247,17 @@ def finalize_command_run(
             values.append(float(cpu_system_seconds))
         sets.append("partial_results = ?")
         values.append(1 if partial_results else 0)
+        mutable_statuses = tuple(sorted(_FINALIZE_MUTABLE_STATUSES))
         values.append(command_run_id)
+        values.extend(mutable_statuses)
         # Guard against the read→update race when two finalize PATCHes arrive
         # simultaneously: both can pass the SELECT-based terminal check above,
-        # but the UPDATE must only land when the row is still 'running'. The
-        # loser hits rowcount=0 and is funnelled into the same 409 path with
-        # the canonical row payload that the SELECT-based check uses.
+        # but the UPDATE must only land when the row is still pre-terminal.
+        # The loser hits rowcount=0 and is funnelled into the same 409 path
+        # with the canonical row payload that the SELECT-based check uses.
+        mutable_placeholders = ", ".join("?" for _ in mutable_statuses)
         cursor = connection.execute(
-            f"UPDATE assessment_command_runs SET {', '.join(sets)} WHERE id = ? AND status = 'running'",
+            f"UPDATE assessment_command_runs SET {', '.join(sets)} WHERE id = ? AND status IN ({mutable_placeholders})",
             tuple(values),
         )
         if cursor.rowcount == 0:
