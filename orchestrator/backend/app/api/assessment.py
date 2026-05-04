@@ -1056,12 +1056,6 @@ async def create_blocked_technique(engagement_key: str, request: BlockedTechniqu
 
 
 _DISPATCH_STATUS = Literal["in-progress", "completed", "failed", "aborted", "blocked"]
-_PERMISSION = Literal[
-    "artifact-only",
-    "passive-probe",
-    "target-facing",
-    "target-facing-destructive",
-]
 _DISPATCH_MODE = Literal[
     "hypothesis-driven",
     "item-iterating",
@@ -1078,17 +1072,12 @@ class DispatchCreate(BaseModel):
     agent_id: str = Field(min_length=1, max_length=256)
     agent_role: str = Field(min_length=1, max_length=128)
     task: str | None = Field(default=None, max_length=4096)
-    skill_loaded: str | None = Field(default=None, max_length=512)
     scope_host: str | None = Field(default=None, max_length=512)
     dispatched_at: str | None = Field(default=None, max_length=64)
     status: _DISPATCH_STATUS = "in-progress"
     model: str | None = Field(default=None, max_length=128)
     reasoning: _REASONING | None = None
-    permission: _PERMISSION | None = None
-    command_budget: int | None = Field(default=None, ge=0)
-    output_schema: str | None = Field(default=None, max_length=512)
     dispatch_mode: _DISPATCH_MODE | None = None
-    files_allowed: list[str] | None = None
     finding_slugs: list[str] | None = None
 
 
@@ -1162,17 +1151,12 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
         agent_id=request.agent_id,
         agent_role=request.agent_role,
         task=request.task,
-        skill_loaded=request.skill_loaded,
         scope_host=request.scope_host,
         dispatched_at=request.dispatched_at,
         status_value=request.status,
         model=request.model,
         reasoning=request.reasoning,
-        permission=request.permission,
-        command_budget=request.command_budget,
-        output_schema=request.output_schema,
         dispatch_mode=request.dispatch_mode,
-        files_allowed=request.files_allowed,
         finding_slugs=request.finding_slugs,
     )
     _audit_assessment_mutation(

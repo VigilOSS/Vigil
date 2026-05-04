@@ -19,7 +19,6 @@ import sys
 
 from assess.lib.contracts import (
     SPECIALIST_DISPATCH_MODES,
-    SPECIALIST_DISPATCH_PERMISSIONS,
     validate_specialist_dispatch_contract,
 )
 
@@ -32,9 +31,7 @@ def register(subparsers) -> None:
         epilog=(
             "Reads the contract from a file path, '-' (stdin), or stdin when no\n"
             "argument is given. Prints OK on success or a list of errors and exits\n"
-            "non-zero on failure. Warnings (e.g., files_allowed/files_forbidden\n"
-            "overlap) print to stderr but do not fail the validation.\n\n"
-            f"Permissions: {', '.join(SPECIALIST_DISPATCH_PERMISSIONS)}\n"
+            "non-zero on failure.\n\n"
             f"Dispatch modes: {', '.join(SPECIALIST_DISPATCH_MODES)}"
         ),
     )

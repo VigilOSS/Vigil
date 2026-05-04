@@ -4634,7 +4634,7 @@ def _utcnow_iso_dispatch() -> str:
 
 def _serialize_dispatch(row) -> dict[str, Any]:
     data = dict(row)
-    for col in ("files_allowed_json", "finding_slugs_json"):
+    for col in ("finding_slugs_json",):
         raw = data.pop(col, None) or ""
         key = col[: -len("_json")]
         if raw:
@@ -4653,24 +4653,18 @@ def record_dispatch(
     agent_id: str,
     agent_role: str,
     task: str | None = None,
-    skill_loaded: str | None = None,
     scope_host: str | None = None,
     dispatched_at: str | None = None,
     status_value: str = "in-progress",
     model: str | None = None,
     reasoning: str | None = None,
-    permission: str | None = None,
-    command_budget: int | None = None,
-    output_schema: str | None = None,
     dispatch_mode: str | None = None,
-    files_allowed: list[str] | None = None,
     finding_slugs: list[str] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not (agent_id or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="agent_id is required")
     dispatched_value = dispatched_at or _utcnow_iso_dispatch()
-    files_json = json.dumps(list(files_allowed)) if files_allowed is not None else None
     findings_json = json.dumps(list(finding_slugs)) if finding_slugs is not None else None
     with get_connection() as connection:
         existing = connection.execute(
@@ -4685,27 +4679,22 @@ def record_dispatch(
         cursor = connection.execute(
             """
             INSERT INTO assessment_dispatches (
-                engagement_id, agent_id, agent_role, task, skill_loaded, scope_host,
-                dispatched_at, status, model, reasoning, permission, command_budget,
-                output_schema, dispatch_mode, files_allowed_json, finding_slugs_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                engagement_id, agent_id, agent_role, task, scope_host,
+                dispatched_at, status, model, reasoning,
+                dispatch_mode, finding_slugs_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
                 agent_id,
                 agent_role,
                 task,
-                skill_loaded,
                 scope_host,
                 dispatched_value,
                 status_value,
                 model,
                 reasoning,
-                permission,
-                command_budget,
-                output_schema,
                 dispatch_mode,
-                files_json,
                 findings_json,
             ),
         )

@@ -2063,12 +2063,6 @@ def test_validate_dispatch_contract_accepts_minimal_payload(
     assess_main = _load_assess_main()
     payload = {
         "role": "vulnerability-analyst",
-        "model": "claude-opus-4-7",
-        "files_allowed": ["agent/agents/vulnerability-analyst.md"],
-        "files_forbidden": ["agent/CLAUDE.md", "agent/AGENTS.md"],
-        "permission": "passive-probe",
-        "command_budget": 25,
-        "output": "#### Findings",
         "dispatch_mode": "item-iterating",
     }
     contract_path = tmp_path / "dispatch.json"
@@ -2078,20 +2072,14 @@ def test_validate_dispatch_contract_accepts_minimal_payload(
     assert "OK" in capsys.readouterr().out
 
 
-def test_validate_dispatch_contract_rejects_unknown_permission(
+def test_validate_dispatch_contract_rejects_unknown_dispatch_mode(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """P3 #31: unknown permission values surface as errors so the contract fails closed."""
+    """Unknown dispatch_mode values surface as errors so the contract fails closed."""
     assess_main = _load_assess_main()
     payload = {
         "role": "vulnerability-analyst",
-        "model": "claude-opus-4-7",
-        "files_allowed": [],
-        "files_forbidden": [],
-        "permission": "godmode",
-        "command_budget": 5,
-        "output": "#### Findings",
-        "dispatch_mode": "item-iterating",
+        "dispatch_mode": "turbo-mode",
     }
     contract_path = tmp_path / "dispatch.json"
     contract_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -2099,31 +2087,7 @@ def test_validate_dispatch_contract_rejects_unknown_permission(
     with pytest.raises(SystemExit):
         assess_main(["validate-dispatch-contract", str(contract_path)])
     err = capsys.readouterr().err
-    assert "permission" in err and "godmode" in err
-
-
-def test_validate_dispatch_contract_warns_on_overlap(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """P3 #31: files_allowed ∩ files_forbidden is a warning, not a hard error."""
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "vulnerability-analyst",
-        "model": "claude-opus-4-7",
-        "files_allowed": ["agent/CLAUDE.md"],
-        "files_forbidden": ["agent/CLAUDE.md", "agent/AGENTS.md"],
-        "permission": "artifact-only",
-        "command_budget": 0,
-        "output": "#### Findings",
-        "dispatch_mode": "deep-manual",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    captured = capsys.readouterr()
-    assert "OK" in captured.out
-    assert "WARN" in captured.err and "overlap" in captured.err
+    assert "dispatch_mode" in err and "turbo-mode" in err
 
 
 def test_actor_kind_warn_on_non_log_subcommand(
@@ -2133,12 +2097,6 @@ def test_actor_kind_warn_on_non_log_subcommand(
     assess_main = _load_assess_main()
     payload = {
         "role": "vulnerability-analyst",
-        "model": "claude-opus-4-7",
-        "files_allowed": [],
-        "files_forbidden": [],
-        "permission": "artifact-only",
-        "command_budget": 0,
-        "output": "#### Findings",
         "dispatch_mode": "deep-manual",
     }
     contract_path = tmp_path / "dispatch.json"
@@ -2291,7 +2249,6 @@ def test_render_handoff_emits_known_fields_for_existing_agent_id(
         "agent_id": "AGENT-EX-1",
         "agent_role": "vulnerability-analyst",
         "task": "Validate IDOR on /api/users/{id}",
-        "skill_loaded": "agent/skills/idor-testing/SKILL.md",
         "scope_host": "target.example",
         "dispatched_at": "2026-04-27T10:00:00Z",
         "status": "completed",
@@ -2319,7 +2276,6 @@ def test_render_handoff_emits_known_fields_for_existing_agent_id(
     out = capsys.readouterr().out
     assert "#### Handoff from vulnerability-analyst dispatch AGENT-EX-1" in out
     assert "Validate IDOR on /api/users/{id}" in out
-    assert "agent/skills/idor-testing/SKILL.md" in out
     assert "target.example" in out
     assert "Validated IDOR on /api/users/{id}" in out  # summary
     assert "Confidence:** high" in out
@@ -2382,7 +2338,6 @@ def test_render_handoff_truncates_at_max_lines(
         "agent_id": "AGENT-MANY-FINDINGS",
         "agent_role": "vulnerability-analyst",
         "task": "deep IDOR sweep across 20 endpoints",
-        "skill_loaded": "agent/skills/idor-testing/SKILL.md",
         "scope_host": "target.example",
         "dispatched_at": "2026-04-27T11:00:00Z",
         "status": "completed",
@@ -2435,7 +2390,6 @@ def test_render_handoff_missing_slug_distinct_from_fetch_error(
         "agent_id": "AGENT-DROP",
         "agent_role": "vulnerability-analyst",
         "task": "slug-drop test",
-        "skill_loaded": "agent/skills/idor-testing/SKILL.md",
         "scope_host": "target.example",
         "dispatched_at": "2026-04-27T12:00:00Z",
         "status": "completed",
@@ -2553,15 +2507,10 @@ def _run_dispatch_verb(monkeypatch, action: str, *, extra=None, **flags):
         "agent_id": None,
         "agent_role": None,
         "task": None,
-        "skill": None,
         "scope_host": None,
         "dispatch_model": None,
         "reasoning": None,
-        "permission": None,
-        "command_budget": None,
-        "output_schema": None,
         "dispatch_mode_arg": None,
-        "files_allowed": None,
         "from_json": None,
         "dispatch_status": None,
         "completed_at": None,
@@ -2606,15 +2555,10 @@ def _dispatch_args(action: str, *, db_path: str | None = None, extra=None, **fla
         "agent_id": None,
         "agent_role": None,
         "task": None,
-        "skill": None,
         "scope_host": None,
         "dispatch_model": None,
         "reasoning": None,
-        "permission": None,
-        "command_budget": None,
-        "output_schema": None,
         "dispatch_mode_arg": None,
-        "files_allowed": None,
         "from_json": None,
         "dispatch_status": None,
         "completed_at": None,
@@ -2696,8 +2640,6 @@ def test_dispatch_register_writes_payload(
         agent_id="AG-CLI-1",
         agent_role="vulnerability-analyst",
         task="IDOR sweep",
-        skill="agent/skills/idor-testing/SKILL.md",
-        permission="target-facing",
         reasoning="high",
         dispatch_mode_arg="item-iterating",
     )
@@ -2761,7 +2703,6 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
         "agent_role": "vulnerability-analyst",
         "status": "in-progress",
         "scope_host": "app.example.test",
-        "permission": "target-facing",
         "dispatch_mode": "hypothesis-driven",
         "task": "Review password reset flows",
     }
@@ -2783,7 +2724,6 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
             agent_id="AG-NEW",
             agent_role="vulnerability-analyst",
             scope_host="app.example.test",
-            permission="target-facing",
             dispatch_mode_arg="hypothesis-driven",
             task="Review account deletion flows",
         )
@@ -2856,9 +2796,9 @@ def test_dispatch_list_emits_jsonl(
     module.run(SimpleNamespace(
         db_path="list", action="", extra=[], reason="", by="status",
         max_lines=40, include_evidence=False, engagement_dir=None,
-        agent_id=None, agent_role=None, task=None, skill=None, scope_host=None,
-        dispatch_model=None, reasoning=None, permission=None, command_budget=None,
-        output_schema=None, dispatch_mode_arg=None, files_allowed=None,
+        agent_id=None, agent_role=None, task=None, scope_host=None,
+        dispatch_model=None, reasoning=None,
+        dispatch_mode_arg=None,
         from_json=None, dispatch_status=None, completed_at=None, finding_slugs=None,
         filter_role=None, filter_since=None, task_q=None, dispatch_limit=None,
         decision_kind=None, payload_json=None, surfaced_to_user=False,
@@ -2988,15 +2928,10 @@ def test_dispatch_record_handoff_is_idempotent_for_repeat_calls(
             "agent_id": None,
             "agent_role": None,
             "task": None,
-            "skill": None,
             "scope_host": None,
             "dispatch_model": None,
             "reasoning": None,
-            "permission": None,
-            "command_budget": None,
-            "output_schema": None,
             "dispatch_mode_arg": None,
-            "files_allowed": None,
             "from_json": str(path),
             "dispatch_status": None,
             "completed_at": None,
