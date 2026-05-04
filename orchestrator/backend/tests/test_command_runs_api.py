@@ -1299,6 +1299,37 @@ def test_dedup_does_not_link_after_finalize(client, isolate_settings):
     assert second.json()["superseded_by_id"] is None
 
 
+def test_dedup_links_to_latest_in_flight_duplicate_peer(client, isolate_settings):
+    """If the original primary finishes while a duplicate peer is still active,
+    the next duplicate should link to that active peer instead of becoming a
+    fresh primary."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    payload = _base_payload(
+        command="nmap -p 22 10.0.0.1",
+        argv=["nmap", "-p", "22", "10.0.0.1"],
+        status="running",
+    )
+    first = _post(client, payload).json()
+    second = _post(client, payload).json()
+    assert second["superseded_by_id"] == first["id"]
+
+    finalize = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{first['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+        },
+    )
+    assert finalize.status_code == 200
+
+    third = _post(client, payload)
+    assert third.status_code == 201, third.text
+    third_row = third.json()
+    assert third_row["superseded_by_id"] == second["id"]
+    assert third_row.get("dedup_predecessor_id") == second["id"]
+
+
 def test_dedup_respects_env_window_zero(client, isolate_settings, monkeypatch):
     """KALI_AUDIT_DEDUP_WINDOW_SECONDS=0 disables dedup entirely."""
     _write_engagement(isolate_settings["engagements_dir"])
