@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # GraphQL Security Testing
 
-> **Kali MCP audit header:** use `X-Technique: RECON` for introspection and schema discovery; when sending attack payloads via resolvers, switch to the matching vuln class (`SQLI` / `AUTH` / `IDOR` / `INFO-DISCLOSURE`).
+> **`aith assess kali` audit flags:** use `--technique RECON` for introspection and schema discovery; when sending attack payloads via resolvers, switch to the matching vuln class (`SQLI` / `AUTH` / `IDOR` / `INFO-DISCLOSURE`).
 
 ## When to Activate
 
@@ -16,10 +16,10 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `curl` / Burp Suite Repeater
-- Altair GraphQL Client
+- `aith assess kali exec -- curl ...` (all target-facing GraphQL requests must go through the kali exec wrapper; use `--technique RECON --probe-kind fingerprint --phase consume-test --timeout 30` for introspection, and the appropriate class (`SQLI`, `AUTH`, `IDOR`, `INFO-DISCLOSURE`) for payload probes)
+- Burp Suite Repeater / Altair GraphQL Client (use to craft requests, then replay via kali exec for audit pipeline coverage)
 - InQL (Burp extension for GraphQL)
-- graphql-voyager (schema visualization)
+- graphql-voyager (schema visualization — host-side analysis)
 - BatchQL (batch query testing)
 - CrackQL (brute-force via GraphQL)
 
@@ -110,7 +110,7 @@ origin: AI Threat Hunting
 - GraphQL endpoint URL and supported methods
 - Schema dump or partial schema (sanitized)
 - Queries/mutations with broken access control
-- Injection payload and result
+- Injection payload and result — confirming a query returns another user's ID is not enough; you must show the **attacker outcome** (e.g., the IDOR query returned the victim's email, billing address, and payment method; the injection payload executed OS command `id` and returned `uid=0(root)`; the batched alias attack enumerated 500 valid usernames in a single HTTP request)
 - DoS threshold (depth/complexity before failure)
 - Severity based on impact (data leak, RCE, DoS)
 - Remediation: disable introspection in prod, enforce depth/complexity limits, field-level authz

@@ -29,6 +29,10 @@ def _load_code_coverage_module():
     return _load_assess_module("code_coverage.py", "test_code_coverage_command")
 
 
+def _load_code_size_summary_module():
+    return _load_assess_module("code_size_summary.py", "test_code_size_summary_command")
+
+
 def _load_code_ingest_module():
     return _load_assess_module("code_ingest.py", "test_code_ingest_command")
 
@@ -208,6 +212,77 @@ def test_code_coverage_cwe_matrix_require_gate_pass_honors_backend_gate(monkeypa
             )
         )
     assert excinfo.value.code == 1
+
+
+def test_code_size_summary_uses_backend_code_files(monkeypatch, capsys):
+    module = _load_code_size_summary_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+            self.calls: list[str] = []
+
+        def get(self, endpoint: str):
+            self.calls.append(endpoint)
+            return [
+                {
+                    "id": 1,
+                    "repo_id": 10,
+                    "file_path": "src/auth/session.py",
+                    "classification": "critical",
+                    "analysis_status": "analyzed",
+                    "language": "python",
+                    "loc": 1500,
+                },
+                {
+                    "id": 2,
+                    "repo_id": 10,
+                    "file_path": "node_modules/lib/index.js",
+                    "classification": "skip",
+                    "analysis_status": "skipped",
+                    "language": "javascript",
+                    "loc": 300,
+                    "skip_reason": "vendor",
+                },
+                {
+                    "id": 3,
+                    "repo_id": 10,
+                    "file_path": "src/generated/api.pb.go",
+                    "classification": "low",
+                    "analysis_status": "unclassified",
+                    "language": "go",
+                    "loc": 800,
+                },
+            ]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=Path("/tmp/eng"),
+            repo_id=None,
+            large_threshold=1000,
+            top=10,
+            json=False,
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert "total_files: 3" in output
+    assert "app_owned|files=1|loc=1500" in output
+    assert "vendor|files=1|loc=300" in output
+    assert "generated|files=1|loc=800" in output
+    assert "1500|critical|app_owned|analyzed|src/auth/session.py" in output
 
 
 def test_code_ingest_repo_key_uses_name_and_canonical_path_hash():
@@ -962,6 +1037,32 @@ def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypa
             )
         )
     assert excinfo.value.code == 1
+
+
+def test_code_dispatch_reset_stale_rejects_zero_before_backend(monkeypatch, tmp_path, capsys):
+    module = _load_code_dispatch_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise AssertionError("reset-stale 0 must not call the backend")
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(SimpleNamespace(action="reset-stale", extra=["0"], engagement_dir=tmp_path))
+
+    assert excinfo.value.code == 1
+    assert "minutes >= 1" in capsys.readouterr().err
 
 
 def test_post_accepts_inline_json_payload(monkeypatch, capsys):

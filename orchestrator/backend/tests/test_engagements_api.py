@@ -566,8 +566,8 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
                 "owasp_category": "A01:2021 Broken Access Control",
                 "cwe_id": "CWE-639",
                 "request_method": "GET",
-                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
-                "cvss_score": 6.5,
+                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N",
+                "cvss_score": 7.1,
                 "remediation": "Enforce server-side ownership checks on order retrieval",
                 "steps_to_reproduce": [
                     "Authenticate as user A",
@@ -740,6 +740,45 @@ def test_coverage_patch_normalizes_tested_to_covered_and_refreshes_service_statu
     summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
     assert summary.status_code == 200
     assert summary.json()["service_coverage_gaps"] == []
+
+
+def test_summary_vendor_saas_decision_reads_dispatch_decisions(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    ingest = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/request-observations",
+        json={
+            "url": "https://tenant.auth0.com/login",
+            "discovery_source": "recon",
+        },
+    )
+    assert ingest.status_code == 201, ingest.text
+
+    summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
+    assert summary.status_code == 200, summary.text
+    pending = {
+        row["host"]: row["vendor"]
+        for row in summary.json()["vendor_saas_hosts_pending_decision"]
+    }
+    assert pending.get("tenant.auth0.com") == "auth0"
+
+    decision = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/dispatch-decisions",
+        json={
+            "kind": "scope_decision",
+            "payload": {
+                "host": "tenant.auth0.com",
+                "vendor": "auth0",
+                "choice": "in_scope",
+            },
+            "surfaced_to_user": True,
+        },
+    )
+    assert decision.status_code == 201, decision.text
+
+    summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["vendor_saas_hosts_pending_decision"] == []
 
 
 def test_repeat_request_observation_preserves_stronger_coverage_status(client, isolate_settings):

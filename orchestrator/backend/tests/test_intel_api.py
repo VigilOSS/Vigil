@@ -304,6 +304,112 @@ def test_cve_post_get_upsert_and_extra_forbid(client, isolate_settings):
 
 
 # ──────────────────────────────────────────────────────────────
+# N8 — CVE validation_status enum extension
+# ──────────────────────────────────────────────────────────────
+
+
+def test_cve_validation_status_accepts_poc_available_unverified(client, isolate_settings):
+    """N8 — `poc_available_unverified` is a valid validation_status."""
+    _seed_engagement(client, isolate_settings)
+    payload = {
+        "cve_id": "CVE-2024-99001",
+        "affected_component": "openssl",
+        "poc_available": True,
+        "validation_status": "poc_available_unverified",
+        "source_name": "github-osint",
+    }
+    response = client.post(f"{INTEL_BASE}/cves", json=payload)
+    assert response.status_code == 201, response.text
+    assert response.json()["validation_status"] == "poc_available_unverified"
+
+
+def test_cve_validation_status_attempted_blocked_requires_block_reason(
+    client, isolate_settings
+):
+    """N8 — validation_status='attempted_blocked' requires details.block_reason."""
+    _seed_engagement(client, isolate_settings)
+    payload = {
+        "cve_id": "CVE-2024-99002",
+        "affected_component": "rails",
+        "validation_status": "attempted_blocked",
+        # No details / no block_reason — must reject.
+    }
+    response = client.post(f"{INTEL_BASE}/cves", json=payload)
+    assert response.status_code == 422, response.text
+    body = response.text.lower()
+    assert "block_reason" in body
+
+
+def test_cve_validation_status_attempted_blocked_persists_block_reason(
+    client, isolate_settings
+):
+    """N8 — `attempted_blocked` with details.block_reason is accepted and the block_reason
+    round-trips."""
+    _seed_engagement(client, isolate_settings)
+    payload = {
+        "cve_id": "CVE-2024-99003",
+        "affected_component": "wordpress",
+        "validation_status": "attempted_blocked",
+        "details": {"block_reason": "WAF intercepted the PoC at the edge"},
+    }
+    response = client.post(f"{INTEL_BASE}/cves", json=payload)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["validation_status"] == "attempted_blocked"
+    assert body["details"]["block_reason"] == "WAF intercepted the PoC at the edge"
+
+
+def test_cve_validation_status_rejects_old_dropped_value(client, isolate_settings):
+    """N8 — values outside the new six-member enum are rejected."""
+    _seed_engagement(client, isolate_settings)
+    payload = {
+        "cve_id": "CVE-2024-99004",
+        "affected_component": "spring",
+        "validation_status": "made-up-status",
+    }
+    response = client.post(f"{INTEL_BASE}/cves", json=payload)
+    assert response.status_code == 422
+
+
+def test_update_cve_attempted_blocked_persists_details_block_reason(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/cves",
+        json={
+            "cve_id": "CVE-2024-99005",
+            "affected_component": "tomcat",
+            "validation_status": "poc_available_unverified",
+        },
+    )
+    assert created.status_code == 201, created.text
+    intel_id = created.json()["id"]
+
+    missing_reason = client.patch(
+        f"{INTEL_BASE}/cves/{intel_id}",
+        json={"payload": {"validation_status": "attempted_blocked"}},
+    )
+    assert missing_reason.status_code == 400, missing_reason.text
+    assert "block_reason" in missing_reason.text
+
+    patched = client.patch(
+        f"{INTEL_BASE}/cves/{intel_id}",
+        json={
+            "payload": {
+                "validation_status": "attempted_blocked",
+                "details": {"block_reason": "Exploit path blocked by upstream WAF"},
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["validation_status"] == "attempted_blocked"
+    assert body["details"]["block_reason"] == "Exploit path blocked by upstream WAF"
+
+
+# ──────────────────────────────────────────────────────────────
 # dns-records
 # ──────────────────────────────────────────────────────────────
 
@@ -579,3 +685,442 @@ def test_unknown_engagement_returns_404(client, isolate_settings):
     assert client.get(f"{base}/summary").status_code == 404
     assert client.get(f"{base}/tech-components").status_code == 404
     assert client.post(f"{base}/notes", json={"title": "x"}).status_code == 404
+
+
+# ──────────────────────────────────────────────────────────────
+# update + supersede + listing filter behavior
+# ──────────────────────────────────────────────────────────────
+
+
+def test_update_intel_patches_existing_row_and_rejects_unknown_field(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "vendor-saas-platform", "version": "1.0.0", "source_name": "wappalyzer"},
+    )
+    assert created.status_code == 201, created.text
+    intel_id = created.json()["id"]
+
+    patched = client.patch(
+        f"{INTEL_BASE}/tech-components/{intel_id}",
+        json={"payload": {"confidence": "confirmed", "notes": "Re-fingerprinted"}},
+    )
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["id"] == intel_id
+    assert body["confidence"] == "confirmed"
+    assert body["notes"] == "Re-fingerprinted"
+
+    # unknown field surfaces as a structured error rather than silently dropping.
+    bad = client.patch(
+        f"{INTEL_BASE}/tech-components/{intel_id}",
+        json={"payload": {"version_label": "x"}},
+    )
+    assert bad.status_code == 400, bad.text
+
+
+def test_update_intel_natural_key_collision_returns_409(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+
+    first = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "vendor-saas-platform", "version": "1.0.0", "source_name": "wappalyzer"},
+    )
+    assert first.status_code == 201, first.text
+    second = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "vendor-saas-platform", "version": "2.0.0", "source_name": "manual"},
+    )
+    assert second.status_code == 201, second.text
+    second_id = second.json()["id"]
+
+    collision = client.patch(
+        f"{INTEL_BASE}/tech-components/{second_id}",
+        json={"payload": {"version": "1.0.0"}},
+    )
+    assert collision.status_code == 409, collision.text
+    assert "natural key" in collision.text
+
+    rows = client.get(f"{INTEL_BASE}/tech-components").json()
+    by_id = {row["id"]: row for row in rows}
+    assert by_id[second_id]["version"] == "2.0.0"
+    assert by_id[second_id]["source_name"] == "manual"
+
+
+def test_supersede_intel_marks_old_row_and_filters_from_list(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "vendor-saas-platform", "version": "1.0.0", "source_name": "wappalyzer"},
+    )
+    assert created.status_code == 201, created.text
+    old_id = created.json()["id"]
+
+    superseded = client.post(
+        f"{INTEL_BASE}/tech-components/{old_id}/supersede",
+        json={
+            "payload": {
+                "component": "vendor-saas-platform",
+                "version": "2.0.0",
+                "source_name": "vulnerability-analyst",
+                "confidence": "confirmed",
+            },
+            "rationale": "Banner re-fingerprinted; version bumped",
+        },
+    )
+    assert superseded.status_code == 201, superseded.text
+    body = superseded.json()
+    assert body["current"]["version"] == "2.0.0"
+    new_id = body["current"]["id"]
+    assert new_id != old_id
+    assert body["superseded"]["superseded_by_id"] == new_id
+    assert body["superseded"]["superseded_at"]
+    assert "[superseded-by id=" in body["superseded"]["notes"]
+
+    # Default list endpoint includes both rows so the UI can render
+    # historical state distinctly.
+    listing = client.get(f"{INTEL_BASE}/tech-components")
+    assert listing.status_code == 200
+    items = listing.json()
+    ids = {row["id"] for row in items}
+    assert ids == {old_id, new_id}
+
+    # The old row is still queryable but flagged.
+    old_row = next(row for row in items if row["id"] == old_id)
+    assert old_row["superseded_by_id"] == new_id
+
+
+def test_supersede_intel_collision_with_natural_key_returns_409(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "vendor-saas-platform", "version": "1.0.0", "source_name": "wappalyzer"},
+    )
+    assert created.status_code == 201, created.text
+    intel_id = created.json()["id"]
+
+    # Same natural key (component, version) -> service helper raises 409
+    # without first upserting the target row.
+    collision = client.post(
+        f"{INTEL_BASE}/tech-components/{intel_id}/supersede",
+        json={
+            "payload": {
+                "component": "vendor-saas-platform",
+                "version": "1.0.0",
+                "source_name": "should-not-be-written",
+            },
+            "rationale": "Wrong call — should have been update-intel",
+        },
+    )
+    assert collision.status_code == 409, collision.text
+    row = client.get(f"{INTEL_BASE}/tech-components").json()[0]
+    assert row["id"] == intel_id
+    assert row["source_name"] == "wappalyzer"
+    assert row["superseded_by_id"] is None
+
+
+def test_supersede_cve_requires_full_natural_key(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/cves",
+        json={
+            "cve_id": "CVE-2025-1111",
+            "affected_component": "openssl",
+            "source_name": "nvd",
+        },
+    )
+    assert created.status_code == 201, created.text
+    intel_id = created.json()["id"]
+
+    missing_component = client.post(
+        f"{INTEL_BASE}/cves/{intel_id}/supersede",
+        json={
+            "payload": {
+                "cve_id": "CVE-2025-1111",
+                "source_name": "operator-review",
+            },
+            "rationale": "Should not create an empty-component replacement",
+        },
+    )
+    assert missing_component.status_code == 400, missing_component.text
+    assert "affected_component" in missing_component.text
+
+    rows = client.get(f"{INTEL_BASE}/cves").json()
+    assert len(rows) == 1
+    assert rows[0]["id"] == intel_id
+    assert rows[0]["affected_component"] == "openssl"
+    assert rows[0]["superseded_by_id"] is None
+
+
+def test_supersede_cve_attempted_blocked_persists_details_block_reason(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/cves",
+        json={
+            "cve_id": "CVE-2025-2222",
+            "affected_component": "spring",
+            "validation_status": "version_match",
+        },
+    )
+    assert created.status_code == 201, created.text
+    intel_id = created.json()["id"]
+
+    superseded = client.post(
+        f"{INTEL_BASE}/cves/{intel_id}/supersede",
+        json={
+            "payload": {
+                "cve_id": "CVE-2025-2222",
+                "affected_component": "spring-cloud-gateway",
+                "validation_status": "attempted_blocked",
+                "details": {"block_reason": "Exploit route requires unavailable admin role"},
+            },
+            "rationale": "Component scope refined during exploit review",
+        },
+    )
+    assert superseded.status_code == 201, superseded.text
+    body = superseded.json()
+    assert body["current"]["validation_status"] == "attempted_blocked"
+    assert (
+        body["current"]["details"]["block_reason"]
+        == "Exploit route requires unavailable admin role"
+    )
+    assert body["superseded"]["superseded_by_id"] == body["current"]["id"]
+
+
+def test_update_intel_unknown_id_returns_404(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    response = client.patch(
+        f"{INTEL_BASE}/tech-components/9999",
+        json={"payload": {"notes": "ghost"}},
+    )
+    assert response.status_code == 404, response.text
+
+
+# ──────────────────────────────────────────────────────────────
+# include_superseded query param + canonical_id wire shape
+# ──────────────────────────────────────────────────────────────
+
+
+def test_list_intel_include_superseded_false_filters_old_rows(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "filter-test", "version": "1.0.0"},
+    )
+    assert created.status_code == 201, created.text
+    old_id = created.json()["id"]
+
+    superseded = client.post(
+        f"{INTEL_BASE}/tech-components/{old_id}/supersede",
+        json={"payload": {"component": "filter-test", "version": "2.0.0"}},
+    )
+    assert superseded.status_code == 201, superseded.text
+    new_id = superseded.json()["current"]["id"]
+
+    # Default (include_superseded=true) returns both rows.
+    listing = client.get(f"{INTEL_BASE}/tech-components")
+    assert listing.status_code == 200
+    ids = {row["id"] for row in listing.json()}
+    assert ids == {old_id, new_id}
+
+    # Explicit include_superseded=false drops the historical row.
+    filtered = client.get(
+        f"{INTEL_BASE}/tech-components",
+        params={"include_superseded": "false"},
+    )
+    assert filtered.status_code == 200, filtered.text
+    filtered_ids = {row["id"] for row in filtered.json()}
+    assert filtered_ids == {new_id}
+
+
+def test_list_intel_canonical_id_walks_to_leaf(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+
+    first = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "canonical-test", "version": "1.0.0"},
+    )
+    a_id = first.json()["id"]
+    second = client.post(
+        f"{INTEL_BASE}/tech-components/{a_id}/supersede",
+        json={"payload": {"component": "canonical-test", "version": "2.0.0"}},
+    )
+    b_id = second.json()["current"]["id"]
+    third = client.post(
+        f"{INTEL_BASE}/tech-components/{b_id}/supersede",
+        json={"payload": {"component": "canonical-test", "version": "3.0.0"}},
+    )
+    c_id = third.json()["current"]["id"]
+
+    rows = client.get(f"{INTEL_BASE}/tech-components").json()
+    by_id = {row["id"]: row for row in rows}
+    assert by_id[a_id]["canonical_id"] == c_id
+    assert by_id[b_id]["canonical_id"] == c_id
+    assert by_id[c_id]["canonical_id"] == c_id
+
+
+# ──────────────────────────────────────────────────────────────
+# supersede payload validation (P1 #4)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_supersede_intel_missing_natural_key_returns_400(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "missing-key-test", "version": "1.0.0"},
+    )
+    intel_id = created.json()["id"]
+
+    # Omit ``component`` (the natural key) — service must surface 400, not 500.
+    bad = client.post(
+        f"{INTEL_BASE}/tech-components/{intel_id}/supersede",
+        json={"payload": {"version": "2.0.0", "notes": "no component"}},
+    )
+    assert bad.status_code == 400, bad.text
+    assert "component" in bad.json().get("detail", "").lower()
+
+
+def test_supersede_intel_dns_record_missing_compound_key_returns_400(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/dns-records",
+        json={"record_type": "A", "name": "alpha.example.com"},
+    )
+    intel_id = created.json()["id"]
+
+    # Compound natural key (record_type, name, value) — omitting any part
+    # must surface 400.
+    missing_name = client.post(
+        f"{INTEL_BASE}/dns-records/{intel_id}/supersede",
+        json={"payload": {"record_type": "A"}},
+    )
+    assert missing_name.status_code == 400, missing_name.text
+
+
+# ──────────────────────────────────────────────────────────────
+# supersede cycle guard (P1 #6)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_supersede_intel_self_collision_returns_409(client, isolate_settings):
+    """Self-supersede via natural-key collision must surface 409."""
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "self-test", "version": "1.0.0"},
+    )
+    intel_id = created.json()["id"]
+
+    self_collide = client.post(
+        f"{INTEL_BASE}/tech-components/{intel_id}/supersede",
+        json={"payload": {"component": "self-test", "version": "1.0.0"}},
+    )
+    assert self_collide.status_code == 409, self_collide.text
+
+
+def test_supersede_intel_cycle_returns_409(client, isolate_settings):
+    """Supersede A->B then B->A would close a cycle; must surface 409."""
+    _seed_engagement(client, isolate_settings)
+
+    a = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "cycle-test", "version": "1.0.0"},
+    )
+    a_id = a.json()["id"]
+    ab = client.post(
+        f"{INTEL_BASE}/tech-components/{a_id}/supersede",
+        json={"payload": {"component": "cycle-test", "version": "2.0.0"}},
+    )
+    b_id = ab.json()["current"]["id"]
+
+    # Attempting to point B back at A's natural key would already collide on
+    # natural key (would re-upsert into A) and surface 409 anyway. The cycle
+    # guard catches the harder case where the new payload has its OWN natural
+    # key but the resulting row already supersedes back to the target.
+    # Re-superseding A -> B via a payload that resolves to B's existing id
+    # would close the loop — but since record_fn upserts and natural key
+    # uniquely maps to one row, the explicit cycle requires a 3-row chain.
+    abc = client.post(
+        f"{INTEL_BASE}/tech-components/{b_id}/supersede",
+        json={"payload": {"component": "cycle-test", "version": "3.0.0"}},
+    )
+    c_id = abc.json()["current"]["id"]
+
+    # A->B->C exists. Now try to supersede C with A's natural key — that
+    # would resolve to A, which is already superseded by B which is
+    # already superseded by C: i.e., A already transitively supersedes
+    # back to C from C's perspective once we link C->A.
+    # Since record_fn upserts on (component, version) the only way to land
+    # on A's id from new payload is to re-use A's natural key:
+    cycle_attempt = client.post(
+        f"{INTEL_BASE}/tech-components/{c_id}/supersede",
+        json={"payload": {"component": "cycle-test", "version": "1.0.0"}},
+    )
+    assert cycle_attempt.status_code == 409, cycle_attempt.text
+
+
+# ──────────────────────────────────────────────────────────────
+# 404 differentiation (P3 #10)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_supersede_404_messages_differ_for_engagement_type_id(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "diff-404-test", "version": "1.0.0"},
+    )
+    intel_id = created.json()["id"]
+
+    # Unknown engagement.
+    unknown_engagement = client.patch(
+        "/engagements/no-such-engagement/intel/tech-components/1",
+        json={"payload": {"notes": "x"}},
+    )
+    assert unknown_engagement.status_code == 404
+    engagement_detail = unknown_engagement.json().get("detail", "").lower()
+
+    # Unknown intel type segment.
+    unknown_type = client.patch(
+        f"{INTEL_BASE}/no-such-type/{intel_id}",
+        json={"payload": {"notes": "x"}},
+    )
+    assert unknown_type.status_code == 404
+    type_detail = unknown_type.json().get("detail", "")
+
+    # Unknown intel id within a known type.
+    unknown_id = client.patch(
+        f"{INTEL_BASE}/tech-components/9999999",
+        json={"payload": {"notes": "x"}},
+    )
+    assert unknown_id.status_code == 404
+    id_detail = unknown_id.json().get("detail", "")
+
+    # All three must use distinct detail messages so the caller can tell
+    # which dimension was wrong without parsing the URL.
+    details = {engagement_detail, type_detail.lower(), id_detail.lower()}
+    assert len(details) == 3, details
+    assert "engagement" in engagement_detail
+    assert "no-such-type" in type_detail
+    assert "9999999" in id_detail

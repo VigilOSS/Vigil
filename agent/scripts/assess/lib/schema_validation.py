@@ -1,6 +1,7 @@
 """Minimal JSON Schema validation for bundled assessment payload schemas."""
 from __future__ import annotations
 
+import difflib
 import json
 from pathlib import Path
 from typing import Any
@@ -18,9 +19,59 @@ def load_schema(schema_name: str) -> dict[str, Any]:
     return json.loads(schema_path.read_text(encoding="utf-8"))
 
 
+def _suggest_close_match(unknown_field: str, allowed_fields: list[str]) -> str | None:
+    """Return a "Did you mean: <c1>, <c2>, <c3>?" hint for an unknown field name.
+
+    Surfaces up to three suggestions joined by ``, `` so a single high-score
+    fluke like ``evidence`` -> ``evidence_ref`` doesn't drown out equally
+    plausible alternatives such as ``evidence_text`` or ``evidence_paths``.
+    The cutoff is loose enough (0.55) to catch typos that previously slipped
+    past the 0.6 wall while staying tight enough that genuinely unrelated
+    tokens (``fizzbuzz``) still produce no hint.
+    """
+    if not allowed_fields:
+        return None
+    matches = difflib.get_close_matches(unknown_field, allowed_fields, n=3, cutoff=0.55)
+    if not matches:
+        return None
+    return ", ".join(matches)
+
+
 def collect_validation_errors(payload: Any, schema: dict[str, Any], *, path: str = "payload") -> list[str]:
     errors: list[str] = []
     _validate_value(payload, schema, path, errors)
+    return errors
+
+
+def collect_patch_validation_errors(
+    payload: Any, schema: dict[str, Any], *, path: str = "payload"
+) -> list[str]:
+    """Validate ``payload`` against ``schema`` while skipping ``required`` checks.
+
+    Use this for partial-update payloads (supersede / update) where the backend
+    enforces a per-type updatable-column whitelist and natural-key fields are
+    intentionally absent. Property-level checks (type, enum, length, did-you-mean
+    hints on unknown fields) still apply so typos surface client-side.
+    """
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        errors.append(f"{path} must be an object")
+        return errors
+    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    additional_properties = schema.get("additionalProperties", True) if isinstance(schema, dict) else True
+    allowed_keys = sorted(properties.keys()) if isinstance(properties, dict) else []
+    if additional_properties is False:
+        for key in payload:
+            if key not in properties:
+                suggestion = _suggest_close_match(key, allowed_keys)
+                if suggestion:
+                    errors.append(f"{path}.{key} is not allowed. Did you mean: {suggestion}?")
+                else:
+                    errors.append(f"{path}.{key} is not allowed")
+    for key, child_value in payload.items():
+        child_schema = properties.get(key) if isinstance(properties, dict) else None
+        if isinstance(child_schema, dict):
+            _validate_value(child_value, child_schema, f"{path}.{key}", errors)
     return errors
 
 
@@ -52,9 +103,16 @@ def _validate_value(value: Any, schema: dict[str, Any], path: str, errors: list[
         properties = schema.get("properties", {})
         additional_properties = schema.get("additionalProperties", True)
         if additional_properties is False:
+            allowed_keys = sorted(properties.keys()) if isinstance(properties, dict) else []
             for key in value:
                 if key not in properties:
-                    errors.append(f"{path}.{key} is not allowed")
+                    suggestion = _suggest_close_match(key, allowed_keys)
+                    if suggestion:
+                        errors.append(
+                            f"{path}.{key} is not allowed. Did you mean: {suggestion}?"
+                        )
+                    else:
+                        errors.append(f"{path}.{key} is not allowed")
         for key, child_value in value.items():
             child_schema = properties.get(key)
             if isinstance(child_schema, dict):

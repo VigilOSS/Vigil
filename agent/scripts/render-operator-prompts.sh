@@ -26,6 +26,7 @@ AGENT_NAMES=(
   code-vuln-hunter
   code-variant-hunter
   code-vuln-verifier
+  code-fuzz-engineer
 )
 
 agent_description() {
@@ -43,7 +44,28 @@ agent_description() {
     code-vuln-hunter) printf '%s\n' "Deep vulnerability analysis specialist for function-level code review and exploitability assessment." ;;
     code-variant-hunter) printf '%s\n' "Systematic variant scanner for confirmed code vulnerability patterns." ;;
     code-vuln-verifier) printf '%s\n' "False-positive elimination specialist for code findings using full entry-to-sink validation." ;;
+    code-fuzz-engineer) printf '%s\n' "AI-driven fuzz campaign orchestration for memory-safety vulnerability discovery." ;;
   esac
+}
+
+agent_prompt_body() {
+  local agent_name="$1"
+  local source="$SOURCE_DIR/agents/$agent_name.md"
+  if [[ ! -f "$source" ]]; then
+    echo "Missing agent prompt source: $source" >&2
+    exit 1
+  fi
+  awk '
+    NR == 1 && $0 == "---" { frontmatter = 1; next }
+    frontmatter && $0 == "---" { frontmatter = 0; body_started = 0; next }
+    !frontmatter {
+      if (!body_started && $0 == "") {
+        next
+      }
+      body_started = 1
+      print
+    }
+  ' "$source"
 }
 
 render_prompt_locality() {
@@ -52,7 +74,7 @@ render_prompt_locality() {
 
 - Operator instructions: `AGENTS.md` / `CLAUDE.md`
 - Specialist prompt sources: `agent/agents/*.md`
-- Generated specialist wrappers: `.codex/agents/*.toml` / `.claude/agents/*.md`
+- Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md`
 - Always-active rules: `agent/rules/hunting.md`, `agent/rules/reporting.md`
 - Skill discovery: `agent/SKILL.md`
 - Detailed skills: `agent/skills/*/SKILL.md`
@@ -90,6 +112,7 @@ render_code_agent_roster() {
 | `code-vuln-hunter` | Deep vulnerability analysis using TOB-style methodology on actual source code. | Code Phase 2 (Hunt), batched. |
 | `code-variant-hunter` | Systematic scanning for variant instances of confirmed bug patterns. | Code Phase 3 (Verify+Variant), parallel per finding. |
 | `code-vuln-verifier` | FP elimination via five-check protocol with devil's advocate verification. | Code Phase 3 (Verify+Variant), parallel. |
+| `code-fuzz-engineer` | AI-driven fuzz campaigns: target selection, harness construction, crash triage. | Code Phase 4 (conditional, C/C++ only). |
 
 EOF
 }
@@ -159,16 +182,22 @@ EOF
     return
   fi
 
-  cat > "$out" <<EOF
+  {
+    cat <<EOF
 ---
 name: $agent_name
 description: $description
 ---
 
-You are $agent_name.
-
-Load \`agent/agents/$agent_name.md\` and follow its instructions. Its "Load First" section tells you which shared constraints (\`shared-constraints.md\` or \`shared-constraints-code.md\`) and primary skill to load next — do not load the operator prompt (\`CLAUDE.md\`/\`AGENTS.md\`); that's the operator's context, not yours.
 EOF
+    agent_prompt_body "$agent_name"
+  } > "$out"
+  perl -0pi -e 's/\n+\z/\n/' "$out"
+}
+
+toml_literal_prompt_body() {
+  local agent_name="$1"
+  agent_prompt_body "$agent_name" | perl -0pe "s/'''/''\\\\''/g"
 }
 
 render_codex_wrapper() {
@@ -191,14 +220,19 @@ EOF
     return
   fi
 
-  cat > "$out" <<EOF
+  {
+    cat <<EOF
 name = "$agent_name"
 description = "$description"
 
-developer_instructions = """
-Load agent/agents/$agent_name.md and follow its instructions. Its "Load First" section tells you which shared constraints (shared-constraints.md or shared-constraints-code.md) and primary skill to load next — do not load the operator prompt (CLAUDE.md/AGENTS.md); that's the operator's context, not yours.
-"""
+developer_instructions = '''
 EOF
+    toml_literal_prompt_body "$agent_name"
+    cat <<'EOF'
+'''
+EOF
+  } > "$out"
+  perl -0pi -e 's/\n+\z/\n/' "$out"
 }
 
 render_all_wrappers() {

@@ -5,7 +5,9 @@
   "title": "Intel Tech Component Record",
   "type": "object",
   "additionalProperties": false,
-  "required": ["component"],
+  "required": [
+    "component"
+  ],
   "properties": {
     "component": {
       "type": "string",
@@ -27,7 +29,13 @@
     },
     "confidence": {
       "type": "string",
-      "enum": ["", "low", "medium", "high", "confirmed"],
+      "enum": [
+        "",
+        "low",
+        "medium",
+        "high",
+        "confirmed"
+      ],
       "default": "",
       "description": "Subjective confidence in the fingerprint."
     },
@@ -59,11 +67,28 @@
       "additionalProperties": false,
       "default": {},
       "properties": {
-        "agent_name": { "type": "string" },
-        "artifact_ref": { "type": "string" },
-        "captured_at": { "type": "string" },
-        "evidence_quote": { "type": "string" }
+        "agent_name": {
+          "type": "string"
+        },
+        "artifact_ref": {
+          "type": "string"
+        },
+        "captured_at": {
+          "type": "string"
+        },
+        "evidence_quote": {
+          "type": "string"
+        }
       }
+    },
+    "superseded_by_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "default": null,
+      "description": "Backend id of the intel row that superseded this one. Set automatically by `aith assess supersede-intel`; report-writer filters on this so stale rows do not appear in reports."
     }
   }
 }

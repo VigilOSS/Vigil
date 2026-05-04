@@ -97,7 +97,7 @@ def run(args) -> None:
         "",
         "Rules:",
         "- Work only on the assigned findings below.",
-        "- Use Kali MCP tools for target-facing work.",
+        "- Use `aith assess kali ...` subcommands for target-facing work; never host Bash, docker run, or docker exec.",
         "- Do not edit the root report.md or scope.json.",
         "- Place artifacts in ./artifacts and notes in ./notes.",
         "- Record proposals with aith assess record-proposal <session-dir> <proposal-json-file>.",

@@ -1,36 +1,47 @@
 # nuclei
 
 **Purpose:** Vulnerability scanning with community templates
-For live engagement targets, prefer `nuclei` through the Kali MCP command-execution tool.
+For live engagement targets, run `nuclei` via `aith assess kali nuclei` (typed verb, audit-flag-aware).
+
+Per-target rate calibration: `agent/operator-core.md` "Recon Dispatch Resource Policy". Pull `--rate-limit / -bs / -c` from the matching trait row before running broad sweeps.
+
+Run all nuclei probes via `aith assess kali nuclei` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. See `agent/skills/kali-exec/SKILL.md` "Examples per verb — kali nuclei" for complete invocation profiles with OOB configuration.
 
 ## Basic Scanning
 
-**Single target:** `nuclei -u https://target`
-**Multiple targets:** `nuclei -l /engagements/$ENGAGEMENT_KEY/scans/targets.txt`
-**By severity:** `nuclei -u https://target -severity critical,high`
-**By tag:** `nuclei -u https://target -tags cve,rce,misconfig`
-**Exclude tags:** `nuclei -u https://target -exclude-tags dos,fuzz`
+Flag reference (used inside `aith assess kali nuclei`):
+
+**Single target:** `-u https://target`
+**Multiple targets:** `-l /engagements/$ENGAGEMENT_KEY/scans/targets.txt`
+**By severity:** `-severity critical,high`
+**By tag:** `-tags cve,rce,misconfig`
+**Exclude tags:** `-exclude-tags dos,fuzz`
 
 ## Template Selection
 
-**Specific template:** `nuclei -u https://target -t http/cves/2021/CVE-2021-44228.yaml`
-**Template directory:** `nuclei -u https://target -t /custom/templates/`
-**Auto-scan (tech-based):** `nuclei -u https://target -as` (detects tech stack, runs matching templates)
-**List templates:** `nuclei -tl`
-**Workflows:** `nuclei -u https://target -w http/workflows/wordpress-workflow.yaml`
+**Specific template:** `-t http/cves/2021/CVE-2021-44228.yaml`
+**Template directory:** `-t /custom/templates/`
+**Auto-scan (tech-based):** `-as` (detects tech stack, runs matching templates)
+**List templates:** `aith assess kali exec --technique HEALTH --intent "nuclei template list" --probe-kind fingerprint --phase recon --timeout 30 -- nuclei -tl`
+**Workflows:** `-w http/workflows/wordpress-workflow.yaml`
 
 Note: Template paths use protocol prefix (e.g., `http/cves/`, `dns/`, `network/`).
 
 ## Auth & Headers
 
-**Custom header:** `nuclei -l targets.txt -header "Cookie: session=abc"`
-**Header from file:** `nuclei -l targets.txt -header-file headers.txt`
-**Proxy through Burp:** `nuclei -l targets.txt -proxy http://127.0.0.1:8080`
+**Custom header:** `-header "Cookie: session=abc"`
+**Header from file:** `-header-file headers.txt`
+**Proxy through Burp:** `-proxy http://127.0.0.1:8080`
 
 ## OOB Callbacks
 
-**Custom interactsh URL:** `nuclei -u target -interactsh-url https://YOUR_ID.oast.fun`
-**Disable interactsh:** `nuclei -u target -no-interactsh`
+OOB callbacks use the shared interactsh infrastructure — agents do not pass raw interactsh URLs directly. Instead:
+1. `aith oob status --json` — confirm `server=true`, `frpc=true`.
+2. `aith oob client start <name> --engagement <key> --agent <role>` — create a named client and get a unique correlated callback URL.
+3. Pass the URL from step 2 as `-interactsh-url <url>` in the nuclei invocation.
+4. `aith oob client logs <name> --lines 80` — read correlated hits after probes fire.
+
+**Disable interactsh (when OOB unavailable):** `-no-interactsh`
 
 ## Rate Limiting & Performance
 
@@ -43,14 +54,16 @@ Note: Template paths use protocol prefix (e.g., `http/cves/`, `dns/`, `network/`
 
 ## Output
 
-**Text:** `-o results.txt`
-**JSON Lines:** `-jsonl -o results.jsonl`
-**Markdown:** `-me /path/to/dir` (markdown export)
+**Text:** `-o /engagements/$ENGAGEMENT_KEY/scans/nuclei_results.txt`
+**JSON Lines:** `-jsonl -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_results.jsonl`
+**Markdown:** `-me /engagements/$ENGAGEMENT_KEY/scans/nuclei_md/` (markdown export)
+
+Always write output to `/engagements/$ENGAGEMENT_KEY/scans/` — writing to `/tmp` loses artifacts on container recreate.
 
 ## Template Management
 
-**Update templates:** `nuclei -ut`
-**Custom template directory:** `nuclei -td /path/to/templates/` (override default template location)
+**Update templates:** `aith assess kali exec --technique HEALTH --intent "nuclei template update" --probe-kind fingerprint --phase recon --timeout 120 -- nuclei -ut`
+**Custom template directory:** `-td /path/to/templates/` (override default template location)
 
 ## Triage Rules
 

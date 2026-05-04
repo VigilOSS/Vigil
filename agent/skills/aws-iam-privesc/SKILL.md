@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # AWS IAM Privilege Escalation
 
-> **Kali MCP audit header:** use `X-Technique: AUTH` (cloud IAM privesc maps to the auth/authorization class in this taxonomy). Set `X-Destructive: 1` whenever the call mutates IAM state (`iam create-*`, `iam attach-*`, `iam put-*`, `iam set-default-policy-version`, or a `sts assume-role` that activates a broader session).
+> **`aith assess kali` audit flags:** use `--technique AUTH` (cloud IAM privesc maps to the auth/authorization class in this taxonomy). Set `--destructive` whenever the call mutates IAM state (`iam create-*`, `iam attach-*`, `iam put-*`, `iam set-default-policy-version`, or a `sts assume-role` that activates a broader session).
 
 ## When to Activate
 
@@ -17,11 +17,12 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- AWS CLI / boto3
-- Pacu (AWS exploitation framework)
-- Cloudsplaining (IAM policy analyzer)
-- enumerate-iam (permission enumeration)
-- Principal Mapper (pmapper -- graph IAM relationships)
+- `aith assess kali exec -- aws ...` (AWS CLI calls against IAM and STS — all target-facing AWS CLI must go through the kali exec wrapper; use `--technique AUTH --probe-kind fingerprint --phase consume-test --timeout 60` for enumeration, and add `--destructive` plus `--probe-kind exploit` for mutating calls like `create-access-key`, `attach-user-policy`, `put-role-policy`)
+- boto3 (Python scripts — run via `aith assess kali exec --technique AUTH ... -- python3 ...`)
+- Pacu (AWS exploitation framework — run via `aith assess kali exec --technique AUTH --probe-kind exploit --phase consume-test --timeout 300 --destructive -- ...`)
+- Cloudsplaining (IAM policy analyzer — host-side analysis on downloaded policy JSON)
+- enumerate-iam (permission enumeration — run via kali exec)
+- Principal Mapper (pmapper — run host-side for graph analysis on downloaded IAM data)
 
 ## Methodology
 
@@ -77,6 +78,8 @@ aws sts assume-role --role-arn arn:aws:iam::TARGET:role/ROLE --role-session-name
 ```
 
 ### 5. Metadata Service Exploitation
+
+Metadata curl calls are target-facing — run them via `aith assess kali exec --technique AUTH --probe-kind exploit --phase consume-test --timeout 30 -- curl ...`.
 ```bash
 # IMDSv1 (if not disabled)
 curl http://169.254.169.254/latest/meta-data/iam/security-credentials/
@@ -114,7 +117,7 @@ aws iam attach-user-policy --user-name backdoor --policy-arn arn:aws:iam::aws:po
 - Cross-account trust relationships
 - IMDS version and retrieved credentials
 - Persistence mechanisms established
-- Full command output for each successful escalation step
+- Full command output for each successful escalation step — confirming an IAM permission exists is not enough; you must show the **attacker outcome** (e.g., `iam:CreatePolicyVersion` was used to attach `*:*` to the current user, and `aws s3 ls s3://prod-data-bucket` then returned 2,400 customer records; `sts:AssumeRole` escalated to the `Admin` role whose `get-caller-identity` confirms full account control; IMDS credentials for role `EC2InstanceRole` granted `s3:GetObject` on the production secrets bucket)
 
 ## Kill Signals — Stop Testing When
 - get-caller-identity shows no IAM permissions (AccessDenied on all enumeration) → credentials may be expired or invalid, verify and move on

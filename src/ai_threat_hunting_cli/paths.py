@@ -10,6 +10,11 @@ from .config import get_config_value
 DEFAULT_INSTALL_ROOT = Path.home() / "security-research"
 CONFIG_DIR = Path.home() / ".config" / "security-research"
 DEFAULT_SOURCE_REPO = "https://github.com/vigil-oss/security-research.git"
+# Hardcoded fallback for ``ORCHESTRATOR_BASE_URL`` — last layer of the
+# resolution chain in ``resolve_orchestrator_base_url`` and the value the
+# engagement-creation flow compares against to decide whether
+# ``.orchestrator.env`` needs an explicit override line.
+DEFAULT_ORCHESTRATOR_BASE_URL = "http://127.0.0.1:18000"
 
 
 def looks_like_repo_root(path: Path) -> bool:
@@ -125,19 +130,33 @@ def read_env_file(path: Path) -> dict[str, str]:
 
 
 def resolve_orchestrator_base_url(install_root: Path, engagement_dir: Path | None = None) -> str:
+    """Resolve the orchestrator base URL through a four-layer chain.
+
+    Precedence (highest first):
+
+    1. ``ORCHESTRATOR_BASE_URL`` env var — explicit override always wins.
+    2. Per-engagement ``.orchestrator.env`` — the backend snapshot for this
+       specific engagement.
+    3. ``aith config get orchestrator_base_url`` — user-set persistent
+       default, so changing the port doesn't require touching code or
+       fiddling with environment variables.
+    4. Install-root ``.orchestrator.env`` / ``.env`` — legacy fallbacks.
+    5. Hardcoded fallback ``DEFAULT_ORCHESTRATOR_BASE_URL``.
+    """
     if os.environ.get("ORCHESTRATOR_BASE_URL"):
         return os.environ["ORCHESTRATOR_BASE_URL"].rstrip("/")
-    for path in (
-        install_root / ".env",
-        install_root / ".orchestrator.env",
-        (engagement_dir / ".orchestrator.env") if engagement_dir else None,
-    ):
-        if path is None:
-            continue
+    if engagement_dir is not None:
+        value = read_env_file(engagement_dir / ".orchestrator.env").get("ORCHESTRATOR_BASE_URL")
+        if value:
+            return value.rstrip("/")
+    config_value = get_config_value("orchestrator_base_url")
+    if config_value:
+        return config_value.rstrip("/")
+    for path in (install_root / ".orchestrator.env", install_root / ".env"):
         value = read_env_file(path).get("ORCHESTRATOR_BASE_URL")
         if value:
             return value.rstrip("/")
-    return "http://127.0.0.1:18000"
+    return DEFAULT_ORCHESTRATOR_BASE_URL
 
 
 def container_host_url(url: str) -> str:

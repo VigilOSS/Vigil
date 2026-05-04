@@ -5,9 +5,13 @@
 frp exposes local runtime services to remote targets. interactsh records out-of-band callbacks
 for blind SSRF, XXE, command injection, SQLi, Log4Shell-style probes, and similar tests.
 
-Tunnels, listeners, and OOB callback servers are **operator-controlled shared infrastructure**.
-Agents must not start or restart them. Agents request OOB support in `# MANUAL:` steps, then use
-the callback URLs and logs that the operator provisions.
+FRP tunnels, listeners, and OOB callback servers are **operator-controlled shared
+infrastructure**. Agents must not start, stop, restart, or reconfigure shared
+`frpc` / `oob-server` sessions because those sessions are global runtime state.
+
+Agents do their own OOB readiness checks and per-agent client handling through
+`aith`. This keeps routine status/log checks out of the operator loop while
+preserving the operator boundary for shared infrastructure and secrets.
 
 Traffic path:
 
@@ -58,7 +62,7 @@ Start or verify the shared frp/interactsh sessions:
 
 ```bash
 aith oob start
-aith oob status
+aith oob status --json
 ```
 
 `aith oob start` is idempotent. It renders runtime config under `/data/oob/`, starts missing tmux
@@ -87,9 +91,33 @@ Use centralized logs from the host:
 aith logs oob --lines 80
 ```
 
+## Agent OOB Readiness Check
+
+Before sending blind payloads, agents verify OOB state directly:
+
+```bash
+aith oob status --json
+aith logs oob --lines 80
+```
+
+Interpretation:
+
+| Check | Ready signal | Agent action |
+|-------|--------------|--------------|
+| `server` | `true` | interactsh-server is available for callbacks |
+| `frpc` | `true` | FRP tunnel registration is active |
+| `clients` | contains your named client | correlated callback logs are available |
+
+If `server` or `frpc` is false, inspect `aith logs oob --lines 80` and record a
+runtime issue in your handoff. Escalate to the operator only for shared
+infrastructure, token, DNS, or authentication failures because those are
+operator-owned controls.
+
 ## Per-Agent Clients
 
-Start one named client per agent/task that needs correlated callback logs:
+Start one named client per agent/task that needs correlated callback logs. Agents
+can manage these client sessions because they are correlation handles, not shared
+FRP/server infrastructure:
 
 ```bash
 aith engagement list --json
@@ -97,8 +125,8 @@ aith oob client start vuln-ssrf-api --engagement <engagement-key> --agent vulner
 aith oob client logs vuln-ssrf-api --lines 80
 ```
 
-The client prints a unique callback URL such as `<id>.oob.example.com`. Use the full unique URL
-in payloads, not only the base OOB domain.
+The client log includes a unique callback URL such as `<id>.oob.example.com`.
+Use the full unique URL in payloads, not only the base OOB domain.
 
 Examples:
 
@@ -133,20 +161,14 @@ aith logs oob --lines 40
 
 Use client logs for vulnerability confirmation and raw server logs for infrastructure debugging.
 
-## Operator Handoff
-
-When OOB is ready for an engagement, record the base OOB domain for agents:
-
-```bash
-echo "oob.example.com" > "$DIR/.oob_url"
-```
+## Agent Workflow
 
 Agents should:
 
-1. Read `$DIR/.oob_url`.
-2. Ask the operator to list engagements and start a named client with an explicit key: `aith engagement list --json` then `aith oob client start <name> --engagement <engagement-key> --agent <agent-name>`.
-3. Use the unique client callback URL in payloads.
-4. Check `/data/oob/clients/<name>.log` through Kali MCP or ask the operator for `aith oob client logs`.
+1. Run `aith oob status --json` and confirm `server=true`, `frpc=true`, and the expected `domain`.
+2. Start or reuse a named client with an explicit engagement key: `aith engagement list --json`, `aith oob client list`, then `aith oob client start <name> --engagement <engagement-key> --agent <agent-name>`.
+3. Use `aith oob client logs <name> --lines 80` to get the unique callback URL and to check correlated hits.
+4. Use `aith logs oob --lines 80` only when debugging shared server/FRP health.
 
 If OOB is unavailable, agents should fall back to time-based detection and state that OOB proof was
 not available.

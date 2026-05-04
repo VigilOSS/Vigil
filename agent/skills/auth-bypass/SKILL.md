@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Authentication & Authorization Bypass
 
-> **Kali MCP audit header:** use `X-Technique: AUTH` (all auth-bypass variants — header spoofing, role drift, logic flaws, forced browsing — collapse to the AUTH class). Switch to `JWT` when attacking a JSON Web Token specifically.
+> **`aith assess kali` audit flags:** use `--technique AUTH` (all auth-bypass variants — header spoofing, role drift, logic flaws, forced browsing — collapse to the AUTH class). Switch to `JWT` when attacking a JSON Web Token specifically.
 
 ## When to Activate
 
@@ -22,6 +22,8 @@ admin:admin  admin:password  admin:123456  root:root  root:toor  test:test  gues
 Check username enumeration: different errors for valid/invalid users, timing diffs, selective lockout.
 
 ### 2. Brute Force (Hydra)
+
+Run via `aith assess kali exec --technique AUTH --intent "brute-force login" --probe-kind payload --phase consume-test --timeout 300 -- hydra ...` so the run lands in the audit pipeline.
 ```bash
 hydra -l admin -P /usr/share/wordlists/rockyou.txt target http-post-form \
   "/login:username=^USER^&password=^PASS^:Invalid credentials"
@@ -100,6 +102,8 @@ PUT /api/profile {"name":"test","role":"admin","is_staff":true}  # Mass assignme
 
 ## Methodology Checklist
 
+All HTTP probing steps must go through `aith assess kali exec --technique AUTH --intent "<purpose>" --probe-kind <kind> --phase consume-test --timeout <N> -- curl ...` (or the appropriate typed verb) so every request lands in the audit pipeline. Use `--probe-kind baseline` for control requests, `--probe-kind payload` for attack attempts, `--probe-kind exploit` for confirmed bypass demonstrations.
+
 1. Map all auth endpoints (login, register, reset, logout, MFA, OAuth)
 2. Create accounts at each privilege level
 3. Test each privileged action with lower/no-auth sessions
@@ -116,6 +120,13 @@ PUT /api/profile {"name":"test","role":"admin","is_staff":true}  # Mass assignme
 - [ ] Remove CSRF token entirely — does the request succeed? (fail-open CSRF)
 - [ ] Test with invalid session cookie — does it create a new authenticated session?
 - [ ] Check if rate limiter failure grants unlimited access instead of blocking
+
+## What to Record
+
+- Auth endpoint, parameter, and bypass technique
+- Before/after state showing unauthorized access (control request, bypassed request, and proof of privileged access)
+- Tokens or credentials captured — confirming a bypass route exists is not enough; you must show the **attacker outcome** (e.g., the `alg:none` JWT was accepted and the forged token accessed the admin user list at `/api/admin/users` returning 1,200 accounts, the account lockout bypass allowed successful credential stuffing of 3 accounts from the breach list, the IDOR allowed reading another user's full profile including SSN and billing address, the forced-browse to `/admin/dashboard` loaded the authenticated admin panel with user management controls)
+- Severity: Critical (account takeover, admin access) to High (privilege escalation, sensitive data) to Medium (enumeration-only)
 
 ## Extended Resources
 

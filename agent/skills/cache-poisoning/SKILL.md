@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Cache Poisoning Testing
 
-> **Kali MCP audit header:** use `X-Technique: OTHER` (cache poisoning spans web-cache-deception, CPDoS, and unkeyed-header abuse — no dedicated enum class). Switch to `REQUEST-SMUGGLING` when the poisoning rides on a smuggled request.
+> **`aith assess kali` audit flags:** use `--technique OTHER` (cache poisoning spans web-cache-deception, CPDoS, and unkeyed-header abuse — no dedicated enum class). Switch to `REQUEST-SMUGGLING` when the poisoning rides on a smuggled request.
 
 ## When to Activate
 
@@ -16,7 +16,7 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `curl` (header injection probing and cache behavior analysis)
+- `aith assess kali exec -- curl ...` (header injection probing and cache behavior analysis — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30` for probing calls)
 - `Param Miner` (Burp extension for unkeyed header/parameter discovery)
 - Browser (verify poisoned responses served to other users)
 
@@ -110,9 +110,8 @@ curl -H "X-Forwarded-Host: attacker.example" -H "X-Forwarded-Scheme: https" http
 - Cache layer identified (CDN, reverse proxy, product name and version if known)
 - Unkeyed input that influences response (header, cookie, body)
 - Exact request that poisons the cache
-- Evidence that poisoned response is served to other users (second request without the unkeyed input)
+- Evidence that poisoned response is served to other users (second request without the unkeyed input) — confirming the primitive exists is not enough; you must show the **attacker outcome**: what a victim receives when they hit the poisoned cache entry (e.g., malicious script executes in victim's browser, victim is redirected to attacker-controlled domain, victim's sensitive data is served to an unauthenticated requester)
 - Impact: XSS via poisoned response, redirect to attacker domain, sensitive data exposure via cache deception
 - Full request/response pairs for both poisoning and victim requests
 
 ## Extended Resources
-

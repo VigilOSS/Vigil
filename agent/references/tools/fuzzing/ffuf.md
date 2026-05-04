@@ -1,7 +1,7 @@
 # ffuf
 
 **Purpose:** Web fuzzing (directories, parameters, vhosts)
-For live engagement targets, use `ffuf` through the Kali MCP command-execution tool.
+For live engagement targets, run `ffuf` via `aith assess kali ffuf` (typed verb, audit-flag-aware).
 
 ## Directory Fuzzing
 
@@ -62,3 +62,24 @@ L3 (deep):  /usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt
 Params:     /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt
 Subdomains: /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt
 ```
+
+**L1 is the recon-mandatory minimum.** `agent/skills/web-recon/SKILL.md` Step 5 requires
+the L1 wordlist + tech-extension variants for every live host before declaring recon
+complete. Escalate to L2 / L3 when the L1 pass surfaces interesting paths (admin / api /
+backup hits) and the engagement budget allows the deeper sweep.
+
+## Rate guidance for cautious-tier / WAF-fronted targets
+
+Pick the rate from the wafw00f finding (full table in
+`agent/references/tools/recon/wafw00f.md` "WAF-tier rate adjustment table"; canonical
+per-target rate calibration in `agent/operator-core.md` "Recon Dispatch Resource Policy"):
+
+- **No WAF** → `-t 40` (default).
+- **Basic WAF** → `-t 20 -rate 50`.
+- **CDN-fronted (any major CDN / edge platform)** → `-t 10 -rate 25`.
+- **Cautious tier (enterprise WAF / high-friction policy / regulated)** → `-t 5 -rate 10`.
+
+Always run wafw00f BEFORE the directory fuzz so the rate is calibrated to the WAF tier.
+Running default `-t 40` against a cautious-tier target trips the WAF lockout for the
+rest of the engagement. The web-recon skill enforces the wafw00f → ffuf order; this
+table is the rate it picks from.

@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Race Condition / TOCTOU Testing
 
-> **Kali MCP audit header:** use `X-Technique: OTHER` (race/TOCTOU has no dedicated enum class; outcomes span double-spend, auth-bypass, and state corruption).
+> **`aith assess kali` audit flags:** use `--technique OTHER` (race/TOCTOU has no dedicated enum class; outcomes span double-spend, auth-bypass, and state corruption).
 
 ## When to Activate
 
@@ -24,10 +24,10 @@ origin: AI Threat Hunting
 - Burp Repeater (send group in parallel)
 - GNU parallel
 
-For current-engagement target requests, execute `curl` through the Kali MCP
-command-execution tool. Add explicit `Cookie:` or `Authorization:` headers
-only when intentionally testing alternate-user races or session override
-behavior.
+For current-engagement target requests, execute `curl` through `aith assess kali exec --` so
+the burst lands in the audit pipeline alongside the audit-flag set you pass. Add explicit
+`Cookie:` or `Authorization:` headers only when intentionally testing alternate-user races or
+session override behavior.
 
 ## Methodology
 
@@ -124,7 +124,7 @@ behavior.
 
 - Endpoint and action with race condition
 - Number of parallel requests sent
-- Number of successful duplicate executions
+- Number of successful duplicate executions — confirming two requests both returned 200 is not enough; you must show the **attacker outcome** (e.g., the coupon was redeemed 18 times in a single burst, the discount was applied 18 times reducing the total from $500 to $0, confirmed by checking the order total in the response; the gift card balance of $50 was withdrawn 12 times totaling $600 withdrawn from a $50 balance; the vote count increased by 8 from a single user confirming no server-side uniqueness enforcement)
 - Technique used (single-packet, Turbo Intruder, curl --parallel)
 - Business impact (financial loss, integrity violation, privilege escalation)
 - Timing window observed

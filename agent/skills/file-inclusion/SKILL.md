@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # File Inclusion Testing
 
-> **Kali MCP audit header:** use `X-Technique: LFI` for local-file inclusion (`/etc/passwd`, PHP filter wrappers, log poisoning). Switch to `RFI` when the payload fetches a remote URL the server loads.
+> **`aith assess kali` audit flags:** use `--technique LFI` for local-file inclusion (`/etc/passwd`, PHP filter wrappers, log poisoning). Switch to `RFI` when the payload fetches a remote URL the server loads.
 
 ## When to Activate
 
@@ -16,9 +16,9 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `curl` — manual path traversal probing and wrapper testing
-- `ffuf` — automated traversal depth and path fuzzing
-- `php_filter_chain_generator.py` — PHP filter chain RCE without file write (synacktiv tool)
+- `aith assess kali exec -- curl ...` (manual path traversal probing and wrapper testing — all target-facing curl must go through the kali exec wrapper; use `--technique LFI --probe-kind payload --phase consume-test --timeout 30` for LFI attempts, `--technique RFI` for remote-file inclusion)
+- `aith assess kali ffuf ...` (automated traversal depth and path fuzzing — use `--technique LFI --probe-kind payload --phase consume-test --timeout 600`)
+- `php_filter_chain_generator.py` — PHP filter chain RCE without file write (synacktiv tool — run host-side to generate payloads, then deliver via kali exec)
 
 ## Methodology
 
@@ -150,7 +150,7 @@ python3 php_filter_chain_generator.py --chain 'PAYLOAD: php system("id")'
 - Vulnerable parameter and endpoint
 - Traversal depth required (how many `../`)
 - Encoding/bypass technique needed (null byte, double encoding, etc.)
-- Files successfully read and their content (redact secrets in report)
+- Files successfully read and their content (redact secrets in report) — confirming `/etc/passwd` is readable is a start; you must show the **attacker outcome** (e.g., the `/etc/shadow` file was read and contains hashed credentials for 5 accounts, the `.env` file disclosed database password that authenticated against the production MySQL instance, log poisoning via User-Agent injection achieved RCE confirmed with `id` output showing `uid=33(www-data)`)
 - RCE method if achieved (log poisoning, PHP wrappers, filter chains)
 - Severity: Critical (RCE), High (sensitive file read), Medium (limited file read)
 

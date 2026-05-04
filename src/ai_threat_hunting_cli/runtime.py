@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import docker
+from .config import RuntimeResources, runtime_resources
 from .paths import container_host_url, resolve_orchestrator_base_url
+
+
+HEAVY_TIER_HOST_GB_THRESHOLD = 32
+HEAVY_TIER_TARGET_GB = 16
+
+ULIMIT_NOFILE_RECOMMENDED = 65536
+ULIMIT_NPROC_RECOMMENDED = 8192
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +35,13 @@ def build_runtime(install_root: Path, *, variant: str = "full", dev: bool = Fals
     docker.require_success(runner(argv), argv)
 
 
-def start_runtime(options: RuntimeOptions, *, runner: docker.Runner = docker.run_command, validate_tools: bool = True) -> None:
+def start_runtime(
+    options: RuntimeOptions,
+    *,
+    runner: docker.Runner = docker.run_command,
+    validate_tools: bool = True,
+    allow_existing: bool = False,
+) -> None:
     install_root = options.install_root.expanduser().resolve()
     data_dir = Path(os.environ.get("KALI_MCP_DATA_DIR", install_root / ".runtime-data"))
     engagements_dir = install_root / "agent" / "engagements"
@@ -33,13 +49,21 @@ def start_runtime(options: RuntimeOptions, *, runner: docker.Runner = docker.run
     engagements_dir.mkdir(parents=True, exist_ok=True)
 
     if not docker.image_exists(options.image, runner=runner):
-        raise SystemExit(f"Missing runtime image: {options.image}. Run `aith runtime build` first.")
+        raise SystemExit(
+            f"Missing runtime image: {options.image}. Run `aith runtime build` first.\n"
+            "The runtime is only needed for target-facing Kali tools. Backend state reads/writes "
+            "use the orchestrator service; run `aith orchestrator status` or "
+            "`aith orchestrator start` if that is what you need."
+        )
 
     if docker.container_running(options.container_name, runner=runner) and not options.recreate:
         _validate_image_current(options, runner=runner)
         _validate_mounts(options.container_name, data_dir, engagements_dir, runner=runner)
         if validate_tools:
             _validate_tools(options.container_name, runner=runner)
+        _check_runtime_ulimits(options.container_name, runner=runner)
+        if not allow_existing:
+            raise SystemExit(_already_running_message(options.container_name, install_root))
         return
 
     if docker.container_exists(options.container_name, runner=runner):
@@ -47,6 +71,8 @@ def start_runtime(options: RuntimeOptions, *, runner: docker.Runner = docker.run
 
     env_file = install_root / ".env"
     base_url = container_host_url(resolve_orchestrator_base_url(install_root))
+    resources = runtime_resources()
+    _maybe_warn_tier_undersized(resources)
     argv = [
         "docker",
         "run",
@@ -57,6 +83,14 @@ def start_runtime(options: RuntimeOptions, *, runner: docker.Runner = docker.run
         "unless-stopped",
         "--cap-add=NET_RAW",
         "--cap-add=NET_ADMIN",
+        "--cap-add=SYS_PTRACE",
+        f"--memory={resources.memory_gb}g",
+        f"--memory-swap={resources.memory_gb}g",
+        "--memory-swappiness=0",
+        f"--cpus={_format_cpus(resources.cpus)}",
+        f"--pids-limit={resources.pids_limit}",
+        f"--shm-size={resources.shm_size}",
+        "--oom-score-adj=-500",
         "-v",
         f"{data_dir}:/data",
         "-v",
@@ -71,6 +105,7 @@ def start_runtime(options: RuntimeOptions, *, runner: docker.Runner = docker.run
     _validate_mounts(options.container_name, data_dir, engagements_dir, runner=runner)
     if validate_tools:
         _validate_tools(options.container_name, runner=runner)
+    _check_runtime_ulimits(options.container_name, runner=runner)
 
 
 def stop_runtime(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> None:
@@ -80,6 +115,16 @@ def stop_runtime(container_name: str = "security-research", *, runner: docker.Ru
 
 def runtime_status(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> str:
     return "running" if docker.container_running(container_name, runner=runner) else "stopped"
+
+
+def _already_running_message(container_name: str, install_root: Path) -> str:
+    return (
+        "Runtime container is already running.\n"
+        f"  container: {container_name}\n"
+        f"  install root: {install_root}\n"
+        "Use `aith runtime status` or `aith runtime resources` to inspect it.\n"
+        "Use `aith runtime restart` to recreate it, or `aith runtime stop` to stop it."
+    )
 
 
 def runtime_mounts_ok(install_root: Path, container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> bool:
@@ -93,6 +138,68 @@ def runtime_mounts_ok(install_root: Path, container_name: str = "security-resear
     return True
 
 
+def runtime_resource_state(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> dict[str, object]:
+    """Return configured runtime resources merged with live cgroup state from the container."""
+    configured = runtime_resources()
+    state: dict[str, object] = {
+        "configured": {
+            "memory_gb": configured.memory_gb,
+            "cpus": configured.cpus,
+            "pids_limit": configured.pids_limit,
+            "shm_size": configured.shm_size,
+        },
+        "container": container_name,
+        "running": docker.container_running(container_name, runner=runner),
+    }
+    if not state["running"]:
+        state["live"] = None
+        return state
+    state["live"] = _read_live_cgroup_state(container_name, runner=runner)
+    return state
+
+
+def aith_runtime_resources(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command, json_output: bool = False) -> None:
+    state = runtime_resource_state(container_name, runner=runner)
+    if json_output:
+        print(json.dumps(state, indent=2))
+        return
+    configured = state["configured"]  # type: ignore[index]
+    print(f"container\t{state['container']}\trunning={state['running']}")
+    print(
+        f"configured\tmemory={configured['memory_gb']}g\tcpus={configured['cpus']}\t"  # type: ignore[index]
+        f"pids_limit={configured['pids_limit']}\tshm_size={configured['shm_size']}"  # type: ignore[index]
+    )
+    live = state.get("live")
+    if live is None:
+        print("live\tcontainer not running")
+        return
+    memory_max = live.get("memory_max", "?") if isinstance(live, dict) else "?"
+    cpu_max = live.get("cpu_max", "?") if isinstance(live, dict) else "?"
+    pids_max = live.get("pids_max", "?") if isinstance(live, dict) else "?"
+    print(f"live\tmemory.max={memory_max}\tcpu.max={cpu_max}\tpids.max={pids_max}")
+
+
+def _read_live_cgroup_state(container_name: str, *, runner: docker.Runner) -> dict[str, str]:
+    command = (
+        "for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/cpu.max /sys/fs/cgroup/pids.max; do "
+        "printf '%s=' \"$f\"; cat \"$f\" 2>/dev/null || printf 'unavailable'; printf '\\n'; "
+        "done"
+    )
+    result = runner(["docker", "exec", container_name, "sh", "-lc", command])
+    if result.returncode != 0:
+        return {"error": (result.stderr or result.stdout).strip() or "docker exec failed"}
+    payload: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition("=")
+        if key.endswith("memory.max"):
+            payload["memory_max"] = value.strip()
+        elif key.endswith("cpu.max"):
+            payload["cpu_max"] = value.strip()
+        elif key.endswith("pids.max"):
+            payload["pids_max"] = value.strip()
+    return payload
+
+
 def _validate_image_current(options: RuntimeOptions, *, runner: docker.Runner) -> None:
     container_id = docker.container_image_id(options.container_name, runner=runner)
     configured_id = docker.image_id(options.image, runner=runner)
@@ -102,8 +209,48 @@ def _validate_image_current(options: RuntimeOptions, *, runner: docker.Runner) -
         )
 
 
+def _check_runtime_ulimits(container_name: str, *, runner: docker.Runner) -> None:
+    """Warn to stderr when dockerd defaults look low for the workload.
+
+    `docker exec`-launched processes inherit from dockerd's daemon defaults, not
+    from container PID 1's `--ulimit`, and `/etc/security/limits.conf` only
+    applies under PAM. The fix is dockerd-side (daemon.json `default-ulimits`);
+    this probe just surfaces the gap so operators don't chase phantom
+    `too many open files` errors during a long Phase 3.
+    """
+    result = runner(["docker", "exec", container_name, "sh", "-lc", "ulimit -n; ulimit -u"])
+    if result.returncode != 0:
+        return
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return
+    nofile = _parse_ulimit_value(lines[0])
+    nproc = _parse_ulimit_value(lines[1])
+    warnings: list[str] = []
+    if nofile is not None and nofile < ULIMIT_NOFILE_RECOMMENDED:
+        warnings.append(f"nofile={nofile} (recommend >={ULIMIT_NOFILE_RECOMMENDED})")
+    if nproc is not None and nproc < ULIMIT_NPROC_RECOMMENDED:
+        warnings.append(f"nproc={nproc} (recommend >={ULIMIT_NPROC_RECOMMENDED})")
+    if warnings:
+        print(
+            "[aith] WARN: dockerd default ulimits are low: "
+            + ", ".join(warnings)
+            + ". See README 'Container resource limits' for the daemon.json fix.",
+            file=sys.stderr,
+        )
+
+
+def _parse_ulimit_value(raw: str) -> int | None:
+    if raw == "unlimited":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def _validate_tools(container_name: str, *, runner: docker.Runner) -> None:
-    required_tools = ["mcp-server", "ping", "katana", "gau", "nuclei", "httpx", "trufflehog", "gf", "uro"]
+    required_tools = ["dtach", "ping", "katana", "gau", "nuclei", "httpx", "trufflehog", "gf", "uro", "xmllint"]
     for tool in required_tools:
         result = runner(["docker", "exec", container_name, "sh", "-lc", f"command -v '{tool}' >/dev/null"])
         if result.returncode != 0:
@@ -128,3 +275,35 @@ def _validate_mounts(container_name: str, data_dir: Path, engagements_dir: Path,
                 f"Runtime mount drift detected for {destination}: {actual_source} != {expected_source}. "
                 "Recreate with `aith runtime restart`."
             )
+
+
+def _format_cpus(value: float) -> str:
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:g}"
+
+
+def _maybe_warn_tier_undersized(resources: RuntimeResources) -> None:
+    """Print a one-line tier-upgrade hint when host RAM is much larger than configured memory."""
+    host_gb = _host_memory_gb()
+    if host_gb is None:
+        return
+    if host_gb >= HEAVY_TIER_HOST_GB_THRESHOLD and resources.memory_gb < HEAVY_TIER_TARGET_GB:
+        print(
+            f"hint\thost has {host_gb} GB RAM but runtime is set to {resources.memory_gb} GB; "
+            "consider AITH_RUNTIME_MEMORY_GB=16 (or 32) for better parallelism. "
+            "See README Resource Sizing."
+        )
+
+
+def _host_memory_gb() -> int | None:
+    """Best-effort read of host RAM in GB; return None on any platform without /proc/meminfo."""
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    return int(parts[1]) // (1024 * 1024)
+    except (OSError, ValueError):
+        return None
+    return None

@@ -7,7 +7,7 @@
 //   Surfaces   — what we can attack (bridges intel → findings)
 //   Coverage   — where we've tested (quantitative companion to Surfaces)
 //   Code       — code-analysis results, own domain
-//   Commands   — Kali MCP command-run audit; a deeper cut of Activity that
+//   Commands   — aith assess command-run audit; a deeper cut of Activity that
 //                exposes per-tool exit codes, output retention, and argv
 //                so operators can audit what actually ran
 //   Activity   — structured state-change timeline

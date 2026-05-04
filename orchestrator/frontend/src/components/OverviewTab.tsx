@@ -41,9 +41,75 @@ export function OverviewTab({ events, assessmentSummary, findings, chains, chain
     .filter((e) => e.event_type !== "artifact.updated")
     .slice(-5);
 
+  const vendorSaasPending = s?.vendor_saas_hosts_pending_decision ?? [];
+  const egressStatus = s?.egress_status;
+  const egressBlockedPct = egressStatus?.blocked_pct ?? 0;
+  const egressBannerVisible = egressBlockedPct > 50;
+
   return (
     <>
       <PhaseWaterfall events={events} currentPhase={currentPhase} />
+
+      {egressBannerVisible && (
+        <section className="panel" data-testid="egress-reputation-banner">
+          <div className="panel-header">
+            <h2>Egress reputation block detected</h2>
+          </div>
+          <p>
+            <strong>{egressBlockedPct}%</strong> of representative live hosts returned 403 / 000-status from
+            the runtime egress IP (pattern: <code>{egressStatus?.pattern ?? "unknown"}</code>). Choose a
+            mitigation before continuing Phase 3 dispatch:
+          </p>
+          <ol>
+            <li>
+              <button type="button" data-testid="egress-choice-allowlist">
+                Request IP allowlisting from the program
+              </button>
+            </li>
+            <li>
+              <button type="button" data-testid="egress-choice-proxy">
+                Route through a residential proxy or clean-IP VPS
+              </button>
+            </li>
+            <li>
+              <button type="button" data-testid="egress-choice-browser">
+                Use a browser-based tool inside the runtime
+              </button>
+            </li>
+            <li>
+              <button type="button" data-testid="egress-choice-accept">
+                Accept the limited coverage and document the gap
+              </button>
+            </li>
+          </ol>
+          <p className="meta-text">
+            Detail: <code>agent/references/runtime-guides/cdn-ip-blocking.md</code>
+          </p>
+        </section>
+      )}
+
+      {vendorSaasPending.length > 0 && (
+        <section className="panel" data-testid="vendor-saas-pending-panel">
+          <div className="panel-header">
+            <h2>Vendor-SaaS hosts pending scope decision</h2>
+          </div>
+          <ul>
+            {vendorSaasPending.map((row) => (
+              <li key={row.host}>
+                <span className="badge" data-testid={`vendor-saas-badge-${row.host}`}>
+                  vendor-saas: {row.vendor}
+                </span>
+                <code style={{ marginLeft: "8px" }}>{row.host}</code>
+              </li>
+            ))}
+          </ul>
+          <p className="meta-text">
+            Surface the numbered checkpoint when recon identifies vendor-managed SaaS; record the
+            choice as a backend scope_decision row with{" "}
+            <code>aith assess dispatch record-decision --kind scope_decision</code>.
+          </p>
+        </section>
+      )}
 
       <section className="panel">
         <div className="panel-header">

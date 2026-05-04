@@ -8,7 +8,7 @@ origin: AI Threat Hunting
 
 Guides consumption of the transient local work buffer in `cases.db` for batching worker tasks. The orchestrator backend remains canonical for findings, coverage, services, request variants, and chains, and the work buffer should mirror canonical backend identities rather than inventing its own request identity.
 
-This skill is coordination-only. Use it to inspect the work buffer, route batches, mark completion or errors, and requeue canonical work items. Do not use host-side shell commands from this skill to probe, crawl, fuzz, or exploit targets directly. All target-facing execution must happen through the attached Kali MCP tools.
+This skill is coordination-only. Use it to inspect the work buffer, route batches, mark completion or errors, and requeue canonical work items. Do not use host-side shell commands from this skill to probe, crawl, fuzz, or exploit targets directly. All target-facing execution must happen through `aith assess kali ...` subcommands so the audit pipeline stays truthful.
 
 ## When to Activate
 
@@ -115,12 +115,12 @@ sqlite3 "$DB" ".timeout 5000" "
 ## Key Rules
 
 - Use `aith assess dispatch "$DB" <action>` for all work-buffer operations — reading cases.db directly bypasses the backend sync layer and can produce stale or inconsistent state
-- Treat this skill as host-side coordination only. All real target testing stays in Kali MCP.
+- Treat this skill as host-side coordination only. All real target testing stays in `aith assess kali ...`.
 - Record findings in backend state immediately via `aith assess record-finding`
 - Re-ingest new endpoints through backend-first producers; let the work buffer mirror the resulting canonical ids
 - Use reset-stale at start of each iteration
-- **DO NOT STOP EARLY** — loop until pending=0 for all consumable types
-- On subagent error: mark work items `error`, log, CONTINUE (don't halt loop)
+- **Loop until pending=0 for all consumable types** — stopping early leaves tested surfaces unrecorded and forces a re-dispatch to pick up the tail
+- On subagent error: mark work items `error`, log, CONTINUE — halting the loop on a single error abandons the remaining batch
 - Stop on any of:
   - pending=0 everywhere (normal completion)
   - the upstream work-buffer producer (surface-collector, ingestion, nuclei sweep) is itself stuck or failing — looping against an empty or broken producer burns dispatch budget on no real work. Escalate the producer issue first, then resume.

@@ -1,7 +1,7 @@
 # wfuzz
 
 **Purpose:** Web fuzzing with advanced filtering and payload encoding
-For live engagement targets, run wfuzz through the Kali MCP command-execution tool with `wfuzz`.
+For live engagement targets, run wfuzz via `aith assess kali exec --technique FUZZ --intent "<why>" --probe-kind payload --phase <phase> --timeout <seconds> -- wfuzz ...` with the standard audit-flag set.
 
 ## Basic Usage
 

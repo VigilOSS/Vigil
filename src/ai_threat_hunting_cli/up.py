@@ -10,9 +10,11 @@ from pathlib import Path
 from . import config as config_module
 from . import docker
 from .engagements import current_engagement_path, resolve_engagement_path
+from .install import InstallOptions, install_from_source
 from .mitmproxy import MitmproxyOptions, start_proxy
 from .oob import OobOptions, oob_status, start_oob
 from .orchestrator import OrchestratorOptions, start_orchestrator
+from .paths import resolve_source_root
 from .runtime import RuntimeOptions, build_runtime, start_runtime, stop_runtime
 
 
@@ -29,6 +31,21 @@ class UpOptions:
 
 def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) -> None:
     install_root = options.install_root.expanduser().resolve()
+
+    try:
+        source_root = resolve_source_root(None, install_root=install_root)
+        print("source sync\tupdating install root")
+        install_from_source(
+            InstallOptions(
+                source_root=source_root,
+                install_root=install_root,
+                verify_docker_image=False,
+            ),
+            runner=runner,
+        )
+    except SystemExit:
+        print("source sync\tskipped (no source checkout found)")
+
     runtime_was_running = docker.container_running("security-research", runner=runner)
 
     runtime_built = False
@@ -51,7 +68,7 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
     else:
         print("mitmproxy image\tcurrent")
 
-    start_orchestrator(OrchestratorOptions(install_root=install_root))
+    start_orchestrator(OrchestratorOptions(install_root=install_root, allow_existing=True))
     _start_mitmproxy_if_needed(install_root, options, runner=runner)
     _start_oob_if_needed(install_root, runner=runner)
 
@@ -78,11 +95,11 @@ def _start_or_restart_runtime(
             start_runtime(RuntimeOptions(install_root=install_root, recreate=True), runner=runner)
             return
         print("runtime\trunning old image; restart skipped")
-        print("Run `aith runtime restart` when you are ready to reconnect MCP clients.")
+        print("Run `aith runtime restart` when you are ready to pick up the new image.")
         return
 
     print("runtime\talready running")
-    start_runtime(runtime_options, runner=runner)
+    start_runtime(runtime_options, runner=runner, allow_existing=True)
 
 
 def _confirm_runtime_restart(options: UpOptions) -> bool:
@@ -96,9 +113,9 @@ def _confirm_runtime_restart(options: UpOptions) -> bool:
 
     timeout = max(0, options.runtime_restart_timeout)
     print(
-        "Runtime image changed. Restarting Kali runtime will close active MCP transports; "
-        "Codex/Claude sessions must reconnect. OOB interactsh client domains may be lost "
-        "unless their session files can resume with the server."
+        "Runtime image changed. Restarting Kali runtime will terminate any in-flight `aith assess kali ...` "
+        "or `docker exec` sessions; OOB interactsh client domains may be lost unless their session files "
+        "can resume with the server."
     )
     print(f"Restart Kali runtime now? [y/N] waiting {timeout}s: ", end="", flush=True)
     readable, _, _ = select.select([sys.stdin], [], [], timeout)
@@ -177,7 +194,7 @@ def _resolve_optional_engagement(install_root: Path, options: UpOptions) -> Path
 def _runtime_image_inputs(install_root: Path) -> list[Path]:
     return [
         install_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
-        install_root / "docker" / "kali-mcp-runtime",
+        install_root / "agent" / "scripts" / "assess" / "lib" / "audit_enums.py",
         install_root / "docker" / "callback_listener.py",
         install_root / "docker" / "start-callback.sh",
     ]
