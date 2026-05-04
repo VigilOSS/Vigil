@@ -16,11 +16,12 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- ysoserial (Java gadget chains)
-- phpggc (PHP gadget chains)
-- Burp Suite (Java Deserialization Scanner extension)
-- ppickle exploit generator (Python)
-- Custom scripts for .NET formatters
+- `aith assess kali exec -- curl ...` (deliver serialized payloads to target endpoints — all target-facing requests must go through the kali exec wrapper; use `--technique RCE --probe-kind payload --phase consume-test --timeout 30` for gadget chain delivery, `--probe-kind exploit` once execution is confirmed)
+- ysoserial (Java gadget chains — run host-side to generate payloads: `java -jar ysoserial.jar ...`)
+- phpggc (PHP gadget chains — run host-side to generate payloads)
+- Burp Suite (Java Deserialization Scanner extension — use to identify candidate parameters, then deliver confirmed payloads via kali exec)
+- ppickle exploit generator (Python — host-side payload generation)
+- Custom scripts for .NET formatters (run via `aith assess kali exec --technique RCE ... -- python3 ...` if target-facing)
 
 ## Methodology
 
@@ -113,7 +114,7 @@ origin: AI Threat Hunting
 - Endpoint and parameter carrying serialized data
 - Serialization format and language
 - Gadget chain used (if RCE)
-- Proof of execution (command output or callback)
+- Proof of execution (command output or callback) — confirming the gadget chain payload was accepted is not enough; you must show the **attacker outcome** (e.g., the CommonsCollections1 payload executed `id` and the OOB DNS callback returned `uid=0(root).attacker.example`, the pickle payload read `/etc/passwd` and its contents were exfiltrated via HTTP callback, the tampered session role field of `admin` was accepted and granted access to the admin dashboard)
 - Libraries enabling the chain
 - Severity: Critical (RCE) or High (data tampering)
 - Remediation: avoid native deserialization, use allowlists, sign serialized data

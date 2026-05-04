@@ -119,8 +119,8 @@ sqlite3 "$DB" ".timeout 5000" "
 - Record findings in backend state immediately via `aith assess record-finding`
 - Re-ingest new endpoints through backend-first producers; let the work buffer mirror the resulting canonical ids
 - Use reset-stale at start of each iteration
-- **DO NOT STOP EARLY** — loop until pending=0 for all consumable types
-- On subagent error: mark work items `error`, log, CONTINUE (don't halt loop)
+- **Loop until pending=0 for all consumable types** — stopping early leaves tested surfaces unrecorded and forces a re-dispatch to pick up the tail
+- On subagent error: mark work items `error`, log, CONTINUE — halting the loop on a single error abandons the remaining batch
 - Stop on any of:
   - pending=0 everywhere (normal completion)
   - the upstream work-buffer producer (surface-collector, ingestion, nuclei sweep) is itself stuck or failing — looping against an empty or broken producer burns dispatch budget on no real work. Escalate the producer issue first, then resume.

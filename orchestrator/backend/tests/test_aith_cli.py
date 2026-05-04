@@ -2142,15 +2142,11 @@ def test_list_clusters_host_filter_supports_wildcard(
     assert "alpha" not in cluster_keys
 
 
-def test_supersede_intel_partial_payload_passes_client_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_supersede_intel_requires_natural_key_before_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """P2 #5: a partial payload (no natural-key fields) must clear the client-side validator.
-
-    We monkeypatch the HTTP client and config loader so the test never reaches
-    the network and just asserts the schema-validation gate accepted the
-    partial payload before dispatching the request.
-    """
+    """Supersede inserts a replacement row; metadata-only edits must fail
+    client-side and tell the operator to include the natural key."""
     supersede_module = _load_assess_module(
         "wave3_supersede_intel_module",
         "agent/scripts/assess/commands/supersede_intel.py",
@@ -2185,19 +2181,23 @@ def test_supersede_intel_partial_payload_passes_client_validation(
         ),
     )
 
-    supersede_module.run(
-        SimpleNamespace(
-            intel_type="cve",
-            intel_id=5,
-            payload=None,
-            inline_payload='{"validation_status":"exploited"}',
-            rationale="post-validation",
-            engagement_dir=str(tmp_path),
+    with pytest.raises(SystemExit) as exc:
+        supersede_module.run(
+            SimpleNamespace(
+                intel_type="cve",
+                intel_id=5,
+                payload=None,
+                inline_payload='{"validation_status":"exploited"}',
+                rationale="post-validation",
+                engagement_dir=str(tmp_path),
+            )
         )
-    )
 
-    assert captured["method"] == "POST"
-    assert "/intel/cves/5/supersede" in str(captured["path"])
+    assert exc.value.code == 1
+    assert captured == {}
+    err = capsys.readouterr().err
+    assert "missing required supersede natural-key field: cve_id" in err
+    assert "missing required supersede natural-key field: affected_component" in err
 
 
 def test_validate_dispatch_contract_accepts_minimal_payload(
@@ -3159,9 +3159,10 @@ def test_record_handoff_client_upsert_falls_back_to_patch_on_409() -> None:
 #
 # Resolution order (highest → lowest):
 #   1. ORCHESTRATOR_BASE_URL env var (explicit override)
-#   2. Per-engagement ``.orchestrator.env`` (and install-root variants)
+#   2. Per-engagement ``.orchestrator.env``
 #   3. ``aith config get orchestrator_base_url`` (persistent default)
-#   4. Hardcoded fallback ``http://127.0.0.1:18000``
+#   4. Install-root env files (legacy fallback)
+#   5. Hardcoded fallback ``http://127.0.0.1:18000``
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -3234,6 +3235,55 @@ def test_resolve_orchestrator_base_url_aith_config_falls_through(
     )
 
 
+def test_resolve_orchestrator_base_url_engagement_env_wins_over_install_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-install-env:18000\n", encoding="utf-8"
+    )
+    (engagement_dir / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-engagement-env:18000\n", encoding="utf-8"
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: "http://from-config:5678")
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == "http://from-engagement-env:18000"
+    )
+
+
+def test_resolve_orchestrator_base_url_aith_config_wins_over_install_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-install-env:18000\n", encoding="utf-8"
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: "http://from-config:5678/")
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == "http://from-config:5678"
+    )
+
+
 def test_resolve_orchestrator_base_url_falls_back_to_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3254,4 +3304,62 @@ def test_resolve_orchestrator_base_url_falls_back_to_default(
     assert (
         resolve_orchestrator_base_url(install_root, engagement_dir)
         == DEFAULT_ORCHESTRATOR_BASE_URL
+    )
+
+
+def test_assess_config_engagement_env_wins_over_install_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    module = importlib.import_module("assess.lib.config")
+    install_root = tmp_path / "install"
+    engagement_dir = install_root / "agent" / "engagements" / "eng-test"
+    engagement_dir.mkdir(parents=True)
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-install-env:18000\n", encoding="utf-8"
+    )
+    (engagement_dir / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-engagement-env:18000\n", encoding="utf-8"
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.delenv("AI_THREAT_HUNTING_CONFIG", raising=False)
+
+    assert (
+        module.resolve_base_url(str(engagement_dir), str(install_root / "agent"))
+        == "http://from-engagement-env:18000"
+    )
+
+
+def test_assess_config_aith_config_wins_over_install_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    module = importlib.import_module("assess.lib.config")
+    install_root = tmp_path / "install"
+    engagement_dir = install_root / "agent" / "engagements" / "eng-test"
+    engagement_dir.mkdir(parents=True)
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-install-env:18000\n", encoding="utf-8"
+    )
+    config_path = tmp_path / "aith-config.json"
+    config_path.write_text(
+        json.dumps({"orchestrator_base_url": "http://from-config:5678/"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setenv("AI_THREAT_HUNTING_CONFIG", str(config_path))
+
+    assert (
+        module.resolve_base_url(str(engagement_dir), str(install_root / "agent"))
+        == "http://from-config:5678"
     )

@@ -484,11 +484,12 @@ _CONTRACTS: dict[str, CommandContract] = {
             'aith assess supersede-intel <type> <id> --inline \'{...}\' --rationale "..."',
         ),
         author_supplied_fields=(
-            "type-specific required fields for the new record",
+            "type-specific natural-key fields for the new replacement record",
             "--rationale (free text)",
         ),
         notes=(
             "Use this when an intel row was wrong but the operator wants to retain the prior observation for audit.",
+            "Metadata-only edits belong to update-intel; supersede-intel requires the replacement row's natural key before making the backend request.",
             "Report-writer filters on superseded_by_id IS NULL so superseded rows do not appear in reports, but stay queryable for cascade-delete and audit.",
         ),
         common_mistakes=(
@@ -785,6 +786,7 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Host-side reconciler for `assessment_command_runs` rows stuck in status=running past --max-age-seconds. Run after a backend restart, host crash, or any window where finalize PATCHes may have failed.",
         "Liveness probe is `docker exec <container> kill -0 <pid>` against the wrapper-recorded pid file at /tmp/aith-pid-<run_uuid>.pid. The run_uuid comes from the row's run_uuid column, with stdout_path parsing kept only for older rows.",
         "Rows whose PID is alive are left alone (still-running). Rows whose PID is dead OR whose pid file is missing are finalized to status=lost via PATCH command-runs/{id}.",
+        "Rows are skipped when Docker probing itself fails, because the command cannot distinguish a live job from an unavailable liveness check.",
         "Use --dry-run first to inspect candidates without writing — a thorough sweep is cheap, an incorrect finalize is not.",
         "Unlike target-facing verbs, sweep-orphans does not take --technique/--intent/--probe-kind/--phase/--timeout — it is a maintenance command, not a probe.",
     ),

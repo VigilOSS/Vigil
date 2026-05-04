@@ -3324,6 +3324,64 @@ def test_sweep_orphans_handles_missing_pid_file_as_dead(monkeypatch, fake_engage
         assert payload["return_code"] is None
 
 
+def test_sweep_orphans_skips_when_pid_probe_fails(
+    monkeypatch, fake_engagement, capsys
+):
+    """Docker probe failures mean liveness is unknown; do not finalize the
+    command-run as lost based on an unavailable liveness check."""
+    rows = [_orphan_row(row_id=13, age_seconds=7200, run_uuid="dddd5555")]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[3] == "cat":
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    assert fake_client.patches == []
+    out = capsys.readouterr().out
+    assert "skipped id=13" in out
+    assert "pid-probe-failed" in out
+
+
+def test_sweep_orphans_skips_when_liveness_probe_fails(
+    monkeypatch, fake_engagement, capsys
+):
+    """A readable pid file is not enough to mark lost when kill -0 cannot
+    complete because Docker probing failed."""
+    rows = [_orphan_row(row_id=14, age_seconds=7200, run_uuid="eeee6666")]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[3] == "cat":
+            return SimpleNamespace(returncode=0, stdout="12345\n", stderr="")
+        if argv[3] == "kill":
+            raise FileNotFoundError("docker")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    assert fake_client.patches == []
+    out = capsys.readouterr().out
+    assert "skipped id=14" in out
+    assert "liveness-probe-failed" in out
+
+
 def test_sweep_orphans_uses_db_run_uuid_when_present(monkeypatch, fake_engagement):
     """P1 schema fix: ``run_uuid`` is the DB column on assessment_command_runs;
     sweep-orphans must prefer that column over parsing the stdout_path regex.
@@ -3346,7 +3404,7 @@ def test_sweep_orphans_uses_db_run_uuid_when_present(monkeypatch, fake_engagemen
         if argv[3] == "cat":
             cat_args.append(argv[-1])
             # Pid file missing — return non-zero to skip kill -0 and finalize as lost.
-            return SimpleNamespace(returncode=1, stdout="", stderr="")
+            return SimpleNamespace(returncode=1, stdout="", stderr="No such file")
         if argv[3] == "kill":
             return SimpleNamespace(returncode=1, stdout="", stderr="")
         raise AssertionError(f"unexpected subprocess call: {argv}")

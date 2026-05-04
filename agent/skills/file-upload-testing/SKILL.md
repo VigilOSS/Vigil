@@ -16,10 +16,10 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `curl` (multipart upload)
-- Burp Suite Repeater (modify upload requests)
-- ExifTool (embed payloads in metadata)
-- Custom polyglot file generators
+- `aith assess kali exec -- curl ...` (multipart upload — all target-facing curl must go through the kali exec wrapper; use `--technique RCE --probe-kind payload --phase consume-test --timeout 60 --destructive` for webshell upload attempts)
+- Burp Suite Repeater (modify upload requests — use to craft the payload, then replay via kali exec)
+- ExifTool (embed payloads in metadata — host-side payload preparation only)
+- Custom polyglot file generators (host-side preparation only)
 
 ## Methodology
 
@@ -93,7 +93,7 @@ origin: AI Threat Hunting
 
 - Upload endpoint and filename parameter
 - Bypass technique used (extension, content-type, magic bytes)
-- Uploaded file URL and whether it executes
+- Uploaded file URL and whether it executes — confirming the file was accepted and stored is not enough; you must show the **attacker outcome** (e.g., the uploaded `shell.php` executed via `GET /uploads/shell.php?c=id` and returned `uid=33(www-data)`, the SVG with XSS triggered JavaScript execution in the admin's browser when they viewed the file manager, the path traversal overwrote `/var/www/html/index.php` with a webshell confirming write access to the web root)
 - Webshell payload and confirmed RCE
 - Path traversal success and file overwritten
 - Severity: Critical (RCE via webshell) or High (XSS, file overwrite)

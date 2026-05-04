@@ -43,28 +43,56 @@ Extract: href/src/action values, hidden fields, data-url/data-api attributes,
 HTML comments, meta tags (canonical, CSRF, API base), inline config (`window.__CONFIG__`).
 
 ### 3. JavaScript Analysis
+
+Write the grep pattern to a temp file to avoid shell-quoting issues, then run via `aith assess kali exec`:
+
 ```bash
-curl -sL <js-url> | grep -oE '["'"'"'](/[a-zA-Z0-9_/\-\.]+)["'"'"']' | sort -u
+# Host-side: write the extraction script to a file inside the engagement dir
+cat > "$ENGAGEMENT_DIR/scans/js_grep.sh" << 'SCRIPT'
+#!/bin/sh
+curl -sL "$1" | grep -oE '["\x27](/[a-zA-Z0-9_/\-\.]+)["\x27]' | sort -u
+SCRIPT
+chmod +x "$ENGAGEMENT_DIR/scans/js_grep.sh"
+
+# Run via audit-wrapped exec
+aith assess kali exec --technique DISCOVERY \
+  --intent "manual JS endpoint grep for inline route strings" \
+  --probe-kind fingerprint --phase recon --timeout 60 -- bash -c \
+  '/engagements/$ENGAGEMENT_KEY/scans/js_grep.sh <js-url>'
 ```
 
 #### Automated JS Endpoint Extraction
 
 ```bash
 # LinkFinder — extract endpoints from JS (far more thorough than manual grep on minified code)
-python3 linkfinder.py -i https://TARGET/static/js/app.js -o cli
+aith assess kali exec --technique DISCOVERY \
+  --intent "LinkFinder endpoint extraction from app.js" \
+  --probe-kind fingerprint --phase recon --timeout 300 -- \
+  python3 linkfinder.py -i https://TARGET/static/js/app.js -o cli
 
 # Batch all JS files discovered in step 1
+aith assess kali exec --technique DISCOVERY \
+  --intent "LinkFinder batch endpoint extraction from all JS files" \
+  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
 for js_url in $(cat /engagements/$ENGAGEMENT_KEY/scans/js_files.txt); do
   python3 linkfinder.py -i "$js_url" -o cli
 done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_endpoints.txt
+'
 
 # SecretFinder — scan for API keys, tokens, credentials in JS
-python3 SecretFinder.py -i https://TARGET/static/js/app.js -o cli
+aith assess kali exec --technique INFO-DISCLOSURE \
+  --intent "SecretFinder secret scan on app.js" \
+  --probe-kind fingerprint --phase recon --timeout 300 -- \
+  python3 SecretFinder.py -i https://TARGET/static/js/app.js -o cli
 
 # Batch scan
+aith assess kali exec --technique INFO-DISCLOSURE \
+  --intent "SecretFinder batch secret scan across all JS files" \
+  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
 for js_url in $(cat /engagements/$ENGAGEMENT_KEY/scans/js_files.txt); do
   python3 SecretFinder.py -i "$js_url" -o cli
 done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_secrets.txt
+'
 ```
 
 Use LinkFinder and SecretFinder as the primary extraction pass. Fall back to manual grep
@@ -92,7 +120,11 @@ The local queue can still be populated as a transient batching aid, but the oper
 the backend ledger:
 
 ```bash
-curl -sL "https://TARGET/openapi.json" -o /engagements/$ENGAGEMENT_KEY/scans/openapi.json
+aith assess kali exec --technique DISCOVERY \
+  --intent "fetch OpenAPI spec for spec ingestion" \
+  --probe-kind fingerprint --phase recon --timeout 60 -- \
+  curl -sL "https://TARGET/openapi.json" -o /engagements/$ENGAGEMENT_KEY/scans/openapi.json
+# Host-side: ingest the downloaded spec into the backend work buffer
 aith assess ingest-spec "$ENGAGEMENT_DIR/cases.db" "$ENGAGEMENT_DIR/scans/openapi.json"
 aith assess dispatch "$ENGAGEMENT_DIR/cases.db" stats
 ```

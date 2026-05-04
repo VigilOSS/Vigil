@@ -16,11 +16,11 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- Burp Suite (WebSocket history + Repeater)
+- `aith assess kali exec -- websocat ...` (CLI WebSocket client — all target-facing WebSocket probing must go through the kali exec wrapper; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 60` for generic probing, switching to the specific vuln class for injection payloads)
+- Burp Suite (WebSocket history + Repeater — use to craft messages, then replay via kali exec for audit pipeline coverage)
 - Browser DevTools (Network → WS tab)
-- websocat (CLI WebSocket client)
 - OWASP ZAP (WebSocket support)
-- Custom scripts (Python websockets library)
+- Custom scripts (Python websockets library — run via `aith assess kali exec -- python3 ...`)
 
 ## Methodology
 
@@ -127,7 +127,7 @@ origin: AI Threat Hunting
 - WebSocket endpoint URL and protocol
 - Authentication mechanism (or lack thereof)
 - Vulnerability type and proof payload
-- Data exposed or action performed
+- Data exposed or action performed — confirming the WebSocket accepts an unauthorized message is not enough; you must show the **attacker outcome** (e.g., unauthenticated WebSocket connection returned real-time order data for all users, CSWSH PoC exfiltrated victim's session token and active trade positions to attacker server, SQLi payload in search message returned all usernames and email addresses from the database)
 - CSWSH PoC if Origin not validated
 - Severity: Critical (data theft, RCE) to Medium (DoS, info leak)
 

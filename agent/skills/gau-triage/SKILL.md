@@ -239,7 +239,7 @@ Return to the operator:
 - `trufflehog` is mandatory on every run; `jsleak` is optional and gated on runtime availability
 - `trufflehog` default is `--no-verification`; `--results=verified` (live verification) requires operator consent
 - Cap body storage at 1 MB per response via httpx `-response-size-to-save`
-- No speculative findings — reproduce the hit before recording
+- Reproduce each trufflehog/jsleak hit before recording it as a finding — speculative findings that cannot be reproduced pollute the backend and mislead Phase 3 specialists
 
 ## Per-host Budget Interaction
 

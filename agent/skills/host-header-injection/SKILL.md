@@ -17,9 +17,9 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `curl` (Host header manipulation, override header injection, response inspection)
+- `aith assess kali exec -- curl ...` (Host header manipulation, override header injection, response inspection — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools (verify reflected Host in rendered pages and network responses)
-- OOB callback server (confirm out-of-band Host-based callbacks for blind scenarios)
+- OOB callbacks: check readiness with `aith oob status --json`; start a named client with `aith oob client start <name> --engagement <key> --agent <agent>`; read correlated hits with `aith oob client logs <name> --lines 80`
 
 ## Methodology
 
@@ -117,7 +117,7 @@ printf "GET / HTTP/1.1\r\nHost: target.example\r\nConnection: keep-alive\r\n\r\n
 - Injection vector (Host header, X-Forwarded-Host, double Host, other override header)
 - Exact request that triggers the behavior (full curl command with headers)
 - Where the injected value appears (response body, Location header, email link, cached response)
-- Impact: password reset token theft, cache poisoning serving attacker resources, internal service access, admin panel bypass
+- Impact: password reset token theft, cache poisoning serving attacker resources, internal service access, admin panel bypass — confirming the Host value is reflected is not enough; you must show the **attacker outcome** (e.g., password reset link in victim's email points to attacker domain and token was captured, poisoned cache entry serves attacker script to victim browsers, internal admin panel is accessible without authentication)
 - Whether override headers bypass Host-locked protections
 - Full request/response pairs for reproducibility
 

@@ -269,6 +269,17 @@ Load these skills for authorized Android/iOS app, device-lab, and mobile fuzzing
 
 ---
 
+## Incident Response Skills
+
+Load these skills for blue-team IR engagements (BEC, account compromise, token theft, audit log review).
+See `agent/rules/ir-evidence.md` (always-active during IR work) for attribution and evidence discipline rules.
+
+- `agent/skills/google-workspaces/SKILL.md`
+  **Use when:** A Google Workspace tenant user is suspected compromised (BEC, AiTM, token theft, malicious OAuth grant, insider misuse); audit log pulls, Alert Center review, OAuth token investigation, session revocation, Gmail content search, or browser/endpoint forensics on Windows and macOS are needed.
+  **Paired references:** _(environment-specific; gcloud / GAM / raw REST — consult operator for scope grants)_
+
+---
+
 ## Code Analysis Skills
 
 Load these skills when performing white-box source code analysis (operator-core-code.md mode).

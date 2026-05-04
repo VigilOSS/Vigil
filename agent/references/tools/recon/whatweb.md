@@ -5,10 +5,14 @@ For live engagement targets, run WhatWeb via `aith assess kali whatweb` (typed v
 
 ## Basic Usage
 
-**Basic (passive):** `whatweb https://target`
-**Aggressive:** `whatweb -a 3 https://target`
-**Multiple targets:** `whatweb --input-file=/engagements/$ENGAGEMENT_KEY/scans/targets.txt`
-**Verbose:** `whatweb -v https://target`
+Run all target-facing whatweb probes via `aith assess kali whatweb` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. See `agent/skills/kali-exec/SKILL.md` "Examples per verb — kali whatweb" for a complete annotated invocation.
+
+Flag reference (used inside `aith assess kali whatweb`):
+
+**Basic (passive, aggression 1):** `aith assess kali whatweb https://target --technique DISCOVERY --intent "passive tech fingerprint" --probe-kind fingerprint --phase recon --timeout 300`
+**Aggressive (aggression 3):** pass `-a 3` via `--extra-args`
+**Multiple targets:** `--input-file /engagements/$ENGAGEMENT_KEY/scans/targets.txt` (via `--extra-args`)
+**Verbose:** `--extra-args "-v"`
 
 ## Aggression Levels
 
@@ -35,15 +39,18 @@ Use level 1 for initial fingerprinting, level 3 for deeper tech stack analysis.
 
 ## Output
 
-**JSON:** `whatweb --log-json=results.json https://target`
-**Brief (one-liner per target):** `whatweb --log-brief=results.txt https://target`
-**Verbose log:** `whatweb --log-verbose=results.txt https://target`
-**XML:** `whatweb --log-xml=results.xml https://target`
-**Quiet (no banner):** `whatweb --color=never --quiet https://target`
+Flag reference for output (pass via `--extra-args` or as direct flag to `aith assess kali whatweb`):
+
+**JSON:** `--log-json /engagements/$ENGAGEMENT_KEY/scans/whatweb_results.json`
+**Brief (one-liner per target):** `--log-brief /engagements/$ENGAGEMENT_KEY/scans/whatweb_brief.txt`
+**Verbose log:** `--log-verbose /engagements/$ENGAGEMENT_KEY/scans/whatweb_verbose.txt`
+**XML:** `--log-xml /engagements/$ENGAGEMENT_KEY/scans/whatweb_results.xml`
+
+Always write output to `/engagements/$ENGAGEMENT_KEY/scans/` — writing to `/tmp` loses artifacts on container recreate.
 
 ## Tuning
 
-**Wait between requests:** `whatweb --wait 0.5 https://target`
-**Max threads:** `whatweb --max-threads 10 https://target`
+**Wait between requests:** `--extra-args "--wait 0.5"`
+**Max threads:** `--extra-args "--max-threads 10"`
 
-**Pipeline usage:** Run whatweb after httpx confirms live hosts. Its plugin-based fingerprinting provides deeper tech detection than httpx's built-in `-tech-detect`, including specific version numbers and framework details.
+**Pipeline usage:** Run whatweb after `aith assess kali httpx` confirms live hosts. Its plugin-based fingerprinting provides deeper tech detection than httpx's built-in `-tech-detect`, including specific version numbers and framework details.

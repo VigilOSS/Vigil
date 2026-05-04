@@ -3,8 +3,9 @@
 When a `kali_exec` finalize PATCH fails (network blip, backend restart, host
 crash mid-run), the pre-exec audit row stays at ``status=running`` forever.
 This command sweeps rows older than ``--max-age-seconds`` and either leaves
-them alone (the in-container PID is still alive) or finalizes them to
-``status=lost`` (the PID is gone or the wrapper pid file is missing).
+them alone (the in-container PID is still alive), finalizes them to
+``status=lost`` (the PID is gone or the wrapper pid file is missing), or skips
+them when Docker probing itself fails and liveness is unknown.
 
 The wrapper shell in ``kali.py:_build_docker_exec`` writes the in-container
 PID to ``/tmp/aith-pid-<run_uuid>.pid``. The canonical source of ``run_uuid``
@@ -21,6 +22,7 @@ import json
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
@@ -42,6 +44,12 @@ _RUNNING_STATUSES = frozenset({"running", "queued"})
 # match — only the trailing ``scans/kali/<run_uuid>.out`` segment is load-
 # bearing for run_uuid extraction.
 _RUN_UUID_PATTERN = re.compile(r"scans/kali/(?P<run_uuid>[A-Za-z0-9_-]+)\.out$")
+
+
+@dataclass(frozen=True)
+class _PidReadResult:
+    pid: int | None
+    reason: str
 
 
 def register(subparsers) -> None:
@@ -157,7 +165,7 @@ def _container_pid_file(run_uuid: str) -> str:
     return f"/tmp/aith-pid-{run_uuid}.pid"
 
 
-def _read_container_pid(container_name: str, run_uuid: str) -> int | None:
+def _read_container_pid_result(container_name: str, run_uuid: str) -> _PidReadResult:
     pid_file = _container_pid_file(run_uuid)
     try:
         result = subprocess.run(
@@ -167,24 +175,30 @@ def _read_container_pid(container_name: str, run_uuid: str) -> int | None:
             text=True,
             timeout=5,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return _PidReadResult(None, f"pid-probe-failed:{exc.__class__.__name__}")
     if result.returncode != 0:
-        return None
+        stderr = (result.stderr or "").lower()
+        if "no such file" in stderr or "cannot open" in stderr:
+            return _PidReadResult(None, "pid-file-missing")
+        return _PidReadResult(None, "pid-probe-failed")
     raw = (result.stdout or "").strip().splitlines()
     if not raw:
-        return None
+        return _PidReadResult(None, "pid-file-empty")
     try:
-        return int(raw[0])
+        return _PidReadResult(int(raw[0]), "pid-read")
     except ValueError:
-        return None
+        return _PidReadResult(None, "pid-file-invalid")
 
 
-def _pid_alive_in_container(container_name: str, pid: int) -> bool:
+def _read_container_pid(container_name: str, run_uuid: str) -> int | None:
+    return _read_container_pid_result(container_name, run_uuid).pid
+
+
+def _pid_alive_in_container(container_name: str, pid: int) -> bool | None:
     """Probe the in-container PID with ``kill -0``. Returns True only when the
-    docker exec call succeeded with rc=0 — any failure mode (container gone,
-    docker not reachable, PID gone) is treated as "not alive" so a flaky probe
-    cannot keep an orphan row pinned at ``running`` forever."""
+    docker exec call succeeded with rc=0, False when the in-container kill
+    reports the PID is gone, and None when Docker probing itself failed."""
     try:
         result = subprocess.run(
             ["docker", "exec", container_name, "kill", "-0", str(pid)],
@@ -193,8 +207,12 @@ def _pid_alive_in_container(container_name: str, pid: int) -> bool:
             timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
         return False
-    return result.returncode == 0
+    return None
 
 
 def _list_running_rows(client: AssessmentClient) -> list[dict]:
@@ -272,11 +290,12 @@ def run(args) -> None:
                 continue
 
             run_uuid = _resolve_run_uuid(row)
-            container_pid: int | None = None
+            pid_read = _PidReadResult(None, "pid-file-unknown")
             if run_uuid:
-                container_pid = _read_container_pid(args.container_name, run_uuid)
+                pid_read = _read_container_pid_result(args.container_name, run_uuid)
+            container_pid = pid_read.pid
 
-            alive = False
+            alive: bool | None = False
             if container_pid is not None:
                 alive = _pid_alive_in_container(args.container_name, container_pid)
 
@@ -287,11 +306,19 @@ def run(args) -> None:
                     f"pid={container_pid} run_uuid={run_uuid}"
                 )
                 continue
+            if alive is None or pid_read.reason.startswith("pid-probe-failed"):
+                summary["skipped"] += 1
+                print(
+                    f"skipped id={row_id} age={int(age_seconds)} "
+                    f"reason={pid_read.reason if container_pid is None else 'liveness-probe-failed'} "
+                    f"run_uuid={run_uuid or 'unknown'}"
+                )
+                continue
 
             # PID file missing OR pid is gone — treat the row as lost.
             if args.dry_run:
                 summary["finalized"] += 1
-                reason = "pid-file-missing" if run_uuid is None or container_pid is None else "pid-dead"
+                reason = pid_read.reason if container_pid is None else "pid-dead"
                 print(
                     f"would-finalize id={row_id} age={int(age_seconds)} "
                     f"reason={reason} new_status=lost"

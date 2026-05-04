@@ -20,11 +20,11 @@ Info disclosure severity depends entirely on WHAT is disclosed. A stack trace wi
 
 ## Tools
 
-- `curl` (header inspection, endpoint probing, error triggering)
+- `aith assess kali exec -- curl ...` (header inspection, endpoint probing, error triggering — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique INFO-DISCLOSURE --probe-kind fingerprint --phase consume-test --timeout 30` for endpoint probing)
+- `aith assess kali ffuf ...` (file and directory brute-force — use `--technique INFO-DISCLOSURE --probe-kind fingerprint --phase consume-test --timeout 600`)
 - Burp Suite (passive scanning, response analysis across all traffic)
-- `ffuf` / `feroxbuster` (file and directory brute-force)
-- `git-dumper` (full `.git` repository reconstruction)
-- `trufflehog` / `gitleaks` (secret scanning in reconstructed repos or exposed source)
+- `git-dumper` (full `.git` repository reconstruction — run host-side after confirming exposure via kali exec)
+- `trufflehog` / `gitleaks` (secret scanning in reconstructed repos or exposed source — host-side tool, not target-facing)
 
 ---
 
@@ -93,7 +93,9 @@ Generic stack traces, verbose 404 pages, "null pointer at line 42" without file 
 
 ## Active Disclosure Techniques
 
-Do not passively wait for errors. Actively trigger them -- different error handlers expose different information.
+Do not passively wait for errors. Actively trigger them — different error handlers expose different information.
+
+All target-facing curl commands below must run via `aith assess kali exec --technique INFO-DISCLOSURE --intent "<purpose>" --probe-kind fingerprint --phase consume-test --timeout 30 -- curl ...`. The curl examples show the command body only; always prepend the full audit-flag set when running against a scoped target.
 
 ### Malformed Content-Type
 
@@ -184,8 +186,10 @@ The single most common high-value disclosure in Java applications. Spring Boot A
 
 ### Discovery
 
+Run discovery loops via `aith assess kali exec --technique INFO-DISCLOSURE --intent "actuator endpoint discovery" --probe-kind fingerprint --phase consume-test --timeout 120 -- sh -c '...'`:
+
 ```bash
-# Standard paths
+# Standard paths (run the sh -c block via aith assess kali exec)
 for path in actuator actuator/env actuator/heapdump actuator/mappings actuator/configprops actuator/beans actuator/trace actuator/httptrace actuator/loggers actuator/jolokia actuator/health; do
   code=$(curl -s -o /dev/null -w "%{http_code}" "https://target.example/$path")
   echo "$code $path"
@@ -223,6 +227,8 @@ strings heapdump.hprof | grep -iE "(password|secret|token|key|credential|jdbc|my
 Finding `/.git/HEAD` returning `ref: refs/heads/main` is not the end -- it is the beginning. Full repository reconstruction gives you the complete source code and, critically, the entire commit history where secrets are frequently committed and then "removed."
 
 ### Verification
+
+Use `aith assess kali exec --technique INFO-DISCLOSURE --intent ".git exposure check" --probe-kind fingerprint --phase consume-test --timeout 30 -- curl -s https://target.example/.git/HEAD` for all target-facing checks.
 
 ```bash
 # Quick check
@@ -312,7 +318,7 @@ For each disclosure finding:
 - **Exact location** — URL, header name, response body offset, or file path
 - **What was disclosed** — the specific data, not just "sensitive information"
 - **Value tier** — Critical/High/Medium/Low per the tiers above
-- **Validation** — for credentials, did you verify they work? For internal architecture, does it reveal something the attacker could not otherwise discover?
+- **Validation** — for credentials, did you verify they work? For internal architecture, does it reveal something the attacker could not otherwise discover? Confirming a file or endpoint is exposed is not enough — you must show the **attacker outcome** (e.g., the leaked database password authenticated against MySQL and returned all customer records, the exposed JWT signing secret was used to forge an admin token that accessed `/admin/users`, the actuator/heapdump contained cleartext AWS access keys that granted S3 read access on the production bucket)
 - **Chain potential** — which other test classes does this disclosure feed? (e.g., actuator/mappings reveals hidden admin API -> test for auth bypass; .git repo reveals JWT secret -> forge tokens)
 
 Severity mapping:

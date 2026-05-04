@@ -6,11 +6,15 @@ Run `aith assess kali nmap-scan --help` for the live flag set, or `aith assess c
 
 ## Discovery Scans
 
-**Quick (with host discovery skip):** `nmap -sV -sC -Pn -T4 target`
-**Full port scan:** `nmap -sV -sC -Pn -T4 -p- target`
-**Top 1000 ports (default):** `nmap -sV -sC -Pn target`
-**Specific ports:** `nmap -sV -sC -Pn -p 80,443,8080,8443 target`
-**UDP top ports:** `nmap -sU --top-ports 50 -Pn target`
+Run all discovery scans via `aith assess kali nmap-scan` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. See `agent/skills/kali-exec/SKILL.md` "Examples per verb" for complete invocation profiles.
+
+Flag reference (used inside the wrapper):
+
+**Quick (with host discovery skip):** `--flags "-sV -sC -Pn -T4"`
+**Full port scan:** `--flags "-sV -sC -Pn -T4 -p-"`
+**Top 1000 ports (default):** `--flags "-sV -sC -Pn"`
+**Specific ports:** `--ports 80,443,8080,8443` (typed flag) or `--flags "-p 80,443,8080,8443"`
+**UDP top ports:** `--flags "-sU --top-ports 50 -Pn"`
 
 `-Pn` is required when ICMP is blocked by firewall (common in lab/engagement environments).
 
@@ -87,9 +91,17 @@ edge often produce false positives.
 
 ## Multi-host batch (`-iL`)
 
+Run via `aith assess kali nmap-scan` with `-iL` passed through `--extra-args` or the typed `--input-file` flag so the audit row records the batch and the scan stays inside the runtime:
+
 ```bash
-nmap -iL hosts.txt -Pn -T3 --max-rate 200 --max-retries 2 --host-timeout 300s \
-  -oA scans/nmap_batch
+aith assess kali nmap-scan \
+  --target placeholder \
+  -iL /engagements/$ENGAGEMENT_KEY/scans/hosts.txt \
+  --ports top-1000 --service-detection \
+  --max-rate 200 --max-retries 2 \
+  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_batch \
+  --technique RECON --intent "cautious-tier multi-host batch" \
+  --probe-kind fingerprint --phase recon --timeout 1800
 ```
 
 Always pair `-iL` with the per-host port-data presence assertion — a single batch can
@@ -138,6 +150,8 @@ The full mandatory assertion + intel-note recipe lives in
 `agent/skills/port-scanning/SKILL.md` "Per-host port-data presence assertion".
 
 ## Scan Types
+
+Pass scan-type flags through `--extra-args` on the `aith assess kali nmap-scan` typed verb, or use `aith assess kali exec -- nmap ...` when building a complex pipeline not covered by the typed verb. Audit flags are required on both paths.
 
 **SYN scan (default, needs root):** `-sS` (stealthy, half-open)
 **TCP connect (no root):** `-sT` (full handshake, logged)
