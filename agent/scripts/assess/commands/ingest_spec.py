@@ -27,7 +27,7 @@ def run(args) -> None:
 
     if spec_file.startswith("http"):
         print("ERROR: ingest-spec no longer fetches target URLs directly.", file=sys.stderr)
-        print("Fetch the spec through the Kali MCP command-execution tool first, save it locally, then rerun.", file=sys.stderr)
+        print("Fetch the spec through `aith assess kali exec curl ...` first, save it locally, then rerun.", file=sys.stderr)
         sys.exit(1)
 
     if not Path(db_path).is_file():

@@ -15,9 +15,13 @@ Read `agent/shared-constraints.md` first, then select from this index.
 
 ## Core Workflow Skills
 
+- `agent/skills/kali-exec/SKILL.md`
+  **Use when:** Always — every target-facing call uses `aith assess kali ...`. Foundational, paired with `shared-constraints.md`.
+  **Paired references:** `references/runtime-guides/kali-cli.md`, plus per-verb references listed inside the skill.
+
 - `agent/skills/web-recon/SKILL.md`
   **Use when:** Starting Phase 1; fingerprinting hosts, ports, tech stacks, headers, web services.
-  **Paired references:** `references/tools/recon/nmap.md`, `references/tools/recon/whatweb.md`, `references/tools/recon/httpx.md`, `references/tools/recon/wafw00f.md`
+  **Paired references:** `references/tools/recon/nmap.md`, `references/tools/recon/whatweb.md`, `references/tools/recon/httpx.md`, `references/tools/recon/wafw00f.md`, `references/tools/recon/nikto.md`, `references/tools/fuzzing/ffuf.md`
 
 - `agent/skills/source-analysis/SKILL.md`
   **Use when:** Analyzing HTML/JS/CSS for routes, secrets, API bases, SPA bundles, source maps.
@@ -42,6 +46,18 @@ Read `agent/shared-constraints.md` first, then select from this index.
 - `agent/skills/osint-recon/SKILL.md`
   **Use when:** Gathering CVEs, public disclosures, DNS exposure, org intel, or historical breach data.
   **Paired references:** _(web-sourced; no local payload files)_
+
+- `agent/skills/vendor-platform-enum/SKILL.md`
+  **Use when:** A single vendor-platform read primitive surfaces (Salesforce SObject, ServiceNow GlideRecord row, Drupal JSON:API entity, Pexip admin-API namespace) — the same dispatch must run the matching deep-enum playbook before returning, because stopping at the first leak misses the full anonymous-readable namespace.
+  **Paired references:** `references/payloads/salesforce-aura-payloads.md`, `references/payloads/servicenow-glide-payloads.md`, `references/payloads/drupal-jsonapi-payloads.md`, `references/payloads/pexip-admin-api-payloads.md`
+
+- `agent/skills/tls-vhost-correlation/SKILL.md`
+  **Use when:** Recon-pass output flagged a CDN-fronted, multi-tenant, or load-balanced shape; running the cross-host SAN collision counter, the multi-time DNS split-VIP loop, and the vhost-cert mismatch check to surface shared multi-tenant certs, load-balanced cluster cert variation, and adjacent tenant attack surface. Owned by recon-specialist as a sub-procedure of Phase 1 web-recon.
+  **Paired references:** `references/tools/recon/openssl-sans.md`
+
+- `agent/skills/exploit-playbook-authoring/SKILL.md`
+  **Use when:** Exploit-developer (or any specialist) has confirmed an exploit and is about to write the replayable script under `tools/exploit-state/playbook-<slug>.sh` — owns bash structure (`set -euo pipefail`), `# MANUAL:` annotation rule, file-path expectations, reproduction requirements, and a worked example.
+  **Paired references:** `references/offensive-tactics/shell-handling.md`, `references/offensive-tactics/frp-tunneling.md`
 
 - `agent/skills/athena-log-investigation/SKILL.md`
   **Use when:** Logs are available after exploit work and you need to check for prior exploitation evidence.
@@ -250,6 +266,17 @@ Load these skills for authorized Android/iOS app, device-lab, and mobile fuzzing
 - `agent/skills/sdk-supply-chain-security/SKILL.md`
   **Use when:** Assessing third-party SDK supply chain risk: building SDK BOM, checking bundled SDK versions against CVEs, detecting known malicious SDKs (SpinOK/Goldoson), auditing SDK data exfiltration, or analyzing SDK permission scope versus app needs.
   **Paired references:** `references/mobile/sdk-supply-chain-security.md`, `references/mobile/android-app-security.md`, `references/mobile/ios-app-security.md`, `references/mobile/masvs-privacy-testing.md`
+
+---
+
+## Incident Response Skills
+
+Load these skills for blue-team IR engagements (BEC, account compromise, token theft, audit log review).
+See `agent/rules/ir-evidence.md` (always-active during IR work) for attribution and evidence discipline rules.
+
+- `agent/skills/google-workspaces/SKILL.md`
+  **Use when:** A Google Workspace tenant user is suspected compromised (BEC, AiTM, token theft, malicious OAuth grant, insider misuse); audit log pulls, Alert Center review, OAuth token investigation, session revocation, Gmail content search, or browser/endpoint forensics on Windows and macOS are needed.
+  **Paired references:** _(environment-specific; gcloud / GAM / raw REST — consult operator for scope grants)_
 
 ---
 

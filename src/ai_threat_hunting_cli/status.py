@@ -13,10 +13,10 @@ from . import docker
 from .backup import latest_backup
 from .config import get_config_value
 from .engagements import list_engagements
-from .oob import oob_status
+from .oob import DEFAULT_OOB_DOMAIN, oob_status
 from .orchestrator import orchestrator_status
-from .paths import resolve_orchestrator_base_url
-from .runtime import runtime_mounts_ok, runtime_status
+from .paths import engagements_root, resolve_orchestrator_base_url
+from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +33,11 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
     mitm_running = docker.container_running("security-research-proxy", runner=runner)
     backup = latest_backup(install_root)
     oob_token_configured = bool(os.environ.get("AI_THREAT_HUNTING_FRP_TOKEN") or get_config_value("oob.frp_token"))
+    oob_domain = (
+        os.environ.get("AI_THREAT_HUNTING_OOB_DOMAIN")
+        or get_config_value("oob.domain", DEFAULT_OOB_DOMAIN)
+        or DEFAULT_OOB_DOMAIN
+    )
     return {
         "install_root": str(install_root),
         "install_exists": install_root.exists(),
@@ -46,14 +51,14 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
             "state": runtime_state,
             "image_exists": docker.image_exists("security-research:latest", runner=runner),
             "mounts_ok": runtime_mounts_ok(install_root, runner=runner) if runtime_state == "running" else None,
+            "resources": runtime_resource_state(runner=runner),
         },
         "mitmproxy": {
             "state": "running" if mitm_running else "stopped",
             "image_exists": docker.image_exists("security-research-proxy:latest", runner=runner),
             "ca_volume": docker.volume_exists("mitmproxy-ca", runner=runner),
         },
-        "oob": oob_status(runner=runner) | {"frp_token_configured": oob_token_configured},
-        "mcp": collect_mcp_status(),
+        "oob": oob_status(oob_domain=oob_domain, runner=runner) | {"frp_token_configured": oob_token_configured},
         "backup": {
             "latest": str(backup.path) if backup else None,
             "modified_at": backup.modified_at if backup else None,
@@ -73,8 +78,23 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     backup = status["backup"]  # type: ignore[index]
     print(f"orchestrator\t{orchestrator['state']}\thealthy={orchestrator['healthy']}")  # type: ignore[index]
     print(f"runtime\t{runtime['state']}\tmounts_ok={runtime['mounts_ok']}")  # type: ignore[index]
+    resources = runtime.get("resources") if isinstance(runtime, dict) else None  # type: ignore[union-attr]
+    if isinstance(resources, dict):
+        configured = resources.get("configured") or {}
+        live = resources.get("live") or {}
+        configured_str = (
+            f"memory={configured.get('memory_gb', '?')}g cpus={configured.get('cpus', '?')} "
+            f"pids={configured.get('pids_limit', '?')} shm={configured.get('shm_size', '?')}"
+        )
+        live_str = ""
+        if isinstance(live, dict) and live:
+            live_str = (
+                f"\tlive=memory.max={live.get('memory_max', '?')} "
+                f"cpu.max={live.get('cpu_max', '?')} pids.max={live.get('pids_max', '?')}"
+            )
+        print(f"runtime-tier\t{configured_str}{live_str}")
     print(f"mitmproxy\t{mitmproxy['state']}\tca_volume={mitmproxy['ca_volume']}")  # type: ignore[index]
-    print(f"oob\t{oob['state']}\tclients={len(oob['clients'])}")  # type: ignore[index]
+    print(f"oob\t{oob['state']}\tclients={len(oob['clients'])}\tdomain={oob.get('domain') or '-'}")  # type: ignore[index]
     print(f"backup\t{backup['latest'] or '-'}")  # type: ignore[index]
 
 
@@ -97,7 +117,7 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
         checks.append(Check("mitmproxy-image", "OK" if docker.image_exists("security-research-proxy:latest", runner=runner) else "MISSING"))
         if runtime_status(runner=runner) == "running":
             checks.append(Check("runtime-mounts", "OK" if runtime_mounts_ok(install_root, runner=runner) else "FAIL"))
-            for tool in ("tmux", "frpc", "interactsh-server", "interactsh-client"):
+            for tool in ("dtach", "tmux", "frpc", "interactsh-server", "interactsh-client"):
                 result = runner(["docker", "exec", "security-research", "sh", "-lc", f"command -v {tool} >/dev/null"])
                 checks.append(Check(f"runtime-tool:{tool}", "OK" if result.returncode == 0 else "MISSING"))
     else:
@@ -109,10 +129,8 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
         checks.append(Check("orchestrator-health", "OK" if _orchestrator_healthy(install_root) else "FAIL"))
     backup = latest_backup(install_root)
     checks.append(Check("backup-latest", "OK" if backup else "MISSING", str(backup.path) if backup else ""))
+    checks.append(_failed_audit_marker_check(install_root))
     checks.append(Check("oob.frp_token", "OK" if os.environ.get("AI_THREAT_HUNTING_FRP_TOKEN") or get_config_value("oob.frp_token") else "MISSING"))
-    mcp = collect_mcp_status()
-    for client in ("codex", "claude"):
-        checks.append(Check(f"mcp:{client}", "OK" if mcp[client]["configured"] else "MISSING", mcp[client]["detail"]))
     return checks
 
 
@@ -120,36 +138,6 @@ def print_doctor(checks: list[Check]) -> None:
     for check in checks:
         suffix = f"\t{check.detail}" if check.detail else ""
         print(f"{check.status}\t{check.name}{suffix}")
-
-
-def collect_mcp_status() -> dict[str, dict[str, object]]:
-    return {
-        "codex": _mcp_client_status("codex", ["codex", "mcp", "list"]),
-        "claude": _mcp_client_status("claude", ["claude", "mcp", "list"]),
-    }
-
-
-def _mcp_client_status(client: str, argv: list[str]) -> dict[str, object]:
-    if shutil.which(argv[0]) is None:
-        return {"configured": False, "detail": f"{client} CLI not found"}
-    try:
-        result = subprocess.run(argv, text=True, capture_output=True, check=False)
-    except FileNotFoundError:
-        return {"configured": False, "detail": f"{client} CLI not found"}
-    text = f"{result.stdout}\n{result.stderr}"
-    configured = _mcp_registration_present(text)
-    return {"configured": configured, "detail": "configured" if configured else "kali server not registered"}
-
-
-def _mcp_registration_present(text: str) -> bool:
-    normalized = " ".join(text.lower().split())
-    if "kali" not in normalized or "mcp-server" not in normalized:
-        return False
-    return (
-        "aith runtime mcp-server" in normalized
-        or "docker exec -i security-research mcp-server" in normalized
-        or "docker exec security-research mcp-server" in normalized
-    )
 
 
 def _binary_check(command: str) -> Check:
@@ -180,3 +168,57 @@ def _orchestrator_healthy(install_root: Path) -> bool:
             return response.status == 200
     except OSError:
         return False
+
+
+def list_failed_audit_markers(engagement_dir: Path) -> list[Path]:
+    """Return ``<run_uuid>.failed-audit`` markers under ``scans/kali/`` for one engagement.
+
+    Each marker is written by ``agent/scripts/assess/lib/kali.py`` when the
+    pre-exec audit POST to the orchestrator backend fails — the assess CLI
+    keeps running the subprocess so the operator sees results, but the audit
+    row never lands. A pile of these on a long engagement signals silent
+    coverage drift, so any surface that wants to nag the operator (doctor,
+    a future cleanup verb) can call this helper.
+
+    Returns the markers sorted newest-first by mtime so callers can show the
+    most recent ones without re-sorting. Missing directories return ``[]``.
+    """
+    marker_dir = engagement_dir / "scans" / "kali"
+    if not marker_dir.is_dir():
+        return []
+    markers = [path for path in marker_dir.glob("*.failed-audit") if path.is_file()]
+    markers.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return markers
+
+
+def _failed_audit_marker_check(install_root: Path) -> Check:
+    """Surface orphaned ``<run_uuid>.failed-audit`` markers across engagements.
+
+    The marker is the only on-disk signal that an ``aith assess kali`` run
+    proceeded without a backend audit row. Nothing else inspects them —
+    ``sweep-orphans`` ignores them, the runtime never re-tries the POST —
+    so they accumulate silently. Surface a WARN with per-engagement counts
+    plus the most recent marker paths (capped at 5 per engagement) so the
+    operator can decide whether to investigate or sweep.
+    """
+    root = engagements_root(install_root)
+    if not root.is_dir():
+        return Check("failed-audit-markers", "OK", "no engagements directory")
+    per_engagement: list[tuple[Path, list[Path]]] = []
+    total = 0
+    for eng_dir in sorted(root.glob("*")):
+        if not eng_dir.is_dir() or not (eng_dir / "scope.json").is_file():
+            continue
+        markers = list_failed_audit_markers(eng_dir)
+        if markers:
+            per_engagement.append((eng_dir, markers))
+            total += len(markers)
+    if total == 0:
+        return Check("failed-audit-markers", "OK", "no orphaned markers")
+    parts: list[str] = [f"{total} orphaned marker(s) across {len(per_engagement)} engagement(s)"]
+    for eng_dir, markers in per_engagement:
+        recent = markers[:5]
+        recent_paths = ", ".join(str(path) for path in recent)
+        suffix = f" (+{len(markers) - len(recent)} more)" if len(markers) > len(recent) else ""
+        parts.append(f"{eng_dir.name}: {len(markers)} — {recent_paths}{suffix}")
+    return Check("failed-audit-markers", "WARN", "; ".join(parts))

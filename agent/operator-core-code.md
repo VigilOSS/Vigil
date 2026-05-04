@@ -23,9 +23,10 @@ Primary methodology reference:
 Always-active rules:
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
+- `agent/rules/adversarial-mindset.md`
 
 Path convention:
-- When a shared prompt references `./scripts/...`, resolve it from the agent workspace root after `cd agent`
+- All assessment operations use `aith assess <subcommand>` from any directory.
 
 ## Core Loop -- Code Analysis Mode
 
@@ -42,7 +43,7 @@ analyzed or user signals stop:
    - **Phase 2 (Hunt):** `code-vuln-hunter` -> `agent/skills/code-vulnerability-analysis/SKILL.md` + CWE-specific refs
    - **Phase 3 (Verify + Variant):** `code-vuln-verifier` -> `agent/skills/code-finding-verification/SKILL.md` AND `code-variant-hunter` -> `agent/skills/code-variant-analysis/SKILL.md` (parallel)
    - **Phase 4 (Fuzz):** `code-fuzz-engineer` -> `agent/skills/code-fuzz-campaign/SKILL.md` + memory-safety CWE refs (conditional, C/C++ only)
-6. **HOST BASH FOR SOURCE READING** -- Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work -- Kali MCP is not needed for reading source files. When code analysis does reach for Kali MCP (for example, a fuzz campaign or binary-triage pass that runs a tool through the runtime), the same audit-and-reuse rules from `operator-core.md` apply: calls carry `engagement_key`/`agent_name`/`phase` and runs land in `assessment_command_runs`. Default to an unscoped search — `aith assess list-command-runs --q <keyword>` — so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, fetch its preview with `aith assess get-command-run <id>` — `success=true` only means `return_code=0`, so open the preview to confirm the stored evidence actually answers the current question. See `agent/references/runtime-guides/command-history-auditing.md`. Kali MCP calls made from code-analysis workflows (fuzz campaigns, binary triage) should also set the four optional audit-metadata headers — `X-Technique`, `X-Intent`, `X-Probe-Kind`, `X-Destructive` — so the command row is filterable alongside web engagement calls; see the `Command Metadata` sub-section in `agent/shared-constraints.md` for the value tables and the companion ban on echo-as-commentary breadcrumbs.
+6. **HOST BASH FOR SOURCE READING** -- Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work -- `aith assess kali` is not needed for reading source files. When code analysis does reach for `aith assess kali ...` (for example, a fuzz campaign or binary-triage pass that runs a tool through the runtime), the same audit-and-reuse rules from `operator-core.md` apply: calls carry `engagement_key`/`agent_name`/`phase` and runs land in `assessment_command_runs`. Default to an unscoped search — `aith assess list-command-runs --q <keyword>` — so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, fetch its preview with `aith assess get-command-run <id>` — `success=true` only means `return_code=0`, so open the preview to confirm the stored evidence actually answers the current question. See `agent/references/runtime-guides/command-history-auditing.md`. `aith assess kali` calls made from code-analysis workflows (fuzz campaigns, binary triage) must also set the audit-metadata flags — `--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`, plus `--destructive` when applicable — so the command row is filterable alongside web engagement calls; see the `Command Metadata` sub-section in `agent/shared-constraints.md` for the value tables, the half-phase tag rationale, and the companion ban on echo-as-commentary breadcrumbs.
 7. **DISPATCH** -- Dispatch to the appropriate subagent for all analysis work. The operator's job is orchestration: fetching metadata, providing paths, recording outputs, gating quality, and managing the analysis queue. Subagents read source files directly and produce structured outputs. Source reading, file-level analysis, and vulnerability judgment belong to subagents -- the operator provides paths, structural index, and metadata, not content.
 8. **PATH-FIRST HANDOFFS** -- Pass repo-relative file paths and artifact paths instead of pasting large JSON blobs or long source excerpts, because specialist agents can read the artifacts directly and operator tokens are better spent on scope control and quality gates.
 9. **RECORD FINDINGS IMMEDIATELY** -- Code findings use the same `aith assess record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
@@ -101,7 +102,7 @@ The `code-index` command:
 Output: `tools/analysis-state/structural-index/` directory with per-file JSON + manifest.
 
 ```bash
-jq '.current_phase = "classify-map"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+aith assess transition-phase classify-map
 ```
 
 Exit: All files inventoried. ctags symbol index generated if ctags is available. Structural index generated. Transition to Phase 1.
@@ -188,7 +189,7 @@ in the call graph become blind spots for every downstream phase. Missing files i
 become permanently invisible to the analysis pipeline.
 
 ```bash
-jq '.current_phase = "hunt"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+aith assess transition-phase hunt
 ```
 
 Exit: Every file classified. Threat model recorded. Call graph recorded with entry-point chains.
@@ -261,10 +262,10 @@ using the available subagent budget.
 - **Batch theme** -- the logical module grouping from the file analysis queue. Files in the same
   batch share a module context, enabling cross-file reasoning within the batch.
 - **Slot types** -- the slot type annotations for each file from Phase 1 classification.
-- **Applicable vulnerability classes** -- copy `applicable_vuln_classes` from the backend queue
-  fetch payload when it is present. The backend computes this canonically from slot types, role,
-  and language. The hunter must evaluate every applicable class, not just the ones named in
-  hypotheses. Only if the backend field is missing, fall back to the mapping below:
+- **Applicable vulnerability classes** -- use the `applicable_vuln_classes` list from the backend
+  queue fetch payload. The backend computes this canonically from slot types, role, and language.
+  The hunter must evaluate every applicable class, not just the ones named in hypotheses.
+  Reference mapping:
 
   | Slot Type | Native (C/C++) | Managed (Python/JS/Java/Go) |
   |---|---|---|
@@ -356,14 +357,22 @@ aith assess code-record-analysis <analysis-json>
 # Preview the exact completion payload before committing queue history when unsure
 aith assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
 
+# cwe-coverage-json must be a file path, not inline JSON. Create it before the done call:
+cat > /tmp/cwe_<item-id>.json <<'JSON'
+[{"cwe": "CWE-122", "chains_traced": 3, "chains_total": 3, "verdict": "clean"}]
+JSON
+
 # Mark one file done with structured cwe_coverage after the payload is correct
-aith assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"]
+aith assess code-dispatch done <item-id> <clean|finding|suspicious> /tmp/cwe_<item-id>.json ["notes"]
 
 # Record any findings
 aith assess record-finding code-vuln-hunter <finding-json>
 
 # Process cross-file triggers (if analysis returned any)
 aith assess code-dispatch requeue-triggers <triggers-json>
+
+# Before fetching the next batch, reset items stuck in-progress:
+aith assess code-dispatch reset-stale 10
 ```
 
 Use `code-dispatch done` with one of `clean`, `finding`, or `suspicious`, because the queue
@@ -503,7 +512,7 @@ confirmed findings, not investigation of incomplete ones.
 **Phase 2 exit:** both 2A and 2B gates pass, AND no unresolved suspicious findings remain.
 
 ```bash
-jq '.current_phase = "verify-variant"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+aith assess transition-phase verify-variant
 ```
 
 Exit: All critical/high files analyzed with effort thresholds met. CWE coverage gaps closed
@@ -639,7 +648,7 @@ aith assess merge-finding <source-slug> <target-slug> "<reason>"
 
 **Phase 3 exit:**
 ```bash
-jq '.current_phase = "fuzz"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+aith assess transition-phase fuzz
 ```
 
 Exit: All findings verified. Variant scan complete. Transition to Phase 4 (Fuzz) if the
@@ -789,7 +798,7 @@ ls tools/fuzz-state/reports/*-triage.json
 - [ ] Campaign summary written to `tools/fuzz-state/reports/campaign-summary.json`
 
 ```bash
-jq '.current_phase = "complete"' "$DIR/scope.json" > "$DIR/scope_tmp.json" && mv "$DIR/scope_tmp.json" "$DIR/scope.json"
+aith assess transition-phase complete
 ```
 
 **Report dispatch:**
@@ -848,6 +857,23 @@ Every code analysis dispatch must include:
   manifest, threat model, call graph — fuzz engineer reads these directly), source repo root,
   build system type, compiler availability, existing fuzzer inventory paths, CWE pattern refs
   (buffer-overflow, integer-overflow, use-after-free, uninitialized-memory, fuzz-harness-patterns)
+
+### Runtime Identity Block
+
+Every code-analysis dispatch prompt must include a Runtime Identity block so the specialist can use the exact values in its closing sequence:
+
+```
+## Runtime Identity
+agent_id: <actual-id-from-register-or-spawn>
+agent_role: <role>
+authorized_phase: <phase>
+```
+
+The operator obtains `agent_id` by:
+- **Claude Code**: use the id passed to `dispatch register --agent-id <id>` — choose a unique string per dispatch (e.g. `hunt-b7c2`).
+- **Codex**: use the id returned by `spawn_agent`.
+
+Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting.
 
 ### Pre-Dispatch Checklist
 

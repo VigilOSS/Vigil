@@ -23,6 +23,9 @@ Test only authorized app builds on owned devices. SDK traffic analysis requires 
 
 ### 1. SDK Bill of Materials
 
+Preflight Android tooling through the generic audited route before APK work:
+`aith assess kali exec --technique HEALTH --intent "Android SDK inventory tooling preflight" --probe-kind fingerprint --phase code-ingest --timeout 60 -- which apktool jadx apkid`. Use `HEALTH` for tool inventory — unknown technique tags are rejected before an audit row is written, so coverage filters and command-history queries stay clean.
+
 **Android:** Decode the APK with `apktool`. Identify SDKs through four methods: (1) enumerate package namespaces in smali/dex directories, filtering out Android/AndroidX/Material; (2) identify native libraries (`.so` files) by known naming patterns; (3) check assets for SDK configuration files (`google-services.json`, AppsFlyer/Branch/Adjust configs); (4) decompile with `jadx` and search for `BuildConfig.VERSION_NAME` and `SDK_VERSION` strings. If source is available, parse Gradle dependencies for exact versions.
 
 **iOS:** Unpack the IPA. Identify SDKs through: (1) list embedded frameworks; (2) check `otool -L` for non-system dynamic libraries; (3) search symbols with `nm` for common SDK class prefixes (FB, GA, FIR, AF, ADJ, BRN, SEN, AMP, MP); (4) search binary strings for SDK version identifiers; (5) check framework `Info.plist` files for bundle identifiers and versions. If source is available, parse Podfile.lock, Package.resolved, or Cartfile.resolved.

@@ -5,7 +5,9 @@
   "title": "Intel Email Record",
   "type": "object",
   "additionalProperties": false,
-  "required": ["address"],
+  "required": [
+    "address"
+  ],
   "properties": {
     "address": {
       "type": "string",
@@ -20,7 +22,10 @@
       "description": "Observed role, e.g. 'admin', 'support', 'ops'."
     },
     "linked_person_id": {
-      "type": ["integer", "null"],
+      "type": [
+        "integer",
+        "null"
+      ],
       "default": null,
       "minimum": 1,
       "description": "intel_people.id if the email has been attributed to a known person."
@@ -40,11 +45,28 @@
       "additionalProperties": false,
       "default": {},
       "properties": {
-        "agent_name": { "type": "string" },
-        "artifact_ref": { "type": "string" },
-        "captured_at": { "type": "string" },
-        "evidence_quote": { "type": "string" }
+        "agent_name": {
+          "type": "string"
+        },
+        "artifact_ref": {
+          "type": "string"
+        },
+        "captured_at": {
+          "type": "string"
+        },
+        "evidence_quote": {
+          "type": "string"
+        }
       }
+    },
+    "superseded_by_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "default": null,
+      "description": "Backend id of the intel row that superseded this one. Set automatically by `aith assess supersede-intel`; report-writer filters on this so stale rows do not appear in reports."
     }
   }
 }

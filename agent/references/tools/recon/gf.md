@@ -3,7 +3,7 @@
 **Purpose:** Classify URLs by vulnerability-parameter patterns using pre-baked JSON pattern
 files. Bug-bounty staple for triaging large historical URL corpora (gau, waybackurls, katana).
 
-**In this repo**: primary classifier in gau-triage Step 3. Invoke via Kali MCP.
+**In this repo**: primary classifier in gau-triage Step 3. Invoke via `aith assess kali exec --technique RECON --intent "<why>" --probe-kind fingerprint --phase recon --timeout <seconds> -- gf ...` with the standard audit-flag set.
 
 ## Install layout
 
@@ -73,15 +73,32 @@ occasionally adds patterns.
 
 ## Pipeline patterns
 
-```bash
-# Feed to a scanner
-cat urls.txt | gf ssrf | httpx -silent -mc 200 > ssrf_live.txt
-cat urls.txt | gf sqli | sqlmap --batch -m -
+`gf` is a host-side URL classifier — it reads a corpus file and writes matched URLs to stdout. Run it on the host without `aith assess kali`; feed its output into a file, then pass the file to `aith assess kali` verbs for the target-facing steps.
 
-# Combine multiple patterns into one priority set
-cat urls.txt | gf ssrf redirect idor sqli lfi 2>/dev/null | sort -u > priority.txt
-# Note: gf itself only takes one pattern per invocation — loop externally:
-for p in ssrf redirect idor sqli lfi; do gf "$p" < urls.txt; done | sort -u
+```bash
+# Classify the corpus into per-bucket files (host-side, no target traffic)
+for p in ssrf redirect idor sqli lfi; do
+  gf "$p" < /engagements/$ENGAGEMENT_KEY/scans/gau_example.txt \
+    > /engagements/$ENGAGEMENT_KEY/scans/gf_${p}.txt
+done
+
+# Feed classified URLs into target-facing tools via aith assess kali
+aith assess kali httpx \
+  -l /engagements/$ENGAGEMENT_KEY/scans/gf_ssrf.txt \
+  -silent -mc 200 \
+  -o /engagements/$ENGAGEMENT_KEY/scans/gf_ssrf_live.jsonl \
+  --technique SSRF --intent "confirm live SSRF-candidate URLs from gf classification" \
+  --probe-kind fingerprint --phase consume-test --timeout 600
+
+aith assess kali sqlmap \
+  -m /engagements/$ENGAGEMENT_KEY/scans/gf_sqli.txt \
+  --technique=BEU --batch \
+  --technique SQLI --intent "gf-classified SQLi candidate sweep" \
+  --probe-kind payload --phase consume-test --timeout 1800
+
+# Combine multiple patterns into one priority set (host-side)
+for p in ssrf redirect idor sqli lfi; do gf "$p" < urls.txt; done | sort -u \
+  > /engagements/$ENGAGEMENT_KEY/scans/gf_priority.txt
 
 # Count per pattern
 for p in xss ssrf redirect idor sqli lfi debug_logic; do

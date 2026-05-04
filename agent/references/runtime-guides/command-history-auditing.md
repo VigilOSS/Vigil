@@ -1,6 +1,6 @@
 # Command History — Coverage Check Before Probing
 
-Every Kali MCP call made during an engagement lands in the orchestrator
+Every `aith assess kali` call made during an engagement lands in the orchestrator
 backend's `assessment_command_runs` table with a searchable index. Treat
 this as a **coverage map** — a record of what's already been probed so your
 next probe can go somewhere the engagement hasn't covered yet.
@@ -54,7 +54,7 @@ aith assess list-command-runs --q "nmap 10.0.0.1"
 aith assess list-command-runs \
     --agent-name recon-specialist --phase recon
 
-# Only successful runs with a specific MCP tool route
+# Only successful runs with a specific typed verb
 aith assess list-command-runs --tool-name nmap_scan --success
 
 # Filter by the underlying binary, even when it ran inside the generic

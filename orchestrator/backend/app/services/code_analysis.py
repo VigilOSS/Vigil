@@ -97,6 +97,46 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _merge_cwe_entry(existing: dict[str, Any], entry: dict[str, Any]) -> None:
+    """Merge one CWE coverage entry using the same max/sum rules everywhere."""
+    if _coerce_float(entry.get("effort", 0)) > _coerce_float(existing.get("effort", 0)):
+        existing["effort"] = entry.get("effort", 0)
+
+    existing_chains = _safe_int(existing.get("entry_chains_traced", 0))
+    new_chains = _safe_int(entry.get("entry_chains_traced", 0))
+    existing["entry_chains_traced"] = existing_chains + new_chains
+
+    for merge_key in ("functions_analyzed", "total_entry_chains"):
+        new_val = _safe_int(entry.get(merge_key, 0))
+        old_val = _safe_int(existing.get(merge_key, 0))
+        if new_val > old_val:
+            existing[merge_key] = new_val
+
+    new_notes = entry.get("notes", "")
+    if new_notes:
+        existing["notes"] = new_notes
+
+
+def _merge_cwe_coverage_entries(
+    cwe_by_file: dict[int, dict[str, dict[str, Any]]],
+    file_id: int,
+    entries: list[dict[str, Any]],
+) -> None:
+    if file_id not in cwe_by_file:
+        cwe_by_file[file_id] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        family = entry.get("family", "")
+        if not family:
+            continue
+        existing = cwe_by_file[file_id].get(family)
+        if existing is None:
+            cwe_by_file[file_id][family] = dict(entry)
+        else:
+            _merge_cwe_entry(existing, entry)
+
+
 def _hydrate_code_repo(row: Any) -> dict[str, Any]:
     payload = dict(row)
     payload["lsp_config"] = _json_decode(payload.get("lsp_config_json"), {})
@@ -228,10 +268,29 @@ def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> 
     done_queue = queue_counts.get("done", 0)
     queue_needs_context = queue_counts.get("needs_context", 0)
 
-    # File-direct mode: derive status from queue items alone
+    direct_result_counts = connection.execute(
+        """
+        SELECT disposition, COUNT(*) AS total
+        FROM code_analysis_results
+        WHERE engagement_id = ? AND file_id = ?
+        GROUP BY disposition
+        """,
+        (engagement_id, file_id),
+    ).fetchall()
+    direct_counts = {str(row["disposition"]): int(row["total"]) for row in direct_result_counts}
+    direct_total = sum(direct_counts.values())
+    direct_needs_context = direct_counts.get("needs_context", 0)
+
+    # File-direct mode: a direct analysis record without queue state is still
+    # durable analysis. Queue state takes precedence when work is active.
     if not queue_counts:
-        return  # No queue items — nothing to sync
-    if queue_needs_context > 0:
+        if direct_needs_context > 0:
+            next_status = "needs_context"
+        elif direct_total > 0:
+            next_status = "analyzed"
+        else:
+            return
+    elif queue_needs_context > 0:
         next_status = "needs_context"
     elif pending_queue == 0 and processing_queue == 0 and done_queue > 0:
         next_status = "analyzed"
@@ -239,6 +298,10 @@ def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> 
         next_status = "in_progress"
     elif pending_queue > 0:
         next_status = "queued"
+    elif direct_needs_context > 0:
+        next_status = "needs_context"
+    elif direct_total > 0:
+        next_status = "analyzed"
     else:
         next_status = "classified"
 
@@ -1953,6 +2016,23 @@ def code_coverage_summary(
             ),
             (engagement.id,) if repo_id is None else (engagement.id, engagement.id, repo_id),
         )
+        direct_needs_context = _scalar_row(
+            connection,
+            (
+                "SELECT COUNT(*) FROM code_analysis_results WHERE engagement_id = ? AND disposition = 'needs_context'"
+                if repo_id is None
+                else """
+                SELECT COUNT(*)
+                FROM code_analysis_results
+                WHERE engagement_id = ? AND disposition = 'needs_context'
+                  AND file_id IN (
+                      SELECT id FROM code_files WHERE engagement_id = ? AND repo_id = ?
+                  )
+                """
+            ),
+            (engagement.id,) if repo_id is None else (engagement.id, engagement.id, repo_id),
+        )
+        unresolved_needs_context += direct_needs_context
         unresolved_active_queue = _scalar_row(
             connection,
             (
@@ -2055,13 +2135,13 @@ def code_coverage_summary(
                     "file_path": erow["file_path"],
                     "classification": erow["classification"],
                     "analysis_status": erow["analysis_status"] or "",
-                    "has_done_item": False,
+                    "has_coverage_record": False,
                     "slot_types": _json_decode(erow["slot_types_json"], []),
                     "language": erow["language"] or "",
                     "role": erow["role"] or "",
                 }
             if erow["cwe_coverage_json"] is not None:
-                file_meta[fid]["has_done_item"] = True
+                file_meta[fid]["has_coverage_record"] = True
             cwe_cov = _json_decode(erow["cwe_coverage_json"], [])
             if fid not in file_efforts:
                 file_efforts[fid] = {}
@@ -2070,6 +2150,28 @@ def code_coverage_summary(
                 effort = _coerce_float(entry.get("effort", 0))
                 if family and effort > file_efforts[fid].get(family, 0):
                     file_efforts[fid][family] = effort
+
+        if file_meta:
+            placeholders = ",".join("?" for _ in file_meta)
+            direct_rows = connection.execute(
+                f"""
+                SELECT file_id, cwe_coverage_json
+                FROM code_analysis_results
+                WHERE engagement_id = ? AND file_id IN ({placeholders})
+                """,
+                (engagement.id, *file_meta.keys()),
+            ).fetchall()
+            for drow in direct_rows:
+                fid = int(drow["file_id"])
+                file_meta[fid]["has_coverage_record"] = True
+                cwe_cov = _json_decode(drow["cwe_coverage_json"], [])
+                if fid not in file_efforts:
+                    file_efforts[fid] = {}
+                for entry in cwe_cov:
+                    family = entry.get("family", "")
+                    effort = _coerce_float(entry.get("effort", 0))
+                    if family and effort > file_efforts[fid].get(family, 0):
+                        file_efforts[fid][family] = effort
 
         for fid, meta in file_meta.items():
             threshold = 70 if meta["classification"] == "critical" else 50
@@ -2099,7 +2201,7 @@ def code_coverage_summary(
 
             efforts = file_efforts.get(fid, {})
             if not efforts:
-                if meta["analysis_status"] not in {"analyzed", "done"} and not meta["has_done_item"]:
+                if meta["analysis_status"] not in {"analyzed", "done"} and not meta["has_coverage_record"]:
                     continue
                 msg = (
                     f"{meta['classification'].capitalize()} file {meta['file_path']}: "
@@ -2468,33 +2570,20 @@ def code_coverage_cwe_detail(
             for qr in queue_done_rows:
                 fid = int(qr["file_id"])
                 cwe_cov = _json_decode(qr["cwe_coverage_json"], [])
-                if fid not in cwe_by_file:
-                    cwe_by_file[fid] = {}
-                for entry in cwe_cov:
-                    family = entry.get("family", "")
-                    if not family:
-                        continue
-                    existing = cwe_by_file[fid].get(family)
-                    if existing is None:
-                        cwe_by_file[fid][family] = dict(entry)
-                    else:
-                        # Max-effort merge
-                        if _coerce_float(entry.get("effort", 0)) > _coerce_float(existing.get("effort", 0)):
-                            existing["effort"] = entry["effort"]
-                        # Sum entry_chains_traced (approximates union across passes)
-                        existing_chains = _safe_int(existing.get("entry_chains_traced", 0))
-                        new_chains = _safe_int(entry.get("entry_chains_traced", 0))
-                        existing["entry_chains_traced"] = existing_chains + new_chains
-                        # Max for functions_analyzed and total_entry_chains
-                        for merge_key in ("functions_analyzed", "total_entry_chains"):
-                            new_val = _safe_int(entry.get(merge_key, 0))
-                            old_val = _safe_int(existing.get(merge_key, 0))
-                            if new_val > old_val:
-                                existing[merge_key] = new_val
-                        # Keep latest non-empty notes
-                        new_notes = entry.get("notes", "")
-                        if new_notes:
-                            existing["notes"] = new_notes
+                _merge_cwe_coverage_entries(cwe_by_file, fid, cwe_cov)
+
+            direct_rows = connection.execute(
+                f"""
+                SELECT file_id, cwe_coverage_json
+                FROM code_analysis_results
+                WHERE engagement_id = ? AND file_id IN ({placeholders})
+                """,
+                (engagement.id, *file_ids),
+            ).fetchall()
+            for dr in direct_rows:
+                fid = int(dr["file_id"])
+                cwe_cov = _json_decode(dr["cwe_coverage_json"], [])
+                _merge_cwe_coverage_entries(cwe_by_file, fid, cwe_cov)
 
         files_detail: list[dict[str, Any]] = []
         for fr in file_rows:

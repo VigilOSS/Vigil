@@ -27,13 +27,28 @@ artifacts directly under `/engagements/$ENGAGEMENT_KEY/scans/` (the host sees th
 `$ENGAGEMENT_DIR/scans/`). Reserve `/tmp` for transient scratch files that do not need to survive
 the container, because anything under `/tmp` disappears on container recreate.
 
+> **Audit envelope is mandatory.** Every command in sections 1–6 below is illustrative shell —
+> execution wraps each network probe in `aith assess kali exec --` with the audit envelope
+> (`--technique OSINT --intent "<purpose>" --probe-kind fingerprint --phase recon --timeout N`).
+> The bare `searchsploit`/`theHarvester`/`bbot`/`curl`/`whois`/`dig`/`amass`/`gau`/`waymore`
+> invocations shown without the wrap are *examples of the underlying tool argv*; running them
+> on the host bypasses the audit pipeline that downstream specialists rely on as a coverage map.
+> Use `--technique OSINT` for passive external-source lookups (CT logs, public APIs, registries),
+> `--technique RECON` only when the probe sends traffic at the assessed target's own
+> infrastructure (theHarvester DNS resolution, bbot active modules). Each wrapped invocation
+> below shows the canonical form; pattern-match it for any tool that doesn't appear here yet.
+
 ### 1. CVE & Exploit Lookup
 
 Pull the tech stack from the backend (`aith assess list-intel tech-component`) — for each component+version:
 
-    # Exploit-DB local search
-    searchsploit "<component> <version>"
-    searchsploit -j "<component> <version>" | jq '.RESULTS_EXPLOIT[]'
+```bash
+# Exploit-DB local search (canonical wrapped form — copy this for every other tool below)
+aith assess kali exec \
+  --technique OSINT --intent "searchsploit lookup for <component> <version>" \
+  --probe-kind fingerprint --phase recon --timeout 60 -- \
+  searchsploit -j "<component> <version>"
+```
 
     # NVD API (rate limit: 5 req/30s without API key)
     curl -s "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=<component>+<version>&resultsPerPage=10" \
@@ -51,7 +66,15 @@ Pull the tech stack from the backend (`aith assess list-intel tech-component`) �
 
 Pull emails and domains from the backend (`aith assess list-intel email` and `aith assess list-intel domain`):
 
-    # theHarvester — email and subdomain enumeration
+```bash
+# theHarvester wrapped form — note --technique RECON when modules touch target DNS.
+aith assess kali exec \
+  --technique RECON --intent "theHarvester email + subdomain enum on <domain>" \
+  --probe-kind fingerprint --phase recon --timeout 1800 -- \
+  theHarvester -d <domain> -b all -f /engagements/$ENGAGEMENT_KEY/scans/osint_harvester.json
+```
+
+    # theHarvester — email and subdomain enumeration (illustrative argv — wrap as above)
     theHarvester -d <domain> -b all -f scans/osint_harvester.json
 
     # h8mail — breach lookup for discovered emails
@@ -69,7 +92,15 @@ Pull emails and domains from the backend (`aith assess list-intel email` and `ai
 
 Pull domains from the backend (`aith assess list-intel domain`):
 
-    # WHOIS
+```bash
+# WHOIS wrapped form (illustrative — every tool in this section follows the same wrap pattern).
+aith assess kali exec \
+  --technique OSINT --intent "WHOIS lookup for <domain>" \
+  --probe-kind fingerprint --phase recon --timeout 60 -- \
+  whois <domain>
+```
+
+    # WHOIS (illustrative argv — wrap as above)
     whois <domain> | tee scans/osint_whois.txt
 
     # Certificate transparency
@@ -104,7 +135,16 @@ Pull domains from the backend (`aith assess list-intel domain`):
 
 Pull people and org facts from the backend (`aith assess list-intel person` and `aith assess list-intel org-fact`):
 
-    # theHarvester — people and email enumeration
+```bash
+# theHarvester social wrapped form. Use --technique OSINT here — the
+# linkedin/google modules query third-party search APIs, not the target.
+aith assess kali exec \
+  --technique OSINT --intent "theHarvester linkedin/google enumeration for <domain>" \
+  --probe-kind fingerprint --phase recon --timeout 1200 -- \
+  theHarvester -d <domain> -b linkedin,google -f /engagements/$ENGAGEMENT_KEY/scans/osint_social.json
+```
+
+    # theHarvester — people and email enumeration (illustrative argv — wrap as above)
     theHarvester -d <domain> -b linkedin,google -f scans/osint_social.json
 
     # bbot recursive recon (modular, JSON output, pipeline-friendly)
@@ -122,6 +162,76 @@ Pull people and org facts from the backend (`aith assess list-intel person` and 
     curl -s "https://api.hunter.io/v2/domain-search?domain=<domain>&api_key=$HUNTER_API_KEY" \
       | jq '.data.emails[] | {value, type, confidence}'
 
+### 5. Org-name Pattern Enumeration
+
+Once one GitHub org is discovered for a target organization, enumerate the org-name pattern
+space before declaring GitHub OSINT done. Single-name lookups miss sibling orgs that share
+the same parent (research arms, internal-tooling orgs, OSS forks, contractor accounts) —
+those siblings frequently carry the most exploitable artifacts because they receive less
+scrutiny than the flagship org.
+
+1. **Variants on the literal org name** — capitalization, hyphenation, suffixes. For an org
+   "Acme" probe `acme`, `Acme`, `ACME`, `acme-corp`, `acmegov`, `acme-internal`, `acme-tools`,
+   `acme-research`, `acme-oss`, `Acme-Inc`. Issue each as a `/search/users?q=<pattern>+type:org`
+   query (see `agent/references/tools/recon/github-osint.md` for the curl + jq pipeline).
+2. **Variants on the parent agency or parent corporation name** — same suffix family
+   (`-internal`, `-research`, `-oss`, `-tools`, `-Inc`) applied to the parent's literal name.
+3. **Cross-search public code for discovered org names** — once you have a confirmed org name,
+   run a GitHub global code search for that name appearing in OTHER public repos (forks,
+   contributor README links, CI config that pulls private packages by org slug). Hits in
+   forks are gold — they expose internal repo names that the org's owner page hides behind
+   private visibility.
+4. **Per discovered org, enumerate public members and recent commit author emails** — list
+   members via `/orgs/<org>/members` and recent commits via `/repos/<org>/<repo>/commits`,
+   then jq-extract `author.email` and `committer.email`. The email pattern that emerges
+   (e.g. `FirstName.LastName@<corp>`) confirms the corporate email format and identifies
+   named developers whose handles map to LinkedIn / personal repos.
+5. **Cross-reference contractor and vendor names** — when procurement records, public
+   case studies, or LinkedIn show a consulting firm working with the target, search GitHub
+   for tagged forks or affiliated repos under the contractor's org slug. Contractor repos
+   often contain target-specific configuration, deployment scripts, or proof-of-concept
+   code with hardcoded internal URLs and credentials.
+
+Wrap every HTTP probe in `aith assess kali exec --` with the audit envelope so the run
+lands in the audit pipeline. Concrete commands and rate-limit guidance live in
+`agent/references/tools/recon/github-osint.md`.
+
+### 6. Exact-version Triangulation
+
+When vendor exact version is needed for CVE matching, multi-source triangulate before
+committing to a range. A version-only inferred range (e.g. "2.x because the login page
+shows 2.0 features") routinely fails: backported security patches keep an old major
+running while sister-package fingerprints reveal the precise patch level. Triangulation
+prevents both false-negative CVE misses (patched version that still matches a CVE
+published against an unpatched line) and false-positive findings (a CVE filed against
+a version older than what is actually deployed).
+
+1. **Source-map APP_VERSION / BUILD_HASH constants** — webpack/Vite bundles routinely
+   inline `APP_VERSION`, `BUILD_HASH`, `__GIT_SHA__`, `__BUILD_VERSION__`, and Sentry
+   release-tag identifiers. Cross-link to `agent/skills/source-analysis/SKILL.md`'s
+   "APP_VERSION / BUILD_HASH / Sentry-release extraction" section for the grep recipes.
+2. **Package registry sister-package publish dates** — vendors that publish their
+   libraries from a monorepo ship sister packages on the same release day. Cross-checking
+   the publish dates of two or three sibling packages narrows the deployed version to
+   one release. Query the registry directly:
+   - npm: `https://registry.npmjs.org/<pkg>/<version>` → `time` field (per-version timestamps).
+   - pypi: `https://pypi.org/pypi/<pkg>/<version>/json` → `urls[].upload_time`.
+   - maven central: `https://search.maven.org/solrsearch/select?q=g:<group>+a:<artifact>+v:<version>&wt=json` → `response.docs[].timestamp`.
+3. **Vendor public release notes / changelog** — convert each candidate version to a
+   release date and confirm at least one externally-visible feature in the deployed app
+   matches a feature the changelog attributes to that version.
+4. **Vendor security bulletins for the patched-version line** — confirms which CVEs are
+   NOT applicable to the deployed version. A CVE published against `<X.Y.Z` is still in
+   play for `X.Y.(Z-1)` even if the vendor backported the patch into a downstream branch;
+   the bulletin tells you which downstream branch carries the fix.
+5. **Sentry release tag in minified bundles** — Sentry's `Sentry.init({release: ...})`
+   call is often pinned to the build's git tag or short SHA. Grep source-maps for `release:`
+   and cross-reference against the vendor's tag list to derive the exact commit.
+
+Worked examples per vendor (npm/pypi/maven probe pipelines and Sentry grep recipes) are
+in `agent/references/payloads/version-fingerprint-probes.md`. Wrap every HTTP probe in
+`aith assess kali exec --` with the audit envelope.
+
 ## CVE Validation Gate
 
 CVE recording rules are defined in `agent/agents/osint-analyst.md` § Finding Recording.
@@ -134,6 +244,23 @@ In short: version-only CVE matches are intel, not findings — record via `aith 
 3. Historical endpoints not in current attack surface (hidden functionality)
 4. Organizational intel enriching social engineering context
 5. DNS/cert history revealing infrastructure changes
+
+## Output Contract
+
+The skill produces these structured sections in the osint-analyst's return payload.
+Backend writes (`record-intel <type>`, `record-finding` for target-proven results) are
+the durable record; this contract names what each markdown section should hold so
+the operator and downstream specialists can parse the output consistently. The
+"Output Integration" table below this section maps each section's intel rows to the
+specific `record-intel <type>` call.
+
+| Section | Holds |
+|---|---|
+| `#### Summary` | One-paragraph headline: tech components researched, CVE matches, breach hits, GitHub orgs enumerated, exact-version triangulation outcomes. |
+| `#### Findings` | Decisive findings the OSINT pass already proved against the live target (e.g., a breach-leaked credential validated to log in, a CVE PoC reproduced). Each must also be recorded via `aith assess record-finding`. CVE matches without target-specific proof stay in `#### Intelligence` per the CVE Validation Gate. |
+| `#### Intelligence` | The bulk of OSINT output. CVE matches → `record-intel cve`. Breach records → `record-intel breach-record`. Historical URLs → `record-intel dns-record`. Social profiles → `record-intel social-profile`. Org facts → `record-intel org-fact`. Tech-component fingerprints → `record-intel tech-component`. Free-form prose → `record-intel note`. See "Output Integration" below for the per-type mapping. |
+| `#### Surface Candidates` | Historical URLs / hidden endpoints surfaced via `gau` / `waymore` / SecurityTrails that warrant active probing, fed back via `aith assess ingest-endpoints` so they enter the work buffer. |
+| `#### Coverage Gaps` | API keys missing for SecurityTrails / Hunter / HIBP, rate-limited GitHub queries that did not complete, theHarvester modules that errored, exact-version triangulation that could not pin a single patch level. The operator uses this section to decide whether to re-dispatch with credentials. |
 
 ## Output Integration
 

