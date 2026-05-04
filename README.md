@@ -38,8 +38,8 @@ uv tool install --editable .
 # Install or upgrade the working root
 aith install ~/security-research
 
-# Build and start the local stack. If OOB is configured but the FRP token is
-# missing, this prompts once and stores it in `aith config`.
+# Sync source, build stale images, and start the local stack.
+# Prompts for FRP token on first run if not configured.
 aith up
 ```
 
@@ -54,14 +54,15 @@ Use one lead operator per engagement at a time unless you are deliberately coord
 
 ### Updating after a `git pull`
 
-After pulling new changes from the repository, re-run the CLI installer to push updates to your working directory:
+`aith up` automatically syncs source files into the install root before checking images and starting services. After pulling changes, just run `aith up` again — no separate update step is needed.
+
+For a source-only sync without starting services:
 
 ```bash
-# from the repo checkout
-aith update
+aith install
 ```
 
-`aith update` is an alias for the idempotent installer. It upgrades in place — engagements, the orchestrator database, and `.env` are never moved or deleted. Code, prompts, skills, and scripts are replaced with the latest versions from the repo.
+`aith install` (and its alias `aith update`) upgrades in place — engagements, the orchestrator database, and `.env` are never moved or deleted. Code, prompts, skills, and scripts are replaced with the latest versions from the repo.
 
 Check local readiness and live service state:
 

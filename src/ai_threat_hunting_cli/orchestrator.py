@@ -28,7 +28,10 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
     runtime_dir.joinpath("logs").mkdir(parents=True, exist_ok=True)
 
     if _frontend_build_needed(install_root, force=options.build):
+        print("frontend\tbuilding")
         _build_frontend(install_root)
+    else:
+        print("frontend\tcurrent")
 
     if _pid_running(pid_file):
         pid = pid_file.read_text(encoding="utf-8").strip()

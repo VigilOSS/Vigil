@@ -10,9 +10,11 @@ from pathlib import Path
 from . import config as config_module
 from . import docker
 from .engagements import current_engagement_path, resolve_engagement_path
+from .install import InstallOptions, install_from_source
 from .mitmproxy import MitmproxyOptions, start_proxy
 from .oob import OobOptions, oob_status, start_oob
 from .orchestrator import OrchestratorOptions, start_orchestrator
+from .paths import resolve_source_root
 from .runtime import RuntimeOptions, build_runtime, start_runtime, stop_runtime
 
 
@@ -29,6 +31,21 @@ class UpOptions:
 
 def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) -> None:
     install_root = options.install_root.expanduser().resolve()
+
+    try:
+        source_root = resolve_source_root(None, install_root=install_root)
+        print("source sync\tupdating install root")
+        install_from_source(
+            InstallOptions(
+                source_root=source_root,
+                install_root=install_root,
+                verify_docker_image=False,
+            ),
+            runner=runner,
+        )
+    except SystemExit:
+        print("source sync\tskipped (no source checkout found)")
+
     runtime_was_running = docker.container_running("security-research", runner=runner)
 
     runtime_built = False
