@@ -566,8 +566,8 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
                 "owasp_category": "A01:2021 Broken Access Control",
                 "cwe_id": "CWE-639",
                 "request_method": "GET",
-                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
-                "cvss_score": 6.5,
+                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N",
+                "cvss_score": 7.1,
                 "remediation": "Enforce server-side ownership checks on order retrieval",
                 "steps_to_reproduce": [
                     "Authenticate as user A",

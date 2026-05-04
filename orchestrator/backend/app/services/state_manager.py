@@ -2333,17 +2333,21 @@ def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
 def coverage_readiness(engagement_id: int) -> dict[str, Any]:
     surfaces = list_surfaces(engagement_id)
     unresolved = [row for row in surfaces if row.get("status") == "discovered"]
+    partially_covered = [
+        row for row in surfaces if row.get("status") == "partially-covered"
+    ]
     high_risk_deferred = [
         row
         for row in surfaces
         if row.get("status") == "deferred"
         and row.get("surface_type") in {"account_recovery", "dynamic_render", "object_reference", "privileged_write"}
     ]
-    blocker_count = len(unresolved) + len(high_risk_deferred)
+    blocker_count = len(unresolved) + len(partially_covered) + len(high_risk_deferred)
     return {
         "ready": blocker_count == 0,
         "blocker_count": blocker_count,
         "unresolved_surfaces": unresolved,
+        "partially_covered_surfaces": partially_covered,
         "high_risk_deferred_surfaces": high_risk_deferred,
     }
 
@@ -3295,7 +3299,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
         )
         open_surface_count = _scalar_row(
             connection,
-            "SELECT COUNT(*) FROM assessment_surfaces WHERE engagement_id = ? AND status IN ('discovered', 'deferred')",
+            "SELECT COUNT(*) FROM assessment_surfaces WHERE engagement_id = ? AND status IN ('discovered', 'deferred', 'partially-covered')",
             (engagement.id,),
         )
         credential_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_credentials WHERE engagement_id = ?", (engagement.id,))

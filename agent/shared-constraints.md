@@ -420,7 +420,7 @@ These are the most commonly violated rules — internalize them before you start
 - **Validate before writing.** Do not draft report content before the lead is reproducible and worth a human reader's time.
 - **Evidence beats volume.** A few decisive requests and exact proofs outweigh broad noisy scanning.
 
-Full rule sets: `agent/rules/hunting.md`, `agent/rules/reporting.md`
+Full rule sets: `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
 
 ---
 
