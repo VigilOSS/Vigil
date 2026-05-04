@@ -492,6 +492,51 @@ def _write_auth_scaffold(eng_dir: Path, mode: str, timestamp: str) -> None:
     _write_json(eng_dir / "auth.json", payload)
 
 
+_CHROME_PATHS = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+]
+
+
+def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
+    report_md = eng_dir / "report.md"
+    if not report_md.exists():
+        raise SystemExit(f"report.md not found in {eng_dir}")
+
+    pandoc = shutil.which("pandoc")
+    if not pandoc:
+        raise SystemExit("pandoc not found on PATH — install via: brew install pandoc")
+
+    chrome = next((p for p in _CHROME_PATHS if Path(p).exists()), None)
+    if not chrome:
+        raise SystemExit("No Chrome/Chromium found — install Google Chrome")
+
+    if output is None:
+        output = eng_dir / "report.pdf"
+
+    html_path = eng_dir / ".report_tmp.html"
+    try:
+        subprocess.run(
+            [pandoc, str(report_md), "-o", str(html_path), "--standalone", "--embed-resources",
+             "--metadata", "title=Engagement Report"],
+            check=True,
+        )
+        subprocess.run(
+            [chrome, "--headless", "--disable-gpu", "--no-sandbox",
+             f"--print-to-pdf={output}", "--print-to-pdf-no-header",
+             f"file://{html_path}"],
+            check=True,
+            capture_output=True,
+        )
+    finally:
+        html_path.unlink(missing_ok=True)
+
+    return output
+
+
 def _write_report(eng_dir: Path, engagement_type: str, *, name: str | None, target: str, repos: list[dict[str, str]], date_label: str) -> None:
     lines = ["# Engagement Report", ""]
     if engagement_type == "code":

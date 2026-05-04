@@ -20,6 +20,7 @@ from .engagements import (
     CreateEngagementOptions,
     create_engagement,
     current_engagement_path,
+    export_pdf,
     list_engagements,
     print_shell_cd_init,
     resolve_engagement_path,
@@ -157,6 +158,10 @@ def main(argv: list[str] | None = None) -> None:
     export_p.add_argument("key", nargs="?")
     export_p.add_argument("--select", action="store_true")
     export_p.add_argument("--output")
+    export_pdf_p = engagement_sub.add_parser("export-pdf", help="Export report.md as a PDF using pandoc + Chrome headless")
+    export_pdf_p.add_argument("key", nargs="?")
+    export_pdf_p.add_argument("--select", action="store_true")
+    export_pdf_p.add_argument("--output", help="Output PDF path (default: <engagement>/report.pdf)")
 
     orch_p = sub.add_parser("orchestrator")
     orch_sub = orch_p.add_subparsers(dest="orchestrator_command", required=True)
@@ -508,6 +513,10 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         with tarfile.open(output, "w:gz") as tar:
             tar.add(path, arcname=path.name)
         print(output)
+    elif command == "export-pdf":
+        path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
+        output = Path(args.output).expanduser() if args.output else None
+        print(export_pdf(path, output))
 
 
 def _looks_like_web_target(value: str) -> bool:
