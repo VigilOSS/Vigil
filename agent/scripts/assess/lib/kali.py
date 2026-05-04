@@ -168,11 +168,12 @@ def kali_exec(
     _check_container_running(container_name)
 
     derived_tool_name = tool_name or _derive_tool_name(cmd)
+    container_working_dir = f"/engagements/{eng_key}"
     docker_argv = _build_docker_exec(
         cmd,
         container_name=container_name,
         run_uuid=run_uuid,
-        working_dir=f"/engagements/{eng_key}",
+        working_dir=container_working_dir,
     )
 
     client = AssessmentClient(cfg.base_url, eng_key)
@@ -197,7 +198,7 @@ def kali_exec(
                 started_at_iso=started_at_iso,
                 stdout_path=str(stdout_path),
                 stderr_path=str(stderr_path),
-                working_dir=os.getcwd(),
+                working_dir=container_working_dir,
                 scope_version=scope_version,
                 auth_context=auth_context,
                 tool_name=derived_tool_name,

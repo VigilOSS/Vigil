@@ -54,7 +54,8 @@ def validate_resolution_status(status: str) -> None:
     """Reject statuses that are not valid resolutions.
 
     ``discovered`` is the seed state — operators can only resolve a
-    surface to ``covered``, ``not_applicable``, or ``deferred``.
+    surface to ``covered``, ``not_applicable``, ``deferred``, or
+    ``partially-covered`` with a follow-up condition.
     """
     if status not in RESOLVABLE_STATUSES:
         valid = ", ".join(sorted(RESOLVABLE_STATUSES))

@@ -27,6 +27,7 @@ already listed below.
 
 - `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
+- `agent/rules/adversarial-mindset.md`
 - `agent/SKILL.md`
 - `agent/skills/web-recon/SKILL.md` — the foundational recon sequence and tool ordering
 - `agent/skills/port-scanning/SKILL.md` — DEFAULT-load for full Phase 1 dispatches. Port + service enumeration is the standard recon step (see Recon Sequence below); the per-batch port-data presence assertion lives in this skill.

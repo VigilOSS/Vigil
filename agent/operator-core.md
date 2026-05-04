@@ -7,6 +7,7 @@ Primary methodology reference:
 Always-active rules:
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
+- `agent/rules/adversarial-mindset.md`
 
 Path convention:
 - All assessment operations use `aith assess <subcommand>` from any directory.

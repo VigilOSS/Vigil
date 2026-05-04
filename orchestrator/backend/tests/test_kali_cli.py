@@ -708,7 +708,7 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
     assert payload["phase"] == "recon"
     assert payload["agent_name"] == "recon-specialist"
     assert payload["timeout_seconds_requested"] == 60
-    assert payload["working_dir"]
+    assert payload["working_dir"] == f"/engagements/{fake_engagement.name}"
     assert payload["scope_version"]
     assert payload["auth_context"] == "cookies"
     # P1 schema fix: the CLI must propagate its engagement-wide run_uuid into
@@ -2665,6 +2665,93 @@ def test_nmap_ports_accepts_documented_shapes(monkeypatch, ports_value):
             "600",
         ]
     )
+
+
+def test_nmap_accepts_input_list_without_target(monkeypatch):
+    """`-iL <file>` is a complete nmap target source; the wrapper must not
+    force an extra positional target that changes scan scope."""
+    cli = _import("assess.cli")
+    kali = _import("assess.lib.kali")
+
+    captured: dict = {}
+
+    def fake_kali_exec(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = kwargs
+        return kali.KaliResult(
+            run_id=1,
+            status="completed",
+            return_code=0,
+            stdout_path="/tmp/x.out",
+            stderr_path="/tmp/x.err",
+            duration_ms=10,
+            peak_rss_bytes=None,
+            stdout_preview="",
+            stderr_preview="",
+            timed_out=False,
+            partial_results=False,
+        )
+
+    mod = _import("assess.commands.kali_nmap")
+    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+
+    cli.main(
+        [
+            "kali",
+            "nmap-scan",
+            "-iL",
+            "/engagements/x/scans/hosts.txt",
+            "--ports",
+            "top-100",
+            "--technique",
+            "RECON",
+            "--intent",
+            "batch scan host list",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--timeout",
+            "600",
+        ]
+    )
+
+    assert captured["cmd"] == [
+        "nmap",
+        "-iL",
+        "/engagements/x/scans/hosts.txt",
+        "--top-ports",
+        "100",
+    ]
+
+
+def test_nmap_requires_target_or_input_list(capsys):
+    """The wrapper still rejects targetless scans when neither --target nor
+    -iL names the target source."""
+    cli = _import("assess.cli")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "kali",
+                "nmap-scan",
+                "--technique",
+                "RECON",
+                "--intent",
+                "missing target source",
+                "--probe-kind",
+                "fingerprint",
+                "--phase",
+                "recon",
+                "--timeout",
+                "600",
+            ]
+        )
+
+    assert exc.value.code != 0
+    err = capsys.readouterr().err
+    assert "--target" in err
+    assert "-iL" in err
 
 
 def test_nmap_scan_type_rejects_legacy_pseudo_values():

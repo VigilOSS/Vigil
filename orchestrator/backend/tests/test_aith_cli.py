@@ -1721,6 +1721,150 @@ def test_resolve_surface_accepts_partially_covered_with_followup_condition(
     assert captured["payload"]["followup_condition"] == "needs auth re-test"
 
 
+def test_transition_phase_resolves_engagement_dir_from_cwd(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`transition-phase` should share the standard assess config fallback:
+    cwd with scope.json is a valid engagement context."""
+    module = _load_assess_module(
+        "round3_transition_phase_cwd_module",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    engagement = tmp_path / "agent" / "engagements" / "eng-test"
+    engagement.mkdir(parents=True)
+    scope_path = engagement / "scope.json"
+    scope_path.write_text(
+        json.dumps({"engagement_type": "web", "current_phase": ""}),
+        encoding="utf-8",
+    )
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.delenv("ENGAGEMENT_DIR", raising=False)
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://127.0.0.1:9")
+    monkeypatch.chdir(engagement)
+
+    module.run(SimpleNamespace(engagement_dir=None, target_phase="recon", force=False))
+
+    assert json.loads(scope_path.read_text(encoding="utf-8"))["current_phase"] == "recon"
+    assert "Phase transitioned" in capsys.readouterr().out
+
+
+def test_transition_phase_backend_error_blocks_precondition_check(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Backend/query failures during guarded phase transitions are blockers
+    because the readiness state is unknown."""
+    module = _load_assess_module(
+        "round3_transition_phase_blocker_module",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    engagement = tmp_path / "agent" / "engagements" / "eng-test"
+    engagement.mkdir(parents=True)
+    scope_path = engagement / "scope.json"
+    scope_path.write_text(
+        json.dumps({"engagement_type": "web", "current_phase": "recon"}),
+        encoding="utf-8",
+    )
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def get(self, _path: str) -> dict:
+            raise RuntimeError("backend unavailable")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(engagement),
+            engagement_key=engagement.name,
+            agent_root=str(tmp_path / "agent"),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(engagement),
+                target_phase="collect",
+                force=False,
+            )
+        )
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "precondition_check_failed" in err
+    assert "backend unavailable" in err
+    assert json.loads(scope_path.read_text(encoding="utf-8"))["current_phase"] == "recon"
+
+
+def test_check_coverage_reports_partially_covered_surfaces(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`check-coverage` should explain partial-coverage blockers instead of
+    exiting non-zero without naming the follow-up condition."""
+    module = _load_assess_module(
+        "round3_check_coverage_module",
+        "agent/scripts/assess/commands/check_coverage.py",
+    )
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def get(self, path: str) -> dict:
+            assert path == "coverage-readiness"
+            return {
+                "ready": False,
+                "blocker_count": 1,
+                "unresolved_surfaces": [],
+                "partially_covered_surfaces": [
+                    {
+                        "surface_type": "object_reference",
+                        "target_descriptor": "https://example.test/api/users/{id}",
+                        "followup_condition": "needs auth re-test",
+                    }
+                ],
+                "high_risk_deferred_surfaces": [],
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(tmp_path),
+            engagement_key="eng-test",
+            agent_root=str(tmp_path),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.run(SimpleNamespace(engagement_dir=str(tmp_path)))
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "Partially covered surfaces need follow-up" in err
+    assert "needs auth re-test" in err
+
+
 def _load_assess_module(name: str, relative: str):
     """Load an assess CLI submodule by relative path so tests can call ``module.run`` directly."""
     import importlib.util
