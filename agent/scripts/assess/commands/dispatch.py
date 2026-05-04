@@ -134,23 +134,13 @@ def register(subparsers) -> None:
     p.add_argument("--agent-role", dest="agent_role", default=None,
                    help="(register / record-handoff) Specialist role.")
     p.add_argument("--task", dest="task", default=None, help="(register) Task description.")
-    p.add_argument("--skill", dest="skill", default=None, help="(register) Skill path the specialist loads.")
     p.add_argument("--scope-host", dest="scope_host", default=None, help="(register) Scope host.")
     p.add_argument("--model", dest="dispatch_model", default=None, help="(register) Model name.")
     p.add_argument("--reasoning", dest="reasoning", default=None,
                    choices=("low", "medium", "high"), help="(register) Reasoning level.")
-    p.add_argument("--permission", dest="permission", default=None,
-                   choices=("artifact-only", "passive-probe", "target-facing", "target-facing-destructive"),
-                   help="(register) Authorization level.")
-    p.add_argument("--command-budget", dest="command_budget", default=None, type=int,
-                   help="(register) Upper bound on aith assess kali ... calls.")
-    p.add_argument("--output-schema", dest="output_schema", default=None,
-                   help="(register) Expected output payload shape.")
     p.add_argument("--dispatch-mode", dest="dispatch_mode_arg", default=None,
                    choices=("hypothesis-driven", "item-iterating", "deep-manual", "variant-rotation"),
                    help="(register) Dispatch loop shape.")
-    p.add_argument("--files-allowed", dest="files_allowed", default=None,
-                   help="(register) Comma-separated list of files the specialist may read.")
     p.add_argument("--from-json", dest="from_json", default=None,
                    help="(register / record-handoff) Path to JSON payload (overrides flag-based fields).")
     p.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true",
@@ -930,7 +920,7 @@ def _render_handoff(args, extra: list[str]) -> None:
     assessment_dispatch_handoffs). The handoff payload provides
     summary / coverage gaps / next steps / runtime issues / working artifacts
     / open questions / extras; the dispatch row provides metadata (role,
-    task, skill_loaded, scope_host, dispatched_at, status). 404 on the
+    task, scope_host, dispatched_at, status). 404 on the
     handoff exits 2; 404 on the dispatch row is non-fatal — the renderer
     still produces output from the handoff.
     """
@@ -973,14 +963,12 @@ def _render_handoff(args, extra: list[str]) -> None:
         if dispatch is not None:
             role = str(dispatch.get("agent_role") or handoff.get("agent_role") or "<unknown role>")
             task = str(dispatch.get("task") or "<unrecorded task>")
-            skill_loaded = dispatch.get("skill_loaded") or ""
             scope_host = dispatch.get("scope_host") or ""
             dispatched_at = dispatch.get("dispatched_at") or ""
             dispatch_status = dispatch.get("status") or ""
         else:
             role = str(handoff.get("agent_role") or "<unknown role>")
             task = "<unrecorded task>"
-            skill_loaded = ""
             scope_host = ""
             dispatched_at = handoff.get("created_at") or ""
             dispatch_status = "(dispatch row missing)"
@@ -1066,7 +1054,6 @@ def _render_handoff(args, extra: list[str]) -> None:
         agent_id=agent_id,
         role=role,
         task=task,
-        skill_loaded=skill_loaded,
         scope_host=scope_host,
         dispatched_at=dispatched_at,
         status=dispatch_status,
@@ -1091,7 +1078,6 @@ def _render_handoff_blob(
     agent_id: str,
     role: str,
     task: str,
-    skill_loaded: str,
     scope_host: str,
     dispatched_at: str,
     status: str,
@@ -1120,7 +1106,6 @@ def _render_handoff_blob(
     head = [
         f"#### Handoff from {role} dispatch {agent_id}",
         f"- **Prior task:** {task}",
-        f"- **Skill loaded:** {skill_loaded or '(none recorded)'}",
         f"- **Scope host:** {scope_host or '(none recorded)'}",
         f"- **Dispatched at:** {dispatched_at or '(unknown)'} (status: {status or 'unknown'})",
     ]
@@ -1417,21 +1402,14 @@ def _build_register_payload(args) -> dict:
         "agent_id": getattr(args, "agent_id", None),
         "agent_role": getattr(args, "agent_role", None),
         "task": getattr(args, "task", None),
-        "skill_loaded": getattr(args, "skill", None),
         "scope_host": getattr(args, "scope_host", None),
         "model": getattr(args, "dispatch_model", None),
         "reasoning": getattr(args, "reasoning", None),
-        "permission": getattr(args, "permission", None),
-        "command_budget": getattr(args, "command_budget", None),
-        "output_schema": getattr(args, "output_schema", None),
         "dispatch_mode": getattr(args, "dispatch_mode_arg", None),
     }
     for k, v in cli_fields.items():
         if v is not None:
             payload[k] = v
-    files_allowed = _split_csv(getattr(args, "files_allowed", None))
-    if files_allowed:
-        payload["files_allowed"] = files_allowed
     finding_slugs = _split_csv(getattr(args, "finding_slugs", None))
     if finding_slugs:
         payload["finding_slugs"] = finding_slugs
@@ -1502,9 +1480,6 @@ def _dispatch_overlap_reason(payload: dict[str, Any], row: dict[str, Any]) -> st
     finding_overlap = _set_overlap(payload.get("finding_slugs"), row.get("finding_slugs"))
     if finding_overlap:
         return "same finding_slugs: " + ",".join(sorted(finding_overlap))
-    file_overlap = _set_overlap(payload.get("files_allowed"), row.get("files_allowed"))
-    if file_overlap and _same_nonempty(payload, row, "dispatch_mode"):
-        return "same files_allowed under same dispatch_mode"
     task = _norm_text(payload.get("task"))
     if task and task == _norm_text(row.get("task")):
         return "exact same task text"

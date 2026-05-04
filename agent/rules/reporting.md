@@ -164,3 +164,39 @@ Common padding to avoid:
 - "This is significant because..." followed by restating the impact that was already in the impact section
 - Listing theoretical secondary impacts that were not proved
 - Adding "defense in depth" remediation items beyond the primary fix
+
+## 16. No severity labels in titles
+
+Finding titles communicate the bug class, location, attacker role, and impact. Severity belongs in the CVSS metadata line, not the title.
+
+Banned patterns: `[CRITICAL] Unauthenticated RCE in /api/upload` · `IDOR in /api/orders/{id} [HIGH]`
+
+Correct pattern: the title carries no severity badge. The CVSS line carries score and vector.
+
+## 17. No internal identifiers or tooling references in external deliverables
+
+External-facing reports must not include:
+- Internal backend tracking IDs (slugs such as `VA-003`, `EX-032`, `RE-010`) in any field
+- References to internal tooling, scan file paths, or orchestrator state
+- Operational status annotations: "Reported to X on date", "Duplicative", "Already sent"
+
+These are internal-only metadata with no meaning to the client. Remove Slug/Slugs fields from all finding sections before external delivery.
+
+## 18. Consolidate findings to root cause
+
+When two findings share the same vulnerable component or configuration and one is a direct consequence of the other, write one finding covering the root cause and all demonstrated impacts.
+
+Separate findings for the same root cause inflate the finding count, split remediation, and fragment the attack story. Apply the same judgment a BugCrowd/HackerOne triager would: one root cause, one submission.
+
+Common patterns that require consolidation:
+- Credential exposure as a direct consequence of an auth bypass on the same system
+- Multiple unauthenticated routes on the same API when the root cause is a single missing-auth control
+
+## 19. No internal-only sections in external reports
+
+The following are internal-only and must not appear in client-facing deliverables:
+
+- **Coverage Summary** — operational metrics (targets, services, probe counts) are engagement-internal and have no meaning to the client
+- **Finding Cross-Reference** — maps report IDs to backend slugs; internal traceability only, exclude from external reports
+- **Tested by / tester attribution** — not required in client deliverables
+

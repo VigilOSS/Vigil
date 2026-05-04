@@ -29,6 +29,7 @@ def start_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command
     if not options.frp_token:
         raise SystemExit("Missing OOB FRP token. Set it with `aith config set oob.frp_token <token>`.")
     _require_runtime_tools(options.container_name, runner=runner)
+    _kill_stale_oob_processes(options.container_name, runner=runner)
     _render_runtime_files(options, runner=runner)
     _ensure_tmux_session(
         options.container_name,
@@ -36,10 +37,16 @@ def start_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command
         f"python3 {OOB_ROOT}/oob_server_watch.py 2>&1 | tee -a {OOB_ROOT}/watch.log",
         runner=runner,
     )
+    frpc_cmd = (
+        f"while true; do "
+        f"frpc -c {OOB_ROOT}/frpc.toml 2>&1 | tee {OOB_ROOT}/frpc.log; "
+        f"echo '[frpc] exited, restarting in 30s...' >> {OOB_ROOT}/frpc.log; "
+        f"sleep 30; done"
+    )
     _ensure_tmux_session(
         options.container_name,
         "frpc",
-        f"frpc -c {OOB_ROOT}/frpc.toml 2>&1 | tee {OOB_ROOT}/frpc.log",
+        frpc_cmd,
         runner=runner,
     )
 
@@ -47,6 +54,7 @@ def start_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command
 def stop_oob(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> None:
     for session in ("frpc", "oob-server"):
         _run_exec(container_name, f"tmux kill-session -t {shlex.quote(session)} 2>/dev/null || true", runner=runner, check=False)
+    _kill_stale_oob_processes(container_name, runner=runner)
 
 
 def oob_status(
@@ -91,11 +99,12 @@ def start_oob_client(
     _write_runtime_file(options.container_name, f"{OOB_ROOT}/clients/{client_name}.json", json.dumps(metadata, indent=2) + "\n", runner=runner)
     log_path = f"{OOB_ROOT}/clients/{client_name}.log"
     session_file = f"{OOB_ROOT}/clients/{client_name}.session"
-    command = (
+    inner = (
         f"interactsh-client -server {shlex.quote(options.oob_domain)} "
         f"-session-file {shlex.quote(session_file)} -v -poll-interval 5 "
-        f"2>&1 | tee {shlex.quote(log_path)}"
+        f"2>&1 | tee -a {shlex.quote(log_path)}"
     )
+    command = f"while true; do {inner}; echo '[oob-client] exited, retrying in 10s...' | tee -a {shlex.quote(log_path)}; sleep 10; done"
     _ensure_tmux_session(options.container_name, session, command, runner=runner)
 
 
@@ -105,10 +114,19 @@ def stop_oob_client(name: str, container_name: str = "security-research", *, run
 
 
 def list_oob_clients(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> list[str]:
+    live: set[str] = set()
     result = _run_exec(container_name, "tmux list-sessions -F '#S' 2>/dev/null | sed -n 's/^oob-client-//p'", runner=runner, check=False)
-    if result.returncode != 0:
-        return []
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode == 0:
+        live = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    configured: set[str] = set()
+    cfg_result = _run_exec(
+        container_name,
+        f"ls {OOB_ROOT}/clients/*.json 2>/dev/null | xargs -I{{}} basename {{}} .json",
+        runner=runner, check=False,
+    )
+    if cfg_result.returncode == 0:
+        configured = {line.strip() for line in cfg_result.stdout.splitlines() if line.strip()}
+    return sorted(live | configured)
 
 
 def test_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command) -> None:
@@ -127,6 +145,12 @@ def sanitize_name(value: str) -> str:
     if not cleaned:
         raise SystemExit("OOB client name cannot be empty")
     return cleaned[:80]
+
+
+def _kill_stale_oob_processes(container_name: str, *, runner: docker.Runner) -> None:
+    """Kill leftover interactsh-server and frpc processes before (re)starting."""
+    for proc in ("interactsh-server", "frpc"):
+        _run_exec(container_name, f"pkill -f {shlex.quote(proc)} 2>/dev/null || true", runner=runner, check=False)
 
 
 def _require_runtime(container_name: str, *, runner: docker.Runner) -> None:
@@ -155,6 +179,8 @@ Path({f"{OOB_ROOT}/frpc.toml"!r}).write_text(f'''serverAddr = {options.frp_host!
 serverPort = {options.frp_port}
 auth.token = {options.frp_token!r}
 loginFailExit = false
+transport.heartbeatInterval = 10
+transport.heartbeatTimeout = 30
 
 [[proxies]]
 name = "{{prefix}}-oob-dns"

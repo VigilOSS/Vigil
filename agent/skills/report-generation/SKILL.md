@@ -42,7 +42,7 @@ aith assess fetch summary
 
 The `report-findings` endpoint returns each finding with:
 - `report_id` — sequential `001`, `002`, etc. (for the report body)
-- `slug` — the original backend slug, e.g. `VA-003` (for cross-reference)
+- `slug` — the original backend slug, e.g. `VA-003` (for publish-mode lifecycle updates only; do not expose in the report body)
 - `cvss_vector`, `cvss_score` — extracted from `details_json`
 - `remediation`, `steps_to_reproduce`, `cwe_id`, `owasp_category` — extracted from `details_json`
 - `impact`, `evidence_detail` — extracted from `details_json`
@@ -121,7 +121,7 @@ No unexplained jargon. "SQL injection (direct database access)" not just "SQL in
 
 ```markdown
 ### 001: [Title] [SEVERITY]
-**Slug:** VA-003  **OWASP:** A03:2021  **CWE:** CWE-89  **CVSS:** 7.5 (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N)
+**OWASP:** A03:2021  **CWE:** CWE-89  **CVSS:** 7.5 (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N)
 
 #### Description
 [2-4 sentences. First sentence: what the attacker gains. Remaining: how, where, auth context.]
@@ -152,7 +152,7 @@ No unexplained jargon. "SQL injection (direct database access)" not just "SQL in
 ```markdown
 ## Attack Path Narrative
 ### Scenario 1: [Title]
-**Findings Used:** 001 (VA-003), 003 (EX-001)
+**Findings Used:** 001, 003
 **Starting Point:** [attacker type]
 1. **Initial Access** - [X] -> [foothold]
 2. **Escalation** - [Y] -> [escalate]
@@ -162,32 +162,7 @@ No unexplained jargon. "SQL injection (direct database access)" not just "SQL in
 
 If no chains: "No multi-step attack paths identified."
 
-### 5. Coverage Summary
-
-```markdown
-## Coverage Summary
-| Metric | Count |
-|--------|-------|
-| Targets | N |
-| Services | N |
-| Surfaces discovered | N |
-| Surfaces covered | N |
-| Probe runs | N |
-```
-
-### 6. Slug Cross-Reference
-
-```markdown
-## Finding Cross-Reference
-| Report ID | Backend Slug | Title |
-|-----------|-------------|-------|
-| 001 | VA-003 | Blind SQL injection in search |
-| 002 | EX-001 | Auth bypass via JWT alg:none |
-```
-
-This table maps report IDs back to canonical backend slugs for traceability.
-
-### 7. Appendix
+### 5. Appendix
 
 Tool output in `<details>` blocks, generated scripts, scope verification table, timeline.
 
@@ -196,7 +171,7 @@ Tool output in `<details>` blocks, generated scripts, scope verification table, 
 Before generating the report body, run these checks against the backend data. If any check fails, **stop and flag the issue to the operator** — do not silently fix or ignore it.
 
 1. **Readiness gate:** for final reports, run `aith assess check-report-readiness`. If it fails, stop and flag the blockers to the operator.
-2. **Duplicate check:** scan findings for pairs sharing the same root cause + endpoint. Flag: "VA-003 and EX-001 appear to describe the same root cause on /api/users — resolve before report."
+2. **Root-cause consolidation check:** scan findings for pairs sharing the same vulnerable component or configuration where one is a direct consequence of the other. These must be consolidated into one finding before the report is written. Flag: "EX-036 (credential extraction) is a consequence of EX-032 (auth bypass on the same TeamCity host) — merge into one finding." Apply the BugCrowd/HackerOne standard: one root cause, one submission.
 3. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
 4. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
 
@@ -210,10 +185,8 @@ Only proceed to report generation after validation passes or the operator resolv
 4. **Use pre-computed remediation** from finding details. Augment only when one of these is true: (a) the chain revealed a prerequisite weakness the original remediation did not address, (b) the exploit bypassed the suggested fix, or (c) the chain spans multiple findings and fixing this one alone does not close the chain
 5. Populate all template fields (flag missing evidence with `[EVIDENCE MISSING]`, never fabricate)
 6. Build attack path narrative from `attack-chains` endpoint data and enrich it with `credentials` / `access-records` when those records explain the authenticated foothold or post-auth scope
-7. Compile coverage summary from `summary` endpoint
-8. Build the slug cross-reference table
-9. Write executive summary LAST — it depends on the complete finding set and chain analysis
-10. Verify: severity counts in executive summary match the actual finding list
+7. Write executive summary LAST — it depends on the complete finding set and chain analysis
+8. Verify: severity counts in executive summary match the actual finding list
 
 ## After Writing the Draft
 
@@ -239,13 +212,14 @@ After writing the report, verify every finding against `agent/rules/reporting.md
 9. Steps to reproduce: one action per step, copy-pasteable (Rule 10)
 10. Executive summary ≤ one page (Rule 10)
 11. Severity counts in executive summary match actual finding list
-12. Every finding appears in the slug cross-reference table
+12. No severity labels in titles, no internal slugs/IDs anywhere, no Coverage Summary, no Finding Cross-Reference (Rules 16–19)
+13. Findings sharing the same root cause are consolidated — one vulnerable component, one finding (Rule 18)
 
 ## Review-and-Fix QA Mode
 
 When the operator dispatches report-writer in review-and-fix QA mode, load the existing `$ENGAGEMENT_DIR/report.md`, pull the same backend report state, and run the 12 checks above against the rendered report.
 
-- Fix report-local failures directly in `report.md`: wording, structure, counts, cross-reference rows, missing annotations, overlong evidence, title echoes, passive voice, and non-load-bearing sentences.
+- Fix report-local failures directly in `report.md`: wording, structure, counts, missing annotations, overlong evidence, title echoes, passive voice, and non-load-bearing sentences.
 - Return `QA PASS` only when all 12 checks pass after fixes.
 - Return `QA BLOCKED` when the report cannot be corrected without new backend state: missing evidence, missing remediation, unresolved duplicate findings, severity/CVSS mismatch, or a finding that no longer belongs in final output. Include exact finding slugs and the required operator action.
 

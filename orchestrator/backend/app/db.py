@@ -1969,18 +1969,13 @@ def init_db() -> None:
                 agent_id TEXT NOT NULL,
                 agent_role TEXT NOT NULL,
                 task TEXT,
-                skill_loaded TEXT,
                 scope_host TEXT,
                 dispatched_at TEXT NOT NULL,
                 completed_at TEXT,
                 status TEXT NOT NULL,
                 model TEXT,
                 reasoning TEXT,
-                permission TEXT,
-                command_budget INTEGER,
-                output_schema TEXT,
                 dispatch_mode TEXT,
-                files_allowed_json TEXT,
                 finding_slugs_json TEXT,
                 UNIQUE(engagement_id, agent_id)
             )

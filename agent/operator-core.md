@@ -136,36 +136,31 @@ Pass this block verbatim at the top of the dispatch prompt. The specialist write
 ### Specialist Dispatch Contract
 
 Every dispatch declares an explicit contract. The contract is what bounds the specialist's
-context, command authority, and output shape — without it, the operator is implicitly trusting
-the wrapper to enforce limits the wrapper does not actually know about. Sub-agents are not
-"read-only by default": they may execute target-facing commands when the contract grants
-`permission >= passive-probe` or `target-facing`. The boundary is contract-driven, not
-hard-coded — a recon dispatch that needs to run wafw00f and nmap declares `target-facing`
-and the specialist proceeds; an analysis dispatch that should only read recorded artifacts
-declares `artifact-only` and the specialist refuses target-facing commands.
+context and dispatch shape — without it, the operator is implicitly trusting
+the wrapper to enforce limits the wrapper does not actually know about.
 
 Required fields per dispatch:
 
 | Field | Values |
 |---|---|
 | `role` | `recon-specialist` / `source-analyzer` / `surface-collector` / `vulnerability-analyst` / `exploit-developer` / `fuzzer` / `osint-analyst` / `report-writer` / `code-architect` / `code-vuln-hunter` / `code-variant-hunter` / `code-vuln-verifier` / `code-fuzz-engineer` |
+| `dispatch_mode` | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Dispatch-Mode Declaration" below) |
+
+Optional fields:
+
+| Field | Values |
+|---|---|
 | `model` | `claude-opus-4-7` / `claude-sonnet-4-6` / `gpt-5.4` / etc. (per the default-model policy in the Core Loop) |
 | `reasoning` | `low` / `medium` / `high` |
-| `files_allowed` | explicit list — the role file, its declared `Load First` items, plus any extra references the task needs |
-| `files_forbidden` | `agent/AGENTS.md` and `agent/CLAUDE.md` are blanket-forbidden — those are operator-only procedures for phase orchestration, dispatch policy, startup, and cross-agent state management. Specialist context lives in the dispatch payload, role file, and that role's `Load First` files. Cross-cutting context (audit-flag tables, listener conventions, OOB callback workflow, runtime tier table, half-phase tag definitions) lives in `agent/shared-constraints.md` or `agent/shared-constraints-code.md`, which every role file's `Load First` section already includes. The dispatch may add other files. |
-| `permission` | `artifact-only` / `passive-probe` / `target-facing` / `target-facing-destructive` (cross-reference the per-target rate calibration table in "Recon Dispatch Resource Policy" before granting `target-facing`) |
-| `command_budget` | upper bound on `aith assess kali ...` calls the specialist may issue this dispatch |
-| `output` | the structured payload schema the agent returns (e.g., `#### Findings`, `#### Surface Candidates`, `#### Coverage Gaps`) |
-| `dispatch_mode` | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Dispatch-Mode Declaration" below) |
+| `scope_host` | target host for this dispatch |
 
 When the operator launches a specialist, register the dispatch up front:
 
 ```bash
 aith assess dispatch register \
     --agent-id <id> --agent-role <role> \
-    --task "..." --skill <path> --scope-host <host> \
-    --model <name> --reasoning <level> \
-    --permission <level> --command-budget <N> --dispatch-mode <mode>
+    --task "..." --scope-host <host> \
+    --model <name> --reasoning <level> --dispatch-mode <mode>
 ```
 
 When the dispatch returns, mark it complete with the slugs it produced:
@@ -245,9 +240,8 @@ Every dispatch launches a fresh agent — treat each dispatch as a clean-room en
 ```bash
 aith assess dispatch register \
     --agent-id <id> --agent-role <role> \
-    --task "..." --skill <path> --scope-host <host> \
-    --model <name> --reasoning <level> \
-    --permission <level> --command-budget <N> --dispatch-mode <mode>
+    --task "..." --scope-host <host> \
+    --model <name> --reasoning <level> --dispatch-mode <mode>
 ```
 
 Update the status when it returns:
@@ -297,7 +291,7 @@ DB="$DIR/cases.db"
 
 1. **Phase 1 — Reconnaissance**
 
-   **Phase 1a/1b dispatch is non-negotiable for ANALYSIS/COVERAGE.** Target-facing recon (1a wildcard subdomain enum, 1b parallel recon + source analysis, 1c reactive nuclei sweep) goes through `recon-specialist` and `source-analyzer`. The operator handles scope prep, command-budget approval, resource thresholds, and durable-state recording. Operator carve-outs (mechanical pipeline checks): (1) credential auto-use validation — single login test; (2) tier-pick smoke — one `wafw00f` or `httpx` HEAD per host; (3) runtime health smoke — `aith assess kali --help`, version probes, container-status; (4) backend-write helpers — `record-finding`, `supersede-intel`, `resolve-surface`, etc. Everything else target-facing is specialist work. If a specialist cannot be launched (missing skill, missing wrapper, runtime down), record the blocker via `aith assess dispatch record-decision --kind dispatch_blocked --phase 1a --reason "..." --surfaced-to-user` (the row carries `kind=dispatch_blocked` plus `surfaced_to_user=true`) and surface to the user — never silently move analysis work back into the operator loop.
+   **Phase 1a/1b dispatch is non-negotiable for ANALYSIS/COVERAGE.** Target-facing recon (1a wildcard subdomain enum, 1b parallel recon + source analysis, 1c reactive nuclei sweep) goes through `recon-specialist` and `source-analyzer`. The operator handles scope prep, resource thresholds, and durable-state recording. Operator carve-outs (mechanical pipeline checks): (1) credential auto-use validation — single login test; (2) tier-pick smoke — one `wafw00f` or `httpx` HEAD per host; (3) runtime health smoke — `aith assess kali --help`, version probes, container-status; (4) backend-write helpers — `record-finding`, `supersede-intel`, `resolve-surface`, etc. Everything else target-facing is specialist work. If a specialist cannot be launched (missing skill, missing wrapper, runtime down), record the blocker via `aith assess dispatch record-decision --kind dispatch_blocked --phase 1a --reason "..." --surfaced-to-user` (the row carries `kind=dispatch_blocked` plus `surfaced_to_user=true`) and surface to the user — never silently move analysis work back into the operator loop.
 
    **1a. Wildcard subdomain enumeration (when scope.json `hosts` contains `*.domain` entries)** — dispatch `recon-specialist` with `agent/skills/subdomain-enumeration/SKILL.md` loaded BEFORE the parallel recon+source pass. Subdomain expansion must land before downstream steps because 1b's endpoint inventory and 1c's reactive nuclei sweep both consume live hosts as input; running them first against the apex alone misses the wildcard surface entirely. Output: live subdomains ingested via `aith assess ingest-endpoints "$DB" subdomain-enum` so they flow into the work buffer alongside apex hosts.
    Before dispatching subdomain enumeration, run `aith assess kali exec --technique HEALTH --intent "verify subdomain-enum runtime binaries" --probe-kind fingerprint --phase recon --timeout 30 -- which alterx asnmap bbot cero dnsx massdns puredns shuffledns subfinder` to confirm tooling. Missing binaries → fix the runtime, do not silently degrade — puredns silently fails when massdns is missing (zero output, no error, exit code 0), and a dnsx fallback against a typical bruteforce wordlist will spike container CPU before stabilizing. Recon-specialist dispatches scanning multiple hosts MUST use `nmap -iL hosts.txt`. The operator never asks a specialist to loop nmap per-host; consolidation is non-negotiable. If the specialist generates `for h in hosts; do aith assess kali nmap-scan --target $h ...`, the operator catches it in dispatch review and re-dispatches with the consolidated command.

@@ -198,10 +198,8 @@ after each major step in your methodology, not only at the end. See
 
 - `## Executive Summary` — severity counts, posture narrative, top recommendation
 - `## Methodology` — approach, phases, tools, limitations
-- `## Findings` — each finding self-contained with NNN ID, slug cross-reference, CVSS, evidence, remediation
-- `## Attack Path Narrative` — chain scenarios with finding cross-references
-- `## Coverage Summary` — metrics from the assessment summary endpoint
-- `## Finding Cross-Reference` — table mapping report IDs to backend slugs
+- `## Findings` — each finding self-contained with NNN ID, CVSS, evidence, remediation (no internal slugs)
+- `## Attack Path Narrative` — chain scenarios with finding number cross-references
 - `## Appendix` — tool output, timeline, scope verification
 
 ## Output Contract

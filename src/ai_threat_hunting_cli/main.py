@@ -676,6 +676,11 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
         _oob_client(args, install_root, options)
 
 
+def _tmux_has_oob_client(name: str) -> bool:
+    result = docker_run_command(["docker", "exec", "security-research", "sh", "-lc", f"tmux has-session -t oob-client-{shlex.quote(name)} 2>/dev/null"])
+    return result.returncode == 0
+
+
 def _oob_client(args: argparse.Namespace, install_root: Path, options: OobOptions) -> None:
     if args.oob_client_command == "start":
         if args.engagement and args.select:
@@ -696,8 +701,13 @@ def _oob_client(args: argparse.Namespace, install_root: Path, options: OobOption
     elif args.oob_client_command == "stop":
         stop_oob_client(args.name, runner=docker_run_command)
     elif args.oob_client_command == "list":
-        for client in list_oob_clients(runner=docker_run_command):
-            print(client)
+        clients = list_oob_clients(runner=docker_run_command)
+        if not clients:
+            print("No OOB clients configured.", file=sys.stderr)
+        for client in clients:
+            alive = _tmux_has_oob_client(client)
+            status = "running" if alive else "dead"
+            print(f"{client}\t{status}")
 
 
 def _oob_options(install_root: Path) -> OobOptions:
