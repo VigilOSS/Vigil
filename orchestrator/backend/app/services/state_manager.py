@@ -3831,7 +3831,6 @@ def _find_dedup_predecessor(
           AND command = ?
           AND argv_json = ?
           AND status IN ('queued', 'running')
-          AND superseded_by_id IS NULL
           AND datetime(created_at) >= {cutoff}
         ORDER BY id DESC
         LIMIT 1
@@ -3997,7 +3996,9 @@ def record_command_run(
         # to one audit row and ``list-command-runs`` lied about coverage. By
         # always inserting we get one row per execution attempt; readers that
         # want to filter to "primary" runs can join on
-        # ``superseded_by_id IS NULL``.
+        # ``superseded_by_id IS NULL``. The predecessor lookup itself scans all
+        # in-flight peers, including already-linked duplicate rows, so duplicate
+        # chains continue when the original primary finishes before later peers.
         superseded_by_id: int | None = None
         if not force:
             superseded_by_id = _find_dedup_predecessor(
@@ -4295,6 +4296,7 @@ def finalize_command_run(
 
 _JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost", "stop_failed"}
 _JOB_VALID_STATUSES = {"queued", "running", *_JOB_TERMINAL_STATUSES}
+_JOB_PRE_TERMINAL_STATUSES = _JOB_VALID_STATUSES - _JOB_TERMINAL_STATUSES
 
 
 def _serialize_job(row) -> dict[str, Any]:
@@ -4442,11 +4444,38 @@ def update_job(
                     "existing": _serialize_job(existing),
                 },
             )
-        values.extend([engagement.id, int(job_id)])
-        connection.execute(
-            f"UPDATE assessment_jobs SET {', '.join(sets)} WHERE engagement_id = ? AND id = ?",
-            tuple(values),
+        where = "WHERE engagement_id = ? AND id = ?"
+        where_values: list[Any] = [engagement.id, int(job_id)]
+        guard_terminal_update = (
+            status_value in _JOB_TERMINAL_STATUSES
+            and existing_status in _JOB_PRE_TERMINAL_STATUSES
         )
+        if guard_terminal_update:
+            pre_terminal_statuses = tuple(sorted(_JOB_PRE_TERMINAL_STATUSES))
+            placeholders = ", ".join("?" for _ in pre_terminal_statuses)
+            where += f" AND status IN ({placeholders})"
+            where_values.extend(pre_terminal_statuses)
+        cursor = connection.execute(
+            f"UPDATE assessment_jobs SET {', '.join(sets)} {where}",
+            tuple(values + where_values),
+        )
+        if cursor.rowcount == 0:
+            current = connection.execute(
+                "SELECT * FROM assessment_jobs WHERE engagement_id = ? AND id = ?",
+                (engagement.id, int(job_id)),
+            ).fetchone()
+            if current is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="job not found",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "job already terminal",
+                    "existing": _serialize_job(current),
+                },
+            )
         row = connection.execute(
             "SELECT * FROM assessment_jobs WHERE id = ?",
             (int(job_id),),
