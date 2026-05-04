@@ -15,6 +15,37 @@ class AssessError(Exception):
     pass
 
 
+def _is_handoff_duplicate_conflict(exc: AssessError) -> bool:
+    """Return True only for the backend's duplicate handoff 409.
+
+    Handoff POST can also return 409 for validation failures such as
+    agent_role mismatch. Those must not fall through to PATCH because PATCH
+    intentionally omits immutable fields such as agent_role.
+    """
+    message = str(exc)
+    if not message.startswith("HTTP 409"):
+        return False
+    _, _, body = message.partition("\n")
+    candidates = [body]
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        if isinstance(detail, str):
+            candidates.append(detail)
+        elif isinstance(detail, dict):
+            nested = detail.get("message")
+            if isinstance(nested, str):
+                candidates.append(nested)
+    return any(
+        "handoff with agent_id=" in candidate
+        and "already exists; PATCH to update" in candidate
+        for candidate in candidates
+    )
+
+
 class AssessmentClient:
     """HTTP client for the orchestrator assessment API.
 
@@ -256,7 +287,7 @@ class AssessmentClient:
         try:
             return self.post("dispatch-handoffs", payload)
         except AssessError as exc:
-            if "HTTP 409" not in str(exc):
+            if not _is_handoff_duplicate_conflict(exc):
                 raise
             agent_id = payload.get("agent_id")
             if not agent_id:
