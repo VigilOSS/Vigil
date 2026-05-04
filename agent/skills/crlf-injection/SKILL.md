@@ -16,9 +16,9 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `curl` (manual CRLF injection probing with encoded payloads)
+- `aith assess kali exec -- curl ...` (manual CRLF injection probing with encoded payloads — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools (inspect injected response headers)
-- OOB callback server (confirm exploitation impact via external request)
+- OOB callback: confirm readiness with `aith oob status --json`, get the unique callback URL and check correlated hits with `aith oob client logs <name> --lines 80`
 
 ## Methodology
 
@@ -115,7 +115,7 @@ curl --http2 -H ":path: /page%0d%0aInjected:value" https://target/
 - Injection point (URL parameter, header, logged field)
 - Exact payload including encoding variant that succeeded
 - Evidence of injected header in response (curl -v output or DevTools screenshot)
-- Impact: session fixation, XSS via response splitting, open redirect, log forging
+- Impact: session fixation, XSS via response splitting, open redirect, log forging — confirming the header is injected is not enough; you must show the **attacker outcome** (e.g., session cookie replaced to attacker-controlled value enabling session fixation, XSS payload executes in victim browser via poisoned response, Referer-based token leaks via open redirect)
 - Whether filter bypass was required and which encoding worked
 - Full request/response for reproducibility
 

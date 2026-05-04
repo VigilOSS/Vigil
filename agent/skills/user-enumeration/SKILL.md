@@ -195,29 +195,38 @@ done
 ### 7. Brute-Force Enumeration (after confirming enumerable endpoint)
 
 ```bash
-# Username enumeration via ffuf
-ffuf -u "http://target/api/login" \
-  -X POST -H "Content-Type: application/json" \
-  -d '{"username":"FUZZ","password":"invalid"}' \
-  -w /seclists/Usernames/top-usernames-shortlist.txt \
-  -fr "User not found" \
-  -o /engagements/$ENGAGEMENT_KEY/scans/user_enum.json -of json
+# Username enumeration via aith assess kali ffuf
+aith assess kali ffuf \
+  --technique AUTH --intent "username enumeration on login endpoint" \
+  --probe-kind payload --phase consume-test --timeout 600 \
+  -- -u "http://target/api/login" \
+     -X POST -H "Content-Type: application/json" \
+     -d '{"username":"FUZZ","password":"invalid"}' \
+     -w /seclists/Usernames/top-usernames-shortlist.txt \
+     -fr "User not found" \
+     -o /engagements/$ENGAGEMENT_KEY/scans/user_enum.json -of json
 
 # Email enumeration via registration check
-ffuf -u "http://target/api/register" \
-  -X POST -H "Content-Type: application/json" \
-  -d '{"email":"FUZZ@target.example","password":"Test123!"}' \
-  -w /seclists/Usernames/top-usernames-shortlist.txt \
-  -fr "Check your email" \
-  -o /engagements/$ENGAGEMENT_KEY/scans/email_enum.json -of json
+aith assess kali ffuf \
+  --technique AUTH --intent "email enumeration via registration endpoint" \
+  --probe-kind payload --phase consume-test --timeout 600 \
+  -- -u "http://target/api/register" \
+     -X POST -H "Content-Type: application/json" \
+     -d '{"email":"FUZZ@target.example","password":"Test123!"}' \
+     -w /seclists/Usernames/top-usernames-shortlist.txt \
+     -fr "Check your email" \
+     -o /engagements/$ENGAGEMENT_KEY/scans/email_enum.json -of json
 
 # Phone number enumeration (if applicable)
-ffuf -u "http://target/api/check-phone" \
-  -X POST -H "Content-Type: application/json" \
-  -d '{"phone":"FUZZ"}' \
-  -w /engagements/$ENGAGEMENT_KEY/scans/phone_wordlist.txt \
-  -fs <baseline_size> \
-  -o /engagements/$ENGAGEMENT_KEY/scans/phone_enum.json -of json
+aith assess kali ffuf \
+  --technique AUTH --intent "phone number enumeration via check-phone endpoint" \
+  --probe-kind payload --phase consume-test --timeout 600 \
+  -- -u "http://target/api/check-phone" \
+     -X POST -H "Content-Type: application/json" \
+     -d '{"phone":"FUZZ"}' \
+     -w /engagements/$ENGAGEMENT_KEY/scans/phone_wordlist.txt \
+     -fs <baseline_size> \
+     -o /engagements/$ENGAGEMENT_KEY/scans/phone_enum.json -of json
 ```
 
 ### 8. OTP / Verification Code Abuse
@@ -302,7 +311,7 @@ other interface. The protocol doesn't matter — the differential response does.
 - **Enumerable interface**: protocol, endpoint/address, parameter
 - **Observable difference**: what exactly changes (message, code, size, timing, structure)
 - **Valid vs invalid response**: exact diff or description
-- **Confirmed valid users**: any usernames/emails/phones confirmed to exist
+- **Confirmed valid users**: any usernames/emails/phones confirmed to exist — confirming the endpoint is enumerable is not enough; you must show the **attacker outcome** (e.g., the password reset error "Email not registered" vs "Reset link sent" confirmed 8 valid email addresses from the company directory, and those addresses were used to successfully credential-stuff 2 accounts from the breach list; the timing oracle (valid user 230ms, invalid 18ms average) confirmed `admin@target.example` exists with no rate limiting, making brute-force of that account feasible in under 2 minutes at 100 req/s)
 - **Rate limiting**: whether the interface has brute-force protection
 - **Severity**: MEDIUM if enumerable + no rate limit, LOW if enumerable with rate limit
 

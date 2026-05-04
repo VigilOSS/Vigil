@@ -52,11 +52,13 @@ For each pair, send `GET /jsonapi/<type>/<bundle>?page[limit]=1`. A 200 with non
 
 ## Sparse-fieldset abuse
 
-Drupal JSON:API supports the JSON:API spec's `?fields[<type>--<bundle>]=...` parameter. The default field set sometimes hides sensitive fields when the access check runs on the default include list — but the sparse-fieldset request can force the response to include them when the per-field access check is missing or misconfigured:
+Drupal JSON:API supports the JSON:API spec's `?fields[<type>--<bundle>]=...` parameter. The default field set sometimes hides sensitive fields when the access check runs on the default include list — but the sparse-fieldset request can force the response to include them when the per-field access check is missing or misconfigured.
+
+Send each probe via `aith assess kali exec -- curl -sS 'https://TARGET<path>' -H 'Accept: application/vnd.api+json'` with the required audit flags. URL patterns:
 
 ```
-GET /jsonapi/user/user?page[limit]=1&fields[user--user]=mail,name,roles,field_phone,field_internal_note,uid,init,langcode,timezone,status
-GET /jsonapi/node/article?page[limit]=1&fields[node--article]=title,body,field_internal_only,field_review_notes,uid
+/jsonapi/user/user?page[limit]=1&fields[user--user]=mail,name,roles,field_phone,field_internal_note,uid,init,langcode,timezone,status
+/jsonapi/node/article?page[limit]=1&fields[node--article]=title,body,field_internal_only,field_review_notes,uid
 ```
 
 A 200 with the requested fields populated indicates the per-field access check is missing — record each field as a separate disclosure when the data is sensitive.

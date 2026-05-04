@@ -83,13 +83,18 @@ Version intel feeds CVE-match in osint-recon — record under `aith assess recor
 
 ## Bounded-vs-systemic IDOR test
 
-Pexip uses sequential integer IDs in object URLs (`/api/admin/configuration/v1/conferencing_node/1/`, `.../2/`). Walk the ID space:
+Pexip uses sequential integer IDs in object URLs (`/api/admin/configuration/v1/conferencing_node/1/`, `.../2/`). Walk the ID space via `aith assess kali exec` so the sweep lands in the audit pipeline:
 
-```
-for id in 1 2 3 4 5 6 7 8 9 10; do
-  curl -sS "https://TARGET/api/admin/configuration/v1/conferencing_node/$id/" \
-    -o /dev/null -w "%{http_code} $id\n"
-done
+```bash
+aith assess kali exec --technique IDOR \
+  --intent "Pexip conferencing_node IDOR boundedness sweep, IDs 1-10" \
+  --probe-kind payload --phase consume-test --timeout 60 -- \
+  bash -c '
+    for id in 1 2 3 4 5 6 7 8 9 10; do
+      curl -sS "https://TARGET/api/admin/configuration/v1/conferencing_node/$id/" \
+        -o /dev/null -w "%{http_code} $id\n"
+    done
+  '
 ```
 
 - **Bounded** — only the current object's IDs return 200; non-existent IDs return 404. The leak is the namespace's current contents.

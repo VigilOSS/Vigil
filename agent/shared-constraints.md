@@ -420,7 +420,7 @@ These are the most commonly violated rules — internalize them before you start
 - **Validate before writing.** Do not draft report content before the lead is reproducible and worth a human reader's time.
 - **Evidence beats volume.** A few decisive requests and exact proofs outweigh broad noisy scanning.
 
-Full rule sets: `agent/rules/hunting.md`, `agent/rules/reporting.md`
+Full rule sets: `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
 
 ---
 
@@ -464,8 +464,7 @@ Record state immediately using `aith assess` with JSON files:
 - **Blocked techniques:** `aith assess post blocked-techniques <json-file>`
 - **Probe runs:** `aith assess post probe-runs <json-file>`
 
-Write payloads to `/tmp/<type>-<slug>.json` before calling.
-Never pass JSON as an inline shell argument.
+Write payloads to `/tmp/<type>-<slug>.json` before calling — inline JSON shell arguments cause escaping damage and are not auditable.
 
 These follow the same backend-first principle as finding recording. Do not defer chain or credential
 recording to the operator. The agent that proves the state writes it; the operator verifies it landed in

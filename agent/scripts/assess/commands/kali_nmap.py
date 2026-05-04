@@ -1,6 +1,9 @@
 """aith assess kali nmap-scan — typed wrapper around nmap inside the runtime."""
 from __future__ import annotations
 
+import sys
+
+from assess.lib.client import AssessError
 from assess.lib.kali import (
     add_passthrough_args_flag,
     add_required_kali_flags,
@@ -18,7 +21,7 @@ def register(subparsers) -> None:
     )
     add_required_kali_flags(p)
     add_passthrough_args_flag(p)
-    p.add_argument("--target", required=True, help="Target host or CIDR.")
+    p.add_argument("--target", default="", help="Target host or CIDR. Optional when -iL is supplied.")
     p.add_argument("--ports", default="top-1000", help="Port spec: top-100 | top-1000 | -p- full | explicit list (e.g. 22,80,443).")
     p.add_argument("--scripts", default="", help="Comma-separated NSE scripts (e.g. default,vuln).")
     p.add_argument(
@@ -39,6 +42,10 @@ def register(subparsers) -> None:
 
 
 def run(args) -> None:
+    if not args.target and not args.input_list:
+        print("nmap-scan: pass --target <host-or-cidr> or -iL <file>", file=sys.stderr)
+        raise AssessError("missing --target or -iL")
+
     cmd: list[str] = ["nmap"]
     if args.scan_type:
         cmd.append(f"-{args.scan_type}")
@@ -69,7 +76,8 @@ def run(args) -> None:
         cmd.extend(["-p", args.ports])
 
     extend_cmd_with_extra_args(cmd, args)
-    cmd.append(args.target)
+    if args.target:
+        cmd.append(args.target)
 
     result = kali_exec(cmd, tool_name="nmap", **kali_args_to_kwargs(args))
     emit_result(result)

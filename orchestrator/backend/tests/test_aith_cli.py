@@ -1721,6 +1721,150 @@ def test_resolve_surface_accepts_partially_covered_with_followup_condition(
     assert captured["payload"]["followup_condition"] == "needs auth re-test"
 
 
+def test_transition_phase_resolves_engagement_dir_from_cwd(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`transition-phase` should share the standard assess config fallback:
+    cwd with scope.json is a valid engagement context."""
+    module = _load_assess_module(
+        "round3_transition_phase_cwd_module",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    engagement = tmp_path / "agent" / "engagements" / "eng-test"
+    engagement.mkdir(parents=True)
+    scope_path = engagement / "scope.json"
+    scope_path.write_text(
+        json.dumps({"engagement_type": "web", "current_phase": ""}),
+        encoding="utf-8",
+    )
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.delenv("ENGAGEMENT_DIR", raising=False)
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://127.0.0.1:9")
+    monkeypatch.chdir(engagement)
+
+    module.run(SimpleNamespace(engagement_dir=None, target_phase="recon", force=False))
+
+    assert json.loads(scope_path.read_text(encoding="utf-8"))["current_phase"] == "recon"
+    assert "Phase transitioned" in capsys.readouterr().out
+
+
+def test_transition_phase_backend_error_blocks_precondition_check(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Backend/query failures during guarded phase transitions are blockers
+    because the readiness state is unknown."""
+    module = _load_assess_module(
+        "round3_transition_phase_blocker_module",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    engagement = tmp_path / "agent" / "engagements" / "eng-test"
+    engagement.mkdir(parents=True)
+    scope_path = engagement / "scope.json"
+    scope_path.write_text(
+        json.dumps({"engagement_type": "web", "current_phase": "recon"}),
+        encoding="utf-8",
+    )
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def get(self, _path: str) -> dict:
+            raise RuntimeError("backend unavailable")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(engagement),
+            engagement_key=engagement.name,
+            agent_root=str(tmp_path / "agent"),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(engagement),
+                target_phase="collect",
+                force=False,
+            )
+        )
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "precondition_check_failed" in err
+    assert "backend unavailable" in err
+    assert json.loads(scope_path.read_text(encoding="utf-8"))["current_phase"] == "recon"
+
+
+def test_check_coverage_reports_partially_covered_surfaces(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`check-coverage` should explain partial-coverage blockers instead of
+    exiting non-zero without naming the follow-up condition."""
+    module = _load_assess_module(
+        "round3_check_coverage_module",
+        "agent/scripts/assess/commands/check_coverage.py",
+    )
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def get(self, path: str) -> dict:
+            assert path == "coverage-readiness"
+            return {
+                "ready": False,
+                "blocker_count": 1,
+                "unresolved_surfaces": [],
+                "partially_covered_surfaces": [
+                    {
+                        "surface_type": "object_reference",
+                        "target_descriptor": "https://example.test/api/users/{id}",
+                        "followup_condition": "needs auth re-test",
+                    }
+                ],
+                "high_risk_deferred_surfaces": [],
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(tmp_path),
+            engagement_key="eng-test",
+            agent_root=str(tmp_path),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.run(SimpleNamespace(engagement_dir=str(tmp_path)))
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "Partially covered surfaces need follow-up" in err
+    assert "needs auth re-test" in err
+
+
 def _load_assess_module(name: str, relative: str):
     """Load an assess CLI submodule by relative path so tests can call ``module.run`` directly."""
     import importlib.util
@@ -1998,15 +2142,11 @@ def test_list_clusters_host_filter_supports_wildcard(
     assert "alpha" not in cluster_keys
 
 
-def test_supersede_intel_partial_payload_passes_client_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_supersede_intel_requires_natural_key_before_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """P2 #5: a partial payload (no natural-key fields) must clear the client-side validator.
-
-    We monkeypatch the HTTP client and config loader so the test never reaches
-    the network and just asserts the schema-validation gate accepted the
-    partial payload before dispatching the request.
-    """
+    """Supersede inserts a replacement row; metadata-only edits must fail
+    client-side and tell the operator to include the natural key."""
     supersede_module = _load_assess_module(
         "wave3_supersede_intel_module",
         "agent/scripts/assess/commands/supersede_intel.py",
@@ -2041,19 +2181,23 @@ def test_supersede_intel_partial_payload_passes_client_validation(
         ),
     )
 
-    supersede_module.run(
-        SimpleNamespace(
-            intel_type="cve",
-            intel_id=5,
-            payload=None,
-            inline_payload='{"validation_status":"exploited"}',
-            rationale="post-validation",
-            engagement_dir=str(tmp_path),
+    with pytest.raises(SystemExit) as exc:
+        supersede_module.run(
+            SimpleNamespace(
+                intel_type="cve",
+                intel_id=5,
+                payload=None,
+                inline_payload='{"validation_status":"exploited"}',
+                rationale="post-validation",
+                engagement_dir=str(tmp_path),
+            )
         )
-    )
 
-    assert captured["method"] == "POST"
-    assert "/intel/cves/5/supersede" in str(captured["path"])
+    assert exc.value.code == 1
+    assert captured == {}
+    err = capsys.readouterr().err
+    assert "missing required supersede natural-key field: cve_id" in err
+    assert "missing required supersede natural-key field: affected_component" in err
 
 
 def test_validate_dispatch_contract_accepts_minimal_payload(
@@ -2063,12 +2207,6 @@ def test_validate_dispatch_contract_accepts_minimal_payload(
     assess_main = _load_assess_main()
     payload = {
         "role": "vulnerability-analyst",
-        "model": "claude-opus-4-7",
-        "files_allowed": ["agent/agents/vulnerability-analyst.md"],
-        "files_forbidden": ["agent/CLAUDE.md", "agent/AGENTS.md"],
-        "permission": "passive-probe",
-        "command_budget": 25,
-        "output": "#### Findings",
         "dispatch_mode": "item-iterating",
     }
     contract_path = tmp_path / "dispatch.json"
@@ -2078,20 +2216,14 @@ def test_validate_dispatch_contract_accepts_minimal_payload(
     assert "OK" in capsys.readouterr().out
 
 
-def test_validate_dispatch_contract_rejects_unknown_permission(
+def test_validate_dispatch_contract_rejects_unknown_dispatch_mode(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """P3 #31: unknown permission values surface as errors so the contract fails closed."""
+    """Unknown dispatch_mode values surface as errors so the contract fails closed."""
     assess_main = _load_assess_main()
     payload = {
         "role": "vulnerability-analyst",
-        "model": "claude-opus-4-7",
-        "files_allowed": [],
-        "files_forbidden": [],
-        "permission": "godmode",
-        "command_budget": 5,
-        "output": "#### Findings",
-        "dispatch_mode": "item-iterating",
+        "dispatch_mode": "turbo-mode",
     }
     contract_path = tmp_path / "dispatch.json"
     contract_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -2099,31 +2231,7 @@ def test_validate_dispatch_contract_rejects_unknown_permission(
     with pytest.raises(SystemExit):
         assess_main(["validate-dispatch-contract", str(contract_path)])
     err = capsys.readouterr().err
-    assert "permission" in err and "godmode" in err
-
-
-def test_validate_dispatch_contract_warns_on_overlap(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """P3 #31: files_allowed ∩ files_forbidden is a warning, not a hard error."""
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "vulnerability-analyst",
-        "model": "claude-opus-4-7",
-        "files_allowed": ["agent/CLAUDE.md"],
-        "files_forbidden": ["agent/CLAUDE.md", "agent/AGENTS.md"],
-        "permission": "artifact-only",
-        "command_budget": 0,
-        "output": "#### Findings",
-        "dispatch_mode": "deep-manual",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    captured = capsys.readouterr()
-    assert "OK" in captured.out
-    assert "WARN" in captured.err and "overlap" in captured.err
+    assert "dispatch_mode" in err and "turbo-mode" in err
 
 
 def test_actor_kind_warn_on_non_log_subcommand(
@@ -2133,12 +2241,6 @@ def test_actor_kind_warn_on_non_log_subcommand(
     assess_main = _load_assess_main()
     payload = {
         "role": "vulnerability-analyst",
-        "model": "claude-opus-4-7",
-        "files_allowed": [],
-        "files_forbidden": [],
-        "permission": "artifact-only",
-        "command_budget": 0,
-        "output": "#### Findings",
         "dispatch_mode": "deep-manual",
     }
     contract_path = tmp_path / "dispatch.json"
@@ -2291,7 +2393,6 @@ def test_render_handoff_emits_known_fields_for_existing_agent_id(
         "agent_id": "AGENT-EX-1",
         "agent_role": "vulnerability-analyst",
         "task": "Validate IDOR on /api/users/{id}",
-        "skill_loaded": "agent/skills/idor-testing/SKILL.md",
         "scope_host": "target.example",
         "dispatched_at": "2026-04-27T10:00:00Z",
         "status": "completed",
@@ -2319,7 +2420,6 @@ def test_render_handoff_emits_known_fields_for_existing_agent_id(
     out = capsys.readouterr().out
     assert "#### Handoff from vulnerability-analyst dispatch AGENT-EX-1" in out
     assert "Validate IDOR on /api/users/{id}" in out
-    assert "agent/skills/idor-testing/SKILL.md" in out
     assert "target.example" in out
     assert "Validated IDOR on /api/users/{id}" in out  # summary
     assert "Confidence:** high" in out
@@ -2382,7 +2482,6 @@ def test_render_handoff_truncates_at_max_lines(
         "agent_id": "AGENT-MANY-FINDINGS",
         "agent_role": "vulnerability-analyst",
         "task": "deep IDOR sweep across 20 endpoints",
-        "skill_loaded": "agent/skills/idor-testing/SKILL.md",
         "scope_host": "target.example",
         "dispatched_at": "2026-04-27T11:00:00Z",
         "status": "completed",
@@ -2435,7 +2534,6 @@ def test_render_handoff_missing_slug_distinct_from_fetch_error(
         "agent_id": "AGENT-DROP",
         "agent_role": "vulnerability-analyst",
         "task": "slug-drop test",
-        "skill_loaded": "agent/skills/idor-testing/SKILL.md",
         "scope_host": "target.example",
         "dispatched_at": "2026-04-27T12:00:00Z",
         "status": "completed",
@@ -2553,15 +2651,10 @@ def _run_dispatch_verb(monkeypatch, action: str, *, extra=None, **flags):
         "agent_id": None,
         "agent_role": None,
         "task": None,
-        "skill": None,
         "scope_host": None,
         "dispatch_model": None,
         "reasoning": None,
-        "permission": None,
-        "command_budget": None,
-        "output_schema": None,
         "dispatch_mode_arg": None,
-        "files_allowed": None,
         "from_json": None,
         "dispatch_status": None,
         "completed_at": None,
@@ -2606,15 +2699,10 @@ def _dispatch_args(action: str, *, db_path: str | None = None, extra=None, **fla
         "agent_id": None,
         "agent_role": None,
         "task": None,
-        "skill": None,
         "scope_host": None,
         "dispatch_model": None,
         "reasoning": None,
-        "permission": None,
-        "command_budget": None,
-        "output_schema": None,
         "dispatch_mode_arg": None,
-        "files_allowed": None,
         "from_json": None,
         "dispatch_status": None,
         "completed_at": None,
@@ -2696,8 +2784,6 @@ def test_dispatch_register_writes_payload(
         agent_id="AG-CLI-1",
         agent_role="vulnerability-analyst",
         task="IDOR sweep",
-        skill="agent/skills/idor-testing/SKILL.md",
-        permission="target-facing",
         reasoning="high",
         dispatch_mode_arg="item-iterating",
     )
@@ -2761,7 +2847,6 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
         "agent_role": "vulnerability-analyst",
         "status": "in-progress",
         "scope_host": "app.example.test",
-        "permission": "target-facing",
         "dispatch_mode": "hypothesis-driven",
         "task": "Review password reset flows",
     }
@@ -2783,7 +2868,6 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
             agent_id="AG-NEW",
             agent_role="vulnerability-analyst",
             scope_host="app.example.test",
-            permission="target-facing",
             dispatch_mode_arg="hypothesis-driven",
             task="Review account deletion flows",
         )
@@ -2856,9 +2940,9 @@ def test_dispatch_list_emits_jsonl(
     module.run(SimpleNamespace(
         db_path="list", action="", extra=[], reason="", by="status",
         max_lines=40, include_evidence=False, engagement_dir=None,
-        agent_id=None, agent_role=None, task=None, skill=None, scope_host=None,
-        dispatch_model=None, reasoning=None, permission=None, command_budget=None,
-        output_schema=None, dispatch_mode_arg=None, files_allowed=None,
+        agent_id=None, agent_role=None, task=None, scope_host=None,
+        dispatch_model=None, reasoning=None,
+        dispatch_mode_arg=None,
         from_json=None, dispatch_status=None, completed_at=None, finding_slugs=None,
         filter_role=None, filter_since=None, task_q=None, dispatch_limit=None,
         decision_kind=None, payload_json=None, surfaced_to_user=False,
@@ -2988,15 +3072,10 @@ def test_dispatch_record_handoff_is_idempotent_for_repeat_calls(
             "agent_id": None,
             "agent_role": None,
             "task": None,
-            "skill": None,
             "scope_host": None,
             "dispatch_model": None,
             "reasoning": None,
-            "permission": None,
-            "command_budget": None,
-            "output_schema": None,
             "dispatch_mode_arg": None,
-            "files_allowed": None,
             "from_json": str(path),
             "dispatch_status": None,
             "completed_at": None,
@@ -3052,7 +3131,17 @@ def test_record_handoff_client_upsert_falls_back_to_patch_on_409() -> None:
 
         def post(self, endpoint: str, payload: dict) -> dict:  # type: ignore[override]
             captured["posts"].append((endpoint, payload))
-            raise AssessError("HTTP 409:\nduplicate (engagement, agent_id)")
+            raise AssessError(
+                "HTTP 409:\n"
+                + json.dumps(
+                    {
+                        "detail": (
+                            "handoff with agent_id='AG-X' already exists; "
+                            "PATCH to update"
+                        )
+                    }
+                )
+            )
 
         def patch(self, endpoint: str, payload: dict, *, accept_409: bool = False) -> dict:  # type: ignore[override]
             captured["patches"].append((endpoint, payload))
@@ -3075,14 +3164,53 @@ def test_record_handoff_client_upsert_falls_back_to_patch_on_409() -> None:
     assert patch_body["summary"] == "v2"
 
 
+def test_record_handoff_client_upsert_does_not_patch_role_mismatch_409() -> None:
+    """Role-mismatch 409s are validation failures, not duplicate-row upserts."""
+    from agent.scripts.assess.lib.client import AssessError, AssessmentClient
+
+    captured: dict[str, object] = {"posts": [], "patches": []}
+
+    class _StubClient(AssessmentClient):
+        def __init__(self) -> None:
+            pass
+
+        def post(self, endpoint: str, payload: dict) -> dict:  # type: ignore[override]
+            captured["posts"].append((endpoint, payload))
+            raise AssessError(
+                "HTTP 409:\n"
+                + json.dumps(
+                    {
+                        "detail": (
+                            "agent_role mismatch: handoff agent_role='wrong' "
+                            "does not match registered dispatch role='right'"
+                        )
+                    }
+                )
+            )
+
+        def patch(self, endpoint: str, payload: dict, *, accept_409: bool = False) -> dict:  # type: ignore[override]
+            captured["patches"].append((endpoint, payload))
+            return {"id": 7, "agent_id": "AG-X", **payload}
+
+    stub = _StubClient()
+    with pytest.raises(AssessError, match="agent_role mismatch"):
+        stub.record_handoff(
+            {"agent_id": "AG-X", "agent_role": "wrong", "summary": "v2"},
+            upsert=True,
+        )
+    assert len(captured["posts"]) == 1
+    assert captured["patches"] == []
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # resolve_orchestrator_base_url precedence chain
 #
 # Resolution order (highest → lowest):
 #   1. ORCHESTRATOR_BASE_URL env var (explicit override)
-#   2. Per-engagement ``.orchestrator.env`` (and install-root variants)
+#   2. Per-engagement ``.orchestrator.env``
 #   3. ``aith config get orchestrator_base_url`` (persistent default)
-#   4. Hardcoded fallback ``http://127.0.0.1:18000``
+#   4. Install-root env files (legacy fallback)
+#   5. Hardcoded fallback ``http://127.0.0.1:18000``
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -3155,6 +3283,55 @@ def test_resolve_orchestrator_base_url_aith_config_falls_through(
     )
 
 
+def test_resolve_orchestrator_base_url_engagement_env_wins_over_install_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-install-env:18000\n", encoding="utf-8"
+    )
+    (engagement_dir / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-engagement-env:18000\n", encoding="utf-8"
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: "http://from-config:5678")
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == "http://from-engagement-env:18000"
+    )
+
+
+def test_resolve_orchestrator_base_url_aith_config_wins_over_install_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-install-env:18000\n", encoding="utf-8"
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: "http://from-config:5678/")
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == "http://from-config:5678"
+    )
+
+
 def test_resolve_orchestrator_base_url_falls_back_to_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3175,4 +3352,62 @@ def test_resolve_orchestrator_base_url_falls_back_to_default(
     assert (
         resolve_orchestrator_base_url(install_root, engagement_dir)
         == DEFAULT_ORCHESTRATOR_BASE_URL
+    )
+
+
+def test_assess_config_engagement_env_wins_over_install_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    module = importlib.import_module("assess.lib.config")
+    install_root = tmp_path / "install"
+    engagement_dir = install_root / "agent" / "engagements" / "eng-test"
+    engagement_dir.mkdir(parents=True)
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-install-env:18000\n", encoding="utf-8"
+    )
+    (engagement_dir / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-engagement-env:18000\n", encoding="utf-8"
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.delenv("AI_THREAT_HUNTING_CONFIG", raising=False)
+
+    assert (
+        module.resolve_base_url(str(engagement_dir), str(install_root / "agent"))
+        == "http://from-engagement-env:18000"
+    )
+
+
+def test_assess_config_aith_config_wins_over_install_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    module = importlib.import_module("assess.lib.config")
+    install_root = tmp_path / "install"
+    engagement_dir = install_root / "agent" / "engagements" / "eng-test"
+    engagement_dir.mkdir(parents=True)
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-install-env:18000\n", encoding="utf-8"
+    )
+    config_path = tmp_path / "aith-config.json"
+    config_path.write_text(
+        json.dumps({"orchestrator_base_url": "http://from-config:5678/"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setenv("AI_THREAT_HUNTING_CONFIG", str(config_path))
+
+    assert (
+        module.resolve_base_url(str(engagement_dir), str(install_root / "agent"))
+        == "http://from-config:5678"
     )

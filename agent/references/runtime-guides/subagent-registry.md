@@ -21,17 +21,13 @@ The operator's audit trail. One row per dispatched specialist agent.
 | `agent_id` | string (PK) | Operator-assigned at `dispatch register` time. |
 | `agent_role` | string | `recon-specialist` / `vulnerability-analyst` / etc. |
 | `task` | string | One-paragraph dispatch objective. |
-| `skill_loaded` | string | Path of the primary skill the specialist loaded (`agent/skills/web-recon/SKILL.md`, ...). |
 | `scope_host` | string | The host the dispatch operated against (or `multi` for multi-host). |
 | `dispatched_at` | ISO datetime | Set on `register`. |
 | `completed_at` | ISO datetime | Set on `update-status` when status moves to a terminal value. |
 | `status` | enum | `pending` / `running` / `completed` / `failed` / `aborted`. |
 | `model` | string | The model id (`claude-opus-4-7`, `gpt-5.4`, ...). |
 | `reasoning` | string | `low` / `medium` / `high`. |
-| `permission` | string | `artifact-only` / `passive-probe` / `target-facing` / `target-facing-destructive`. |
-| `command_budget` | int | Upper bound on `aith assess kali ...` calls. |
 | `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation`. |
-| `files_allowed_json` | JSON array | `files_allowed` from the dispatch contract. |
 | `finding_slugs_json` | JSON array | Finding slugs the dispatch produced (set on `update-status`). |
 
 ### CLI
@@ -42,12 +38,9 @@ aith assess dispatch register \
     --agent-id recon_a3f9 \
     --agent-role recon-specialist \
     --task "Phase 1 wildcard subdomain enum + recon on saas.acme.example" \
-    --skill agent/skills/web-recon/SKILL.md \
     --scope-host saas.acme.example \
     --model claude-opus-4-7 \
     --reasoning high \
-    --permission target-facing \
-    --command-budget 40 \
     --dispatch-mode hypothesis-driven
 
 # Update status when the dispatch returns.
@@ -63,11 +56,9 @@ aith assess dispatch list --task-q "wildcard subdomain"
 aith assess dispatch get recon_a3f9
 ```
 
-The contract fields (`model`, `reasoning`, `permission`, `command_budget`,
-`dispatch_mode`, `files_allowed_json`) capture what the dispatch was authorized
-to do alongside the audit fields. Report-writer and later operators read these
-to audit not only what was dispatched but also the bounds the specialist was
-working within.
+The contract fields (`model`, `reasoning`, `dispatch_mode`) capture the dispatch
+shape alongside the audit fields. Report-writer and later operators read these
+to audit not only what was dispatched but also the dispatch configuration.
 
 ## Contract Schema
 
@@ -75,14 +66,9 @@ The contract fields recorded on every `dispatch register` call:
 
 | Field | Type | Values |
 |---|---|---|
-| `model` | string | model id (`claude-opus-4-7`, `claude-sonnet-4-6`, `gpt-5.4`) |
-| `reasoning` | string | `low` / `medium` / `high` |
-| `files_allowed` | string[] | role file plus `Load First` items and any extra references the task needs |
-| `files_forbidden` | string[] | always includes `agent/AGENTS.md` and `agent/CLAUDE.md` (operator-only bootstrap) |
-| `permission` | string | `artifact-only` / `passive-probe` / `target-facing` / `target-facing-destructive` |
-| `command_budget` | integer | upper bound on `aith assess kali ...` calls |
-| `output` | string | the structured payload the dispatch produces — typically a dispatch summary alongside the canonical handoff row in `assessment_dispatch_handoffs` (the dispatches table records who-did-what; the handoffs table records what-was-done; the operator queries both) |
 | `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Dispatch-Mode Declaration" in `agent/operator-core.md`) |
+| `model` | string (optional) | model id (`claude-opus-4-7`, `claude-sonnet-4-6`, `gpt-5.4`) |
+| `reasoning` | string (optional) | `low` / `medium` / `high` |
 
 ## Table 2 — `assessment_dispatch_handoffs`
 
@@ -177,7 +163,7 @@ before advancing.
   pulls finding metadata from the findings table and artifact state from disk.
 - **Decision audit.** Vendor-SaaS scope and egress-reputation decisions are
   cross-dispatch state — the dispatcher needs them when choosing the next
-  dispatch's permission / scope shape.
+  dispatch's scope shape.
 
 ## Continuing work across dispatches
 
@@ -197,7 +183,6 @@ next-step list is always emitted.
 ```markdown
 #### Handoff from exploit-developer dispatch exp_g8h3
 - **Prior task:** RCE chain: phpMyAdmin → template injection → webshell
-- **Skill loaded:** agent/skills/command-injection/SKILL.md
 - **Scope host:** target.example
 - **Phase:** exploit (status: completed)
 - **Summary:** Chained EX-001 (auth-bypass) → EX-002 (RCE) into authenticated webshell on app.target.example; full chain recorded; one credential captured.

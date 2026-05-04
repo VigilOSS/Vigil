@@ -243,10 +243,12 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     # Only seed `.orchestrator.env` when an explicit override is in effect.
     # The default base URL falls through `resolve_orchestrator_base_url`
     # (env var → engagement env file → `aith config get orchestrator_base_url`
-    # → hardcoded default), so writing the default into the file would just
-    # confuse operators reading it ("do I edit this to change the port?").
-    # When an override IS configured (via env var or `aith config`), we
-    # snapshot it into the engagement file so the launcher re-exports it.
+    # → legacy install env files → hardcoded default), so writing the default
+    # into the file would just confuse operators reading it ("do I edit this
+    # to change the port?").
+    # When an override IS configured (via env var, `aith config`, or a legacy
+    # install-root env file), we snapshot it into the engagement file so the
+    # launcher re-exports it.
     resolved_base_url = resolve_orchestrator_base_url(install_root, eng_dir)
     if resolved_base_url and resolved_base_url != DEFAULT_ORCHESTRATOR_BASE_URL:
         (eng_dir / ".orchestrator.env").write_text(
@@ -490,6 +492,51 @@ def _write_auth_scaffold(eng_dir: Path, mode: str, timestamp: str) -> None:
     _write_json(eng_dir / "auth.json", payload)
 
 
+_CHROME_PATHS = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+]
+
+
+def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
+    report_md = eng_dir / "report.md"
+    if not report_md.exists():
+        raise SystemExit(f"report.md not found in {eng_dir}")
+
+    pandoc = shutil.which("pandoc")
+    if not pandoc:
+        raise SystemExit("pandoc not found on PATH — install via: brew install pandoc")
+
+    chrome = next((p for p in _CHROME_PATHS if Path(p).exists()), None)
+    if not chrome:
+        raise SystemExit("No Chrome/Chromium found — install Google Chrome")
+
+    if output is None:
+        output = eng_dir / "report.pdf"
+
+    html_path = eng_dir / ".report_tmp.html"
+    try:
+        subprocess.run(
+            [pandoc, str(report_md), "-o", str(html_path), "--standalone", "--embed-resources",
+             "--metadata", "title=Engagement Report"],
+            check=True,
+        )
+        subprocess.run(
+            [chrome, "--headless", "--disable-gpu", "--no-sandbox",
+             f"--print-to-pdf={output}", "--print-to-pdf-no-header",
+             f"file://{html_path}"],
+            check=True,
+            capture_output=True,
+        )
+    finally:
+        html_path.unlink(missing_ok=True)
+
+    return output
+
+
 def _write_report(eng_dir: Path, engagement_type: str, *, name: str | None, target: str, repos: list[dict[str, str]], date_label: str) -> None:
     lines = ["# Engagement Report", ""]
     if engagement_type == "code":
@@ -566,7 +613,7 @@ def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str) ->
 Artifact sync:
 - Use `aith assess ...` for assessment operations from any directory
 - Start clients through this engagement directory's launcher so ENGAGEMENT_DIR is exported automatically
-- The local .orchestrator.env provides the default orchestrator base URL; install-root .env can override it
+- The local .orchestrator.env provides this engagement's orchestrator base URL; install-root env files are only fallbacks
 """
     if client_kind in {"codex", "both"}:
         (eng_dir / "AGENTS.md").write_text(f"# Engagement Workspace\n\nLoad workspace operator instructions from:\n- {agent_root / 'AGENTS.md'}\n\n{common}", encoding="utf-8")
@@ -591,10 +638,10 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
 def _write_launcher(agent_root: Path, eng_dir: Path, client: str, permission_arg: str) -> None:
     extra = f" {permission_arg}" if permission_arg else ""
     # The launcher exports operator-side env from the per-engagement
-    # .orchestrator.env (and the install-root .env / .orchestrator.env
-    # fallbacks). The legacy contract for ORCHESTRATOR_BASE_URL is preserved
-    # verbatim: parent-shell export wins over file values; among file values
-    # the LAST file wins (install-root .env overrides per-eng).
+    # .orchestrator.env, with install-root .orchestrator.env / .env kept as
+    # legacy fallbacks. Parent-shell ORCHESTRATOR_BASE_URL remains the
+    # explicit override; among files the first hit wins so an install-root
+    # default cannot retarget an engagement-local snapshot.
     #
     # AGENT_NAME is no longer exported here. The kali helper now defaults
     # to "operator" when neither --agent-name nor $AGENT_NAME / $AITH_AGENT_NAME
@@ -621,6 +668,7 @@ if [[ -z "${{ORCHESTRATOR_BASE_URL:-}}" ]]; then
       candidate="$(grep -E '^ORCHESTRATOR_BASE_URL=' "$env_file" | tail -n1 | cut -d= -f2- || true)"
       if [[ -n "$candidate" ]]; then
         export ORCHESTRATOR_BASE_URL="${{candidate%/}}"
+        break
       fi
     fi
   done

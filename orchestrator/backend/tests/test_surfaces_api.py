@@ -314,6 +314,41 @@ def test_patch_surface_resolves_to_partially_covered_with_followup(client, isola
     assert body["followup_condition"] == "needs auth re-test once credentials are issued"
 
 
+def test_partially_covered_surface_blocks_coverage_readiness(client, isolate_settings):
+    """partially-covered records still need follow-up, so coverage and report
+    readiness must count them as blockers."""
+    _seed_engagement(client, isolate_settings)
+    created = _create_surface(client)
+    surface_id = created["id"]
+
+    response = client.patch(
+        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
+        json={
+            "status": "partially-covered",
+            "rationale": "unauth path tested; admin path still pending auth",
+            "followup_condition": "needs auth re-test once credentials are issued",
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    coverage = client.get(f"{ASSESSMENT_BASE}/coverage-readiness")
+    assert coverage.status_code == 200, coverage.text
+    coverage_body = coverage.json()
+    assert coverage_body["ready"] is False
+    assert coverage_body["blocker_count"] == 1
+    assert coverage_body["partially_covered_surfaces"][0]["id"] == surface_id
+
+    report = client.get(f"{ASSESSMENT_BASE}/report-readiness")
+    assert report.status_code == 200, report.text
+    assert report.json()["ready"] is False
+
+    summary = client.get(f"{ASSESSMENT_BASE}/summary")
+    assert summary.status_code == 200, summary.text
+    summary_body = summary.json()
+    assert summary_body["coverage_blocker_count"] == 1
+    assert summary_body["open_surface_count"] == 1
+
+
 def test_patch_surface_partially_covered_requires_followup_condition(client, isolate_settings):
     """N7 — backend rejects partially-covered without followup_condition."""
     _seed_engagement(client, isolate_settings)

@@ -10,14 +10,6 @@ from .intel_types import INTEL_TYPES
 from .schema_validation import load_schema
 
 
-SPECIALIST_DISPATCH_PERMISSIONS: tuple[str, ...] = (
-    "artifact-only",
-    "passive-probe",
-    "target-facing",
-    "target-facing-destructive",
-)
-
-
 SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
     "hypothesis-driven",
     "item-iterating",
@@ -28,12 +20,6 @@ SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
 
 _SPECIALIST_DISPATCH_REQUIRED_FIELDS: tuple[str, ...] = (
     "role",
-    "model",
-    "files_allowed",
-    "files_forbidden",
-    "permission",
-    "command_budget",
-    "output",
     "dispatch_mode",
 )
 
@@ -45,20 +31,12 @@ class SpecialistDispatchContract:
     Every field on this dataclass corresponds to a row in the contract table
     documented in ``agent/operator-core.md`` (Specialist Dispatch Contract).
     Use ``validate_specialist_dispatch_contract`` to check a JSON payload
-    parsed from disk or stdin — the validator returns a list of error strings
-    plus a list of warnings (the ``files_allowed`` / ``files_forbidden`` overlap
-    is a warning rather than a hard error so dispatches that intentionally
-    re-list a path can still proceed).
+    parsed from disk or stdin — the validator returns a list of error strings.
     """
 
     role: str
-    model: str
-    files_allowed: list[str]
-    files_forbidden: list[str]
-    permission: str
-    command_budget: int
-    output: str
     dispatch_mode: str
+    model: str | None = None
     reasoning: str | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
@@ -66,8 +44,7 @@ class SpecialistDispatchContract:
 def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list[str]]:
     """Validate a parsed specialist dispatch payload.
 
-    Returns ``(errors, warnings)``. Errors block the dispatch; warnings are
-    informational (e.g., the ``files_allowed`` / ``files_forbidden`` overlap).
+    Returns ``(errors, warnings)``.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -79,13 +56,6 @@ def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list
         if field_name not in payload:
             errors.append(f"missing required field: {field_name}")
 
-    permission = payload.get("permission")
-    if permission is not None and permission not in SPECIALIST_DISPATCH_PERMISSIONS:
-        errors.append(
-            f"permission '{permission}' is not allowed; "
-            f"valid: {', '.join(SPECIALIST_DISPATCH_PERMISSIONS)}"
-        )
-
     dispatch_mode = payload.get("dispatch_mode")
     if dispatch_mode is not None and dispatch_mode not in SPECIALIST_DISPATCH_MODES:
         errors.append(
@@ -93,29 +63,7 @@ def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list
             f"valid: {', '.join(SPECIALIST_DISPATCH_MODES)}"
         )
 
-    files_allowed = payload.get("files_allowed")
-    files_forbidden = payload.get("files_forbidden")
-    if files_allowed is not None and not isinstance(files_allowed, list):
-        errors.append("files_allowed must be a list of file paths")
-        files_allowed = None
-    if files_forbidden is not None and not isinstance(files_forbidden, list):
-        errors.append("files_forbidden must be a list of file paths")
-        files_forbidden = None
-
-    if isinstance(files_allowed, list) and isinstance(files_forbidden, list):
-        overlap = sorted(set(files_allowed).intersection(files_forbidden))
-        if overlap:
-            warnings.append(
-                f"files_allowed and files_forbidden overlap: {', '.join(overlap)} "
-                "(forbidden takes precedence at the wrapper)"
-            )
-
-    command_budget = payload.get("command_budget")
-    if command_budget is not None:
-        if isinstance(command_budget, bool) or not isinstance(command_budget, int) or command_budget < 0:
-            errors.append("command_budget must be a non-negative integer")
-
-    for str_field in ("role", "model", "output"):
+    for str_field in ("role",):
         value = payload.get(str_field)
         if value is not None and not isinstance(value, str):
             errors.append(f"{str_field} must be a string")
@@ -536,11 +484,12 @@ _CONTRACTS: dict[str, CommandContract] = {
             'aith assess supersede-intel <type> <id> --inline \'{...}\' --rationale "..."',
         ),
         author_supplied_fields=(
-            "type-specific required fields for the new record",
+            "type-specific natural-key fields for the new replacement record",
             "--rationale (free text)",
         ),
         notes=(
             "Use this when an intel row was wrong but the operator wants to retain the prior observation for audit.",
+            "Metadata-only edits belong to update-intel; supersede-intel requires the replacement row's natural key before making the backend request.",
             "Report-writer filters on superseded_by_id IS NULL so superseded rows do not appear in reports, but stay queryable for cascade-delete and audit.",
         ),
         common_mistakes=(
@@ -837,6 +786,7 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Host-side reconciler for `assessment_command_runs` rows stuck in status=running past --max-age-seconds. Run after a backend restart, host crash, or any window where finalize PATCHes may have failed.",
         "Liveness probe is `docker exec <container> kill -0 <pid>` against the wrapper-recorded pid file at /tmp/aith-pid-<run_uuid>.pid. The run_uuid comes from the row's run_uuid column, with stdout_path parsing kept only for older rows.",
         "Rows whose PID is alive are left alone (still-running). Rows whose PID is dead OR whose pid file is missing are finalized to status=lost via PATCH command-runs/{id}.",
+        "Rows are skipped when Docker probing itself fails, because the command cannot distinguish a live job from an unavailable liveness check.",
         "Use --dry-run first to inspect candidates without writing — a thorough sweep is cheap, an incorrect finalize is not.",
         "Unlike target-facing verbs, sweep-orphans does not take --technique/--intent/--probe-kind/--phase/--timeout — it is a maintenance command, not a probe.",
     ),

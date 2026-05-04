@@ -943,6 +943,41 @@ def test_finalize_patch_transitions_status(client, isolate_settings):
     assert updated["success"] is True
 
 
+def test_finalize_patch_queued_to_terminal_succeeds(client, isolate_settings):
+    """Queued pre-exec rows are non-terminal and can be finalized."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(
+        client,
+        _base_payload(
+            status="queued",
+            stdout_path="/engagements/example/scans/kali/run-queued.out",
+            stderr_path="/engagements/example/scans/kali/run-queued.err",
+        ),
+    ).json()
+    assert created["status"] == "queued"
+
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+            "duration_ms": 5000,
+            "stdout_preview": "queued worker completed",
+        },
+    )
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["status"] == "completed"
+    assert updated["return_code"] == 0
+    assert updated["success"] is True
+
+    refetched = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}"
+    ).json()
+    assert refetched["status"] == "completed"
+
+
 def test_finalize_patch_round_trips_partial_results(client, isolate_settings):
     """partial_results is now a real column on assessment_command_runs and is
     persisted by finalize_command_run when the agent reports it."""
@@ -1087,10 +1122,11 @@ def test_finalize_patch_concurrent_double_patch_is_consistent(client, isolate_se
 
     We use a ThreadPoolExecutor against the FastAPI TestClient. The TestClient
     runs requests sequentially within a single asyncio loop, so this test
-    exercises the *gate* (UPDATE ... WHERE status='running') rather than true
-    OS-level concurrency, but the gate is the load-bearing invariant: after
-    the first writer commits, the second writer's UPDATE matches zero rows
-    and the rowcount=0 branch must funnel into the same 409 path.
+    exercises the *gate* (UPDATE ... WHERE status is still pre-terminal)
+    rather than true OS-level concurrency, but the gate is the load-bearing
+    invariant: after the first writer commits, the second writer's UPDATE
+    matches zero rows and the rowcount=0 branch must funnel into the same
+    409 path.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1261,6 +1297,37 @@ def test_dedup_does_not_link_after_finalize(client, isolate_settings):
     second = _post(client, payload)
     assert second.status_code == 201
     assert second.json()["superseded_by_id"] is None
+
+
+def test_dedup_links_to_latest_in_flight_duplicate_peer(client, isolate_settings):
+    """If the original primary finishes while a duplicate peer is still active,
+    the next duplicate should link to that active peer instead of becoming a
+    fresh primary."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    payload = _base_payload(
+        command="nmap -p 22 10.0.0.1",
+        argv=["nmap", "-p", "22", "10.0.0.1"],
+        status="running",
+    )
+    first = _post(client, payload).json()
+    second = _post(client, payload).json()
+    assert second["superseded_by_id"] == first["id"]
+
+    finalize = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{first['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+        },
+    )
+    assert finalize.status_code == 200
+
+    third = _post(client, payload)
+    assert third.status_code == 201, third.text
+    third_row = third.json()
+    assert third_row["superseded_by_id"] == second["id"]
+    assert third_row.get("dedup_predecessor_id") == second["id"]
 
 
 def test_dedup_respects_env_window_zero(client, isolate_settings, monkeypatch):

@@ -20,6 +20,7 @@ from .engagements import (
     CreateEngagementOptions,
     create_engagement,
     current_engagement_path,
+    export_pdf,
     list_engagements,
     print_shell_cd_init,
     resolve_engagement_path,
@@ -81,12 +82,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--source", help="Source checkout root for install/upgrade")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    install_p = sub.add_parser("install")
+    install_p = sub.add_parser("install", help="Install or update the working root from source")
     install_p.add_argument("install_dir", nargs="?")
     install_p.add_argument("--dry-run", action="store_true")
     install_p.add_argument("--force-image", action="store_true")
     install_p.add_argument("--skip-image-check", action="store_true")
-    update_p = sub.add_parser("update")
+    update_p = sub.add_parser("update", help="Alias for install")
     update_p.add_argument("install_dir", nargs="?")
     update_p.add_argument("--dry-run", action="store_true")
     update_p.add_argument("--force-image", action="store_true")
@@ -157,6 +158,10 @@ def main(argv: list[str] | None = None) -> None:
     export_p.add_argument("key", nargs="?")
     export_p.add_argument("--select", action="store_true")
     export_p.add_argument("--output")
+    export_pdf_p = engagement_sub.add_parser("export-pdf", help="Export report.md as a PDF using pandoc + Chrome headless")
+    export_pdf_p.add_argument("key", nargs="?")
+    export_pdf_p.add_argument("--select", action="store_true")
+    export_pdf_p.add_argument("--output", help="Output PDF path (default: <engagement>/report.pdf)")
 
     orch_p = sub.add_parser("orchestrator")
     orch_sub = orch_p.add_subparsers(dest="orchestrator_command", required=True)
@@ -508,6 +513,10 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         with tarfile.open(output, "w:gz") as tar:
             tar.add(path, arcname=path.name)
         print(output)
+    elif command == "export-pdf":
+        path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
+        output = Path(args.output).expanduser() if args.output else None
+        print(export_pdf(path, output))
 
 
 def _looks_like_web_target(value: str) -> bool:
@@ -676,6 +685,11 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
         _oob_client(args, install_root, options)
 
 
+def _tmux_has_oob_client(name: str) -> bool:
+    result = docker_run_command(["docker", "exec", "security-research", "sh", "-lc", f"tmux has-session -t oob-client-{shlex.quote(name)} 2>/dev/null"])
+    return result.returncode == 0
+
+
 def _oob_client(args: argparse.Namespace, install_root: Path, options: OobOptions) -> None:
     if args.oob_client_command == "start":
         if args.engagement and args.select:
@@ -696,8 +710,13 @@ def _oob_client(args: argparse.Namespace, install_root: Path, options: OobOption
     elif args.oob_client_command == "stop":
         stop_oob_client(args.name, runner=docker_run_command)
     elif args.oob_client_command == "list":
-        for client in list_oob_clients(runner=docker_run_command):
-            print(client)
+        clients = list_oob_clients(runner=docker_run_command)
+        if not clients:
+            print("No OOB clients configured.", file=sys.stderr)
+        for client in clients:
+            alive = _tmux_has_oob_client(client)
+            status = "running" if alive else "dead"
+            print(f"{client}\t{status}")
 
 
 def _oob_options(install_root: Path) -> OobOptions:

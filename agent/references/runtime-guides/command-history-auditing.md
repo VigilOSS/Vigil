@@ -54,7 +54,7 @@ aith assess list-command-runs --q "nmap 10.0.0.1"
 aith assess list-command-runs \
     --agent-name recon-specialist --phase recon
 
-# Only successful runs with a specific MCP tool route
+# Only successful runs with a specific typed verb
 aith assess list-command-runs --tool-name nmap_scan --success
 
 # Filter by the underlying binary, even when it ran inside the generic

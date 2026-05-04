@@ -7,6 +7,7 @@ helpers in `app/services/state_manager.py`.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 ENGAGEMENT_KEY = "2026-04-17-130000-jobs"
@@ -204,6 +205,118 @@ def test_patch_job_updates_terminal_status(client, isolate_settings):
     assert body["exit_code"] == 0
 
 
+def test_patch_job_rejects_terminal_status_overwrite(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
+        json={"status": "running"},
+    ).json()
+    completed = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
+        json={"status": "completed", "exit_code": 0},
+    )
+    assert completed.status_code == 200, completed.text
+
+    overwrite = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
+        json={"status": "killed"},
+    )
+
+    assert overwrite.status_code == 409
+    assert overwrite.json()["detail"]["existing"]["status"] == "completed"
+    current = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}"
+    ).json()
+    assert current["status"] == "completed"
+
+
+def test_patch_job_terminal_update_uses_preterminal_compare_and_swap(
+    client, isolate_settings, monkeypatch
+):
+    """A stale pre-terminal read must not allow a later terminal write to
+    overwrite the terminal row that already won."""
+    from app import db as db_module
+    from app.services import state_manager
+
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
+        json={"status": "running"},
+    ).json()
+
+    with db_module.get_connection() as connection:
+        stale_running_row = connection.execute(
+            "SELECT * FROM assessment_jobs WHERE id = ?",
+            (created["id"],),
+        ).fetchone()
+        connection.execute(
+            "UPDATE assessment_jobs SET status = ?, exit_code = ? WHERE id = ?",
+            ("completed", 0, created["id"]),
+        )
+
+    real_get_connection = state_manager.get_connection
+
+    class _SingleRowCursor:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _StaleReadConnection:
+        def __init__(self, connection):
+            self._connection = connection
+            self._served_stale = False
+
+        def execute(self, sql, params=()):
+            if (
+                not self._served_stale
+                and "FROM assessment_jobs WHERE engagement_id = ? AND id = ?" in sql
+            ):
+                self._served_stale = True
+                return _SingleRowCursor(stale_running_row)
+            return self._connection.execute(sql, params)
+
+    @contextmanager
+    def stale_read_connection():
+        with real_get_connection() as connection:
+            yield _StaleReadConnection(connection)
+
+    monkeypatch.setattr(state_manager, "get_connection", stale_read_connection)
+
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
+        json={"status": "killed", "exit_code": -9},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["existing"]["status"] == "completed"
+    monkeypatch.setattr(state_manager, "get_connection", real_get_connection)
+    current = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}"
+    ).json()
+    assert current["status"] == "completed"
+    assert current["exit_code"] == 0
+
+
+def test_patch_job_allows_terminal_artifact_update_without_status(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
+        json={"status": "completed"},
+    ).json()
+
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
+        json={"stdout_path": "/engagements/example/scans/kali/job.out"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["stdout_path"] == "/engagements/example/scans/kali/job.out"
+
+
 def test_patch_job_404_for_unknown(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
     response = client.patch(
@@ -257,5 +370,3 @@ def test_parent_command_run_cascade_set_null(client, isolate_settings):
     )
     assert response.status_code == 200
     assert response.json()["parent_command_run_id"] is None
-
-

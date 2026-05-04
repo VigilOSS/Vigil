@@ -121,7 +121,7 @@ Output: CONFIRMED/PARTIAL/FAILED status, extracted data, PoC, chains, credential
 Output: backend intel-table updates via `record-intel` (technology, CVE, breach, credential intel, people, domains, social, org facts, notes)
 
 1. Read Intelligence Assessment section
-2. HIGH-value CVE + PoC match → record via `aith assess record-intel cve <json-file>` and dispatch exploit-developer to **validate** against the live target — **bring the matching skill from `agent/SKILL.md`**. Do NOT record a finding until exploit-developer confirms exploitability. Version-only CVE matches are intel, not findings.
+2. HIGH-value CVE + PoC match → record via `aith assess record-intel cve <json-file>` and dispatch exploit-developer to **validate** against the live target — **bring the matching skill from `agent/SKILL.md`**. Promote to a finding only after exploit-developer confirms exploitability — version-only CVE matches are intel, not findings, because backported patches and disabled modules routinely invalidate version-only matches.
 3. Breached credentials with target-specific proof → record finding + credential via `aith assess post credentials` + dispatch exploit-developer to test access
 4. Historical endpoints → ingest into backend coverage state via `aith assess ingest-endpoints`
 5. MEDIUM/LOW intel without target proof → keep in backend intel tables via `record-intel` only — do not promote to findings

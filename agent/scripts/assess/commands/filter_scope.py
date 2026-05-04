@@ -38,9 +38,9 @@ def _vendor_saas_decided_hosts(cfg: Config) -> set[str]:
         if not isinstance(row, dict):
             continue
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-        host = payload.get("host") or payload.get("target")
-        if isinstance(host, str) and host.strip():
-            decisions.add(host.strip().rstrip(".").lower())
+        host = host_from_token(str(payload.get("host") or payload.get("target") or ""))
+        if host:
+            decisions.add(host)
     return decisions
 
 

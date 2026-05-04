@@ -11,7 +11,7 @@ import os
 import sys
 
 from assess.lib.client import AssessmentClient
-from assess.lib.config import load_config
+from assess.lib.config import Config, load_config
 
 
 WEB_PHASES = [
@@ -52,12 +52,8 @@ def register(subparsers) -> None:
 
 
 def run(args) -> None:
-    engagement_dir = args.engagement_dir
-    if not engagement_dir:
-        engagement_dir = os.environ.get("ENGAGEMENT_DIR", "")
-    if not engagement_dir:
-        print("transition-phase: ENGAGEMENT_DIR not set", file=sys.stderr)
-        sys.exit(2)
+    cfg = load_config(args.engagement_dir)
+    engagement_dir = cfg.engagement_dir
 
     scope_path = os.path.join(engagement_dir, "scope.json")
     if not os.path.isfile(scope_path):
@@ -99,7 +95,7 @@ def run(args) -> None:
                 sys.exit(1)
 
     blockers = _check_preconditions(
-        target_phase, engagement_type, engagement_dir, args,
+        target_phase, engagement_type, engagement_dir, args, cfg,
     )
 
     if blockers and not args.force:
@@ -128,10 +124,11 @@ def _check_preconditions(
     engagement_type: str,
     engagement_dir: str,
     args,
+    cfg: Config | None = None,
 ) -> list[dict[str, str]]:
     blockers: list[dict[str, str]] = []
 
-    cfg = load_config(engagement_dir)
+    cfg = cfg or load_config(engagement_dir)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
 
     try:
@@ -143,6 +140,14 @@ def _check_preconditions(
         client.close()
 
     return blockers
+
+
+def _precondition_check_failed(check_name: str, exc: Exception) -> dict[str, str]:
+    message = str(exc) or exc.__class__.__name__
+    return {
+        "kind": "precondition_check_failed",
+        "detail": f"{check_name} check failed: {message}",
+    }
 
 
 def _check_web_preconditions(
@@ -160,8 +165,8 @@ def _check_web_preconditions(
                     "kind": "no_services",
                     "detail": "No live services discovered — recon may be incomplete",
                 })
-        except Exception:
-            pass
+        except Exception as exc:
+            blockers.append(_precondition_check_failed("collect services", exc))
 
     elif target_phase == "consume-test":
         db_path = os.path.join(engagement_dir, "cases.db")
@@ -183,8 +188,8 @@ def _check_web_preconditions(
                         "kind": "empty_work_buffer",
                         "detail": "No pending work items in cases.db — nothing to consume",
                     })
-            except Exception:
-                pass
+            except Exception as exc:
+                blockers.append(_precondition_check_failed("consume-test work buffer", exc))
 
     elif target_phase == "verify":
         try:
@@ -196,8 +201,8 @@ def _check_web_preconditions(
                         "kind": "no_active_findings",
                         "detail": "No active findings to verify",
                     })
-        except Exception:
-            pass
+        except Exception as exc:
+            blockers.append(_precondition_check_failed("verify findings", exc))
 
     elif target_phase == "exploit":
         try:
@@ -219,8 +224,8 @@ def _check_web_preconditions(
                             + (" ..." if len(unverified_high) > 5 else "")
                         ),
                     })
-        except Exception:
-            pass
+        except Exception as exc:
+            blockers.append(_precondition_check_failed("exploit findings", exc))
 
     elif target_phase == "report":
         try:
@@ -232,8 +237,8 @@ def _check_web_preconditions(
                             "kind": b.get("kind", "report_readiness"),
                             "detail": b.get("detail", str(b)),
                         })
-        except Exception:
-            pass
+        except Exception as exc:
+            blockers.append(_precondition_check_failed("report readiness", exc))
 
     elif target_phase == "complete":
         try:
@@ -243,8 +248,8 @@ def _check_web_preconditions(
                     "kind": "report_not_ready",
                     "detail": "Report readiness check has blockers",
                 })
-        except Exception:
-            pass
+        except Exception as exc:
+            blockers.append(_precondition_check_failed("complete readiness", exc))
 
     return blockers
 
@@ -265,8 +270,8 @@ def _check_code_preconditions(
                         "kind": "no_indexed_files",
                         "detail": "No files indexed — ingest may be incomplete",
                     })
-        except Exception:
-            pass
+        except Exception as exc:
+            blockers.append(_precondition_check_failed("classify-map coverage", exc))
 
     elif target_phase == "hunt":
         try:
@@ -283,8 +288,8 @@ def _check_code_preconditions(
                         "kind": "no_classified_files",
                         "detail": "No files classified — classify-map may be incomplete",
                     })
-        except Exception:
-            pass
+        except Exception as exc:
+            blockers.append(_precondition_check_failed("hunt coverage", exc))
 
     elif target_phase == "verify-variant":
         try:
@@ -300,8 +305,8 @@ def _check_code_preconditions(
                         "kind": "no_code_findings",
                         "detail": "No active code findings to verify — hunt may be incomplete",
                     })
-        except Exception:
-            pass
+        except Exception as exc:
+            blockers.append(_precondition_check_failed("verify-variant findings", exc))
 
     elif target_phase == "complete":
         try:
@@ -324,7 +329,7 @@ def _check_code_preconditions(
                             + (" ..." if len(unverified) > 5 else "")
                         ),
                     })
-        except Exception:
-            pass
+        except Exception as exc:
+            blockers.append(_precondition_check_failed("complete code findings", exc))
 
     return blockers

@@ -48,14 +48,10 @@ def test_dispatch_post_get_list_patch(client, isolate_settings) -> None:
         "agent_id": "AG-001",
         "agent_role": "vulnerability-analyst",
         "task": "Validate IDOR on /api/users/{id}",
-        "skill_loaded": "agent/skills/idor-testing/SKILL.md",
         "scope_host": "example.com",
         "model": "gpt-5.4",
         "reasoning": "high",
-        "permission": "target-facing",
-        "command_budget": 30,
         "dispatch_mode": "item-iterating",
-        "files_allowed": ["agent/agents/vulnerability-analyst.md"],
         "finding_slugs": [],
     }
     resp = client.post(f"{BASE}/dispatches", json=payload)
@@ -64,7 +60,6 @@ def test_dispatch_post_get_list_patch(client, isolate_settings) -> None:
     assert row["agent_id"] == "AG-001"
     assert row["agent_role"] == "vulnerability-analyst"
     assert row["status"] == "in-progress"
-    assert row["files_allowed"] == ["agent/agents/vulnerability-analyst.md"]
     assert row["finding_slugs"] == []
     assert row["dispatched_at"]  # server-stamped when not supplied
 

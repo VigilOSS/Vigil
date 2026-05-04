@@ -2333,17 +2333,21 @@ def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
 def coverage_readiness(engagement_id: int) -> dict[str, Any]:
     surfaces = list_surfaces(engagement_id)
     unresolved = [row for row in surfaces if row.get("status") == "discovered"]
+    partially_covered = [
+        row for row in surfaces if row.get("status") == "partially-covered"
+    ]
     high_risk_deferred = [
         row
         for row in surfaces
         if row.get("status") == "deferred"
         and row.get("surface_type") in {"account_recovery", "dynamic_render", "object_reference", "privileged_write"}
     ]
-    blocker_count = len(unresolved) + len(high_risk_deferred)
+    blocker_count = len(unresolved) + len(partially_covered) + len(high_risk_deferred)
     return {
         "ready": blocker_count == 0,
         "blocker_count": blocker_count,
         "unresolved_surfaces": unresolved,
+        "partially_covered_surfaces": partially_covered,
         "high_risk_deferred_surfaces": high_risk_deferred,
     }
 
@@ -3295,7 +3299,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
         )
         open_surface_count = _scalar_row(
             connection,
-            "SELECT COUNT(*) FROM assessment_surfaces WHERE engagement_id = ? AND status IN ('discovered', 'deferred')",
+            "SELECT COUNT(*) FROM assessment_surfaces WHERE engagement_id = ? AND status IN ('discovered', 'deferred', 'partially-covered')",
             (engagement.id,),
         )
         credential_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_credentials WHERE engagement_id = ?", (engagement.id,))
@@ -3827,7 +3831,6 @@ def _find_dedup_predecessor(
           AND command = ?
           AND argv_json = ?
           AND status IN ('queued', 'running')
-          AND superseded_by_id IS NULL
           AND datetime(created_at) >= {cutoff}
         ORDER BY id DESC
         LIMIT 1
@@ -3993,7 +3996,9 @@ def record_command_run(
         # to one audit row and ``list-command-runs`` lied about coverage. By
         # always inserting we get one row per execution attempt; readers that
         # want to filter to "primary" runs can join on
-        # ``superseded_by_id IS NULL``.
+        # ``superseded_by_id IS NULL``. The predecessor lookup itself scans all
+        # in-flight peers, including already-linked duplicate rows, so duplicate
+        # chains continue when the original primary finishes before later peers.
         superseded_by_id: int | None = None
         if not force:
             superseded_by_id = _find_dedup_predecessor(
@@ -4132,6 +4137,7 @@ def _infer_command_run_status(
 
 _FINALIZE_TERMINAL_STATUSES = {"completed", "failed", "timed_out", "killed", "lost"}
 _FINALIZE_ALLOWED_STATUSES = _FINALIZE_TERMINAL_STATUSES | {"running"}
+_FINALIZE_MUTABLE_STATUSES = {"queued", "running"}
 
 
 def finalize_command_run(
@@ -4154,9 +4160,9 @@ def finalize_command_run(
 
     Idempotency contract (B4): a row already in a terminal state must not be
     overwritten — the second writer is signalled with HTTP 409 carrying the
-    existing row. A ``running``-to-``running`` PATCH is a refresh no-op that
-    surfaces ``noop=true`` so the caller can distinguish it from a fresh
-    write."""
+    existing row. ``queued`` and ``running`` are mutable pre-terminal states.
+    A ``running``-to-``running`` PATCH is a refresh no-op that surfaces
+    ``noop=true`` so the caller can distinguish it from a fresh write."""
     engagement = _engagement_or_404(engagement_id)
     if status_value not in _FINALIZE_ALLOWED_STATUSES:
         raise HTTPException(
@@ -4191,6 +4197,19 @@ def finalize_command_run(
             serialized = _serialize_command_run(existing_row, include_output=True)
             serialized["noop"] = True
             return serialized
+        if status_value == "running":
+            serialized = _serialize_command_run(existing_row, include_output=True)
+            serialized["noop"] = True
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        f"command run id={command_run_id} is status='{existing_status or 'unknown'}'; "
+                        "running refresh only applies to rows already in status='running'"
+                    ),
+                    "existing": serialized,
+                },
+            )
         success_flag = 1 if (status_value == "completed" and (return_code in (0, None) and not timed_out)) else 0
         if return_code is not None and return_code != 0:
             success_flag = 0
@@ -4229,14 +4248,17 @@ def finalize_command_run(
             values.append(float(cpu_system_seconds))
         sets.append("partial_results = ?")
         values.append(1 if partial_results else 0)
+        mutable_statuses = tuple(sorted(_FINALIZE_MUTABLE_STATUSES))
         values.append(command_run_id)
+        values.extend(mutable_statuses)
         # Guard against the read→update race when two finalize PATCHes arrive
         # simultaneously: both can pass the SELECT-based terminal check above,
-        # but the UPDATE must only land when the row is still 'running'. The
-        # loser hits rowcount=0 and is funnelled into the same 409 path with
-        # the canonical row payload that the SELECT-based check uses.
+        # but the UPDATE must only land when the row is still pre-terminal.
+        # The loser hits rowcount=0 and is funnelled into the same 409 path
+        # with the canonical row payload that the SELECT-based check uses.
+        mutable_placeholders = ", ".join("?" for _ in mutable_statuses)
         cursor = connection.execute(
-            f"UPDATE assessment_command_runs SET {', '.join(sets)} WHERE id = ? AND status = 'running'",
+            f"UPDATE assessment_command_runs SET {', '.join(sets)} WHERE id = ? AND status IN ({mutable_placeholders})",
             tuple(values),
         )
         if cursor.rowcount == 0:
@@ -4274,6 +4296,7 @@ def finalize_command_run(
 
 _JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost", "stop_failed"}
 _JOB_VALID_STATUSES = {"queued", "running", *_JOB_TERMINAL_STATUSES}
+_JOB_PRE_TERMINAL_STATUSES = _JOB_VALID_STATUSES - _JOB_TERMINAL_STATUSES
 
 
 def _serialize_job(row) -> dict[str, Any]:
@@ -4400,7 +4423,7 @@ def update_job(
     sets.append("updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')")
     with get_connection() as connection:
         existing = connection.execute(
-            "SELECT id FROM assessment_jobs WHERE engagement_id = ? AND id = ?",
+            "SELECT * FROM assessment_jobs WHERE engagement_id = ? AND id = ?",
             (engagement.id, int(job_id)),
         ).fetchone()
         if existing is None:
@@ -4408,11 +4431,51 @@ def update_job(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="job not found",
             )
-        values.extend([engagement.id, int(job_id)])
-        connection.execute(
-            f"UPDATE assessment_jobs SET {', '.join(sets)} WHERE engagement_id = ? AND id = ?",
-            tuple(values),
+        existing_status = str(existing["status"] or "")
+        if (
+            status_value is not None
+            and existing_status in _JOB_TERMINAL_STATUSES
+            and status_value != existing_status
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "job already terminal",
+                    "existing": _serialize_job(existing),
+                },
+            )
+        where = "WHERE engagement_id = ? AND id = ?"
+        where_values: list[Any] = [engagement.id, int(job_id)]
+        guard_terminal_update = (
+            status_value in _JOB_TERMINAL_STATUSES
+            and existing_status in _JOB_PRE_TERMINAL_STATUSES
         )
+        if guard_terminal_update:
+            pre_terminal_statuses = tuple(sorted(_JOB_PRE_TERMINAL_STATUSES))
+            placeholders = ", ".join("?" for _ in pre_terminal_statuses)
+            where += f" AND status IN ({placeholders})"
+            where_values.extend(pre_terminal_statuses)
+        cursor = connection.execute(
+            f"UPDATE assessment_jobs SET {', '.join(sets)} {where}",
+            tuple(values + where_values),
+        )
+        if cursor.rowcount == 0:
+            current = connection.execute(
+                "SELECT * FROM assessment_jobs WHERE engagement_id = ? AND id = ?",
+                (engagement.id, int(job_id)),
+            ).fetchone()
+            if current is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="job not found",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "job already terminal",
+                    "existing": _serialize_job(current),
+                },
+            )
         row = connection.execute(
             "SELECT * FROM assessment_jobs WHERE id = ?",
             (int(job_id),),
@@ -4621,7 +4684,7 @@ def _utcnow_iso_dispatch() -> str:
 
 def _serialize_dispatch(row) -> dict[str, Any]:
     data = dict(row)
-    for col in ("files_allowed_json", "finding_slugs_json"):
+    for col in ("finding_slugs_json",):
         raw = data.pop(col, None) or ""
         key = col[: -len("_json")]
         if raw:
@@ -4640,24 +4703,18 @@ def record_dispatch(
     agent_id: str,
     agent_role: str,
     task: str | None = None,
-    skill_loaded: str | None = None,
     scope_host: str | None = None,
     dispatched_at: str | None = None,
     status_value: str = "in-progress",
     model: str | None = None,
     reasoning: str | None = None,
-    permission: str | None = None,
-    command_budget: int | None = None,
-    output_schema: str | None = None,
     dispatch_mode: str | None = None,
-    files_allowed: list[str] | None = None,
     finding_slugs: list[str] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not (agent_id or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="agent_id is required")
     dispatched_value = dispatched_at or _utcnow_iso_dispatch()
-    files_json = json.dumps(list(files_allowed)) if files_allowed is not None else None
     findings_json = json.dumps(list(finding_slugs)) if finding_slugs is not None else None
     with get_connection() as connection:
         existing = connection.execute(
@@ -4672,27 +4729,22 @@ def record_dispatch(
         cursor = connection.execute(
             """
             INSERT INTO assessment_dispatches (
-                engagement_id, agent_id, agent_role, task, skill_loaded, scope_host,
-                dispatched_at, status, model, reasoning, permission, command_budget,
-                output_schema, dispatch_mode, files_allowed_json, finding_slugs_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                engagement_id, agent_id, agent_role, task, scope_host,
+                dispatched_at, status, model, reasoning,
+                dispatch_mode, finding_slugs_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
                 agent_id,
                 agent_role,
                 task,
-                skill_loaded,
                 scope_host,
                 dispatched_value,
                 status_value,
                 model,
                 reasoning,
-                permission,
-                command_budget,
-                output_schema,
                 dispatch_mode,
-                files_json,
                 findings_json,
             ),
         )

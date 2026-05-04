@@ -708,7 +708,7 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
     assert payload["phase"] == "recon"
     assert payload["agent_name"] == "recon-specialist"
     assert payload["timeout_seconds_requested"] == 60
-    assert payload["working_dir"]
+    assert payload["working_dir"] == f"/engagements/{fake_engagement.name}"
     assert payload["scope_version"]
     assert payload["auth_context"] == "cookies"
     # P1 schema fix: the CLI must propagate its engagement-wide run_uuid into
@@ -1741,6 +1741,42 @@ def test_job_stop_patches_killed(monkeypatch, fake_engagement):
     assert fake_client.patches[0] == ("jobs/22", {"status": "killed"})
 
 
+def test_job_stop_rejects_already_terminal_job(monkeypatch, fake_engagement):
+    kali_jobs = _import("assess.lib.kali_jobs")
+    from assess.lib.client import AssessError
+
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    class _StopClient(_FakeClient):
+        def get(self, endpoint):
+            return {"id": 22, "status": "completed", "dtach_socket_path": "/tmp/aith-jobs/abc.sock"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            return {"id": 22, "status": payload["status"]}
+
+    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+
+    signals: list[tuple] = []
+    monkeypatch.setattr(kali_jobs, "_signal_job_pid", lambda *args, **kwargs: signals.append(args))
+
+    with pytest.raises(AssessError, match="already terminal"):
+        kali_jobs.job_stop(22, container_name="security-research")
+
+    assert fake_client.patches == []
+    assert signals == []
+
+
 def test_job_stop_records_stop_failed_when_pid_missing(monkeypatch, fake_engagement):
     kali_jobs = _import("assess.lib.kali_jobs")
     from assess.lib.client import AssessError
@@ -2631,6 +2667,93 @@ def test_nmap_ports_accepts_documented_shapes(monkeypatch, ports_value):
     )
 
 
+def test_nmap_accepts_input_list_without_target(monkeypatch):
+    """`-iL <file>` is a complete nmap target source; the wrapper must not
+    force an extra positional target that changes scan scope."""
+    cli = _import("assess.cli")
+    kali = _import("assess.lib.kali")
+
+    captured: dict = {}
+
+    def fake_kali_exec(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = kwargs
+        return kali.KaliResult(
+            run_id=1,
+            status="completed",
+            return_code=0,
+            stdout_path="/tmp/x.out",
+            stderr_path="/tmp/x.err",
+            duration_ms=10,
+            peak_rss_bytes=None,
+            stdout_preview="",
+            stderr_preview="",
+            timed_out=False,
+            partial_results=False,
+        )
+
+    mod = _import("assess.commands.kali_nmap")
+    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+
+    cli.main(
+        [
+            "kali",
+            "nmap-scan",
+            "-iL",
+            "/engagements/x/scans/hosts.txt",
+            "--ports",
+            "top-100",
+            "--technique",
+            "RECON",
+            "--intent",
+            "batch scan host list",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--timeout",
+            "600",
+        ]
+    )
+
+    assert captured["cmd"] == [
+        "nmap",
+        "-iL",
+        "/engagements/x/scans/hosts.txt",
+        "--top-ports",
+        "100",
+    ]
+
+
+def test_nmap_requires_target_or_input_list(capsys):
+    """The wrapper still rejects targetless scans when neither --target nor
+    -iL names the target source."""
+    cli = _import("assess.cli")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "kali",
+                "nmap-scan",
+                "--technique",
+                "RECON",
+                "--intent",
+                "missing target source",
+                "--probe-kind",
+                "fingerprint",
+                "--phase",
+                "recon",
+                "--timeout",
+                "600",
+            ]
+        )
+
+    assert exc.value.code != 0
+    err = capsys.readouterr().err
+    assert "--target" in err
+    assert "-iL" in err
+
+
 def test_nmap_scan_type_rejects_legacy_pseudo_values():
     """F1 — `--scan-type top-1000`, `full-tcp`, `udp-top`, `targeted`, `ports-only`
     were drift values from older skill text. The wrapper restricts `--scan-type`
@@ -3201,6 +3324,64 @@ def test_sweep_orphans_handles_missing_pid_file_as_dead(monkeypatch, fake_engage
         assert payload["return_code"] is None
 
 
+def test_sweep_orphans_skips_when_pid_probe_fails(
+    monkeypatch, fake_engagement, capsys
+):
+    """Docker probe failures mean liveness is unknown; do not finalize the
+    command-run as lost based on an unavailable liveness check."""
+    rows = [_orphan_row(row_id=13, age_seconds=7200, run_uuid="dddd5555")]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[3] == "cat":
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    assert fake_client.patches == []
+    out = capsys.readouterr().out
+    assert "skipped id=13" in out
+    assert "pid-probe-failed" in out
+
+
+def test_sweep_orphans_skips_when_liveness_probe_fails(
+    monkeypatch, fake_engagement, capsys
+):
+    """A readable pid file is not enough to mark lost when kill -0 cannot
+    complete because Docker probing failed."""
+    rows = [_orphan_row(row_id=14, age_seconds=7200, run_uuid="eeee6666")]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[3] == "cat":
+            return SimpleNamespace(returncode=0, stdout="12345\n", stderr="")
+        if argv[3] == "kill":
+            raise FileNotFoundError("docker")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="security-research",
+        dry_run=False,
+    ))
+
+    assert fake_client.patches == []
+    out = capsys.readouterr().out
+    assert "skipped id=14" in out
+    assert "liveness-probe-failed" in out
+
+
 def test_sweep_orphans_uses_db_run_uuid_when_present(monkeypatch, fake_engagement):
     """P1 schema fix: ``run_uuid`` is the DB column on assessment_command_runs;
     sweep-orphans must prefer that column over parsing the stdout_path regex.
@@ -3223,7 +3404,7 @@ def test_sweep_orphans_uses_db_run_uuid_when_present(monkeypatch, fake_engagemen
         if argv[3] == "cat":
             cat_args.append(argv[-1])
             # Pid file missing — return non-zero to skip kill -0 and finalize as lost.
-            return SimpleNamespace(returncode=1, stdout="", stderr="")
+            return SimpleNamespace(returncode=1, stdout="", stderr="No such file")
         if argv[3] == "kill":
             return SimpleNamespace(returncode=1, stdout="", stderr="")
         raise AssertionError(f"unexpected subprocess call: {argv}")

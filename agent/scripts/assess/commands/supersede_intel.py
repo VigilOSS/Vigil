@@ -46,7 +46,8 @@ _INTEL_UPDATABLE_FIELDS: dict[str, set[str]] = {
     "cve": {
         "cve_id", "affected_component", "affected_version_range", "cvss_score",
         "cvss_vector", "cwe_id", "poc_available", "source_name",
-        "validation_status", "linked_finding_slug", "notes", "provenance",
+        "validation_status", "linked_finding_slug", "notes", "details",
+        "provenance",
     },
     "dns-record": {
         "record_type", "name", "value", "first_seen", "last_seen",
@@ -66,6 +67,19 @@ _INTEL_UPDATABLE_FIELDS: dict[str, set[str]] = {
     "note": {
         "title", "body_markdown", "source_agent", "tags", "source_name", "provenance",
     },
+}
+
+_INTEL_NATURAL_KEY_FIELDS: dict[str, tuple[str, ...]] = {
+    "tech-component": ("component", "version"),
+    "person": ("name",),
+    "email": ("address",),
+    "domain": ("identity", "kind"),
+    "cve": ("cve_id", "affected_component"),
+    "dns-record": ("record_type", "name", "value"),
+    "social-profile": ("subject_kind", "subject_ref", "platform", "handle"),
+    "breach-record": ("subject", "breach_name"),
+    "org-fact": ("fact_key",),
+    "note": ("title",),
 }
 
 
@@ -138,13 +152,21 @@ def run(args) -> None:
         print(msg, file=sys.stderr)
         sys.exit(1)
 
-    # Supersede payloads are partial-update by design: the backend's
-    # _INTEL_UPDATABLE_FIELDS whitelist filters them, so requiring full
-    # natural-key fields client-side would reject legitimate calls like
-    # `--inline '{"validation_status": "exploited"}'`. Use the patch-mode
-    # validator so typos still raise but missing required fields don't.
+    # Supersede inserts a replacement row, so the new payload must carry the
+    # same natural-key fields the backend uses for that intel table. Metadata-
+    # only edits belong to update-intel; accepting them here only fails later
+    # after a network round trip.
     schema = load_schema(schema_name)
     errors = collect_patch_validation_errors(new_payload, schema)
+    natural_key = _INTEL_NATURAL_KEY_FIELDS.get(args.intel_type, ())
+    missing_natural_key = [
+        field for field in natural_key
+        if field not in new_payload or new_payload[field] in (None, "")
+    ]
+    errors.extend(
+        f"missing required supersede natural-key field: {field}"
+        for field in missing_natural_key
+    )
     if errors:
         print(f"supersede-intel {args.intel_type}: payload failed schema validation:", file=sys.stderr)
         for error in errors:
