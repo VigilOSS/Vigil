@@ -16,7 +16,7 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `curl` (manual parameter injection and response analysis)
+- `aith assess kali exec -- curl ...` (manual parameter injection and response analysis — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique AUTH --probe-kind payload --phase consume-test --timeout 30` for injection attempts, and add `--destructive` when the request creates or modifies a resource)
 - `Arjun` / `param-miner` (hidden parameter discovery and fuzzing)
 - Browser DevTools (compare request fields vs response fields)
 
@@ -127,7 +127,7 @@ curl "https://target/api/orders?user_id=other_user_id"
 - Endpoint, HTTP method, and Content-Type where assignment succeeds
 - Exact field names that were injected and accepted
 - Before/after state showing the unauthorized change (GET before, POST with extra field, GET after)
-- Impact: privilege escalation, balance manipulation, PII access, data leakage
+- Impact: privilege escalation, balance manipulation, PII access, data leakage — confirming a field was accepted is not enough; you must show the **attacker outcome** (e.g., the account now has `role: admin` and can access `/admin` endpoints, balance was set to $999999 and a purchase completed for free, `is_verified: true` bypassed email confirmation and granted access to restricted features)
 - Full request/response for reproducibility
 
 ## Extended Resources

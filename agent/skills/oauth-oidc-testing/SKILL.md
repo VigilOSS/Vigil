@@ -16,10 +16,10 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `curl` (manual OAuth flow manipulation and token probing)
+- `aith assess kali exec -- curl ...` (manual OAuth flow manipulation and token probing — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique AUTH --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools (intercept redirects, capture authorization codes, inspect tokens)
-- `jwt_tool` / `jwt.io` (decode and tamper with ID tokens and access tokens)
-- OOB callback server (capture leaked tokens via redirect_uri)
+- `jwt_tool` / `jwt.io` (decode and tamper with ID tokens and access tokens — host-side analysis, not target-facing)
+- OOB callbacks to capture leaked tokens via redirect_uri: check readiness with `aith oob status --json`; start a named client with `aith oob client start <name> --engagement <key> --agent <agent>`; read captured tokens with `aith oob client logs <name> --lines 80`
 
 ## Methodology
 
@@ -142,7 +142,7 @@ curl -X POST https://target/oauth/token \
 - Vulnerable endpoint and parameter (redirect_uri, state, scope, code_challenge)
 - Exact payload/request that exploits the flaw
 - Token contents (decoded JWT claims) and scope differences
-- Impact: account takeover, privilege escalation, token theft, CSRF
+- Impact: account takeover, privilege escalation, token theft, CSRF — confirming the redirect_uri or state weakness exists is not enough; you must show the **attacker outcome** (e.g., authorization code was delivered to attacker-controlled redirect_uri and exchanged for an access token that reads victim's profile, forged id_token with elevated claims was accepted and granted admin access, stolen refresh_token maintains persistent authenticated sessions without re-authorization)
 - Full request/response chain including authorization and token exchange
 
 ## Extended Resources

@@ -37,7 +37,7 @@ aith assess kali nikto \
 - `x0` excludes DoS checks (never run against production).
 - Combined as `x60` it skips both categories while keeping every other check class.
 
-**NEVER use `-Tuning 6`** (no `x` prefix flips it from "exclude" to "only run") and **never include `6` in the tuning set** against any production-like target. The DoS checks are exactly what they sound like — they will impact target availability. The `agent/rules/hunting.md` "no destructive tests against production" rule applies here.
+Use only the exclusion form: `-Tuning x<digits>` (the `x` prefix means "exclude these categories"). The bare positive form (e.g., `-Tuning 6` with no `x`) flips the meaning to "run ONLY these categories" — category `6` is DoS, which will impact target availability. Always include `x0` and `x6` in the tuning string to guarantee DoS and File Upload are excluded; `-Tuning x60` is the safe default that achieves this. The `agent/rules/hunting.md` "no destructive tests against production" rule applies to DoS and file-write checks.
 
 The full tuning category list (use only when researching a specific check class):
 

@@ -482,18 +482,66 @@ def test_aith_start_codex_exports_engagement_environment(tmp_path: Path) -> None
     )
     os.chmod(bin_dir / "codex", 0o755)
 
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    env.pop("ORCHESTRATOR_BASE_URL", None)
     launch = subprocess.run(
         [str(created.path / "start_codex.sh")],
         text=True,
         capture_output=True,
         check=True,
         cwd=str(created.path),
-        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        env=env,
     )
 
     assert f"ENGAGEMENT_DIR={created.path}" in launch.stdout
     assert f"AI_THREAT_HUNTING_AGENT_ROOT={sandbox_root}" in launch.stdout
     assert "ORCHESTRATOR_BASE_URL=https://override.example.test" in launch.stdout
+
+
+def test_aith_start_codex_keeps_engagement_env_over_install_env(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    install_root = tmp_path / "install"
+    sandbox_root = install_root / "agent"
+    sandbox_root.mkdir(parents=True)
+    _copy_agent_fixture(repo_root / "agent", sandbox_root, client="codex")
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://127.0.0.1:9/\n",
+        encoding="utf-8",
+    )
+
+    created = create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="web",
+            target="https://app.example.com",
+        )
+    )
+    (created.path / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://127.0.0.1:19001/\n",
+        encoding="utf-8",
+    )
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "codex").write_text(
+        "#!/usr/bin/env bash\n"
+        "printf 'ORCHESTRATOR_BASE_URL=%s\\n' \"${ORCHESTRATOR_BASE_URL:-}\"\n",
+        encoding="utf-8",
+    )
+    os.chmod(bin_dir / "codex", 0o755)
+
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    env.pop("ORCHESTRATOR_BASE_URL", None)
+    launch = subprocess.run(
+        [str(created.path / "start_codex.sh")],
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=str(created.path),
+        env=env,
+    )
+
+    assert "ORCHESTRATOR_BASE_URL=http://127.0.0.1:19001" in launch.stdout
 
 
 def test_aith_engagement_create_does_not_write_agent_name_to_env_file(

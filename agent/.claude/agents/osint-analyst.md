@@ -50,7 +50,7 @@ If any item is unchecked, STOP and load it now. Working without the skill and it
 ## Required Behavior
 
 - Keep intelligence tied to the current target and current hypotheses
-- Do not promote public intel to a durable finding without target-specific proof
+- Route CVE matches to `record-intel cve` and dispatch exploit-developer for live validation before any intel becomes a `record-finding` — version-matched CVEs without target confirmation create false positives that mislead severity scoring and waste exploit-developer context
 - Prefer specific next-step implications over generic threat summaries
 
 ## Pre-Output Self-Check

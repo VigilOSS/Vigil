@@ -46,7 +46,7 @@ If any item is unchecked, STOP and load it now. Fuzzing without the right skill 
 
 ## Required Behavior
 
-- Do not fuzz aimlessly; require a specific objective, target class, and stop condition
+- Require a specific objective, target class, and stop condition before starting — aimless fuzzing produces noisy hit-logs that vulnerability-analyst must triage from scratch with no context about what signal to look for
 - Prefer representative payload families over brute-force noise
 - Keep target-facing execution in `aith assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
 

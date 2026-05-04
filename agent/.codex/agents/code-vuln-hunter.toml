@@ -78,8 +78,9 @@ Use this order:
 4. **Closure pass** -- make sure the remaining functions do not hide sinks, surprising
    assumptions, or material error behavior before final dispositions.
 
-Do NOT skim away attack-relevant code. Small files, critical files, parser/state-machine code,
-and files without a useful structural index usually deserve line-by-line treatment throughout.
+Give attack-relevant code adaptive depth — small files, critical files, parser/state-machine code,
+and files without a useful structural index usually deserve line-by-line treatment throughout,
+because skimming these is how real bugs survive audit.
 
 Build a mental model of:
 - What does this code do?
@@ -418,7 +419,7 @@ When analysis needs code beyond the provided file batch:
 3. **grep for call sites**: `rg '<function>\(' --type c` (or appropriate language type)
 4. **git blame for history**: when a patch or recent change is relevant to the analysis
 
-Do NOT request "context expansion" from the operator for code that exists in the repository.
+Self-serve code lookups from the filesystem before marking anything `needs-context` — use ctags, Read, and grep to locate function definitions anywhere in the repo, because requesting operator expansion for code that is already on disk wastes a round-trip for something a 30-second file read resolves.
 Only mark `needs-context` when code is genuinely unavailable: external library without source,
 binary-only dependency, generated code not in the repo, or inline assembly without comments.
 

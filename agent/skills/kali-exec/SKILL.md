@@ -366,7 +366,7 @@ Every typed verb and `kali exec` writes an audit row with `command`, `argv`, `to
 
 ## Process cleanup discipline
 
-> Never `pkill <toolname>` (e.g. `pkill -f nmap`, `pkill -f ffuf`) — broad pkill stomps on sibling specialist processes in the shared runtime. For async jobs, use `aith assess kali job stop <id>` (signals only the job-owned in-container PID); for synchronous calls, the CLI already handles the SIGTERM/SIGKILL escalation on `--timeout` expiry.
+Use PID-targeted cleanup, not binary-name signals — `pkill -f nmap` or `pkill -f ffuf` kills sibling specialists' parallel scans in the shared runtime, losing potentially hours of recon. For async jobs, use `aith assess kali job stop <id>` (signals only the job-owned in-container PID); for synchronous calls, the CLI already handles the SIGTERM/SIGKILL escalation on `--timeout` expiry so no manual cleanup is needed.
 
 ## Troubleshooting and runtime errors
 
