@@ -1,9 +1,11 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from .api.activity import router as activity_router
+from .api.admin import router as admin_router
 from .api.artifacts import router as artifacts_router
 from .api.assessment import router as assessment_router
 from .api.code_analysis import router as code_analysis_router
@@ -16,12 +18,25 @@ from .services.backup import start_scheduler as start_backup_scheduler, stop_sch
 from .services.engagements import get_engagement_or_404, maybe_sync_engagements
 from .ws import broadcaster
 
+logger = logging.getLogger(__name__)
+
+
+_FRONTEND_MISSING_HELP = (
+    "Frontend build not found at "
+    f"{settings.frontend_dist_dir}. The backend was started without first "
+    "building the frontend (likely a direct `uv run uvicorn ...` instead of "
+    "`aith up` or `aith orchestrator start`). Run `aith orchestrator build` "
+    "to build the install-side frontend in place, then refresh."
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     maybe_sync_engagements(force=True)
     start_backup_scheduler()
+    if not settings.frontend_dist_dir.exists():
+        logger.warning(_FRONTEND_MISSING_HELP)
     try:
         yield
     finally:
@@ -29,6 +44,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.include_router(admin_router)
 app.include_router(engagements_router)
 app.include_router(events_router)
 app.include_router(artifacts_router)
@@ -57,7 +73,10 @@ async def engagement_stream(websocket: WebSocket, engagement_key: str) -> None:
 @app.get("/{full_path:path}")
 def frontend_app(full_path: str):
     if not settings.frontend_dist_dir.exists():
-        return {"detail": "frontend build not found"}
+        return JSONResponse(
+            status_code=503,
+            content={"detail": _FRONTEND_MISSING_HELP, "fix": "aith orchestrator build"},
+        )
 
     requested_path = settings.frontend_dist_dir / full_path
     if full_path and requested_path.is_file() and requested_path.is_relative_to(settings.frontend_dist_dir):
@@ -67,4 +86,7 @@ def frontend_app(full_path: str):
     if index_path.exists():
         return FileResponse(index_path)
 
-    return {"detail": "frontend build not found"}
+    return JSONResponse(
+        status_code=503,
+        content={"detail": _FRONTEND_MISSING_HELP, "fix": "aith orchestrator build"},
+    )

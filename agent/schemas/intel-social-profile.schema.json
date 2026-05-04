@@ -5,11 +5,17 @@
   "title": "Intel Social Profile Record",
   "type": "object",
   "additionalProperties": false,
-  "required": ["subject_kind", "platform"],
+  "required": [
+    "subject_kind",
+    "platform"
+  ],
   "properties": {
     "subject_kind": {
       "type": "string",
-      "enum": ["person", "org"],
+      "enum": [
+        "person",
+        "org"
+      ],
       "description": "Whether the profile belongs to an individual or an organisation."
     },
     "subject_ref": {
@@ -49,11 +55,28 @@
       "additionalProperties": false,
       "default": {},
       "properties": {
-        "agent_name": { "type": "string" },
-        "artifact_ref": { "type": "string" },
-        "captured_at": { "type": "string" },
-        "evidence_quote": { "type": "string" }
+        "agent_name": {
+          "type": "string"
+        },
+        "artifact_ref": {
+          "type": "string"
+        },
+        "captured_at": {
+          "type": "string"
+        },
+        "evidence_quote": {
+          "type": "string"
+        }
       }
+    },
+    "superseded_by_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "default": null,
+      "description": "Backend id of the intel row that superseded this one. Set automatically by `aith assess supersede-intel`; report-writer filters on this so stale rows do not appear in reports."
     }
   }
 }

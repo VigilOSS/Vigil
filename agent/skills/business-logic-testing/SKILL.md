@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Business Logic Testing
 
-> **Kali MCP audit header:** use `X-Technique: OTHER` (business-logic flaws are workflow abuse, not a vuln class in the technique taxonomy).
+> **`aith assess kali` audit flags:** use `--technique OTHER` (business-logic flaws are workflow abuse, not a vuln class in the technique taxonomy).
 
 ## When to Activate
 
@@ -18,14 +18,11 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `curl` — craft requests with manipulated parameters
-- `ffuf` — fuzz parameter values for boundary conditions
-- Browser DevTools — observe workflow state and hidden parameters
+- `aith assess kali exec -- curl ...` (craft requests with manipulated parameters — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30` for workflow abuse, and add `--destructive` for requests that create, modify, or delete resources)
+- `aith assess kali ffuf ...` (fuzz parameter values for boundary conditions — use `--technique OTHER --probe-kind payload --phase consume-test --timeout 600`)
+- Browser DevTools — observe workflow state and hidden parameters (client-side analysis only)
 
-For live engagement target requests, execute `curl` through the Kali MCP
-command-execution tool. Add explicit `-b` or `-H "Authorization: ..."` only
-when intentionally testing alternate identities, broken session handling, or
-auth override behavior.
+Add explicit `-b` or `-H "Authorization: ..."` only when intentionally testing alternate identities, broken session handling, or auth override behavior.
 
 ## Methodology
 
@@ -185,7 +182,7 @@ curl -s -X POST "http://target/api/payment" \
 
 - **Workflow step** that was bypassed or abused
 - **Expected behavior** vs **actual behavior**
-- **Financial impact** if applicable (e.g., "purchased item for $0")
+- **Financial impact** if applicable — confirming the API accepted a negative quantity or zero price is not enough; you must show the **attacker outcome** (e.g., submitting `quantity: -5` resulted in a credit of $50 applied to the account balance, confirmed by the subsequent balance API call; the coupon was applied twice in the same order reducing the total from $100 to $0; the payment step was skipped and the order was fulfilled with no payment record in the transaction log)
 - **Exact request/response** proving the logic flaw
 - **Reproducibility** — can it be repeated?
 - **Severity** — based on business impact, not just technical impact:

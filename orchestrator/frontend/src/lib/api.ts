@@ -44,6 +44,20 @@ export type AssessmentSurface = {
   evidence_ref: string;
   status: string;
   updated_at: string;
+  vendor_saas?: boolean;
+};
+
+export type VendorSaasPendingDecision = {
+  host: string;
+  vendor: string;
+};
+
+export type EgressStatus = {
+  blocked_pct: number;
+  pattern: string;
+  samples_total?: number;
+  samples_blocked?: number;
+  checked_at?: string | null;
 };
 
 export type AssessmentPhaseWorker = {
@@ -262,6 +276,8 @@ export type AssessmentSummary = {
   attack_chains: AssessmentAttackChain[];
   service_coverage_gaps: AssessmentServiceGap[];
   phase_workers: AssessmentPhaseWorker[];
+  vendor_saas_hosts_pending_decision?: VendorSaasPendingDecision[];
+  egress_status?: EgressStatus;
 };
 
 export type Artifact = {
@@ -398,6 +414,7 @@ export type AssessmentTarget = {
   discovered_by: string;
   created_at: string;
   updated_at: string;
+  vendor_saas?: boolean;
 };
 
 export type AssessmentService = {
@@ -732,6 +749,15 @@ type IntelRowBase = {
   source_name: string;
   notes: string;
   provenance: IntelProvenance;
+  // Populated when this row was replaced by a newer record via
+  // `aith assess supersede-intel`. The IntelTab renders superseded rows
+  // distinctly (struck-through, link to the superseder).
+  superseded_by_id: number | null;
+  superseded_at: string | null;
+  // Leaf of the supersede chain. Equal to ``id`` when this row is the
+  // canonical record; otherwise points to the latest replacement so the
+  // UI can chase to current state in a single hop.
+  canonical_id: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -962,6 +988,67 @@ export function listActivityEntries(
 // `listSurfaces` is an alias over the existing assessment endpoint; the
 // SurfacesTab imports this name for parity with §3b.
 export const listSurfaces = listAssessmentSurfaces;
+
+// ── Mutation helpers (CLI parity) ───────────────────────
+
+export type SurfacePatchPayload = {
+  status?: "covered" | "deferred" | "discovered" | "not_applicable";
+  rationale?: string;
+  source_name?: string;
+  evidence_ref?: string;
+};
+
+export function patchAssessmentSurface(
+  engagementKey: string,
+  surfaceId: number,
+  payload: SurfacePatchPayload,
+) {
+  return request<AssessmentSurface>(
+    `/engagements/${engagementKey}/assessment/surfaces/${surfaceId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function patchIntelRecord(
+  engagementKey: string,
+  entityType: IntelEntityType,
+  intelId: number,
+  patch: Record<string, unknown>,
+) {
+  const path = intelEntityPath(entityType);
+  return request<IntelRecord>(
+    `/engagements/${engagementKey}/intel/${path}/${intelId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ payload: patch }),
+    },
+  );
+}
+
+export type IntelSupersedeResult = {
+  superseded: IntelRecord;
+  current: IntelRecord;
+};
+
+export function supersedeIntelRecord(
+  engagementKey: string,
+  entityType: IntelEntityType,
+  intelId: number,
+  newPayload: Record<string, unknown>,
+  rationale: string = "",
+) {
+  const path = intelEntityPath(entityType);
+  return request<IntelSupersedeResult>(
+    `/engagements/${engagementKey}/intel/${path}/${intelId}/supersede`,
+    {
+      method: "POST",
+      body: JSON.stringify({ payload: newPayload, rationale }),
+    },
+  );
+}
 
 function intelEntityPath(entityType: IntelEntityType): string {
   switch (entityType) {

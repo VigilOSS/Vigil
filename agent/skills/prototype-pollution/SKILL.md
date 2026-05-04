@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Prototype Pollution Testing
 
-> **Kali MCP audit header:** use `X-Technique: OTHER` (prototype pollution is a primitive with variable outcomes). Switch to `XSS` or `RCE` when the pollution produces that specifically.
+> **`aith assess kali` audit flags:** use `--technique OTHER` (prototype pollution is a primitive with variable outcomes). Switch to `XSS` or `RCE` when the pollution produces that specifically.
 
 ## When to Activate
 
@@ -16,8 +16,8 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `curl` (server-side pollution probing via JSON bodies)
-- Browser DevTools (client-side pollution detection and gadget chain testing)
+- `aith assess kali exec -- curl ...` (server-side pollution probing via JSON bodies — all target-facing curl must go through the kali exec wrapper; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30`)
+- Browser DevTools (client-side pollution detection and gadget chain testing — client-side analysis, not target-facing)
 - `ppmap` / `ppfuzz` (automated client-side prototype pollution scanning)
 
 ## Methodology
@@ -118,7 +118,7 @@ deep-extend          deap.merge             mixin-deep
 
 - Pollution vector (URL parameter, JSON body, hash fragment)
 - Exact payload that achieves pollution
-- Proof of pollution (console output, behavior change, error)
+- Proof of pollution (console output, behavior change, error) — confirming `({}).polluted === "yes"` is not enough; you must show the **attacker outcome** (e.g., polluted `isAdmin: true` property was respected by the access check and granted admin panel access, EJS `outputFunctionName` gadget chain achieved RCE via `id` execution, XSS payload fired in another user's browser via polluted innerHTML handler)
 - Gadget chain details if escalated to XSS/RCE/DoS
 - Affected library/function and version
 - Full request/response for reproducibility

@@ -120,6 +120,9 @@ class FakeClient:
     must not call those endpoints, and a regression that re-adds the call
     should fail the test suite loudly rather than silently receive an
     empty list.
+
+    ``list_decisions`` stands in for the assessment_dispatch_decisions table —
+    vendor-SaaS scope decisions come from the backend.
     """
 
     def __init__(
@@ -127,10 +130,12 @@ class FakeClient:
         *,
         services: list[dict[str, Any]] | None = None,
         surfaces: list[dict[str, Any]] | None = None,
+        decisions: list[dict[str, Any]] | None = None,
         endpoint_handler=None,
     ) -> None:
         self._services = services or []
         self._surfaces = surfaces or []
+        self._decisions = decisions or []
         self._endpoint_handler = endpoint_handler
         self.calls: list[str] = []
 
@@ -146,6 +151,13 @@ class FakeClient:
             return self._surfaces
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
+    def list_decisions(self, **filters: Any) -> list[dict[str, Any]]:
+        rows = list(self._decisions)
+        kind = filters.get("kind")
+        if kind:
+            rows = [r for r in rows if r.get("kind") == kind]
+        return rows
+
     def close(self) -> None:
         return None
 
@@ -156,16 +168,19 @@ def _patch_client(
     *,
     services=None,
     surfaces=None,
+    decisions=None,
     endpoint_handler=None,
 ) -> list[FakeClient]:
     fake_services = services or []
     fake_surfaces = surfaces or []
+    fake_decisions = decisions or []
     created: list[FakeClient] = []
 
     def _factory(base_url: str, engagement_key: str) -> FakeClient:
         client = FakeClient(
             services=fake_services,
             surfaces=fake_surfaces,
+            decisions=fake_decisions,
             endpoint_handler=endpoint_handler,
         )
         created.append(client)
@@ -194,10 +209,12 @@ def _run(
     *,
     services=None,
     surfaces=None,
+    decisions=None,
     endpoint_handler=None,
     require_stage: str | None = None,
     as_json: bool = True,
     verbose: bool = False,
+    strict_vendor_saas: bool = False,
 ) -> FakeClient | None:
     module = _load_module()
     _patch_config(monkeypatch, module, engagement_dir)
@@ -206,6 +223,7 @@ def _run(
         module,
         services=services,
         surfaces=surfaces,
+        decisions=decisions,
         endpoint_handler=endpoint_handler,
     )
     module.run(
@@ -214,6 +232,7 @@ def _run(
             require_stage=require_stage,
             as_json=as_json,
             verbose=verbose,
+            strict_vendor_saas=strict_vendor_saas,
         )
     )
     return clients[0] if clients else None
@@ -830,3 +849,239 @@ def test_collection_gate_fails_when_no_surfaces_or_work_items(monkeypatch, tmp_p
     assert entry["collection_attempted"] is False
     assert entry["collection_evidence"] == []
     assert "no-collection" in entry["gaps"]
+
+
+# ---------------------------------------------------------------------------
+# Wildcard-apex semantics
+# ---------------------------------------------------------------------------
+
+
+def test_wildcard_admits_apex(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A wildcard scope entry covers the bare apex AND every subdomain
+    (HackerOne / Bugcrowd / VDP convention)."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["*.example.test"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db, queue_key="apex:1", url="https://example.test/", url_path="/", status="pending"
+    )
+    _insert_work_item(
+        db,
+        queue_key="sub:1",
+        url="https://corp.example.test/api",
+        url_path="/api",
+        status="pending",
+    )
+
+    services = [
+        {"endpoint": "example.test", "state": "up"},
+        {"endpoint": "corp.example.test", "state": "up"},
+    ]
+    surfaces = [
+        {"target_descriptor": "https://example.test/"},
+        {"target_descriptor": "https://corp.example.test/api"},
+    ]
+
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum")
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is True, report
+    entry = report["entries"][0]
+    assert entry["entry_kind"] == "wildcard"
+    assert entry["live_hosts"] == 2, entry
+    assert entry["surfaces_count"] == 2
+    assert entry["work_queued"]["pending"] == 2
+
+
+def test_explicit_apex_plus_wildcard(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Listing the apex AND the wildcard covers both apex and subdomains.
+    The wildcard entry already admits the apex; the explicit apex entry still
+    matches and reports its own sample."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["example.test", "*.example.test"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db, queue_key="apex:1", url="https://example.test/", url_path="/", status="done"
+    )
+    _insert_work_item(
+        db,
+        queue_key="sub:1",
+        url="https://vendor-saas.example.test/api",
+        url_path="/api",
+        status="done",
+    )
+
+    services = [
+        {"endpoint": "example.test", "state": "up"},
+        {"endpoint": "vendor-saas.example.test", "state": "up"},
+    ]
+    surfaces = [
+        {"target_descriptor": "https://example.test/"},
+        {"target_descriptor": "https://vendor-saas.example.test/api"},
+    ]
+
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is True, report
+    by_scope = {entry["scope_entry"]: entry for entry in report["entries"]}
+    assert by_scope["example.test"]["live_hosts"] == 1
+    assert by_scope["example.test"]["live_host_samples"] == ["example.test"]
+    assert by_scope["*.example.test"]["live_hosts"] == 2
+    assert "vendor-saas.example.test" in by_scope["*.example.test"]["live_host_samples"]
+
+
+def _patch_vendor_saas_suffix(monkeypatch, label: str, suffix: str) -> None:
+    """Append a test-only suffix to the live vendor-SaaS suffix table."""
+    scripts_root = _scripts_root()
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    import importlib
+
+    scope_mod = importlib.import_module("assess.lib.scope")
+    monkeypatch.setattr(
+        scope_mod,
+        "_VENDOR_SAAS_SUFFIXES",
+        list(scope_mod._VENDOR_SAAS_SUFFIXES) + [(label, suffix)],
+    )
+
+
+def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A vendor-SaaS host that surfaced under wildcard expansion (NOT an
+    explicit literal in scope.json) blocks the gate until a scope_decision
+    is recorded.
+
+    ``host_is_vendor_saas`` matches CNAME / rDNS suffixes; the test
+    monkeypatches the suffix table so the fixture host registers as vendor
+    SaaS without putting a real vendor's domain in test fixtures.
+    """
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    # Wildcard scope: the vendor-SaaS host appears under expansion, not as
+    # an explicit literal — that is the genuinely ambiguous case the
+    # checkpoint exists to resolve.
+    _write_scope(eng, hosts=["*.example.test"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db,
+        queue_key="vs:1",
+        url="https://vendor-saas-platform.example.test/api/health",
+        url_path="/api/health",
+        status="done",
+    )
+
+    _patch_vendor_saas_suffix(monkeypatch, "vendor-saas-platform", ".example.test")
+
+    services = [{"endpoint": "vendor-saas-platform.example.test", "state": "up"}]
+    surfaces = [
+        {"target_descriptor": "https://vendor-saas-platform.example.test/api/health"},
+    ]
+
+    # Without strict mode, an undecided vendor-SaaS discovery is reported for
+    # operator visibility but does not fail the stage gate.
+    _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is True, report
+    pending = {row["host"]: row["vendor"] for row in report["vendor_saas_pending_decision"]}
+    assert pending.get("vendor-saas-platform.example.test") == "vendor-saas-platform"
+    assert report["strict_vendor_saas"] is False
+    assert not any(
+        "vendor-saas" in msg and "vendor-saas-platform.example.test" in msg
+        for msg in report["overall_gaps"]
+    )
+
+    # Strict mode restores the phase gate when an engagement wants vendor-SaaS
+    # ambiguity to block progress.
+    with pytest.raises(SystemExit) as excinfo:
+        _run(
+            monkeypatch,
+            eng,
+            services=services,
+            surfaces=surfaces,
+            require_stage="enum",
+            strict_vendor_saas=True,
+        )
+    assert excinfo.value.code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is False, report
+    assert report["strict_vendor_saas"] is True
+    pending = {row["host"]: row["vendor"] for row in report["vendor_saas_pending_decision"]}
+    assert pending.get("vendor-saas-platform.example.test") == "vendor-saas-platform"
+    assert any(
+        "vendor-saas" in msg and "vendor-saas-platform.example.test" in msg
+        for msg in report["overall_gaps"]
+    )
+
+    # Recording a scope_decision in the backend clears the gate — the
+    # decision lives in assessment_dispatch_decisions.
+    decisions = [
+        {
+            "id": 1,
+            "kind": "scope_decision",
+            "payload": {
+                "target": "https://vendor-saas-platform.example.test:8443/review",
+                "vendor": "vendor-saas-platform",
+                "choice": "in_scope",
+            },
+            "surfaced_to_user": True,
+            "resolved": False,
+        }
+    ]
+
+    _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        decisions=decisions,
+        require_stage="enum",
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is True, report
+    assert report["vendor_saas_pending_decision"] == []
+
+
+def test_vendor_saas_explicit_literal_in_scope_skips_gate(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A vendor-SaaS host authored as an explicit literal in scope.json is
+    already the operator's in-scope decision, so the gate must not fire on
+    it. The Vendor-SaaS scope checkpoint exists for the wildcard-expansion
+    case where the operator did not author the host by hand; firing on a
+    literal entry is theatre.
+    """
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    # Explicit literal entry — the operator typed the host directly.
+    _write_scope(eng, hosts=["vendor-saas-platform.example.test"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db,
+        queue_key="vs:1",
+        url="https://vendor-saas-platform.example.test/api/health",
+        url_path="/api/health",
+        status="done",
+    )
+
+    _patch_vendor_saas_suffix(monkeypatch, "vendor-saas-platform", ".example.test")
+
+    services = [{"endpoint": "vendor-saas-platform.example.test", "state": "up"}]
+    surfaces = [
+        {"target_descriptor": "https://vendor-saas-platform.example.test/api/health"},
+    ]
+
+    # No scope_decision recorded — but the literal entry skips the gate.
+    _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is True, report
+    assert report["vendor_saas_pending_decision"] == []

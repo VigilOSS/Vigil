@@ -157,21 +157,30 @@ If the app checks that a cookie value matches a form parameter:
 
 ## Useful Curl for Testing
 
+Run all target-facing curl probes via `aith assess kali exec --technique CSRF --intent "<why>" --probe-kind payload --phase <phase> --timeout <seconds> -- curl ...` so the request lands in the audit pipeline. Keep explicit Cookie overrides only when replaying a victim session on purpose.
+
 ```bash
-# For live testing, provide the current auth context through the Kali MCP command-execution tool when needed.
-# Keep explicit Cookie overrides only when replaying a victim session on purpose.
 # Check if endpoint accepts requests without CSRF token
-curl -s -X POST http://target.example/api/action \
-  -H "Cookie: session=VICTIM_SESSION" \
-  -d "email=test@test.com"
+aith assess kali exec --technique CSRF \
+  --intent "CSRF probe: POST without token to /api/action" \
+  --probe-kind payload --phase consume-test --timeout 30 -- \
+  curl -s -X POST http://target.example/api/action \
+    -H "Cookie: session=VICTIM_SESSION" \
+    -d "email=test@test.com"
 
 # Check if endpoint accepts GET instead of POST
-curl -s "http://target.example/api/action?email=test@test.com" \
-  -H "Cookie: session=VICTIM_SESSION"
+aith assess kali exec --technique CSRF \
+  --intent "CSRF probe: method switch GET vs POST on /api/action" \
+  --probe-kind payload --phase consume-test --timeout 30 -- \
+  curl -s "http://target.example/api/action?email=test@test.com" \
+    -H "Cookie: session=VICTIM_SESSION"
 
 # Check Referer validation
-curl -s -X POST http://target.example/api/action \
-  -H "Cookie: session=VICTIM_SESSION" \
-  -H "Referer: https://evil.example/" \
-  -d "email=test@test.com"
+aith assess kali exec --technique CSRF \
+  --intent "CSRF probe: cross-origin Referer on /api/action" \
+  --probe-kind payload --phase consume-test --timeout 30 -- \
+  curl -s -X POST http://target.example/api/action \
+    -H "Cookie: session=VICTIM_SESSION" \
+    -H "Referer: https://evil.example/" \
+    -d "email=test@test.com"
 ```

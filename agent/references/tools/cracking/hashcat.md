@@ -1,7 +1,7 @@
 # hashcat
 
 **Purpose:** GPU-accelerated password hash cracking
-Run hashcat through the Kali MCP command-execution tool.
+Run hashcat via `aith assess kali exec --technique AUTH --intent "<why>" --probe-kind payload --phase <phase> --timeout <seconds> -- hashcat ...` with the standard audit-flag set.
 
 ## Hash Mode Quick Reference
 

@@ -39,6 +39,23 @@ def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
     return {row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
+def _has_unique_index_on_columns(
+    connection: sqlite3.Connection, table_name: str, columns: tuple[str, ...]
+) -> bool:
+    for row in connection.execute(f"PRAGMA index_list({table_name})"):
+        index_name = str(row[1])
+        is_unique = bool(row[2])
+        if not is_unique:
+            continue
+        indexed_columns = tuple(
+            str(info[2])
+            for info in connection.execute(f"PRAGMA index_info({index_name})")
+        )
+        if indexed_columns == columns:
+            return True
+    return False
+
+
 def _append_notes(existing: str, incoming: str) -> str:
     if not incoming:
         return existing
@@ -385,6 +402,7 @@ _ENGAGEMENT_SCOPED_TABLES = {
     "assessment_tunnels",
     "assessment_blocked_techniques",
     "assessment_command_runs",
+    "assessment_jobs",
     "code_repos",
     "code_modules",
     "code_files",
@@ -403,6 +421,9 @@ _ENGAGEMENT_SCOPED_TABLES = {
     "intel_notes",
     "intel_search_index",
     "activity_entries",
+    "assessment_dispatches",
+    "assessment_dispatch_handoffs",
+    "assessment_dispatch_decisions",
 }
 
 
@@ -534,6 +555,12 @@ def init_db() -> None:
             )
             """
         )
+        # NOTE: Older dev databases may carry an ``engagement_token`` column
+        # left over from a previous experiment. SQLite < 3.35 cannot DROP
+        # COLUMN, and even with newer SQLite a rewrite would force every
+        # operator to take downtime. The orchestrator simply stops reading
+        # and writing the column; fresh DBs created from the schema above
+        # never have it.
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS engagement_sessions (
@@ -743,6 +770,7 @@ def init_db() -> None:
                 rationale TEXT NOT NULL DEFAULT '',
                 evidence_ref TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'discovered',
+                followup_condition TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, surface_type, target_descriptor),
@@ -750,6 +778,14 @@ def init_db() -> None:
             )
             """
         )
+        # Additive migration for existing deployments that predate the
+        # ``partially-covered`` lifecycle state and its companion
+        # ``followup_condition`` column.
+        surface_columns = _table_columns(connection, "assessment_surfaces")
+        if surface_columns and "followup_condition" not in surface_columns:
+            connection.execute(
+                "ALTER TABLE assessment_surfaces ADD COLUMN followup_condition TEXT NOT NULL DEFAULT ''"
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS assessment_findings (
@@ -993,7 +1029,7 @@ def init_db() -> None:
             )
             """
         )
-        # assessment_command_runs is the source of truth for every Kali MCP
+        # assessment_command_runs is the source of truth for every Kali
         # command executed during an engagement. A shadow FTS5 virtual table
         # plus three sync triggers provide keyword search. A later change can
         # add assessment_command_run_chunks (cols: command_run_id, seq,
@@ -1013,6 +1049,7 @@ def init_db() -> None:
                 agent_name TEXT NOT NULL,
                 phase TEXT NOT NULL,
                 audit_source TEXT NOT NULL DEFAULT 'header',
+                status TEXT NOT NULL DEFAULT 'completed',
                 return_code INTEGER,
                 timed_out INTEGER NOT NULL DEFAULT 0,
                 success INTEGER NOT NULL DEFAULT 0,
@@ -1037,6 +1074,17 @@ def init_db() -> None:
                 intent TEXT,
                 probe_kind TEXT,
                 destructive INTEGER,
+                stdout_path TEXT,
+                stderr_path TEXT,
+                peak_rss_bytes INTEGER,
+                cpu_user_seconds REAL,
+                cpu_system_seconds REAL,
+                working_dir TEXT,
+                scope_version TEXT,
+                auth_context TEXT,
+                superseded_by_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
+                timeout_seconds_requested INTEGER,
+                partial_results INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
             )
@@ -1047,6 +1095,16 @@ def init_db() -> None:
         # above already includes the columns, so _table_columns returns them
         # and the ALTER is skipped).
         cmdrun_columns = _table_columns(connection, "assessment_command_runs")
+        if cmdrun_columns and "run_uuid" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN run_uuid TEXT")
+            connection.execute(
+                """
+                UPDATE assessment_command_runs
+                SET run_uuid = 'legacy-' || id
+                WHERE run_uuid IS NULL OR run_uuid = ''
+                """
+            )
+            cmdrun_columns = _table_columns(connection, "assessment_command_runs")
         if cmdrun_columns and "tool_bin" not in cmdrun_columns:
             connection.execute(
                 "ALTER TABLE assessment_command_runs ADD COLUMN tool_bin TEXT NOT NULL DEFAULT ''"
@@ -1074,6 +1132,61 @@ def init_db() -> None:
         if cmdrun_columns and "destructive" not in cmdrun_columns:
             connection.execute(
                 "ALTER TABLE assessment_command_runs ADD COLUMN destructive INTEGER"
+            )
+        # Wave-1 cutover migrations: pre-exec lifecycle, output spill paths,
+        # resource snapshot, scope/auth context, dedup linkage, and the
+        # agent-supplied timeout. All NULL/safe-default so legacy rows
+        # continue to validate.
+        #
+        # Note: there is no schema-version mechanism. Round 9 dropped the
+        # ``strace_path`` column entirely; existing DBs that still carry the
+        # column keep it as a vestigial NULL TEXT (SQLite does not reliably
+        # support DROP COLUMN). Fresh DBs created against this schema do not
+        # have it. Code paths must not read or write the field either way.
+        if cmdrun_columns and "status" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"
+            )
+        if cmdrun_columns and "stdout_path" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN stdout_path TEXT")
+        if cmdrun_columns and "stderr_path" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN stderr_path TEXT")
+        if cmdrun_columns and "peak_rss_bytes" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN peak_rss_bytes INTEGER")
+        if cmdrun_columns and "cpu_user_seconds" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN cpu_user_seconds REAL")
+        if cmdrun_columns and "cpu_system_seconds" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN cpu_system_seconds REAL")
+        if cmdrun_columns and "working_dir" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN working_dir TEXT")
+        if cmdrun_columns and "scope_version" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN scope_version TEXT")
+        if cmdrun_columns and "auth_context" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN auth_context TEXT")
+        # SQLite cannot ALTER a column to add a REFERENCES constraint, but the
+        # FK is non-load-bearing — the application enforces the link, the
+        # constraint is an integrity belt. Legacy rows simply have a plain
+        # INTEGER column; new schema gets the REFERENCES via CREATE TABLE.
+        if cmdrun_columns and "superseded_by_id" not in cmdrun_columns:
+            connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN superseded_by_id INTEGER")
+        # Round 9 dropped ``strace_path``; we deliberately do NOT re-add the
+        # column on legacy DBs (SQLite cannot DROP COLUMN reliably, so a
+        # vestigial NULL column on existing files is the migration). Fresh DBs
+        # created against the new schema simply do not have the column.
+        if cmdrun_columns and "timeout_seconds_requested" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN timeout_seconds_requested INTEGER"
+            )
+        if cmdrun_columns and "partial_results" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN partial_results INTEGER NOT NULL DEFAULT 0"
+            )
+        if not _has_unique_index_on_columns(
+            connection, "assessment_command_runs", ("run_uuid",)
+        ):
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_assessment_command_runs_run_uuid "
+                "ON assessment_command_runs(run_uuid) WHERE run_uuid IS NOT NULL"
             )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_created "
@@ -1111,6 +1224,12 @@ def init_db() -> None:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_acr_destructive "
             "ON assessment_command_runs(engagement_id, destructive)"
+        )
+        # status powers the in-flight Commands tab and the dedup-window
+        # check that ignores already-finalized rows.
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_acr_status "
+            "ON assessment_command_runs(engagement_id, status, created_at DESC)"
         )
         # If the FTS schema predates tool_bin, drop it so CREATE VIRTUAL
         # TABLE below rebuilds with the new column set. Old triggers are
@@ -1234,6 +1353,38 @@ def init_db() -> None:
             connection.execute(
                 "INSERT INTO assessment_command_runs_fts(assessment_command_runs_fts) VALUES ('rebuild')"
             )
+        # assessment_jobs tracks long-running dtach-supervised workers spawned
+        # by `aith assess kali job start`. parent_command_run_id links the
+        # synchronous audit row that initiated the job; SET NULL on cascade
+        # so cleaning up an orphaned command-run does not destroy the job
+        # record we still need for forensics.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                parent_command_run_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                started_at TEXT,
+                ended_at TEXT,
+                exit_code INTEGER,
+                dtach_socket_path TEXT,
+                stdout_path TEXT,
+                stderr_path TEXT,
+                audit_metadata_json TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_jobs_engagement "
+            "ON assessment_jobs(engagement_id, status, created_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_jobs_command_run "
+            "ON assessment_jobs(parent_command_run_id)"
+        )
         # ── Code Analysis Tables ──────────────────────────────────
         connection.execute(
             """
@@ -1531,6 +1682,8 @@ def init_db() -> None:
                 last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_tech_components(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, component, version),
@@ -1550,6 +1703,8 @@ def init_db() -> None:
                 source_name TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_people(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, name),
@@ -1568,6 +1723,8 @@ def init_db() -> None:
                 source_name TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_emails(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, address),
@@ -1588,6 +1745,8 @@ def init_db() -> None:
                 live_status TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_domains(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, identity, kind),
@@ -1611,7 +1770,10 @@ def init_db() -> None:
                 validation_status TEXT NOT NULL DEFAULT 'unverified',
                 linked_finding_slug TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
+                details_json TEXT NOT NULL DEFAULT '{}',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_cves(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, cve_id, affected_component),
@@ -1619,6 +1781,14 @@ def init_db() -> None:
             )
             """
         )
+        # Additive migration for existing deployments — adds details_json so
+        # validation_status='attempted_blocked' rows can persist their
+        # ``block_reason`` and any future structured detail field.
+        cve_columns = _table_columns(connection, "intel_cves")
+        if cve_columns and "details_json" not in cve_columns:
+            connection.execute(
+                "ALTER TABLE intel_cves ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}'"
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS intel_dns_records (
@@ -1632,6 +1802,8 @@ def init_db() -> None:
                 source_name TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_dns_records(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, record_type, name, value),
@@ -1652,6 +1824,8 @@ def init_db() -> None:
                 source_name TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_social_profiles(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, subject_kind, subject_ref, platform, handle),
@@ -1671,6 +1845,8 @@ def init_db() -> None:
                 source_name TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_breach_records(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, subject, breach_name),
@@ -1688,6 +1864,8 @@ def init_db() -> None:
                 source_name TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_org_facts(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, fact_key),
@@ -1706,6 +1884,8 @@ def init_db() -> None:
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 source_name TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                superseded_by_id INTEGER REFERENCES intel_notes(id) ON DELETE SET NULL,
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, title),
@@ -1773,6 +1953,92 @@ def init_db() -> None:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_activity_entries_actor "
             "ON activity_entries(engagement_id, actor_kind, actor_name)"
+        )
+
+        # Dispatch tracking lives in the orchestrator. Three
+        # tables — dispatches (the audit row of who was dispatched), handoffs
+        # (the structured payload the agent returned to the operator), and
+        # decisions (scope/egress/dispatch-blocked checkpoints surfaced to the
+        # user). Constraint enforcement on status/confidence/kind lives in the
+        # Pydantic layer so we can evolve enums without a schema rebuild.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_dispatches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL,
+                agent_role TEXT NOT NULL,
+                task TEXT,
+                scope_host TEXT,
+                dispatched_at TEXT NOT NULL,
+                completed_at TEXT,
+                status TEXT NOT NULL,
+                model TEXT,
+                reasoning TEXT,
+                dispatch_mode TEXT,
+                finding_slugs_json TEXT,
+                UNIQUE(engagement_id, agent_id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_at "
+            "ON assessment_dispatches(engagement_id, dispatched_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_role "
+            "ON assessment_dispatches(engagement_id, agent_role)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_status "
+            "ON assessment_dispatches(engagement_id, status)"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_dispatch_handoffs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL,
+                agent_role TEXT NOT NULL,
+                phase TEXT,
+                summary TEXT NOT NULL,
+                confidence TEXT,
+                finding_slugs_json TEXT,
+                coverage_gaps_json TEXT,
+                next_steps_json TEXT,
+                runtime_issues_json TEXT,
+                working_artifacts_json TEXT,
+                open_questions_json TEXT,
+                recommended_next_agent TEXT,
+                extras_json TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(engagement_id, agent_id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_handoffs_engagement_at "
+            "ON assessment_dispatch_handoffs(engagement_id, created_at DESC)"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_dispatch_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                surfaced_to_user INTEGER NOT NULL DEFAULT 0,
+                resolved INTEGER NOT NULL DEFAULT 0,
+                resolution_json TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_decisions_engagement_kind "
+            "ON assessment_dispatch_decisions(engagement_id, kind)"
         )
 
         # FTS5 virtual tables + rebuild-on-drift guard follow the pattern
@@ -1915,6 +2181,54 @@ def init_db() -> None:
             connection.execute(
                 "INSERT INTO activity_entries_fts(activity_entries_fts) VALUES ('rebuild')"
             )
+
+        # Intel supersede migration: each intel_* row may be marked stale when
+        # a newer record displaces it. Report-writer filters on
+        # superseded_by_id IS NULL so historical rows stay queryable for
+        # audit but never appear in the report. Idempotent: re-runs skip
+        # tables that already carry the columns.
+        #
+        # Wrapped in ``BEGIN IMMEDIATE`` + commit/rollback so the 20 ALTER
+        # statements either all succeed or all roll back. Mid-loop failure
+        # (disk full, FK constraint mismatch on ALTER REFERENCES) used to
+        # leave the schema split-brain — half the intel_* tables carrying the
+        # supersede columns and half not — which made downstream code paths
+        # unsafe to run.
+        _INTEL_SUPERSEDE_TABLES: tuple[str, ...] = (
+            "intel_tech_components",
+            "intel_people",
+            "intel_emails",
+            "intel_domains",
+            "intel_cves",
+            "intel_dns_records",
+            "intel_social_profiles",
+            "intel_breach_records",
+            "intel_org_facts",
+            "intel_notes",
+        )
+        # Flush any implicit Python-sqlite3 transaction before starting an
+        # explicit BEGIN IMMEDIATE — Python's sqlite3 driver opens a deferred
+        # txn on first DML, and a manual BEGIN inside that txn raises
+        # ``cannot start a transaction within a transaction``. Committing
+        # first releases the implicit txn cleanly.
+        if connection.in_transaction:
+            connection.commit()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            for intel_table in _INTEL_SUPERSEDE_TABLES:
+                intel_columns = _table_columns(connection, intel_table)
+                if intel_columns and "superseded_by_id" not in intel_columns:
+                    connection.execute(
+                        f"ALTER TABLE {intel_table} ADD COLUMN superseded_by_id INTEGER REFERENCES {intel_table}(id) ON DELETE SET NULL"
+                    )
+                if intel_columns and "superseded_at" not in intel_columns:
+                    connection.execute(
+                        f"ALTER TABLE {intel_table} ADD COLUMN superseded_at TEXT"
+                    )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
         # ── End Intel Tables ──────────────────────────────────────
 
         _migrate_legacy_finding_slug_references(connection)
@@ -1938,7 +2252,12 @@ def get_connection() -> Iterator[sqlite3.Connection]:
         gc.collect()
 
 
-def create_engagement(key: str, target: str, status: str, engagement_root: str) -> Engagement:
+def create_engagement(
+    key: str,
+    target: str,
+    status: str,
+    engagement_root: str,
+) -> Engagement:
     with get_connection() as connection:
         cursor = connection.execute(
             """

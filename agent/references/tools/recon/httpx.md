@@ -1,24 +1,31 @@
 # httpx
 
 **Purpose:** Fast multi-purpose HTTP toolkit — live host probing, tech detection, status codes, titles
-For live engagement targets, run httpx through the Kali MCP command-execution tool.
+For live engagement targets, run httpx via `aith assess kali httpx` (typed verb, audit-flag-aware).
+
+Per-target rate calibration (when probing in volume): `agent/operator-core.md` "Recon Dispatch Resource Policy". Pull `-rl` and `-timeout` values from the matching trait row before running large batches.
 
 ## Probing
 
-**Probe single URL:** `echo "https://target" | httpx -silent -status-code -title -tech-detect`
-**Probe from file:** `httpx -l targets.txt -silent -status-code -title -server -content-length`
-**Follow redirects:** `httpx -l targets.txt -follow-redirects -silent`
-**With path appended:** `httpx -l targets.txt -path /api/v1 -silent`
+Run all target-facing httpx probes via `aith assess kali httpx` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. See `agent/skills/kali-exec/SKILL.md` "Examples per verb — kali httpx" for a complete annotated invocation.
+
+Flag reference (used inside `aith assess kali httpx`):
+
+**Probe from file:** `-l /engagements/$ENGAGEMENT_KEY/scans/targets.txt -status-code -title -server -content-length`
+**Follow redirects:** `-follow-redirects`
+**With path appended:** `-path /api/v1`
 
 ## Fingerprinting
 
-**Tech detection:** `httpx -l targets.txt -tech-detect -silent`
-**TLS certificate info:** `httpx -l targets.txt -tls-grab -silent`
-**CDN detection:** `httpx -l targets.txt -cdn -silent`
-**IP resolution:** `httpx -l targets.txt -ip -silent`
-**Favicon hash (Shodan matching):** `httpx -l targets.txt -favicon -silent`
-**Response hash:** `httpx -l targets.txt -hash md5 -silent`
-**Screenshot:** `httpx -l targets.txt -screenshot -silent`
+Flag reference (used inside `aith assess kali httpx`):
+
+**Tech detection:** `-tech-detect`
+**TLS certificate info:** `-tls-grab`
+**CDN detection:** `-cdn`
+**IP resolution:** `-ip`
+**Favicon hash (Shodan matching):** `-favicon`
+**Response hash:** `-hash md5`
+**Screenshot:** `-screenshot`
 
 ## Filtering & Matching
 
@@ -40,10 +47,21 @@ For live engagement targets, run httpx through the Kali MCP command-execution to
 
 ## Output
 
-**JSON output:** `httpx -l targets.txt -json -o results.json`
-**CSV output:** `httpx -l targets.txt -csv -o results.csv`
+**JSON output:** `-json -o /engagements/$ENGAGEMENT_KEY/scans/httpx_live.jsonl`
+**CSV output:** `-csv -o /engagements/$ENGAGEMENT_KEY/scans/httpx_live.csv`
 
-**Pipeline usage:** httpx is glue between subdomain enumeration and scanning. Feed subfinder/puredns output into httpx to confirm live hosts before deeper testing:
-```
-subfinder -d target.example -silent | dnsx -silent -a -resp-only | httpx -silent -status-code -title -tech-detect
+Always write output to `/engagements/$ENGAGEMENT_KEY/scans/` — writing to `/tmp` loses artifacts on container recreate.
+
+**Pipeline usage:** httpx is glue between subdomain enumeration and scanning. Write subfinder/puredns output to a file first, then pass it to `aith assess kali httpx -l <file>` so each step has its own audit row and the coverage map stays truthful. Piping between tools in a single `kali exec` heredoc loses the per-tool audit rows.
+
+Example two-step pattern:
+```bash
+# Step 1 — passive enum writes to file (aith assess kali subfinder ...)
+# Step 2 — httpx consumes the file
+aith assess kali httpx \
+  -l /engagements/$ENGAGEMENT_KEY/scans/subs_resolved.txt \
+  -status-code -title -tech-detect -tls-grab -json \
+  -o /engagements/$ENGAGEMENT_KEY/scans/httpx_live.jsonl \
+  --technique DISCOVERY --intent "live-host + tech confirm over resolved subs" \
+  --probe-kind fingerprint --phase recon --timeout 1200
 ```

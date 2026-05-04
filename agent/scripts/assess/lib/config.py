@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,29 +53,79 @@ def resolve_engagement_dir(cli_flag: str | None = None) -> str:
     raise SystemExit("Cannot resolve engagement directory. Set --engagement-dir, $ENGAGEMENT_DIR, or run from a dir with scope.json.")
 
 
+def _candidate_env_files(engagement_dir: str, agent_root: str) -> list[str]:
+    """Return the ordered list of env files the resolver searches.
+
+    Parent-shell env var wins. Among env files, engagement-local config wins
+    over install-root legacy defaults so an old install .env cannot retarget a
+    specific engagement.
+    """
+    install_root = str(Path(agent_root).parent)
+    candidates = []
+    if engagement_dir:
+        candidates.append(os.path.join(engagement_dir, ".orchestrator.env"))
+    candidates.extend([
+        os.path.join(install_root, ".orchestrator.env"),
+        os.path.join(install_root, ".env"),
+    ])
+    seen: set[str] = set()
+    unique: list[str] = []
+    for candidate in candidates:
+        normalized = str(Path(candidate).expanduser())
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(candidate)
+    return unique
+
+
+def _read_aith_config_value(key: str) -> str | None:
+    config_path = Path(
+        os.environ.get(
+            "AI_THREAT_HUNTING_CONFIG",
+            str(Path.home() / ".config" / "security-research" / "config.json"),
+        )
+    ).expanduser()
+    if not config_path.is_file():
+        return None
+    try:
+        raw = config_path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return None
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Invalid aith config JSON at {config_path}: {exc}") from exc
+    except OSError:
+        return None
+    if not isinstance(payload, dict):
+        raise SystemExit(f"Invalid aith config at {config_path}: expected a JSON object")
+    value = payload.get(key)
+    return str(value) if value is not None else None
+
+
 def resolve_base_url(engagement_dir: str, agent_root: str) -> str:
-    """Resolve ORCHESTRATOR_BASE_URL through the env var chain."""
+    """Resolve ORCHESTRATOR_BASE_URL through env, engagement, config, legacy defaults."""
     url = os.environ.get("ORCHESTRATOR_BASE_URL", "")
     if url:
         return url.rstrip("/")
 
-    install_root = str(Path(agent_root).parent)
+    engagement_env_file = (
+        os.path.join(engagement_dir, ".orchestrator.env")
+        if engagement_dir else ""
+    )
+    if engagement_env_file:
+        env_vars = _read_env_file(engagement_env_file)
+        val = env_vars.get("ORCHESTRATOR_BASE_URL", "")
+        if val:
+            return val.rstrip("/")
 
-    candidate_files = [
-        os.path.join(install_root, ".env"),
-        os.path.join(install_root, ".orchestrator.env"),
-    ]
-    # Check $ENGAGEMENT_DIR env var path (may differ from resolved engagement_dir)
-    env_eng_dir = os.environ.get("ENGAGEMENT_DIR", "")
-    if env_eng_dir:
-        candidate_files.append(os.path.join(env_eng_dir, ".orchestrator.env"))
-    # Check current working directory
-    candidate_files.append(os.path.join(os.getcwd(), ".orchestrator.env"))
-    # Check resolved engagement dir
-    if engagement_dir:
-        candidate_files.append(os.path.join(engagement_dir, ".orchestrator.env"))
+    config_value = _read_aith_config_value("orchestrator_base_url")
+    if config_value:
+        return config_value.rstrip("/")
 
-    for env_file in candidate_files:
+    for env_file in _candidate_env_files(engagement_dir, agent_root):
+        if engagement_env_file and env_file == engagement_env_file:
+            continue
         env_vars = _read_env_file(env_file)
         val = env_vars.get("ORCHESTRATOR_BASE_URL", "")
         if val:

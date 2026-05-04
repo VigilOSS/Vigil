@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # GAU Triage
 
-> **Kali MCP audit header:** use `X-Technique: DISCOVERY` (gau harvests historical URLs from public archives; triage runs classify them without attacking the live target).
+> **`aith assess kali` audit flags:** use `--technique DISCOVERY` (gau harvests historical URLs from public archives; triage runs classify them without attacking the live target).
 
 Operator-dispatched deeper pass over a gau (or any large URL) corpus **after** mechanical
 ingestion in Phase 2. Produces a cluster manifest the operator feeds into `aith assess
@@ -23,7 +23,7 @@ adding the depth that surface-collector cannot afford inline at high URL counts.
 
 ## Tools
 
-All run inside the shared Kali MCP runtime:
+All run inside the shared runtime container — invoke each via `aith assess kali ...` so the run lands in the audit pipeline. Use the typed verbs where they exist (`aith assess kali httpx`, `aith assess kali gau`); otherwise wrap in `aith assess kali exec --` with the standard audit-flag set:
 
 - `uro` — smart structural URL deduplication (collapses `/page/1`, `/page/2` → one representative)
 - `gf` — parameter-pattern classifier. Cite the matching bucket reference from `agent/references/gf-patterns/<bucket>.md` before loading it
@@ -43,7 +43,9 @@ Pick `RID` (run id) as a timestamped slug, e.g. `RID=$(date -u +%Y%m%dT%H%M%SZ)`
 
 ## Pipeline
 
-Set up variables inside the Kali MCP shell — `$ENGAGEMENT_KEY` is exported by the engagement launcher and visible inside the container:
+Set up variables inside the runtime shell (e.g. `aith assess kali exec --technique META --intent "set up gau triage variables" --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '...'` or
+inside an interactive session opened with `aith runtime shell-exec`) — `$ENGAGEMENT_KEY` is
+exported by the engagement launcher and visible inside the container:
 
 ```bash
 KEY="${ENGAGEMENT_KEY:?exported by the engagement launcher}"
@@ -231,13 +233,25 @@ Return to the operator:
 
 ## Key Rules
 
-- All target-facing probes go through Kali MCP — host-side curl or wget against in-scope targets bypasses runtime isolation
+- All target-facing probes go through `aith assess kali ...` — host-side curl or wget against in-scope targets bypasses the audit pipeline that downstream specialists rely on
 - Cite `agent/references/gf-patterns/<bucket>.md` with a "Load because X" reason before running any gf bucket — blind per-bucket drains miss the signal calibration the reference library provides
 - Filter inert extensions (images, fonts, binaries) before httpx body download — scanning them wastes disk and yields no trufflehog signal
 - `trufflehog` is mandatory on every run; `jsleak` is optional and gated on runtime availability
 - `trufflehog` default is `--no-verification`; `--results=verified` (live verification) requires operator consent
 - Cap body storage at 1 MB per response via httpx `-response-size-to-save`
-- No speculative findings — reproduce the hit before recording
+- Reproduce each trufflehog/jsleak hit before recording it as a finding — speculative findings that cannot be reproduced pollute the backend and mislead Phase 3 specialists
+
+## Per-host Budget Interaction
+
+GAU corpora are per-host by construction (a single gau invocation pulls historical URLs for
+one domain at a time). When the corpus exceeds the host's budget configured in
+`agent/skills/surface-collection/SKILL.md` § "Per-host URL Budget" (1000 content-rich /
+200 API-tier / 2000 sitemap-bearing), surplus URLs admit to
+`cluster_key=deferred:per-host-budget-exceeded` rather than `pending`. The Step 4 cluster
+manifest should still surface the deferred set under `proposed_defers` so the operator can
+audit which clusters were deferred for budget rather than for low signal — those are
+candidates for the recovery flow (re-run gau with `--budget-override <host>:<n>` when a
+Phase 3 finding warrants follow-up crawl on that host).
 
 ## Extended Resources
 
@@ -246,5 +260,5 @@ Return to the operator:
 - `agent/references/tools/recon/gf.md` — gf load order, gf-before-uro rule
 - `agent/references/tools/recon/httpx.md` — httpx body storage and rate tuning
 - `agent/references/tools/recon/gau.md` — gau (upstream source for the corpus this skill triages)
-- `agent/skills/surface-collection/SKILL.md` — Phase 2 collection upstream of this skill (gau-triage is a follow-up pass)
+- `agent/skills/surface-collection/SKILL.md` — Phase 2 collection upstream of this skill (gau-triage is a follow-up pass) and per-host URL budget formula (1000 content-rich / 200 API-tier / 2000 sitemap-bearing)
 - `agent/skills/sensitive-data-detection/SKILL.md` — ad-hoc body/secret scanning for single responses (not bulk corpora)

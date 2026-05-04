@@ -90,6 +90,75 @@ def test_insert_populates_shadow_and_fts(client, isolate_settings):
     assert _fts_count("source_name MATCH ?", ("wappalyzer",)) >= 1
 
 
+def test_supersede_rationale_appended_to_old_row_is_searchable(client, isolate_settings):
+    """The supersede UPDATE may append the rationale to the old row's notes.
+
+    That append happens via raw SQL on the intel table — without a parallel
+    refresh of the FTS shadow row, the appended text never becomes
+    searchable. Regression: ensure the rationale token shows up in FTS.
+    """
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "rationale_phrase_target", "version": "1.0.0"},
+    )
+    assert created.status_code == 201, created.text
+    old_id = created.json()["id"]
+
+    response = client.post(
+        f"{INTEL_BASE}/tech-components/{old_id}/supersede",
+        json={
+            "payload": {
+                "component": "rationale_phrase_target",
+                "version": "2.0.0",
+            },
+            "rationale": "rationale_unique_token_zeta",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    # The rationale was tagged onto the OLD row's notes; FTS must reflect it.
+    assert _fts_count("body MATCH ?", ("rationale_unique_token_zeta",)) >= 1
+
+
+def test_supersede_keeps_old_row_indexed_and_indexes_new(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+
+    created = client.post(
+        f"{INTEL_BASE}/tech-components",
+        json={"component": "vendorsaasplatform", "version": "1.0.0", "source_name": "wappalyzer"},
+    )
+    assert created.status_code == 201, created.text
+    old_id = created.json()["id"]
+
+    superseded = client.post(
+        f"{INTEL_BASE}/tech-components/{old_id}/supersede",
+        json={
+            "payload": {
+                "component": "vendorsaasplatform",
+                "version": "2.0.0",
+                "source_name": "vulnerability-analyst",
+            },
+            "rationale": "Banner re-fingerprinted",
+        },
+    )
+    assert superseded.status_code == 201, superseded.text
+    new_id = superseded.json()["current"]["id"]
+    assert new_id != old_id
+
+    # Both versions are still discoverable via FTS — superseded rows stay
+    # queryable for audit even though list endpoints can filter them out.
+    assert _fts_count("key MATCH ?", ("vendorsaasplatform",)) >= 2
+    # Shadow holds both rows so the older "1.0.0" version is still present
+    # alongside the new "2.0.0" one. Pull from intel_search_index directly
+    # since FTS5's default tokenizer doesn't keep version-style numerics.
+    shadow = _shadow_rows()
+    keys = [row[2] for row in shadow if row[0] == "tech_component"]
+    assert any("1.0.0" in (k or "") for k in keys), keys
+    assert any("2.0.0" in (k or "") for k in keys), keys
+
+
 # ──────────────────────────────────────────────────────────────
 # UPSERT refreshes searchable text
 # ──────────────────────────────────────────────────────────────

@@ -20,6 +20,7 @@ from .engagements import (
     CreateEngagementOptions,
     create_engagement,
     current_engagement_path,
+    export_pdf,
     list_engagements,
     print_shell_cd_init,
     resolve_engagement_path,
@@ -42,10 +43,10 @@ from .oob import (
     stop_oob_client,
     test_oob,
 )
-from .orchestrator import OrchestratorOptions, orchestrator_status, start_orchestrator, stop_orchestrator
+from .orchestrator import OrchestratorOptions, build_frontend, orchestrator_status, start_orchestrator, stop_orchestrator
 from .paths import resolve_install_root, resolve_source_root
-from .runtime import RuntimeOptions, build_runtime, runtime_status, start_runtime, stop_runtime
-from .status import collect_doctor_checks, collect_mcp_status, collect_status, print_doctor, print_status
+from .runtime import RuntimeOptions, aith_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime
+from .status import collect_doctor_checks, collect_status, print_doctor, print_status
 from .up import UpOptions, run_up
 
 
@@ -56,7 +57,6 @@ def _print_post_install(result: InstallResult) -> None:
         print("Upgrade complete. Services using the previous install should be restarted:")
         print(f"  - Kali runtime:   aith runtime restart")
         print(f"  - Orchestrator:   aith orchestrator restart")
-        print(f"  - MCP server:     reconnect the kali MCP server in your client")
         if result.image_built:
             print(f"  - Docker image was rebuilt — running containers use the old image until restarted")
         else:
@@ -64,11 +64,10 @@ def _print_post_install(result: InstallResult) -> None:
     else:
         print("Install complete. Next steps:")
         print(f"  1. Configure tokens and API keys in {root / '.env'}")
-        print(f"  2. aith runtime build          # build the Kali MCP runtime image")
-        print(f"  3. aith runtime start           # start the runtime container")
-        print(f"  4. aith mcp install both        # register the kali MCP server")
-        print(f"  5. aith orchestrator start       # start the orchestrator backend")
-        print(f"  6. aith engagement create <target>  # create your first engagement")
+        print(f"  2. Optional OOB: aith config set oob.frp_token <token>")
+        print(f"  3. aith up                      # build/start runtime, orchestrator, and OOB")
+        print(f"  4. aith engagement create <target>  # create your first engagement")
+        print(f"  5. aith assess kali --help      # discover target-facing CLI verbs")
     print()
 
 
@@ -83,12 +82,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--source", help="Source checkout root for install/upgrade")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    install_p = sub.add_parser("install")
+    install_p = sub.add_parser("install", help="Install or update the working root from source")
     install_p.add_argument("install_dir", nargs="?")
     install_p.add_argument("--dry-run", action="store_true")
     install_p.add_argument("--force-image", action="store_true")
     install_p.add_argument("--skip-image-check", action="store_true")
-    update_p = sub.add_parser("update")
+    update_p = sub.add_parser("update", help="Alias for install")
     update_p.add_argument("install_dir", nargs="?")
     update_p.add_argument("--dry-run", action="store_true")
     update_p.add_argument("--force-image", action="store_true")
@@ -127,13 +126,16 @@ def main(argv: list[str] | None = None) -> None:
     engagement_sub.add_parser("list").add_argument("--json", action="store_true")
     create_p = engagement_sub.add_parser("create")
     create_p.add_argument("target_or_name", nargs="?")
-    create_p.add_argument("--type", choices=["web", "code", "both"], default=None)
+    create_p.add_argument("--type", choices=["web", "code", "both", "android"], default=None)
     create_p.add_argument("--name")
     create_p.add_argument("--target")
     create_p.add_argument("--hosts")
     create_p.add_argument("--auth-mode", choices=["none", "manual", "auth_json", "proxy_capture"], default=None)
     create_p.add_argument("--exploit-policy", choices=["pause", "full_send", "selected"], default=None)
     create_p.add_argument("--repo", action="append", default=[])
+    create_p.add_argument("--apk", action="append", default=[], help="Android APK/AAB/XAPK artifact path")
+    create_p.add_argument("--package-name", help="Android package name, for example com.example.app")
+    create_p.add_argument("--dynamic-mode", choices=["static_only", "device", "emulator"], default="static_only")
     create_p.add_argument("--skip-permissions", action="store_true")
     create_p.add_argument("--no-prompt", action="store_true")
     path_p = engagement_sub.add_parser("path")
@@ -156,6 +158,10 @@ def main(argv: list[str] | None = None) -> None:
     export_p.add_argument("key", nargs="?")
     export_p.add_argument("--select", action="store_true")
     export_p.add_argument("--output")
+    export_pdf_p = engagement_sub.add_parser("export-pdf", help="Export report.md as a PDF using pandoc + Chrome headless")
+    export_pdf_p.add_argument("key", nargs="?")
+    export_pdf_p.add_argument("--select", action="store_true")
+    export_pdf_p.add_argument("--output", help="Output PDF path (default: <engagement>/report.pdf)")
 
     orch_p = sub.add_parser("orchestrator")
     orch_sub = orch_p.add_subparsers(dest="orchestrator_command", required=True)
@@ -166,6 +172,11 @@ def main(argv: list[str] | None = None) -> None:
     orch_sub.add_parser("restart")
     orch_sub.add_parser("status")
     orch_sub.add_parser("open")
+    orch_build = orch_sub.add_parser(
+        "build",
+        help="Build the install-side frontend dist (recovery for direct-uvicorn launches that bypass aith up).",
+    )
+    orch_build.add_argument("--force", action="store_true", help="Rebuild even if dist looks up-to-date.")
 
     runtime_p = sub.add_parser("runtime")
     runtime_sub = runtime_p.add_subparsers(dest="runtime_command", required=True)
@@ -180,7 +191,8 @@ def main(argv: list[str] | None = None) -> None:
     runtime_sub.add_parser("shell")
     runtime_shell_exec = runtime_sub.add_parser("shell-exec", help="Run a non-interactive shell command inside the Kali runtime")
     runtime_shell_exec.add_argument("shell_command", nargs=argparse.REMAINDER, metavar="COMMAND")
-    runtime_sub.add_parser("mcp-server")
+    runtime_resources_p = runtime_sub.add_parser("resources", help="Print configured runtime resource tier and live cgroup state")
+    runtime_resources_p.add_argument("--json", action="store_true")
 
     mitm_p = sub.add_parser("mitmproxy")
     mitm_sub = mitm_p.add_subparsers(dest="mitmproxy_command", required=True)
@@ -192,15 +204,10 @@ def main(argv: list[str] | None = None) -> None:
     mitm_sub.add_parser("status")
     mitm_sub.add_parser("cert")
 
-    mcp_p = sub.add_parser("mcp")
-    mcp_sub = mcp_p.add_subparsers(dest="mcp_command", required=True)
-    mcp_install = mcp_sub.add_parser("install")
-    mcp_install.add_argument("client", choices=["codex", "claude", "both"])
-    mcp_remove = mcp_sub.add_parser("remove")
-    mcp_remove.add_argument("client", choices=["codex", "claude", "both"])
-    mcp_repair = mcp_sub.add_parser("repair")
-    mcp_repair.add_argument("client", choices=["codex", "claude", "both"])
-    mcp_sub.add_parser("status")
+    # `aith mcp` retired in the typed-CLI cutover. Keep the parser so calls fail with a clear message
+    # instead of argparse's generic "unknown command" error; downstream handler prints the deprecation note.
+    mcp_p = sub.add_parser("mcp", help="(removed) Kali MCP support retired; use `aith assess kali ...`")
+    mcp_p.add_argument("mcp_args", nargs=argparse.REMAINDER)
 
     auth_p = sub.add_parser("auth")
     auth_sub = auth_p.add_subparsers(dest="auth_command", required=True)
@@ -423,14 +430,30 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         engagement_type = args.type
         positional = args.target_or_name
         if engagement_type is None:
-            if not args.no_prompt and sys.stdin.isatty() and not positional and not args.hosts and not args.repo:
-                engagement_type = _prompt_choice("Engagement type", "web", ["web", "code", "both"])
+            if not args.no_prompt and sys.stdin.isatty() and not positional and not args.hosts and not args.repo and not args.apk:
+                engagement_type = _prompt_choice("Engagement type", "web", ["web", "code", "both", "android"])
             else:
-                engagement_type = "web" if (args.hosts or (positional and _looks_like_web_target(positional))) else "code"
+                engagement_type = (
+                    "android"
+                    if (args.apk or (positional and _looks_like_android_artifact(positional)))
+                    else "web" if (args.hosts or (positional and _looks_like_web_target(positional)))
+                    else "code"
+                )
         target = args.target
         name = args.name
+        artifacts = list(args.apk or [])
+        android_package = args.package_name
         if positional:
-            if engagement_type == "code" and not name:
+            if engagement_type == "android" and _looks_like_android_artifact(positional):
+                if positional not in artifacts:
+                    artifacts.insert(0, positional)
+                if not name:
+                    name = Path(positional).name
+            elif engagement_type == "android":
+                android_package = android_package or positional
+                if not name:
+                    name = positional
+            elif engagement_type == "code" and not name:
                 name = positional
             elif not target:
                 target = positional
@@ -439,6 +462,8 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
             if engagement_type in {"web", "both"} and not target and not hosts:
                 target = input("Target URL or host: ").strip()
             if engagement_type in {"code", "both"} and not name:
+                name = input("Engagement name: ").strip()
+            if engagement_type == "android" and not name and not args.package_name and not artifacts:
                 name = input("Engagement name: ").strip()
             if engagement_type in {"web", "both"} and args.auth_mode is None:
                 args.auth_mode = _prompt_choice("Auth mode", "none", ["none", "auth_json", "manual", "proxy_capture"])
@@ -456,6 +481,9 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
                 auth_mode=auth_mode,
                 exploit_policy=exploit_policy,
                 repos=args.repo,
+                artifacts=artifacts,
+                android_package=android_package,
+                dynamic_mode=args.dynamic_mode,
                 skip_permissions=args.skip_permissions,
             )
         )
@@ -485,6 +513,10 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         with tarfile.open(output, "w:gz") as tar:
             tar.add(path, arcname=path.name)
         print(output)
+    elif command == "export-pdf":
+        path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
+        output = Path(args.output).expanduser() if args.output else None
+        print(export_pdf(path, output))
 
 
 def _looks_like_web_target(value: str) -> bool:
@@ -500,6 +532,10 @@ def _looks_like_web_target(value: str) -> bool:
         return "." in host
 
 
+def _looks_like_android_artifact(value: str) -> bool:
+    return Path(value).suffix.lower() in {".apk", ".aab", ".xapk", ".apks"}
+
+
 def _orchestrator(args: argparse.Namespace, install_root: Path) -> None:
     if args.orchestrator_command == "start":
         start_orchestrator(OrchestratorOptions(install_root=install_root, build=args.build, foreground=args.foreground))
@@ -512,6 +548,8 @@ def _orchestrator(args: argparse.Namespace, install_root: Path) -> None:
         print(orchestrator_status(install_root))
     elif args.orchestrator_command == "open":
         webbrowser.open("http://127.0.0.1:18000")
+    elif args.orchestrator_command == "build":
+        build_frontend(install_root, force=args.force)
 
 
 def _runtime(args: argparse.Namespace, install_root: Path) -> None:
@@ -530,8 +568,8 @@ def _runtime(args: argparse.Namespace, install_root: Path) -> None:
         os.execvp("docker", ["docker", "exec", "-it", "security-research", "bash"])
     elif args.runtime_command == "shell-exec":
         _runtime_shell_exec(args.shell_command)
-    elif args.runtime_command == "mcp-server":
-        os.execvp("docker", ["docker", "exec", "-i", "security-research", "mcp-server"])
+    elif args.runtime_command == "resources":
+        aith_runtime_resources(json_output=args.json)
 
 
 def _runtime_shell_exec(command_parts: list[str]) -> None:
@@ -571,51 +609,17 @@ def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
 
 
 def _mcp(args: argparse.Namespace) -> None:
-    if args.mcp_command == "status":
-        status = collect_mcp_status()
-        for client, payload in status.items():
-            state = "OK" if payload["configured"] else "MISSING"
-            print(f"{state}\t{client}\t{payload['detail']}")
-        return
-    if args.mcp_command == "remove":
-        _remove_mcp(args.client)
-        return
-    if args.mcp_command == "repair":
-        _remove_mcp(args.client)
-        _install_mcp(args.client)
-        return
-    if args.mcp_command == "install":
-        _install_mcp(args.client)
-
-
-def _install_mcp(client: str) -> None:
-    if client in {"claude", "both"}:
-        _replace_mcp_server(
-            "claude",
-            ["claude", "mcp", "remove", "-s", "user", "kali"],
-            ["claude", "mcp", "add", "-s", "user", "kali", "--", "aith", "runtime", "mcp-server"],
-        )
-    if client in {"codex", "both"}:
-        _replace_mcp_server(
-            "codex",
-            ["codex", "mcp", "remove", "kali"],
-            ["codex", "mcp", "add", "kali", "--", "aith", "runtime", "mcp-server"],
-        )
-
-
-def _remove_mcp(client: str) -> None:
-    if client in {"claude", "both"}:
-        _run_mcp_remove("claude", ["claude", "mcp", "remove", "-s", "user", "kali"])
-    if client in {"codex", "both"}:
-        _run_mcp_remove("codex", ["codex", "mcp", "remove", "kali"])
-
-
-def _run_mcp_remove(client: str, argv: list[str]) -> None:
-    try:
-        subprocess.run(argv, check=False)
-    except FileNotFoundError as exc:
-        raise SystemExit(f"{client} CLI not found on PATH") from exc
-    print(f"removed {client} MCP server: kali")
+    """Stub: Kali MCP support was removed in the typed-CLI cutover."""
+    print(
+        "aith mcp install/status/uninstall/remove/repair were removed in the typed-CLI cutover.",
+        file=sys.stderr,
+    )
+    print(
+        "Use `aith assess kali ...` for target-facing tool execution and `aith runtime status` "
+        "or `aith runtime resources` for runtime visibility.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 
 
 def _auth(args: argparse.Namespace, install_root: Path) -> None:
@@ -667,15 +671,23 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
         stop_oob(runner=docker_run_command)
         start_oob(options, runner=docker_run_command)
     elif args.oob_command == "status":
-        payload = oob_status(runner=docker_run_command)
+        payload = oob_status(oob_domain=options.oob_domain, runner=docker_run_command)
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
-            print(f"{payload['state']}\tserver={payload['server']}\tfrpc={payload['frpc']}\tclients={len(payload['clients'])}")
+            print(
+                f"{payload['state']}\tserver={payload['server']}\tfrpc={payload['frpc']}"
+                f"\tclients={len(payload['clients'])}\tdomain={payload['domain']}"
+            )
     elif args.oob_command == "test":
         test_oob(options, runner=docker_run_command)
     elif args.oob_command == "client":
         _oob_client(args, install_root, options)
+
+
+def _tmux_has_oob_client(name: str) -> bool:
+    result = docker_run_command(["docker", "exec", "security-research", "sh", "-lc", f"tmux has-session -t oob-client-{shlex.quote(name)} 2>/dev/null"])
+    return result.returncode == 0
 
 
 def _oob_client(args: argparse.Namespace, install_root: Path, options: OobOptions) -> None:
@@ -698,8 +710,13 @@ def _oob_client(args: argparse.Namespace, install_root: Path, options: OobOption
     elif args.oob_client_command == "stop":
         stop_oob_client(args.name, runner=docker_run_command)
     elif args.oob_client_command == "list":
-        for client in list_oob_clients(runner=docker_run_command):
-            print(client)
+        clients = list_oob_clients(runner=docker_run_command)
+        if not clients:
+            print("No OOB clients configured.", file=sys.stderr)
+        for client in clients:
+            alive = _tmux_has_oob_client(client)
+            status = "running" if alive else "dead"
+            print(f"{client}\t{status}")
 
 
 def _oob_options(install_root: Path) -> OobOptions:
@@ -733,17 +750,6 @@ def _resolve_engagement_reference(install_root: Path, value: str) -> Path:
         if candidate.exists() or candidate.is_absolute() or "/" in value:
             return candidate
         raise exc
-
-
-def _replace_mcp_server(client: str, remove_argv: list[str], add_argv: list[str]) -> None:
-    try:
-        subprocess.run(remove_argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        result = subprocess.run(add_argv, check=False)
-    except FileNotFoundError as exc:
-        raise SystemExit(f"{client} CLI not found on PATH") from exc
-    if result.returncode != 0:
-        raise SystemExit(f"Failed to install Kali MCP server for {client}")
-    print(f"installed {client} MCP server: kali")
 
 
 def _prompt_choice(label: str, default: str, choices: list[str]) -> str:

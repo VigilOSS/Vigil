@@ -6,7 +6,7 @@ origin: AI Threat Hunting
 
 # Container Escape Detection
 
-> **Kali MCP audit header:** use `X-Technique: RECON` for capability/cgroup/mount/socket/kernel enumeration; switch to `EXPLOIT-CHAIN` on an actual breakout attempt.
+> **`aith assess kali` audit flags:** use `--technique RECON` for capability/cgroup/mount/socket/kernel enumeration; switch to `EXPLOIT-CHAIN` on an actual breakout attempt.
 
 ## When to Activate
 
@@ -17,11 +17,12 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- Docker CLI / kubectl
-- Falco (runtime detection)
-- amicontained (capability checker)
-- deepce (container escape enumeration)
-- CDK (Container penetration toolkit)
+- `aith assess kali exec -- ...` (all target-facing enumeration and escape attempts inside the runtime container must go through the kali exec wrapper; use `--technique RECON --probe-kind fingerprint --phase consume-test --timeout 30` for capability/mount/socket enumeration, and `--technique EXPLOIT-CHAIN --probe-kind exploit --phase consume-test --timeout 120 --destructive` for actual breakout attempts)
+- Docker CLI / kubectl (use via kali exec when target-facing)
+- Falco (runtime detection — observation layer, host-side)
+- amicontained (capability checker — run via `aith assess kali exec --technique RECON --probe-kind fingerprint --phase consume-test --timeout 30 -- amicontained`)
+- deepce (container escape enumeration — run via kali exec)
+- CDK (Container penetration toolkit — run via kali exec)
 
 ## Methodology
 
@@ -110,7 +111,7 @@ Falco rule example:
 - Seccomp/AppArmor profile status (enforcing, complaining, unconfined)
 - Mounted volumes and sensitive paths exposed
 - Docker socket presence and permissions
-- Escape vector used and host-level access achieved
+- Escape vector used and host-level access achieved — confirming a dangerous capability or socket is present is not enough; you must show the **attacker outcome** (e.g., the `CAP_SYS_ADMIN` capability enabled cgroup release_agent escape and `cat /host/etc/shadow` read the host's credential file, the Docker socket created a privileged container with `/:/host` bind mount and `chroot /host` granted full host root filesystem access, the Kubernetes service account token listed all secrets in the cluster including database passwords and TLS private keys)
 - Falco/runtime detection coverage gaps
 - Kubernetes RBAC permissions for the service account
 

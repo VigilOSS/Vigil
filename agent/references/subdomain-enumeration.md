@@ -4,12 +4,38 @@ Activate when scope.json `hosts` contains `*.domain` entries (e.g., `*.example.c
 
 ## Phase 0: Enumerate Subdomains
 
+Run the staged composition end-to-end via `aith assess kali ...`. Methodology and exact invocations live in `agent/skills/subdomain-enumeration/SKILL.md`; this doc is the prioritization/sliding-window companion.
+
 1. Identify which domains have `*.domain` entries in the `hosts` array.
-2. For each such domain, run `subfinder` into `scans/subdomains_raw.txt`.
-3. Apply the `subdomain-enumeration` skill's 3-stage filter:
+2. **Tooling preflight** — `aith assess kali exec --technique HEALTH --intent "subdomain-enum tooling preflight" --probe-kind fingerprint --phase recon --timeout 60 -- which massdns puredns dnsx subfinder shuffledns alterx cero asnmap bbot`. Missing binaries → fix the runtime, do not silently degrade.
+3. Run the staged pipeline:
+   - **Phase 0** — passive (`subfinder -all -recursive` + chaos + github-subdomains; optional bbot `subdomain-enum -rf passive` for deep coverage).
+   - **Phase 1** — active brute (`puredns @ tier rate-limit, --wildcard-batch 100000, --wildcard-tests 30` for wildcard-heavy targets). Skip when Phase 0 returned >5000 subs or target is top-tier.
+   - **Phase 2** — permutation (`alterx -enrich -estimate` first, then `-limit 100000`, then `puredns resolve`).
+   - **Phase 3** — TLS SAN feedback (`httpx -tls-grab` against the merged set; `asnmap → cero` against owned CIDRs); final `dnsx` resolution drives live-host confirmation.
+4. Apply the `subdomain-enumeration` skill's 3-stage filter:
    - DNS resolution
    - web-port reachability
    - lightweight fingerprinting
+
+### Bound rules (stop early when any fires)
+
+- **Recursion depth ≤ 2.** Further recursion produces marketing-tracker subs and stale CDN siblings.
+- **New-subdomain ratio < 5% of prior round.** Marginal yield is below the cost-per-discovery threshold.
+- **Wildcard ratio > 30%.** Apex is a wildcard sink — switch to TLS SAN / asnmap.
+- **Permutation estimate > 500k candidates.** Abort Phase 2; narrow the input set first.
+
+Record bound-rule firings via `aith assess log operator "Subdomain enum bound rule fired" "<rule>" "<round-stats>" --actor-kind operator` so the audit trail explains the missing rounds.
+
+### Resource-tier profiles (rate-limits)
+
+Pick by target shape, not apex shape — wildcards expand the surface and the rate calibration must match the surface. **Default to `polite-residential` for any new engagement** — DNS bruteforce is the dominant host-CPU and host-network spike in the runtime, and aggressive profiles have crashed Docker on standard laptop hardware.
+
+- **polite-CDN-fronted-target** — `puredns --rate-limit 800 --wildcard-tests 30`, `dnsx -rl 100 -t 20 -retry 3 -timeout 5`. CDN-fronted, enterprise-WAF-protected, regulated, or household-name brand.
+- **polite-residential default** — `puredns --rate-limit 2500 --wildcard-batch 100000`, `dnsx -rl 300 -t 50 -retry 2`. Standard runtime, public resolvers.
+- **bursty-OK (opt-in only)** — `puredns --rate-limit 5000`, `dnsx -rl 500 -t 100`. Private resolver pool only AND with explicit operator opt-in.
+
+Drop one tier when `AITH_RUNTIME_MEMORY_GB` is below the Standard tier (8 GB).
 
 ## Phase 0.5: Prioritize
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, HTTPException, Query, status
 
 from ..services import intel as intel_service
 from ..services import state_manager
@@ -23,12 +23,29 @@ from .intel_schemas import (
     EmailRecordRequest,
     IntelByUrlResponse,
     IntelSummaryResponse,
+    IntelSupersedeRequest,
+    IntelUpdateRequest,
     NoteRecordRequest,
     OrgFactRecordRequest,
     PersonRecordRequest,
     SocialProfileRecordRequest,
     TechComponentRecordRequest,
 )
+
+
+# Map URL plural segment -> CLI/type slug used by services.intel helpers.
+_INTEL_TYPE_BY_PLURAL: dict[str, str] = {
+    "tech-components": "tech-component",
+    "people": "person",
+    "emails": "email",
+    "domains": "domain",
+    "cves": "cve",
+    "dns-records": "dns-record",
+    "social-profiles": "social-profile",
+    "breach-records": "breach-record",
+    "org-facts": "org-fact",
+    "notes": "note",
+}
 
 
 router = APIRouter(prefix="/engagements/{engagement_key}/intel", tags=["intel"])
@@ -92,63 +109,103 @@ def list_intel_credentials(engagement_key: str) -> list[dict[str, Any]]:
 
 
 @router.get("/tech-components")
-def list_tech_components(engagement_key: str) -> list[dict[str, Any]]:
+def list_tech_components(
+    engagement_key: str,
+    include_superseded: bool = Query(default=True),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_tech_components(engagement.id)
+    return intel_service.list_tech_components(
+        engagement.id, include_superseded=include_superseded
+    )
 
 
 @router.get("/people")
-def list_people(engagement_key: str) -> list[dict[str, Any]]:
+def list_people(
+    engagement_key: str,
+    include_superseded: bool = Query(default=True),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_people(engagement.id)
+    return intel_service.list_people(engagement.id, include_superseded=include_superseded)
 
 
 @router.get("/emails")
-def list_emails(engagement_key: str) -> list[dict[str, Any]]:
+def list_emails(
+    engagement_key: str,
+    include_superseded: bool = Query(default=True),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_emails(engagement.id)
+    return intel_service.list_emails(engagement.id, include_superseded=include_superseded)
 
 
 @router.get("/domains")
-def list_domains(engagement_key: str) -> list[dict[str, Any]]:
+def list_domains(
+    engagement_key: str,
+    include_superseded: bool = Query(default=True),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_domains(engagement.id)
+    return intel_service.list_domains(engagement.id, include_superseded=include_superseded)
 
 
 @router.get("/cves")
-def list_cves(engagement_key: str) -> list[dict[str, Any]]:
+def list_cves(
+    engagement_key: str,
+    include_superseded: bool = Query(default=True),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_cves(engagement.id)
+    return intel_service.list_cves(engagement.id, include_superseded=include_superseded)
 
 
 @router.get("/dns-records")
-def list_dns_records(engagement_key: str) -> list[dict[str, Any]]:
+def list_dns_records(
+    engagement_key: str,
+    include_superseded: bool = Query(default=True),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_dns_records(engagement.id)
+    return intel_service.list_dns_records(
+        engagement.id, include_superseded=include_superseded
+    )
 
 
 @router.get("/social-profiles")
-def list_social_profiles(engagement_key: str) -> list[dict[str, Any]]:
+def list_social_profiles(
+    engagement_key: str,
+    include_superseded: bool = Query(default=True),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_social_profiles(engagement.id)
+    return intel_service.list_social_profiles(
+        engagement.id, include_superseded=include_superseded
+    )
 
 
 @router.get("/breach-records")
-def list_breach_records(engagement_key: str) -> list[dict[str, Any]]:
+def list_breach_records(
+    engagement_key: str,
+    include_superseded: bool = Query(default=True),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_breach_records(engagement.id)
+    return intel_service.list_breach_records(
+        engagement.id, include_superseded=include_superseded
+    )
 
 
 @router.get("/org-facts")
-def list_org_facts(engagement_key: str) -> list[dict[str, Any]]:
+def list_org_facts(
+    engagement_key: str,
+    include_superseded: bool = Query(default=True),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_org_facts(engagement.id)
+    return intel_service.list_org_facts(
+        engagement.id, include_superseded=include_superseded
+    )
 
 
 @router.get("/notes")
-def list_notes(engagement_key: str) -> list[dict[str, Any]]:
+def list_notes(
+    engagement_key: str,
+    include_superseded: bool = Query(default=True),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_notes(engagement.id)
+    return intel_service.list_notes(engagement.id, include_superseded=include_superseded)
 
 
 # ── POST endpoints ─────────────────────────────────────────
@@ -241,6 +298,7 @@ async def create_cve(engagement_key: str, request: CveRecordRequest) -> dict[str
         validation_status=request.validation_status,
         linked_finding_slug=request.linked_finding_slug,
         notes=request.notes,
+        details=request.details,
         provenance=request.provenance,
     )
     await _broadcast(engagement.key, "cve", record)
@@ -333,3 +391,66 @@ async def create_note(engagement_key: str, request: NoteRecordRequest) -> dict[s
     )
     await _broadcast(engagement.key, "note", record)
     return record
+
+
+# ── PATCH + supersede ──────────────────────────────────────
+
+
+def _resolve_intel_plural(intel_type_plural: str) -> str:
+    intel_type = _INTEL_TYPE_BY_PLURAL.get(intel_type_plural)
+    if not intel_type:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"unknown intel type segment '{intel_type_plural}'",
+        )
+    return intel_type
+
+
+@router.patch("/{intel_type_plural}/{intel_id}")
+async def patch_intel_record(
+    engagement_key: str,
+    intel_type_plural: str,
+    intel_id: int,
+    request: IntelUpdateRequest,
+) -> dict[str, Any]:
+    """In-place patch on an intel row by id.
+
+    The body shape is ``{"payload": {...}}`` so the agent CLI can stream a
+    raw JSON object as ``payload`` without conflating it with route-level
+    metadata. Field-level validation lives in the service helper.
+
+    Three distinct 404s are possible: engagement not found, unknown intel
+    type segment, and intel id not found. Each returns a different ``detail``
+    so callers can disambiguate without parsing the URL back out of the
+    request.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    intel_type = _resolve_intel_plural(intel_type_plural)
+    record = intel_service.update_intel(engagement.id, intel_type, intel_id, request.payload)
+    await _broadcast(engagement.key, intel_type.replace("-", "_"), record)
+    return record
+
+
+@router.post("/{intel_type_plural}/{intel_id}/supersede", status_code=status.HTTP_201_CREATED)
+async def supersede_intel_record(
+    engagement_key: str,
+    intel_type_plural: str,
+    intel_id: int,
+    request: IntelSupersedeRequest,
+) -> dict[str, Any]:
+    """Insert a replacement intel row and mark the old row as superseded.
+
+    Returns ``{"superseded": {...}, "current": {...}}`` so callers can render
+    both rows side-by-side without a second fetch.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    intel_type = _resolve_intel_plural(intel_type_plural)
+    result = intel_service.supersede_intel(
+        engagement.id,
+        intel_type,
+        intel_id,
+        request.payload,
+        rationale=request.rationale,
+    )
+    await _broadcast(engagement.key, intel_type.replace("-", "_"), result.get("current", {}))
+    return result

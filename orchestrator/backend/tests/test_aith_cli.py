@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shutil
 import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 repo_root = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(repo_root))
 sys.path.insert(0, str(repo_root / "src"))
 
 
@@ -33,9 +36,16 @@ def _write_marker_database(path: Path, value: str) -> None:
         connection.execute("INSERT INTO marker (value) VALUES (?)", (value,))
 
 
-def test_engagement_create_web_writes_scope_launchers_and_list_entry(tmp_path: Path) -> None:
+def _isolate_orchestrator_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://127.0.0.1:9")
+
+
+def test_engagement_create_web_writes_scope_launchers_and_list_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement, list_engagements
 
+    _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
 
@@ -73,6 +83,116 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(tmp_path: P
     assert rows[0].target == "https://app.example.com"
 
 
+def test_engagement_create_android_uses_artifact_only_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement, list_engagements
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+    apk_path = tmp_path / "keeper.xapk"
+
+    created = create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="android",
+            artifacts=[str(apk_path)],
+            android_package="com.callpod.android_apps.keeper",
+            dynamic_mode="static_only",
+            hosts=["api.keepersecurity.com"],
+            skip_permissions=True,
+        )
+    )
+
+    scope = json.loads((created.path / "scope.json").read_text(encoding="utf-8"))
+    manifest = json.loads((created.path / "engagement.json").read_text(encoding="utf-8"))
+
+    assert scope["engagement_type"] == "android"
+    assert scope["mobile_platform"] == "android"
+    assert scope["scope_mode"] == "artifact-only"
+    assert scope["hosts"] == []
+    assert scope["backend_hosts"] == ["api.keepersecurity.com"]
+    assert scope["android_package"] == "com.callpod.android_apps.keeper"
+    assert scope["artifacts"] == [str(apk_path)]
+    assert scope["current_phase"] == "ingest"
+    assert manifest["target"] == "com.callpod.android_apps.keeper"
+    assert (created.path / "source").is_dir()
+    assert (created.path / "cases.db").exists()
+    assert list_engagements(install_root)[0].target == "com.callpod.android_apps.keeper"
+
+
+def test_engagement_create_android_cli_accepts_package_positional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "--type",
+            "android",
+            "com.callpod.android_apps.keeper",
+            "--no-prompt",
+        ]
+    )
+
+    created_path = Path(capsys.readouterr().out.strip())
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["engagement_type"] == "android"
+    assert scope["scope_mode"] == "artifact-only"
+    assert scope["hosts"] == []
+    assert scope["android_package"] == "com.callpod.android_apps.keeper"
+
+
+def test_engagement_create_android_cli_infers_apk_without_interactive_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+    apk_path = tmp_path / "keeper.apk"
+
+    class _InteractiveStdin:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(main_module.sys, "stdin", _InteractiveStdin())
+    monkeypatch.setattr(
+        main_module,
+        "_prompt_choice",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected prompt")),
+    )
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "--apk",
+            str(apk_path),
+            "--exploit-policy",
+            "pause",
+        ]
+    )
+
+    created_path = Path(capsys.readouterr().out.strip())
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["engagement_type"] == "android"
+    assert scope["artifacts"] == [str(apk_path)]
+    assert scope["hosts"] == []
+
+
 def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
 
@@ -82,6 +202,7 @@ def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkey
     default_data = install_root / "orchestrator" / "backend" / "data"
     _write_marker_database(custom_data / "orchestrator.sqlite3", "custom")
     _write_marker_database(default_data / "orchestrator.sqlite3", "default")
+    _isolate_orchestrator_url(monkeypatch)
     monkeypatch.delenv("AI_THREAT_HUNTING_DATA_DIR", raising=False)
     monkeypatch.setenv("REDTEAM_ORCHESTRATOR_DATA_DIR", str(custom_data))
 
@@ -188,6 +309,62 @@ def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
     assert f"{install_root / 'agent' / 'engagements'}:/engagements" in run_command
     assert "--add-host=host.docker.internal:host-gateway" in run_command
     assert "ORCHESTRATOR_BASE_URL=http://host.docker.internal:18000" in run_command
+
+
+def test_runtime_start_missing_image_points_to_orchestrator_for_backend_state(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    install_root = tmp_path / "install"
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(1, "", "missing")
+        if argv[:4] == ["docker", "inspect", "--type", "image"]:
+            return DockerResult(1, "", "missing")
+        if argv[:3] == ["docker", "images", "-q"]:
+            return DockerResult(0, "", "")
+        return DockerResult(0, "", "")
+
+    with pytest.raises(SystemExit) as exc_info:
+        start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
+
+    message = str(exc_info.value)
+    assert "Missing runtime image" in message
+    assert "aith runtime build" in message
+    assert "aith orchestrator status" in message
+
+
+def test_runtime_start_grants_sys_ptrace_capability(tmp_path: Path) -> None:
+    """B2: runtime diagnostic tooling needs CAP_SYS_PTRACE; the docker-run argv
+    must request it explicitly so ptrace operations do not fail with EPERM."""
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "", "")
+        if argv[:3] == ["docker", "ps", "-a"]:
+            return DockerResult(0, "", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        return DockerResult(0, "", "")
+
+    start_runtime(RuntimeOptions(install_root=install_root, recreate=False), runner=runner, validate_tools=False)
+
+    run_command = next(command for command in commands if command[:3] == ["docker", "run", "-d"])
+    assert "--cap-add=SYS_PTRACE" in run_command
+    assert "--cap-add=NET_RAW" in run_command
+    assert "--cap-add=NET_ADMIN" in run_command
 
 
 def test_runtime_start_retries_without_host_gateway_when_docker_rejects_flag(tmp_path: Path) -> None:
@@ -306,6 +483,7 @@ def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pyt
 def test_mitmproxy_start_without_arg_uses_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import main as main_module
 
+    _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
     engagement = install_root / "agent" / "engagements" / "eng-1"
     engagement.mkdir(parents=True)
@@ -359,7 +537,9 @@ def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeyp
     assert env["AI_THREAT_HUNTING_INSTALL_DIR"] == str(install_root.resolve())
 
 
-def test_orchestrator_start_builds_frontend_even_when_backend_already_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_orchestrator_start_builds_frontend_then_errors_when_backend_already_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from ai_threat_hunting_cli import orchestrator as orchestrator_module
 
     install_root = tmp_path / "install"
@@ -379,9 +559,17 @@ def test_orchestrator_start_builds_frontend_even_when_backend_already_running(tm
     monkeypatch.setattr(orchestrator_module.subprocess, "run", fake_run)
     monkeypatch.setattr(orchestrator_module, "_pid_running", lambda path: True)
 
-    orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
 
     assert calls == [["npm", "install"], ["npm", "run", "build"]]
+    message = str(excinfo.value)
+    assert "Orchestrator is already running" in message
+    assert "PID: 123" in message
+    assert str(pid_file) in message
+    assert "http://127.0.0.1:18000" in message
+    assert "aith orchestrator restart" in message
+    assert "aith logs orchestrator" in message
 
 
 def test_orchestrator_health_wait_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -429,24 +617,68 @@ def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Pat
             self.killed = True
 
     fake_process = FakeProcess()
+    signals_sent: list[tuple[int, signal.Signals]] = []
 
-    def fake_popen(*_: object, **__: object) -> FakeProcess:
+    def fake_popen(*_: object, **kwargs: object) -> FakeProcess:
+        assert kwargs["start_new_session"] is True
+        assert kwargs["stdin"] is not None
         return fake_process
 
+    def fake_killpg(pid: int, sig: signal.Signals) -> None:
+        signals_sent.append((pid, sig))
+
     monkeypatch.setattr(orchestrator_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orchestrator_module.os, "killpg", fake_killpg)
     monkeypatch.setattr(orchestrator_module, "_wait_for_health", lambda *_, **__: False)
 
     with pytest.raises(SystemExit, match="did not become healthy"):
         orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
 
-    assert fake_process.terminated is True
+    assert signals_sent == [(4321, signal.SIGTERM)]
+    assert fake_process.terminated is False
     assert fake_process.killed is False
     assert not pid_file.exists()
+
+
+def test_assess_kali_help_lists_every_typed_verb(capsys: pytest.CaptureFixture[str]) -> None:
+    """`aith assess kali --help` must enumerate the 13 typed verbs plus exec and job."""
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    # Reload assess modules so our injected sys.path takes effect.
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.cli import main as assess_main
+
+    with pytest.raises(SystemExit) as exc:
+        assess_main(["kali", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    for verb in (
+        "nmap-scan",
+        "nuclei",
+        "httpx",
+        "wafw00f",
+        "ffuf",
+        "sqlmap",
+        "subfinder",
+        "puredns",
+        "dnsx",
+        "nikto",
+        "katana",
+        "gau",
+        "whatweb",
+        "exec",
+        "job",
+    ):
+        assert verb in out, f"verb {verb} missing from kali --help"
 
 
 def test_main_assess_passthrough_only_applies_to_top_level_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import main as main_module
 
+    _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
 
@@ -484,59 +716,232 @@ def test_main_assess_passthrough_execs_assess_script(tmp_path: Path, monkeypatch
     assert captured["argv"] == [str(install_root / "agent" / "scripts" / "assess.py"), "--help"]
 
 
-def test_mcp_install_registers_codex_and_claude_servers(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_aith_mcp_subcommand_prints_deprecation_and_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
     from ai_threat_hunting_cli import main as main_module
 
-    calls: list[list[str]] = []
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main(["mcp", "install", "both"])
 
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr(main_module.subprocess, "run", fake_run)
-
-    main_module.main(["mcp", "install", "both"])
-
-    assert ["claude", "mcp", "remove", "-s", "user", "kali"] in calls
-    assert ["claude", "mcp", "add", "-s", "user", "kali", "--", "aith", "runtime", "mcp-server"] in calls
-    assert ["codex", "mcp", "remove", "kali"] in calls
-    assert ["codex", "mcp", "add", "kali", "--", "aith", "runtime", "mcp-server"] in calls
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "removed in the typed-CLI cutover" in err
+    assert "aith assess kali" in err
 
 
-def test_mcp_status_recognizes_aith_runtime_registration(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import status as status_module
+def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
 
-    def fake_which(command: str) -> str | None:
-        return f"/usr/bin/{command}"
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "16")
+    monkeypatch.setenv("AITH_RUNTIME_CPUS", "8")
+    monkeypatch.setenv("AITH_RUNTIME_PIDS_LIMIT", "1024")
+    monkeypatch.setenv("AITH_RUNTIME_SHM_SIZE", "2g")
+    commands: list[list[str]] = []
 
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 0, "kali\taith runtime mcp-server\n", "")
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "", "")
+        if argv[:3] == ["docker", "ps", "-a"]:
+            return DockerResult(0, "", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        return DockerResult(0, "", "")
 
-    monkeypatch.setattr(status_module.shutil, "which", fake_which)
-    monkeypatch.setattr(status_module.subprocess, "run", fake_run)
+    start_runtime(RuntimeOptions(install_root=install_root, recreate=False), runner=runner, validate_tools=False)
 
-    status = status_module.collect_mcp_status()
+    run_command = next(command for command in commands if command[:3] == ["docker", "run", "-d"])
+    assert "--memory=16g" in run_command
+    assert "--memory-swap=16g" in run_command
+    assert "--memory-swappiness=0" in run_command
+    assert "--cpus=8" in run_command
+    assert "--pids-limit=1024" in run_command
+    assert "--shm-size=2g" in run_command
+    assert "--oom-score-adj=-500" in run_command
+    # nofile/nproc are dockerd-side (default-ulimits in daemon.json); see README
+    # "Container resource limits". `aith runtime start` probes them via
+    # _check_runtime_ulimits and warns to stderr when low.
 
-    assert status["codex"]["configured"] is True
-    assert status["claude"]["configured"] is True
+
+def test_runtime_start_rejects_already_running_container_with_clear_message(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(
+                0,
+                f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n",
+                "",
+            )
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "exec", "security-research"] and argv[-1] == "ulimit -n; ulimit -u":
+            return DockerResult(0, "1048576\nunlimited\n", "")
+        return DockerResult(0, "", "")
+
+    with pytest.raises(SystemExit) as excinfo:
+        start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
+
+    message = str(excinfo.value)
+    assert "Runtime container is already running" in message
+    assert "container: security-research" in message
+    assert "aith runtime status" in message
+    assert "aith runtime restart" in message
 
 
-def test_mcp_status_recognizes_legacy_docker_exec_registration(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import status as status_module
+def test_check_runtime_ulimits_warns_when_below_threshold(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
 
-    def fake_which(command: str) -> str | None:
-        return f"/usr/bin/{command}"
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
 
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 0, "kali\tdocker exec -i security-research mcp-server codex\n", "")
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "exec", "security-research"] and argv[-1] == "ulimit -n; ulimit -u":
+            return DockerResult(0, "8192\n4096\n", "")
+        return DockerResult(0, "", "")
 
-    monkeypatch.setattr(status_module.shutil, "which", fake_which)
-    monkeypatch.setattr(status_module.subprocess, "run", fake_run)
+    start_runtime(
+        RuntimeOptions(install_root=install_root, recreate=False),
+        runner=runner,
+        validate_tools=False,
+        allow_existing=True,
+    )
+    err = capsys.readouterr().err
+    assert "WARN: dockerd default ulimits are low" in err
+    assert "nofile=8192" in err
+    assert "nproc=4096" in err
 
-    status = status_module.collect_mcp_status()
 
-    assert status["codex"]["configured"] is True
-    assert status["claude"]["configured"] is True
+def test_check_runtime_ulimits_silent_when_limits_ok(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "exec", "security-research"] and argv[-1] == "ulimit -n; ulimit -u":
+            return DockerResult(0, "1048576\nunlimited\n", "")
+        return DockerResult(0, "", "")
+
+    start_runtime(
+        RuntimeOptions(install_root=install_root, recreate=False),
+        runner=runner,
+        validate_tools=False,
+        allow_existing=True,
+    )
+    assert "WARN" not in capsys.readouterr().err
+
+
+def test_check_runtime_ulimits_silent_on_exec_failure(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "exec", "security-research"] and argv[-1] == "ulimit -n; ulimit -u":
+            return DockerResult(1, "", "exec failed")
+        return DockerResult(0, "", "")
+
+    start_runtime(
+        RuntimeOptions(install_root=install_root, recreate=False),
+        runner=runner,
+        validate_tools=False,
+        allow_existing=True,
+    )
+    assert "WARN" not in capsys.readouterr().err
+
+
+def test_aith_runtime_resources_renders_configured_and_live_state(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import aith_runtime_resources
+
+    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
+    monkeypatch.setenv("AITH_RUNTIME_CPUS", "4")
+    monkeypatch.setenv("AITH_RUNTIME_PIDS_LIMIT", "512")
+    monkeypatch.setenv("AITH_RUNTIME_SHM_SIZE", "1g")
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if argv[:3] == ["docker", "exec", "security-research"]:
+            return DockerResult(
+                0,
+                "/sys/fs/cgroup/memory.max=8589934592\n"
+                "/sys/fs/cgroup/cpu.max=400000 100000\n"
+                "/sys/fs/cgroup/pids.max=512\n",
+                "",
+            )
+        return DockerResult(0, "", "")
+
+    aith_runtime_resources(runner=runner)
+    output = capsys.readouterr().out
+    assert "configured\tmemory=8g" in output
+    assert "cpus=4" in output
+    assert "memory.max=8589934592" in output
+    assert "cpu.max=400000 100000" in output
+    assert "pids.max=512" in output
+
+
+def test_aith_runtime_resources_handles_stopped_container(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import aith_runtime_resources
+
+    monkeypatch.delenv("AITH_RUNTIME_MEMORY_GB", raising=False)
+    monkeypatch.delenv("AITH_RUNTIME_CPUS", raising=False)
+    monkeypatch.delenv("AITH_RUNTIME_PIDS_LIMIT", raising=False)
+    monkeypatch.delenv("AITH_RUNTIME_SHM_SIZE", raising=False)
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "", "")
+        return DockerResult(0, "", "")
+
+    aith_runtime_resources(runner=runner)
+    output = capsys.readouterr().out
+    assert "running=False" in output
+    assert "live\tcontainer not running" in output
 
 
 def test_runtime_shell_exec_passes_symbol_heavy_command_as_single_shell_payload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -589,9 +994,10 @@ def test_runtime_shell_exec_strips_separator_and_quotes_multiple_parts(monkeypat
     assert calls == [["docker", "exec", "security-research", "sh", "-lc", "printf %s 'a b'"]]
 
 
-def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path) -> None:
+def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import main as main_module
 
+    _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
 
@@ -676,7 +1082,6 @@ def test_doctor_reports_missing_binary_without_crashing(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(status_module.shutil, "which", fake_which)
     monkeypatch.setattr(status_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(status_module, "collect_mcp_status", lambda: {"codex": {"configured": False, "detail": ""}, "claude": {"configured": False, "detail": ""}})
     monkeypatch.setattr(main_module, "docker_run_command", fake_docker)
 
     main_module.main(["--root", str(tmp_path), "doctor"])
@@ -702,7 +1107,6 @@ def test_doctor_skips_docker_checks_when_docker_cli_missing(
 
     monkeypatch.setattr(status_module.shutil, "which", fake_which)
     monkeypatch.setattr(status_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(status_module, "collect_mcp_status", lambda: {"codex": {"configured": False, "detail": ""}, "claude": {"configured": False, "detail": ""}})
     monkeypatch.setattr(main_module, "docker_run_command", fail_docker)
 
     main_module.main(["--root", str(tmp_path), "doctor"])
@@ -730,7 +1134,6 @@ def test_status_json_reports_runtime_mount_mismatch(tmp_path: Path, monkeypatch:
         return DockerResult(0, "", "")
 
     monkeypatch.setattr(main_module, "docker_run_command", runner)
-    monkeypatch.setattr(status_module, "collect_mcp_status", lambda: {"codex": {"configured": False, "detail": ""}, "claude": {"configured": False, "detail": ""}})
 
     main_module.main(["--root", str(install_root), "status", "--json"])
 
@@ -752,6 +1155,34 @@ def test_config_set_get_and_unset_uses_config_env(tmp_path: Path, monkeypatch: p
     main_module.main(["config", "unset", "oob.domain"])
     main_module.main(["config", "list"])
     assert "oob.domain" not in capsys.readouterr().out
+
+
+def test_oob_status_json_reports_effective_domain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ai_threat_hunting_cli import main as main_module
+    from ai_threat_hunting_cli.docker import DockerResult
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("AI_THREAT_HUNTING_CONFIG", str(config_path))
+
+    main_module.main(["config", "set", "oob.domain", "oob.example.test"])
+    capsys.readouterr()
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "", "")
+        return DockerResult(0, "", "")
+
+    monkeypatch.setattr(main_module, "docker_run_command", runner)
+
+    main_module.main(["oob", "status", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "stopped"
+    assert payload["domain"] == "oob.example.test"
 
 
 def test_logs_routes_to_centralized_targets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1127,3 +1558,1856 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
     up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=lambda *args, **kwargs: None)
 
     assert calls[:3] == ["runtime", "orchestrator", "frp-prompt"]
+
+
+# ---------------------------------------------------------------------------
+# Wave 3 W3-B mutation-helper coverage
+# ---------------------------------------------------------------------------
+
+
+def _load_assess_main():
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.cli import main as assess_main  # type: ignore[import-not-found]
+
+    return assess_main
+
+
+def _seed_dispatch_db(db_path: Path, rows: list[dict[str, object]]) -> None:
+    """Insert synthetic work_items rows for dispatch / list-clusters tests."""
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.lib.db import db_init  # type: ignore[import-not-found]
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.touch()
+    db_init(str(db_path))
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for row in rows:
+            conn.execute(
+                """INSERT INTO work_items
+                (queue_key, method, url, url_path, query_params, body_params,
+                 type, source, status, priority_score, cluster_key, terminal_reason)
+                VALUES (?, ?, ?, ?, '{}', '{}', ?, 'test', ?, ?, ?, ?)""",
+                (
+                    row["queue_key"],
+                    row.get("method", "GET"),
+                    row["url"],
+                    row.get("url_path", "/"),
+                    row.get("type", "api"),
+                    row.get("status", "pending"),
+                    row.get("priority_score", 0),
+                    row.get("cluster_key"),
+                    row.get("terminal_reason"),
+                ),
+            )
+            if "id" in row:
+                conn.execute(
+                    "UPDATE work_items SET id = ? WHERE queue_key = ?",
+                    (row["id"], row["queue_key"]),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_resolve_surface_requires_rationale(capsys: pytest.CaptureFixture[str]) -> None:
+    """P1 #2: --rationale is required so the audit trail is never empty."""
+    assess_main = _load_assess_main()
+    with pytest.raises(SystemExit):
+        assess_main(["resolve-surface", "1", "--status", "covered"])
+    err = capsys.readouterr().err
+    assert "--rationale" in err
+
+
+def test_resolve_surface_rejects_empty_rationale(capsys: pytest.CaptureFixture[str]) -> None:
+    """P1 #2: --rationale='' surfaces an early error before HTTP."""
+    assess_main = _load_assess_main()
+    with pytest.raises(SystemExit) as exc:
+        assess_main(["resolve-surface", "1", "--status", "covered", "--rationale", "   "])
+    assert "--rationale must be non-empty" in (str(exc.value) or "")
+
+
+def test_resolve_surface_lowercases_status(capsys: pytest.CaptureFixture[str]) -> None:
+    """P3 #1: --status is case-insensitive and rejected by argparse choices when invalid."""
+    assess_main = _load_assess_main()
+    # Mixed-case input parses to lowercase via type=lambda.
+    with pytest.raises(SystemExit):
+        assess_main(["resolve-surface", "1", "--status", "BOGUS", "--rationale", "x"])
+    err = capsys.readouterr().err
+    assert "invalid choice" in err.lower() or "invalid choice" in str(err)
+
+
+def test_resolve_surface_partially_covered_requires_followup_condition(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """N7 — `--status partially-covered` without `--followup-condition` exits with a clear error."""
+    assess_main = _load_assess_main()
+    with pytest.raises(SystemExit) as exc:
+        assess_main(
+            [
+                "resolve-surface",
+                "1",
+                "--status",
+                "partially-covered",
+                "--rationale",
+                "unauth path tested",
+            ]
+        )
+    message = str(exc.value) or ""
+    assert "--followup-condition" in message
+    assert "partially-covered" in message
+
+
+def test_resolve_surface_accepts_partially_covered_with_followup_condition(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """N7 — argparse round-trip: `partially-covered` with a follow-up condition parses
+    cleanly and the payload reaches the backend client with `followup_condition`."""
+    module = _load_assess_module(
+        "round3_resolve_surface_module",
+        "agent/scripts/assess/commands/resolve_surface.py",
+    )
+
+    captured: dict[str, dict] = {}
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def patch(self, path: str, payload: dict) -> dict:
+            captured["path"] = path
+            captured["payload"] = payload
+            return {"id": 42, "status": payload["status"], **payload}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(tmp_path),
+            engagement_key="eng-test",
+            agent_root=str(tmp_path),
+        ),
+    )
+
+    module.run(
+        SimpleNamespace(
+            surface_id=42,
+            status="partially-covered",
+            rationale="unauth path tested",
+            source_name="",
+            evidence_ref="",
+            followup_condition="needs auth re-test",
+            engagement_dir=str(tmp_path),
+        )
+    )
+
+    assert captured["path"] == "surfaces/42"
+    assert captured["payload"]["status"] == "partially-covered"
+    assert captured["payload"]["followup_condition"] == "needs auth re-test"
+
+
+def test_transition_phase_resolves_engagement_dir_from_cwd(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`transition-phase` should share the standard assess config fallback:
+    cwd with scope.json is a valid engagement context."""
+    module = _load_assess_module(
+        "round3_transition_phase_cwd_module",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    engagement = tmp_path / "agent" / "engagements" / "eng-test"
+    engagement.mkdir(parents=True)
+    scope_path = engagement / "scope.json"
+    scope_path.write_text(
+        json.dumps({"engagement_type": "web", "current_phase": ""}),
+        encoding="utf-8",
+    )
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.delenv("ENGAGEMENT_DIR", raising=False)
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://127.0.0.1:9")
+    monkeypatch.chdir(engagement)
+
+    module.run(SimpleNamespace(engagement_dir=None, target_phase="recon", force=False))
+
+    assert json.loads(scope_path.read_text(encoding="utf-8"))["current_phase"] == "recon"
+    assert "Phase transitioned" in capsys.readouterr().out
+
+
+def test_transition_phase_backend_error_blocks_precondition_check(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Backend/query failures during guarded phase transitions are blockers
+    because the readiness state is unknown."""
+    module = _load_assess_module(
+        "round3_transition_phase_blocker_module",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    engagement = tmp_path / "agent" / "engagements" / "eng-test"
+    engagement.mkdir(parents=True)
+    scope_path = engagement / "scope.json"
+    scope_path.write_text(
+        json.dumps({"engagement_type": "web", "current_phase": "recon"}),
+        encoding="utf-8",
+    )
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def get(self, _path: str) -> dict:
+            raise RuntimeError("backend unavailable")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(engagement),
+            engagement_key=engagement.name,
+            agent_root=str(tmp_path / "agent"),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(engagement),
+                target_phase="collect",
+                force=False,
+            )
+        )
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "precondition_check_failed" in err
+    assert "backend unavailable" in err
+    assert json.loads(scope_path.read_text(encoding="utf-8"))["current_phase"] == "recon"
+
+
+def test_check_coverage_reports_partially_covered_surfaces(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`check-coverage` should explain partial-coverage blockers instead of
+    exiting non-zero without naming the follow-up condition."""
+    module = _load_assess_module(
+        "round3_check_coverage_module",
+        "agent/scripts/assess/commands/check_coverage.py",
+    )
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def get(self, path: str) -> dict:
+            assert path == "coverage-readiness"
+            return {
+                "ready": False,
+                "blocker_count": 1,
+                "unresolved_surfaces": [],
+                "partially_covered_surfaces": [
+                    {
+                        "surface_type": "object_reference",
+                        "target_descriptor": "https://example.test/api/users/{id}",
+                        "followup_condition": "needs auth re-test",
+                    }
+                ],
+                "high_risk_deferred_surfaces": [],
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(tmp_path),
+            engagement_key="eng-test",
+            agent_root=str(tmp_path),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.run(SimpleNamespace(engagement_dir=str(tmp_path)))
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "Partially covered surfaces need follow-up" in err
+    assert "needs auth re-test" in err
+
+
+def _load_assess_module(name: str, relative: str):
+    """Load an assess CLI submodule by relative path so tests can call ``module.run`` directly."""
+    import importlib.util
+
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    module_path = repo_root / relative
+    spec = importlib.util.spec_from_file_location(name, module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run_dispatch_action(db_path: Path, action: str, extra: list[str] | None = None, reason: str = "") -> None:
+    module = _load_assess_module(
+        "wave3_dispatch_module",
+        "agent/scripts/assess/commands/dispatch.py",
+    )
+    module.run(
+        SimpleNamespace(
+            db_path=str(db_path),
+            action=action,
+            extra=list(extra or []),
+            reason=reason,
+            by="status",
+        )
+    )
+
+
+def _run_list_clusters_action(
+    db_path: Path,
+    status: str = "pending",
+    limit: int = 100,
+    host: str = "",
+) -> None:
+    module = _load_assess_module(
+        "wave3_list_clusters_module",
+        "agent/scripts/assess/commands/list_clusters.py",
+    )
+    module.run(
+        SimpleNamespace(
+            db_path=str(db_path),
+            status=status,
+            limit=limit,
+            host=host,
+        )
+    )
+
+
+def test_dispatch_defer_items_accepts_multiple_positional_ids(tmp_path: Path) -> None:
+    """P1 #10: defer-items must affect every id, not just extra[0]."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(
+        db,
+        [
+            {"queue_key": "q:1", "url": "https://target.example/a", "id": 1},
+            {"queue_key": "q:2", "url": "https://target.example/b", "id": 2},
+            {"queue_key": "q:3", "url": "https://target.example/c", "id": 3},
+        ],
+    )
+
+    _run_dispatch_action(db, "defer-items", ["1", "2", "3"], reason="low signal")
+
+    rows = sqlite3.connect(str(db)).execute(
+        "SELECT id, status, terminal_reason FROM work_items ORDER BY id"
+    ).fetchall()
+    assert [(r[0], r[1]) for r in rows] == [(1, "skipped"), (2, "skipped"), (3, "skipped")]
+    assert all(r[2] == "low signal" for r in rows)
+
+
+def test_dispatch_defer_items_accepts_comma_separated(tmp_path: Path) -> None:
+    """P1 #10: comma form still works alongside the multi-positional form."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(
+        db,
+        [
+            {"queue_key": "q:1", "url": "https://target.example/a", "id": 10},
+            {"queue_key": "q:2", "url": "https://target.example/b", "id": 11},
+        ],
+    )
+
+    _run_dispatch_action(db, "defer-items", ["10,11"], reason="noise")
+
+    rows = sqlite3.connect(str(db)).execute(
+        "SELECT status FROM work_items ORDER BY id"
+    ).fetchall()
+    assert [r[0] for r in rows] == ["skipped", "skipped"]
+
+
+def test_dispatch_defer_items_with_no_ids_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P1 #10: empty / pure-comma id input must abort instead of silently no-op."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(db, [])
+
+    with pytest.raises(SystemExit):
+        _run_dispatch_action(db, "defer-items", [], reason="x")
+    err = capsys.readouterr().err
+    assert "Usage" in err or "id" in err.lower()
+
+
+def test_dispatch_defer_items_pure_comma_string_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P3 #15: a pure-comma id_list (e.g. ',') must abort instead of silently no-op."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(db, [])
+
+    with pytest.raises(SystemExit):
+        _run_dispatch_action(db, "defer-items", [","], reason="x")
+    err = capsys.readouterr().err
+    assert "at least one numeric ID" in err
+
+
+def test_dispatch_defer_items_zero_rows_exits_nonzero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P2 #11: zero matched rows must surface an error so a typo isn't a silent success."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(
+        db,
+        [
+            {"queue_key": "q:1", "url": "https://target.example/a", "id": 1, "status": "done"},
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        _run_dispatch_action(db, "defer-items", ["1"], reason="x")
+    err = capsys.readouterr().err
+    assert "no pending items matched" in err
+
+
+def test_dispatch_done_marks_every_id(tmp_path: Path) -> None:
+    """P1 #10: done must update all ids, not just the first one in `extra`."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(
+        db,
+        [
+            {"queue_key": "q:1", "url": "https://target.example/a", "id": 1, "status": "processing"},
+            {"queue_key": "q:2", "url": "https://target.example/b", "id": 2, "status": "processing"},
+        ],
+    )
+
+    _run_dispatch_action(db, "done", ["1", "2"])
+
+    rows = sqlite3.connect(str(db)).execute("SELECT status FROM work_items ORDER BY id").fetchall()
+    assert [r[0] for r in rows] == ["done", "done"]
+
+
+def test_dispatch_peek_invalid_limit_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P3 #12: a non-integer peek limit prints a clean usage line instead of a stacktrace."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(db, [])
+    with pytest.raises(SystemExit):
+        _run_dispatch_action(db, "peek", ["api", "abc"])
+    err = capsys.readouterr().err
+    assert "must be an integer" in err
+
+
+def test_dispatch_fetch_by_priority_warns_when_only_non_routable_pending(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P2 #14: pending rows in non-routable types must surface a stderr WARN."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(
+        db,
+        [
+            {
+                "queue_key": "img:1",
+                "url": "https://target.example/logo.png",
+                "id": 1,
+                "type": "image",
+                "status": "pending",
+            },
+        ],
+    )
+
+    _run_dispatch_action(db, "fetch-by-priority", ["10", "auto"])
+
+    captured = capsys.readouterr()
+    assert "WARN fetch-by-priority" in captured.err
+    assert "image" in captured.err
+
+
+def test_list_clusters_host_filter_matches_full_population(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P1 #25: --host considers ALL items per cluster, not just the first 5 samples."""
+    db = tmp_path / "cases.db"
+    rows = []
+    # Cluster A: 6 items on other-host.com, then 1 on target.example (sample window covers
+    # only the first 5 by priority — the legacy implementation would miss target.example).
+    for i in range(6):
+        rows.append(
+            {
+                "queue_key": f"a:{i}",
+                "url": f"https://other-host.com/x{i}",
+                "id": i + 1,
+                "cluster_key": "alpha",
+                "priority_score": 100 - i,
+                "type": "api",
+            }
+        )
+    rows.append(
+        {
+            "queue_key": "a:target",
+            "url": "https://target.example/important",
+            "id": 100,
+            "cluster_key": "alpha",
+            "priority_score": 1,
+            "type": "api",
+        }
+    )
+    # Cluster B: only on other-host.com.
+    rows.append(
+        {
+            "queue_key": "b:1",
+            "url": "https://other-host.com/y",
+            "id": 200,
+            "cluster_key": "beta",
+            "priority_score": 50,
+            "type": "api",
+        }
+    )
+    _seed_dispatch_db(db, rows)
+
+    _run_list_clusters_action(db, host="target.example")
+    payload = json.loads(capsys.readouterr().out)
+    cluster_keys = [c["cluster_key"] for c in payload["clusters"]]
+    assert "alpha" in cluster_keys
+    assert "beta" not in cluster_keys
+
+
+def test_list_clusters_host_filter_supports_wildcard(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Bonus #26: '*.example.com' fnmatches subdomains, exact 'example.com' does not."""
+    db = tmp_path / "cases.db"
+    _seed_dispatch_db(
+        db,
+        [
+            {
+                "queue_key": "a:1",
+                "url": "https://api.example.com/v1",
+                "id": 1,
+                "cluster_key": "alpha",
+                "priority_score": 10,
+            },
+            {
+                "queue_key": "a:2",
+                "url": "https://example.com/",
+                "id": 2,
+                "cluster_key": "beta",
+                "priority_score": 5,
+            },
+        ],
+    )
+
+    _run_list_clusters_action(db, host="*.example.com")
+    payload = json.loads(capsys.readouterr().out)
+    cluster_keys = [c["cluster_key"] for c in payload["clusters"]]
+    assert "alpha" in cluster_keys
+    assert "beta" not in cluster_keys
+
+    # Exact apex match excludes subdomain-only clusters.
+    _run_list_clusters_action(db, host="example.com")
+    payload = json.loads(capsys.readouterr().out)
+    cluster_keys = [c["cluster_key"] for c in payload["clusters"]]
+    assert "beta" in cluster_keys
+    assert "alpha" not in cluster_keys
+
+
+def test_supersede_intel_requires_natural_key_before_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Supersede inserts a replacement row; metadata-only edits must fail
+    client-side and tell the operator to include the natural key."""
+    supersede_module = _load_assess_module(
+        "wave3_supersede_intel_module",
+        "agent/scripts/assess/commands/supersede_intel.py",
+    )
+
+    captured: dict[str, object] = {}
+
+    class _StubClient:
+        _engagement_prefix = "/engagements/test"
+
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def _request(self, method: str, path: str, body: bytes | None = None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["body"] = body
+            return 200, json.dumps({"id": 5, "validation_status": "exploited"})
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(supersede_module, "AssessmentClient", _StubClient)
+    monkeypatch.setattr(
+        supersede_module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(tmp_path),
+            engagement_key="eng-test",
+            agent_root=str(tmp_path),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        supersede_module.run(
+            SimpleNamespace(
+                intel_type="cve",
+                intel_id=5,
+                payload=None,
+                inline_payload='{"validation_status":"exploited"}',
+                rationale="post-validation",
+                engagement_dir=str(tmp_path),
+            )
+        )
+
+    assert exc.value.code == 1
+    assert captured == {}
+    err = capsys.readouterr().err
+    assert "missing required supersede natural-key field: cve_id" in err
+    assert "missing required supersede natural-key field: affected_component" in err
+
+
+def test_validate_dispatch_contract_accepts_minimal_payload(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P3 #31: the validator returns OK for a contract with every required field set."""
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assess_main(["validate-dispatch-contract", str(contract_path)])
+    assert "OK" in capsys.readouterr().out
+
+
+def test_validate_dispatch_contract_rejects_unknown_dispatch_mode(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unknown dispatch_mode values surface as errors so the contract fails closed."""
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "vulnerability-analyst",
+        "dispatch_mode": "turbo-mode",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        assess_main(["validate-dispatch-contract", str(contract_path)])
+    err = capsys.readouterr().err
+    assert "dispatch_mode" in err and "turbo-mode" in err
+
+
+def test_actor_kind_warn_on_non_log_subcommand(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P3 #33: passing --actor-kind to a subcommand that doesn't consume it warns on stderr."""
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "vulnerability-analyst",
+        "dispatch_mode": "deep-manual",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assess_main(
+        [
+            "--actor-kind",
+            "operator",
+            "validate-dispatch-contract",
+            str(contract_path),
+        ]
+    )
+    err = capsys.readouterr().err
+    assert "--actor-kind=operator ignored" in err
+
+
+# ---------------------------------------------------------------------------
+# Round 9 — `aith assess dispatch render-handoff` tests against the backend
+#
+# The renderer now reads from the orchestrator's assessment_dispatches and
+# assessment_dispatch_handoffs tables.
+# These tests stub the AssessmentClient calls so we exercise the rendering
+# logic without standing up the real backend.
+# ---------------------------------------------------------------------------
+
+
+def _stub_render_handoff_environment(
+    monkeypatch,
+    module,
+    engagement_dir: Path,
+    *,
+    handoff: dict | None,
+    dispatch_row: dict | None = None,
+    findings_by_slug: dict[str, dict] | None = None,
+    missing_slugs: tuple[str, ...] = (),
+    credentials: list[dict] | None = None,
+) -> None:
+    """Wire a fake AssessmentClient + load_config into the dispatch module."""
+
+    class _StubClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def get(self, endpoint: str):
+            if endpoint.startswith("findings/"):
+                slug = endpoint.split("/", 1)[1]
+                if slug in missing_slugs:
+                    raise module.AssessError("HTTP 404: not found")
+                if findings_by_slug and slug in findings_by_slug:
+                    return findings_by_slug[slug]
+                raise module.AssessError("HTTP 404: not found")
+            if endpoint == "credentials":
+                return list(credentials or [])
+            raise module.AssessError(f"unexpected endpoint {endpoint}")
+
+        def get_handoff(self, agent_id: str):
+            if handoff is None:
+                return None
+            return handoff
+
+        def get_dispatch(self, agent_id: str):
+            return dispatch_row
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _StubClient)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(engagement_dir),
+            engagement_key=engagement_dir.name,
+            agent_root=str(engagement_dir.parent),
+        ),
+    )
+
+
+def _load_dispatch_module():
+    """Load dispatch.py with AssessError, AssessmentClient, and load_config
+    visible on the module namespace for monkeypatching.
+    """
+    return _load_assess_module(
+        "round9_dispatch_module",
+        "agent/scripts/assess/commands/dispatch.py",
+    )
+
+
+def _run_render_handoff(
+    module,
+    engagement_dir: Path,
+    agent_id: str,
+    *,
+    max_lines: int = 40,
+    include_evidence: bool = False,
+) -> None:
+    module.run(
+        SimpleNamespace(
+            db_path="render-handoff",
+            action=agent_id,
+            extra=[],
+            reason="",
+            by="status",
+            max_lines=max_lines,
+            include_evidence=include_evidence,
+            engagement_dir=str(engagement_dir),
+        )
+    )
+
+
+def test_render_handoff_emits_known_fields_for_existing_agent_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Round 9: render the bounded handoff blob from backend dispatch + handoff rows."""
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    (engagement_dir / "tools").mkdir()
+    (engagement_dir / "tools" / "exploit-state").mkdir()
+    (engagement_dir / "tools" / "exploit-state" / "EX-001-payload.sql").write_text(
+        "-- payload", encoding="utf-8"
+    )
+
+    handoff = {
+        "agent_id": "AGENT-EX-1",
+        "agent_role": "vulnerability-analyst",
+        "summary": "Validated IDOR on /api/users/{id}; confirmed write primitive.",
+        "confidence": "high",
+        "finding_slugs": ["VA-001", "VA-002"],
+        "next_steps": [
+            {"action": "replay captured cookie at /api/users/2 and confirm IDOR write"},
+        ],
+        "coverage_gaps": [
+            {"area": "auth boundary", "reason": "anonymous session not tested"},
+        ],
+        "working_artifacts": [
+            {"path": "tools/exploit-state/EX-001-payload.sql"},
+            {"path": "tools/exploit-state/EX-002-poc.py"},
+        ],
+        "runtime_issues": [],
+        "open_questions": [],
+        "extras": None,
+        "recommended_next_agent": "exploit-developer",
+        "created_at": "2026-04-27T10:00:00Z",
+    }
+    dispatch_row = {
+        "agent_id": "AGENT-EX-1",
+        "agent_role": "vulnerability-analyst",
+        "task": "Validate IDOR on /api/users/{id}",
+        "scope_host": "target.example",
+        "dispatched_at": "2026-04-27T10:00:00Z",
+        "status": "completed",
+    }
+
+    module = _load_dispatch_module()
+    _stub_render_handoff_environment(
+        monkeypatch,
+        module,
+        engagement_dir,
+        handoff=handoff,
+        dispatch_row=dispatch_row,
+        findings_by_slug={
+            "VA-001": {"slug": "VA-001", "title": "IDOR write on user profile", "severity": "high"},
+            "VA-002": {"slug": "VA-002", "title": "IDOR read on user email", "severity": "medium"},
+        },
+        credentials=[
+            {"id": 17, "source_name": "vulnerability-analyst"},
+            {"id": 18, "source_name": "exploit-developer"},
+        ],
+    )
+
+    _run_render_handoff(module, engagement_dir, "AGENT-EX-1")
+
+    out = capsys.readouterr().out
+    assert "#### Handoff from vulnerability-analyst dispatch AGENT-EX-1" in out
+    assert "Validate IDOR on /api/users/{id}" in out
+    assert "target.example" in out
+    assert "Validated IDOR on /api/users/{id}" in out  # summary
+    assert "Confidence:** high" in out
+    assert "`VA-001` — IDOR write on user profile [severity=high]" in out
+    assert "`VA-002` — IDOR read on user email [severity=medium]" in out
+    assert "tools/exploit-state/EX-001-payload.sql` (state: present)" in out
+    assert "tools/exploit-state/EX-002-poc.py` (state: missing)" in out
+    assert "replay captured cookie at /api/users/2" in out
+    assert "Recommended next agent:** exploit-developer" in out
+    assert "Credentials captured:** 1 rows (ids: 17)" in out
+
+
+def test_render_handoff_404s_unknown_agent_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Round 9: an unknown agent-id (no handoff row) exits 2."""
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+
+    module = _load_dispatch_module()
+    _stub_render_handoff_environment(
+        monkeypatch, module, engagement_dir, handoff=None
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_render_handoff(module, engagement_dir, "AGENT-DOES-NOT-EXIST")
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "AGENT-DOES-NOT-EXIST" in err
+    # Helpful hint about where the data should come from.
+    assert "record-handoff" in err
+
+
+def test_render_handoff_truncates_at_max_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Round 9: a large finding_slugs list collapses with '... and N more'."""
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+
+    slugs = [f"VA-{idx:03d}" for idx in range(1, 21)]
+    handoff = {
+        "agent_id": "AGENT-MANY-FINDINGS",
+        "agent_role": "vulnerability-analyst",
+        "summary": "Deep IDOR sweep across 20 endpoints — many findings recorded.",
+        "finding_slugs": slugs,
+        "next_steps": [{"action": "promote highest-severity finding to exploit-developer"}],
+        "coverage_gaps": [],
+        "working_artifacts": [],
+        "runtime_issues": [],
+        "open_questions": [],
+        "recommended_next_agent": "exploit-developer",
+        "created_at": "2026-04-27T11:00:00Z",
+    }
+    dispatch_row = {
+        "agent_id": "AGENT-MANY-FINDINGS",
+        "agent_role": "vulnerability-analyst",
+        "task": "deep IDOR sweep across 20 endpoints",
+        "scope_host": "target.example",
+        "dispatched_at": "2026-04-27T11:00:00Z",
+        "status": "completed",
+    }
+    findings = {
+        slug: {"slug": slug, "title": f"finding {slug}", "severity": "medium"}
+        for slug in slugs
+    }
+
+    module = _load_dispatch_module()
+    _stub_render_handoff_environment(
+        monkeypatch,
+        module,
+        engagement_dir,
+        handoff=handoff,
+        dispatch_row=dispatch_row,
+        findings_by_slug=findings,
+    )
+
+    _run_render_handoff(module, engagement_dir, "AGENT-MANY-FINDINGS", max_lines=20)
+    out = capsys.readouterr().out
+    assert "... and " in out and " more" in out
+    assert "#### Handoff from vulnerability-analyst dispatch AGENT-MANY-FINDINGS" in out
+    assert "promote highest-severity finding" in out
+
+
+def test_render_handoff_missing_slug_distinct_from_fetch_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ISSUE-010: 404 on a slug renders 'slug missing in backend', not 'non-dict response'."""
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+
+    handoff = {
+        "agent_id": "AGENT-DROP",
+        "agent_role": "vulnerability-analyst",
+        "summary": "Slug was killed between dispatch and handoff.",
+        "finding_slugs": ["VA-DROPPED"],
+        "next_steps": [],
+        "coverage_gaps": [],
+        "working_artifacts": [],
+        "runtime_issues": [],
+        "open_questions": [],
+        "recommended_next_agent": None,
+        "created_at": "2026-04-27T12:00:00Z",
+    }
+    dispatch_row = {
+        "agent_id": "AGENT-DROP",
+        "agent_role": "vulnerability-analyst",
+        "task": "slug-drop test",
+        "scope_host": "target.example",
+        "dispatched_at": "2026-04-27T12:00:00Z",
+        "status": "completed",
+    }
+
+    module = _load_dispatch_module()
+    _stub_render_handoff_environment(
+        monkeypatch,
+        module,
+        engagement_dir,
+        handoff=handoff,
+        dispatch_row=dispatch_row,
+        missing_slugs=("VA-DROPPED",),
+    )
+    _run_render_handoff(module, engagement_dir, "AGENT-DROP")
+    out = capsys.readouterr().out
+    assert "VA-DROPPED" in out
+    assert "deleted or never recorded" in out, (
+        "ISSUE-010: a 404 on a slug must render the explicit 'slug missing' wording, "
+        "not a generic 'non-dict response' / 'fetch error' fallback"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Round 9 — `aith assess dispatch register / update-status / list / get /
+# record-decision / record-handoff` smoke tests. The CLI calls the
+# AssessmentClient's helper methods, so we wire a fake client and assert
+# the CLI builds the right payloads / prints the right output.
+# ---------------------------------------------------------------------------
+
+
+class _CapturingClient:
+    """Minimal AssessmentClient stand-in for CLI smoke tests."""
+
+    def __init__(self, *_: object, **__: object) -> None:
+        self.recorded: list[dict] = []
+        self.patches: list[tuple[str, dict]] = []
+        self.dispatches_by_id: dict[str, dict] = {}
+        self.handoff_response: dict | None = None
+        self.decisions_recorded: list[dict] = []
+        self.handoff_calls: list[dict] = []
+        self.handoffs_by_id: dict[str, dict] = {}
+
+    def record_dispatch(self, payload: dict) -> dict:
+        self.recorded.append(payload)
+        row = {"id": 1, **payload, "status": payload.get("status", "in-progress")}
+        self.dispatches_by_id[row["agent_id"]] = row
+        return row
+
+    def update_dispatch(self, agent_id: str, patch: dict) -> dict:
+        self.patches.append((agent_id, patch))
+        existing = dict(self.dispatches_by_id.get(agent_id) or {"agent_id": agent_id})
+        existing.update(patch)
+        self.dispatches_by_id[agent_id] = existing
+        return existing
+
+    def get_dispatch(self, agent_id: str):
+        return self.dispatches_by_id.get(agent_id)
+
+    def list_dispatches(self, **filters):
+        return list(self.dispatches_by_id.values())
+
+    def record_decision(self, payload: dict) -> dict:
+        self.decisions_recorded.append(payload)
+        return {"id": 99, **payload}
+
+    def record_handoff(self, payload: dict, *, upsert: bool = False) -> dict:
+        # Track every call for idempotency tests; the dispatch CLI should
+        # always pass upsert=True so checkpointing the same agent_id is safe.
+        self.handoff_response = payload
+        self.handoff_calls.append({"payload": payload, "upsert": upsert})
+        prior = self.handoffs_by_id.get(payload.get("agent_id"))
+        if prior is not None and not upsert:
+            from agent.scripts.assess.lib.client import AssessError  # type: ignore
+            raise AssessError("HTTP 409:\nduplicate (engagement, agent_id)")
+        # Latest write wins (upsert semantics).
+        merged = {"id": 42, **(prior or {}), **payload}
+        self.handoffs_by_id[payload.get("agent_id")] = merged
+        return {"id": merged["id"], "agent_id": merged.get("agent_id")}
+
+    def update_handoff(self, agent_id: str, patch: dict) -> dict:
+        existing = dict(self.handoffs_by_id.get(agent_id) or {"agent_id": agent_id})
+        existing.update(patch)
+        self.handoffs_by_id[agent_id] = existing
+        return existing
+
+    def close(self) -> None:
+        return None
+
+
+def _run_dispatch_verb(monkeypatch, action: str, *, extra=None, **flags):
+    """Execute dispatch.run with a fake AssessmentClient injected."""
+    module = _load_dispatch_module()
+    fake = _CapturingClient()
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+    args_dict = {
+        "db_path": action,
+        "action": "",
+        "extra": list(extra or []),
+        "reason": "",
+        "by": "status",
+        "max_lines": 40,
+        "include_evidence": False,
+        "engagement_dir": None,
+        "agent_id": None,
+        "agent_role": None,
+        "task": None,
+        "scope_host": None,
+        "dispatch_model": None,
+        "reasoning": None,
+        "dispatch_mode_arg": None,
+        "from_json": None,
+        "dispatch_status": None,
+        "completed_at": None,
+        "finding_slugs": None,
+        "filter_role": None,
+        "filter_since": None,
+        "task_q": None,
+        "dispatch_limit": None,
+        "decision_kind": None,
+        "payload_json": None,
+        "surfaced_to_user": False,
+        "decision_host": None,
+        "decision_vendor": None,
+        "decision_choice": None,
+        "decision_note": None,
+        "decision_phase": None,
+        "hf_summary": None,
+        "hf_confidence": None,
+        "hf_next_steps": None,
+        "hf_coverage_gaps": None,
+        "hf_runtime_issues": None,
+        "hf_working_artifacts": None,
+        "hf_open_questions": None,
+        "hf_recommended_next_agent": None,
+        "hf_extras_json": None,
+    }
+    args_dict.update(flags)
+    module.run(SimpleNamespace(**args_dict))
+    return fake
+
+
+def _dispatch_args(action: str, *, db_path: str | None = None, extra=None, **flags) -> SimpleNamespace:
+    args_dict = {
+        "db_path": action if db_path is None else db_path,
+        "action": "" if db_path is None else action,
+        "extra": list(extra or []),
+        "reason": "",
+        "by": "status",
+        "max_lines": 40,
+        "include_evidence": False,
+        "engagement_dir": None,
+        "agent_id": None,
+        "agent_role": None,
+        "task": None,
+        "scope_host": None,
+        "dispatch_model": None,
+        "reasoning": None,
+        "dispatch_mode_arg": None,
+        "from_json": None,
+        "dispatch_status": None,
+        "completed_at": None,
+        "finding_slugs": None,
+        "filter_role": None,
+        "filter_since": None,
+        "task_q": None,
+        "dispatch_limit": None,
+        "decision_kind": None,
+        "payload_json": None,
+        "surfaced_to_user": False,
+        "decision_host": None,
+        "decision_vendor": None,
+        "decision_choice": None,
+        "decision_note": None,
+        "decision_phase": None,
+        "hf_summary": None,
+        "hf_confidence": None,
+        "hf_next_steps": None,
+        "hf_coverage_gaps": None,
+        "hf_runtime_issues": None,
+        "hf_working_artifacts": None,
+        "hf_open_questions": None,
+        "hf_recommended_next_agent": None,
+        "hf_extras_json": None,
+    }
+    args_dict.update(flags)
+    return SimpleNamespace(**args_dict)
+
+
+def test_dispatch_backend_actions_reject_cases_db_prefix(capsys: pytest.CaptureFixture[str]) -> None:
+    module = _load_dispatch_module()
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(_dispatch_args("record-handoff", db_path="cases.db"))
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "must not take a cases.db path" in err
+    assert "aith assess dispatch record-handoff" in err
+
+
+def test_dispatch_record_handoff_from_json_rejects_agent_id_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_dispatch_module()
+    payload_path = tmp_path / "handoff.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "agent_id": "stale-local-name",
+                "agent_role": "recon-specialist",
+                "summary": "checkpoint from a local artifact",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            _dispatch_args(
+                "record-handoff",
+                from_json=str(payload_path),
+                agent_id="actual-agent-id",
+            )
+        )
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "does not match explicit --agent-id 'actual-agent-id'" in err
+
+
+def test_dispatch_register_writes_payload(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "register",
+        agent_id="AG-CLI-1",
+        agent_role="vulnerability-analyst",
+        task="IDOR sweep",
+        reasoning="high",
+        dispatch_mode_arg="item-iterating",
+    )
+    out = capsys.readouterr().out
+    body = json.loads(out)
+    assert body["agent_id"] == "AG-CLI-1"
+    assert body["status"] == "in-progress"
+    assert fake.recorded[0]["agent_role"] == "vulnerability-analyst"
+    assert fake.recorded[0]["dispatch_mode"] == "item-iterating"
+
+
+def test_dispatch_register_warns_on_structured_overlap(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_dispatch_module()
+    fake = _CapturingClient()
+    fake.dispatches_by_id["AG-OLD"] = {
+        "id": 1,
+        "agent_id": "AG-OLD",
+        "agent_role": "vulnerability-analyst",
+        "status": "in-progress",
+        "finding_slugs": ["VA-001"],
+        "task": "Older exploitation attempt",
+    }
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+
+    module.run(
+        _dispatch_args(
+            "register",
+            agent_id="AG-NEW",
+            agent_role="vulnerability-analyst",
+            task="Follow-up exploitation attempt",
+            finding_slugs="VA-001",
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "WARN dispatch register" in err
+    assert "same finding_slugs: VA-001" in err
+    assert fake.recorded[0]["agent_id"] == "AG-NEW"
+
+
+def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_dispatch_module()
+    fake = _CapturingClient()
+    fake.dispatches_by_id["AG-OLD"] = {
+        "id": 1,
+        "agent_id": "AG-OLD",
+        "agent_role": "vulnerability-analyst",
+        "status": "in-progress",
+        "scope_host": "app.example.test",
+        "dispatch_mode": "hypothesis-driven",
+        "task": "Review password reset flows",
+    }
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+
+    module.run(
+        _dispatch_args(
+            "register",
+            agent_id="AG-NEW",
+            agent_role="vulnerability-analyst",
+            scope_host="app.example.test",
+            dispatch_mode_arg="hypothesis-driven",
+            task="Review account deletion flows",
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "WARN dispatch register" not in err
+    assert fake.recorded[0]["agent_id"] == "AG-NEW"
+
+
+def test_dispatch_abort_duplicate_marks_row_and_records_decision(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "abort-duplicate",
+        extra=["AG-DUP"],
+        replacement_agent_id="AG-KEEP",
+        reason="same exploit review was registered twice",
+    )
+
+    assert fake.patches[0][0] == "AG-DUP"
+    assert fake.patches[0][1]["status"] == "aborted"
+    decision = fake.decisions_recorded[0]
+    assert decision["kind"] == "dispatch_duplicate"
+    assert decision["payload"]["replacement_agent_id"] == "AG-KEEP"
+
+
+def test_dispatch_update_status_marks_completed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "update-status",
+        extra=["AG-CLI-1"],
+        dispatch_status="completed",
+        finding_slugs="VA-001,VA-002",
+    )
+    assert fake.patches[0][0] == "AG-CLI-1"
+    patch = fake.patches[0][1]
+    assert patch["status"] == "completed"
+    assert patch["finding_slugs"] == ["VA-001", "VA-002"]
+    assert patch.get("completed_at"), "completed_at must be auto-stamped on terminal status"
+
+
+def test_dispatch_list_emits_jsonl(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_dispatch_module()
+
+    class _ListClient(_CapturingClient):
+        def list_dispatches(self, **filters):
+            return [
+                {"id": 1, "agent_id": "L1", "agent_role": "recon-specialist"},
+                {"id": 2, "agent_id": "L2", "agent_role": "vulnerability-analyst"},
+            ]
+
+    fake = _ListClient()
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+    module.run(SimpleNamespace(
+        db_path="list", action="", extra=[], reason="", by="status",
+        max_lines=40, include_evidence=False, engagement_dir=None,
+        agent_id=None, agent_role=None, task=None, scope_host=None,
+        dispatch_model=None, reasoning=None,
+        dispatch_mode_arg=None,
+        from_json=None, dispatch_status=None, completed_at=None, finding_slugs=None,
+        filter_role=None, filter_since=None, task_q=None, dispatch_limit=None,
+        decision_kind=None, payload_json=None, surfaced_to_user=False,
+        decision_host=None, decision_vendor=None, decision_choice=None,
+        decision_note=None, decision_phase=None,
+        hf_summary=None, hf_confidence=None, hf_next_steps=None,
+        hf_coverage_gaps=None, hf_runtime_issues=None, hf_working_artifacts=None,
+        hf_open_questions=None, hf_recommended_next_agent=None, hf_extras_json=None,
+    ))
+    out = capsys.readouterr().out
+    lines = [line for line in out.strip().split("\n") if line.strip()]
+    assert len(lines) == 2
+    rows = [json.loads(line) for line in lines]
+    assert {r["agent_id"] for r in rows} == {"L1", "L2"}
+
+
+def test_dispatch_get_exits_2_on_missing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        _run_dispatch_verb(monkeypatch, "get", extra=["NOPE"])
+    assert exc_info.value.code == 2
+
+
+def test_dispatch_record_decision_friendly_flags(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "record-decision",
+        decision_kind="scope_decision",
+        decision_host="vendor-saas.example.com",
+        decision_vendor="salesforce",
+        decision_choice="in_scope",
+        surfaced_to_user=True,
+    )
+    decisions = fake.decisions_recorded
+    assert len(decisions) == 1
+    body = decisions[0]
+    assert body["kind"] == "scope_decision"
+    assert body["payload"]["host"] == "vendor-saas.example.com"
+    assert body["surfaced_to_user"] is True
+
+
+def test_dispatch_record_handoff_flag_based(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "record-handoff",
+        agent_id="HF-CLI-1",
+        agent_role="vulnerability-analyst",
+        hf_summary="Validated IDOR write primitive.",
+        hf_next_steps=["promote to exploit-developer"],
+        hf_coverage_gaps=["auth boundary: anonymous untested"],
+        hf_recommended_next_agent="exploit-developer",
+        finding_slugs="VA-001",
+    )
+    payload = fake.handoff_response
+    assert payload["agent_id"] == "HF-CLI-1"
+    assert payload["summary"] == "Validated IDOR write primitive."
+    assert payload["next_steps"] == [{"action": "promote to exploit-developer"}]
+    assert payload["coverage_gaps"][0]["area"] == "auth boundary"
+    assert payload["finding_slugs"] == ["VA-001"]
+    assert payload["recommended_next_agent"] == "exploit-developer"
+    # The CLI MUST request upsert semantics so checkpointing is idempotent.
+    assert fake.handoff_calls[-1]["upsert"] is True
+
+
+def test_dispatch_record_handoff_is_idempotent_for_repeat_calls(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Round 9c: agents call record-handoff after every major step. The same
+    (engagement, agent_id) tuple collides on every call after the first; the
+    CLI must transparently fall back to PATCH so the agent never sees a 409."""
+    module = _load_dispatch_module()
+    # One fake shared across all three calls so handoffs_by_id persists.
+    shared_fake = _CapturingClient()
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: shared_fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+
+    payload_v1 = {
+        "agent_id": "HF-CHECKPOINT",
+        "agent_role": "recon-specialist",
+        "summary": "checkpoint v1 — wafw00f done",
+        "confidence": "low",
+    }
+    payload_v2 = {
+        "agent_id": "HF-CHECKPOINT",
+        "agent_role": "recon-specialist",
+        "summary": "checkpoint v2 — nmap done",
+        "confidence": "medium",
+    }
+    payload_v3 = {
+        "agent_id": "HF-CHECKPOINT",
+        "agent_role": "recon-specialist",
+        "summary": "checkpoint v3 — full sweep done",
+        "confidence": "high",
+    }
+
+    p1 = tmp_path / "v1.json"
+    p2 = tmp_path / "v2.json"
+    p3 = tmp_path / "v3.json"
+    p1.write_text(json.dumps(payload_v1), encoding="utf-8")
+    p2.write_text(json.dumps(payload_v2), encoding="utf-8")
+    p3.write_text(json.dumps(payload_v3), encoding="utf-8")
+
+    def _invoke(path: Path) -> None:
+        args_dict = {
+            "db_path": "record-handoff",
+            "action": "",
+            "extra": [],
+            "reason": "",
+            "by": "status",
+            "max_lines": 40,
+            "include_evidence": False,
+            "engagement_dir": None,
+            "agent_id": None,
+            "agent_role": None,
+            "task": None,
+            "scope_host": None,
+            "dispatch_model": None,
+            "reasoning": None,
+            "dispatch_mode_arg": None,
+            "from_json": str(path),
+            "dispatch_status": None,
+            "completed_at": None,
+            "finding_slugs": None,
+            "filter_role": None,
+            "filter_since": None,
+            "task_q": None,
+            "dispatch_limit": None,
+            "decision_kind": None,
+            "payload_json": None,
+            "surfaced_to_user": False,
+            "decision_host": None,
+            "decision_vendor": None,
+            "decision_choice": None,
+            "decision_note": None,
+            "decision_phase": None,
+            "hf_summary": None,
+            "hf_confidence": None,
+            "hf_next_steps": None,
+            "hf_coverage_gaps": None,
+            "hf_runtime_issues": None,
+            "hf_working_artifacts": None,
+            "hf_open_questions": None,
+            "hf_recommended_next_agent": None,
+            "hf_extras_json": None,
+        }
+        module.run(SimpleNamespace(**args_dict))
+
+    _invoke(p1)
+    _invoke(p2)
+    _invoke(p3)
+
+    # All three calls passed upsert=True (the contract).
+    assert len(shared_fake.handoff_calls) == 3
+    assert all(call["upsert"] is True for call in shared_fake.handoff_calls)
+
+    # Latest payload wins; row reflects the v3 summary.
+    final = shared_fake.handoffs_by_id["HF-CHECKPOINT"]
+    assert final["summary"] == "checkpoint v3 — full sweep done"
+    assert final["confidence"] == "high"
+
+
+def test_record_handoff_client_upsert_falls_back_to_patch_on_409() -> None:
+    """The client helper itself catches 409 and re-issues a PATCH."""
+    from agent.scripts.assess.lib.client import AssessError, AssessmentClient
+
+    captured: dict[str, object] = {"posts": [], "patches": []}
+
+    class _StubClient(AssessmentClient):
+        def __init__(self) -> None:
+            # Skip parent __init__ — we don't need a real socket for this unit test.
+            pass
+
+        def post(self, endpoint: str, payload: dict) -> dict:  # type: ignore[override]
+            captured["posts"].append((endpoint, payload))
+            raise AssessError(
+                "HTTP 409:\n"
+                + json.dumps(
+                    {
+                        "detail": (
+                            "handoff with agent_id='AG-X' already exists; "
+                            "PATCH to update"
+                        )
+                    }
+                )
+            )
+
+        def patch(self, endpoint: str, payload: dict, *, accept_409: bool = False) -> dict:  # type: ignore[override]
+            captured["patches"].append((endpoint, payload))
+            return {"id": 7, "agent_id": "AG-X", **payload}
+
+    stub = _StubClient()
+    out = stub.record_handoff(
+        {"agent_id": "AG-X", "agent_role": "recon-specialist", "summary": "v2"},
+        upsert=True,
+    )
+    assert out["summary"] == "v2"
+    assert len(captured["posts"]) == 1
+    assert len(captured["patches"]) == 1
+    assert captured["patches"][0][0] == "dispatch-handoffs/AG-X"
+    # PATCH body must NOT include agent_id (URL-bound) or agent_role
+    # (immutable post-create — HandoffUpdate forbids both).
+    patch_body = captured["patches"][0][1]
+    assert "agent_id" not in patch_body
+    assert "agent_role" not in patch_body
+    assert patch_body["summary"] == "v2"
+
+
+def test_record_handoff_client_upsert_does_not_patch_role_mismatch_409() -> None:
+    """Role-mismatch 409s are validation failures, not duplicate-row upserts."""
+    from agent.scripts.assess.lib.client import AssessError, AssessmentClient
+
+    captured: dict[str, object] = {"posts": [], "patches": []}
+
+    class _StubClient(AssessmentClient):
+        def __init__(self) -> None:
+            pass
+
+        def post(self, endpoint: str, payload: dict) -> dict:  # type: ignore[override]
+            captured["posts"].append((endpoint, payload))
+            raise AssessError(
+                "HTTP 409:\n"
+                + json.dumps(
+                    {
+                        "detail": (
+                            "agent_role mismatch: handoff agent_role='wrong' "
+                            "does not match registered dispatch role='right'"
+                        )
+                    }
+                )
+            )
+
+        def patch(self, endpoint: str, payload: dict, *, accept_409: bool = False) -> dict:  # type: ignore[override]
+            captured["patches"].append((endpoint, payload))
+            return {"id": 7, "agent_id": "AG-X", **payload}
+
+    stub = _StubClient()
+    with pytest.raises(AssessError, match="agent_role mismatch"):
+        stub.record_handoff(
+            {"agent_id": "AG-X", "agent_role": "wrong", "summary": "v2"},
+            upsert=True,
+        )
+    assert len(captured["posts"]) == 1
+    assert captured["patches"] == []
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# resolve_orchestrator_base_url precedence chain
+#
+# Resolution order (highest → lowest):
+#   1. ORCHESTRATOR_BASE_URL env var (explicit override)
+#   2. Per-engagement ``.orchestrator.env``
+#   3. ``aith config get orchestrator_base_url`` (persistent default)
+#   4. Install-root env files (legacy fallback)
+#   5. Hardcoded fallback ``http://127.0.0.1:18000``
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_resolve_orchestrator_base_url_env_var_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+    (engagement_dir / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-env-file:9000\n", encoding="utf-8"
+    )
+
+    monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://from-env-var:1234/")
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: "http://from-config:5678")
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == "http://from-env-var:1234"
+    )
+
+
+def test_resolve_orchestrator_base_url_engagement_env_file_wins_over_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+    (engagement_dir / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-env-file:9000/\n", encoding="utf-8"
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: "http://from-config:5678")
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == "http://from-env-file:9000"
+    )
+
+
+def test_resolve_orchestrator_base_url_aith_config_falls_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With env var unset and no engagement env file override, aith config
+    is consulted before the hardcoded default."""
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+    # No env file at all — everything falls through to the config layer.
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: "http://from-config:5678/")
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == "http://from-config:5678"
+    )
+
+
+def test_resolve_orchestrator_base_url_engagement_env_wins_over_install_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-install-env:18000\n", encoding="utf-8"
+    )
+    (engagement_dir / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-engagement-env:18000\n", encoding="utf-8"
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: "http://from-config:5678")
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == "http://from-engagement-env:18000"
+    )
+
+
+def test_resolve_orchestrator_base_url_aith_config_wins_over_install_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-install-env:18000\n", encoding="utf-8"
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: "http://from-config:5678/")
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == "http://from-config:5678"
+    )
+
+
+def test_resolve_orchestrator_base_url_falls_back_to_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.paths import (
+        DEFAULT_ORCHESTRATOR_BASE_URL,
+        resolve_orchestrator_base_url,
+    )
+
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: None)
+
+    assert (
+        resolve_orchestrator_base_url(install_root, engagement_dir)
+        == DEFAULT_ORCHESTRATOR_BASE_URL
+    )
+
+
+def test_assess_config_engagement_env_wins_over_install_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    module = importlib.import_module("assess.lib.config")
+    install_root = tmp_path / "install"
+    engagement_dir = install_root / "agent" / "engagements" / "eng-test"
+    engagement_dir.mkdir(parents=True)
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-install-env:18000\n", encoding="utf-8"
+    )
+    (engagement_dir / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-engagement-env:18000\n", encoding="utf-8"
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.delenv("AI_THREAT_HUNTING_CONFIG", raising=False)
+
+    assert (
+        module.resolve_base_url(str(engagement_dir), str(install_root / "agent"))
+        == "http://from-engagement-env:18000"
+    )
+
+
+def test_assess_config_aith_config_wins_over_install_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    module = importlib.import_module("assess.lib.config")
+    install_root = tmp_path / "install"
+    engagement_dir = install_root / "agent" / "engagements" / "eng-test"
+    engagement_dir.mkdir(parents=True)
+    (install_root / ".env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://from-install-env:18000\n", encoding="utf-8"
+    )
+    config_path = tmp_path / "aith-config.json"
+    config_path.write_text(
+        json.dumps({"orchestrator_base_url": "http://from-config:5678/"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setenv("AI_THREAT_HUNTING_CONFIG", str(config_path))
+
+    assert (
+        module.resolve_base_url(str(engagement_dir), str(install_root / "agent"))
+        == "http://from-config:5678"
+    )

@@ -8,6 +8,99 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
+# ---------------------------------------------------------------------------
+# Vendor-SaaS heuristics
+# ---------------------------------------------------------------------------
+#
+# Hosts whose underlying application is vendor-managed SaaS (Salesforce,
+# ServiceNow, hosted status pages, hosted helpdesks, identity providers, etc.)
+# need a scope-decision checkpoint before recon-specialist dispatches against
+# them — testing the underlying vendor platform rather than the customer's
+# integration is usually out of scope for a VDP and produces noise instead of
+# signal. The matcher is purely lexical on hostname shape; the operator
+# confirms every match via the Vendor-SaaS scope checkpoint before any recon
+# dispatch fires.
+#
+# Suffix matches require a strict subdomain boundary. Vendor SaaS shows up
+# as ``<tenant>.salesforce.com``, never as the bare ``salesforce.com`` apex
+# (which is the vendor's own corporate site, not a customer asset). Prefix
+# every entry with a leading dot in the table; the matcher uses
+# ``host.endswith(suffix)`` only.
+_VENDOR_SAAS_SUFFIXES: list[tuple[str, str]] = [
+    # (vendor label, hostname suffix)
+    ("salesforce", ".salesforce.com"),
+    ("salesforce", ".lightning.force.com"),
+    ("salesforce", ".my.salesforce.com"),
+    ("salesforce", ".force.com"),
+    ("servicenow", ".service-now.com"),
+    ("servicenow", ".servicenowservices.com"),
+    ("statuspage", ".statuspage.io"),
+    ("statuspage", ".statuspage.amazon.com"),
+    ("govdelivery", ".govdelivery.com"),
+    ("awsconnect", ".awsconnect.com"),
+    ("awsconnect", ".amazonconnect.com"),
+    ("auth0", ".auth0.com"),
+    ("okta", ".okta.com"),
+    ("okta", ".oktapreview.com"),
+    ("zendesk", ".zendesk.com"),
+    ("freshdesk", ".freshdesk.com"),
+    ("intercom", ".intercom.io"),
+]
+
+
+def host_is_vendor_saas(host: str | None) -> str | None:
+    """Return the vendor label for a known SaaS-platform-fronted host or None.
+
+    Pattern matching is strict-subdomain on the hostname (CNAME / rDNS shape)
+    and is purely lexical — no DNS resolution, HTTP probing, or backend
+    lookup happens at call time, so the function is safe to invoke inside
+    scope filters and admission gates. A bare ``salesforce.com`` apex is
+    never a customer asset; only ``<tenant>.salesforce.com`` and similar
+    subdomains return a vendor label.
+
+    Returns the vendor label (e.g. ``"salesforce"``, ``"servicenow"``,
+    ``"statuspage"``, ``"govdelivery"``, ``"awsconnect"``) on the first
+    matching suffix, or ``None`` when nothing matches. Lookup is O(N) over a
+    small fixed list; the cost is negligible.
+    """
+    if not host:
+        return None
+    normalized = host.strip().rstrip(".").lower()
+    if not normalized:
+        return None
+    for label, suffix in _VENDOR_SAAS_SUFFIXES:
+        if normalized.endswith(suffix):
+            return label
+    return None
+
+
+def _to_a_label(host: str) -> str:
+    """Return the A-label (punycode) form of a hostname, lowercased.
+
+    IDN scope entries can be authored as U-labels (``café.test``) while
+    incoming hostnames arrive A-label-encoded (``xn--caf-dma.test``) or
+    vice versa. Comparing the raw strings would miss the match. Falling
+    back to the input on encode failure preserves IP literals and other
+    non-IDNA strings.
+    """
+    if not host:
+        return ""
+    cleaned = host.strip().rstrip(".").lower()
+    if not cleaned:
+        return ""
+    try:
+        return cleaned.encode("idna").decode("ascii").lower()
+    except (UnicodeError, UnicodeDecodeError):
+        return cleaned
+
+
+def _normalize_host_for_match(host: str) -> str:
+    """Return a normalized host suitable for scope matching (lowercase, no trailing dot, A-label)."""
+    if not host:
+        return ""
+    return _to_a_label(host)
+
+
 def normalize_scope_payload(scope: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     changed = False
     raw_targets = scope.get("approved_targets")
@@ -61,7 +154,8 @@ def scope_entries(scope: dict[str, Any]) -> list[dict[str, str]]:
 
     Entries use the same coarse semantics as ``check-scope-coverage``: URL
     entries collapse to their host, bare hosts match exactly, and wildcards
-    match the apex plus subdomains.
+    match the bare apex AND every subdomain (HackerOne / Bugcrowd / VDP
+    convention).
     """
     raw_hosts = scope.get("hosts") or []
     if not isinstance(raw_hosts, list):
@@ -82,7 +176,7 @@ def classify_scope_entry(raw: str) -> dict[str, str] | None:
         return None
 
     if stripped.startswith("*.") and len(stripped) > 2:
-        host = stripped[2:].strip().rstrip(".").lower()
+        host = _to_a_label(stripped[2:])
         if not host:
             return None
         return {
@@ -93,7 +187,7 @@ def classify_scope_entry(raw: str) -> dict[str, str] | None:
 
     if "://" in stripped:
         try:
-            host = (urlsplit(stripped).hostname or "").rstrip(".").lower()
+            host = _to_a_label(urlsplit(stripped).hostname or "")
         except ValueError:
             return None
         if not host:
@@ -110,7 +204,7 @@ def classify_scope_entry(raw: str) -> dict[str, str] | None:
     return {
         "scope_entry": stripped,
         "entry_kind": "bare_host",
-        "host": host,
+        "host": _to_a_label(host) or host,
     }
 
 
@@ -193,12 +287,19 @@ def looks_like_host(host: str) -> bool:
 
 
 def entry_matches_host(entry: dict[str, str], host: str) -> bool:
+    """Return True when ``host`` is covered by this scope entry.
+
+    Wildcard semantics: ``*.example.test`` matches the bare ``example.test``
+    apex AND every subdomain (HackerOne / Bugcrowd / VDP convention).
+    """
     if not host:
         return False
-    normalized = host.rstrip(".").lower()
+    normalized = _normalize_host_for_match(host)
     entry_host = entry["host"]
     if entry["entry_kind"] == "wildcard":
-        return normalized == entry_host or normalized.endswith("." + entry_host)
+        if normalized.endswith("." + entry_host):
+            return True
+        return normalized == entry_host
     return normalized == entry_host
 
 

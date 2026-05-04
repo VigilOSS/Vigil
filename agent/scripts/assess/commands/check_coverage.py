@@ -26,6 +26,7 @@ def run(args) -> None:
         sys.exit(1)
 
     unresolved = readiness.get("unresolved_surfaces") or []
+    partially_covered = readiness.get("partially_covered_surfaces") or []
     blocked_deferred = readiness.get("high_risk_deferred_surfaces") or []
 
     if not readiness.get("ready", False):
@@ -33,6 +34,13 @@ def run(args) -> None:
             print("Uncovered surfaces remain:", file=sys.stderr)
             for item in unresolved:
                 print(f"  - {item.get('surface_type')} | {item.get('target_descriptor')}", file=sys.stderr)
+        if partially_covered:
+            print("Partially covered surfaces need follow-up:", file=sys.stderr)
+            for item in partially_covered:
+                print(
+                    f"  - {item.get('surface_type')} | {item.get('target_descriptor')} | {item.get('followup_condition')}",
+                    file=sys.stderr,
+                )
         if blocked_deferred:
             print("High-risk surfaces cannot remain deferred:", file=sys.stderr)
             for item in blocked_deferred:
