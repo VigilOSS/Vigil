@@ -109,6 +109,31 @@ because the code is the source of truth.
 | unknown     | operator (manual)      |
 | image / video / font / archive / sourcemap / manifest | skipped at insert (status='skipped', terminal_reason='inert_type') |
 
+## Signal → Skill Trigger Table
+
+Before dispatching a batch, scan the work items for these signals. When a signal matches,
+the named skill MUST be included in the dispatch context (`--skills` on `dispatch register`)
+in addition to the specialist's default skill. This prevents new skills from going unused.
+
+| Signal in Work Item / Intel | Required Skill | Agent |
+|-----------------------------|----------------|-------|
+| Search endpoint + ES tech fingerprint (hits/took/_source in responses, `X-Elastic-Product` header) | `elasticsearch-injection` | vulnerability-analyst |
+| BFF/proxy architecture detected (Express middleware, API gateway, `X-Forwarded-User` header in responses) | `bff-parameter-override` | vulnerability-analyst |
+| PUT/PATCH endpoint where body contains `_id`, `id`, `objectId` that mirrors route param | `split-brain-idor` | vulnerability-analyst |
+| SAML SP endpoint (`/saml/acs`, `/saml/metadata`, SAML login redirect) | `saml-sso-testing` | vulnerability-analyst |
+| Object reference IDs in URL params or path segments | `idor-testing` | vulnerability-analyst |
+| Login/register/reset/MFA/OAuth endpoint | `auth-bypass` | vulnerability-analyst |
+| GraphQL endpoint (`/graphql`, introspection response) | `graphql-testing` | vulnerability-analyst |
+| File upload endpoint (multipart form, file parameter) | `file-upload-testing` | vulnerability-analyst |
+| URL/callback/webhook parameter (server-side fetch surface) | `ssrf-testing` | vulnerability-analyst |
+| Redirect parameter (`next`, `return_to`, `url`, `redirect_uri`) | `open-redirect-testing` | vulnerability-analyst |
+| MongoDB/CouchDB tech fingerprint (ObjectId format, Mongoose errors) | `nosql-injection` | vulnerability-analyst |
+| XML input accepted (SOAP, SVG upload, RSS, SAML) | `xxe-testing` | vulnerability-analyst |
+
+**Operator obligation**: When fetching work items, scan the URL patterns and intel for these
+signals. If a signal matches, name the skill in the dispatch prompt. The specialist loads what
+the operator names — if the operator omits it, the specialist won't know the skill exists.
+
 ## Batch Strategy
 
 - Up to 10 same-type work items per cycle, dispatch immediately

