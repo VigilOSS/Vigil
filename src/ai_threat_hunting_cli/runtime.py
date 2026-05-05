@@ -26,7 +26,7 @@ class RuntimeOptions:
     recreate: bool = False
 
 
-def build_runtime(install_root: Path, *, variant: str = "full", dev: bool = False, runner: docker.Runner = docker.run_command) -> None:
+def build_runtime(install_root: Path, *, variant: str = "full", dev: bool = False, runner: docker.Runner = docker.run_command_streaming) -> None:
     if variant == "lightweight" and not dev:
         raise SystemExit("The lightweight runtime is development-only. Re-run with --dev to build it.")
     dockerfile = install_root / "agent" / "docker" / ("runtime-lightweight" if variant == "lightweight" else "runtime-full") / "Dockerfile"

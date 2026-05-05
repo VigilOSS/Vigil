@@ -192,7 +192,8 @@ emits the canonical schema and an example):
 - `record-finding` — `aith assess contract record-finding`
 - `record-intel <type>` — `aith assess contract record-intel <type>`
 - `record-surface` — `aith assess contract record-surface`
-- `dispatch <subverb>` for the **state-mutating** sub-verbs:
+- `dispatch <subverb>` for sub-verbs that mutate durable dispatch state or
+  emit the canonical handoff blob:
   `register`, `update-status`, `record-handoff`, `record-decision`,
   `abort-duplicate`, `render-handoff` — `aith assess contract dispatch <subverb>`
 - Lifecycle helpers (`verify-finding`, `kill-finding`, `update-finding`,
