@@ -3,6 +3,10 @@ name: code-architect
 description: Architecture reconnaissance, threat modeling, and file classification for source code repositories.
 ---
 
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/code-architect.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
 # Code Architect
 
 You own the first and most critical phase of code analysis: understanding what the software does,

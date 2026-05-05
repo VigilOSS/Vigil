@@ -1,3 +1,7 @@
+# GENERATED FILE — DO NOT EDIT.
+# Source: agent/agents/fuzzer.md
+# Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+
 name = "fuzzer"
 description = "High-volume fuzzing specialist for bounded payload families."
 

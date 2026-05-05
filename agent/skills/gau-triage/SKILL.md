@@ -16,7 +16,9 @@ The gau pipeline is now three composable verbs that all share one cached gau cor
 | `aith assess gau-secrets <target>` | Cache-aware gau → uro dedup → httpx body capture → trufflehog scan | bodies, trufflehog JSON, secrets manifest |
 | `aith assess gau-js-endpoints <target>` | LinkFinder regex over JS bodies → resolve to absolute URLs → ingest as `source=js-extract` | new `work_items` rows hidden in JS bundles |
 
-All three reuse `<engagement>/scans/gau_output.txt` plus its sidecar `gau_output.meta.json` so a single gau call serves all three downstream consumers. The wrapper announces cache reuse on stderr and includes `cache_reused: true|false` in the JSON summary so the dispatch-time decision is auditable.
+Artifacts for each `(target, gau-flag-set)` pair live under `<engagement>/scans/gau-pipeline/<target_slug>/<cache_key_slug>/`, including `gau_output.txt`, the sidecar `gau_output.meta.json`, intermediate filtered/dedup files, `bodies/`, and `trufflehog.json`. Two targets — or the same target run with different `--subs`/`--providers` — never share `bodies/` or trufflehog input. The wrapper announces cache reuse on stderr and includes `cache_reused: true|false` in the JSON summary so the dispatch-time decision is auditable.
+
+> `gau-js-endpoints` is a post-processor — it does not run gau. Pass it the **same** `--subs` and `--providers` values you used on `gau-secrets`/`gau-endpoints` so it locates the right `<target>/<cache_key>/bodies/` directory.
 
 ## When to Activate
 
@@ -49,10 +51,11 @@ gau-secrets <target>
 ## Cache reuse semantics
 
 `gau-endpoints` and `gau-secrets` are the verbs that actually call gau, so they
-own cache reuse. Each checks six conditions before reusing the cached corpus:
+own cache reuse. Each looks up `<engagement>/scans/gau-pipeline/<target_slug>/<cache_key_slug>/gau_output.txt`
+and checks six conditions before reusing it:
 
 1. Operator did NOT pass `--refresh`
-2. `<engagement>/scans/gau_output.txt` exists and is non-empty
+2. The cached output file exists and is non-empty
 3. Sidecar `gau_output.meta.json` exists and parses
 4. Cached run's `exit_code == 0` and `target` matches the current target
 5. Cached run's `cache_key` matches the current corpus-affecting flags

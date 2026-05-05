@@ -1,3 +1,7 @@
+# GENERATED FILE — DO NOT EDIT.
+# Source: agent/agents/report-writer.md
+# Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+
 name = "report-writer"
 description = "Human-first reporting specialist for concise, evidence-backed reporting."
 

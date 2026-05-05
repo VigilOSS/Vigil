@@ -32,6 +32,25 @@ _DBLESS_ACTIONS = (
     "record-handoff",
 )
 
+# Actions that DO need a cases.db (work-buffer SQLite) — listed once so the
+# Unknown-action help text and the operator-facing docs stay aligned with the
+# actual dispatch surface. Add new actions here and the help string updates
+# automatically.
+_DB_ACTIONS = (
+    "stats",
+    "peek",
+    "fetch",
+    "fetch-by-priority",
+    "defer-cluster",
+    "defer-items",
+    "done",
+    "error",
+    "reset-stale",
+    "retry-errors",
+    "migrate",
+    "requeue",
+)
+
 
 def _utcnow_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -81,19 +100,15 @@ def register(subparsers) -> None:
         "db_path",
         metavar="action_or_db",
         help=(
-            "Backend action name (register/update-status/list/get/record-decision/"
-            "record-handoff/render-handoff) OR path to cases.db for work-buffer actions"
+            f"Backend action name ({'/'.join(_DBLESS_ACTIONS)}) OR "
+            f"path to cases.db for work-buffer actions"
         ),
     )
     p.add_argument(
         "action",
         nargs="?",
         default="",
-        help=(
-            "stats|fetch|fetch-by-priority|peek|defer-cluster|defer-items|done|error|"
-            "reset-stale|retry-errors|migrate|requeue|render-handoff|register|"
-            "update-status|abort-duplicate|list|get|record-decision|record-handoff"
-        ),
+        help="|".join((*_DB_ACTIONS, *_DBLESS_ACTIONS)),
     )
     p.add_argument("extra", nargs="*", help="Action-specific arguments")
     p.add_argument(
@@ -359,11 +374,8 @@ def run(args) -> None:
     else:
         print(f"Unknown action: {action}", file=sys.stderr)
         print(
-            "Work-buffer actions: stats, peek, fetch, fetch-by-priority, "
-            "defer-cluster, defer-items, done, error, reset-stale, retry-errors, "
-            "migrate, requeue\n"
-            "Dispatch actions (no cases.db): register, update-status, list, get, "
-            "abort-duplicate, render-handoff, record-decision, record-handoff",
+            f"Work-buffer actions: {', '.join(_DB_ACTIONS)}\n"
+            f"Dispatch actions (no cases.db): {', '.join(_DBLESS_ACTIONS)}",
             file=sys.stderr,
         )
         sys.exit(1)

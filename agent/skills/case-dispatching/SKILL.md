@@ -88,15 +88,26 @@ you're unsure why a cluster scored the way it did.
 
 ## Type → Agent Routing
 
-| Type | Agent | Type | Agent |
-|------|-------|------|-------|
-| api | vulnerability-analyst | page | source-analyzer |
-| api-spec | vulnerability-analyst | page | source-analyzer |
-| form | vulnerability-analyst | javascript | source-analyzer |
-| upload | vulnerability-analyst | stylesheet | source-analyzer |
-| graphql | vulnerability-analyst | data | source-analyzer |
-| websocket | vulnerability-analyst | unknown | operator (manual) |
-| image/video/font/archive | skipped | | |
+The inert/skipped type list is owned by
+`agent/scripts/assess/lib/classify_buckets.py:INERT_TYPES`; this table mirrors
+that set so an operator reading the skill gets the same answer as the
+inline classifier. If the table goes stale, fix the drift in this file
+because the code is the source of truth.
+
+| Type        | Agent                  |
+|-------------|------------------------|
+| api         | vulnerability-analyst  |
+| api-spec    | vulnerability-analyst  |
+| form        | vulnerability-analyst  |
+| upload      | vulnerability-analyst  |
+| graphql     | vulnerability-analyst  |
+| websocket   | vulnerability-analyst  |
+| page        | source-analyzer        |
+| javascript  | source-analyzer        |
+| stylesheet  | source-analyzer        |
+| data        | source-analyzer        |
+| unknown     | operator (manual)      |
+| image / video / font / archive / sourcemap / manifest | skipped at insert (status='skipped', terminal_reason='inert_type') |
 
 ## Batch Strategy
 

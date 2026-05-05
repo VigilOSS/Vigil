@@ -119,4 +119,5 @@ Full list: `trufflehog --help` or upstream detector index.
   default (`4`) is fine for typical stored-response sets.
 - `--only-verified` does **not** exist in v3 filesystem mode. Use `--results=verified`.
 - `Raw` contains the actual secret. Do **not** upload raw results to untrusted sinks; keep
-  them in `$DIR/scans/gau-pipeline/` (where `gau-secrets` writes `trufflehog.json`).
+  them in `$DIR/scans/gau-pipeline/<target>/<cache_key>/` (where `gau-secrets` writes
+  `trufflehog.json` namespaced per target + gau-flag-set).
