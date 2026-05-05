@@ -1156,12 +1156,16 @@ def _looks_like_verification_payload(payload: Any | None) -> bool:
 # discover the helper rather than freelance their own handoff format.
 # ---------------------------------------------------------------------------
 
+# Dispatch sub-verbs that have their own contract entry. The Contract-First
+# Rule directs operators to read these before first use, and the
+# `aith assess contract` resolver uses this tuple to advertise what is
+# discoverable. Read-only sub-verbs (`list`, `get`) are intentionally absent
+# because they do not mutate state and have nothing to validate.
 DISPATCH_VERBS: tuple[str, ...] = (
     "render-handoff",
     "register",
     "update-status",
-    "list",
-    "get",
+    "abort-duplicate",
     "record-decision",
     "record-handoff",
 )
