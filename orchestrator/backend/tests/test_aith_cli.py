@@ -2889,6 +2889,7 @@ def test_dispatch_register_writes_payload(
         task="IDOR sweep",
         reasoning="high",
         dispatch_mode_arg="item-iterating",
+        skills="idor-testing",
     )
     out = capsys.readouterr().out
     body = json.loads(out)
@@ -2896,6 +2897,23 @@ def test_dispatch_register_writes_payload(
     assert body["status"] == "in-progress"
     assert fake.recorded[0]["agent_role"] == "vulnerability-analyst"
     assert fake.recorded[0]["dispatch_mode"] == "item-iterating"
+
+
+def test_dispatch_register_rejects_missing_skills_locally(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        _run_dispatch_verb(
+            monkeypatch,
+            "register",
+            agent_id="AG-NO-SKILL",
+            agent_role="vulnerability-analyst",
+            task="IDOR sweep",
+            dispatch_mode_arg="item-iterating",
+        )
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "skills is required for role 'vulnerability-analyst'" in err
 
 
 def test_dispatch_register_warns_on_structured_overlap(
@@ -2930,6 +2948,8 @@ def test_dispatch_register_warns_on_structured_overlap(
             agent_role="vulnerability-analyst",
             task="Follow-up exploitation attempt",
             finding_slugs="VA-001",
+            dispatch_mode_arg="item-iterating",
+            skills="idor-testing",
         )
     )
 
@@ -2973,6 +2993,7 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
             scope_host="app.example.test",
             dispatch_mode_arg="hypothesis-driven",
             task="Review account deletion flows",
+            skills="idor-testing",
         )
     )
 
@@ -2984,12 +3005,39 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
 def test_dispatch_abort_duplicate_marks_row_and_records_decision(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    fake = _run_dispatch_verb(
-        monkeypatch,
-        "abort-duplicate",
-        extra=["AG-DUP"],
-        replacement_agent_id="AG-KEEP",
-        reason="same exploit review was registered twice",
+    module = _load_dispatch_module()
+    fake = _CapturingClient()
+    fake.dispatches_by_id["AG-KEEP"] = {
+        "id": 1,
+        "agent_id": "AG-KEEP",
+        "agent_role": "vulnerability-analyst",
+        "status": "in-progress",
+    }
+    fake.dispatches_by_id["AG-DUP"] = {
+        "id": 2,
+        "agent_id": "AG-DUP",
+        "agent_role": "vulnerability-analyst",
+        "status": "in-progress",
+    }
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+
+    module.run(
+        _dispatch_args(
+            "abort-duplicate",
+            extra=["AG-DUP"],
+            replacement_agent_id="AG-KEEP",
+            reason="same exploit review was registered twice",
+        )
     )
 
     assert fake.patches[0][0] == "AG-DUP"
@@ -2997,6 +3045,38 @@ def test_dispatch_abort_duplicate_marks_row_and_records_decision(
     decision = fake.decisions_recorded[0]
     assert decision["kind"] == "dispatch_duplicate"
     assert decision["payload"]["replacement_agent_id"] == "AG-KEEP"
+
+
+def test_dispatch_abort_duplicate_rejects_missing_replacement(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        _run_dispatch_verb(
+            monkeypatch,
+            "abort-duplicate",
+            extra=["AG-DUP"],
+            replacement_agent_id="AG-MISSING",
+            reason="same exploit review was registered twice",
+        )
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "replacement dispatch 'AG-MISSING' was not found" in err
+
+
+def test_dispatch_abort_duplicate_rejects_same_replacement(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        _run_dispatch_verb(
+            monkeypatch,
+            "abort-duplicate",
+            extra=["AG-DUP"],
+            replacement_agent_id="AG-DUP",
+            reason="same exploit review was registered twice",
+        )
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "must point at the dispatch to keep" in err
 
 
 def test_dispatch_update_status_marks_completed(
@@ -3088,6 +3168,23 @@ def test_dispatch_record_decision_friendly_flags(
     assert body["kind"] == "scope_decision"
     assert body["payload"]["host"] == "vendor-saas.example.com"
     assert body["surfaced_to_user"] is True
+
+
+def test_dispatch_record_decision_includes_reason_flag(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "record-decision",
+        decision_kind="dispatch_blocked",
+        decision_phase="recon",
+        reason="missing massdns binary in runtime image",
+        surfaced_to_user=True,
+    )
+    body = fake.decisions_recorded[0]
+    assert body["kind"] == "dispatch_blocked"
+    assert body["payload"]["phase"] == "recon"
+    assert body["payload"]["reason"] == "missing massdns binary in runtime image"
 
 
 def test_dispatch_record_handoff_flag_based(

@@ -1445,11 +1445,11 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             author_supplied_fields=(
                 "--kind (scope_decision|egress_decision|dispatch_blocked|... — the backend accepts any string but report-writer only renders known kinds)",
-                "--payload-json OR shorthand flags (--host / --vendor / --choice / --note / --phase) that build the payload dict",
+                "--payload-json OR shorthand flags (--host / --vendor / --choice / --note / --reason / --phase) that build the payload dict",
                 "--surfaced-to-user (set when the operator presented the decision to the human; controls whether it appears in user-visible logs)",
             ),
             helper_defaults=(
-                ("payload", "constructed from --host/--vendor/--choice/--note/--phase when --payload-json is omitted"),
+                ("payload", "constructed from --host/--vendor/--choice/--note/--reason/--phase when --payload-json is omitted"),
                 ("surfaced_to_user", "false unless --surfaced-to-user is set"),
             ),
             notes=(
@@ -1498,6 +1498,9 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "Use this instead of update-status when the duplicate was noticed AFTER "
                 "register, so audit retains both the bad row (now aborted) and a paired "
                 "decision row pointing at the replacement.",
+                "`--replacement-agent-id` must already exist in the dispatch registry; the "
+                "helper checks before aborting so a typo cannot leave the duplicate row "
+                "pointing at a missing canonical dispatch.",
             ),
             common_mistakes=(
                 ("aborting the wrong direction", "abort the DUPLICATE id and point --replacement-agent-id at the row you want to keep — flipping these orphans the active dispatch"),

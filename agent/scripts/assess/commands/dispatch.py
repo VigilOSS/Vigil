@@ -12,6 +12,7 @@ from typing import Any
 
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
+from assess.lib.contracts import validate_specialist_dispatch_contract
 from assess.lib.db import db_init, db_query, db_exec, db_insert_work_item
 from assess.lib.params import extract_url_path, extract_query_params, extract_path_params, generate_params_sig
 
@@ -114,10 +115,10 @@ def register(subparsers) -> None:
     p.add_argument(
         "--reason",
         default="",
-        help="Reason for defer-cluster / defer-items / abort-duplicate (required for those "
-        "actions). Free text; stored in terminal_reason (defer-*) or the dispatch_duplicate "
-        "decision payload (abort-duplicate) so operators can audit why a cluster, item, or "
-        "duplicate dispatch was skipped/aborted.",
+        help="Reason for defer-cluster / defer-items / abort-duplicate / record-decision "
+        "(required for defer-* and abort-duplicate; optional for record-decision). Free text; "
+        "stored in terminal_reason (defer-*) or the decision payload so operators can audit why "
+        "a cluster, item, duplicate dispatch, or operator decision was skipped/aborted/recorded.",
     )
     p.add_argument(
         "--by",
@@ -586,7 +587,6 @@ def _fetch(db_path: str, type_val: str, limit: int, agent: str) -> None:
 _VULN_ANALYST_TYPES = ("api", "api-spec", "form", "upload", "graphql", "websocket")
 _SOURCE_ANALYZER_TYPES = ("page", "javascript", "stylesheet", "data")
 _ROUTED_TYPES = _VULN_ANALYST_TYPES + _SOURCE_ANALYZER_TYPES
-_SKIP_TYPES = ("image", "font", "media", "binary", "archive", "unknown")
 _VULN_SIGNAL_FALLBACK_TYPES = ("unknown",)
 
 
@@ -1473,6 +1473,13 @@ def _build_register_payload(args) -> dict:
     if not payload.get("agent_role"):
         print("register: --agent-role is required (or include 'agent_role' in --from-json)", file=sys.stderr)
         sys.exit(1)
+    errors, warnings = validate_specialist_dispatch_contract(payload)
+    for warning in warnings:
+        print(f"WARN register: {warning}", file=sys.stderr)
+    if errors:
+        for error in errors:
+            print(f"register: {error}", file=sys.stderr)
+        sys.exit(1)
     return payload
 
 
@@ -1605,9 +1612,24 @@ def _abort_duplicate_dispatch(args, extra: list[str]) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+    if agent_id == replacement:
+        print(
+            "abort-duplicate: --replacement-agent-id must point at the dispatch to keep, "
+            "not the duplicate being aborted.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     client, _ = _client_for(args)
     now = _utcnow_iso()
     try:
+        replacement_row = client.get_dispatch(replacement)
+        if replacement_row is None:
+            print(
+                f"abort-duplicate: replacement dispatch '{replacement}' was not found; "
+                "register the canonical replacement before aborting the duplicate.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         row = client.update_dispatch(agent_id, {"status": "aborted", "completed_at": now})
         decision = client.record_decision(
             {
@@ -1688,6 +1710,7 @@ def _record_decision(args) -> None:
         vendor = getattr(args, "decision_vendor", None)
         choice = getattr(args, "decision_choice", None)
         note = getattr(args, "decision_note", None)
+        reason = getattr(args, "reason", None)
         phase = getattr(args, "decision_phase", None)
         if host:
             payload["host"] = host
@@ -1697,12 +1720,14 @@ def _record_decision(args) -> None:
             payload["choice"] = choice
         if note:
             payload["note"] = note
+        if reason:
+            payload["reason"] = reason
         if phase:
             payload["phase"] = phase
         if not payload:
             print(
                 "record-decision: pass --payload-json or at least one of "
-                "--host/--vendor/--choice/--note/--phase",
+                "--host/--vendor/--choice/--note/--reason/--phase",
                 file=sys.stderr,
             )
             sys.exit(1)
