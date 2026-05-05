@@ -1,3 +1,7 @@
+# GENERATED FILE — DO NOT EDIT.
+# Source: agent/agents/code-vuln-hunter.md
+# Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+
 name = "code-vuln-hunter"
 description = "Deep vulnerability analysis specialist for function-level code review and exploitability assessment."
 

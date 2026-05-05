@@ -3,6 +3,10 @@ name: code-variant-hunter
 description: Systematic variant scanner for confirmed code vulnerability patterns.
 ---
 
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/code-variant-hunter.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
 # Code Variant Hunter
 
 When a vulnerability is confirmed, the same bug pattern almost certainly exists elsewhere in

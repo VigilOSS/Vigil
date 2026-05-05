@@ -52,19 +52,26 @@ def _load_pipeline_lib():
     return gau_pipeline
 
 
-def _make_paths(tmp_path: Path):
-    """Build a GauOutputPaths instance pointing at a fake engagement dir."""
+def _make_paths(tmp_path: Path, *, target: str = "example.com", cache_key: str | None = None):
+    """Build a GauOutputPaths instance pointing at a fake engagement dir.
+
+    Routes through `resolve_pipeline_paths` instead of constructing the
+    dataclass by hand so the test layout always matches the production
+    one (namespaced by target+cache_key under `scans/gau-pipeline/`).
+    """
     lib = _load_pipeline_lib()
     eng_dir = tmp_path / "2026-05-04-test-engagement"
     eng_dir.mkdir()
     (eng_dir / "scans").mkdir()
-    return lib, lib.GauOutputPaths(
-        engagement_dir=eng_dir,
-        output_path=eng_dir / "scans" / "gau_output.txt",
-        meta_path=eng_dir / "scans" / "gau_output.meta.json",
-        bodies_dir=eng_dir / "scans" / "gau-pipeline" / "bodies",
-        work_dir=eng_dir / "scans" / "gau-pipeline",
-    )
+
+    class _StubCfg:
+        engagement_dir = str(eng_dir)
+
+    if cache_key is None:
+        cache_key = lib.gau_cache_key(subs=False, providers="")
+    paths = lib.resolve_pipeline_paths(_StubCfg(), target=target, cache_key=cache_key)
+    paths.work_dir.mkdir(parents=True, exist_ok=True)
+    return lib, paths
 
 
 # ─── Cache decision rules ───────────────────────────────────────────────
@@ -285,6 +292,66 @@ def test_gau_cache_key_is_stable() -> None:
     b = lib.gau_cache_key(subs=True, providers="wayback,otx")
     assert a == b
     assert a.startswith("v2|")  # version tag bumped when blacklist dropped
+
+
+def test_pipeline_paths_namespace_by_target_and_cache_key(tmp_path: Path) -> None:
+    """Two targets (or one target with different gau flags) must land in disjoint dirs."""
+    lib, paths_a = _make_paths(tmp_path, target="foo.com")
+    second_root = tmp_path / "second"
+    second_root.mkdir()
+    _, paths_b = _make_paths(second_root, target="bar.com")
+    assert paths_a.work_dir != paths_b.work_dir
+    assert paths_a.bodies_dir != paths_b.bodies_dir
+
+    # Same target, different corpus flags → different dirs.
+    eng_dir = tmp_path / "third"
+    eng_dir.mkdir()
+    (eng_dir / "scans").mkdir()
+
+    class _Cfg:
+        engagement_dir = str(eng_dir)
+
+    p1 = lib.resolve_pipeline_paths(_Cfg(), target="foo.com", cache_key=lib.gau_cache_key(subs=False))
+    p2 = lib.resolve_pipeline_paths(_Cfg(), target="foo.com", cache_key=lib.gau_cache_key(subs=True))
+    assert p1.work_dir != p2.work_dir
+    # Both still rooted under scans/gau-pipeline/<target>/
+    assert "gau-pipeline" in str(p1.work_dir)
+    assert p1.target_slug == p2.target_slug
+    assert p1.cache_key_slug != p2.cache_key_slug
+
+
+def test_pipeline_paths_target_slug_is_filesystem_safe(tmp_path: Path) -> None:
+    """Targets with weird characters (URLs, ports, paths) must produce safe slugs."""
+    lib = _load_pipeline_lib()
+    weird_targets = [
+        "https://example.com:8443/admin/",
+        "*.example.com",
+        "foo bar.com",
+        "Example.COM",
+    ]
+    seen_slugs: set[str] = set()
+    for t in weird_targets:
+        slug = lib.slug_target(t)
+        # Slug must be path-safe (no slashes, spaces, colons, glob chars).
+        assert "/" not in slug
+        assert " " not in slug
+        assert ":" not in slug
+        assert "*" not in slug
+        # Must be deterministic.
+        assert lib.slug_target(t) == slug
+        seen_slugs.add(slug)
+    # Different targets must produce different slugs.
+    assert len(seen_slugs) == len(weird_targets)
+
+
+def test_container_paths_reflect_namespaced_layout(tmp_path: Path) -> None:
+    """Container-side paths must include the <target>/<key>/ prefix so kali_exec writes to the right place."""
+    lib, paths = _make_paths(tmp_path, target="example.com")
+    assert "/scans/gau-pipeline/" in paths.container_work_dir
+    assert paths.target_slug in paths.container_work_dir
+    assert paths.cache_key_slug in paths.container_work_dir
+    assert paths.container_output_path.endswith("/gau_output.txt")
+    assert paths.container_bodies_dir.endswith("/bodies")
 
 
 def test_gau_cache_key_v2_invalidates_v1_meta(tmp_path: Path) -> None:

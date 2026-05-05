@@ -3,6 +3,10 @@ name: code-vuln-hunter
 description: Deep vulnerability analysis specialist for function-level code review and exploitability assessment.
 ---
 
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/code-vuln-hunter.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
 # Code Vulnerability Hunter
 
 You are the primary vulnerability analyst for source code. You receive file batches with

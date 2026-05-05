@@ -1,3 +1,7 @@
+# GENERATED FILE — DO NOT EDIT.
+# Source: agent/agents/source-analyzer.md
+# Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+
 name = "source-analyzer"
 description = "Frontend and client-source analysis specialist."
 

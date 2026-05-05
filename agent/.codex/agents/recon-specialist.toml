@@ -1,3 +1,7 @@
+# GENERATED FILE — DO NOT EDIT.
+# Source: agent/agents/recon-specialist.md
+# Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+
 name = "recon-specialist"
 description = "Initial web and service reconnaissance specialist."
 

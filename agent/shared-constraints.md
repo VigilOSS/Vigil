@@ -185,21 +185,25 @@ the example payload. Schema validation errors from guessing waste a full
 round-trip, so reading the contract first is faster than re-running the
 verb after a rejection.
 
-Verbs covered by the rule:
+Verbs covered by the rule (all have a contract entry; `aith assess contract`
+emits the canonical schema and an example):
 
 - `kali <verb>` — `aith assess contract kali <verb>`
 - `record-finding` — `aith assess contract record-finding`
 - `record-intel <type>` — `aith assess contract record-intel <type>`
 - `record-surface` — `aith assess contract record-surface`
-- `dispatch <subverb>` (register / record-handoff / record-decision / etc.) — `aith assess contract dispatch <subverb>`
+- `dispatch <subverb>` for the **state-mutating** sub-verbs:
+  `register`, `update-status`, `record-handoff`, `record-decision`,
+  `abort-duplicate`, `render-handoff` — `aith assess contract dispatch <subverb>`
 - Lifecycle helpers (`verify-finding`, `kill-finding`, `update-finding`,
   `reset-finding`, `resolve-surface`) — `aith assess contract <verb>`
 
 Verbs **not** covered (skip the contract round-trip — they are read-only or
 have no payload to validate): `fetch`, `list-skills`, `list-clusters`,
 `list-command-runs`, `get-command-run`, `check-scope-coverage`,
-`filter-scope`, `dispatch <db> stats|peek|fetch|done`. Reading the contract
-for these adds latency without preventing any error class.
+`filter-scope`, `dispatch <db> stats|peek|fetch|done`,
+`dispatch list`, `dispatch get`. Reading the contract for these adds
+latency without preventing any error class.
 
 Treat the contract output as the source of truth for arg ordering, flag
 names, enum values, and required fields. Do not infer field names from

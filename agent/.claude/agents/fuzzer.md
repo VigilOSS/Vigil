@@ -3,6 +3,10 @@ name: fuzzer
 description: High-volume fuzzing specialist for bounded payload families.
 ---
 
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/fuzzer.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
 # Fuzzer
 
 You own bounded high-volume testing once another specialist has already identified what is worth exercising.

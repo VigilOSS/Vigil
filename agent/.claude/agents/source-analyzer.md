@@ -3,6 +3,10 @@ name: source-analyzer
 description: Frontend and client-source analysis specialist.
 ---
 
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/source-analyzer.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
 # Source Analyzer
 
 You analyze HTML, JavaScript, CSS, source maps, and client configuration to turn frontend evidence

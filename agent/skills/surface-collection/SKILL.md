@@ -89,11 +89,14 @@ aith assess gau-endpoints TARGET_DOMAIN --subs \
   --providers wayback,otx,commoncrawl,urlscan
 ```
 
-That single verb runs `kali gau` (or reuses `<engagement>/scans/gau_output.txt` when a
-fresh run is cached), then pipes the output through `ingest-endpoints` so inline
-classification scores every URL at insert time and inert types (images, fonts) are
-filtered downstream. The `--max-cache-age-hours` flag (default 24) tunes reuse
-aggressiveness; pass `--refresh` to force a fresh gau run.
+That single verb runs `kali gau` (or reuses
+`<engagement>/scans/gau-pipeline/<target_slug>/<cache_key_slug>/gau_output.txt` when a
+fresh run is cached for this exact target + flag combination), then pipes the output
+through `ingest-endpoints` so inline classification scores every URL at insert time
+and inert types (images, fonts) are filtered downstream. The `--max-cache-age-hours`
+flag (default 24) tunes reuse aggressiveness; pass `--refresh` to force a fresh gau
+run. Different targets — or the same target with different `--subs`/`--providers` —
+land in disjoint directories, so caches never cross-contaminate.
 
 **Multi-domain:** Run `gau-endpoints` for each in-scope domain. Each run writes its own
 sidecar meta keyed by target so reuse decisions stay per-host.

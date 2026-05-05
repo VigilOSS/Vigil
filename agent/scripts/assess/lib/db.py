@@ -9,7 +9,12 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .classify_buckets import INERT_TYPES
+# Absolute import — every consumer of this module either runs through
+# `assess.cli` (which has the scripts dir on sys.path) or via the
+# `_load_script_module` test loader (which also inserts the scripts dir on
+# sys.path before exec_module). A relative `from .classify_buckets` fails
+# in the test path because the file is loaded without a parent package.
+from assess.lib.classify_buckets import INERT_TYPES
 
 _SCHEMA_FILE = Path(__file__).resolve().parent.parent.parent / "schema.sql"
 
@@ -19,7 +24,7 @@ _SCHEMA_FILE = Path(__file__).resolve().parent.parent.parent / "schema.sql"
 # docstring for the rationale and the consumer list. Re-export here so
 # `db._SKIP_TYPES` stays a stable internal name for the insert path; new
 # code should import the public symbol from `classify_buckets`.
-_SKIP_TYPES = INERT_TYPES
+_SKIP_TYPES: frozenset[str] = INERT_TYPES
 
 # Idempotent ALTER-based migration for pre-existing work_items tables that
 # predate the signal-first dispatch columns. SQLite lacks `ADD COLUMN IF NOT
@@ -173,13 +178,13 @@ def db_insert_work_item(
     path_params: str = "{}",
     cookie_params: str = "{}",
     headers: str = "",
-    body: str = "",
+    body: str | None = "",
     content_type: str = "",
     content_length: int = 0,
     response_status: int = 0,
     response_headers: str = "",
     response_size: int = 0,
-    response_snippet: str = "",
+    response_snippet: str | None = "",
     case_type: str = "unknown",
     source: str = "",
     params_key_sig: str = "",

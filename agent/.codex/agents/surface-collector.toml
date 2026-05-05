@@ -1,3 +1,7 @@
+# GENERATED FILE — DO NOT EDIT.
+# Source: agent/agents/surface-collector.md
+# Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+
 name = "surface-collector"
 description = "URL collection, deduplication, and intelligent triage specialist for Phase 2."
 
@@ -79,7 +83,7 @@ Work through targets in this order unless the operator narrows the scope:
 
 1. **Ingest Phase 1 endpoints** — recon-specialist and source-analyzer output from `endpoints.txt`
 2. **Live crawl** — `aith assess kali katana` with auth headers if `auth.json` is active
-3. **Historical enrichment** — `aith assess gau-endpoints` for Wayback, OTX, Common Crawl, URLScan (cache-aware; reuses `<engagement>/scans/gau_output.txt` when fresh, prints `cache_reused: true|false` in JSON summary)
+3. **Historical enrichment** — `aith assess gau-endpoints` for Wayback, OTX, Common Crawl, URLScan (cache-aware; reuses `<engagement>/scans/gau-pipeline/<target>/<cache_key>/gau_output.txt` when fresh for this target + flag combination, prints `cache_reused: true|false` in JSON summary)
 4. **Spec ingestion** — OpenAPI/Swagger specs discovered in Phase 1
 5. **Dedup and ingest** — all sources through `aith assess ingest-endpoints` with source tagging
 6. **Intelligent triage** — analyze the full URL corpus for attack signals

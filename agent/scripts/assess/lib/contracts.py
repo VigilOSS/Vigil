@@ -1214,6 +1214,12 @@ def _dispatch_root_contract() -> CommandContract:
                 "`aith assess dispatch cases.db record-handoff ...` is rejected so handoffs "
                 "cannot be written to the wrong state surface",
             ),
+            (
+                "defer-items <ids> with stale id list",
+                "`defer-items` exits 1 (not 0) when zero rows match — by design, so a typo "
+                "or already-processed id list is surfaced loudly. `reset-stale` first if "
+                "the rows you wanted to defer are now in `processing`.",
+            ),
         ),
     )
 
@@ -1280,6 +1286,221 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 },
                 {
                     "command": "aith assess dispatch render-handoff a424a88b02054913d --max-lines 60 --include-evidence",
+                },
+            ),
+        )
+    if verb == "register":
+        return CommandContract(
+            name="dispatch register",
+            summary=(
+                "Register a specialist dispatch in the backend audit ledger so the "
+                "row carries role, task, scope, model, dispatch-mode, and the skills "
+                "the agent loaded."
+            ),
+            schema_name="backend DispatchCreate (POST /dispatches)",
+            preferred_invocations=(
+                "aith assess dispatch register --agent-id <id> --agent-role <role> "
+                "--task \"...\" --scope-host <host> --model <name> --reasoning <level> "
+                "--dispatch-mode <mode> --skills \"<skill>[,<skill>...]\"",
+                "aith assess dispatch register --from-json <payload.json>",
+            ),
+            author_supplied_fields=(
+                "--agent-id (unique per dispatch)",
+                "--agent-role (specialist role; operator role is reserved for phase coordination)",
+                "--dispatch-mode (hypothesis-driven|item-iterating|deep-manual|variant-rotation)",
+                "--skills (comma-separated; required for non-operator roles)",
+                "--task (one-line objective)",
+            ),
+            helper_defaults=(
+                ("status", "in-progress (set on insert)"),
+                ("dispatched_at", "now() when omitted"),
+                ("--allow-duplicate", "off — overlapping in-progress dispatches log a warning"),
+            ),
+            notes=(
+                "Backend `DispatchCreate._enforce_skills_for_specialists` rejects "
+                "specialist dispatches that omit `skills`; the CLI's "
+                "`validate_specialist_dispatch_contract` performs the same check before "
+                "sending so typos surface locally.",
+                "Use `aith assess list-skills` to discover skill names — the value passed "
+                "here must match the directory under `agent/skills/<name>/`.",
+                "Pair with `update-status` when the dispatch finishes: leaving rows in "
+                "`in-progress` past the dispatch's actual lifetime corrupts dedup checks.",
+            ),
+            common_mistakes=(
+                ("role", "use --agent-role for the registry payload (the validator accepts both, but the registry stores agent_role)"),
+                ("operator role with --skills", "operator dispatches are exempt from the skills requirement; pass --skills only for specialist roles"),
+                ("--skills agent/skills/foo/SKILL.md", "pass the bare skill name (e.g. 'gau-triage'); the validator resolves it on disk"),
+            ),
+            examples=(
+                {
+                    "command": (
+                        "aith assess dispatch register --agent-id va-7f3 "
+                        "--agent-role vulnerability-analyst --task 'review SSRF candidates' "
+                        "--scope-host api.example.com --model claude-opus-4-7 "
+                        "--reasoning high --dispatch-mode item-iterating "
+                        "--skills 'ssrf-testing,case-dispatching'"
+                    ),
+                },
+            ),
+        )
+    if verb == "update-status":
+        return CommandContract(
+            name="dispatch update-status",
+            summary="Patch the lifecycle status (and optionally finding_slugs / completed_at) of a registered dispatch row.",
+            schema_name="backend DispatchUpdate (PATCH /dispatches/{agent_id})",
+            preferred_invocations=(
+                "aith assess dispatch update-status <agent-id> --status completed --finding-slugs <slug1,slug2>",
+                "aith assess dispatch update-status <agent-id> --status failed",
+                "aith assess dispatch update-status <agent-id> --status aborted",
+            ),
+            author_supplied_fields=(
+                "<agent-id>",
+                "--status (in-progress|completed|failed|aborted|blocked)",
+            ),
+            helper_defaults=(
+                ("--completed-at", "now() when --status is terminal and the flag is omitted"),
+                ("--finding-slugs", "appended additively to the row, not replaced"),
+            ),
+            notes=(
+                "Use this when a dispatch returns so cross-dispatch dedup, reporting, "
+                "and report-writer's audit trail see the actual outcome.",
+                "Pair `--status completed --finding-slugs <slugs>` so the dispatch row "
+                "names the slugs the specialist produced; `aith assess dispatch render-handoff` "
+                "reads from there.",
+            ),
+            common_mistakes=(
+                ("status=done", "status enum is in-progress / completed / failed / aborted / blocked — 'done' is rejected"),
+                ("missing finding-slugs on completed run", "the slug list is what links the dispatch to its produced findings; missing it means the next operator cannot trace what came out"),
+            ),
+            examples=(
+                {
+                    "command": "aith assess dispatch update-status va-7f3 --status completed --finding-slugs va-001,va-002",
+                },
+            ),
+        )
+    if verb == "record-handoff":
+        return CommandContract(
+            name="dispatch record-handoff",
+            summary=(
+                "Persist a specialist's structured exit handoff (summary, next steps, "
+                "coverage gaps, runtime issues, working artifacts) into the backend "
+                "audit ledger so the next dispatch can render it."
+            ),
+            schema_name="backend handoff-record (POST /dispatch-handoffs, idempotent upsert)",
+            preferred_invocations=(
+                "aith assess dispatch record-handoff --from-json <handoff.json>",
+                "aith assess dispatch record-handoff --agent-id <id> --agent-role <role> "
+                "--summary \"...\" --next-step \"...\" --coverage-gap \"<area>: <reason>\"",
+            ),
+            author_supplied_fields=(
+                "--agent-id",
+                "--agent-role",
+                "--summary (≤2000 chars; required)",
+                "structured payload via --from-json OR repeated --next-step / --coverage-gap / --runtime-issue / --working-artifact / --open-question",
+            ),
+            helper_defaults=(
+                ("upsert", "POST then PATCH on 409 — the operation is idempotent so checkpointing is safe"),
+                ("confidence", "omitted when not specified"),
+            ),
+            notes=(
+                "Specialists are expected to call this from their closing sequence "
+                "before exiting; the backend is then the canonical 'what was done, "
+                "what's missing, what's next' record for the dispatch.",
+                "`render-handoff <agent-id>` reads from this row, fetches each named "
+                "finding, and emits the bounded markdown blob the next dispatch pastes.",
+                "Schema for the JSON payload: agent/references/runtime-guides/handoff-schema.md.",
+            ),
+            common_mistakes=(
+                ("transcript paste in summary", "summary is 2000 chars and bounded — use coverage_gaps / next_steps / runtime_issues for structured continuation, not a transcript dump"),
+                ("missing recommended_next_agent", "without it, the operator has to re-derive who picks up; set it from the specialist's perspective"),
+            ),
+            examples=(
+                {
+                    "command": (
+                        "aith assess dispatch record-handoff --agent-id va-7f3 "
+                        "--agent-role vulnerability-analyst "
+                        "--summary 'SSRF candidates triaged; 2 confirmed, 1 deferred for OOB' "
+                        "--next-step 'Validate confirmed findings against staging' "
+                        "--coverage-gap 'admin-panel: requires auth refresh'"
+                    ),
+                },
+            ),
+        )
+    if verb == "record-decision":
+        return CommandContract(
+            name="dispatch record-decision",
+            summary=(
+                "Record a structured operator decision (scope, egress reputation, "
+                "dispatch-blocked, vendor-SaaS gate, etc.) into dispatch_decisions for audit."
+            ),
+            schema_name="backend decision-record (POST /dispatch-decisions)",
+            preferred_invocations=(
+                "aith assess dispatch record-decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user",
+                "aith assess dispatch record-decision --kind egress_decision --choice browser-based-tool --payload-json '{\"egress_block_pct\": 67}'",
+                "aith assess dispatch record-decision --kind dispatch_blocked --phase recon --reason \"missing massdns binary in runtime image\" --surfaced-to-user",
+            ),
+            author_supplied_fields=(
+                "--kind (scope_decision|egress_decision|dispatch_blocked|... — the backend accepts any string but report-writer only renders known kinds)",
+                "--payload-json OR shorthand flags (--host / --vendor / --choice / --note / --phase) that build the payload dict",
+                "--surfaced-to-user (set when the operator presented the decision to the human; controls whether it appears in user-visible logs)",
+            ),
+            helper_defaults=(
+                ("payload", "constructed from --host/--vendor/--choice/--note/--phase when --payload-json is omitted"),
+                ("surfaced_to_user", "false unless --surfaced-to-user is set"),
+            ),
+            notes=(
+                "Vendor-SaaS scope warnings, egress-block decisions, and dispatch-blocked "
+                "rows all live in this one table — keep the kind taxonomy disciplined so "
+                "report-writer can summarize by kind.",
+                "When the decision is operator-facing (vendor-SaaS, egress reputation, "
+                "blocked dispatch), set --surfaced-to-user so the human-visible audit log "
+                "matches what the operator was actually shown.",
+            ),
+            common_mistakes=(
+                ("freeform reason in --kind", "kinds are vocabulary; put the prose in --note or --reason"),
+                ("missing --surfaced-to-user", "user-facing decisions invisible to audit defeats the purpose; set the flag whenever the operator showed the gate to the human"),
+            ),
+            examples=(
+                {
+                    "command": (
+                        "aith assess dispatch record-decision --kind scope_decision "
+                        "--host api.foo.com --vendor 'Vendor SaaS' --choice pending "
+                        "--surfaced-to-user"
+                    ),
+                },
+            ),
+        )
+    if verb == "abort-duplicate":
+        return CommandContract(
+            name="dispatch abort-duplicate",
+            summary=(
+                "Mark an accidentally-duplicated specialist dispatch as aborted and "
+                "record a `dispatch_duplicate` decision pointing at the replacement."
+            ),
+            schema_name="backend DispatchUpdate (PATCH /dispatches/{agent_id}) + decision-record (POST /dispatch-decisions)",
+            preferred_invocations=(
+                "aith assess dispatch abort-duplicate <agent-id> --replacement-agent-id <new-id> --reason \"<text>\"",
+            ),
+            author_supplied_fields=(
+                "<agent-id> (the duplicate to abort)",
+                "--replacement-agent-id (the active dispatch that replaces it)",
+                "--reason (free text; goes into the decision payload)",
+            ),
+            helper_defaults=(
+                ("status", "aborted"),
+                ("completed_at", "now() at the time the abort runs"),
+            ),
+            notes=(
+                "Use this instead of update-status when the duplicate was noticed AFTER "
+                "register, so audit retains both the bad row (now aborted) and a paired "
+                "decision row pointing at the replacement.",
+            ),
+            common_mistakes=(
+                ("aborting the wrong direction", "abort the DUPLICATE id and point --replacement-agent-id at the row you want to keep — flipping these orphans the active dispatch"),
+            ),
+            examples=(
+                {
+                    "command": "aith assess dispatch abort-duplicate va-bad --replacement-agent-id va-good --reason 'register fired twice — the second one is canonical'",
                 },
             ),
         )
