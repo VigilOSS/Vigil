@@ -114,12 +114,63 @@ All HTTP probing steps must go through `aith assess kali exec --technique AUTH -
 
 ## Fail-Open Testing
 
+Authentication code that fails open executes the protected action despite returning an error
+response. The client sees a 401/403, but the side effect (write, email, state change) still fires.
+
+### Detection Methodology
+
+1. **Identify state-changing endpoints** that require auth (POST/PUT/PATCH/DELETE)
+2. **Send request without auth** (or with invalid auth)
+3. **Check for the side effect** via a secondary read, even if the response was 401/403
+4. **If side effect fired** → the endpoint fails open (the auth check doesn't `return` before the action)
+
+### Checklist
+
+- [ ] Test authenticated POST/PUT endpoints without session — does the write land despite 401 response?
+- [ ] Test with expired/invalid token — check if the action executed before the auth error was returned
 - [ ] Test authentication when backend auth service is slow: does timeout grant access?
 - [ ] Send malformed auth tokens — does the app fail-open or fail-closed?
 - [ ] Test with empty `Authorization` header vs missing `Authorization` header (different behavior?)
 - [ ] Remove CSRF token entirely — does the request succeed? (fail-open CSRF)
 - [ ] Test with invalid session cookie — does it create a new authenticated session?
 - [ ] Check if rate limiter failure grants unlimited access instead of blocking
+- [ ] After receiving 401/403 on a write endpoint, immediately read the resource — was it modified?
+- [ ] Test async/webhook endpoints — auth failure may log but not prevent the queued action
+- [ ] Check activity/audit logs after a 401 — if the action was logged, it likely executed
+
+### Why This Matters
+
+The common fail-open pattern in code:
+
+```javascript
+// VULNERABLE: auth check doesn't return on failure
+app.post('/api/action', (req, res) => {
+  if (!req.session.auth) {
+    res.status(401).send('Unauthorized');
+    // BUG: missing "return" here — execution continues
+  }
+  db.performAction(req.body);  // Executes even without auth
+});
+```
+
+The tester sees 401 and moves on. The action still fires. The only way to detect this
+from black-box is to check for the side effect after receiving the error response.
+
+### Confirm via Side-Effect Verification
+
+```bash
+# Step 1: Attempt write without auth
+curl -X POST https://target/api/logs \
+  -H "Content-Type: application/json" \
+  -d '{"message": "fail-open-test-marker-xyz"}' \
+  -v
+# Response: 401 Unauthorized
+
+# Step 2: Check if the write landed (use valid auth for read)
+curl https://target/api/logs?q=fail-open-test-marker-xyz \
+  -H "Cookie: session=VALID_TOKEN"
+# If the log entry exists → FAIL-OPEN CONFIRMED
+```
 
 ## What to Record
 

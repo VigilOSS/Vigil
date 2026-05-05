@@ -143,6 +143,9 @@ Copy-pasteable payloads organized by attack type. Used by: exploit-developer, vu
 | `payloads/pexip-admin-api-payloads.md` | Pexip Infinity admin-API deep-enum: namespace probe list, anonymous-vs-default-admin-vs-credentialed reachability triad, configuration-leak chain seeds |
 | `payloads/csp-default-grep.md` | Vendor-template CSP / CORS placeholder grep — placeholder-literal regex, unsafe-inline + unsafe-eval check, overly-broad wildcard check, per-vendor known-default snippets, sweep helper |
 | `payloads/yara-cobalt-strike.md` | YARA rules for Cobalt Strike beacon config, default cert, shellcode stager, XOR keys |
+| `payloads/elasticsearch-injection-payloads.md` | Lucene query_string injection, field enumeration (`_exists_`, wildcard fields), regex-based data extraction, cross-index access, source filtering override, direct API enumeration |
+| `payloads/bff-override-params.md` | Framework-specific BFF/middleware internal parameter wordlists (Express, Next.js, Django, Rails, Spring, Kong) for identity/tenant/role override testing |
+| `payloads/saml-attack-payloads.md` | Unsigned assertion templates, XSW signature wrapping variants (1-8), NameID comment/encoding injection, attribute escalation, RelayState redirect, XXE via SAML |
 
 ## code-vuln-patterns/ — SAST-Surviving Vulnerability Patterns
 
