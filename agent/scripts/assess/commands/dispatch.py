@@ -141,6 +141,10 @@ def register(subparsers) -> None:
     p.add_argument("--dispatch-mode", dest="dispatch_mode_arg", default=None,
                    choices=("hypothesis-driven", "item-iterating", "deep-manual", "variant-rotation"),
                    help="(register) Dispatch loop shape.")
+    p.add_argument("--skills", dest="skills", default=None,
+                   help="(register) Comma-separated skill names the specialist must load "
+                        "(e.g. 'surface-collection,gau-triage'). Required for non-operator "
+                        "roles to make skill scope explicit at dispatch time.")
     p.add_argument("--from-json", dest="from_json", default=None,
                    help="(register / record-handoff) Path to JSON payload (overrides flag-based fields).")
     p.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true",
@@ -569,6 +573,7 @@ _VULN_ANALYST_TYPES = ("api", "api-spec", "form", "upload", "graphql", "websocke
 _SOURCE_ANALYZER_TYPES = ("page", "javascript", "stylesheet", "data")
 _ROUTED_TYPES = _VULN_ANALYST_TYPES + _SOURCE_ANALYZER_TYPES
 _SKIP_TYPES = ("image", "font", "media", "binary", "archive", "unknown")
+_VULN_SIGNAL_FALLBACK_TYPES = ("unknown",)
 
 
 def _agent_route(agent: str) -> tuple[str, ...] | None:
@@ -577,14 +582,30 @@ def _agent_route(agent: str) -> tuple[str, ...] | None:
     if not normalized:
         return None
     if "vulnerability" in normalized or normalized.startswith("vuln"):
-        return _VULN_ANALYST_TYPES
+        return _VULN_ANALYST_TYPES + _VULN_SIGNAL_FALLBACK_TYPES
     if "source" in normalized:
         return _SOURCE_ANALYZER_TYPES
     return None
 
 
-def _assigned_agent_for_type(case_type: str) -> str | None:
-    if case_type in _VULN_ANALYST_TYPES:
+def _is_vuln_signal_fallback(row) -> bool:
+    """Unknown type with explicit gf signal is vulnerability-analyst work.
+
+    `unknown` is not broadly routable because many rows are low-context
+    leftovers. The inline classifier can still assign strong gf buckets from
+    path or parameter signal (for example `gf:trust_surface`); those rows
+    should not wait for manual type fetches.
+    """
+    return (
+        row["type"] in _VULN_SIGNAL_FALLBACK_TYPES
+        and int(row["priority_score"] or 0) > 0
+        and str(row["cluster_key"] or "").startswith("gf:")
+    )
+
+
+def _assigned_agent_for_row(row) -> str | None:
+    case_type = row["type"]
+    if case_type in _VULN_ANALYST_TYPES or _is_vuln_signal_fallback(row):
         return "vulnerability-analyst"
     if case_type in _SOURCE_ANALYZER_TYPES:
         return "source-analyzer"
@@ -601,14 +622,15 @@ def _fetch_by_priority(db_path: str, limit: int, agent: str) -> None:
     ``vulnerability-analyst-1`` without handing it JavaScript/page work.
 
     We exclude rows with terminal_reason set because classify-work already
-    stamped those as skip-worthy, and we exclude inert types as a belt-and-
-    suspenders guard in case an older DB predates the terminal_reason stamp.
+    stamped those as skip-worthy. High-signal `unknown` rows are a narrow
+    vulnerability-analyst fallback when inline classification assigned a
+    positive `gf:*` bucket; plain unknown rows remain unrouted.
     """
     import sqlite3
 
     agent = (agent or "auto").strip()
     auto_route = agent.lower() in {"auto", "routed", "route"}
-    allowed_types = _ROUTED_TYPES if auto_route else _agent_route(agent)
+    allowed_types = (_ROUTED_TYPES + _VULN_SIGNAL_FALLBACK_TYPES) if auto_route else _agent_route(agent)
     if allowed_types is None:
         print(
             "fetch-by-priority: agent is not a routed agent; use 'auto', "
@@ -629,13 +651,17 @@ def _fetch_by_priority(db_path: str, limit: int, agent: str) -> None:
                 WHERE status = 'pending'
                   AND terminal_reason IS NULL
                   AND type IN ({placeholders})
+                  AND (
+                      type NOT IN ({",".join("?" * len(_VULN_SIGNAL_FALLBACK_TYPES))})
+                      OR (priority_score > 0 AND cluster_key LIKE 'gf:%')
+                  )
                 ORDER BY priority_score DESC, cluster_key, id
                 LIMIT ?""",
-            (*allowed_types, limit),
+            (*allowed_types, *_VULN_SIGNAL_FALLBACK_TYPES, limit),
         ).fetchall()
         claimed: list[dict] = []
         for row in candidates:
-            row_agent = _assigned_agent_for_type(row["type"]) if auto_route else agent
+            row_agent = _assigned_agent_for_row(row) if auto_route else agent
             if not row_agent:
                 continue
             updated = conn.execute(
@@ -966,12 +992,14 @@ def _render_handoff(args, extra: list[str]) -> None:
             scope_host = dispatch.get("scope_host") or ""
             dispatched_at = dispatch.get("dispatched_at") or ""
             dispatch_status = dispatch.get("status") or ""
+            skills = str(dispatch.get("skills") or "")
         else:
             role = str(handoff.get("agent_role") or "<unknown role>")
             task = "<unrecorded task>"
             scope_host = ""
             dispatched_at = handoff.get("created_at") or ""
             dispatch_status = "(dispatch row missing)"
+            skills = ""
 
         # Handoff payload extraction. JSON columns deserialize to lists/dicts
         # in the state-manager serializer; treat anything else defensively.
@@ -1057,6 +1085,7 @@ def _render_handoff(args, extra: list[str]) -> None:
         scope_host=scope_host,
         dispatched_at=dispatched_at,
         status=dispatch_status,
+        skills=skills,
         summary=summary,
         confidence=confidence,
         finding_rows=finding_rows,
@@ -1081,6 +1110,7 @@ def _render_handoff_blob(
     scope_host: str,
     dispatched_at: str,
     status: str,
+    skills: str,
     summary: str,
     confidence: str,
     finding_rows: list[dict],
@@ -1109,6 +1139,15 @@ def _render_handoff_blob(
         f"- **Scope host:** {scope_host or '(none recorded)'}",
         f"- **Dispatched at:** {dispatched_at or '(unknown)'} (status: {status or 'unknown'})",
     ]
+    # Skills loaded by the prior dispatch are part of the audit surface — the
+    # next dispatch should know which procedure context the previous agent
+    # carried so it can either continue with the same skills or change loadout
+    # deliberately. Operators are exempt from declaring skills, so an empty
+    # value is rendered as a clear marker rather than dropped silently.
+    if skills:
+        head.append(f"- **Skills loaded:** {skills}")
+    elif role and role != "operator":
+        head.append("- **Skills loaded:** (not recorded)")
 
     summary_lines = _summary_section(summary, confidence)
     finding_lines = _findings_section(finding_rows, include_evidence=include_evidence)
@@ -1406,6 +1445,7 @@ def _build_register_payload(args) -> dict:
         "model": getattr(args, "dispatch_model", None),
         "reasoning": getattr(args, "reasoning", None),
         "dispatch_mode": getattr(args, "dispatch_mode_arg", None),
+        "skills": getattr(args, "skills", None),
     }
     for k, v in cli_fields.items():
         if v is not None:

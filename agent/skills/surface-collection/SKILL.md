@@ -80,31 +80,38 @@ cat "$DIR/scans/katana_output.txt" | aith assess ingest-endpoints "$DB" katana
 
 ### Step 3: Historical URL Enrichment via gau
 
-Run gau via `aith assess kali gau` against each in-scope domain. gau queries Wayback Machine,
-AlienVault OTX, Common Crawl, and URLScan for historical URLs:
+Use the cache-aware pipeline wrapper. It runs gau (or reuses a fresh cached corpus),
+ingests the URLs into `work_items` with inline classification, and emits a structured
+JSON summary with `cache_reused: true|false` so the dispatch decision is auditable.
 
 ```bash
-aith assess kali gau TARGET_DOMAIN --subs --threads 5 \
-  --blacklist png,jpg,gif,css,woff,svg \
-  --providers wayback,otx,commoncrawl,urlscan \
-  -o /engagements/$ENGAGEMENT_KEY/scans/gau_output.txt \
-  --technique DISCOVERY --intent "historical URL harvest for TARGET_DOMAIN (passive)" \
-  --probe-kind fingerprint --phase collect --timeout 1800
+aith assess gau-endpoints TARGET_DOMAIN --subs \
+  --providers wayback,otx,commoncrawl,urlscan
 ```
 
-gau output contains duplicates — deduplicate before ingestion:
+That single verb runs `kali gau` (or reuses `<engagement>/scans/gau_output.txt` when a
+fresh run is cached), then pipes the output through `ingest-endpoints` so inline
+classification scores every URL at insert time and inert types (images, fonts) are
+filtered downstream. The `--max-cache-age-hours` flag (default 24) tunes reuse
+aggressiveness; pass `--refresh` to force a fresh gau run.
 
-```bash
-sort -u "$DIR/scans/gau_output.txt" > "$DIR/scans/gau_deduped.txt"
-cat "$DIR/scans/gau_deduped.txt" | aith assess ingest-endpoints "$DB" gau
-```
+**Multi-domain:** Run `gau-endpoints` for each in-scope domain. Each run writes its own
+sidecar meta keyed by target so reuse decisions stay per-host.
 
-**Multi-domain:** Run gau for each domain in scope.json hosts. Use `--subs` when wildcard
-subdomains are in scope.
+**Follow-on verbs that share the same cached corpus:**
 
-**Why gau matters:** Katana only discovers what is currently linked. gau finds endpoints that
-existed historically — deprecated routes, old API versions, test endpoints, admin paths that
-were once public. These are often still functional but hidden from the live sitemap.
+- `aith assess gau-secrets TARGET_DOMAIN` — body capture + trufflehog secret scan.
+  Defaults to `--no-verification`; pass `--verify` to enable trufflehog's verification.
+- `aith assess gau-js-endpoints TARGET_DOMAIN --fetch-if-missing` — extract endpoints
+  hidden in minified JS bundles (LinkFinder-derived regex) and ingest them as
+  `source='js-extract'`. Catches admin/internal routes that exist only in JS code
+  paths — a class of endpoint live crawls and HTML-only inspection consistently miss.
+
+**Why gau matters:** Katana only discovers what is currently linked. gau finds endpoints
+that existed historically — deprecated routes, old API versions, test endpoints, admin
+paths that were once public. These are often still functional but hidden from the live
+sitemap. Pairing gau with `gau-js-endpoints` closes the additional gap of routes that
+were never linked anywhere except inside compiled JS.
 
 ### Step 4: OpenAPI/Swagger Spec Ingestion
 
@@ -130,58 +137,41 @@ with different parameter values = one work item). Review stats to confirm reason
 counts — if a single source contributed disproportionately, investigate whether dedup
 is working correctly.
 
-### Per-host URL Budget (replaces global URL caps)
+### Volume control happens at ingest, not via budgets
 
-The work buffer is bounded per-host, not globally. A single global URL ceiling either
-truncates a sitemap-bearing host that legitimately exposes thousands of pages or fails
-to defer a 50,000-URL CDN dump that pollutes Phase 3 priority for every other host. The
-per-host formula keeps budget proportional to the host's likely attack-surface depth:
+There is no per-host URL cap. Volume control happens at ingest:
 
-| Host class | Budget | Rationale |
-|---|---|---|
-| content-rich hosts (typical web app: HTML pages, blog, marketing content) | **1000 URLs / host** | Default for hosts not matching the API-tier or sitemap-bearing rules. |
-| API-tier hosts (`api.*`, `*.api.example.test`, hosts whose URL surface is mostly endpoints) | **1000 URLs / host** | Same as content-rich. The earlier 200 cap silently truncated real microservice clusters with hundreds of legitimate REST routes; operators still cap a noisy API host lower with `--budget-override`. |
-| sitemap-bearing hosts (sitemap.xml provides an explicit upper-bound list) | **2000 URLs / host** | Don't truncate below the sitemap's count; the sitemap is the host's own declaration of canonical surface. |
+- **Inert types skip the dispatch queue at insert time.** `image`, `video`, `font`,
+  `archive`, `sourcemap`, and `manifest` types are stamped `status='skipped'` in
+  `db_insert_work_item()` so they never enter the priority-mode dispatch.
+- **Classification runs inline at ingestion** so every URL gets a `cluster_key` and
+  `priority_score` immediately. Run `aith assess list-clusters "$DB"` to review the
+  resulting cluster set and `aith assess dispatch "$DB" defer-cluster <key> --reason "…"`
+  to drop low-signal clusters before Phase 3.
+- **Egress-blocked hosts still defer** (see "Egress-blocked hosts" below) — that is a
+  network-failure class, not a volume cap.
 
-Operator override: pass `--budget-override <host>:<n>` on the dispatch context when a
-specific host needs a non-default cap (a host known to expose thousands of legitimate
-endpoints, or a CDN host that should be capped lower than 1000). Surface-collector
-honors the override at ingestion time; URLs beyond the budget land as
-`cluster_key=deferred:per-host-budget-exceeded` rather than `pending`, so the operator
-sees them in `aith assess dispatch peek` output without polluting the work-buffer
-priority queue.
-
-#### Recovery flow when classify-work scores deferred clusters above default
-
-When classify-work assigns a high priority to any cluster on a host that already
-deferred surplus URLs (e.g., a host that hit the 1000 cap and where the
-`gf:ssrf` cluster surfaces with 50 candidates), the operator should auto-raise
-the budget for that host and re-ingest:
-
-1. Inspect the deferred bucket: `aith assess dispatch "$DB" peek deferred:per-host-budget-exceeded 50`.
-2. If high-priority clusters appear in the deferred set, re-run gau for the host
-   with a wider scope: `aith assess kali gau X --subs --threads 5 ... -o /engagements/$ENGAGEMENT_KEY/scans/gau_<host>_followup.txt --technique DISCOVERY --intent "follow-up gau after classify-work scored deferred cluster" --probe-kind fingerprint --phase consume-test --timeout 1800`.
-3. Re-ingest with the override: pipe the new gau output into `aith assess ingest-endpoints` and pass `--budget-override <host>:<n>` so the new URLs admit beyond the default cap. Pick `<n>` large enough to cover the deferred surplus you just inspected.
-4. Re-run `aith assess classify-work` to score the newly-admitted rows before the next dispatch.
-
-This loop keeps the default cap conservative while surfacing the recovery path
-the moment classify-work flags real signal in the deferred set.
+If a real-world ingest produces a cluster the operator does not want to deal with right
+now, defer that cluster explicitly. Do not introduce a new budget gate — the silent
+truncation is the bug, not the verbose buffer.
 
 #### Egress-blocked hosts
 
 A host that responds to every probe with HTTP 403 (CDN-IP-blocked egress) belongs in a
 `deferred` cluster with `terminal_reason=egress-blocked, see CDN-IP playbook` and a
 cross-link to `agent/references/runtime-guides/cdn-ip-blocking.md`. The egress-blocked
-deferral path is owned by W4a-1; per-host budget enforcement here coexists with that
-deferral by adding distinct ingestion-time functions rather than reshaping the existing
-egress-blocked path.
+deferral path is owned by `_insert_egress_blocked_work_item` in
+`ingest_endpoints.py` and is the only deferral class that still gates URLs at insert
+time — every other URL is admitted and classified inline.
 
 #### Newly-discovered hosts post-OSINT
 
 Subdomain enumeration deltas and Phase 1 OSINT discoveries that surface a new host
 AFTER initial ingestion MUST receive their own gau pass — surface-collector cannot
 skip them on the assumption that initial collection was exhaustive. A new host
-inherits the default per-host budget and is ingested through the standard path.
+ingests through the standard path; inline classification scores its rows
+immediately, and any low-signal cluster gets explicit operator control via
+`aith assess dispatch defer-cluster` rather than an automatic URL cap.
 
 #### Admin / internal / config URL preservation under egress block
 
@@ -194,8 +184,7 @@ narrative even when live testing is blocked.
 
 ### Step 6: Intelligent Triage
 
-This is the core value-add over the previous operator-orchestrated pipeline. After
-mechanical ingestion is complete, analyze the full URL corpus for attack signals.
+After mechanical ingestion is complete, analyze the full URL corpus for attack signals.
 
 **Deep triage (large corpora):** when the gau output exceeds ~500 URLs, or response-body
 secret scanning is in scope, stop here and ask the operator to dispatch a follow-up
@@ -260,8 +249,9 @@ with triage signals, recommended dispatch order, and suggested vuln-class skills
 
 ## Key Rules
 
-- Keep all URL crawling and enrichment in `aith assess kali katana` / `aith assess kali gau` — host-side crawling bypasses the audit pipeline that downstream specialists rely on
-- Use `aith assess ingest-endpoints` for all work-buffer writes — direct DB inserts bypass backend sync
+- Keep all URL crawling and enrichment in `aith assess kali katana` / `aith assess gau-endpoints` (or `gau-secrets` / `gau-js-endpoints`) — host-side crawling bypasses the audit pipeline that downstream specialists rely on
+- Use the `gau-*` wrappers for gau collection — they pair gau with ingest in one shot and emit a structured JSON summary with cache-decision metadata
+- Use `aith assess ingest-endpoints` directly only for non-gau sources (katana output, OpenAPI specs, mitmproxy captures) — gau callers should use `gau-endpoints` instead
 - Use `aith assess record-surface` for all surface writes — bypassing loses backend sync
 - Use `aith assess record-finding` for any findings — unrecorded findings are lost data
 - Triage is classification and pattern matching — analyze URLs without sending target-facing probes during triage
@@ -284,4 +274,4 @@ The surface-collector agent prompt defines the full output format. Key sections:
 
 - `references/tools/recon/gau.md` — gau CLI reference and pipeline patterns
 - `references/tools/recon/httpx.md` — HTTP probing reference for URL validation
-- `agent/skills/gau-triage/SKILL.md` — deeper follow-up pass (gf classification + httpx body capture + trufflehog secret scan) for large historical URL corpora
+- `agent/skills/gau-triage/SKILL.md` — deeper follow-up pass for large historical URL corpora: cluster review on top of inline-classified buffer, httpx body capture, and trufflehog secret scan

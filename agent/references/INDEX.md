@@ -219,8 +219,8 @@ Quick-reference per tool, organized by usage phase.
 | `tools/recon/asnmap.md` | ASN → CIDR mapping; feeds cero for TLS SAN sweeps |
 | `tools/recon/bbot.md` | Multi-module passive preset (Phase 0 deep); `subdomain-enum -rf passive`, `--allow-deadly` gated behind `--destructive` |
 | `tools/recon/shuffledns.md` | Lighter alternative to puredns; we generally prefer puredns for better wildcard handling |
-| `tools/recon/gau.md` | Historical URL discovery (Wayback, OTX, Common Crawl, URLScan) |
-| `tools/recon/gf.md` | URL parameter-pattern classifier (xss, ssrf, redirect, idor, sqli, lfi, debug) with 1ndianl33t patterns |
+| `tools/recon/gau.md` | Historical URL discovery (Wayback, OTX, Common Crawl, URLScan); `aith assess gau-endpoints` is the recommended wrapper (cache-aware, ingests in one shot), with `gau-secrets` and `gau-js-endpoints` for body capture and JS-extracted route recovery |
+| `tools/recon/gf.md` | URL parameter-pattern classifier (xss, ssrf, redirect, idor, sqli, lfi, debug); the patterns are now compiled into `assess.lib.classify_buckets` and applied inline at ingest — this reference documents the bucket source-of-truth |
 | `tools/recon/trufflehog.md` | Secret scanner (filesystem mode, 800+ detectors, v3 positional-path syntax, `--no-verification` default) |
 | `tools/recon/github-osint.md` | GitHub OSINT — org-name pattern enumeration (literal/parent/contractor variants), public-member listing, commit-author email mining, code-search cross-reference; rate-limit etiquette and `GITHUB_TOKEN` pattern |
 | `tools/recon/openssl-sans.md` | Per-host TLS SAN extraction (openssl s_client + x509 -ext subjectAltName), cross-host SAN collision detection (shared multi-tenant cert flag), vhost / cert mismatch detection, multi-time DNS resolution (split-VIP detection), dnsx live-host confirmation of SAN-discovered names — paired with `agent/skills/tls-vhost-correlation/SKILL.md` |
@@ -264,29 +264,35 @@ Quick-reference per tool, organized by usage phase.
 
 ## gf-patterns/ — GF Pattern Library
 
-Per-bucket reference files for the gf URL classifier, keyed to the buckets that
-`agent/scripts/assess/commands/classify_work.py` recognizes. Used by: surface-collector,
+Per-bucket reference files for the URL classifier, keyed to the buckets that
+`agent/scripts/assess/lib/classify_buckets.py` defines. Used by: surface-collector,
 gau-triage, operator.
 
 Each file documents what the bucket classifies, the parameter keys and path fragments that
 match, the baseline `priority_score` weight, representative examples, and false-positive
-surface to keep operator calibration honest. Skills cite these files with a "Load because X"
-reason before invoking a bucket.
+surface to keep operator calibration honest. Inline classification at ingest applies these
+buckets automatically; the `aith assess classify-work --reclassify-all` verb re-applies
+them after a `_BUCKETS` change.
 
 | File | Bucket | Baseline weight | What it classifies |
 |------|--------|-----------------|--------------------|
+| `gf-patterns/DRIFT.md` | maintenance | n/a | Static upstream-only vs Python-only bucket review decisions |
 | `gf-patterns/rce.md` | `rce` | 50 | Command-exec parameters (`cmd`, `exec`) and `/exec/`, `/cmd/`, `/shell/` paths |
-| `gf-patterns/ssrf.md` | `ssrf` | 45 | URL-fetch parameters (`url`, `callback`, `feed`) and `/proxy/`, `/fetch/` paths |
+| `gf-patterns/ssrf.md` | `ssrf` | 40 | URL-fetch parameters (`url`, `callback`, `feed`) and `/proxy/`, `/fetch/` paths |
 | `gf-patterns/sqli.md` | `sqli` | 40 | Query/identifier parameters (`id`, `q`, `sort`, `filter`) |
 | `gf-patterns/lfi.md` | `lfi` | 40 | File-handling parameters (`file`, `path`, `template`, `include`) |
+| `gf-patterns/img_traversal.md` | `img_traversal` | 35 | Image-handling parameters and `/img/`, `/thumb/`, `/photo/` paths (LFI vector) |
+| `gf-patterns/trust_surface.md` | `trust_surface` | 35 | Sensitive lifecycle paths (`/upload`, `/webhook`, `/oauth`, `/reset`) |
 | `gf-patterns/idor.md` | `idor` | 35 | Object-reference parameters (`id`, `user`, `account`, `order`) |
 | `gf-patterns/debug_logic.md` | `debug_logic` | 30 | Privileged paths (`/admin`, `/actuator`, `/.git`, `/.env`) |
+| `gf-patterns/upload_fields.md` | `upload_fields` | 30 | File-upload parameters (`file`, `filename`, `attachment`, `avatar`) |
 | `gf-patterns/redirect.md` | `redirect` | 25 | Return-URL parameters (`next`, `redirect_uri`, `return`) |
 | `gf-patterns/ssti.md` | `ssti` | 25 | Template-resolver parameters (`template`, `theme`, `view`) |
+| `gf-patterns/cors.md` | `cors` | 25 | CORS-control parameters (`origin`, `access_control`, `allow_origin`) |
 | `gf-patterns/xss.md` | `xss` | 20 | Reflected-input parameters (`q`, `message`, `comment`) |
 | `gf-patterns/interestingparams.md` | `interestingparams` | 15 | Credential parameters (`api_key`, `token`, `password`) |
-| `gf-patterns/interestingsubs.md` | conceptual | n/a | Subdomain conventions (`staging.`, `internal.`) — surfaces via subdomain-enumeration, not a direct classify-work bucket |
-| `gf-patterns/interestingEXT.md` | conceptual | n/a | Backup/config extensions (`.bak`, `.env`, `.sql`) — surfaces via `path:` cluster fallback plus trufflehog body scan |
+| `gf-patterns/interestingEXT.md` | `interestingext` | 10 | Backup/config extensions (`.bak`, `.env`, `.sql`, `.pem`, `.key`) |
+| `gf-patterns/interestingsubs.md` | conceptual | n/a | Subdomain conventions (`staging.`, `internal.`) — surfaces via subdomain-enumeration, not a direct classification bucket |
 
 ## runtime-guides/ — Shared Runtime References
 

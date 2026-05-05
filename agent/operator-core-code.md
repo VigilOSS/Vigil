@@ -37,7 +37,7 @@ analyzed or user signals stop:
 2. **DECIDE NEXT ACTION** -- Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified, call graph complete, structural index generated). In Phase 2A, analyze critical files first using the file analysis queue priority order. In Phase 2B, close CWE effort gaps on critical/high files before proceeding. In Phase 3, drive precise FP elimination on all findings — kills require counter-evidence as rigorous as the original finding. Coverage gaps drive decisions.
 3. **FORMULATE PLAN** -- Select agent, skill, file batch, and applicable vulnerability classes. Batch size must stay small enough that source code remains the primary context. Use adaptive batching by module, entry-chain cluster, or trust-boundary/behavior family instead of a fixed-size handoff. When unrelated queue items are ready at the same time, split them into multiple independent hunter dispatches so broad hunt parallelizes across modules instead of serializing on fetch order. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
 4. **PRESENT OR PROCEED** -- Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.
-5. **USE SKILLS FIRST** -- Read `agent/SKILL.md` and load the matching skill before starting target work. After loading the skill, read `agent/references/INDEX.md` to identify paired CWE pattern references and tool cheatsheets. Do not begin analysis work until both reads are complete.
+5. **USE SKILLS FIRST** -- Use `aith assess list-skills` to pick the matching skill (compact name + one-line "Use when:"), then load that skill file in full before starting target work. After loading the skill, read `agent/references/INDEX.md` to identify paired CWE pattern references and tool cheatsheets. Do not begin analysis work until both reads are complete.
    - **Phase 0 (Ingest + Index):** operator-mechanical, no agent dispatch needed
    - **Phase 1 (Classify + Map):** `code-architect` -> `agent/skills/code-architecture-mapping/SKILL.md`
    - **Phase 2 (Hunt):** `code-vuln-hunter` -> `agent/skills/code-vulnerability-analysis/SKILL.md` + CWE-specific refs
@@ -836,7 +836,7 @@ the rendered report, and publication plus `reported` lifecycle transitions wait 
 Every code analysis dispatch must include:
 - **Agent identity** and **repository name**
 - **Current phase** and **specific task objective**
-- **Which skill to load** (from `agent/SKILL.md`)
+- **Which skill(s) to load** (selected via `aith assess list-skills`)
 - **For Phase 1**: full file listing, project docs, git churn data, structural index manifest
 - **For Phase 2 (Hunt)**: file paths from queue items, batch theme, slot types,
   applicable vulnerability classes (ALL classes from SLOT_VULN_CLASSES for these slot types),
@@ -881,7 +881,9 @@ Before every dispatch, verify:
 
 - [ ] Agent identity named and repository specified
 - [ ] Current phase stated with specific task objective (not just "analyze this")
-- [ ] Skill to load identified from `agent/SKILL.md`
+- [ ] Skill name(s) identified from `aith assess list-skills` (the first column = `name`, matches `agent/skills/<name>/`)
+- [ ] Full skill path(s) `agent/skills/<name>/SKILL.md` included in the dispatch prompt with explicit enforcement: "You MUST read and follow `agent/skills/<name>/SKILL.md` before beginning work; if a skill contradicts this prompt, the skill wins for procedural steps."
+- [ ] Bare skill `name(s)` (not paths) passed to `--skills` on `aith assess dispatch register` for audit — the validator resolves names against `agent/skills/<name>/SKILL.md`
 - [ ] For Phase 2: file paths from queue items included (NOT context IDs, NOT JSON metadata)
 - [ ] For Phase 2: applicable vulnerability classes copied from backend `applicable_vuln_classes` when present; otherwise derived from slot types + role/language fallback rules
 - [ ] For Phase 2: CWE pattern references selected via slot-type mapping table
