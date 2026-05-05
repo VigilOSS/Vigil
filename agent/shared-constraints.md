@@ -175,6 +175,47 @@ silent `operator` attribution breaks coverage ownership.
 
 ---
 
+## Contract-First Rule
+
+Before the **first invocation of any `aith assess` verb that mutates durable
+state, dispatches a kali tool, or seats work-buffer rows**, run
+`aith assess contract <verb>` (or `aith assess contract <verb> <variant>`)
+to read the canonical schema, the required fields, the common mistakes, and
+the example payload. Schema validation errors from guessing waste a full
+round-trip, so reading the contract first is faster than re-running the
+verb after a rejection.
+
+Verbs covered by the rule (all have a contract entry; `aith assess contract`
+emits the canonical schema and an example):
+
+- `kali <verb>` — `aith assess contract kali <verb>`
+- `record-finding` — `aith assess contract record-finding`
+- `record-intel <type>` — `aith assess contract record-intel <type>`
+- `record-surface` — `aith assess contract record-surface`
+- `dispatch <subverb>` for sub-verbs that mutate durable dispatch state or
+  emit the canonical handoff blob:
+  `register`, `update-status`, `record-handoff`, `record-decision`,
+  `abort-duplicate`, `render-handoff` — `aith assess contract dispatch <subverb>`
+- Lifecycle helpers (`verify-finding`, `kill-finding`, `update-finding`,
+  `reset-finding`, `resolve-surface`) — `aith assess contract <verb>`
+
+Verbs **not** covered (skip the contract round-trip — they are read-only or
+have no payload to validate): `fetch`, `list-skills`, `list-clusters`,
+`list-command-runs`, `get-command-run`, `check-scope-coverage`,
+`filter-scope`, `dispatch <db> stats|peek|fetch|done`,
+`dispatch list`, `dispatch get`. Reading the contract for these adds
+latency without preventing any error class.
+
+Treat the contract output as the source of truth for arg ordering, flag
+names, enum values, and required fields. Do not infer field names from
+similar tools — five of the most common dispatch errors in recent
+engagements (`record-surface` arg ordering, `record-finding` agent prefix,
+`update-finding --details-patch`, `kali katana -H`, `kali exec
+--probe-kind active`) would each have been prevented by running
+`contract` before the first call.
+
+---
+
 ## 2a. Listener, Tunnel, and OOB Responsibility
 
 Shared listener infrastructure belongs to the operator because a listener, tunnel, or
@@ -271,8 +312,12 @@ truth.
 
 ## 3. Use Skills and References — They Are the Methodology
 
-**Step 1 — Read `agent/SKILL.md`** before starting any specialist work. It lists every available
-skill with "Use when:" criteria. Select and load the matching skill before doing anything else.
+**Step 1 — Load the skill(s) named in your dispatch prompt.** The operator selects skills via
+`aith assess list-skills` (compact name + one-line "Use when:") and includes the path(s) in the
+dispatch prompt. Read each named `agent/skills/<name>/SKILL.md` in full before doing anything else.
+If no skill was named and you believe one exists, run `aith assess list-skills` to discover it
+yourself and report back rather than improvising — skill selection is the operator's job, but
+discovery is fast (~200 tokens) and usually faster than guessing.
 
 **Step 2 — Read `agent/references/INDEX.md`** after loading the skill. Identify the paired
 payload files, tool cheatsheets, and OWASP checklists that apply to your task and load them.
@@ -479,6 +524,47 @@ Engagement artifacts live at one physical location on disk but have two names de
 - **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR`. Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local file work, `aith assess` calls, and any script running on the host.
 - **Kali side** — `/engagements/$ENGAGEMENT_KEY` is the same directory via the bind mount managed by `aith runtime start`. Launchers also export `ENGAGEMENT_KEY` (the basename of `$DIR`) so commands inside the runtime can resolve it.
 - **`aith assess kali ...` invocations MUST reference paths as `/engagements/$ENGAGEMENT_KEY/...`** in their command argv — the host path `$DIR` is not valid inside the container, and writing to `/tmp` or `/data` for engagement-scoped artifacts loses them outside the shared-infra conventions.
+
+---
+
+## 11a. Script Execution Inside Kali
+
+Custom scripts (Python helpers, exploit PoCs, payload builders) often need to
+run inside the runtime container so they can hit target hosts through the same
+network isolation envelope as the Kali tools. The path the operator references
+when authoring or reviewing the script is different from the path the script
+sees at execution time, and getting this wrong causes silent file-not-found
+failures or runs the script against the wrong file system.
+
+- **Authoring on the host** — write scripts under
+  `$DIR/scripts/<name>.py` (host path) or `$ENGAGEMENT_DIR/scripts/<name>.py`.
+  The host path is what the operator and reviewers see, what `aith assess`
+  recording references when capturing artifacts, and what shows up in commit
+  diffs.
+- **Executing inside Kali** — invoke the script through `aith assess kali exec`
+  using its container-side path
+  `/engagements/$ENGAGEMENT_KEY/scripts/<name>.py`. The container sees the
+  bind-mounted directory at `/engagements/<engagement_key>`, so the host-side
+  `$DIR` prefix is invalid inside the runtime and a literal `$DIR` in the argv
+  resolves to nothing.
+- **Common pattern** — author at `$DIR/scripts/exploit.py`, then run
+  `aith assess kali exec --technique EXPLOIT --intent "..." --probe-kind exploit
+  --phase exploit --timeout 600 -- python3
+  /engagements/$ENGAGEMENT_KEY/scripts/exploit.py --target https://example`.
+  The `--` separator forwards everything after it as raw argv to the in-container
+  command, which is how arbitrary script invocations stay auditable through the
+  same wrapper that records typed verbs.
+- **Outputs land back on the host** — anything the script writes under
+  `/engagements/$ENGAGEMENT_KEY/...` is visible from the host at the matching
+  `$DIR/...` path, because both names point at the same bind-mounted directory.
+  Engagement-scoped output should always live under that tree, not under
+  `/tmp` or `/data` inside the container, so artifacts survive container
+  restarts and remain attached to the engagement.
+
+The dual-path naming exists because the container and the host share one
+filesystem at one mount point — there is no second copy of the script to
+sync. The two prefixes are aliases for the same bytes; using the wrong one
+just means the lookup happens against a path that does not exist on that side.
 
 ---
 

@@ -125,7 +125,40 @@ When progress stalls, use this table to pick a concrete next action instead of g
 | I confirmed a low-severity bug but can't chain it | Check if it enables a higher-impact primitive (open redirect -> OAuth theft, SSRF -> metadata, XSS -> admin panel) |
 | Tools are returning nothing useful | Stop automation, test manually. Read the JS source, map the API by hand, test one request at a time |
 
-## 18. Developer psychology heuristics
+## 18. Sub-Agent Dispatch Discipline
+
+The operator's value is *not* doing the testing — it is choosing the right
+specialist, framing the dispatch tightly, and judging the returned evidence.
+When the operator does the hunting itself, two things break: the operator's
+context window fills with low-level transcripts that should have stayed in a
+specialist subagent, and the audit trail loses the per-role provenance that
+report-writer and later operators rely on.
+
+- **Default to dispatch.** When a task fits a named role (`recon-specialist`,
+  `vulnerability-analyst`, `exploit-developer`, `fuzzer`, `osint-analyst`,
+  `surface-collector`, `source-analyzer`, `report-writer`, or any
+  `code-*` role), launch that specialist instead of running the underlying
+  tools yourself. Specialists carry the role prompt, the matching skill
+  context, and the handoff schema the operator does not.
+- **Inline only for genuinely operator-scoped work.** A handful of actions
+  belong on the operator: scope and authorization decisions, dispatch
+  authoring, recording specialist handoffs, reviewing evidence, and the
+  occasional one-shot lookup that informs the next dispatch (a single
+  `aith assess fetch ...` query, a `list-skills` call, a contract render).
+  Anything that walks a target, parses output, or iterates over a work-buffer
+  cluster is specialist work.
+- **One specialist, one objective, one skill set.** Each dispatch names the
+  role, the dispatch mode, and the explicit skill list (`--skills` on
+  `aith assess dispatch register`). Bundling multiple objectives into one
+  dispatch defeats the role boundary and produces handoffs that report-writer
+  cannot map back to a coherent finding line.
+- **When in doubt, dispatch.** If the operator is about to run a Kali tool,
+  parse its output, and decide what to do next, that loop belongs in a
+  specialist. The cost of an extra dispatch is small; the cost of a polluted
+  operator context is large because it reduces the operator's ability to
+  judge the next dispatch.
+
+## 19. Developer psychology heuristics
 
 Use these to generate testable hypotheses about where developers introduced flaws:
 

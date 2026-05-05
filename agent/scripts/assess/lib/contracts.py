@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 import re
+from pathlib import Path
 from typing import Any
 
 from .intel_types import INTEL_TYPES
@@ -19,9 +21,41 @@ SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
 
 
 _SPECIALIST_DISPATCH_REQUIRED_FIELDS: tuple[str, ...] = (
-    "role",
     "dispatch_mode",
 )
+
+
+# Roles exempt from the `skills` requirement. The operator coordinates phases
+# and dispatch decisions rather than executing a single skill, so requiring an
+# explicit skill list on operator dispatches would be misleading. Every other
+# specialist role must declare which skills it loaded so the dispatch row is a
+# truthful audit of the specialist context.
+_DISPATCH_ROLES_WITHOUT_SKILLS: frozenset[str] = frozenset({"operator"})
+
+
+def _agent_skills_root() -> Path:
+    """Resolve agent/skills/ relative to this file or AITH_REPO_ROOT.
+
+    Used for warn-only validation that named skills exist on disk. Returning a
+    bogus path is harmless because the caller treats a missing directory as
+    "skip the on-disk check" rather than a hard error.
+    """
+    override = os.environ.get("AITH_REPO_ROOT")
+    if override:
+        candidate = Path(override) / "agent" / "skills"
+        if candidate.is_dir():
+            return candidate
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "agent" / "skills"
+        if candidate.is_dir():
+            return candidate
+    # Fallback when no parent dir holds an `agent/skills/` (e.g. the file is
+    # imported from a copied checkout). `__file__` lives at
+    # agent/scripts/assess/lib/contracts.py, so parents[3] is the `agent/`
+    # directory itself — append `skills` rather than `agent/skills` to avoid
+    # building an `agent/agent/skills` path that never exists.
+    return Path(__file__).resolve().parents[3] / "skills"
 
 
 @dataclass
@@ -56,6 +90,15 @@ def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list
         if field_name not in payload:
             errors.append(f"missing required field: {field_name}")
 
+    role_value = payload.get("agent_role", payload.get("role"))
+    if "role" not in payload and "agent_role" not in payload:
+        errors.append("missing required field: role (or agent_role)")
+    if "role" in payload and "agent_role" in payload:
+        role_text = str(payload.get("role") or "").strip()
+        agent_role_text = str(payload.get("agent_role") or "").strip()
+        if role_text and agent_role_text and role_text != agent_role_text:
+            errors.append("role and agent_role must match when both are present")
+
     dispatch_mode = payload.get("dispatch_mode")
     if dispatch_mode is not None and dispatch_mode not in SPECIALIST_DISPATCH_MODES:
         errors.append(
@@ -63,19 +106,69 @@ def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list
             f"valid: {', '.join(SPECIALIST_DISPATCH_MODES)}"
         )
 
-    for str_field in ("role",):
+    for str_field in ("role", "agent_role"):
         value = payload.get(str_field)
         if value is not None and not isinstance(value, str):
             errors.append(f"{str_field} must be a string")
         elif value is not None and not str(value).strip():
             errors.append(f"{str_field} must be a non-empty string")
 
+    # Skills are required for every specialist role so the dispatch row is a
+    # truthful audit of which skill context the agent loaded. Operators are
+    # exempt because they coordinate phases rather than executing a single
+    # skill. Skip on-disk verification when the skills directory cannot be
+    # located so the validator stays usable from arbitrary CWDs.
+    role_name = str(role_value).strip() if isinstance(role_value, str) else ""
+    skills_value = payload.get("skills")
+    skills_list: list[str] = []
+    if isinstance(skills_value, str):
+        skills_list = [s.strip() for s in skills_value.split(",") if s.strip()]
+    elif isinstance(skills_value, list):
+        for entry in skills_value:
+            if isinstance(entry, str) and entry.strip():
+                skills_list.append(entry.strip())
+            else:
+                errors.append("skills entries must be non-empty strings")
+                break
+    elif skills_value is not None:
+        errors.append("skills must be a comma-separated string or a list of strings")
+
+    if role_name and role_name not in _DISPATCH_ROLES_WITHOUT_SKILLS:
+        if not skills_list:
+            errors.append(
+                f"skills is required for role '{role_name}'; "
+                "list at least one skill name from `aith assess list-skills`"
+            )
+
+    if skills_list:
+        skills_root = _agent_skills_root()
+        if skills_root.is_dir():
+            for skill_name in skills_list:
+                skill_path = skills_root / skill_name / "SKILL.md"
+                if not skill_path.is_file():
+                    warnings.append(
+                        f"skill '{skill_name}' has no SKILL.md under {skills_root} "
+                        "— typo or repo-relative path mismatch?"
+                    )
+
     return errors, warnings
 
 
 # Verbs registered under `aith assess kali ...`. Names are kept in sync with
 # the modules under `agent/scripts/assess/commands/kali_*.py`.
-KALI_VERBS: tuple[str, ...] = (
+#
+# Two categories live here so the audit-flag invariants stay truthful:
+# - KALI_TARGET_VERBS — target-facing probes that REQUIRE the standard
+#   audit-flag set (`--technique`, `--intent`, `--probe-kind`, `--phase`,
+#   `--timeout`). Common notes and common mistakes apply.
+# - KALI_MAINT_VERBS — host-side maintenance commands. They do not touch the
+#   target and do not take the audit-flag set. Common notes do NOT apply;
+#   each gets a bespoke contract entry.
+#
+# `KALI_VERBS` is the union for command registration / discovery, but
+# documentation and validation must use the right subset so prompts cannot
+# tell the operator that `sweep-orphans` requires `--phase` (it does not).
+KALI_TARGET_VERBS: tuple[str, ...] = (
     "nmap-scan",
     "nuclei",
     "httpx",
@@ -95,8 +188,13 @@ KALI_VERBS: tuple[str, ...] = (
     "bbot",
     "exec",
     "job",
+)
+
+KALI_MAINT_VERBS: tuple[str, ...] = (
     "sweep-orphans",
 )
+
+KALI_VERBS: tuple[str, ...] = KALI_TARGET_VERBS + KALI_MAINT_VERBS
 
 
 _KALI_COMMON_NOTES: tuple[str, ...] = (
@@ -866,7 +964,10 @@ def _kali_root_contract() -> CommandContract:
             "--timeout <seconds>",
         ),
         notes=_KALI_COMMON_NOTES + (
-            f"Verbs: {', '.join(KALI_VERBS)}.",
+            f"Target-facing verbs (require the audit-flag set above): "
+            f"{', '.join(KALI_TARGET_VERBS)}.",
+            f"Host-side maintenance verbs (no audit flags — they do not touch "
+            f"the target): {', '.join(KALI_MAINT_VERBS)}.",
         ),
         common_mistakes=_KALI_COMMON_MISTAKES,
         examples=(
@@ -1055,12 +1156,16 @@ def _looks_like_verification_payload(payload: Any | None) -> bool:
 # discover the helper rather than freelance their own handoff format.
 # ---------------------------------------------------------------------------
 
+# Dispatch sub-verbs that have their own contract entry. The Contract-First
+# Rule directs operators to read these before first use, and the
+# `aith assess contract` resolver uses this tuple to advertise what is
+# discoverable. Read-only sub-verbs (`list`, `get`) are intentionally absent
+# because they do not mutate state and have nothing to validate.
 DISPATCH_VERBS: tuple[str, ...] = (
     "render-handoff",
     "register",
     "update-status",
-    "list",
-    "get",
+    "abort-duplicate",
     "record-decision",
     "record-handoff",
 )
@@ -1112,6 +1217,12 @@ def _dispatch_root_contract() -> CommandContract:
                 "backend dispatch actions use `aith assess dispatch record-handoff ...`; "
                 "`aith assess dispatch cases.db record-handoff ...` is rejected so handoffs "
                 "cannot be written to the wrong state surface",
+            ),
+            (
+                "defer-items <ids> with stale id list",
+                "`defer-items` exits 1 (not 0) when zero rows match — by design, so a typo "
+                "or already-processed id list is surfaced loudly. `reset-stale` first if "
+                "the rows you wanted to defer are now in `processing`.",
             ),
         ),
     )
@@ -1179,6 +1290,224 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 },
                 {
                     "command": "aith assess dispatch render-handoff a424a88b02054913d --max-lines 60 --include-evidence",
+                },
+            ),
+        )
+    if verb == "register":
+        return CommandContract(
+            name="dispatch register",
+            summary=(
+                "Register a specialist dispatch in the backend audit ledger so the "
+                "row carries role, task, scope, model, dispatch-mode, and the skills "
+                "the agent loaded."
+            ),
+            schema_name="backend DispatchCreate (POST /dispatches)",
+            preferred_invocations=(
+                "aith assess dispatch register --agent-id <id> --agent-role <role> "
+                "--task \"...\" --scope-host <host> --model <name> --reasoning <level> "
+                "--dispatch-mode <mode> --skills \"<skill>[,<skill>...]\"",
+                "aith assess dispatch register --from-json <payload.json>",
+            ),
+            author_supplied_fields=(
+                "--agent-id (unique per dispatch)",
+                "--agent-role (specialist role; operator role is reserved for phase coordination)",
+                "--dispatch-mode (hypothesis-driven|item-iterating|deep-manual|variant-rotation)",
+                "--skills (comma-separated; required for non-operator roles)",
+                "--task (one-line objective)",
+            ),
+            helper_defaults=(
+                ("status", "in-progress (set on insert)"),
+                ("dispatched_at", "now() when omitted"),
+                ("--allow-duplicate", "off — overlapping in-progress dispatches log a warning"),
+            ),
+            notes=(
+                "Backend `DispatchCreate._enforce_skills_for_specialists` rejects "
+                "specialist dispatches that omit `skills`; the CLI's "
+                "`validate_specialist_dispatch_contract` performs the same check before "
+                "sending so typos surface locally.",
+                "Use `aith assess list-skills` to discover skill names — the value passed "
+                "here must match the directory under `agent/skills/<name>/`.",
+                "Pair with `update-status` when the dispatch finishes: leaving rows in "
+                "`in-progress` past the dispatch's actual lifetime corrupts dedup checks.",
+            ),
+            common_mistakes=(
+                ("role", "use --agent-role for the registry payload (the validator accepts both, but the registry stores agent_role)"),
+                ("operator role with --skills", "operator dispatches are exempt from the skills requirement; pass --skills only for specialist roles"),
+                ("--skills agent/skills/foo/SKILL.md", "pass the bare skill name (e.g. 'gau-triage'); the validator resolves it on disk"),
+            ),
+            examples=(
+                {
+                    "command": (
+                        "aith assess dispatch register --agent-id va-7f3 "
+                        "--agent-role vulnerability-analyst --task 'review SSRF candidates' "
+                        "--scope-host api.example.com --model claude-opus-4-7 "
+                        "--reasoning high --dispatch-mode item-iterating "
+                        "--skills 'ssrf-testing,case-dispatching'"
+                    ),
+                },
+            ),
+        )
+    if verb == "update-status":
+        return CommandContract(
+            name="dispatch update-status",
+            summary="Patch the lifecycle status (and optionally finding_slugs / completed_at) of a registered dispatch row.",
+            schema_name="backend DispatchUpdate (PATCH /dispatches/{agent_id})",
+            preferred_invocations=(
+                "aith assess dispatch update-status <agent-id> --status completed --finding-slugs <slug1,slug2>",
+                "aith assess dispatch update-status <agent-id> --status failed",
+                "aith assess dispatch update-status <agent-id> --status aborted",
+            ),
+            author_supplied_fields=(
+                "<agent-id>",
+                "--status (in-progress|completed|failed|aborted|blocked)",
+            ),
+            helper_defaults=(
+                ("--completed-at", "now() when --status is terminal and the flag is omitted"),
+                ("--finding-slugs", "appended additively to the row, not replaced"),
+            ),
+            notes=(
+                "Use this when a dispatch returns so cross-dispatch dedup, reporting, "
+                "and report-writer's audit trail see the actual outcome.",
+                "Pair `--status completed --finding-slugs <slugs>` so the dispatch row "
+                "names the slugs the specialist produced; `aith assess dispatch render-handoff` "
+                "reads from there.",
+            ),
+            common_mistakes=(
+                ("status=done", "status enum is in-progress / completed / failed / aborted / blocked — 'done' is rejected"),
+                ("missing finding-slugs on completed run", "the slug list is what links the dispatch to its produced findings; missing it means the next operator cannot trace what came out"),
+            ),
+            examples=(
+                {
+                    "command": "aith assess dispatch update-status va-7f3 --status completed --finding-slugs va-001,va-002",
+                },
+            ),
+        )
+    if verb == "record-handoff":
+        return CommandContract(
+            name="dispatch record-handoff",
+            summary=(
+                "Persist a specialist's structured exit handoff (summary, next steps, "
+                "coverage gaps, runtime issues, working artifacts) into the backend "
+                "audit ledger so the next dispatch can render it."
+            ),
+            schema_name="backend handoff-record (POST /dispatch-handoffs, idempotent upsert)",
+            preferred_invocations=(
+                "aith assess dispatch record-handoff --from-json <handoff.json>",
+                "aith assess dispatch record-handoff --agent-id <id> --agent-role <role> "
+                "--summary \"...\" --next-step \"...\" --coverage-gap \"<area>: <reason>\"",
+            ),
+            author_supplied_fields=(
+                "--agent-id",
+                "--agent-role",
+                "--summary (≤2000 chars; required)",
+                "structured payload via --from-json OR repeated --next-step / --coverage-gap / --runtime-issue / --working-artifact / --open-question",
+            ),
+            helper_defaults=(
+                ("upsert", "POST then PATCH on 409 — the operation is idempotent so checkpointing is safe"),
+                ("confidence", "omitted when not specified"),
+            ),
+            notes=(
+                "Specialists are expected to call this from their closing sequence "
+                "before exiting; the backend is then the canonical 'what was done, "
+                "what's missing, what's next' record for the dispatch.",
+                "`render-handoff <agent-id>` reads from this row, fetches each named "
+                "finding, and emits the bounded markdown blob the next dispatch pastes.",
+                "Schema for the JSON payload: agent/references/runtime-guides/handoff-schema.md.",
+            ),
+            common_mistakes=(
+                ("transcript paste in summary", "summary is 2000 chars and bounded — use coverage_gaps / next_steps / runtime_issues for structured continuation, not a transcript dump"),
+                ("missing recommended_next_agent", "without it, the operator has to re-derive who picks up; set it from the specialist's perspective"),
+            ),
+            examples=(
+                {
+                    "command": (
+                        "aith assess dispatch record-handoff --agent-id va-7f3 "
+                        "--agent-role vulnerability-analyst "
+                        "--summary 'SSRF candidates triaged; 2 confirmed, 1 deferred for OOB' "
+                        "--next-step 'Validate confirmed findings against staging' "
+                        "--coverage-gap 'admin-panel: requires auth refresh'"
+                    ),
+                },
+            ),
+        )
+    if verb == "record-decision":
+        return CommandContract(
+            name="dispatch record-decision",
+            summary=(
+                "Record a structured operator decision (scope, egress reputation, "
+                "dispatch-blocked, vendor-SaaS gate, etc.) into dispatch_decisions for audit."
+            ),
+            schema_name="backend decision-record (POST /dispatch-decisions)",
+            preferred_invocations=(
+                "aith assess dispatch record-decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user",
+                "aith assess dispatch record-decision --kind egress_decision --choice browser-based-tool --payload-json '{\"egress_block_pct\": 67}'",
+                "aith assess dispatch record-decision --kind dispatch_blocked --phase recon --reason \"missing massdns binary in runtime image\" --surfaced-to-user",
+            ),
+            author_supplied_fields=(
+                "--kind (scope_decision|egress_decision|dispatch_blocked|... — the backend accepts any string but report-writer only renders known kinds)",
+                "--payload-json OR shorthand flags (--host / --vendor / --choice / --note / --reason / --phase) that build the payload dict",
+                "--surfaced-to-user (set when the operator presented the decision to the human; controls whether it appears in user-visible logs)",
+            ),
+            helper_defaults=(
+                ("payload", "constructed from --host/--vendor/--choice/--note/--reason/--phase when --payload-json is omitted"),
+                ("surfaced_to_user", "false unless --surfaced-to-user is set"),
+            ),
+            notes=(
+                "Vendor-SaaS scope warnings, egress-block decisions, and dispatch-blocked "
+                "rows all live in this one table — keep the kind taxonomy disciplined so "
+                "report-writer can summarize by kind.",
+                "When the decision is operator-facing (vendor-SaaS, egress reputation, "
+                "blocked dispatch), set --surfaced-to-user so the human-visible audit log "
+                "matches what the operator was actually shown.",
+            ),
+            common_mistakes=(
+                ("freeform reason in --kind", "kinds are vocabulary; put the prose in --note or --reason"),
+                ("missing --surfaced-to-user", "user-facing decisions invisible to audit defeats the purpose; set the flag whenever the operator showed the gate to the human"),
+            ),
+            examples=(
+                {
+                    "command": (
+                        "aith assess dispatch record-decision --kind scope_decision "
+                        "--host api.foo.com --vendor 'Vendor SaaS' --choice pending "
+                        "--surfaced-to-user"
+                    ),
+                },
+            ),
+        )
+    if verb == "abort-duplicate":
+        return CommandContract(
+            name="dispatch abort-duplicate",
+            summary=(
+                "Mark an accidentally-duplicated specialist dispatch as aborted and "
+                "record a `dispatch_duplicate` decision pointing at the replacement."
+            ),
+            schema_name="backend DispatchUpdate (PATCH /dispatches/{agent_id}) + decision-record (POST /dispatch-decisions)",
+            preferred_invocations=(
+                "aith assess dispatch abort-duplicate <agent-id> --replacement-agent-id <new-id> --reason \"<text>\"",
+            ),
+            author_supplied_fields=(
+                "<agent-id> (the duplicate to abort)",
+                "--replacement-agent-id (the active dispatch that replaces it)",
+                "--reason (free text; goes into the decision payload)",
+            ),
+            helper_defaults=(
+                ("status", "aborted"),
+                ("completed_at", "now() at the time the abort runs"),
+            ),
+            notes=(
+                "Use this instead of update-status when the duplicate was noticed AFTER "
+                "register, so audit retains both the bad row (now aborted) and a paired "
+                "decision row pointing at the replacement.",
+                "`--replacement-agent-id` must already exist in the dispatch registry; the "
+                "helper checks before aborting so a typo cannot leave the duplicate row "
+                "pointing at a missing canonical dispatch.",
+            ),
+            common_mistakes=(
+                ("aborting the wrong direction", "abort the DUPLICATE id and point --replacement-agent-id at the row you want to keep — flipping these orphans the active dispatch"),
+            ),
+            examples=(
+                {
+                    "command": "aith assess dispatch abort-duplicate va-bad --replacement-agent-id va-good --reason 'register fired twice — the second one is canonical'",
                 },
             ),
         )

@@ -3,6 +3,10 @@ name: report-writer
 description: Human-first reporting specialist for concise, evidence-backed reporting.
 ---
 
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/report-writer.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
 # Report Writer
 
 You turn durable backend finding state into a report a human can trust quickly.
@@ -25,8 +29,7 @@ already listed below.
 
 - `agent/shared-constraints.md` — scope, finding IDs, CVSS/details format, rule reminders
 - `agent/rules/reporting.md`
-- `agent/SKILL.md`
-- `agent/skills/report-generation/SKILL.md`
+- `agent/skills/report-generation/SKILL.md` (named explicitly because it is your primary procedure; for any other skill needed, run `aith assess list-skills`)
 
 ## Pre-Work Checkpoint
 

@@ -4710,12 +4710,14 @@ def record_dispatch(
     reasoning: str | None = None,
     dispatch_mode: str | None = None,
     finding_slugs: list[str] | None = None,
+    skills: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not (agent_id or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="agent_id is required")
     dispatched_value = dispatched_at or _utcnow_iso_dispatch()
     findings_json = json.dumps(list(finding_slugs)) if finding_slugs is not None else None
+    skills_value = (skills or "").strip() or None
     with get_connection() as connection:
         existing = connection.execute(
             "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
@@ -4731,8 +4733,8 @@ def record_dispatch(
             INSERT INTO assessment_dispatches (
                 engagement_id, agent_id, agent_role, task, scope_host,
                 dispatched_at, status, model, reasoning,
-                dispatch_mode, finding_slugs_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dispatch_mode, finding_slugs_json, skills
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -4746,6 +4748,7 @@ def record_dispatch(
                 reasoning,
                 dispatch_mode,
                 findings_json,
+                skills_value,
             ),
         )
         row = connection.execute(

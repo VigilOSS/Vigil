@@ -201,8 +201,10 @@ functions. A guard in function A does not protect function B unless B re-validat
 
 ## 8. Skills and References Are Methodology -- Required, Not Optional
 
-**Step 1 -- Check `agent/SKILL.md`** when you begin specialist work. It lists every code
-analysis skill with "Use when:" criteria. Load the matching skill before doing any analysis.
+**Step 1 -- Use the skill named in your dispatch payload, or run `aith assess list-skills`**
+when you begin specialist work. The CLI walks `agent/skills/*/SKILL.md` frontmatter and prints
+each skill's compact description so you can pick the matching code-analysis skill without
+loading the full file. Load the chosen skill before doing any analysis.
 
 **Step 2 -- Read the skill's Extended Resources section.** Every code analysis skill lists
 specific reference files. Load them.

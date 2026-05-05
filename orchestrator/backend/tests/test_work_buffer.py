@@ -14,7 +14,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -61,6 +61,27 @@ def _load_dispatch_module():
     return _load_script_module(
         "test_dispatch_module",
         "agent/scripts/assess/commands/dispatch.py",
+    )
+
+
+def _load_proxy_addon_module():
+    mitmproxy = ModuleType("mitmproxy")
+    http = ModuleType("mitmproxy.http")
+    http.HTTPFlow = object  # type: ignore[attr-defined]
+    mitmproxy.http = http  # type: ignore[attr-defined]
+    mitmproxy.ctx = SimpleNamespace(
+        log=SimpleNamespace(
+            info=lambda *_args, **_kwargs: None,
+            warn=lambda *_args, **_kwargs: None,
+            error=lambda *_args, **_kwargs: None,
+        ),
+        options=SimpleNamespace(engagement_dir="", engagement_key=""),
+    )
+    sys.modules.setdefault("mitmproxy", mitmproxy)
+    sys.modules.setdefault("mitmproxy.http", http)
+    return _load_script_module(
+        "test_proxy_addon_module",
+        "agent/scripts/proxy_addon.py",
     )
 
 
@@ -116,9 +137,19 @@ def _insert_work_item(
         conn.close()
 
 
-def _run_classify(db_path: Path, batch: int = 500):
+def _run_classify(db_path: Path, batch: int = 500, extra_args: list[str] | None = None):
     module = _load_classify_module()
-    module.run(SimpleNamespace(db_path=str(db_path), batch=batch))
+    extras = extra_args or []
+    reclassify_all = "--reclassify-all" in extras
+    only_unscored = "--only-unscored" in extras  # deprecated alias, kept for back-compat
+    module.run(
+        SimpleNamespace(
+            db_path=str(db_path),
+            batch=batch,
+            reclassify_all=reclassify_all,
+            only_unscored=only_unscored,
+        )
+    )
 
 
 def _run_list_clusters(
@@ -270,6 +301,34 @@ def test_classify_work_assigns_ssrf_bucket(tmp_path: Path, capsys) -> None:
     assert summary["by_cluster"].get("gf:ssrf") == 1
 
 
+def test_upload_rows_prefer_upload_fields_over_generic_lfi(tmp_path: Path) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="upload:1",
+        url_path="/api/users/avatar",
+        method="POST",
+        case_type="upload",
+        body_params={"file": "avatar.png"},
+    )
+
+    _run_classify(db_path)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT cluster_key, priority_score, priority_reason "
+            "FROM work_items WHERE queue_key = ?",
+            ("upload:1",),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row[0] == "gf:upload_fields"
+    assert row[1] == 40
+    assert row[2] == "gf:lfi+gf:upload_fields"
+
+
 def test_classify_work_deterministic(tmp_path: Path, capsys) -> None:
     db_path = _make_fresh_db(tmp_path)
     _insert_work_item(
@@ -297,9 +356,11 @@ def test_classify_work_deterministic(tmp_path: Path, capsys) -> None:
     finally:
         conn.close()
 
-    # Re-running should be a no-op because classify-work only touches rows with
-    # priority_score=0 AND cluster_key IS NULL. We assert both the output
-    # summary and the stored rows are unchanged.
+    # Re-running classify-work with the safe default predicate must not
+    # touch already-scored rows — otherwise an operator running it as a
+    # routine "refresh" would silently overwrite manual triage. Re-running
+    # with --reclassify-all is the explicit opt-in that re-applies the
+    # current bucket table to every pending row.
     _run_classify(db_path)
     second = capsys.readouterr().out
 
@@ -316,8 +377,25 @@ def test_classify_work_deterministic(tmp_path: Path, capsys) -> None:
     first_summary = json.loads(first)
     second_summary = json.loads(second)
     assert first_summary["classified"] == 2
+    # Default predicate is narrow: scored rows are skipped on re-run.
     assert second_summary["classified"] == 0
     assert second_summary["updated"] == 0
+
+    # --reclassify-all re-applies the bucket table to every pending row
+    # (the deliberate path for picking up _BUCKETS edits without resetting).
+    _run_classify(db_path, extra_args=["--reclassify-all"])
+    third = capsys.readouterr().out
+    third_summary = json.loads(third)
+    assert third_summary["classified"] == 2
+    assert third_summary["updated"] == 2
+
+    # Deprecated --only-unscored alias still works as a no-op when every row
+    # is already scored, so older runbooks/CI do not break mid-cutover.
+    _run_classify(db_path, extra_args=["--only-unscored"])
+    fourth = capsys.readouterr().out
+    fourth_summary = json.loads(fourth)
+    assert fourth_summary["classified"] == 0
+    assert fourth_summary["updated"] == 0
 
 
 def test_classify_work_ignores_non_pending_consumable_rows(tmp_path: Path, capsys) -> None:
@@ -384,6 +462,13 @@ def test_classify_work_inert_type_terminates(tmp_path: Path, capsys) -> None:
     assert row[3] == 0
 
 
+def test_classify_type_marks_archive_extensions_inert() -> None:
+    module = _load_classify_lib_module()
+
+    assert module.classify_type("GET", "/backup.zip", "", "") == "archive"
+    assert module.classify_type("GET", "/exports/site.tar.gz", "", "") == "archive"
+
+
 def test_classify_work_path_fallback(tmp_path: Path) -> None:
     db_path = _make_fresh_db(tmp_path)
     _insert_work_item(
@@ -414,6 +499,7 @@ def test_fetch_by_priority_auto_routes_by_type(tmp_path: Path, capsys) -> None:
     seeds = [
         ("api-rce", "api", 50, "gf:rce"),
         ("js-ssrf", "javascript", 45, "gf:ssrf"),
+        ("unknown-trust", "unknown", 35, "gf:trust_surface"),
         ("unknown-high", "unknown", 99, "path:/unknown"),
         ("page-low", "page", 5, "path:/page"),
     ]
@@ -434,13 +520,123 @@ def test_fetch_by_priority_auto_routes_by_type(tmp_path: Path, capsys) -> None:
     assert [row["queue_key"] for row in payload] == [
         "api-rce",
         "js-ssrf",
+        "unknown-trust",
         "page-low",
     ]
     assert [row["assigned_agent"] for row in payload] == [
         "vulnerability-analyst",
         "source-analyzer",
+        "vulnerability-analyst",
         "source-analyzer",
     ]
+
+
+def test_db_insert_inline_classifies_unknown_trust_surface(tmp_path: Path) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    db_module = _load_db_module()
+
+    db_module.db_insert_work_item(
+        str(db_path),
+        queue_key="unknown:trust",
+        method="GET",
+        url="https://target.example/oauth/callback",
+        url_path="/oauth/callback",
+        query_params="{}",
+        body_params="{}",
+        path_params="{}",
+        case_type="unknown",
+        source="test",
+        params_key_sig="",
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT type, status, priority_score, cluster_key, priority_reason "
+            "FROM work_items WHERE queue_key = ?",
+            ("unknown:trust",),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row == ("unknown", "pending", 35, "gf:trust_surface", "gf:trust_surface")
+
+
+def test_proxy_insert_uses_shared_inline_classification(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    collector = module.CaseCollector()
+    collector.engagement_dir = str(engagement_dir)
+    collector._init_db()
+
+    case_type = collector._classify_type("GET", "/oauth/callback", "", {})
+    assert case_type == "unknown"
+    collector._insert_case(
+        queue_key="variant:1:unknown",
+        request_variant_id=1,
+        service_id=None,
+        auth_context="anonymous",
+        method="GET",
+        url="https://target.example/oauth/callback",
+        url_path="/oauth/callback",
+        params={
+            "query_params": "{}",
+            "body_params": "{}",
+            "path_params": "{}",
+            "cookie_params": "{}",
+        },
+        headers="{}",
+        body=None,
+        content_type="",
+        content_length=0,
+        response_status=200,
+        response_headers="{}",
+        response_size=0,
+        response_snippet=None,
+        case_type=case_type,
+        params_key_sig="",
+    )
+
+    conn = sqlite3.connect(str(engagement_dir / "cases.db"))
+    try:
+        row = conn.execute(
+            "SELECT type, status, priority_score, cluster_key, priority_reason "
+            "FROM work_items WHERE queue_key = ?",
+            ("variant:1:unknown",),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row == ("unknown", "pending", 35, "gf:trust_surface", "gf:trust_surface")
+
+
+def test_fetch_by_priority_vuln_agent_routes_scored_unknown_only(
+    tmp_path: Path, capsys
+) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="unknown-trust",
+        url_path="/oauth/callback",
+        case_type="unknown",
+        priority_score=35,
+        cluster_key="gf:trust_surface",
+    )
+    _insert_work_item(
+        db_path,
+        queue_key="unknown-path",
+        url_path="/misc/path",
+        case_type="unknown",
+        priority_score=99,
+        cluster_key="path:/misc/path",
+    )
+
+    _run_dispatch(db_path, "fetch-by-priority", ["10", "vulnerability-analyst-1"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["queue_key"] for row in payload] == ["unknown-trust"]
+    assert payload[0]["assigned_agent"] == "vulnerability-analyst-1"
 
 
 def test_fetch_by_priority_known_agent_filters_to_routed_types(tmp_path: Path, capsys) -> None:
@@ -865,140 +1061,14 @@ def _bulk_insert_for_host(
         conn.close()
 
 
-def test_per_host_budget_caps_content_rich_at_1000(tmp_path: Path) -> None:
-    """A typical content-rich host caps at 1000 active rows. The 1001st URL
-    must defer with cluster_key='deferred:per-host-budget-exceeded' rather
-    than admit."""
-    classify_lib = _load_classify_lib_module()
-    db_path = _make_fresh_db(tmp_path)
-
-    # Default content-rich tier returns 1000.
-    assert classify_lib.per_host_budget("example.test") == classify_lib.PER_HOST_BUDGET_CONTENT_RICH
-    assert classify_lib.PER_HOST_BUDGET_CONTENT_RICH == 1000
-
-    _bulk_insert_for_host(
-        db_path,
-        host="example.test",
-        n_pending=1000,
-        queue_prefix="content",
-    )
-
-    # The view should report the host at exactly 1000 active rows.
-    assert classify_lib.host_active_count(str(db_path), "example.test") == 1000
-
-    # Now the budget gate replicates the ingest decision: the next URL would
-    # exceed the budget, so it must be inserted as deferred.
-    ingest = _load_ingest_module()
-    ingest._insert_budget_exceeded_work_item(
-        db_path=str(db_path),
-        method="GET",
-        url="https://example.test/over1001",
-        url_path="/over1001",
-        query_params={},
-        body_params={},
-        path_params={},
-        cookie_params={},
-        case_type="page",
-        source="test",
-        params_sig="",
-        auth_context="anonymous",
-        host="example.test",
-        budget=1000,
-    )
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        pending = conn.execute(
-            "SELECT COUNT(*) FROM work_items WHERE status='pending' AND url LIKE 'https://example.test/%'"
-        ).fetchone()[0]
-        deferred = conn.execute(
-            "SELECT COUNT(*), MAX(cluster_key), MAX(terminal_reason) "
-            "FROM work_items WHERE status='deferred' AND url LIKE 'https://example.test/%'"
-        ).fetchone()
-    finally:
-        conn.close()
-
-    assert pending == 1000
-    assert deferred[0] == 1
-    assert deferred[1] == "deferred:per-host-budget-exceeded"
-    assert deferred[2] == "per-host-budget-exceeded"
-
-
-def test_per_host_budget_api_tier_at_1000(tmp_path: Path) -> None:
-    """An ``api.*`` host caps at 1000 (Round 5 raised this from 200 because
-    the lower cap silently truncated legitimate microservice surface).
-    Operators still cap noisy hosts lower with ``--budget-override``."""
-    classify_lib = _load_classify_lib_module()
-    db_path = _make_fresh_db(tmp_path)
-
-    # api.* matches the API-tier rule.
-    assert classify_lib.per_host_budget("api.example.test") == classify_lib.PER_HOST_BUDGET_API_TIER
-    assert classify_lib.PER_HOST_BUDGET_API_TIER == 1000
-
-    # *.api.* also matches.
-    assert classify_lib.per_host_budget("staging.api.example.test") == classify_lib.PER_HOST_BUDGET_API_TIER
-
-    _bulk_insert_for_host(
-        db_path,
-        host="api.example.test",
-        n_pending=1000,
-        queue_prefix="api",
-    )
-
-    assert classify_lib.host_active_count(str(db_path), "api.example.test") == 1000
-
-
-def test_per_host_budget_sitemap_at_2000(tmp_path: Path) -> None:
-    """A sitemap-bearing host raises the budget to 2000 because the sitemap
-    declares the canonical surface and we must not truncate below it. The
-    sitemap-bearing flag is supplied by the operator at ingestion time
-    (``--sitemap-host`` flag or backend intel lookup)."""
-    classify_lib = _load_classify_lib_module()
-
-    sitemap_hosts = {"docs.example.test"}
-    assert classify_lib.per_host_budget(
-        "docs.example.test", sitemap_hosts=sitemap_hosts
-    ) == classify_lib.PER_HOST_BUDGET_SITEMAP_BEARING
-    assert classify_lib.PER_HOST_BUDGET_SITEMAP_BEARING == 2000
-
-    # Sitemap-bearing wins over API-tier when both apply: the sitemap is the
-    # canonical surface declaration, so honor it.
-    assert classify_lib.per_host_budget(
-        "api.example.test", sitemap_hosts={"api.example.test"}
-    ) == classify_lib.PER_HOST_BUDGET_SITEMAP_BEARING
-
-
-def test_per_host_budget_override_via_dispatch_context(tmp_path: Path) -> None:
-    """The operator passes ``--budget-override host:N`` to override the
-    default. The override beats every heuristic rule (API-tier, sitemap-
-    bearing, and content-rich) so the operator can both raise and lower the
-    cap on a specific host without rewriting the heuristic table."""
-    classify_lib = _load_classify_lib_module()
-
-    # parse_budget_overrides handles the operator-side flag parsing and
-    # normalizes hostnames.
-    overrides = classify_lib.parse_budget_overrides(
-        ["EXAMPLE.test:5000", "api.example.test:50"]
-    )
-    assert overrides == {"example.test": 5000, "api.example.test": 50}
-
-    # Override raises a content-rich host above its 1000 default.
-    assert classify_lib.per_host_budget("example.test", overrides=overrides) == 5000
-    # Override LOWERS an API-tier host below its 1000 default.
-    assert classify_lib.per_host_budget("api.example.test", overrides=overrides) == 50
-
-    # Sitemap-bearing AND override → override still wins.
-    assert classify_lib.per_host_budget(
-        "example.test",
-        sitemap_hosts={"example.test"},
-        overrides=overrides,
-    ) == 5000
-
-    # Bad override input fails fast.
-    with pytest.raises(ValueError):
-        classify_lib.parse_budget_overrides(["malformed-no-colon"])
-    with pytest.raises(ValueError):
-        classify_lib.parse_budget_overrides(["host.test:notanumber"])
+# The per-host budget tests (caps_content_rich_at_1000,
+# api_tier_at_1000, sitemap_at_2000, override_via_dispatch_context) and the
+# classify-work per_host_budget signal test were removed when the budget gate
+# was deleted in the mid-engagement refactor — the silent 4,300-URL deferral
+# bug they protected against no longer exists because all URLs now ingest
+# (low-signal types stamp `status='skipped'`). The view tests below still
+# exercise `work_items_per_host` directly so the view's port-stripping and
+# IPv6 handling remain regression-protected.
 
 
 def test_work_items_per_host_view_aggregates_across_statuses(tmp_path: Path) -> None:
@@ -1044,46 +1114,16 @@ def test_work_items_per_host_view_aggregates_across_statuses(tmp_path: Path) -> 
     assert rows["beta.example.test"]["pending"] == 1
 
 
-def test_classify_work_emits_per_host_budget_signal(tmp_path: Path, capsys) -> None:
-    """``classify-work`` includes a ``per_host_budget`` summary in its JSON
-    output so the operator can spot hosts whose budget gate fired without
-    separately reading the view. The signal is the deferred-count, not an
-    at_budget flag computed against the default tier — operator overrides at
-    ingestion time would make a default-tier comparison wrong."""
-    db_path = _make_fresh_db(tmp_path)
-    # Seed an api-tier host at its 1000 cap (raised in Round 5 from 200).
-    _bulk_insert_for_host(
-        db_path,
-        host="api.example.test",
-        n_pending=1000,
-        n_deferred=5,
-        queue_prefix="apicap",
-    )
-
-    _run_classify(db_path)
-    summary = json.loads(capsys.readouterr().out)
-
-    per_host = {entry["host"]: entry for entry in summary["per_host_budget"]}
-    assert "api.example.test" in per_host
-    api_entry = per_host["api.example.test"]
-    assert api_entry["budget"] == 1000
-    assert api_entry["active_count"] == 1000
-    # at_budget was removed — the authoritative signal is the deferred count.
-    assert "at_budget" not in api_entry
-    assert api_entry["budget_deferred_count"] == 5
-
-
 def test_work_items_per_host_view_strips_explicit_port(tmp_path: Path) -> None:
     """B6 regression: URLs with an explicit port collapse onto the same host
     row as their portless siblings.
 
-    The view used to extract host as ``example.com:8443`` while
-    ``host_active_count`` looks up the host via ``urlparse(url).hostname``
-    (which never carries a port), silently disabling the per-host budget
-    gate for explicit-port URLs. The fix strips the port in the view's host
+    The view used to extract host as ``example.com:8443`` while host
+    aggregation lookups looked up the host via ``urlparse(url).hostname``
+    (which never carries a port), silently disabling per-host counting for
+    explicit-port URLs. The fix strips the port in the view's host
     expression so both forms aggregate on ``example.com``.
     """
-    classify_lib = _load_classify_lib_module()
     db_path = _make_fresh_db(tmp_path)
 
     conn = sqlite3.connect(str(db_path))
@@ -1112,14 +1152,8 @@ def test_work_items_per_host_view_strips_explicit_port(tmp_path: Path) -> None:
     rollup = dict(rows)
     assert rollup == {"example.com": 3, "other.example": 1}, rollup
 
-    # host_active_count looks up by portless host and must return 3 — the
-    # bug it regression-protects against was that it returned 0 because the
-    # view stored ``example.com:8443`` and ``example.com`` separately.
-    assert classify_lib.host_active_count(str(db_path), "example.com") == 3
-
 
 def test_work_items_per_host_view_preserves_ipv6_literal(tmp_path: Path) -> None:
-    classify_lib = _load_classify_lib_module()
     db_path = _make_fresh_db(tmp_path)
 
     conn = sqlite3.connect(str(db_path))
@@ -1144,15 +1178,6 @@ def test_work_items_per_host_view_preserves_ipv6_literal(tmp_path: Path) -> None
 
     rollup = dict(rows)
     assert rollup == {"2001:db8::1": 2, "2001:db8::2": 1}, rollup
-    assert classify_lib.host_active_count(str(db_path), "2001:db8::1") == 2
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute("DROP VIEW work_items_per_host")
-        conn.commit()
-    finally:
-        conn.close()
-    assert classify_lib.host_active_count(str(db_path), "2001:db8::1") == 2
 
 
 def test_egress_script_logic_handles_dead_hosts_and_empty_input() -> None:

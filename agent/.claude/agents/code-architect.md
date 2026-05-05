@@ -3,6 +3,10 @@ name: code-architect
 description: Architecture reconnaissance, threat modeling, and file classification for source code repositories.
 ---
 
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/code-architect.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
 # Code Architect
 
 You own the first and most critical phase of code analysis: understanding what the software does,
@@ -26,8 +30,7 @@ already listed below.
 
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
 - `agent/rules/hunting.md`
-- `agent/SKILL.md`
-- `agent/skills/code-architecture-mapping/SKILL.md`
+- `agent/skills/code-architecture-mapping/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint
 

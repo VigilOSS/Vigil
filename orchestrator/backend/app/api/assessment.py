@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..services import activity as activity_service
 from ..services import state_manager
@@ -1066,6 +1066,15 @@ _REASONING = Literal["low", "medium", "high"]
 _CONFIDENCE = Literal["low", "medium", "high"]
 
 
+# Roles exempt from declaring `skills` on dispatch. The operator coordinates
+# phases rather than executing a single skill, so requiring an explicit skill
+# list on operator dispatches would be misleading. Every other specialist role
+# must declare which skills it loaded so the dispatch row is a truthful audit
+# of the specialist context. Mirrors `_DISPATCH_ROLES_WITHOUT_SKILLS` in
+# `agent/scripts/assess/lib/contracts.py`; keep the two in sync.
+_DISPATCH_ROLES_WITHOUT_SKILLS: frozenset[str] = frozenset({"operator"})
+
+
 class DispatchCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1079,6 +1088,27 @@ class DispatchCreate(BaseModel):
     reasoning: _REASONING | None = None
     dispatch_mode: _DISPATCH_MODE | None = None
     finding_slugs: list[str] | None = None
+    skills: str | None = Field(default=None, max_length=4096)
+
+    @model_validator(mode="after")
+    def _enforce_skills_for_specialists(self) -> "DispatchCreate":
+        """Specialist dispatches must declare which skills the agent loaded.
+
+        The dispatch row is the audit surface for "what context did this
+        specialist actually carry"; without a skill list it loses the
+        provenance report-writer relies on. Operators are exempt because
+        they coordinate phases rather than executing a single skill.
+        """
+        role = (self.agent_role or "").strip()
+        if role in _DISPATCH_ROLES_WITHOUT_SKILLS:
+            return self
+        skills = (self.skills or "").strip()
+        if not skills:
+            raise ValueError(
+                f"skills is required for role '{role}'; "
+                "list at least one skill name from `aith assess list-skills`"
+            )
+        return self
 
 
 class DispatchUpdate(BaseModel):
@@ -1158,6 +1188,7 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
         reasoning=request.reasoning,
         dispatch_mode=request.dispatch_mode,
         finding_slugs=request.finding_slugs,
+        skills=request.skills,
     )
     _audit_assessment_mutation(
         engagement.id,

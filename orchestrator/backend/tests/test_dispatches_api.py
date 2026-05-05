@@ -53,6 +53,7 @@ def test_dispatch_post_get_list_patch(client, isolate_settings) -> None:
         "reasoning": "high",
         "dispatch_mode": "item-iterating",
         "finding_slugs": [],
+        "skills": "auth-bypass,business-logic-testing",
     }
     resp = client.post(f"{BASE}/dispatches", json=payload)
     assert resp.status_code == 201, resp.text
@@ -61,6 +62,7 @@ def test_dispatch_post_get_list_patch(client, isolate_settings) -> None:
     assert row["agent_role"] == "vulnerability-analyst"
     assert row["status"] == "in-progress"
     assert row["finding_slugs"] == []
+    assert row["skills"] == "auth-bypass,business-logic-testing"
     assert row["dispatched_at"]  # server-stamped when not supplied
 
     # GET one
@@ -102,7 +104,11 @@ def test_dispatch_post_get_list_patch(client, isolate_settings) -> None:
 def test_dispatch_duplicate_agent_id_returns_409(client, isolate_settings) -> None:
     _seed(client, isolate_settings)
 
-    payload = {"agent_id": "AG-DUP", "agent_role": "recon-specialist"}
+    payload = {
+        "agent_id": "AG-DUP",
+        "agent_role": "recon-specialist",
+        "skills": "subdomain-enumeration",
+    }
     resp = client.post(f"{BASE}/dispatches", json=payload)
     assert resp.status_code == 201
     resp2 = client.post(f"{BASE}/dispatches", json=payload)
@@ -121,11 +127,14 @@ def test_dispatch_list_filters(client, isolate_settings) -> None:
     _seed(client, isolate_settings)
     rows = [
         {"agent_id": "F1", "agent_role": "recon-specialist", "task": "phase 1 enum",
-         "status": "completed", "dispatched_at": "2026-04-27T09:00:00Z"},
+         "status": "completed", "dispatched_at": "2026-04-27T09:00:00Z",
+         "skills": "subdomain-enumeration"},
         {"agent_id": "F2", "agent_role": "vulnerability-analyst", "task": "IDOR sweep",
-         "status": "in-progress", "dispatched_at": "2026-04-28T10:00:00Z"},
+         "status": "in-progress", "dispatched_at": "2026-04-28T10:00:00Z",
+         "skills": "auth-bypass"},
         {"agent_id": "F3", "agent_role": "vulnerability-analyst", "task": "SQLi probe",
-         "status": "failed", "dispatched_at": "2026-04-28T11:00:00Z"},
+         "status": "failed", "dispatched_at": "2026-04-28T11:00:00Z",
+         "skills": "sql-injection"},
     ]
     for r in rows:
         assert client.post(f"{BASE}/dispatches", json=r).status_code == 201
@@ -154,6 +163,7 @@ def test_dispatch_validation_rejects_bad_status_and_unknown_fields(client, isola
         "agent_id": "BAD-1",
         "agent_role": "recon-specialist",
         "status": "in_progress",  # underscore instead of hyphen
+        "skills": "subdomain-enumeration",
     })
     assert bad.status_code == 422
 
@@ -162,5 +172,43 @@ def test_dispatch_validation_rejects_bad_status_and_unknown_fields(client, isola
         "agent_id": "BAD-2",
         "agent_role": "recon-specialist",
         "garbage_key": "nope",
+        "skills": "subdomain-enumeration",
     })
     assert bad.status_code == 422
+
+
+def test_dispatch_specialist_requires_skills(client, isolate_settings) -> None:
+    """Specialist roles must declare at least one skill so the dispatch row is auditable."""
+    _seed(client, isolate_settings)
+    bad = client.post(f"{BASE}/dispatches", json={
+        "agent_id": "NO-SKILLS",
+        "agent_role": "vulnerability-analyst",
+    })
+    assert bad.status_code == 422, bad.text
+    assert "skills is required" in bad.text
+
+
+def test_dispatch_operator_role_skills_optional(client, isolate_settings) -> None:
+    """Operator coordinates phases and is exempt from the skills requirement."""
+    _seed(client, isolate_settings)
+    resp = client.post(f"{BASE}/dispatches", json={
+        "agent_id": "OP-1",
+        "agent_role": "operator",
+    })
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["skills"] is None
+
+
+def test_dispatch_skills_round_trip(client, isolate_settings) -> None:
+    """skills value is persisted through POST and surfaces unchanged on GET."""
+    _seed(client, isolate_settings)
+    resp = client.post(f"{BASE}/dispatches", json={
+        "agent_id": "SK-1",
+        "agent_role": "surface-collector",
+        "skills": "surface-collection,gau-triage",
+    })
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["skills"] == "surface-collection,gau-triage"
+    fetched = client.get(f"{BASE}/dispatches/SK-1")
+    assert fetched.status_code == 200
+    assert fetched.json()["skills"] == "surface-collection,gau-triage"

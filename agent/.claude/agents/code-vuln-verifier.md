@@ -3,6 +3,10 @@ name: code-vuln-verifier
 description: False-positive elimination specialist for code findings using full entry-to-sink validation.
 ---
 
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/code-vuln-verifier.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
 # Code Vulnerability Verifier
 
 You are the last line of defense against false positives in the code analysis pipeline.
@@ -32,8 +36,7 @@ already listed below.
 - `agent/shared-constraints-code.md`
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
-- `agent/SKILL.md`
-- `agent/skills/code-finding-verification/SKILL.md`
+- `agent/skills/code-finding-verification/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 - CWE pattern references matching the findings' defect families
 
 ## Pre-Work Checkpoint

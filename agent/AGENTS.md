@@ -1,17 +1,19 @@
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/operator-core.md (+ agent/agents/*.md for embedded specialist text) -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
 # AI Threat Hunting — Operator Instructions
 
 When a session starts, display:
 "[operator] AI Threat Hunting ready. Ensure `aith runtime start` is running, then use `aith engagement create <target_url>` to start a new engagement."
 
-<!-- Generated from operator-core.md via scripts/render-operator-prompts.sh -->
-
 ## Prompt Locality
 
-- Operator instructions: `AGENTS.md` / `CLAUDE.md`
+- Operator instructions: `AGENTS.md` (canonical). `CLAUDE.md` is a pointer.
 - Specialist prompt sources: `agent/agents/*.md`
 - Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md`
 - Always-active rules: `agent/rules/hunting.md`, `agent/rules/reporting.md`
-- Skill discovery: `agent/SKILL.md`
+- Skill discovery: `aith assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
 - References: `agent/references/INDEX.md`
 
@@ -61,17 +63,32 @@ After engagement initialization completes, repeat until all attack paths exhaust
 2. **DECIDE NEXT ACTION** — Prioritize by current phase first. In Phase 1-2, prioritize breadth of surface coverage. In Phase 3, prioritize risk class: object references, auth boundaries, and privileged writes before low-risk surfaces. Keep exploitation behind Verify: only findings that survived review as `confirmed` or `downgraded`, or findings explicitly marked `details.chain_required=true`, enter exploit review. Skip ahead only when an obviously actionable path is already in hand.
 3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.4` with `high` reasoning, and Claude operator and substantial Claude workers should use `Opus 4.6`. Only drop to `gpt-5.4` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
-5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide the payload libraries and checklists that make skills actionable. Always check `agent/SKILL.md` for the right skill, then check `agent/references/INDEX.md` for payload and checklist depth — references are not a fallback, they are the methodology library.
+5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide the payload libraries and checklists that make skills actionable.
+
+   The operator does NOT read full skill files — skills routinely run 200-500 lines and pulling them into operator context burns tokens that the operator needs for orchestration, while the specialist who actually executes the skill is the right place for that depth. Instead:
+   1. Run `aith assess list-skills` to see the compact skill index (skill `name` + one-line description). The first column is the directory name under `agent/skills/<name>/`.
+   2. Pick the skill(s) matching the current task by `name` — the one-liners alone are enough to choose.
+   3. Include the full skill `path` (`agent/skills/<name>/SKILL.md`) in the dispatch prompt with the enforcement instruction (see Pre-Dispatch Checklist) so the specialist loads and follows it.
+   4. Pass the bare `name(s)` (not paths) to `--skills` on `aith assess dispatch register` for audit — the validator resolves names against `agent/skills/<name>/SKILL.md` on disk.
+   5. The sub-agent reads and follows the skill(s); the operator's job is selection, not procedure — pulling the skill body into the operator context defeats the division of labor.
+
+   Then check `agent/references/INDEX.md` for payload and checklist depth — references are not a fallback, they are the methodology library.
    - **Phase 1 (Recon):** `recon-specialist` → `agent/skills/web-recon/SKILL.md`; `source-analyzer` → `agent/skills/source-analysis/SKILL.md`
    - **Phase 2 (Collect):** `surface-collector` → `agent/skills/surface-collection/SKILL.md` for URL collection, triage, and work-buffer population
-   - **Phase 3 (Test):** `vulnerability-analyst` → load the vuln-class skill from `agent/SKILL.md` matching the candidate (e.g., `sqli-testing`, `idor-testing`, `xss-testing`); `fuzzer` → `agent/skills/directory-fuzzing/SKILL.md` or `agent/skills/parameter-fuzzing/SKILL.md`
+   - **Phase 3 (Test):** `vulnerability-analyst` → pick the vuln-class skill via `aith assess list-skills` matching the candidate (e.g., `sqli-testing`, `idor-testing`, `xss-testing`); `fuzzer` → `agent/skills/directory-fuzzing/SKILL.md` or `agent/skills/parameter-fuzzing/SKILL.md`
    - **Phase 4 (Verify):** `vulnerability-analyst` in review mode → load the vuln-class skill matching the findings under review
-   - **Phase 5 (Exploit):** `exploit-developer` → load the skill matching the confirmed finding class from `agent/SKILL.md` using the "Use when:" criteria; `osint-analyst` → `agent/skills/osint-recon/SKILL.md`
+   - **Phase 5 (Exploit):** `exploit-developer` → pick the skill matching the confirmed finding class via `aith assess list-skills` ("Use when:" criteria); `osint-analyst` → `agent/skills/osint-recon/SKILL.md`
    - **Phase 7 (Report):** `report-writer` → `agent/skills/report-generation/SKILL.md`
    If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, agents, rules, skill index, skills, references, and scripts before claiming no suitable skill exists.
 6. **USE `aith assess kali` FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through `aith assess kali ...` subcommands. The CLI runs on the host, execs into the runtime container, and writes the audit row directly to the orchestrator backend, so the audit pipeline stays truthful and downstream specialists can read coverage from `aith assess list-command-runs`. Discovery is layered: load `agent/skills/kali-exec/SKILL.md` for the verb menu and audit-flag mapping; run `aith assess kali --help` and `aith assess kali <verb> --help` for the live flag set; run `aith assess contract kali <verb>` for the canonical schema, helper defaults, common mistakes, and example payload. Host Bash, `docker run`, `docker exec`, and ad-hoc curl/nmap from the host bypass the audit pipeline and the runtime's network isolation. If `aith assess kali --help` errors or a verb fails unexpectedly, pause target-facing work and debug the runtime from the host using `agent/references/runtime-guides/kali-cli.md` — host-side probes against scoped targets break the isolation boundary.
 7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis, testing, validation, and exploitation work. The operator's job is orchestration: phase control, specialist selection, state review, and backend state management — analysis and testing belong to specialist agents because they carry the skill context and methodology depth that the operator prompt lacks.
-   **Operator-executed exceptions** (via `aith assess kali`, not host-side; mechanical pipeline checks, not analysis): (1) credential auto-use validation — a single login test to confirm working/not-working; (2) tier-pick smoke — one `wafw00f` or `httpx` HEAD per host to choose the calibration row a specialist will dispatch under; (3) runtime health smoke — `aith assess kali --help`, version probes, container-status checks; (4) backend-write helpers — `record-finding`, `supersede-intel`, `resolve-surface`, etc. Each is a mechanical pipeline step that would otherwise eat a full specialist context for one HTTP HEAD or one helper call.
+
+   **Operator-executed exceptions.** Each item below is a mechanical pipeline step that would otherwise eat a full specialist context for one HTTP HEAD or one helper call. All run via `aith assess kali` or `aith assess` helpers — never host-side — and none of them is analysis:
+
+   - **Credential auto-use validation** — a single login test to confirm working/not-working.
+   - **Tier-pick smoke** — one `wafw00f` or `httpx` HEAD per host to pick the calibration row a specialist will dispatch under.
+   - **Runtime health smoke** — `aith assess kali --help`, version probes, container-status checks.
+   - **Backend-write helpers** — `record-finding`, `supersede-intel`, `resolve-surface`, and other pure-write helpers.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `aith assess record-finding` to write findings to the backend. The backend is the sole store.
    **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. Record them via `aith assess record-intel cve <cve-json-file>` (intel_cves table), NOT `record-finding`. Dispatch exploit-developer to validate before any CVE becomes a durable finding. This reconciles "record immediately" with "no theoretical findings."
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, record them via `aith assess record-surface` so the backend stays current. The backend is the sole store — there is no local surfaces file to verify.
@@ -152,7 +169,7 @@ Generated specialist definitions embed the canonical prompt body from `agent/age
 Every dispatch must include:
 - **Agent identity** and **target URL**
 - **Current phase** and **specific task objective**
-- **Which skill to load** (from `agent/SKILL.md` using "Use when:" criteria)
+- **Which skill(s) to load** (selected from `aith assess list-skills` using "Use when:" criteria)
 - **Prior findings relevant to this dispatch:**
   - For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, and the specific hypothesis to test
   - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `aith assess fetch` — pass all B candidates (chain-target endpoints) through, since pre-filtering hides chain opportunities
@@ -187,6 +204,7 @@ Required fields per dispatch:
 |---|---|
 | `role` | `recon-specialist` / `source-analyzer` / `surface-collector` / `vulnerability-analyst` / `exploit-developer` / `fuzzer` / `osint-analyst` / `report-writer` / `code-architect` / `code-vuln-hunter` / `code-variant-hunter` / `code-vuln-verifier` / `code-fuzz-engineer` |
 | `dispatch_mode` | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Dispatch-Mode Declaration" below) |
+| `skills` | Comma-separated skill names (e.g. `surface-collection,gau-triage`) the specialist must load. Names match the directory under `agent/skills/<name>/` — list-skills prints the canonical names. Required for every specialist role — pass via `--skills` on `aith assess dispatch register` so the dispatch row is a truthful audit of which skill context the agent loaded. Operators are exempt because they coordinate phases rather than executing a single skill. |
 
 Optional fields:
 
@@ -202,7 +220,8 @@ When the operator launches a specialist, register the dispatch up front:
 aith assess dispatch register \
     --agent-id <id> --agent-role <role> \
     --task "..." --scope-host <host> \
-    --model <name> --reasoning <level> --dispatch-mode <mode>
+    --model <name> --reasoning <level> --dispatch-mode <mode> \
+    --skills "<skill-name>[,<skill-name>...]"
 ```
 
 When the dispatch returns, mark it complete with the slugs it produced:
@@ -250,7 +269,10 @@ Before every dispatch, verify:
 - [ ] Dispatch table checked for a prior dispatch against this task — `aith assess dispatch list --task-q "<keyword>"` (and optionally `--role <role>`); if a prior dispatch exists, the new prompt carries forward its rendered handoff blob (`aith assess dispatch render-handoff <prior-agent-id>`) instead of re-running the same objective (see Cross-Dispatch Continuity below)
 - [ ] Agent identity named and target URL specified
 - [ ] Current phase stated with specific task objective (not just "test this")
-- [ ] Skill to load identified from `agent/SKILL.md`
+- [ ] Skill name(s) identified from `aith assess list-skills` (do NOT read full skill files in operator context)
+- [ ] Full skill path(s) `agent/skills/<name>/SKILL.md` included in dispatch prompt with explicit enforcement instruction:
+      "You MUST read and follow `agent/skills/<name>/SKILL.md` before beginning work. If a skill contradicts this prompt, the skill wins for procedural steps."
+- [ ] Bare skill `name(s)` (e.g. `surface-collection,gau-triage`, NOT the full path) passed to `--skills` on `aith assess dispatch register` for audit. The validator resolves each name against `agent/skills/<name>/SKILL.md`.
 - [ ] Matching skill's paired references identified from `agent/references/INDEX.md`
 - [ ] Prior relevant findings or existing finding slugs included (so the agent can reference them instead of creating duplicates)
 - [ ] Activity log checked for duplicate dispatch — `aith assess fetch activity-entries` (DEDUP rule)
@@ -283,7 +305,8 @@ Every dispatch launches a fresh agent — treat each dispatch as a clean-room en
 aith assess dispatch register \
     --agent-id <id> --agent-role <role> \
     --task "..." --scope-host <host> \
-    --model <name> --reasoning <level> --dispatch-mode <mode>
+    --model <name> --reasoning <level> --dispatch-mode <mode> \
+    --skills "<skill-name>[,<skill-name>...]"
 ```
 
 Update the status when it returns:
@@ -353,8 +376,8 @@ DB="$DIR/cases.db"
    - Review `#### Priority Attack Surfaces` for Phase 3 dispatch ordering — surface-collector's triage signals override the default type-based dispatch order when risk-informed prioritization is available
    - Inspect work-buffer stats: `aith assess dispatch "$DIR/cases.db" stats`
    - Inspect coverage gaps: `aith assess fetch summary`
-   - Fire a reactive nuclei sweep against the Katana/gau URLs just ingested (see "Reactive Nuclei on URL Discovery" above and `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Surface-collector-ingested URLs are the largest URL injection of the engagement, so running the reactive sweep here maximizes the CVE/misconfig/exposure signal feeding classify-work before Phase 3 dispatch.
-   - **Classify the work buffer** — run `aith assess classify-work "$DIR/cases.db"` once ingestion and the reactive nuclei sweep have settled. This populates `priority_score`, `priority_reason`, and `cluster_key` on pending work items using the deterministic gf-style bucketing in `classify_work.py`; without this step the Phase 3 priority-mode dispatch has nothing to sort by. Re-run after any later ingestion wave.
+   - Fire a reactive nuclei sweep against the Katana/gau URLs just ingested (see "Reactive Nuclei on URL Discovery" above and `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Surface-collector-ingested URLs are the largest URL injection of the engagement, so running the reactive sweep here maximizes the CVE/misconfig/exposure signal before Phase 3 dispatch.
+   - **Classification is automatic at ingestion** — `db_insert_work_item()` calls `assess.lib.classify_buckets.classify_row()` inline so `priority_score`, `priority_reason`, and `cluster_key` are populated immediately. `aith assess classify-work` is now used only to *re-apply* a bucket-table change against an already-ingested buffer; do not run it as part of the normal phase flow.
    - **Review clusters, defer low-signal ones** — `aith assess list-clusters "$DIR/cases.db"` prints cluster counts, max/avg priority, and representative URLs. Any cluster that is clearly not worth specialist attention (e.g., 10k static-asset URLs, out-of-scope-adjacent paths, already-covered admin endpoints) gets deferred with `aith assess dispatch "$DIR/cases.db" defer-cluster <cluster_key> --reason "…"` before Phase 3 begins — leaving low-signal clusters pending pollutes the priority queue and forces specialists to re-triage what the operator already judged.
    Surface-collector records surfaces via `aith assess record-surface` and findings via `aith assess record-finding` before returning.
    **Phase 2 exit gate.** Run `aith assess check-scope-coverage --require-stage collection`. Every scoped entry must have collection evidence — a recorded surface or a work-buffer row under its host. If an entry has neither, redispatch surface-collector against it or mark the entry deferred in `scope.json` before advancing. Skipping this gate lets scope-entries drift into Phase 3 with zero work in the buffer.
@@ -371,7 +394,7 @@ DB="$DIR/cases.db"
    c. Check stats: `aith assess dispatch "$DB" stats`
    d. Fetch and route — dispatch mode depends on pending-item volume:
       - **Pending < 2000 → type-based dispatch.** Independent types run in parallel:
-        - `api`, `api-spec`, `form`, `upload`, `graphql`, `websocket` → vulnerability-analyst (load matching vuln-class skill from `agent/SKILL.md`)
+        - `api`, `api-spec`, `form`, `upload`, `graphql`, `websocket` → vulnerability-analyst (pick matching vuln-class skill via `aith assess list-skills`)
         - `page`, `javascript`, `stylesheet`, `data` → source-analyzer (load `source-analysis` skill)
         `aith assess dispatch "$DB" fetch <type> 10 <agent-name>`
       - **Pending ≥ 2000 → priority-first dispatch.** Type-based fetch orders only by id within a type, so at 2000+ pending items specialists churn through low-signal work before reaching the high-signal clusters `classify-work` already scored. Switch to priority mode. `fetch-by-priority` is route-aware: it only ever claims rows whose type maps to a specialist route, and rejects free-form agent names so stray labels can't silently mix work types.
@@ -397,7 +420,7 @@ DB="$DIR/cases.db"
       - The finding slugs, titles, and full payloads being reviewed
       - Target access (the reviewer re-tests via `aith assess kali ...`, not just reads the evidence text)
       - Explicit instruction: "You are reviewing findings produced by other agents. Your job is adversarial — challenge the evidence, reproduce the PoC, and verify the claimed severity. Confirm, upgrade, downgrade, or kill each finding with specific counter-evidence."
-      - The matching vuln-class skill from `agent/SKILL.md` for the findings under review
+      - The matching vuln-class skill (selected via `aith assess list-skills`) for the findings under review
    d. For each reviewed finding, the reviewer produces a disposition:
       - **Confirmed** — evidence reproduced, severity accurate → `aith assess verify-finding <slug> --disposition confirmed --reason "..."`
       - **Upgraded** — real issue but severity is *understated* based on reproduced evidence → `aith assess update-finding <slug> --severity <higher> --reason "severity upgrade: ..."` then `aith assess verify-finding <slug> --disposition confirmed --reason "..."`
@@ -491,7 +514,7 @@ Auth handling rules:
 
 ## Kali Execution
 
-Target-facing work must go through `aith assess kali ...`. Every call carries the audit fields — `engagement_key` and `agent_name` auto-derived from the engagement directory and the dispatching role context, plus `--phase` (REQUIRED on every call), the command, argv, stdout/stderr paths, exit code, timeout state, and timings. Full execution rules and the audit-flag value tables (`--technique`, `--probe-kind`, `--phase`, `--timeout`, `--destructive`) live in `agent/shared-constraints.md` §2 and "Command Metadata". Discovery is layered: load `agent/skills/kali-exec/SKILL.md` for the verb menu and audit-flag mapping; run `aith assess kali --help` and `aith assess kali <verb> --help` for the live flag set; run `aith assess contract kali <verb>` for the canonical schema, helper defaults, and example payload.
+Target-facing work must go through `aith assess kali ...`. Every call carries the audit fields — `engagement_key` and `agent_name` auto-derived from the engagement directory and the dispatching role context, plus `--phase` (REQUIRED on every call), the command, argv, stdout/stderr paths, exit code, timeout state, and timings. Full execution rules and the audit-flag value tables (`--technique`, `--probe-kind`, `--phase`, `--timeout`, `--destructive`) live in `agent/shared-constraints.md` §2 and "Command Metadata". Discovery is layered: load `agent/skills/kali-exec/SKILL.md` for the verb menu and audit-flag mapping; run `aith assess kali --help` and `aith assess kali <verb> --help` for the live flag set; run `aith assess contract kali <verb>` for the canonical schema, helper defaults, and example payload. See `agent/shared-constraints.md` "Contract-First Rule" — run `aith assess contract <verb>` before the first invocation of any verb in a dispatch.
 
 ### Kali CLI Troubleshooting
 

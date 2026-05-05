@@ -72,11 +72,11 @@ render_prompt_locality() {
   cat <<'EOF'
 ## Prompt Locality
 
-- Operator instructions: `AGENTS.md` / `CLAUDE.md`
+- Operator instructions: `AGENTS.md` (canonical). `CLAUDE.md` is a pointer.
 - Specialist prompt sources: `agent/agents/*.md`
 - Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md`
 - Always-active rules: `agent/rules/hunting.md`, `agent/rules/reporting.md`
-- Skill discovery: `agent/SKILL.md`
+- Skill discovery: `aith assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
 - References: `agent/references/INDEX.md`
 
@@ -121,12 +121,14 @@ render_operator_prompt() {
   local out="$1"
   {
     cat <<'EOF'
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/operator-core.md (+ agent/agents/*.md for embedded specialist text) -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
 # AI Threat Hunting — Operator Instructions
 
 When a session starts, display:
 "[operator] AI Threat Hunting ready. Ensure `aith runtime start` is running, then use `aith engagement create <target_url>` to start a new engagement."
-
-<!-- Generated from operator-core.md via scripts/render-operator-prompts.sh -->
 
 EOF
     render_prompt_locality
@@ -153,7 +155,24 @@ EOF
 }
 
 render_claude() {
-  render_operator_prompt "$CLAUDE_OUT"
+  # CLAUDE.md is intentionally a thin pointer — AGENTS.md is the single
+  # canonical full prompt. Rendering both as full copies caused Cursor /
+  # Claude Code to load ~16.5k tokens 2-4x per turn (engagement wrapper +
+  # agent/CLAUDE.md + agent/AGENTS.md). Keeping CLAUDE.md as a pointer
+  # collapses that to a single load.
+  cat > "$CLAUDE_OUT" <<'EOF'
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- This file is intentionally a thin pointer to AGENTS.md so Claude Code -->
+<!-- does not load the same operator prompt twice. -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
+# AI Threat Hunting — Operator Instructions
+
+Read `AGENTS.md` (in this same directory) for the complete operator prompt.
+
+Do not load this file AND `AGENTS.md` — they would otherwise be identical.
+`AGENTS.md` is canonical.
+EOF
 }
 
 render_agents() {
@@ -174,9 +193,13 @@ name: operator
 description: Lead red team operator. Drives pentest methodology, coordinates phases, and manages state.
 ---
 
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/operator.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
 You are the lead red team operator.
 
-Load and follow the complete operator instructions from `CLAUDE.md` in the project root.
+Load and follow the complete operator instructions from `AGENTS.md` in the project root.
 This wrapper exists only so Claude Code can expose an `operator` agent entrypoint without duplicating prompt text.
 EOF
     return
@@ -188,6 +211,10 @@ EOF
 name: $agent_name
 description: $description
 ---
+
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/$agent_name.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
 
 EOF
     agent_prompt_body "$agent_name"
@@ -209,6 +236,10 @@ render_codex_wrapper() {
 
   if [[ "$agent_name" == "operator" ]]; then
     cat > "$out" <<'EOF'
+# GENERATED FILE — DO NOT EDIT.
+# Source: agent/agents/operator.md
+# Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+
 name = "operator"
 description = "Lead red team operator. Drives methodology, coordinates phases, and manages state."
 
@@ -222,6 +253,10 @@ EOF
 
   {
     cat <<EOF
+# GENERATED FILE — DO NOT EDIT.
+# Source: agent/agents/$agent_name.md
+# Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+
 name = "$agent_name"
 description = "$description"
 

@@ -1,3 +1,7 @@
+# GENERATED FILE — DO NOT EDIT.
+# Source: agent/agents/recon-specialist.md
+# Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+
 name = "recon-specialist"
 description = "Initial web and service reconnaissance specialist."
 
@@ -27,8 +31,7 @@ already listed below.
 - `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
-- `agent/SKILL.md`
-- `agent/skills/web-recon/SKILL.md` — the foundational recon sequence and tool ordering
+- `agent/skills/web-recon/SKILL.md` — the foundational recon sequence and tool ordering (for any other skill, run `aith assess list-skills` to discover it rather than reading the index file)
 - `agent/skills/port-scanning/SKILL.md` — DEFAULT-load for full Phase 1 dispatches. Port + service enumeration is the standard recon step (see Recon Sequence below); the per-batch port-data presence assertion lives in this skill.
 - `agent/references/recon/rate-calibration.md` — the trait-row rate table extracted from shared-constraints. Recon dispatches consume rate values per-target before invoking nmap/ffuf/nuclei.
 
@@ -307,6 +310,6 @@ The recon-pivot half-phase dispatch shape is the same — narrower set of writes
 ## Handoffs
 
 - To `source-analyzer`: frontend assets, scripts, routes, SPA hints, leaked config, source maps — bring `agent/skills/source-analysis/SKILL.md`
-- To `vulnerability-analyst`: requestable endpoints, object references, auth inconsistencies, exposed APIs — bring the vuln-class skill from `agent/SKILL.md` matching the candidate surface
+- To `vulnerability-analyst`: requestable endpoints, object references, auth inconsistencies, exposed APIs — name the vuln-class skill (discoverable via `aith assess list-skills`) matching the candidate surface so the operator can include it in the dispatch
 - To `exploit-developer`: only when recon already uncovers a clearly actionable path such as open admin access, default credentials, or exposed management services — bring `agent/skills/auth-bypass/SKILL.md` or the relevant skill for the specific path
 '''

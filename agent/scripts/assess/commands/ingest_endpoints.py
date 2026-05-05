@@ -11,12 +11,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from assess.lib.auth import auth_active_context
-from assess.lib.classify import (
-    classify_type,
-    host_active_count,
-    parse_budget_overrides,
-    per_host_budget,
-)
+from assess.lib.classify import classify_type
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.db import db_init, db_insert_work_item
@@ -39,49 +34,7 @@ def register(subparsers) -> None:
             "rather than admitted to the work buffer."
         ),
     )
-    p.add_argument(
-        "--budget-override",
-        dest="budget_override",
-        action="append",
-        default=None,
-        metavar="HOST:N",
-        help=(
-            "Override the default per-host URL budget for HOST to N. May be "
-            "passed multiple times. Default budgets are 1000 (content-rich), "
-            "200 (api.* / *.api.* tier), and 2000 (sitemap-bearing)."
-        ),
-    )
-    p.add_argument(
-        "--sitemap-host",
-        dest="sitemap_host",
-        action="append",
-        default=None,
-        metavar="HOST",
-        help=(
-            "Mark HOST as sitemap-bearing so its per-host budget is 2000 rather "
-            "than the 1000 default. May be passed multiple times. Use this when "
-            "prior intel confirms the host exposes a sitemap.xml the operator "
-            "wants fully ingested."
-        ),
-    )
     p.set_defaults(func=run)
-
-
-def _per_host_budget(
-    host: str,
-    *,
-    sitemap_hosts: set[str] | None = None,
-    overrides: dict[str, int] | None = None,
-) -> int:
-    """Return the per-host URL budget for ``host`` (1D.2).
-
-    Thin wrapper around :func:`assess.lib.classify.per_host_budget` so the
-    ingestion path can swap in a unit-test stub without monkey-patching the
-    library function. Match order is operator-override > sitemap-bearing >
-    API-tier > default content-rich (see classify.per_host_budget for the
-    exact rule).
-    """
-    return per_host_budget(host, sitemap_hosts=sitemap_hosts, overrides=overrides)
 
 
 def _load_egress_blocked_hosts(path: str | None) -> set[str]:
@@ -129,30 +82,13 @@ def run(args) -> None:
     # Egress-blocked deferral: hosts whose representative responses returned a
     # 100% 403 cluster from the runtime egress IP get deferred at ingestion
     # rather than admitted, so specialists do not rediscover the block per-URL.
+    # The earlier per-host URL budget gate was removed in the mid-engagement
+    # refactor: it silently deferred 4,300+ functional URLs in a single
+    # authenticated Katana crawl. Volume control now lives in inline
+    # classification at insert time (low-signal types stamp `status='skipped'`).
     egress_blocked_hosts = _load_egress_blocked_hosts(getattr(args, "egress_blocked_hosts", None))
     egress_blocked_count = 0
     egress_warned_hosts: set[str] = set()
-
-    # Per-host URL budget enforcement (1D.2). Surplus URLs above the host's
-    # budget are deferred with cluster_key='deferred:per-host-budget-exceeded'
-    # so the operator can audit them and re-run gau with --budget-override
-    # when a Phase 3 finding warrants follow-up crawl.
-    try:
-        budget_overrides = parse_budget_overrides(getattr(args, "budget_override", None))
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(1)
-    sitemap_hosts: set[str] = {
-        s.strip().rstrip(".").lower()
-        for s in (getattr(args, "sitemap_host", None) or [])
-        if s and s.strip()
-    }
-    # Cache active counts per host so we read the work_items_per_host view
-    # once per host, then increment locally as we admit rows. Without this the
-    # ingestion of a 5000-URL run would query the view 5000 times.
-    host_active_cache: dict[str, int] = {}
-    budget_exceeded_count = 0
-    budget_warned_hosts: set[str] = set()
 
     input_stream = open(args.input_file, "r", encoding="utf-8") if args.input_file else sys.stdin
     count = 0
@@ -267,50 +203,6 @@ def run(args) -> None:
                 )
                 continue
 
-            # Per-host URL budget gate (1D.2). When the host's active row
-            # count would exceed its budget after admitting this URL, defer
-            # the URL with cluster_key='deferred:per-host-budget-exceeded'
-            # rather than admit it to pending. This coexists with the
-            # egress-blocked deferral above by gating after that check —
-            # egress-blocked is the more specific failure class and should
-            # not be reclassified as a budget overflow when it fires.
-            if apex_host:
-                if apex_host not in host_active_cache:
-                    host_active_cache[apex_host] = host_active_count(db_path, apex_host)
-                budget = _per_host_budget(
-                    apex_host,
-                    sitemap_hosts=sitemap_hosts,
-                    overrides=budget_overrides,
-                )
-                if host_active_cache[apex_host] >= budget:
-                    budget_exceeded_count += 1
-                    if apex_host not in budget_warned_hosts:
-                        budget_warned_hosts.add(apex_host)
-                        print(
-                            f"WARN: {apex_host} reached per-host URL budget {budget}. "
-                            f"Surplus URLs deferred with "
-                            f"cluster_key='deferred:per-host-budget-exceeded'. "
-                            f"Pass --budget-override {apex_host}:<n> to raise the cap.",
-                            file=sys.stderr,
-                        )
-                    _insert_budget_exceeded_work_item(
-                        db_path=db_path,
-                        method=method,
-                        url=url,
-                        url_path=url_path,
-                        query_params=query_params,
-                        body_params=body_params,
-                        path_params=path_params,
-                        cookie_params=cookie_params,
-                        case_type=case_type,
-                        source=source,
-                        params_sig=params_sig,
-                        auth_context=auth_context,
-                        host=apex_host,
-                        budget=budget,
-                    )
-                    continue
-
             observation = {
                 "url": url,
                 "method": method,
@@ -377,13 +269,6 @@ def run(args) -> None:
                 auth_context=auth_context,
             )
             count += 1
-            if apex_host:
-                # Increment the local cache so the next URL for the same host
-                # sees the just-admitted row count without re-reading the
-                # work_items_per_host view. The view stays the source of
-                # truth for the FIRST URL per host in this run; subsequent
-                # URLs use the local counter to avoid the per-row read.
-                host_active_cache[apex_host] = host_active_cache.get(apex_host, 0) + 1
     finally:
         if args.input_file and input_stream is not sys.stdin:
             input_stream.close()
@@ -397,75 +282,6 @@ def run(args) -> None:
             f"— see agent/references/runtime-guides/cdn-ip-blocking.md.",
             file=sys.stderr,
         )
-    if budget_exceeded_count:
-        print(
-            f"[ingest] Deferred {budget_exceeded_count} URL(s) past per-host budget "
-            f"(cluster_key='deferred:per-host-budget-exceeded'). Pass --budget-override host:N "
-            f"to raise the cap when follow-up testing warrants it.",
-            file=sys.stderr,
-        )
-
-
-def _insert_budget_exceeded_work_item(
-    *,
-    db_path: str,
-    method: str,
-    url: str,
-    url_path: str,
-    query_params,
-    body_params,
-    path_params,
-    cookie_params,
-    case_type: str,
-    source: str,
-    params_sig: str,
-    auth_context: str,
-    host: str,
-    budget: int,
-) -> None:
-    """Insert a deferred row for a URL that would exceed the host's URL budget.
-
-    Distinct from both the wildcard-apex rejection path AND the egress-blocked
-    deferral path: this row uses ``status='deferred'``,
-    ``cluster_key='deferred:per-host-budget-exceeded'``, and
-    ``terminal_reason='per-host-budget-exceeded'`` so the operator can list,
-    audit, and selectively re-admit the surplus when a Phase 3 finding
-    warrants follow-up crawl on this host. The standard
-    ``db_insert_work_item`` helper would mark it ``pending``, which would let
-    it leak into the dispatch queue and defeat the budget.
-    """
-    queue_key = f"deferred:per-host-budget:{host}:{url}"
-    qp = json.dumps(query_params) if isinstance(query_params, dict) else str(query_params)
-    bp = json.dumps(body_params) if isinstance(body_params, dict) else str(body_params)
-    pp = json.dumps(path_params) if isinstance(path_params, dict) else str(path_params)
-    cp = json.dumps(cookie_params) if isinstance(cookie_params, dict) else str(cookie_params)
-    conn = sqlite3.connect(db_path, timeout=5.0)
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute(
-            """INSERT OR IGNORE INTO work_items (
-                queue_key, auth_context, method, url, url_path,
-                query_params, body_params, path_params, cookie_params,
-                type, source, status, params_key_sig,
-                cluster_key, terminal_reason, priority_reason
-            ) VALUES (
-                ?, ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?
-            )""",
-            (
-                queue_key, auth_context, method, url, url_path,
-                qp, bp, pp, cp,
-                case_type, source, "deferred", params_sig,
-                "deferred:per-host-budget-exceeded",
-                "per-host-budget-exceeded",
-                f"per-host budget {budget} reached for {host}",
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _insert_egress_blocked_work_item(

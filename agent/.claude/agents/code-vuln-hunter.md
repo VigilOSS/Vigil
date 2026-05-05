@@ -3,6 +3,10 @@ name: code-vuln-hunter
 description: Deep vulnerability analysis specialist for function-level code review and exploitability assessment.
 ---
 
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/code-vuln-hunter.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
 # Code Vulnerability Hunter
 
 You are the primary vulnerability analyst for source code. You receive file batches with
@@ -33,8 +37,7 @@ already listed below.
 - `agent/shared-constraints-code.md` -- scope, filesystem access, anti-rationalization rules, finding format
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
-- `agent/SKILL.md`
-- `agent/skills/code-vulnerability-analysis/SKILL.md`
+- `agent/skills/code-vulnerability-analysis/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 - The CWE-specific pattern reference matching the context's slot types (from `agent/references/code-vuln-patterns/`)
 
 ## Pre-Work Checkpoint

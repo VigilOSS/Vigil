@@ -1977,10 +1977,16 @@ def init_db() -> None:
                 reasoning TEXT,
                 dispatch_mode TEXT,
                 finding_slugs_json TEXT,
+                skills TEXT,
                 UNIQUE(engagement_id, agent_id)
             )
             """
         )
+        # Additive migration for pre-existing DBs created before the `skills`
+        # column was introduced. New schema gets it via CREATE TABLE above.
+        dispatch_columns = _table_columns(connection, "assessment_dispatches")
+        if dispatch_columns and "skills" not in dispatch_columns:
+            connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN skills TEXT")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_at "
             "ON assessment_dispatches(engagement_id, dispatched_at DESC)"
