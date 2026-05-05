@@ -46,45 +46,13 @@ The attacker supplies the internal parameter directly, overriding the value the 
 
 ### 1.2 Framework-Specific Internal Parameters
 
-Test these based on detected tech stack:
+Load the full parameter wordlist from `agent/references/payloads/bff-override-params.md` — it contains framework-specific parameter lists for Express, Next.js, Django, Rails, Spring, and Kong. Select the section matching the detected tech stack and test each parameter in all locations (query, body, header, cookie).
 
-**Express/Node.js BFF (highest priority — most common pattern):**
+**Quick-start (top 10 highest-value params to test first regardless of framework):**
 ```
-notAuthUserId, $id$, $agencyId$, $originId$, $tenantId$
-userId, user_id, authenticatedUserId, sessionUserId
-checkPassword, nonAuthorizedUpdate, skipValidation
-internalOnly, bypassAuth, isAdmin, isSuperAdmin
-x-internal-user-id, x-forwarded-user, x-real-user
-```
-
-**Next.js / Nuxt middleware:**
-```
-__nextLocale, __nextDefaultLocale
-_nextI18Next, _nextData
-userId, sessionId, tenantId
-x-middleware-rewrite, x-middleware-next
-```
-
-**Django REST Framework:**
-```
-format, _method
-user, request.user.id
-is_staff, is_superuser, is_authenticated
-_force_auth_user, _force_auth_token
-```
-
-**Rails API:**
-```
-_method, authenticity_token
-current_user_id, admin, role
-X-User-Id, X-Admin, X-Role
-```
-
-**Spring Cloud Gateway / Zuul:**
-```
-X-Forwarded-User, X-Forwarded-Groups
-X-User-Id, X-Tenant-Id, X-Client-Id
-principal, authorities, roles
+userId, $id$, notAuthUserId, tenantId, isAdmin
+X-User-Id, X-Forwarded-User, X-Tenant-Id
+checkPassword, skipValidation
 ```
 
 ### 1.3 Active Discovery via Parameter Injection
