@@ -2208,12 +2208,79 @@ def test_validate_dispatch_contract_accepts_minimal_payload(
     payload = {
         "role": "vulnerability-analyst",
         "dispatch_mode": "item-iterating",
+        "skills": "auth-bypass",
     }
     contract_path = tmp_path / "dispatch.json"
     contract_path.write_text(json.dumps(payload), encoding="utf-8")
 
     assess_main(["validate-dispatch-contract", str(contract_path)])
     assert "OK" in capsys.readouterr().out
+
+
+def test_validate_dispatch_contract_accepts_dispatch_register_payload(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The contract preflight accepts the same role field used by dispatch register."""
+    assess_main = _load_assess_main()
+    payload = {
+        "agent_id": "VA-1",
+        "agent_role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+        "skills": "auth-bypass",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assess_main(["validate-dispatch-contract", str(contract_path)])
+    assert "OK" in capsys.readouterr().out
+
+
+def test_validate_dispatch_contract_rejects_role_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "recon-specialist",
+        "agent_role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+        "skills": "auth-bypass",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        assess_main(["validate-dispatch-contract", str(contract_path)])
+    assert "role and agent_role must match" in capsys.readouterr().err
+
+
+def test_list_skills_uses_directory_names_for_dispatch_audit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assess_main = _load_assess_main()
+
+    assess_main(["list-skills", "--json"])
+
+    rows = json.loads(capsys.readouterr().out)
+    google = next(row for row in rows if row["path"] == "agent/skills/google-workspaces/SKILL.md")
+    assert google["name"] == "google-workspaces"
+
+
+def test_validate_dispatch_contract_accepts_list_skills_canonical_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assess_main = _load_assess_main()
+    payload = {
+        "agent_role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+        "skills": "google-workspaces",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assess_main(["validate-dispatch-contract", str(contract_path)])
+    captured = capsys.readouterr()
+    assert "OK" in captured.out
+    assert "WARN skill" not in captured.err
 
 
 def test_validate_dispatch_contract_rejects_unknown_dispatch_mode(
@@ -2224,6 +2291,7 @@ def test_validate_dispatch_contract_rejects_unknown_dispatch_mode(
     payload = {
         "role": "vulnerability-analyst",
         "dispatch_mode": "turbo-mode",
+        "skills": "auth-bypass",
     }
     contract_path = tmp_path / "dispatch.json"
     contract_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -2234,6 +2302,40 @@ def test_validate_dispatch_contract_rejects_unknown_dispatch_mode(
     assert "dispatch_mode" in err and "turbo-mode" in err
 
 
+def test_validate_dispatch_contract_requires_skills_for_specialist(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Specialist dispatches must declare which skills the agent loaded."""
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        assess_main(["validate-dispatch-contract", str(contract_path)])
+    err = capsys.readouterr().err
+    assert "skills is required" in err
+
+
+def test_validate_dispatch_contract_operator_skills_optional(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Operator role coordinates phases; skills are not required on operator dispatches."""
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "operator",
+        "dispatch_mode": "deep-manual",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assess_main(["validate-dispatch-contract", str(contract_path)])
+    assert "OK" in capsys.readouterr().out
+
+
 def test_actor_kind_warn_on_non_log_subcommand(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2242,6 +2344,7 @@ def test_actor_kind_warn_on_non_log_subcommand(
     payload = {
         "role": "vulnerability-analyst",
         "dispatch_mode": "deep-manual",
+        "skills": "auth-bypass",
     }
     contract_path = tmp_path / "dispatch.json"
     contract_path.write_text(json.dumps(payload), encoding="utf-8")

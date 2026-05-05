@@ -24,7 +24,7 @@ the next dispatch's prompt.
 
 Every handoff specifies **which skill the next agent should load**. The operator includes
 this in the dispatch context. Each agent's `## Handoffs` section names the specific skill
-or skill-selection rule. Use the "Use when:" lines in `agent/SKILL.md` to select the right
+or skill-selection rule. Use the "Use when:" lines from `aith assess list-skills` to select the right
 skill when the handoff says "bring the matching vuln-class skill."
 
 ## Phase 1 Returns
@@ -121,7 +121,7 @@ Output: CONFIRMED/PARTIAL/FAILED status, extracted data, PoC, chains, credential
 Output: backend intel-table updates via `record-intel` (technology, CVE, breach, credential intel, people, domains, social, org facts, notes)
 
 1. Read Intelligence Assessment section
-2. HIGH-value CVE + PoC match → record via `aith assess record-intel cve <json-file>` and dispatch exploit-developer to **validate** against the live target — **bring the matching skill from `agent/SKILL.md`**. Promote to a finding only after exploit-developer confirms exploitability — version-only CVE matches are intel, not findings, because backported patches and disabled modules routinely invalidate version-only matches.
+2. HIGH-value CVE + PoC match → record via `aith assess record-intel cve <json-file>` and dispatch exploit-developer to **validate** against the live target — **name the matching skill (discoverable via `aith assess list-skills`) so the operator includes it in the dispatch**. Promote to a finding only after exploit-developer confirms exploitability — version-only CVE matches are intel, not findings, because backported patches and disabled modules routinely invalidate version-only matches.
 3. Breached credentials with target-specific proof → record finding + credential via `aith assess post credentials` + dispatch exploit-developer to test access
 4. Historical endpoints → ingest into backend coverage state via `aith assess ingest-endpoints`
 5. MEDIUM/LOW intel without target proof → keep in backend intel tables via `record-intel` only — do not promote to findings

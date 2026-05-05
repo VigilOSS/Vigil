@@ -1,264 +1,114 @@
 ---
 name: gau-triage
-description: Deep triage of large historical URL corpora — load gf buckets with stated reasons, emit a cluster manifest for classify-work/defer-cluster, download inert content, and scan for secrets with trufflehog + jsleak
+description: Decide which gau pipeline verb to run, interpret its structured output, and write findings/surfaces from secrets and JS-discovered endpoints. The full bash pipeline (gau → uro → httpx → trufflehog) is now packaged as `aith assess gau-secrets`; this skill is the dispatch + interpretation layer.
 origin: AI Threat Hunting
 ---
 
 # GAU Triage
 
-> **`aith assess kali` audit flags:** use `--technique DISCOVERY` (gau harvests historical URLs from public archives; triage runs classify them without attacking the live target).
+> **`aith assess kali` audit flags:** the inner kali invocations (gau, uro, httpx, trufflehog) carry their own audit rows; the wrappers stamp `--technique RECON --probe-kind fingerprint --phase recon` automatically.
 
-Operator-dispatched deeper pass over a gau (or any large URL) corpus **after** mechanical
-ingestion in Phase 2. Produces a cluster manifest the operator feeds into `aith assess
-classify-work` and `aith assess dispatch defer-cluster`, plus stored response bodies and
-secret-scan results. This skill does not replace `surface-collection` — it extends it by
-adding the depth that surface-collector cannot afford inline at high URL counts.
+The gau pipeline is now three composable verbs that all share one cached gau corpus:
+
+| Verb | What it does | Output written to |
+|---|---|---|
+| `aith assess gau-endpoints <target>` | Cache-aware gau, then ingest into work_items with inline classification | `work_items` rows + cluster assignments |
+| `aith assess gau-secrets <target>` | Cache-aware gau → uro dedup → httpx body capture → trufflehog scan | bodies, trufflehog JSON, secrets manifest |
+| `aith assess gau-js-endpoints <target>` | LinkFinder regex over JS bodies → resolve to absolute URLs → ingest as `source=js-extract` | new `work_items` rows hidden in JS bundles |
+
+All three reuse `<engagement>/scans/gau_output.txt` plus its sidecar `gau_output.meta.json` so a single gau call serves all three downstream consumers. The wrapper announces cache reuse on stderr and includes `cache_reused: true|false` in the JSON summary so the dispatch-time decision is auditable.
 
 ## When to Activate
 
-- Run when the corpus holds **~500+ URLs** — surface-collector's inline triage loses fidelity at that scale because the bucket analysis is context-bound.
-- Run mandatorily when the corpus holds **~5000+ URLs** — the cluster manifest produced here is the only way the operator can defer low-signal clusters without re-reading every URL.
-- Run when response-body secret scanning is in scope — stored bodies feed `trufflehog` and optionally `jsleak` for a complementary regex pass.
-- Skip when the corpus is small (<500 URLs), when auth-only surfaces dominate, or when Phase 3 is mid-flight and further triage would delay exploitation — surface-collector already covers that case.
+Dispatch this skill when the operator wants signal beyond what live crawling produced — typically right after Phase 2 surface collection lands:
 
-## Tools
+1. **Suspect missing endpoints** (small work buffer, large historical surface) → run `gau-endpoints` first, then `gau-js-endpoints` to catch JS-only routes.
+2. **Secret scanning is in scope** → run `gau-secrets`. The default keeps trufflehog in `--no-verification` mode; pass `--verify` to enable trufflehog's verification step.
+3. **Reviewing existing clusters** → no fresh run needed; read clusters via `aith assess list-clusters`. Inline classification already scored every URL at ingest time.
 
-All run inside the shared runtime container — invoke each via `aith assess kali ...` so the run lands in the audit pipeline. Use the typed verbs where they exist (`aith assess kali httpx`, `aith assess kali gau`); otherwise wrap in `aith assess kali exec --` with the standard audit-flag set:
+Skip the pipeline entirely when the corpus is small (<500 URLs), no JS bundles are present, and secret scanning is out of scope.
 
-- `uro` — smart structural URL deduplication (collapses `/page/1`, `/page/2` → one representative)
-- `gf` — parameter-pattern classifier. Cite the matching bucket reference from `agent/references/gf-patterns/<bucket>.md` before loading it
-- `httpx` with `-store-response` — live probe with body capture for downstream secret scanning
-- `trufflehog` — mandatory secret scan across stored bodies (800+ detectors, v3 filesystem mode)
-- `jsleak` — optional complementary regex-based JS secret scanner. If not in the Kali image, trufflehog-only coverage is acceptable and the install hint belongs in `agent/docker/runtime-full/Dockerfile` as a follow-up (out of scope for this skill)
-- `jq` — output formatting and manifest assembly
+## Verb Decision Tree
 
-Host side: `aith assess record-surface`, `aith assess record-finding`,
-`aith assess classify-work`, `aith assess dispatch defer-cluster`.
+```
+gau-endpoints <target>
+  └─ work_items grew by N rows? Inspect clusters via `list-clusters`.
+     ├─ many `gf:trust_surface` / `gf:upload_fields` → dispatch vulnerability-analyst
+     └─ many `gf:interestingext` (e.g., `.bak`, `.env`, `.sql`) → consider `gau-exposures` follow-up (planned) or nuclei -t exposures/ targeted run
 
-## Storage Rule
+gau-js-endpoints <target>  (after gau-secrets, or with --fetch-if-missing)
+  └─ "ingested_count" > 0 → JS-hidden routes added; classification scored them
+     └─ inspect new clusters; routes named like `/admin/*`, `/internal/*` are high-value
 
-Kali mounts the engagement dir at `/engagements/$ENGAGEMENT_KEY/`. Stage ephemeral work under `/tmp/gau-triage-$RID/` inside the container; persist durable artifacts directly to `/engagements/$ENGAGEMENT_KEY/scans/gau-triage/$RID/` — the host sees the same files under `$DIR/scans/gau-triage/$RID/`. Engagement-scoped artifacts never land in `/data/` — that path is reserved for shared-infrastructure state.
-
-Pick `RID` (run id) as a timestamped slug, e.g. `RID=$(date -u +%Y%m%dT%H%M%SZ)`.
-
-## Pipeline
-
-Set up variables inside the runtime shell (e.g. `aith assess kali exec --technique META --intent "set up gau triage variables" --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '...'` or
-inside an interactive session opened with `aith runtime shell-exec`) — `$ENGAGEMENT_KEY` is
-exported by the engagement launcher and visible inside the container:
-
-```bash
-KEY="${ENGAGEMENT_KEY:?exported by the engagement launcher}"
-RID="$(date -u +%Y%m%dT%H%M%SZ)"
-OUT="/engagements/$KEY/scans/gau-triage/$RID"
-CT_WORK="/tmp/gau-triage-$RID"
-mkdir -p "$OUT" "$CT_WORK" "$CT_WORK/bodies"
+gau-secrets <target>
+  └─ "findings_count" > 0 → review trufflehog output, reproduce each hit before recording finding
+     ├─ verified=true (only when --verify used) → high-confidence; record-finding draft
+     └─ verified=false → still worth review; many regex-only hits are exploitable secrets
 ```
 
-The canonical input is the gau corpus already produced by surface-collection at `/engagements/$KEY/scans/gau_output.txt`. If it is missing, stop and ask the operator to run surface-collector first — gau-triage extends that pipeline, it does not replace it.
+## Cache reuse semantics
 
-### Step 1 — Stage input from the engagement mount
+`gau-endpoints` and `gau-secrets` are the verbs that actually call gau, so they
+own cache reuse. Each checks six conditions before reusing the cached corpus:
 
-Read the gau corpus straight from the mount so downstream steps keep scratch work off the durable directory:
+1. Operator did NOT pass `--refresh`
+2. `<engagement>/scans/gau_output.txt` exists and is non-empty
+3. Sidecar `gau_output.meta.json` exists and parses
+4. Cached run's `exit_code == 0` and `target` matches the current target
+5. Cached run's `cache_key` matches the current corpus-affecting flags
+   (`--subs`, `--providers`) — toggling one of those triggers a fresh run
+   so the operator does not silently get the wrong corpus
+6. Cached output age ≤ `--max-cache-age-hours` (default 24)
 
-```bash
-cp "/engagements/$KEY/scans/gau_output.txt" "$CT_WORK/gau_raw.txt"
-wc -l "$CT_WORK/gau_raw.txt"
-```
+Failure of any condition triggers a fresh gau run and an explicit stderr message
+naming which condition failed. The JSON summary always carries
+`cache_reused: true|false` and `cache_decision_reason: <human string>`.
 
-### Step 2 — Filter inert extensions and structural-dedup
+`gau-js-endpoints` is a post-processor: it reads the existing cache + bodies
+that `gau-endpoints`/`gau-secrets` produced and does not run gau itself. It
+intentionally does not expose `--refresh` or `--max-cache-age-hours` — refresh
+the corpus by re-running the verb that produced it.
 
-Drop images, fonts, and binaries before gf runs — these waste gf cycles and trufflehog will not extract secrets from them. Then collapse structurally similar URLs with `uro`:
+## Output Contract (per verb)
 
-```bash
-INERT_EXT='jpg|jpeg|png|gif|webp|svg|ico|woff|woff2|ttf|eot|otf|ttc|mp3|mp4|webm|avi|mov|flac|wav|ogg|pdf|zip|tar|gz|rar|7z|exe|dll|so|dylib'
-grep -viE "\\.(${INERT_EXT})(\\?|$)" "$CT_WORK/gau_raw.txt" \
-  | grep -vE '^\S+\?ver=[0-9.]+$' \
-  | uro \
-  > "$CT_WORK/gau_deduped.txt"
-wc -l "$CT_WORK/gau_raw.txt" "$CT_WORK/gau_deduped.txt"
-```
+### `gau-endpoints` JSON keys
 
-### Step 3 — Load gf buckets with stated reasons
+`verb`, `target`, `cache_reused`, `cache_decision_reason`, `cache_age_hours`, `gau_status`, `gau_exit_code`, `gau_argv`, `gau_output_path`, `gau_line_count`, `ingest_source`, `db_path`, `work_items_total`, `work_items_pending`, `work_items_skipped`, `top_clusters`.
 
-Before invoking any bucket, cite the matching reference file and the observed corpus signal that justifies loading it. This keeps the skill aligned with the `AGENTS.md` "Positive instructions with reasoning" standard — the operator sees *why* a bucket is in play, not just that it ran.
+### `gau-secrets` JSON keys
 
-Check each bucket's load conditions (documented in `agent/references/gf-patterns/<bucket>.md`) against the corpus. Only run buckets whose conditions are present; running every bucket blindly drains the per-engagement context budget without adding signal.
+All of `gau-endpoints`'s cache keys, plus `gau_raw_count`, `filtered_count`, `deduped_count`, `bodies_dir`, `bodies_captured`, `httpx_results_path`, `reused_bodies`, `trufflehog_path`, `verify_enabled`, `detector_counts`, `findings_count`, `findings_preview`.
 
-Example load-and-run template (report the reason in output, then run):
+### `gau-js-endpoints` JSON keys
 
-```bash
-# Announce: "Loading `ssrf` bucket because N URLs in this corpus contain url=/redirect=/callback= query parameters — see agent/references/gf-patterns/ssrf.md."
-gf ssrf < "$CT_WORK/gau_deduped.txt" > "$CT_WORK/gf_ssrf.txt" 2>/dev/null || true
+`verb`, `target`, `bodies_dir`, `bodies_fetched`, `js_bodies_scanned`, `raw_endpoints_extracted`, `unique_in_scope_urls`, `ingested_count`, `ingest_source`, `db_path`, `per_body_preview`.
 
-# Announce: "Loading `sqli` bucket because N URLs carry id=/q=/sort= — see agent/references/gf-patterns/sqli.md."
-gf sqli < "$CT_WORK/gau_deduped.txt" > "$CT_WORK/gf_sqli.txt" 2>/dev/null || true
+## Recording high-confidence hits
 
-# Repeat for buckets whose load conditions fire. Reference the per-bucket file for each.
-```
-
-Candidate buckets (each has a reference at `agent/references/gf-patterns/<bucket>.md`):
-`rce, ssrf, sqli, lfi, idor, debug_logic, redirect, ssti, xss, interestingparams`. The
-`interestingsubs` and `interestingEXT` concepts are handled via ingest-time hostname
-routing and the extension filter in Step 2 — they are documented in the reference library
-for analyst context but are not direct `gf` runs.
-
-For each loaded bucket, capture: the URL count, 3-5 sample URLs, and the proposed
-`cluster_key = gf:<bucket>` that will be attached to matching work items when the operator
-runs `aith assess classify-work`. URLs that do not match any gf bucket fall back to
-`path:/<first-two-segments>` clusters.
-
-If `gf` patterns are missing, the Dockerfile install of Gf-Patterns is broken — stop and reseed `~/.gf/` from `github.com/1ndianl33t/Gf-Patterns`.
-
-### Step 4 — Emit cluster manifest for the operator handoff
-
-Write a structured manifest the operator can feed into `aith assess classify-work` and `aith assess dispatch defer-cluster`. The operator contract: after gau-triage returns, the operator runs `aith assess classify-work $DB` (which derives `cluster_key` and `priority_score` from URL structure using the same bucket weights documented in the reference library) and then `aith assess dispatch $DB defer-cluster <key> --reason "..."` for any cluster the manifest flagged as defer-worthy.
-
-Assemble the manifest with `jq` rather than Python heredocs:
+For each reproducible high-confidence trufflehog or JS-extracted endpoint where the secret demonstrably leaks material an attacker can use (token, key, credential, session id), record a finding via the host script. Unverified-but-suspicious hits → `record-surface`, not `record-finding`. No speculative findings per `rules/hunting.md`.
 
 ```bash
-MANIFEST="$CT_WORK/cluster_manifest.json"
-# Build the loaded_buckets array from the gf_*.txt files that fired.
-LOADED_BUCKETS=$(
-  for f in "$CT_WORK"/gf_*.txt; do
-    [ -s "$f" ] || continue
-    bucket="$(basename "$f" .txt | sed 's/^gf_//')"
-    count="$(wc -l < "$f")"
-    samples="$(head -n 5 "$f" | jq -R . | jq -sc .)"
-    jq -nc --arg bucket "$bucket" --argjson count "$count" --argjson samples "$samples" \
-      --arg reason "Loaded because $count URLs matched; see agent/references/gf-patterns/$bucket.md" \
-      '{bucket:$bucket, reason:$reason, url_count:$count, samples:$samples}'
-  done | jq -sc .
-)
-jq -n --arg rid "$RID" \
-      --argjson raw "$(wc -l < "$CT_WORK/gau_raw.txt")" \
-      --argjson dedup "$(wc -l < "$CT_WORK/gau_deduped.txt")" \
-      --argjson buckets "$LOADED_BUCKETS" \
-  '{run_id:$rid, gau_raw_count:$raw, dedup_count:$dedup,
-    loaded_buckets:$buckets, proposed_defers:[],
-    sensitive_files_found:[], secrets_detected:[]}' > "$MANIFEST"
+# Inspect required fields, then write the finding draft.
+aith assess contract record-finding
+aith assess record-finding gau-triage <path-to-finding-json>
 ```
-
-Populate `proposed_defers` with clusters the operator should skip — static asset paths, CDN-backed mirrors, and localization directories. Each entry carries `cluster_key`, a free-text `reason`, and the `url_count` so the operator can judge the throughput win.
-
-### Step 5 — Download inert-filtered bodies and scan for secrets
-
-Download all `.js`, `.css`, `.map`, and `.json` responses with `httpx -store-response`. Filter the input list so images/fonts/binaries never leave the URL queue — the Step 2 inert filter already did this on the deduped corpus, so reuse it. Cap per-body size at 1 MB to prevent runaway disk use:
-
-```bash
-grep -iE '\.(js|css|map|json)(\?|$)' "$CT_WORK/gau_deduped.txt" > "$CT_WORK/body_targets.txt"
-wc -l "$CT_WORK/body_targets.txt"
-
-httpx -l "$CT_WORK/body_targets.txt" -silent \
-  -store-response -store-response-dir "$CT_WORK/bodies" \
-  -mc 200,301,302,401,403 \
-  -status-code -content-length -title -tech-detect \
-  -follow-redirects -threads 20 -rate-limit 30 \
-  -response-size-to-save 1048576 \
-  -o "$CT_WORK/httpx_results.txt"
-```
-
-Mandatorily run `trufflehog` in filesystem mode across the downloaded bodies — it carries the primary detector set (800+ detectors) and covers the widest secret surface. Default is `--no-verification` so trufflehog will not send discovered tokens to AWS/GitHub/Slack/etc. to test them; opt-in verification (`--results=verified`) requires explicit operator authorization of out-of-scope traffic.
-
-```bash
-trufflehog filesystem "$CT_WORK/bodies/" \
-  --no-update --no-verification --concurrency 8 --json \
-  > "$CT_WORK/trufflehog.json"
-wc -l "$CT_WORK/trufflehog.json"
-```
-
-Run `jsleak` as a complementary regex pass over the `.js` subset when it is installed — it catches a narrower class of JS-specific secret patterns that trufflehog's default detectors may miss. If `jsleak` is not present in the current Kali runtime, trufflehog-only coverage is acceptable; flag the gap in the returned output so the operator can track the install follow-up on `agent/docker/runtime-full/Dockerfile`.
-
-```bash
-if command -v jsleak >/dev/null 2>&1; then
-  find "$CT_WORK/bodies" -name '*.js' -print0 \
-    | xargs -0 jsleak --json \
-    > "$CT_WORK/jsleak.json" 2>/dev/null || true
-else
-  echo "jsleak not installed — trufflehog coverage is acceptable; install hint belongs in Dockerfile." \
-    > "$CT_WORK/jsleak.missing"
-fi
-```
-
-Merge trufflehog (and jsleak when present) findings into the cluster manifest's `secrets_detected` array so the operator reads one file, not three:
-
-```bash
-TH_FINDINGS=$(jq -sc '[.[] | {detector:.DetectorName, file:.SourceMetadata.Data.Filesystem.file, raw:(.Raw[0:120])}]' "$CT_WORK/trufflehog.json" 2>/dev/null || echo '[]')
-jq --argjson secrets "$TH_FINDINGS" '.secrets_detected = $secrets' "$MANIFEST" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST"
-```
-
-### Step 6 — Persist artifacts and record high-signal findings
-
-Copy durable artifacts to the engagement mount:
-
-```bash
-cp -r "$CT_WORK/." "$OUT/"
-ls "$OUT"
-```
-
-For each reproducible high-confidence trufflehog or jsleak hit where the secret demonstrably leaks material an attacker can use (token, key, credential, session id), record a finding via the host script. Unverified hits that cannot be reproduced → `record-surface`, not `record-finding`. No speculative findings per `rules/hunting.md`.
-
-```bash
-# Host side. $DIR is the repo-side twin of /engagements/$KEY — same bytes on disk.
-aith assess contract record-finding   # inspect required fields
-aith assess record-finding surface-collector "$DIR/scans/gau-triage/$RID/findings/<slug>.json"
-```
-
-## Operator Handoff
-
-After gau-triage returns the manifest, the operator runs:
-
-```bash
-# Derive cluster_key/priority_score for all pending work_items using the same bucket weights
-# documented in agent/references/gf-patterns/*.md.
-aith assess classify-work "$DB"
-
-# For each cluster the manifest flagged in proposed_defers, defer it so downstream dispatch skips it.
-aith assess dispatch "$DB" defer-cluster "<cluster_key>" --reason "<manifest reason>"
-
-# Inspect the resulting cluster set ahead of Phase 3 dispatch.
-aith assess list-clusters "$DB"
-```
-
-## Output Contract
-
-Return to the operator:
-
-- The run directory (`$DIR/scans/gau-triage/$RID/` on the host) containing `cluster_manifest.json`, per-bucket `gf_*.txt` files, `httpx_results.txt`, `bodies/`, `trufflehog.json`, and optional `jsleak.json`
-- Totals: raw count, deduped count, per-bucket counts, unique trufflehog detector names
-- The list of proposed defer clusters with stated reasons
-- Any recorded finding slugs and surface ids
-- Explicit statement of whether `--results=verified` live verification was enabled (must be `false` unless the operator authorized external validation traffic)
-- Whether `jsleak` ran or was flagged missing for the Dockerfile follow-up
 
 ## Key Rules
 
-- All target-facing probes go through `aith assess kali ...` — host-side curl or wget against in-scope targets bypasses the audit pipeline that downstream specialists rely on
-- Cite `agent/references/gf-patterns/<bucket>.md` with a "Load because X" reason before running any gf bucket — blind per-bucket drains miss the signal calibration the reference library provides
-- Filter inert extensions (images, fonts, binaries) before httpx body download — scanning them wastes disk and yields no trufflehog signal
-- `trufflehog` is mandatory on every run; `jsleak` is optional and gated on runtime availability
-- `trufflehog` default is `--no-verification`; `--results=verified` (live verification) requires operator consent
-- Cap body storage at 1 MB per response via httpx `-response-size-to-save`
-- Reproduce each trufflehog/jsleak hit before recording it as a finding — speculative findings that cannot be reproduced pollute the backend and mislead Phase 3 specialists
-
-## Per-host Budget Interaction
-
-GAU corpora are per-host by construction (a single gau invocation pulls historical URLs for
-one domain at a time). When the corpus exceeds the host's budget configured in
-`agent/skills/surface-collection/SKILL.md` § "Per-host URL Budget" (1000 content-rich /
-200 API-tier / 2000 sitemap-bearing), surplus URLs admit to
-`cluster_key=deferred:per-host-budget-exceeded` rather than `pending`. The Step 4 cluster
-manifest should still surface the deferred set under `proposed_defers` so the operator can
-audit which clusters were deferred for budget rather than for low signal — those are
-candidates for the recovery flow (re-run gau with `--budget-override <host>:<n>` when a
-Phase 3 finding warrants follow-up crawl on that host).
+- **Use the wrapper verbs** — they pair the gau call with the ingest step in one shot, so the work buffer cannot end up empty after a successful gau run.
+- **Cache reuse is intentional and auditable** — the stderr `[gau-pipeline] REUSING ...` message and the `cache_reused: true` JSON field both surface the decision; if you want a fresh run, pass `--refresh`.
+- **Reproduce each hit before recording it as a finding** — speculative findings pollute the backend and mislead Phase 3 specialists.
+- **JS-extracted endpoints get `source='js-extract'`** so report-writer can audit which work_items came from bundle extraction versus crawl/spec ingestion.
 
 ## Extended Resources
 
-- `agent/references/INDEX.md` (GF Pattern Library section) — per-bucket reference library with load conditions, parameter keys, weights, and examples
-- `agent/references/tools/recon/trufflehog.md` — TruffleHog v3 CLI, filesystem mode, verification flags
-- `agent/references/tools/recon/gf.md` — gf load order, gf-before-uro rule
-- `agent/references/tools/recon/httpx.md` — httpx body storage and rate tuning
-- `agent/references/tools/recon/gau.md` — gau (upstream source for the corpus this skill triages)
-- `agent/skills/surface-collection/SKILL.md` — Phase 2 collection upstream of this skill (gau-triage is a follow-up pass) and per-host URL budget formula (1000 content-rich / 200 API-tier / 2000 sitemap-bearing)
+- `agent/scripts/assess/lib/gau_pipeline.py` — shared cache logic, sidecar meta, LinkFinder regex
+- `agent/scripts/assess/commands/gau_endpoints.py` — Stream A wrapper source
+- `agent/scripts/assess/commands/gau_secrets.py` — Stream B wrapper source
+- `agent/scripts/assess/commands/gau_js_endpoints.py` — Stream C wrapper source
+- `agent/references/tools/recon/gau.md` — gau CLI reference (provider list, output format)
+- `agent/references/tools/recon/httpx.md` — httpx body capture and rate tuning
+- `agent/references/tools/recon/trufflehog.md` — TruffleHog v3 detector list, verification flag semantics
+- `agent/scripts/assess/lib/classify_buckets.py` — gf-style bucket weights inline classification uses
+- `agent/skills/surface-collection/SKILL.md` — Phase 2 collection upstream (operator typically calls gau-endpoints from there)
 - `agent/skills/sensitive-data-detection/SKILL.md` — ad-hoc body/secret scanning for single responses (not bulk corpora)

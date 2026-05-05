@@ -17,6 +17,9 @@ from urllib.request import Request, urlopen
 
 from mitmproxy import http, ctx
 
+from assess.lib.classify import classify_type
+from assess.lib.db import db_init, db_insert_work_item
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -41,30 +44,12 @@ NOISE_PATH_RE = re.compile(r"(\.gif\?|pixel|beacon)", re.IGNORECASE)
 
 BODY_TRUNCATE = 100 * 1024  # 100 KB
 
-SKIP_TYPES = {"image", "video", "font", "archive"}
-
 BINARY_PREFIXES = ("image/", "video/", "audio/", "font/")
 
 LOGIN_URL_RE = re.compile(r"(login|auth|signin|session|token)", re.IGNORECASE)
 
 TOKEN_KEYS_RE = re.compile(r"(token|access_token|jwt)", re.IGNORECASE)
 BEARER_TOKEN_KEYS_RE = re.compile(r"(access_token|id_token|jwt|token)", re.IGNORECASE)
-
-# Maps file extensions / content-type fragments to a classification label.
-# Order matters — first match wins (highest priority first).
-_EXT_GRAPHQL = {"/graphql"}
-_EXT_WS = set()  # detected via Upgrade header
-_EXT_API = {"/api/", "/rest/", "/v1/", "/v2/", "/v3/"}
-_EXT_UPLOAD_CT = {"multipart/form-data"}
-_EXT_FORM_CT = {"application/x-www-form-urlencoded"}
-_EXT_JS = {".js", ".mjs", ".cjs"}
-_EXT_CSS = {".css"}
-_EXT_PAGE = {".html", ".htm", ".xhtml", ".php", ".asp", ".aspx", ".jsp"}
-_EXT_DATA = {".json", ".xml", ".csv", ".yaml", ".yml"}
-_EXT_IMAGE = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".webp", ".bmp"}
-_EXT_VIDEO = {".mp4", ".webm", ".avi", ".mov", ".flv"}
-_EXT_FONT = {".woff", ".woff2", ".ttf", ".eot", ".otf"}
-_EXT_ARCHIVE = {".zip", ".gz", ".tar", ".rar", ".7z", ".bz2"}
 
 # Dynamic path-segment patterns
 _DYNAMIC_RE = re.compile(
@@ -125,43 +110,12 @@ class CaseCollector:
     def _init_db(self):
         db_path = os.path.join(self.engagement_dir, "cases.db")
         try:
+            if not os.path.exists(db_path):
+                open(db_path, "a", encoding="utf-8").close()
+            db_init(db_path)
             self.db = sqlite3.connect(db_path, check_same_thread=False)
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA busy_timeout=5000")
-            self.db.execute(
-                """CREATE TABLE IF NOT EXISTS work_items (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    queue_key TEXT NOT NULL,
-                    request_variant_id INTEGER,
-                    service_id INTEGER,
-                    coverage_item_id INTEGER,
-                    auth_context TEXT NOT NULL DEFAULT 'anonymous',
-                    method TEXT NOT NULL,
-                    url TEXT NOT NULL,
-                    url_path TEXT NOT NULL,
-                    query_params TEXT,
-                    body_params TEXT,
-                    path_params TEXT,
-                    cookie_params TEXT,
-                    headers TEXT,
-                    body TEXT,
-                    content_type TEXT,
-                    content_length INTEGER,
-                    response_status INTEGER,
-                    response_headers TEXT,
-                    response_size INTEGER,
-                    response_snippet TEXT,
-                    type TEXT NOT NULL DEFAULT 'unknown',
-                    source TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    assigned_agent TEXT,
-                    retry_count INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT DEFAULT (datetime('now')),
-                    consumed_at TEXT,
-                    params_key_sig TEXT,
-                    UNIQUE(queue_key)
-                )"""
-            )
             ctx.log.info(f"proxy_addon: connected to {db_path}")
         except sqlite3.OperationalError as exc:
             ctx.log.error(f"proxy_addon: cannot open DB — {exc}")
@@ -233,54 +187,9 @@ class CaseCollector:
     def _classify_type(
         self, method: str, path: str, content_type: str, req_headers: dict
     ) -> str:
-        ct = (content_type or "").lower()
-        path_lower = path.lower()
-
-        # Strip query string for extension matching
-        base_path = path_lower.split("?")[0]
-
-        # graphql
-        if any(seg in base_path for seg in _EXT_GRAPHQL):
-            return "graphql"
-
-        # websocket
         if req_headers.get("upgrade", "").lower() == "websocket":
             return "websocket"
-
-        # api — path heuristic or JSON content-type on non-page paths
-        if any(seg in base_path for seg in _EXT_API):
-            return "api"
-        if "application/json" in ct and method in ("POST", "PUT", "PATCH", "DELETE"):
-            return "api"
-
-        # upload
-        if any(seg in ct for seg in _EXT_UPLOAD_CT):
-            return "upload"
-
-        # form
-        if any(seg in ct for seg in _EXT_FORM_CT):
-            return "form"
-
-        # static asset types by extension
-        _, ext = os.path.splitext(base_path)
-        if ext in _EXT_JS:
-            return "javascript"
-        if ext in _EXT_CSS:
-            return "stylesheet"
-        if ext in _EXT_PAGE or "text/html" in ct:
-            return "page"
-        if ext in _EXT_DATA or "application/json" in ct or "text/xml" in ct or "application/xml" in ct:
-            return "data"
-        if ext in _EXT_IMAGE or ct.startswith("image/"):
-            return "image"
-        if ext in _EXT_VIDEO or ct.startswith("video/"):
-            return "video"
-        if ext in _EXT_FONT or ct.startswith("font/"):
-            return "font"
-        if ext in _EXT_ARCHIVE:
-            return "archive"
-
-        return "unknown"
+        return classify_type(method, path, content_type)
 
     # -- parameter extraction -----------------------------------------------
 
@@ -641,54 +550,37 @@ class CaseCollector:
         response_size: int,
         response_snippet: str | None,
         case_type: str,
-        status: str,
         params_key_sig: str,
     ):
         if not self.db:
             return
         try:
-            self.db.execute(
-                """INSERT OR IGNORE INTO work_items (
-                    queue_key, request_variant_id, service_id, coverage_item_id, auth_context,
-                    method, url, url_path,
-                    query_params, body_params, path_params, cookie_params,
-                    headers, body, content_type, content_length,
-                    response_status, response_headers, response_size, response_snippet,
-                    type, source, status, params_key_sig
-                ) VALUES (
-                    ?, ?, ?, NULL, ?,
-                    ?, ?, ?,
-                    ?, ?, ?, ?,
-                    ?, ?, ?, ?,
-                    ?, ?, ?, ?,
-                    ?, 'proxy', ?, ?
-                )""",
-                (
-                    queue_key,
-                    request_variant_id,
-                    service_id,
-                    auth_context,
-                    method,
-                    url,
-                    url_path,
-                    params.get("query_params"),
-                    params.get("body_params"),
-                    params.get("path_params"),
-                    params.get("cookie_params"),
-                    headers,
-                    body,
-                    content_type,
-                    content_length,
-                    response_status,
-                    response_headers,
-                    response_size,
-                    response_snippet,
-                    case_type,
-                    status,
-                    params_key_sig,
-                ),
+            db_insert_work_item(
+                os.path.join(self.engagement_dir, "cases.db"),
+                queue_key=queue_key,
+                request_variant_id=request_variant_id,
+                service_id=service_id,
+                coverage_item_id=None,
+                auth_context=auth_context,
+                method=method,
+                url=url,
+                url_path=url_path,
+                query_params=params.get("query_params"),
+                body_params=params.get("body_params"),
+                path_params=params.get("path_params"),
+                cookie_params=params.get("cookie_params"),
+                headers=headers,
+                body=body,
+                content_type=content_type,
+                content_length=content_length,
+                response_status=response_status,
+                response_headers=response_headers,
+                response_size=response_size,
+                response_snippet=response_snippet,
+                case_type=case_type,
+                source="proxy",
+                params_key_sig=params_key_sig,
             )
-            self.db.commit()
         except sqlite3.OperationalError as exc:
             ctx.log.warn(f"proxy_addon: DB busy/error — {exc}")
 
@@ -734,7 +626,7 @@ class CaseCollector:
         content_length = len(raw_req_body)
 
         # Classification
-        case_type = self._classify_type(req.method, req.pretty_url, content_type, req_headers_dict)
+        case_type = self._classify_type(req.method, path, content_type, req_headers_dict)
 
         # Body save policy
         saved_body = self._apply_body_policy(raw_req_body, content_type)
@@ -755,9 +647,6 @@ class CaseCollector:
         params_key_sig = self._generate_sig(
             params.get("query_params"), params.get("body_params")
         )
-
-        # Status
-        status = "skipped" if case_type in SKIP_TYPES else "pending"
 
         assessment_record = self._post_request_observation(
             url=req.pretty_url,
@@ -799,7 +688,6 @@ class CaseCollector:
             response_size=response_size,
             response_snippet=response_snippet,
             case_type=case_type,
-            status=status,
             params_key_sig=params_key_sig,
         )
 

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 import re
+from pathlib import Path
 from typing import Any
 
 from .intel_types import INTEL_TYPES
@@ -19,9 +21,41 @@ SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
 
 
 _SPECIALIST_DISPATCH_REQUIRED_FIELDS: tuple[str, ...] = (
-    "role",
     "dispatch_mode",
 )
+
+
+# Roles exempt from the `skills` requirement. The operator coordinates phases
+# and dispatch decisions rather than executing a single skill, so requiring an
+# explicit skill list on operator dispatches would be misleading. Every other
+# specialist role must declare which skills it loaded so the dispatch row is a
+# truthful audit of the specialist context.
+_DISPATCH_ROLES_WITHOUT_SKILLS: frozenset[str] = frozenset({"operator"})
+
+
+def _agent_skills_root() -> Path:
+    """Resolve agent/skills/ relative to this file or AITH_REPO_ROOT.
+
+    Used for warn-only validation that named skills exist on disk. Returning a
+    bogus path is harmless because the caller treats a missing directory as
+    "skip the on-disk check" rather than a hard error.
+    """
+    override = os.environ.get("AITH_REPO_ROOT")
+    if override:
+        candidate = Path(override) / "agent" / "skills"
+        if candidate.is_dir():
+            return candidate
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "agent" / "skills"
+        if candidate.is_dir():
+            return candidate
+    # Fallback when no parent dir holds an `agent/skills/` (e.g. the file is
+    # imported from a copied checkout). `__file__` lives at
+    # agent/scripts/assess/lib/contracts.py, so parents[3] is the `agent/`
+    # directory itself — append `skills` rather than `agent/skills` to avoid
+    # building an `agent/agent/skills` path that never exists.
+    return Path(__file__).resolve().parents[3] / "skills"
 
 
 @dataclass
@@ -56,6 +90,15 @@ def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list
         if field_name not in payload:
             errors.append(f"missing required field: {field_name}")
 
+    role_value = payload.get("agent_role", payload.get("role"))
+    if "role" not in payload and "agent_role" not in payload:
+        errors.append("missing required field: role (or agent_role)")
+    if "role" in payload and "agent_role" in payload:
+        role_text = str(payload.get("role") or "").strip()
+        agent_role_text = str(payload.get("agent_role") or "").strip()
+        if role_text and agent_role_text and role_text != agent_role_text:
+            errors.append("role and agent_role must match when both are present")
+
     dispatch_mode = payload.get("dispatch_mode")
     if dispatch_mode is not None and dispatch_mode not in SPECIALIST_DISPATCH_MODES:
         errors.append(
@@ -63,19 +106,69 @@ def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list
             f"valid: {', '.join(SPECIALIST_DISPATCH_MODES)}"
         )
 
-    for str_field in ("role",):
+    for str_field in ("role", "agent_role"):
         value = payload.get(str_field)
         if value is not None and not isinstance(value, str):
             errors.append(f"{str_field} must be a string")
         elif value is not None and not str(value).strip():
             errors.append(f"{str_field} must be a non-empty string")
 
+    # Skills are required for every specialist role so the dispatch row is a
+    # truthful audit of which skill context the agent loaded. Operators are
+    # exempt because they coordinate phases rather than executing a single
+    # skill. Skip on-disk verification when the skills directory cannot be
+    # located so the validator stays usable from arbitrary CWDs.
+    role_name = str(role_value).strip() if isinstance(role_value, str) else ""
+    skills_value = payload.get("skills")
+    skills_list: list[str] = []
+    if isinstance(skills_value, str):
+        skills_list = [s.strip() for s in skills_value.split(",") if s.strip()]
+    elif isinstance(skills_value, list):
+        for entry in skills_value:
+            if isinstance(entry, str) and entry.strip():
+                skills_list.append(entry.strip())
+            else:
+                errors.append("skills entries must be non-empty strings")
+                break
+    elif skills_value is not None:
+        errors.append("skills must be a comma-separated string or a list of strings")
+
+    if role_name and role_name not in _DISPATCH_ROLES_WITHOUT_SKILLS:
+        if not skills_list:
+            errors.append(
+                f"skills is required for role '{role_name}'; "
+                "list at least one skill name from `aith assess list-skills`"
+            )
+
+    if skills_list:
+        skills_root = _agent_skills_root()
+        if skills_root.is_dir():
+            for skill_name in skills_list:
+                skill_path = skills_root / skill_name / "SKILL.md"
+                if not skill_path.is_file():
+                    warnings.append(
+                        f"skill '{skill_name}' has no SKILL.md under {skills_root} "
+                        "— typo or repo-relative path mismatch?"
+                    )
+
     return errors, warnings
 
 
 # Verbs registered under `aith assess kali ...`. Names are kept in sync with
 # the modules under `agent/scripts/assess/commands/kali_*.py`.
-KALI_VERBS: tuple[str, ...] = (
+#
+# Two categories live here so the audit-flag invariants stay truthful:
+# - KALI_TARGET_VERBS — target-facing probes that REQUIRE the standard
+#   audit-flag set (`--technique`, `--intent`, `--probe-kind`, `--phase`,
+#   `--timeout`). Common notes and common mistakes apply.
+# - KALI_MAINT_VERBS — host-side maintenance commands. They do not touch the
+#   target and do not take the audit-flag set. Common notes do NOT apply;
+#   each gets a bespoke contract entry.
+#
+# `KALI_VERBS` is the union for command registration / discovery, but
+# documentation and validation must use the right subset so prompts cannot
+# tell the operator that `sweep-orphans` requires `--phase` (it does not).
+KALI_TARGET_VERBS: tuple[str, ...] = (
     "nmap-scan",
     "nuclei",
     "httpx",
@@ -95,8 +188,13 @@ KALI_VERBS: tuple[str, ...] = (
     "bbot",
     "exec",
     "job",
+)
+
+KALI_MAINT_VERBS: tuple[str, ...] = (
     "sweep-orphans",
 )
+
+KALI_VERBS: tuple[str, ...] = KALI_TARGET_VERBS + KALI_MAINT_VERBS
 
 
 _KALI_COMMON_NOTES: tuple[str, ...] = (
@@ -866,7 +964,10 @@ def _kali_root_contract() -> CommandContract:
             "--timeout <seconds>",
         ),
         notes=_KALI_COMMON_NOTES + (
-            f"Verbs: {', '.join(KALI_VERBS)}.",
+            f"Target-facing verbs (require the audit-flag set above): "
+            f"{', '.join(KALI_TARGET_VERBS)}.",
+            f"Host-side maintenance verbs (no audit flags — they do not touch "
+            f"the target): {', '.join(KALI_MAINT_VERBS)}.",
         ),
         common_mistakes=_KALI_COMMON_MISTAKES,
         examples=(

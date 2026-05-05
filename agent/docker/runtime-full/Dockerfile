@@ -2,6 +2,8 @@ ARG BASE_IMAGE=kalilinux/kali-rolling@sha256:dddc31e0f4bc57b4b91e9027762544506bf
 ARG PRELOADED_TOOLS=0
 FROM ${BASE_IMAGE}
 ARG PRELOADED_TOOLS=0
+ARG INSTALL_VERSION_STAMP=2026.05.05-84a231c
+LABEL security-research.install-versions="${INSTALL_VERSION_STAMP}"
 
 ARG APT_BASE_PACKAGES="ca-certificates=20260223 curl=8.19.0-3 jq=1.8.1-4+b1 sqlite3=3.46.1-9+b1 git=1:2.53.0-1 ripgrep=15.1.0-1+b1 bind9-dnsutils=1:9.20.22-1 iputils-ping=3:20250605-1+b1 whois=5.6.6 openssl=3.6.1-3 netcat-openbsd=1.234-2 procps=2:4.0.4-9+b2 lsof=4.99.4+dfsg-2+b1 python3=3.13.9-3 python3-pip=26.0.1+dfsg-1 python3-aiohttp=3.13.3-3 sudo=1.9.17p2-5 tini=0.19.0-6+b2 wget=1.25.0-2+b1 rlwrap=0.47.1-0.1+b1 unzip=6.0-29+b1 dtach=0.9-8+b1 libxml2-utils=2.15.2+dfsg-0.1 pipx=1.11.1-1 strace=6.18+ds-2 build-essential"
 ARG APT_TOOL_PACKAGES="subfinder=2.13.0-0kali1 sublist3r=1.1-5 testssl.sh=3.2.2+dfsg-1 golang-go=2:1.26~1 chromium=147.0.7727.101-1 chromium-driver=147.0.7727.101-1 whatweb=0.6.3-1kali1 ffuf=2.1.0-1+b11 gobuster=3.8.2-1 wfuzz=3.1.0-6 dirb=2.22+dfsg-7+b1 sqlmap=1.10.4-1 hydra=9.6-3+b1 john=1.9.0-Jumbo-1+git20211102-0kali10 hashcat=7.1.2+ds1-4 ruby-full=1:3.3 proxychains4=4.17-3+b2 openssh-client=1:10.2p1-6 socat=1.8.1.1-1 tcpdump=4.99.6-2 tmux=3.6a-2+b1 nikto=1:2.6.0-0kali3 massdns=1.1.0-0kali2 nmap amass wafw00f"

@@ -24,8 +24,7 @@ already listed below.
 
 - `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
-- `agent/SKILL.md`
-- `agent/skills/source-analysis/SKILL.md`
+- `agent/skills/source-analysis/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint
 
@@ -188,7 +187,7 @@ than enumerating canonical state.
 
 ## Handoffs
 
-- To `vulnerability-analyst`: API routes, object references, mutation paths, auth assumptions, feature flags — bring the vuln-class skill from `agent/SKILL.md` matching the candidate (e.g., `idor-testing` for object refs, `sqli-testing` for query params)
+- To `vulnerability-analyst`: API routes, object references, mutation paths, auth assumptions, feature flags — name the vuln-class skill (discoverable via `aith assess list-skills`) matching the candidate (e.g., `idor-testing` for object refs, `sqli-testing` for query params) so the operator can include it in the dispatch
 - To `fuzzer`: parameter names, format hints, upload paths, parser hints — bring `agent/skills/parameter-fuzzing/SKILL.md`
 - To `exploit-developer`: only when source analysis already proves exploitable secrets or high-confidence abuse paths — bring the skill matching the specific finding class
 '''

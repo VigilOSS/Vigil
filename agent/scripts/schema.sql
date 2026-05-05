@@ -102,7 +102,8 @@ CREATE TABLE IF NOT EXISTS work_items (
     -- Dedup signature: hash of sorted query/body param KEYS
     params_key_sig TEXT,
 
-    -- Signal-first dispatch metadata (classify-work writes these)
+    -- Signal-first dispatch metadata (db_insert_work_item writes these inline at ingest;
+    -- classify-work re-applies them when classify_buckets._BUCKETS is intentionally changed)
     priority_score INTEGER NOT NULL DEFAULT 0,
     priority_reason TEXT,
     cluster_key TEXT,
@@ -116,49 +117,11 @@ CREATE INDEX IF NOT EXISTS idx_work_items_source ON work_items(source);
 CREATE INDEX IF NOT EXISTS idx_work_items_created ON work_items(created_at);
 CREATE INDEX IF NOT EXISTS idx_work_items_priority ON work_items(status, priority_score DESC, cluster_key);
 
--- Per-host aggregate view for budget enforcement (1D.2). Built from `url`
--- parsing because `work_items` does not carry a separate host column;
--- `dispatch.py` uses the same substring expression for its `stats by=host`
--- output, so this view shares the host-extraction semantics with the rest
--- of the buffer. The `active_count` and `pending_count` columns drive the
--- per-host budget check inside `ingest-endpoints`; the `deferred_count`
--- column lets the operator audit how many URLs the budget pushed off the
--- pending queue.
---
--- Host extraction strips an explicit port so that `example.com` and
--- `example.com:8443` collapse onto the same row — `host_active_count` in
--- `lib/classify.py` looks the host up via `urlparse(url).hostname`, which
--- never carries the port, and missing the port-strip silently disables the
--- per-host budget gate for explicit-port URLs.
-CREATE VIEW IF NOT EXISTS work_items_per_host AS
-WITH host_with_port AS (
-    SELECT
-        id,
-        status,
-        cluster_key,
-        CASE
-            WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
-                THEN substr(
-                    substr(url, instr(url, '://') + 3),
-                    1,
-                    instr(substr(url, instr(url, '://') + 3), '/') - 1
-                )
-            ELSE substr(url, instr(url, '://') + 3)
-        END AS host_authority
-    FROM work_items
-    WHERE url IS NOT NULL AND url != ''
-)
-SELECT
-    lower(
-        CASE
-            WHEN instr(host_authority, ':') > 0
-                THEN substr(host_authority, 1, instr(host_authority, ':') - 1)
-            ELSE host_authority
-        END
-    ) AS host,
-    SUM(CASE WHEN status IN ('pending', 'processing', 'done') THEN 1 ELSE 0 END) AS active_count,
-    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
-    SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done_count,
-    SUM(CASE WHEN cluster_key LIKE 'deferred:%' THEN 1 ELSE 0 END) AS deferred_count
-FROM host_with_port
-GROUP BY host;
+-- The per-host aggregate view (`work_items_per_host`) is owned by
+-- `agent/scripts/assess/lib/db.py:_apply_work_items_per_host_view`, NOT by
+-- this file. It is purely derived state (no rows) and the host-extraction
+-- expression evolved across releases (port strip, IPv6 bracket strip), so
+-- defining it in two places creates drift. db.py drops and recreates the
+-- view on every `db_init()` so both fresh engagements and legacy engagement
+-- DBs end up with the same definition. Look there if you need to change
+-- the view shape or host extraction logic.

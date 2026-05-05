@@ -181,7 +181,7 @@ version-string collisions, etc.) before they reach the finding lifecycle.
   noting the template-id and matched URL. Medium hits often seed Phase 3 targeted testing
   rather than standalone findings.
 - **Tech fingerprints** (from `-as` template matches like `http/technologies/`) — record via
-  `aith assess record-intel tech-component <json-file>` so classify-work can match them
+  `aith assess record-intel tech-component <json-file>` so downstream tooling can match them
   against CVE intel.
 
 ### Safety and scope boundary

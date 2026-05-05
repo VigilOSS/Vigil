@@ -35,10 +35,12 @@ Each iteration (set `DB="$DIR/cases.db"`):
 
 3b. Pending >= 2000 → priority-first dispatch:
 
-    # Populate priority/cluster once (idempotent):
-    aith assess classify-work "$DB"
+    # Classification ran inline at ingestion, so priority_score / cluster_key
+    # are already populated. Re-run classify-work only if you intentionally
+    # changed _BUCKETS in classify_buckets.py and want to re-apply the new
+    # weights to already-ingested rows.
 
-    # Optional: review clusters, defer low-signal ones before dispatch:
+    # Review clusters and defer low-signal ones before dispatch:
     aith assess list-clusters "$DB"
     aith assess dispatch "$DB" defer-cluster <cluster_key> --reason "..."
 
@@ -56,7 +58,7 @@ Each iteration (set `DB="$DIR/cases.db"`):
 
 4. On subagent return:
    - Done: aith assess dispatch "$DB" done "id1,id2,..."
-   - New endpoints: feed them back through `aith assess ingest-endpoints "$DB" <source>` or `aith assess ingest-spec "$DB" <spec-file>` so backend state is created first, then rerun `classify-work` so the new rows enter the priority queue with scores
+   - New endpoints: feed them back through `aith assess ingest-endpoints "$DB" <source>` or `aith assess ingest-spec "$DB" <spec-file>` — those paths run inline classification so the new rows enter the priority queue with scores immediately
    - Findings: write structured finding state with `aith assess record-finding`
    - Errors: aith assess dispatch "$DB" error "id1,id2,..."
 5. pending=0 and producers stopped → report completion
@@ -65,19 +67,21 @@ Each iteration (set `DB="$DIR/cases.db"`):
 
 ### Priority-mode scoring reference
 
-`classify-work` populates four fields on each work item from the URL structure (see
-`agent/scripts/assess/commands/classify_work.py` for the exact weight table):
+Classification runs inline during `db_insert_work_item()` and populates four fields on
+each work item from the URL structure (see `agent/scripts/assess/lib/classify_buckets.py`
+for the authoritative weight table):
 
 - `cluster_key` — `gf:<bucket>` when a parameter or path pattern matches a gf bucket; otherwise
   `path:/<first-two-url-segments>` as the fallback when nothing matches.
-- `priority_score` — integer 0-50. Weights (highest first): rce (50), ssrf (45), sqli/lfi (40),
-  idor (35), debug_logic (30), ssti/redirect (25), xss (20), interestingparams (15).
+- `priority_score` — integer 0-50. Weights (highest first): rce (50), ssrf (40), sqli/lfi (40),
+  img_traversal (35), trust_surface (35), idor (35), upload_fields (30), debug_logic (30),
+  redirect/ssti/cors (25), xss (20), interestingparams (15), interestingext (10).
   Cluster_key and priority_score track the single highest-weight match; when two buckets tie,
   earlier declaration order wins deterministically.
 - `priority_reason` — e.g. `"gf:ssrf+gf:idor"` listing every matched bucket, so the operator sees
   why an item scored high without running gf manually.
-- `terminal_reason` — set on hopeless items (`inert_type` for image/video/font/archive); these
-  are excluded from `fetch-by-priority`.
+- `terminal_reason` — set on hopeless items (`inert_type` for image/video/font/archive/sourcemap/manifest);
+  these are excluded from `fetch-by-priority`.
 
 Each gf bucket has a reference at `agent/references/gf-patterns/<bucket>.md` — consult it when
 you're unsure why a cluster scored the way it did.

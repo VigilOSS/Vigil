@@ -32,8 +32,7 @@ already listed below.
 - `agent/shared-constraints-code.md`
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
-- `agent/SKILL.md`
-- `agent/skills/code-finding-verification/SKILL.md`
+- `agent/skills/code-finding-verification/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 - CWE pattern references matching the findings' defect families
 
 ## Pre-Work Checkpoint

@@ -47,6 +47,10 @@ def _register_dispatch(client, *, agent_id: str, agent_role: str) -> None:
             "agent_id": agent_id,
             "agent_role": agent_role,
             "task": f"handoff test for {agent_id}",
+            # Specialist roles require a non-empty `skills` value so the
+            # dispatch row is auditable. Use a real on-disk skill name so
+            # the validator's warn-only on-disk check stays quiet.
+            "skills": "auth-bypass",
         },
     )
     assert response.status_code == 201, response.text

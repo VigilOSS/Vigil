@@ -1,15 +1,21 @@
 # AI Threat Hunting Skill Index
 
-Use this file when you need to decide which skill to load before starting specialist work.
-Read `agent/shared-constraints.md` first, then select from this index.
+> **Operators and specialists:** prefer `aith assess list-skills` for discovery
+> (compact name + one-line "Use when:"). Reading this full index file costs
+> ~300 lines of context per turn just to pick a skill. This file is retained
+> as a human-readable reference for paired-reference details and the long-form
+> "Use when" descriptions; the CLI is the authoritative discovery surface.
 
-## Selection Rule
+Use this file only as a long-form human reference. For live dispatch selection, run
+`aith assess list-skills` and pass the directory-name skill value to
+`aith assess dispatch register --skills`; the validator resolves those names
+against `agent/skills/<name>/SKILL.md` on disk.
 
-1. Load `agent/shared-constraints.md` first (subagents) or confirm constraints are active (operator).
-2. Find the best-fit skill below using the "Use when:" line.
-3. Load that skill file in full before running target work.
-4. When the skill's "Extended Resources" lists reference files, read those too — they contain the payloads and checklists for that test class.
-5. Check `agent/references/INDEX.md` for additional depth only after the skill is loaded.
+## Deprecated Selection Note
+
+The old manual selection flow in this file is intentionally superseded. Operators
+should not read the full index just to pick a skill; subagents should load the
+specific `agent/skills/<name>/SKILL.md` path named in their dispatch prompt.
 
 ---
 
@@ -28,12 +34,12 @@ Read `agent/shared-constraints.md` first, then select from this index.
   **Paired references:** `references/payloads/info-disclosure-probes.md`, `references/tools/exploitation/dalfox.md` _(for JS-discovered parameterized URLs)_
 
 - `agent/skills/surface-collection/SKILL.md`
-  **Use when:** Phase 2 (Collect); running Katana + gau + historical URL enrichment, intelligent URL triage, and work-buffer population.
+  **Use when:** Phase 2 (Collect); running Katana live crawl plus the gau pipeline wrappers (`gau-endpoints` / `gau-js-endpoints`) for historical and JS-hidden URL enrichment, intelligent URL triage, and work-buffer population.
   **Paired references:** `references/tools/recon/gau.md`, `references/tools/recon/httpx.md`
 
 - `agent/skills/gau-triage/SKILL.md`
-  **Use when:** After Phase 2 ingestion, a large (~500+) historical URL corpus remains to triage; deep pass of gf classification → httpx body fetch → trufflehog secret scan (no external HTTP by default). Operator-dispatched; owned by surface-collector.
-  **Paired references:** `references/tools/recon/gf.md`, `references/tools/recon/trufflehog.md`, `references/tools/recon/httpx.md`, `references/tools/recon/gau.md`
+  **Use when:** Dispatching one of the gau pipeline wrappers (`gau-endpoints`, `gau-secrets`, `gau-js-endpoints`) and interpreting their structured output. Owns the verb-decision tree, body-fetch interpretation, and finding-recording rules over the wrapper output. Operator-dispatched; owned by surface-collector.
+  **Paired references:** `references/tools/recon/trufflehog.md`, `references/tools/recon/httpx.md`, `references/tools/recon/gau.md`
 
 - `agent/skills/case-dispatching/SKILL.md`
   **Use when:** Operator needs to coordinate the Phase 3 work-buffer consumption loop (reset-stale → stats → fetch → dispatch → done → requeue).
