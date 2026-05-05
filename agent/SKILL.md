@@ -143,6 +143,10 @@ Load the relevant skill before starting validation or exploitation of a candidat
   **Use when:** Investigating potential data exfiltration via DNS; analyzing query entropy, subdomain patterns, record type ratios, and query volume in Zeek/Splunk logs to detect tunneling tools (iodine, dnscat2, DNSExfiltrator, Cobalt Strike DNS).
   **Paired references:** _(none — methodology in skill)_
 
+- `agent/skills/elasticsearch-injection/SKILL.md`
+  **Use when:** Search functionality backed by Elasticsearch, OpenSearch, or Apache Solr; user input reaches Lucene `query_string` parsing; testing for field enumeration, data extraction, cross-index access, or access control bypass via search syntax.
+  **Paired references:** `references/payloads/elasticsearch-injection-payloads.md`
+
 - `agent/skills/idor-testing/SKILL.md`
   **Use when:** Testing object references in API parameters, IDs, GUIDs, or path segments for unauthorized access.
   **Paired references:** `references/api-security/API01-broken-object-level-authz.md`
@@ -166,6 +170,18 @@ Load the relevant skill before starting validation or exploitation of a candidat
 - `agent/skills/oauth-oidc-testing/SKILL.md`
   **Use when:** Application uses OAuth 2.0 or OpenID Connect for authentication; testing redirect_uri manipulation, state parameter abuse, token leakage, scope escalation, or PKCE bypass.
   **Paired references:** `references/payloads/jwt-payloads.md`
+
+- `agent/skills/saml-sso-testing/SKILL.md`
+  **Use when:** Target exposes SAML SP endpoints (`/saml/acs`, `/saml/metadata`); testing unsigned assertion acceptance, signature wrapping (XSW1-8), NameID manipulation, RelayState redirect abuse, or XXE via SAML XML parsing.
+  **Paired references:** `references/payloads/saml-attack-payloads.md`
+
+- `agent/skills/split-brain-idor/SKILL.md`
+  **Use when:** API uses RESTful routes with IDs in the path AND request bodies also contain ID fields; testing whether the server validates auth on the URL ID but operates on the body ID (body/route parameter divergence).
+  **Paired references:** `references/api-security/API01-broken-object-level-authz.md`
+
+- `agent/skills/bff-parameter-override/SKILL.md`
+  **Use when:** Target uses a BFF/API gateway/Express middleware that proxies to backend services; testing for hidden internal parameters (userId, tenantId, role flags) that the middleware sets from session but doesn't strip from client input, allowing client-side override of server-set identity/authorization context.
+  **Paired references:** `references/payloads/bff-override-params.md`
 
 - `agent/skills/open-redirect-testing/SKILL.md`
   **Use when:** Testing redirect parameters (`next`, `url`, `return_to`, etc.) for open redirect or OAuth token theft chains.

