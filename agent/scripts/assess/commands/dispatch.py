@@ -114,8 +114,10 @@ def register(subparsers) -> None:
     p.add_argument(
         "--reason",
         default="",
-        help="Reason for defer-cluster / defer-items (required for those actions). Free text; "
-        "stored in terminal_reason so operators can audit why a cluster or item was skipped.",
+        help="Reason for defer-cluster / defer-items / abort-duplicate (required for those "
+        "actions). Free text; stored in terminal_reason (defer-*) or the dispatch_duplicate "
+        "decision payload (abort-duplicate) so operators can audit why a cluster, item, or "
+        "duplicate dispatch was skipped/aborted.",
     )
     p.add_argument(
         "--by",
