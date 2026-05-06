@@ -22,6 +22,7 @@ type OverviewTabProps = {
   chains: (AssessmentAttackChainDetail | AssessmentAttackChain)[];
   chainLinks: AssessmentAttackChainLink[];
   currentPhase: string;
+  assessmentRefreshVersion: number;
 };
 
 function sortFindings(findings: (AssessmentFindingDetail | AssessmentFinding)[]) {
@@ -38,7 +39,7 @@ function verificationSummary(finding: AssessmentFindingDetail | AssessmentFindin
   return finding.verification_state;
 }
 
-export function OverviewTab({ engagementKey, events, assessmentSummary, findings, chains, chainLinks, currentPhase }: OverviewTabProps) {
+export function OverviewTab({ engagementKey, events, assessmentSummary, findings, chains, chainLinks, currentPhase, assessmentRefreshVersion }: OverviewTabProps) {
   const s = assessmentSummary;
   const [readiness, setReadiness] = useState<ReportReadiness | null>(null);
   const [readinessError, setReadinessError] = useState<string | null>(null);
@@ -67,7 +68,7 @@ export function OverviewTab({ engagementKey, events, assessmentSummary, findings
     return () => {
       cancelled = true;
     };
-  }, [engagementKey]);
+  }, [engagementKey, assessmentRefreshVersion]);
 
   return (
     <>

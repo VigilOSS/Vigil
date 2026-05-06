@@ -121,6 +121,12 @@ def test_root_cause_link_rejects_nested_groups_and_merge_of_group_root(client, i
     )
     assert nested.status_code == 400, nested.text
 
+    parent_as_sibling = client.put(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-010/root-cause",
+        json={"root_cause_slug": "RC-012"},
+    )
+    assert parent_as_sibling.status_code == 400, parent_as_sibling.text
+
     merge = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/merge",
         json={"source_slug": "RC-010", "target_slug": "RC-012", "reason": "duplicate"},

@@ -1480,6 +1480,9 @@ def _build_register_payload(args) -> dict:
         for error in errors:
             print(f"register: {error}", file=sys.stderr)
         sys.exit(1)
+    skills_value = payload.get("skills")
+    if isinstance(skills_value, list):
+        payload["skills"] = ",".join(str(skill).strip() for skill in skills_value)
     return payload
 
 

@@ -157,15 +157,21 @@ def _extract_source_url_from_body(body_path: Path) -> str | None:
     candidate = request_match.group(1)
     if candidate.startswith(("http://", "https://")):
         return candidate
-    # Path-only request line; recover host + scheme from the Host header
-    # and the .meta.json sidecar (newer httpx versions). Fall back to the
-    # CLI-provided target.
+    # Path-only request line; recover host from the Host header and scheme
+    # from httpx's sanitized body filename.
     host_match = re.search(r"^Host:\s*(\S+)", head, flags=re.IGNORECASE | re.MULTILINE)
     if not host_match:
         return None
     host = host_match.group(1).strip()
-    scheme_hint = "https" if "tls" in head.lower()[:1024] else "https"
+    scheme_hint = _scheme_hint_from_body_name(body_path)
     return f"{scheme_hint}://{host}{candidate}"
+
+
+def _scheme_hint_from_body_name(body_path: Path) -> str:
+    name = body_path.name.lower()
+    if name.startswith("http-"):
+        return "http"
+    return "https"
 
 
 def _list_js_bodies(bodies_dir: Path, max_bodies: int) -> list[Path]:
@@ -182,6 +188,8 @@ def _list_js_bodies(bodies_dir: Path, max_bodies: int) -> list[Path]:
             continue
         if entry.suffix.lower() in {".js", ".mjs", ".cjs"}:
             candidates.append(entry)
+            if max_bodies and len(candidates) >= max_bodies:
+                break
             continue
         # Fall back to peek the stored request line for `.js` URLs
         try:
@@ -196,11 +204,27 @@ def _list_js_bodies(bodies_dir: Path, max_bodies: int) -> list[Path]:
     return candidates
 
 
+def _directory_has_files(path: Path) -> bool:
+    return path.is_dir() and any(entry.is_file() for entry in path.rglob("*"))
+
+
+def _normalize_target_host(target: str) -> str:
+    raw = (target or "").lower().strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw if "://" in raw else f"//{raw}")
+    target_host = (parsed.hostname or raw).strip().rstrip(".")
+    if target_host.startswith("*."):
+        target_host = target_host[2:]
+    elif target_host.startswith("."):
+        target_host = target_host[1:]
+    return target_host
+
+
 def _host_matches_target(host: str, target: str) -> bool:
     """Return true for exact target host or a real subdomain of it."""
-    target_host = (urlparse(target).hostname or target).lower().strip().lstrip(".")
+    target_host = _normalize_target_host(target)
     host = (host or "").lower().strip().rstrip(".")
-    target_host = target_host.rstrip(".")
     return bool(host and target_host and (host == target_host or host.endswith("." + target_host)))
 
 
@@ -338,7 +362,7 @@ def run(args: argparse.Namespace) -> None:
     )
 
     fetched_count = 0
-    bodies_dir_has_files = bodies_dir.is_dir() and any(bodies_dir.rglob("*"))
+    bodies_dir_has_files = _directory_has_files(bodies_dir)
     if not bodies_dir_has_files:
         if not args.fetch_if_missing:
             print(

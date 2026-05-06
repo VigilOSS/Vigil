@@ -1560,6 +1560,38 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
     assert calls[:3] == ["runtime", "orchestrator", "frp-prompt"]
 
 
+def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import up as up_module
+
+    seen: dict[str, object] = {}
+
+    def fake_runner(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(up_module, "resolve_source_root", lambda *_args, **_kwargs: tmp_path)
+    monkeypatch.setattr(up_module, "install_from_source", lambda *args, **kwargs: None)
+    monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: False)
+    monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: True)
+    monkeypatch.setattr(up_module, "_start_or_restart_runtime", lambda *args, **kwargs: None)
+    monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: None)
+    monkeypatch.setattr(up_module, "_start_mitmproxy_if_needed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(up_module, "_start_oob_if_needed", lambda *args, **kwargs: None)
+
+    def fake_build_runtime(_install_root, *, runner=None, **_kwargs):
+        seen["runtime_runner"] = runner
+
+    def fake_build_mitmproxy(_install_root, *, runner=None):
+        seen["mitmproxy_runner"] = runner
+
+    monkeypatch.setattr(up_module, "build_runtime", fake_build_runtime)
+    monkeypatch.setattr(up_module, "_build_mitmproxy_image", fake_build_mitmproxy)
+
+    up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=fake_runner)
+
+    assert seen["runtime_runner"] is fake_runner
+    assert seen["mitmproxy_runner"] is fake_runner
+
+
 # ---------------------------------------------------------------------------
 # Wave 3 W3-B mutation-helper coverage
 # ---------------------------------------------------------------------------
@@ -2897,6 +2929,31 @@ def test_dispatch_register_writes_payload(
     assert body["status"] == "in-progress"
     assert fake.recorded[0]["agent_role"] == "vulnerability-analyst"
     assert fake.recorded[0]["dispatch_mode"] == "item-iterating"
+
+
+def test_dispatch_register_normalizes_list_skills_from_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload_path = tmp_path / "dispatch.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "agent_id": "AG-LIST-SKILLS",
+                "agent_role": "vulnerability-analyst",
+                "task": "IDOR sweep",
+                "dispatch_mode": "item-iterating",
+                "skills": ["idor-testing", "auth-bypass"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake = _run_dispatch_verb(monkeypatch, "register", from_json=str(payload_path))
+    capsys.readouterr()
+
+    assert fake.recorded[0]["skills"] == "idor-testing,auth-bypass"
 
 
 def test_dispatch_register_rejects_missing_skills_locally(

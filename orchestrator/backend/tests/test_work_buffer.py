@@ -611,6 +611,46 @@ def test_proxy_insert_uses_shared_inline_classification(tmp_path: Path) -> None:
     assert row == ("unknown", "pending", 35, "gf:trust_surface", "gf:trust_surface")
 
 
+def test_proxy_insert_reuses_open_db_connection(tmp_path: Path, monkeypatch) -> None:
+    module = _load_proxy_addon_module()
+    collector = module.CaseCollector()
+    collector.engagement_dir = str(tmp_path)
+    collector.db = object()
+    seen: dict[str, object] = {}
+
+    def fake_insert(_db_path: str, **kwargs) -> None:
+        seen["connection"] = kwargs.get("connection")
+
+    monkeypatch.setattr(module, "db_insert_work_item", fake_insert)
+    collector._insert_case(
+        queue_key="variant:1:unknown",
+        request_variant_id=1,
+        service_id=None,
+        auth_context="anonymous",
+        method="GET",
+        url="https://target.example/oauth/callback",
+        url_path="/oauth/callback",
+        params={
+            "query_params": "{}",
+            "body_params": "{}",
+            "path_params": "{}",
+            "cookie_params": "{}",
+        },
+        headers="{}",
+        body=None,
+        content_type="",
+        content_length=0,
+        response_status=200,
+        response_headers="{}",
+        response_size=0,
+        response_snippet=None,
+        case_type="unknown",
+        params_key_sig="",
+    )
+
+    assert seen["connection"] is collector.db
+
+
 def test_fetch_by_priority_vuln_agent_routes_scored_unknown_only(
     tmp_path: Path, capsys
 ) -> None:
