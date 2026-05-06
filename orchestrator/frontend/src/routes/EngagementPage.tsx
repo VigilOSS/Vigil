@@ -449,6 +449,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
 
           {activeTab === "overview" && (
             <OverviewTab
+              engagementKey={engagementKey}
               events={displayEvents}
               assessmentSummary={displaySummary}
               findings={displayFindings}

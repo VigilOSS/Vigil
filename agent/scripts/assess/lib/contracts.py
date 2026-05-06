@@ -310,6 +310,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Use details.poc_code for exploit scripts, or details.poc_request / details.poc_response for structured HTTP request/response pairs that demonstrate the vulnerability.",
             "Use details.references for CVE links, advisory URLs, or related documentation (array of strings).",
             "Use details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete and worth tracking, but only becomes exploitation-worthy as part of a larger chain. Specialists set or refine these fields through record-finding or update-finding; verification reviews them but does not own them.",
+            "Do not put `link_kind=root_cause` in the finding `links` array. Record the finding first, then use `aith assess link-finding` after verification so root/sibling grouping stays an explicit lifecycle action.",
         ),
         common_mistakes=(
             ("status", "use workflow_status for lifecycle overrides, or omit it and keep the helper default"),
@@ -318,6 +319,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("description", "use summary for the short finding statement or notes for replayable proof"),
             ("evidence", "use details.evidence"),
             ("impact", "use details.impact"),
+            ("links[].link_kind=root_cause", "use `aith assess link-finding <sibling-slug> --root-cause <root-slug>` after verification"),
         ),
         examples=(
             {
@@ -381,6 +383,50 @@ _CONTRACTS: dict[str, CommandContract] = {
                     "references": ["https://cwe.mitre.org/data/definitions/122.html"],
                 },
             },
+        ),
+    ),
+    "link-finding": CommandContract(
+        name="link-finding",
+        summary="Attach one finding as a sibling of a root-cause finding using backend-owned finding links.",
+        schema_name="backend RootCauseLinkRequest",
+        preferred_invocations=(
+            "aith assess link-finding <sibling-slug> --root-cause <root-slug> --effect eliminates_finding",
+            "aith assess link-finding <sibling-slug> --root-cause <root-slug> --effect eliminates_attack_path --note 'Root removes this exploit chain; residual XXE remains.'",
+            "aith assess link-finding <sibling-slug> --clear-root-cause",
+        ),
+        author_supplied_fields=(
+            "finding_slug",
+            "root_cause_slug",
+            "root_cause_effect",
+            "note when the relationship is not obvious",
+        ),
+        helper_defaults=(
+            ("source_name", "operator"),
+            ("sibling_order", "next available order when omitted"),
+            ("provenance", "{}"),
+        ),
+        notes=(
+            "Use this after findings are verified enough to consolidate. The helper records intentional grouping without changing root_cause_key, so deduplication and human grouping stay separate.",
+            "Choose eliminates_attack_path when fixing the root removes only the demonstrated chain and the sibling still needs remediation as a standalone issue.",
+        ),
+        common_mistakes=(
+            ("root_cause_key", "do not repurpose root_cause_key as a display grouping field; use link-finding for intentional groups"),
+            ("related", "generic related links do not suppress duplicate-root-cause report blockers"),
+        ),
+    ),
+    "list-finding-group": CommandContract(
+        name="list-finding-group",
+        summary="Inspect a root-cause finding group as the backend will present it to reporting and the UI.",
+        schema_name="backend finding group projection",
+        preferred_invocations=(
+            "aith assess list-finding-group <root-slug>",
+            "aith assess list-finding-group <root-slug> --json",
+        ),
+        author_supplied_fields=(
+            "root_slug",
+        ),
+        notes=(
+            "Use this before report generation to confirm sibling order, residual-path badges, and root/sibling membership.",
         ),
     ),
     "verify-finding": CommandContract(

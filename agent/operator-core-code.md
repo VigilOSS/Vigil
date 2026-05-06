@@ -303,6 +303,10 @@ using the available subagent budget.
 - **Threat model summary** -- trust boundaries, entry points, and high-value targets relevant
   to this batch from the Phase 1 threat model. Keep this short and file-local; do not dump the
   full Phase 1 artifact when a 3-8 bullet summary will do.
+- **Root-cause candidate capture** -- ask the hunter to put shared utility functions, shared
+  guards, or common missing-control candidates in handoff `extras.root_cause_candidates` when
+  several concrete findings appear to depend on the same cause. This stays schema-valid and gives
+  the operator a Phase 4 grouping checklist without forcing speculative finding fields.
 - **CWE pattern references** -- matching the applicable vulnerability classes for this batch.
   Use the Slot-Type -> Reference Mapping table below to select which pattern files to include.
 - **Effort score guidelines** -- effort thresholds for this file's classification tier:
@@ -803,11 +807,11 @@ aith assess transition-phase complete
 
 **Report dispatch:**
 For a final report, run `aith assess check-report-readiness` before dispatching
-`report-writer`. Report-writer queries `report-findings?mode=final` for final output and
-`report-findings?mode=draft` for interim output; both include code and web findings from the
-shared backend. Fuzz findings (CF-xxx) include crash inputs and ASAN reports as evidence.
+`report-writer`. Report-writer queries `report-findings?mode=final&view=groups` for final output and
+`report-findings?mode=draft&view=groups` for interim output; both include code and web findings from the
+shared backend with root-cause grouping applied. Fuzz findings (CF-xxx) include crash inputs and ASAN reports as evidence.
 Use the same draft → review-and-fix QA → publish gate as runtime engagements: draft generation
-writes `report.md` and returns the 12-step checklist, a fresh `report-writer` reviews and fixes
+writes `report.md` and returns the 13-check checklist, a fresh `report-writer` reviews and fixes
 the rendered report, and publication plus `reported` lifecycle transitions wait for `QA PASS`.
 
 ## Agent Roster -- Code Analysis
