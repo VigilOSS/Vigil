@@ -17,11 +17,15 @@ Before writing anything, pull the canonical state from the orchestrator API.
 Use the helper script or `curl` — never query the SQLite database file directly.
 
 ```bash
-# Final report gate and final-mode findings
+# Final report gate and grouped final-mode findings
 aith assess check-report-readiness
-aith assess fetch "report-findings?mode=final"
+aith assess fetch "report-findings?mode=final&view=groups"
 
-# Interim report findings when the operator explicitly wants a draft before final readiness passes
+# Interim grouped findings when the operator explicitly wants a draft before final readiness passes
+aith assess fetch "report-findings?mode=draft&view=groups"
+
+# Optional flat finding list for lifecycle cross-checks or troubleshooting
+aith assess fetch "report-findings?mode=final"
 aith assess fetch "report-findings?mode=draft"
 
 # Attack chains with narrative and severity
@@ -40,12 +44,18 @@ aith assess fetch surfaces
 aith assess fetch summary
 ```
 
-The `report-findings` endpoint returns each finding with:
+The flat `report-findings` endpoint returns each finding with:
 - `report_id` — sequential `001`, `002`, etc. (for the report body)
 - `slug` — the original backend slug, e.g. `VA-003` (for publish-mode lifecycle updates only; do not expose in the report body)
 - `cvss_vector`, `cvss_score` — extracted from `details_json`
 - `remediation`, `steps_to_reproduce`, `cwe_id`, `owasp_category` — extracted from `details_json`
 - `impact`, `evidence_detail` — extracted from `details_json`
+
+The grouped `report-findings?view=groups` endpoint returns `groups` and `standalone`.
+Each group has a `root` finding and `siblings`; sibling rows include
+`root_cause_effect`, `root_cause_note`, and `sibling_order`. Use this projection
+to keep one root-cause narrative while still naming downstream outcomes and residual
+standalone paths.
 
 Use these structured fields directly. Do not re-derive CVSS or remediation unless the
 proved impact at report time materially differs from what was recorded at validation.
@@ -171,7 +181,7 @@ Tool output in `<details>` blocks, generated scripts, scope verification table, 
 Before generating the report body, run these checks against the backend data. If any check fails, **stop and flag the issue to the operator** — do not silently fix or ignore it.
 
 1. **Readiness gate:** for final reports, run `aith assess check-report-readiness`. If it fails, stop and flag the blockers to the operator.
-2. **Root-cause consolidation check:** scan findings for pairs sharing the same vulnerable component or configuration where one is a direct consequence of the other. These must be consolidated into one finding before the report is written. Flag: "EX-036 (credential extraction) is a consequence of EX-032 (auth bypass on the same TeamCity host) — merge into one finding." Apply the BugCrowd/HackerOne standard: one root cause, one submission.
+2. **Root-cause consolidation check:** use `report-findings?view=groups` and `aith assess check-report-readiness` to confirm intentional root/sibling groups are already represented. If two reportable findings still share the same vulnerable component or configuration and are not grouped, stop and ask the operator to run `aith assess link-finding` or merge them. Apply the BugCrowd/HackerOne standard: one root cause, one submission.
 3. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
 4. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
 
@@ -180,7 +190,7 @@ Only proceed to report generation after validation passes or the operator resolv
 ## Generation Procedure
 
 1. **Pull backend state** using the queries in "Query Backend First" above
-2. **Use `report-findings?mode=final`** as the authoritative finding list for final reports, or `report-findings?mode=draft` for interim drafts
+2. **Use `report-findings?mode=final&view=groups`** as the authoritative final finding structure, or `report-findings?mode=draft&view=groups` for interim drafts. Render one section per group root; include siblings as downstream outcomes under the root narrative, and explicitly call out `eliminates_attack_path` siblings as residual remediation paths.
 3. **Use pre-computed CVSS** from finding details. Recalculate only if proved impact at report time would shift at least one CVSS base metric (AV, AC, PR, UI, S, C, I, A) by one or more levels versus the validated vector
 4. **Use pre-computed remediation** from finding details. Augment only when one of these is true: (a) the chain revealed a prerequisite weakness the original remediation did not address, (b) the exploit bypassed the suggested fix, or (c) the chain spans multiple findings and fixing this one alone does not close the chain
 5. Populate all template fields (flag missing evidence with `[EVIDENCE MISSING]`, never fabricate)
@@ -213,14 +223,14 @@ After writing the report, verify every finding against `agent/rules/reporting.md
 10. Executive summary ≤ one page (Rule 10)
 11. Severity counts in executive summary match actual finding list
 12. No severity labels in titles, no internal slugs/IDs anywhere, no Coverage Summary, no Finding Cross-Reference (Rules 16–19)
-13. Findings sharing the same root cause are consolidated — one vulnerable component, one finding (Rule 18)
+13. Findings sharing the same root cause are consolidated through grouped report data — one vulnerable component, one finding, with siblings only as downstream outcomes (Rule 18)
 
 ## Review-and-Fix QA Mode
 
-When the operator dispatches report-writer in review-and-fix QA mode, load the existing `$ENGAGEMENT_DIR/report.md`, pull the same backend report state, and run the 12 checks above against the rendered report.
+When the operator dispatches report-writer in review-and-fix QA mode, load the existing `$ENGAGEMENT_DIR/report.md`, pull the same backend report state, and run the 13 checks above against the rendered report.
 
 - Fix report-local failures directly in `report.md`: wording, structure, counts, missing annotations, overlong evidence, title echoes, passive voice, and non-load-bearing sentences.
-- Return `QA PASS` only when all 12 checks pass after fixes.
+- Return `QA PASS` only when all 13 checks pass after fixes.
 - Return `QA BLOCKED` when the report cannot be corrected without new backend state: missing evidence, missing remediation, unresolved duplicate findings, severity/CVSS mismatch, or a finding that no longer belongs in final output. Include exact finding slugs and the required operator action.
 
 ## Publish After QA Pass

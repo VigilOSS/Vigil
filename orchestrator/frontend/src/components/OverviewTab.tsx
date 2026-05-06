@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type {
   AssessmentAttackChain,
   AssessmentAttackChainDetail,
@@ -6,12 +7,15 @@ import type {
   AssessmentFindingDetail,
   AssessmentSummary,
   EventRecord,
+  ReportReadiness,
 } from "../lib/api";
+import { getReportReadiness } from "../lib/api";
 import { PhaseWaterfall } from "./PhaseWaterfall";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
 
 type OverviewTabProps = {
+  engagementKey: string;
   events: EventRecord[];
   assessmentSummary: AssessmentSummary | null;
   findings: (AssessmentFindingDetail | AssessmentFinding)[];
@@ -34,8 +38,10 @@ function verificationSummary(finding: AssessmentFindingDetail | AssessmentFindin
   return finding.verification_state;
 }
 
-export function OverviewTab({ events, assessmentSummary, findings, chains, chainLinks, currentPhase }: OverviewTabProps) {
+export function OverviewTab({ engagementKey, events, assessmentSummary, findings, chains, chainLinks, currentPhase }: OverviewTabProps) {
   const s = assessmentSummary;
+  const [readiness, setReadiness] = useState<ReportReadiness | null>(null);
+  const [readinessError, setReadinessError] = useState<string | null>(null);
   const sortedFindings = sortFindings(findings);
   const latestEvents = events
     .filter((e) => e.event_type !== "artifact.updated")
@@ -45,6 +51,23 @@ export function OverviewTab({ events, assessmentSummary, findings, chains, chain
   const egressStatus = s?.egress_status;
   const egressBlockedPct = egressStatus?.blocked_pct ?? 0;
   const egressBannerVisible = egressBlockedPct > 50;
+
+  useEffect(() => {
+    let cancelled = false;
+    getReportReadiness(engagementKey)
+      .then((row) => {
+        if (!cancelled) {
+          setReadiness(row);
+          setReadinessError(null);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setReadinessError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engagementKey]);
 
   return (
     <>
@@ -154,6 +177,37 @@ export function OverviewTab({ events, assessmentSummary, findings, chains, chain
           </article>
         </div>
       </section>
+
+      {readiness && !readiness.ready && (
+        <section className="panel report-blockers-panel">
+          <div className="panel-header">
+            <h2>Report blockers</h2>
+          </div>
+          <div className="blocker-list">
+            {readiness.blockers.map((blocker, index) => {
+              const affected = blocker.slug ? [blocker.slug] : blocker.slugs || [];
+              return (
+                <article key={`${blocker.kind}-${index}`} className="blocker-row">
+                  <span className="badge severity-high">{blocker.kind.replace(/_/g, " ")}</span>
+                  <div>
+                    {affected.length > 0 && (
+                      <p className="meta-text">
+                        Findings: {affected.map((slug) => <code key={slug}>{slug}</code>)}
+                      </p>
+                    )}
+                    <p>{blocker.detail || "No detail provided."}</p>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      )}
+      {readinessError && (
+        <section className="panel">
+          <p className="meta-text">Report readiness unavailable: {readinessError}</p>
+        </section>
+      )}
 
       <section className="engagement-grid">
         <article className="panel">
