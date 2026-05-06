@@ -4,6 +4,7 @@ import type {
   AssessmentAttackChainLink,
   AssessmentFinding,
   AssessmentFindingDetail,
+  AssessmentFindingGroup,
   AssessmentFindingLink,
   AssessmentFindingTransition,
   FindingDetails,
@@ -12,8 +13,7 @@ import type {
   FindingProvenance,
   FindingReference,
 } from "../lib/api";
-import { listAssessmentFindingLinks, listAssessmentFindingTransitions } from "../lib/api";
-import { useResizableColumns } from "../lib/useResizableColumns";
+import { listAssessmentFindingGroups, listAssessmentFindingLinks, listAssessmentFindingTransitions } from "../lib/api";
 import { JsonTree } from "./ArtifactViewer";
 import { JsonView } from "./JsonView";
 import { useBodyScrollLock } from "../lib/modalScrollLock";
@@ -29,6 +29,7 @@ type FindingsTabProps = {
   fallbackFindings: AssessmentFinding[];
   chains: AssessmentAttackChainDetail[];
   chainLinks: AssessmentAttackChainLink[];
+  assessmentRefreshVersion: number;
 };
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const;
@@ -36,7 +37,6 @@ type Severity = (typeof SEVERITY_ORDER)[number];
 const SEV_RANK: Record<string, number> = Object.fromEntries(
   SEVERITY_ORDER.map((s, i) => [s, i]),
 );
-const PAGE_SIZE = 40;
 const SEV_COLORS: Record<string, string> = {
   critical: "#991b1b",
   high: "#c64d15",
@@ -44,13 +44,6 @@ const SEV_COLORS: Record<string, string> = {
   low: "#17354c",
   info: "#9a988d",
 };
-
-// Default column widths (in px) for the Findings list. Order matches
-// the columns rendered in the list-header / frow below. These get saved
-// to localStorage via useResizableColumns and can be reset per-column
-// by double-clicking a handle.
-const FINDINGS_LIST_DEFAULTS = [10, 74, 520, 240, 260, 140];
-const FINDINGS_LIST_MINS = [8, 52, 220, 120, 140, 100];
 
 const KNOWN_DETAIL_KEYS = new Set<string>([
   "discovered_by",
@@ -268,6 +261,7 @@ type DerivedLink = {
   link_kind: string;
   target_kind: "finding" | "chain" | "cve" | string;
   target_ref: string;
+  notes?: string;
   id?: number;
 };
 
@@ -326,7 +320,21 @@ type Derived = {
   details: FindingDetails;
   provenance: FindingProvenance | null;
   links: DerivedLink[];
+  root_cause_role?: "root" | "sibling";
+  root_cause_slug?: string;
+  root_cause_note?: string;
+  root_cause_effect?: "eliminates_finding" | "eliminates_attack_path";
+  sibling_order?: number | null;
+  sibling_count?: number;
+  residual_path_count?: number;
   searchCorpus: string;
+};
+
+type RootCauseMeta = {
+  root_cause_slug: string;
+  root_cause_note: string;
+  root_cause_effect: "eliminates_finding" | "eliminates_attack_path";
+  sibling_order: number | null;
 };
 
 function toStringArray(v: unknown): string[] | undefined {
@@ -359,6 +367,10 @@ function buildSearchCorpus(d: Omit<Derived, "searchCorpus">): string {
     d.evidence,
     d.kill_reason,
     d.root_cause_key,
+    d.root_cause_role,
+    d.root_cause_slug,
+    d.root_cause_effect,
+    d.root_cause_note,
     d.poc_code,
     d.entry_point,
     d.sink,
@@ -537,10 +549,15 @@ export function FindingsTab({
   fallbackFindings,
   chains,
   chainLinks,
+  assessmentRefreshVersion,
 }: FindingsTabProps) {
   const allFindingsRaw = findings.length > 0 ? findings : fallbackFindings;
 
   const [allFindingLinks, setAllFindingLinks] = useState<AssessmentFindingLink[]>([]);
+  const [allFindingGroups, setAllFindingGroups] = useState<AssessmentFindingGroup[]>([]);
+  const [findingLinksError, setFindingLinksError] = useState<string | null>(null);
+  const [findingGroupsLoading, setFindingGroupsLoading] = useState(false);
+  const [findingGroupsError, setFindingGroupsError] = useState<string | null>(null);
   const [transitions, setTransitions] = useState<AssessmentFindingTransition[]>([]);
   const [transitionsLoading, setTransitionsLoading] = useState(false);
   const [transitionsError, setTransitionsError] = useState<string | null>(null);
@@ -549,7 +566,6 @@ export function FindingsTab({
   const [sevFilters, setSevFilters] = useState<Set<string>>(new Set());
   const [workflowFilters, setWorkflowFilters] = useState<Set<string>>(new Set());
   const [verifFilters, setVerifFilters] = useState<Set<string>>(new Set());
-  const [page, setPage] = useState(0);
   const [cmdOpen, setCmdOpen] = useState(false);
 
   const [selected, setSelected] = useState<string | null>(() => {
@@ -565,19 +581,6 @@ export function FindingsTab({
   const [detailOpen, setDetailOpen] = useState(false);
   const rowRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const lastFocusSlugRef = useRef<string | null>(null);
-
-  // Column widths for the Findings list. 6 cols: [sev-bar, sev, title,
-  // location, tags, status]. Persisted per-key so the Findings and
-  // Intel tabs don't trample each other.
-  const {
-    gridTemplate: listGridTemplate,
-    startResize: startListResize,
-    resetColumn: resetListColumn,
-  } = useResizableColumns(
-    "findings.col-widths",
-    FINDINGS_LIST_DEFAULTS,
-    FINDINGS_LIST_MINS,
-  );
 
   const searchRef = useRef<HTMLInputElement | null>(null);
 
@@ -596,15 +599,48 @@ export function FindingsTab({
     let cancelled = false;
     listAssessmentFindingLinks(engagementKey)
       .then((rows) => {
-        if (!cancelled) setAllFindingLinks(rows);
+        if (!cancelled) {
+          setAllFindingLinks(rows);
+          setFindingLinksError(null);
+        }
       })
-      .catch(() => {
-        if (!cancelled) setAllFindingLinks([]);
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setAllFindingLinks([]);
+          setFindingLinksError(error instanceof Error ? error.message : String(error));
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [engagementKey]);
+  }, [engagementKey, assessmentRefreshVersion]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setFindingGroupsLoading(true);
+    setFindingGroupsError(null);
+    listAssessmentFindingGroups(engagementKey)
+      .then((rows) => {
+        if (!cancelled) {
+          setAllFindingGroups(rows);
+          setFindingGroupsError(null);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setAllFindingGroups([]);
+          setFindingGroupsError(error instanceof Error ? error.message : String(error));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setFindingGroupsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engagementKey, assessmentRefreshVersion]);
 
   // ── Derived findings (one pass) ──
   const detailIdToSlug = useMemo(() => {
@@ -635,6 +671,33 @@ export function FindingsTab({
     return map;
   }, [allFindingLinks]);
 
+  const rootCauseBySibling = useMemo(() => {
+    const map = new Map<string, RootCauseMeta>();
+    for (const group of allFindingGroups) {
+      const rootSlug = group.root.slug;
+      for (const sibling of group.siblings || []) {
+        map.set(sibling.slug, {
+          root_cause_slug: sibling.root_cause_slug || rootSlug,
+          root_cause_note: sibling.root_cause_note || "",
+          root_cause_effect: sibling.root_cause_effect || "eliminates_finding",
+          sibling_order: sibling.sibling_order ?? null,
+        });
+      }
+    }
+    return map;
+  }, [allFindingGroups]);
+
+  const rootCauseMetricsByRoot = useMemo(() => {
+    const map = new Map<string, { sibling_count: number; residual_path_count: number }>();
+    for (const group of allFindingGroups) {
+      map.set(group.root.slug, {
+        sibling_count: group.sibling_count,
+        residual_path_count: group.residual_path_count,
+      });
+    }
+    return map;
+  }, [allFindingGroups]);
+
   const derivedList = useMemo<Derived[]>(() => {
     return allFindingsRaw.map((f) => {
       const details = parseDetails(f);
@@ -642,6 +705,8 @@ export function FindingsTab({
 
       const findingLinks = findingLinksBySlug.get(f.slug) || [];
       const chainLinkSet = chainLinksByFindingSlug.get(f.slug) || [];
+      const rootMeta = rootCauseBySibling.get(f.slug);
+      const rootMetrics = rootCauseMetricsByRoot.get(f.slug);
 
       // Build derived links: prefer AssessmentFindingLink for finding/chain/cve.
       const links: DerivedLink[] = [];
@@ -651,6 +716,7 @@ export function FindingsTab({
           link_kind: link.link_kind,
           target_kind: link.target_kind,
           target_ref: link.target_ref,
+          notes: link.notes,
           id: link.id,
         });
         if (link.target_kind === "chain") seenChains.add(link.target_ref);
@@ -720,10 +786,17 @@ export function FindingsTab({
         details,
         provenance,
         links,
+        root_cause_role: rootMeta ? "sibling" : rootMetrics ? "root" : undefined,
+        root_cause_slug: rootMeta?.root_cause_slug,
+        root_cause_note: rootMeta?.root_cause_note,
+        root_cause_effect: rootMeta?.root_cause_effect,
+        sibling_order: rootMeta?.sibling_order,
+        sibling_count: rootMetrics?.sibling_count,
+        residual_path_count: rootMetrics?.residual_path_count,
       };
       return { ...base, searchCorpus: buildSearchCorpus(base) };
     });
-  }, [allFindingsRaw, findingLinksBySlug, chainLinksByFindingSlug]);
+  }, [allFindingsRaw, findingLinksBySlug, chainLinksByFindingSlug, rootCauseBySibling, rootCauseMetricsByRoot]);
 
   const derivedBySlug = useMemo(() => {
     const m = new Map<string, Derived>();
@@ -840,16 +913,60 @@ export function FindingsTab({
     return list;
   }, [derivedList, sevFilters, workflowFilters, verifFilters, parsedQuery, matchesQuery]);
 
-  // Reset page when filters/search change
-  useEffect(() => {
-    setPage(0);
-  }, [sevFilters, workflowFilters, verifFilters, query]);
+  const groupedFiltered = useMemo(() => {
+    const filteredSlugs = new Set(filtered.map((d) => d.slug));
+    const groups = new Map<string, { root: Derived; siblings: Derived[]; highestSeverity: string }>();
+    const standalone: Derived[] = [];
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  useEffect(() => {
-    setPage((p) => Math.min(p, totalPages - 1));
-  }, [totalPages]);
-  const pageRows = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+    function ensureGroup(rootSlug: string): { root: Derived; siblings: Derived[]; highestSeverity: string } | null {
+      const root = derivedBySlug.get(rootSlug);
+      if (!root) return null;
+      if (!groups.has(rootSlug)) {
+        groups.set(rootSlug, { root, siblings: [], highestSeverity: root.severity });
+      }
+      return groups.get(rootSlug)!;
+    }
+
+    for (const d of filtered) {
+      if (d.root_cause_role === "sibling" && d.root_cause_slug) {
+        const group = ensureGroup(d.root_cause_slug);
+        if (group) {
+          group.siblings.push(d);
+          if ((SEV_RANK[d.severity] ?? 99) < (SEV_RANK[group.highestSeverity] ?? 99)) {
+            group.highestSeverity = d.severity;
+          }
+          continue;
+        }
+      }
+      if (d.root_cause_role === "root" && d.sibling_count) {
+        ensureGroup(d.slug);
+        continue;
+      }
+      standalone.push(d);
+    }
+
+    for (const group of groups.values()) {
+      group.siblings = group.siblings
+        .filter((sibling) => filteredSlugs.has(sibling.slug))
+        .sort((a, b) => {
+          const aOrder = a.sibling_order ?? 999999;
+          const bOrder = b.sibling_order ?? 999999;
+          if (aOrder !== bOrder) return aOrder - bOrder;
+          const severityDelta = (SEV_RANK[a.severity] ?? 99) - (SEV_RANK[b.severity] ?? 99);
+          if (severityDelta !== 0) return severityDelta;
+          return a.title.localeCompare(b.title);
+        });
+    }
+
+    const groupList = [...groups.values()]
+      .filter((group) => group.siblings.length > 0 || filteredSlugs.has(group.root.slug))
+      .sort((a, b) => {
+        const severityDelta = (SEV_RANK[a.highestSeverity] ?? 99) - (SEV_RANK[b.highestSeverity] ?? 99);
+        if (severityDelta !== 0) return severityDelta;
+        return a.root.title.localeCompare(b.root.title);
+      });
+    return { groups: groupList, standalone };
+  }, [filtered, derivedBySlug]);
 
   // Keep selection valid — if the persisted slug no longer exists in
   // the filtered set, fall through to the first row so j/k still has
@@ -893,7 +1010,7 @@ export function FindingsTab({
     return () => {
       cancelled = true;
     };
-  }, [engagementKey, selected]);
+  }, [engagementKey, selected, assessmentRefreshVersion]);
 
   // ── Keyboard ──
   const filteredRef = useRef(filtered);
@@ -1119,101 +1236,54 @@ export function FindingsTab({
       {/* List (detail renders as a centred modal below) */}
       <div className="findings-shell">
         <section className="list-panel panel">
-          <div className="list-scroll-x">
-            <div
-              className="list-header"
-              style={{ gridTemplateColumns: listGridTemplate, minWidth: "fit-content" }}
-            >
-              <span />
-              <span>
-                Sev
-                <span
-                  className="col-resize-handle"
-                  onPointerDown={(e) => startListResize(1, e)}
-                  onDoubleClick={() => resetListColumn(1)}
-                />
-              </span>
-              <span>
-                Title / slug
-                <span
-                  className="col-resize-handle"
-                  onPointerDown={(e) => startListResize(2, e)}
-                  onDoubleClick={() => resetListColumn(2)}
-                />
-              </span>
-              <span>
-                Location
-                <span
-                  className="col-resize-handle"
-                  onPointerDown={(e) => startListResize(3, e)}
-                  onDoubleClick={() => resetListColumn(3)}
-                />
-              </span>
-              <span>
-                Tags
-                <span
-                  className="col-resize-handle"
-                  onPointerDown={(e) => startListResize(4, e)}
-                  onDoubleClick={() => resetListColumn(4)}
-                />
-              </span>
-              <span style={{ textAlign: "right" }}>Status</span>
-            </div>
-            <div className="list-scroll">
-              {pageRows.length === 0 ? (
-                <div className="empty">
-                  No findings match.
-                  <div style={{ marginTop: 10 }}>
-                    <button type="button" className="qa-btn" onClick={clearAll}>
-                      Clear filters
-                    </button>
-                  </div>
-                </div>
+          <div className="grouping-status">
+            <div>
+              <strong>{filtered.length}</strong> of <strong>{derivedList.length}</strong> findings visible
+              {activeFilterCount > 0 || query.trim() ? (
+                <span className="meta-text"> · filtered by the current search or chips</span>
               ) : (
-                pageRows.map((d) => (
-                  <FindingRow
-                    key={d.slug}
-                    d={d}
-                    selected={selected === d.slug}
-                    onClick={() => {
-                      setSelected(d.slug);
-                      lastFocusSlugRef.current = d.slug;
-                      setDetailOpen(true);
-                    }}
-                    freeTerms={parsedQuery.freeTerms}
-                    gridTemplate={listGridTemplate}
-                    registerRef={(slug, el) => {
-                      if (el) rowRefs.current.set(slug, el);
-                      else rowRefs.current.delete(slug);
-                    }}
-                  />
-                ))
+                <span className="meta-text"> · all findings shown</span>
+              )}
+            </div>
+            <div className="grouping-status-meta">
+              {findingGroupsLoading ? (
+                <span className="tag">Loading groups</span>
+              ) : findingGroupsError ? (
+                <span className="tag warning">Grouping unavailable</span>
+              ) : allFindingGroups.length > 0 ? (
+                <span className="tag root">{allFindingGroups.length} root-cause groups</span>
+              ) : (
+                <span className="tag">No root-cause groups</span>
               )}
             </div>
           </div>
-          <div className="list-footer">
-            <span>
-              {filtered.length} findings · page {page + 1} / {totalPages}
-            </span>
-            <div className="pager-group">
-              <button
-                type="button"
-                className="pager-btn"
-                disabled={page === 0}
-                onClick={() => setPage((p) => p - 1)}
-              >
-                Prev
-              </button>
-              <button
-                type="button"
-                className="pager-btn"
-                disabled={page >= totalPages - 1}
-                onClick={() => setPage((p) => p + 1)}
-              >
-                Next
-              </button>
+          {(findingGroupsError || findingLinksError) && (
+            <div className="grouping-warning" role="status">
+              {findingGroupsError && (
+                <p>
+                  Root-cause grouping could not be loaded. Findings are still shown, but root/sibling
+                  grouping may be incomplete. Error: {findingGroupsError}
+                </p>
+              )}
+              {findingLinksError && (
+                <p>
+                  Finding links could not be loaded. Findings are still shown, but relationship and CVE
+                  links may be incomplete. Error: {findingLinksError}
+                </p>
+              )}
             </div>
-          </div>
+          )}
+          <GroupedFindingsList
+            groups={groupedFiltered.groups}
+            standalone={groupedFiltered.standalone}
+            selected={selected}
+            onOpen={(slug) => {
+              setSelected(slug);
+              lastFocusSlugRef.current = slug;
+              setDetailOpen(true);
+            }}
+            freeTerms={parsedQuery.freeTerms}
+          />
         </section>
       </div>
 
@@ -1317,76 +1387,132 @@ function SevSpark({ counts }: { counts: Record<string, number> }) {
   );
 }
 
-// ── FindingRow ────────────────────────────────────────────────────────
+function GroupedFindingsList({
+  groups,
+  standalone,
+  selected,
+  onOpen,
+  freeTerms,
+}: {
+  groups: { root: Derived; siblings: Derived[]; highestSeverity: string }[];
+  standalone: Derived[];
+  selected: string | null;
+  onOpen: (slug: string) => void;
+  freeTerms: string[];
+}) {
+  if (groups.length === 0 && standalone.length === 0) {
+    return <div className="empty">No findings match.</div>;
+  }
+  return (
+    <div className="grouped-findings">
+      {groups.map((group) => (
+        <RootCauseGroupCard
+          key={group.root.slug}
+          group={group}
+          selected={selected}
+          onOpen={onOpen}
+          freeTerms={freeTerms}
+        />
+      ))}
+      {standalone.length > 0 && (
+        <section className="standalone-group">
+          <div className="group-card-head">
+            <div>
+              <p className="eyebrow">Standalone Findings</p>
+              <h3>{standalone.length} ungrouped findings</h3>
+            </div>
+          </div>
+          <div className="group-siblings">
+            {standalone.map((d) => (
+              <FindingMiniRow
+                key={d.slug}
+                d={d}
+                selected={selected === d.slug}
+                onOpen={() => onOpen(d.slug)}
+                freeTerms={freeTerms}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
 
-function FindingRow({
+function RootCauseGroupCard({
+  group,
+  selected,
+  onOpen,
+  freeTerms,
+}: {
+  group: { root: Derived; siblings: Derived[]; highestSeverity: string };
+  selected: string | null;
+  onOpen: (slug: string) => void;
+  freeTerms: string[];
+}) {
+  const residualCount = group.siblings.filter((d) => d.root_cause_effect === "eliminates_attack_path").length;
+  return (
+    <section className="root-group-card">
+      <div className="group-card-head">
+        <div>
+          <p className="eyebrow">Root Cause</p>
+          <button
+            type="button"
+            className={`group-root-title ${selected === group.root.slug ? "is-selected" : ""}`}
+            onClick={() => onOpen(group.root.slug)}
+          >
+            <span className="sev-dot" style={{ background: sevDotColor(group.root.severity) }} />
+            {highlight(group.root.title, freeTerms)}
+          </button>
+          <p className="meta-text">
+            <code>{group.root.slug}</code> · {group.root.canonical_location || "No location recorded"}
+          </p>
+        </div>
+        <div className="group-card-metrics">
+          <span className={`badge severity-${group.highestSeverity}`}>{group.highestSeverity}</span>
+          <span className="tag root">{group.siblings.length} siblings</span>
+          {residualCount > 0 && <span className="tag chain">{residualCount} residual paths</span>}
+        </div>
+      </div>
+      <div className="group-siblings">
+        {group.siblings.map((d) => (
+          <FindingMiniRow
+            key={d.slug}
+            d={d}
+            selected={selected === d.slug}
+            onOpen={() => onOpen(d.slug)}
+            freeTerms={freeTerms}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function FindingMiniRow({
   d,
   selected,
-  onClick,
+  onOpen,
   freeTerms,
-  gridTemplate,
-  registerRef,
 }: {
   d: Derived;
   selected: boolean;
-  onClick: () => void;
+  onOpen: () => void;
   freeTerms: string[];
-  gridTemplate?: string;
-  registerRef?: (slug: string, el: HTMLButtonElement | null) => void;
 }) {
-  const chainRefs = d.links.filter((l) => l.target_kind === "chain");
-  const cveRefs = d.links.filter((l) => l.target_kind === "cve");
-  const suppressed =
-    d.workflow_status === "false_positive" || d.workflow_status === "merged";
   return (
-    <button
-      type="button"
-      className={`frow ${selected ? "is-selected" : ""} ${suppressed ? "is-suppressed" : ""}`}
-      onClick={onClick}
-      data-slug={d.slug}
-      ref={(el) => registerRef?.(d.slug, el)}
-      style={gridTemplate ? { gridTemplateColumns: gridTemplate, minWidth: "fit-content" } : { minWidth: "fit-content" }}
-    >
-      <span className={`frow-sevbar sevbar-${d.severity}`} />
-      <span className={`frow-sev ${d.severity}`}>{d.severity}</span>
-      <span className="frow-main">
-        <span className="frow-title">{highlight(d.title, freeTerms)}</span>
-        <span className="frow-meta">
-          <span className="mono">{d.slug}</span>
-          <span className="dot" />
-          {d.cwe_id && <span>{d.cwe_id}</span>}
-          {d.cwe_id && <span className="dot" />}
-          <span>{d.source_name || "—"}</span>
-          {d.updated_at && (
-            <>
-              <span className="dot" />
-              <span>{relTime(d.updated_at)}</span>
-            </>
-          )}
+    <button type="button" className={`mini-finding-row ${selected ? "is-selected" : ""}`} onClick={onOpen}>
+      <span className="sev-dot" style={{ background: sevDotColor(d.severity) }} />
+      <span className="mini-main">
+        <strong>{highlight(d.title, freeTerms)}</strong>
+        <span className="meta-text">
+          <code>{d.slug}</code>
+          {d.canonical_location ? ` · ${d.canonical_location}` : ""}
         </span>
+        {d.root_cause_note && <span className="meta-text">{d.root_cause_note}</span>}
       </span>
-      <span className="frow-loc">{d.canonical_location || ""}</span>
-      <span className="frow-tags">
-        {d.cwe_id && <span className="tag cwe">{d.cwe_id}</span>}
-        {cveRefs.map((r, i) => (
-          <span key={`cve-${i}-${r.target_ref}`} className="tag cve">
-            {r.target_ref}
-          </span>
-        ))}
-        {chainRefs.map((r, i) => (
-          <span key={`chain-${i}-${r.target_ref}`} className="tag chain">
-            {r.target_ref}
-          </span>
-        ))}
-      </span>
-      <span className="frow-status">
-        <span className={`pill pill-${d.workflow_status}`}>{d.workflowLabel}</span>
-        {d.verificationKey !== "unreviewed" && (
-          <span className={`pill pill-${d.verificationKey}`}>
-            {d.verificationLabel}
-          </span>
-        )}
-      </span>
+      {d.root_cause_effect === "eliminates_attack_path" && <span className="tag chain">Residual path</span>}
+      <span className={`pill pill-${d.workflow_status}`}>{d.workflowLabel}</span>
     </button>
   );
 }
@@ -1587,6 +1713,27 @@ function OverviewPane({ d }: { d: Derived }) {
           <p>{d.remediation}</p>
         </div>
       )}
+      {d.root_cause_role && (
+        <div className="section root-cause-section">
+          <p className="section-title">Root Cause Group</p>
+          {d.root_cause_role === "root" ? (
+            <p>
+              Root finding with {d.sibling_count ?? 0} linked sibling outcomes
+              {d.residual_path_count ? `, including ${d.residual_path_count} residual paths` : ""}.
+            </p>
+          ) : (
+            <>
+              <p>
+                Sibling of <code>{d.root_cause_slug}</code>.{" "}
+                {d.root_cause_effect === "eliminates_attack_path"
+                  ? "Fixing the root eliminates this attack path, but this finding remains a residual remediation item."
+                  : "Fixing the root eliminates this finding."}
+              </p>
+              {d.root_cause_note && <p className="meta-text">{d.root_cause_note}</p>}
+            </>
+          )}
+        </div>
+      )}
       {d.kill_reason && (
         <div className="callout kill">
           <p className="section-title">
@@ -1605,7 +1752,7 @@ function OverviewPane({ d }: { d: Derived }) {
           <KV k="Source" v={d.source_name} />
           <KV k="Discovered by" v={d.discovered_by} mono />
           <KV k="Defect family" v={d.defect_family} />
-          <KV k="Root cause" v={d.root_cause_key} mono />
+          <KV k="Dedupe key" v={d.root_cause_key} mono />
           <KV k="OWASP" v={d.owasp_category} />
           <KV k="CWE" v={d.cwe_id} />
           <KV k="CVSS vector" v={d.cvss_vector} mono />

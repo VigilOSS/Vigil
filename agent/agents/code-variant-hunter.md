@@ -26,8 +26,7 @@ already listed below.
 
 - `agent/shared-constraints-code.md` — scope, finding format
 - `agent/rules/hunting.md`
-- `agent/SKILL.md`
-- `agent/skills/code-variant-analysis/SKILL.md`
+- `agent/skills/code-variant-analysis/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint
 

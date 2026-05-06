@@ -35,10 +35,12 @@ Each iteration (set `DB="$DIR/cases.db"`):
 
 3b. Pending >= 2000 → priority-first dispatch:
 
-    # Populate priority/cluster once (idempotent):
-    aith assess classify-work "$DB"
+    # Classification ran inline at ingestion, so priority_score / cluster_key
+    # are already populated. Re-run classify-work only if you intentionally
+    # changed _BUCKETS in classify_buckets.py and want to re-apply the new
+    # weights to already-ingested rows.
 
-    # Optional: review clusters, defer low-signal ones before dispatch:
+    # Review clusters and defer low-signal ones before dispatch:
     aith assess list-clusters "$DB"
     aith assess dispatch "$DB" defer-cluster <cluster_key> --reason "..."
 
@@ -56,7 +58,7 @@ Each iteration (set `DB="$DIR/cases.db"`):
 
 4. On subagent return:
    - Done: aith assess dispatch "$DB" done "id1,id2,..."
-   - New endpoints: feed them back through `aith assess ingest-endpoints "$DB" <source>` or `aith assess ingest-spec "$DB" <spec-file>` so backend state is created first, then rerun `classify-work` so the new rows enter the priority queue with scores
+   - New endpoints: feed them back through `aith assess ingest-endpoints "$DB" <source>` or `aith assess ingest-spec "$DB" <spec-file>` — those paths run inline classification so the new rows enter the priority queue with scores immediately
    - Findings: write structured finding state with `aith assess record-finding`
    - Errors: aith assess dispatch "$DB" error "id1,id2,..."
 5. pending=0 and producers stopped → report completion
@@ -65,34 +67,72 @@ Each iteration (set `DB="$DIR/cases.db"`):
 
 ### Priority-mode scoring reference
 
-`classify-work` populates four fields on each work item from the URL structure (see
-`agent/scripts/assess/commands/classify_work.py` for the exact weight table):
+Classification runs inline during `db_insert_work_item()` and populates four fields on
+each work item from the URL structure (see `agent/scripts/assess/lib/classify_buckets.py`
+for the authoritative weight table):
 
 - `cluster_key` — `gf:<bucket>` when a parameter or path pattern matches a gf bucket; otherwise
   `path:/<first-two-url-segments>` as the fallback when nothing matches.
-- `priority_score` — integer 0-50. Weights (highest first): rce (50), ssrf (45), sqli/lfi (40),
-  idor (35), debug_logic (30), ssti/redirect (25), xss (20), interestingparams (15).
+- `priority_score` — integer 0-50. Weights (highest first): rce (50), ssrf (40), sqli/lfi (40),
+  img_traversal (35), trust_surface (35), idor (35), upload_fields (30), debug_logic (30),
+  redirect/ssti/cors (25), xss (20), interestingparams (15), interestingext (10).
   Cluster_key and priority_score track the single highest-weight match; when two buckets tie,
   earlier declaration order wins deterministically.
 - `priority_reason` — e.g. `"gf:ssrf+gf:idor"` listing every matched bucket, so the operator sees
   why an item scored high without running gf manually.
-- `terminal_reason` — set on hopeless items (`inert_type` for image/video/font/archive); these
-  are excluded from `fetch-by-priority`.
+- `terminal_reason` — set on hopeless items (`inert_type` for image/video/font/archive/sourcemap/manifest);
+  these are excluded from `fetch-by-priority`.
 
 Each gf bucket has a reference at `agent/references/gf-patterns/<bucket>.md` — consult it when
 you're unsure why a cluster scored the way it did.
 
 ## Type → Agent Routing
 
-| Type | Agent | Type | Agent |
-|------|-------|------|-------|
-| api | vulnerability-analyst | page | source-analyzer |
-| api-spec | vulnerability-analyst | page | source-analyzer |
-| form | vulnerability-analyst | javascript | source-analyzer |
-| upload | vulnerability-analyst | stylesheet | source-analyzer |
-| graphql | vulnerability-analyst | data | source-analyzer |
-| websocket | vulnerability-analyst | unknown | operator (manual) |
-| image/video/font/archive | skipped | | |
+The inert/skipped type list is owned by
+`agent/scripts/assess/lib/classify_buckets.py:INERT_TYPES`; this table mirrors
+that set so an operator reading the skill gets the same answer as the
+inline classifier. If the table goes stale, fix the drift in this file
+because the code is the source of truth.
+
+| Type        | Agent                  |
+|-------------|------------------------|
+| api         | vulnerability-analyst  |
+| api-spec    | vulnerability-analyst  |
+| form        | vulnerability-analyst  |
+| upload      | vulnerability-analyst  |
+| graphql     | vulnerability-analyst  |
+| websocket   | vulnerability-analyst  |
+| page        | source-analyzer        |
+| javascript  | source-analyzer        |
+| stylesheet  | source-analyzer        |
+| data        | source-analyzer        |
+| unknown     | operator (manual)      |
+| image / video / font / archive / sourcemap / manifest | skipped at insert (status='skipped', terminal_reason='inert_type') |
+
+## Signal → Skill Trigger Table
+
+Before dispatching a batch, scan the work items for these signals. When a signal matches,
+the named skill MUST be included in the dispatch context (`--skills` on `dispatch register`)
+in addition to the specialist's default skill. This prevents new skills from going unused.
+
+| Signal in Work Item / Intel | Required Skill | Agent |
+|-----------------------------|----------------|-------|
+| Search endpoint + ES tech fingerprint (hits/took/_source in responses, `X-Elastic-Product` header) | `elasticsearch-injection` | vulnerability-analyst |
+| BFF/proxy architecture detected (Express middleware, API gateway, `X-Forwarded-User` header in responses) | `bff-parameter-override` | vulnerability-analyst |
+| PUT/PATCH endpoint where body contains `_id`, `id`, `objectId` that mirrors route param | `split-brain-idor` | vulnerability-analyst |
+| SAML SP endpoint (`/saml/acs`, `/saml/metadata`, SAML login redirect) | `saml-sso-testing` | vulnerability-analyst |
+| Object reference IDs in URL params or path segments | `idor-testing` | vulnerability-analyst |
+| Login/register/reset/MFA/OAuth endpoint | `auth-bypass` | vulnerability-analyst |
+| GraphQL endpoint (`/graphql`, introspection response) | `graphql-testing` | vulnerability-analyst |
+| File upload endpoint (multipart form, file parameter) | `file-upload-testing` | vulnerability-analyst |
+| URL/callback/webhook parameter (server-side fetch surface) | `ssrf-testing` | vulnerability-analyst |
+| Redirect parameter (`next`, `return_to`, `url`, `redirect_uri`) | `open-redirect-testing` | vulnerability-analyst |
+| MongoDB/CouchDB tech fingerprint (ObjectId format, Mongoose errors) | `nosql-injection` | vulnerability-analyst |
+| XML input accepted (SOAP, SVG upload, RSS, SAML) | `xxe-testing` | vulnerability-analyst |
+
+**Operator obligation**: When fetching work items, scan the URL patterns and intel for these
+signals. If a signal matches, name the skill in the dispatch prompt. The specialist loads what
+the operator names — if the operator omits it, the specialist won't know the skill exists.
 
 ## Batch Strategy
 

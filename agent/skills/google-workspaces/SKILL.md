@@ -1,5 +1,5 @@
 ---
-name: google-workspace-ir
+name: google-workspaces
 description: Blue-team IR for Google Workspace BEC and AiTM compromises — audit log pulls, Alert Center, OAuth token review, session revoke, Gmail content search, browser/endpoint forensics on Windows and macOS. Covers gcloud vs GAM vs raw REST and the scopes each needs.
 origin: AI Threat Hunting
 ---

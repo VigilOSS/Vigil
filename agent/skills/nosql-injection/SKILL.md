@@ -228,22 +228,17 @@ CouchDB has a different attack surface than MongoDB. Test these if CouchDB is id
 
 ## Elasticsearch Testing
 
-Elasticsearch injection has narrowed significantly since ES 5.x disabled inline scripting by default.
+If Elasticsearch is identified (via Step 1 indicators), load the dedicated skill:
 
-- [ ] **Lucene query injection**: if user input is concatenated into query strings:
-  ```
-  search=*&_source=password,secret_key
-  search=admin" OR "1"="1
-  ```
-- [ ] **Script injection** (requires `script.inline: true` — rare in production):
-  ```json
-  {"query": {"bool": {"must": [{"script": {"script": "java.lang.Runtime.getRuntime().exec('id')"}}]}}}
-  ```
-- [ ] **Field enumeration via wildcards**:
-  ```json
-  {"query": {"regexp": {"password": {"value": "a.*"}}}}
-  ```
-- [ ] **Index enumeration**: `GET /_cat/indices?v` — list all indices, look for sensitive data stores
+**→ `agent/skills/elasticsearch-injection/SKILL.md`** — full methodology for query_string injection, field enumeration, data extraction, cross-index access, and access control bypass.
+
+**Quick gate check (3 probes to confirm ES injection surface exists):**
+
+- [ ] `search=test AND 1=1` vs `search=test AND 1=2` — result sets differ → query_string confirmed
+- [ ] `search=*` — returns more results than specific term → Lucene syntax active
+- [ ] `search=_exists_:password` — results change → field-qualified queries work
+
+If any gate fires, switch to the dedicated ES skill. Do not improvise ES testing from this skill.
 
 ---
 

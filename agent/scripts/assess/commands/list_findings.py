@@ -16,6 +16,7 @@ def register(subparsers) -> None:
         epilog=(
             "Examples:\n"
             "  aith assess list-findings --severity high --status active\n"
+            "  aith assess list-findings --root-cause auth-bypass-root\n"
             "  aith assess list-findings --verification-disposition false_positive --json\n"
             "  aith assess list-findings --search parser --source-name vulnerability-analyst"
         ),
@@ -26,6 +27,7 @@ def register(subparsers) -> None:
     p.add_argument("--verification-disposition")
     p.add_argument("--source-name")
     p.add_argument("--slug")
+    p.add_argument("--root-cause", dest="root_cause_slug", help="Show the root finding and linked siblings")
     p.add_argument("--search", help="Case-insensitive search over slug, title, summary, and location")
     p.add_argument("--json", action="store_true", help="Print filtered findings as JSON instead of a table")
     p.set_defaults(func=run)
@@ -43,7 +45,18 @@ def run(args) -> None:
     cfg = load_config(args.engagement_dir)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
-        findings = client.get("findings")
+        root_cause_slug = getattr(args, "root_cause_slug", None)
+        if root_cause_slug:
+            group = client.get(f"finding-groups/{root_cause_slug}")
+            root = dict(group.get("root", {}))
+            root["root_cause_role"] = "root"
+            findings = [root]
+            for sibling in group.get("siblings", []):
+                item = dict(sibling)
+                item["root_cause_role"] = "sibling"
+                findings.append(item)
+        else:
+            findings = client.get("findings")
     finally:
         client.close()
 
@@ -92,5 +105,6 @@ def run(args) -> None:
             f"{item.get('severity', '')} | "
             f"{item.get('workflow_status', '')} | "
             f"{item.get('verification_state', '')}/{item.get('verification_disposition', '')} | "
+            f"{item.get('root_cause_role', '')} | "
             f"{item.get('title', '')}"
         )

@@ -55,7 +55,27 @@ origin: AI Threat Hunting
 - [ ] Array injection: `id[]=1&id[]=2` — may return multiple objects
 - [ ] Wildcard or special values: `*`, `all`, `null`
 
-### 5. Bypass Techniques
+### 5. Split-Brain IDOR (Body/Route Divergence)
+
+The server validates authorization against the URL ID but operates on the body ID.
+This bypasses standard IDOR protections where ownership is checked on the route param.
+
+- [ ] On PUT/PATCH: send request with YOUR ID in the URL + VICTIM's ID in the body
+  ```
+  PUT /api/orders/MY_ORDER_ID
+  {"_id": "VICTIM_ORDER_ID", "status": "cancelled"}
+  ```
+- [ ] Test all body ID field names: `_id`, `id`, `objectId`, `orderId`, `userId`, `documentId`
+- [ ] Verify which ID the server actually used: read the object back and check which one changed
+- [ ] Test nested object IDs: `{"items": [{"_id": "VICTIM_ITEM"}]}`
+- [ ] Test bulk endpoints: `{"ids": ["MY_ID", "VICTIM_ID"]}`
+- [ ] If body ID is normally omitted, test what happens when you ADD it (may override URL routing)
+
+**Confirmation protocol:** (1) baseline with matching URL+body IDs → works, (2) swap body ID to victim → check if victim's object was modified, (3) remove override → confirm reversion.
+
+See also: `agent/skills/split-brain-idor/SKILL.md` for the full methodology.
+
+### 6. Bypass Techniques
 
 - [ ] Change HTTP method: GET blocked → try PUT/PATCH/DELETE
 - [ ] Add wrapping: `/api/users/me/../123`
@@ -64,7 +84,7 @@ origin: AI Threat Hunting
 - [ ] Version switch: `/v1/users/123` if `/v2/` is protected
 - [ ] JSON body vs query param: move ID between locations
 
-### 6. Account Isolation Testing (Shared Platforms)
+### 7. Account Isolation Testing (Shared Platforms)
 
 On shared/SaaS platforms, test whether object IDs are scoped to the current account:
 
@@ -76,7 +96,7 @@ On shared/SaaS platforms, test whether object IDs are scoped to the current acco
 - [ ] Test webhook/integration callbacks — does event-triggered execution stay within the correct account's data?
 - [ ] Check 404 vs 403 — a 403 on an out-of-account ID confirms the object exists (ID oracle)
 
-### 7. Bulk / Mass Assignment
+### 8. Bulk / Mass Assignment
 
 - [ ] Test listing endpoints without filter: `/api/orders` returns all
 - [ ] Remove or blank the user filter parameter

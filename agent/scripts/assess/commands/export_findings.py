@@ -125,6 +125,18 @@ def _render_finding(f: dict) -> str:
         lines.append(f"- **Remediation**: {remediation}")
     if f.get("merged_into_slug"):
         lines.append(f"- **Merged Into**: {f['merged_into_slug']}")
+    root_role = f.get("root_cause_role")
+    if root_role == "root":
+        lines.append(f"- **Root Cause Group**: root ({f.get('sibling_count', 0)} siblings)")
+    elif root_role == "sibling":
+        root_slug = f.get("root_cause_slug", "")
+        effect = f.get("root_cause_effect", "eliminates_finding")
+        effect_label = "fixing root eliminates this finding"
+        if effect == "eliminates_attack_path":
+            effect_label = "fixing root eliminates this attack path; residual finding remains"
+        lines.append(f"- **Root Cause Group**: sibling of {root_slug} ({effect_label})")
+        if f.get("root_cause_note"):
+            lines.append(f"- **Root Cause Note**: {f['root_cause_note']}")
     entry_point = str(_detail_value(f, "entry_point", "") or "")
     sink = str(_detail_value(f, "sink", "") or "")
     references = _string_list(_detail_value(f, "references", []))
@@ -186,12 +198,40 @@ def run(args) -> None:
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
         findings = client.get("findings")
+        groups = client.get("finding-groups")
     finally:
         client.close()
 
     if not isinstance(findings, list):
         print("export-findings: unexpected response from backend", file=sys.stderr)
         sys.exit(1)
+    if not isinstance(groups, list):
+        groups = []
+
+    finding_by_slug = {str(finding.get("slug", "")): finding for finding in findings if finding.get("slug")}
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        root = group.get("root")
+        if isinstance(root, dict):
+            root_slug = str(root.get("slug", ""))
+            if root_slug in finding_by_slug:
+                finding_by_slug[root_slug]["root_cause_role"] = "root"
+                finding_by_slug[root_slug]["sibling_count"] = group.get("sibling_count", 0)
+        for sibling in group.get("siblings", []):
+            if not isinstance(sibling, dict):
+                continue
+            sibling_slug = str(sibling.get("slug", ""))
+            if sibling_slug in finding_by_slug:
+                finding_by_slug[sibling_slug].update(
+                    {
+                        "root_cause_role": "sibling",
+                        "root_cause_slug": sibling.get("root_cause_slug", ""),
+                        "root_cause_effect": sibling.get("root_cause_effect", "eliminates_finding"),
+                        "root_cause_note": sibling.get("root_cause_note", ""),
+                        "sibling_order": sibling.get("sibling_order"),
+                    }
+                )
 
     findings.sort(key=lambda f: (
         _SEVERITY_ORDER.get((f.get("severity") or "medium").lower(), 99),
