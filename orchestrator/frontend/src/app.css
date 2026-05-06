@@ -2010,6 +2010,7 @@ input {
 .findings-redesign .tag.cve { background: rgba(153, 27, 27, 0.1); color: #991b1b; }
 .findings-redesign .tag.chain { background: rgba(244, 162, 89, 0.2); color: #7a3a11; }
 .findings-redesign .tag.root { background: rgba(23, 53, 76, 0.1); color: var(--accent); }
+.findings-redesign .tag.warning { background: rgba(161, 98, 7, 0.14); color: #a16207; }
 
 .findings-redesign .pill {
   display: inline-flex;
@@ -2063,6 +2064,37 @@ input {
   font-size: 0.9rem;
 }
 .findings-redesign .empty code { font-family: "IBM Plex Mono", "SFMono-Regular", monospace; }
+
+.findings-redesign .grouping-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--ink);
+}
+.findings-redesign .grouping-status-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.findings-redesign .grouping-warning {
+  margin: 12px 14px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(161, 98, 7, 0.35);
+  border-radius: 10px;
+  background: rgba(161, 98, 7, 0.08);
+  color: var(--ink);
+  font-size: 0.86rem;
+}
+.findings-redesign .grouping-warning p {
+  margin: 0;
+}
+.findings-redesign .grouping-warning p + p {
+  margin-top: 6px;
+}
 
 .findings-redesign .grouped-findings {
   display: grid;

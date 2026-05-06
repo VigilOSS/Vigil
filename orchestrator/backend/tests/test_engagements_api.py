@@ -1171,7 +1171,8 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
 
     report_findings = client.get("/engagements/2026-03-30-120000-example/assessment/report-findings")
     assert report_findings.status_code == 200
-    assert report_findings.json() == []
+    assert report_findings.json()["groups"] == []
+    assert report_findings.json()["standalone"] == []
 
     rediscovered = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
@@ -1654,7 +1655,7 @@ def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
 
     report_findings = client.get("/engagements/2026-03-30-120000-example/assessment/report-findings")
     assert report_findings.status_code == 200
-    assert all(item["slug"] != "CH-041" for item in report_findings.json())
+    assert all(item["slug"] != "CH-041" for item in report_findings.json()["standalone"])
 
 
 def test_findings_verify_rejects_records_merged_after_validation(client, isolate_settings, monkeypatch):
