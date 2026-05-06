@@ -29,11 +29,11 @@ Record bound-rule firings via `aith assess log operator "Subdomain enum bound ru
 
 ### Resource-tier profiles (rate-limits)
 
-Pick by target shape, not apex shape — wildcards expand the surface and the rate calibration must match the surface. **Default to `polite-residential` for any new engagement** — DNS bruteforce is the dominant host-CPU and host-network spike in the runtime, and aggressive profiles have crashed Docker on standard laptop hardware.
+Pick by target shape, not apex shape — wildcards expand the surface and the rate calibration must match the surface. The `aith assess kali dnsx` wrapper defaults to `--dnsx-profile polite-cdn --resolver-profile public-tcp`; keep that default until the target and Docker host can justify stepping up. DNS bruteforce is the dominant host-CPU and host-network spike in the runtime, and aggressive profiles have crashed Docker on standard laptop hardware.
 
-- **polite-CDN-fronted-target** — `puredns --rate-limit 800 --wildcard-tests 30`, `dnsx -rl 100 -t 20 -retry 3 -timeout 5`. CDN-fronted, enterprise-WAF-protected, regulated, or household-name brand.
-- **polite-residential default** — `puredns --rate-limit 2500 --wildcard-batch 100000`, `dnsx -rl 300 -t 50 -retry 2`. Standard runtime, public resolvers.
-- **bursty-OK (opt-in only)** — `puredns --rate-limit 5000`, `dnsx -rl 500 -t 100`. Private resolver pool only AND with explicit operator opt-in.
+- **polite-CDN-fronted-target** — `puredns --rate-limit 800 --wildcard-tests 30`, `dnsx --dnsx-profile polite-cdn`. CDN-fronted, enterprise-WAF-protected, regulated, or household-name brand.
+- **polite-residential** — `puredns --rate-limit 2500 --wildcard-batch 100000`, `dnsx --dnsx-profile polite-residential`. Standard runtime, public resolvers after explicit target assessment.
+- **bursty-OK (opt-in only)** — `puredns --rate-limit 5000`, `dnsx --dnsx-profile bursty-ok`. Private resolver pool only AND with explicit operator opt-in.
 
 Drop one tier when `AITH_RUNTIME_MEMORY_GB` is below the Standard tier (8 GB).
 

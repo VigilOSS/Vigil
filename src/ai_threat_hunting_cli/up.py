@@ -267,7 +267,7 @@ def _runtime_image_drift(options: RuntimeOptions, *, runner: docker.Runner) -> b
     return bool(container_id and configured_id and container_id != configured_id)
 
 
-def _build_mitmproxy_image(install_root: Path, *, runner: docker.Runner) -> None:
+def _build_mitmproxy_image(install_root: Path, *, runner: docker.Runner = docker.run_command_streaming) -> None:
     dockerfile = install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile"
     argv = ["docker", "build", "-t", "security-research-proxy:latest", "-f", str(dockerfile), str(install_root / "agent")]
     docker.require_success(runner(argv), argv)

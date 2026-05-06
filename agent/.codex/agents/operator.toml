@@ -1,3 +1,7 @@
+# GENERATED FILE — DO NOT EDIT.
+# Source: agent/agents/operator.md
+# Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+
 name = "operator"
 description = "Lead red team operator. Drives methodology, coordinates phases, and manages state."
 

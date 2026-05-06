@@ -1,25 +1,26 @@
 # dnsx
 
 **Purpose:** Fast multi-purpose DNS toolkit for bulk resolution and record enumeration
-For live engagement targets, run dnsx via `aith assess kali dnsx` (typed verb, audit-flag-aware).
+For live engagement targets, run dnsx via `aith assess kali dnsx` (typed verb, audit-flag-aware). The typed wrapper applies Docker-safe defaults: `--dnsx-profile polite-cdn`, `--resolver-profile public-tcp`, `-rl 100`, `-t 20`, `-retry 3`, and `-timeout 5` unless the operator chooses a more aggressive profile.
 
 ## NXDOMAIN / CPU-spike trap (read first)
 
 `-resp -json` against brute-force wordlists emits a JSON record for every NXDOMAIN response, not just successful resolutions. On a 110k-entry wordlist with the typical 95-99% miss rate, that is 100k+ JSON serializations per pass — enough to saturate container CPU and force several pacing reductions before stabilizing. The rule is **lean on bulk, enrich on survivors**.
 
-**Host-CPU and Docker-stability note.** DNS bruteforce is the dominant host-CPU and host-network spike in the engagement runtime — see `agent/skills/subdomain-enumeration/SKILL.md` "Host-CPU note" for the full mechanism. dnsx sends thousands of UDP queries per second; the host kernel's per-packet network-stack overhead is amplified well beyond what `--cpus` cgroup limits constrain (cgroup CPU limits the userland process, not the host's kernel networking path). Aggressive dnsx profiles have crashed Docker on standard laptop hardware. Default to the polite-residential or polite-CDN-fronted-target profile; reach for the bursty-OK ceiling only when the operator has explicitly opted in.
+**Host-CPU and Docker-stability note.** DNS bruteforce is the dominant host-CPU and host-network spike in the engagement runtime — see `agent/skills/subdomain-enumeration/SKILL.md` "Host-CPU note" for the full mechanism. dnsx can send thousands of UDP queries per second; the host kernel's per-packet network-stack overhead is amplified well beyond what `--cpus` cgroup limits constrain (cgroup CPU limits the userland process, not the host's kernel networking path). Aggressive dnsx profiles have crashed Docker on standard laptop hardware. Keep the typed wrapper's `public-tcp` resolver profile unless there is a deliberate reason to use UDP resolvers. Reach for the `bursty-ok` ceiling only when the operator has explicitly opted in.
 
 ```bash
 # Step 1 — lean brute (no -resp / no -json on bulk inputs)
 aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates.txt \
-  -silent \
+  --dnsx-profile polite-cdn --resolver-profile public-tcp -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.txt \
   --technique RECON --intent "bulk dnsx resolve (lean — no JSON, drop NXDOMAIN early)" \
   --probe-kind baseline --phase recon --timeout 1200
 
 # Step 2 — enrich survivors only (smaller set, JSON safe here)
 aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.txt \
-  -resp -json -a -cname -silent \
+  --dnsx-profile polite-cdn --resolver-profile public-tcp \
+  -resp -json --allow-bulk-json -a -cname -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/dnsx_enriched.jsonl \
   --technique RECON --intent "enrich resolved survivors with A+CNAME JSON" \
   --probe-kind fingerprint --phase recon --timeout 600
@@ -41,11 +42,13 @@ aith assess kali exec --technique RECON \
 
 Match the dnsx flags to the runtime/target tier — see `agent/skills/subdomain-enumeration/SKILL.md` "Docker-resource-safe profiles" for selection guidance.
 
-| Profile | Flags |
+| Wrapper profile | Flags |
 |---------|-------|
-| polite-CDN-fronted-target (CDN-fronted / WAF-protected / regulated cautious tier) | `-rl 100 -t 20 -retry 3 -timeout 5` |
-| polite-residential default (Standard runtime, public resolvers) | `-rl 300 -t 50 -retry 2` |
-| bursty-OK (opt-in only — private resolver, no shared-infra constraints) | `-rl 500 -t 100` |
+| `--dnsx-profile polite-cdn` (default; CDN-fronted / WAF-protected / regulated cautious tier) | `-rl 100 -t 20 -retry 3 -timeout 5` |
+| `--dnsx-profile polite-residential` (Standard runtime, public resolvers after explicit assessment) | `-rl 300 -t 50 -retry 2 -timeout 5` |
+| `--dnsx-profile bursty-ok` (opt-in only — private resolver, no shared-infra constraints) | `-rl 500 -t 100 -retry 2 -timeout 5` |
+
+The typed wrapper rejects `-rl` / `-t` above `polite-residential` unless `--dnsx-profile bursty-ok` is passed, and rejects values above `bursty-ok` unless `--allow-unsafe-rate` is passed. Guarded flags such as `-rl`, `-t`, `-r`, `-w`, `-resp`, and `-json` must be passed as typed wrapper flags, not through `--extra-args`, so the safety checks cannot be bypassed. Common dnsx record/filter flags are typed (`-aaaa`, `-mx`, `-txt`, `-ns`, `-soa`, `-ptr`, `-asn`, `-cdn`, `-rcode`, `-wd`); use `--extra-args` for unmodeled flags that are not load/transport/bulk-response knobs.
 
 ## Record Resolution
 
@@ -68,7 +71,7 @@ Match the dnsx flags to the runtime/target tier — see `agent/skills/subdomain-
 ## Tuning
 
 **Threads:** `cat subs.txt | dnsx -silent -a -resp -t 100`
-**Rate limit:** `-rate-limit 300`
+**Rate limit:** `-rl 300`
 **Retry:** `-retry 2`
 **Wildcard filtering:** `-wd target.example`
 

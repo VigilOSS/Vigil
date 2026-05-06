@@ -240,9 +240,16 @@ aith assess kali puredns resolve /engagements/$ENGAGEMENT_KEY/scans/subs_passive
   --probe-kind fingerprint --phase recon --timeout 1800
 
 aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_resolved.txt \
-  -a -cname -resp -json \
+  --dnsx-profile polite-cdn --resolver-profile public-tcp -silent \
+  -o /engagements/$ENGAGEMENT_KEY/scans/dnsx_live.txt \
+  --technique RECON --intent "lean dnsx confirmation for resolved subs" \
+  --probe-kind baseline --phase recon --timeout 1200
+
+aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/dnsx_live.txt \
+  --dnsx-profile polite-cdn --resolver-profile public-tcp \
+  -a -cname -resp -json --allow-bulk-json \
   -o /engagements/$ENGAGEMENT_KEY/scans/dnsx.jsonl \
-  --technique RECON --intent "A+CNAME enrichment for resolved subs" \
+  --technique RECON --intent "A+CNAME enrichment for live dnsx survivors" \
   --probe-kind fingerprint --phase recon --timeout 1200
 ```
 
@@ -285,6 +292,10 @@ aith assess kali katana \
 ```
 
 ### `kali gau`
+
+For the standard historical-URL collection flow, prefer `aith assess gau-endpoints` —
+it wraps `kali gau` with cache reuse and inline ingestion in one verb. The raw `kali gau`
+typed verb is for one-off archive sweeps that do not need to feed the work buffer.
 
 ```bash
 # Historical URLs from passive archives — no traffic to the target.
@@ -359,6 +370,71 @@ When you know what you want to learn, this lookup gets you to the right verb wit
 - "Inventory runtime tools or versions?" → `kali exec --technique HEALTH --intent "tooling inventory" --probe-kind fingerprint --phase <phase> --timeout 60 -- which <tool...>`.
 - "Run a tool not in the typed surface?" → `kali exec --technique <enum> --intent "<why>" --probe-kind <kind> --phase <phase> --timeout <seconds> -- <command...>`.
 - "Run something that needs to outlive my shell?" → `kali job start --technique <enum> --intent "<why>" --probe-kind <kind> --phase <phase> --timeout <seconds> -- <command...>`.
+
+## Common Patterns
+
+These are the high-frequency invocation shapes specialists reach for. They are
+written as templates so the operator/specialist substitutes the engagement
+key, target, and audit metadata without re-deriving the path conventions.
+
+### Run a custom Python helper inside the runtime
+
+Authoring path on the host: `$DIR/scripts/<name>.py` (or
+`$ENGAGEMENT_DIR/scripts/<name>.py`). Container path the script sees at
+execution time: `/engagements/$ENGAGEMENT_KEY/scripts/<name>.py`. Both names
+point at the same bind-mounted bytes — the dual naming exists because the
+container and host share one filesystem at one mount point. See
+`agent/shared-constraints.md §11a` for the path-aliasing rule.
+
+```bash
+aith assess kali exec \
+    --technique EXPLOIT --intent "PoC: chained SSRF -> metadata creds" \
+    --probe-kind exploit --phase exploit --timeout 600 \
+    -- python3 /engagements/$ENGAGEMENT_KEY/scripts/exploit.py \
+       --target https://target.example --out /engagements/$ENGAGEMENT_KEY/scans/exploit.log
+```
+
+The `--` separator is what makes everything after it raw argv to the
+in-container command, which is how arbitrary scripts stay auditable through
+the same wrapper that records typed verbs.
+
+### Capture stdout/stderr to engagement-scoped paths
+
+Always write outputs under `/engagements/$ENGAGEMENT_KEY/...` so artifacts
+survive container restarts and stay attached to the engagement. `/tmp` and
+`/data` inside the container are non-engagement paths and outputs there are
+invisible from the host.
+
+```bash
+aith assess kali exec \
+    --technique RECON --intent "harvest body of /api/health" \
+    --probe-kind fingerprint --phase recon --timeout 60 \
+    -- bash -lc "curl -sS https://target.example/api/health \
+                   > /engagements/$ENGAGEMENT_KEY/scans/health.json \
+                   2> /engagements/$ENGAGEMENT_KEY/scans/health.err"
+```
+
+The same files are visible from the host at `$DIR/scans/health.json` and
+`$DIR/scans/health.err` for review and for `aith assess record-*` references.
+
+### Wrap a long-running custom command as a job
+
+Anything that may exceed the synchronous timeout window or that should
+survive the calling shell goes through `kali job start`. The dtach session is
+parented by tini so it survives the calling agent's exit; recover with
+`kali job status <id>` and `kali job tail <id>`.
+
+```bash
+aith assess kali job start \
+    --technique FUZZ --intent "long ffuf sweep on /api/v1/{id}" \
+    --probe-kind payload --phase consume-test --timeout 21600 \
+    -- ffuf -u https://target.example/api/v1/FUZZ \
+            -w /usr/share/seclists/Discovery/Web-Content/api/api-endpoints.txt \
+            -mc 200,401,403 -o /engagements/$ENGAGEMENT_KEY/scans/ffuf-api.json -of json
+```
+
+Job output writes through the wrapper so the audit row stays accurate even
+when the agent that started the job has long since exited.
 
 ## Coverage check before probing
 

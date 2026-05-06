@@ -9,9 +9,22 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+# Absolute import — every consumer of this module either runs through
+# `assess.cli` (which has the scripts dir on sys.path) or via the
+# `_load_script_module` test loader (which also inserts the scripts dir on
+# sys.path before exec_module). A relative `from .classify_buckets` fails
+# in the test path because the file is loaded without a parent package.
+from assess.lib.classify_buckets import INERT_TYPES
+
 _SCHEMA_FILE = Path(__file__).resolve().parent.parent.parent / "schema.sql"
 
-_SKIP_TYPES = frozenset({"image", "video", "font", "archive"})
+# Inert work-item types live in `classify_buckets.INERT_TYPES` so all three
+# consumers (this insert path, classify_buckets.classify_row, and
+# classify-work --reclassify-all) read from the same set. See that module's
+# docstring for the rationale and the consumer list. Re-export here so
+# `db._SKIP_TYPES` stays a stable internal name for the insert path; new
+# code should import the public symbol from `classify_buckets`.
+_SKIP_TYPES: frozenset[str] = INERT_TYPES
 
 # Idempotent ALTER-based migration for pre-existing work_items tables that
 # predate the signal-first dispatch columns. SQLite lacks `ADD COLUMN IF NOT
@@ -165,13 +178,13 @@ def db_insert_work_item(
     path_params: str = "{}",
     cookie_params: str = "{}",
     headers: str = "",
-    body: str = "",
+    body: str | None = "",
     content_type: str = "",
     content_length: int = 0,
     response_status: int = 0,
     response_headers: str = "",
     response_size: int = 0,
-    response_snippet: str = "",
+    response_snippet: str | None = "",
     case_type: str = "unknown",
     source: str = "",
     params_key_sig: str = "",
@@ -179,6 +192,7 @@ def db_insert_work_item(
     service_id: int | None = None,
     coverage_item_id: int | None = None,
     auth_context: str = "anonymous",
+    connection: sqlite3.Connection | None = None,
 ) -> None:
     """Insert a work item using parameterized SQL. No SQL injection surface."""
     if not url or url == "null":
@@ -190,9 +204,27 @@ def db_insert_work_item(
 
     status = "skipped" if case_type in _SKIP_TYPES else "pending"
 
-    conn = sqlite3.connect(db_path, timeout=5.0)
+    # Inline classification at insert time. Previously, classification ran as
+    # a separate `aith assess classify-work` step that operators routinely
+    # forgot, leaving the work buffer unscored and the priority-mode dispatch
+    # with nothing to sort by. The classification helper is pure string
+    # matching (<1ms per row, no I/O) so doing it here is effectively free
+    # and removes the entire forgotten-step class of bug.
+    from assess.lib.classify_buckets import classify_from_fields
+
+    assignment = classify_from_fields(
+        case_type=case_type,
+        url_path=url_path,
+        query_params=query_params,
+        body_params=body_params,
+        path_params=path_params,
+    )
+
+    should_close = connection is None
+    conn = connection or sqlite3.connect(db_path, timeout=5.0)
     try:
-        conn.execute("PRAGMA busy_timeout=5000")
+        if should_close:
+            conn.execute("PRAGMA busy_timeout=5000")
         conn.execute(
             """INSERT OR IGNORE INTO work_items (
                 queue_key, request_variant_id, service_id, coverage_item_id, auth_context,
@@ -218,6 +250,33 @@ def db_insert_work_item(
                 case_type, source, status, params_key_sig,
             ),
         )
+        # `INSERT OR IGNORE` above means a re-ingest of the same `queue_key`
+        # leaves the existing row untouched. The UPDATE here is scoped to
+        # rows that are still at the schema-default classification — so a
+        # newly-inserted row gets its inline assignment, while a row that
+        # was already ingested and possibly re-classified by hand or by
+        # `aith assess classify-work --reclassify-all` keeps its existing
+        # priority_score / cluster_key. Without the default-only predicate,
+        # every re-ingest would clobber operator triage.
+        conn.execute(
+            """UPDATE work_items
+            SET priority_score = ?,
+                priority_reason = ?,
+                cluster_key = ?,
+                terminal_reason = COALESCE(?, terminal_reason)
+            WHERE queue_key = ?
+              AND priority_score = 0
+              AND cluster_key IS NULL
+            """,
+            (
+                assignment["priority_score"],
+                assignment["priority_reason"],
+                assignment["cluster_key"],
+                assignment["terminal_reason"],
+                queue_key,
+            ),
+        )
         conn.commit()
     finally:
-        conn.close()
+        if should_close:
+            conn.close()

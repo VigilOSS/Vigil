@@ -20,7 +20,7 @@ This repository contains the operator prompts, Kali runtime image, engagement sc
 - Specialist prompt sources live under `agent/agents/`.
 - Generated specialist wrappers live under `agent/.codex/agents/` and `agent/.claude/agents/`; install copies them to root `.codex/agents/` and `.claude/agents/`.
 - Always-active rules live under `agent/rules/`.
-- Skill discovery starts at `agent/SKILL.md`, then drills into `agent/skills/*/SKILL.md`.
+- Skill discovery is driven by `aith assess list-skills`, which walks `agent/skills/*/SKILL.md` frontmatter; the operator picks a skill by name and the dispatched specialist reads the full file.
 
 ## Quick Start
 

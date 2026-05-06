@@ -180,9 +180,40 @@ export type AssessmentFindingLink = {
   finding_slug: string;
   link_kind: string;
   target_kind: string;
+  target_id?: number | null;
   target_ref: string;
   notes: string;
+  provenance_json?: string;
   updated_at: string;
+};
+
+export type AssessmentFindingGroupMember = AssessmentFindingDetail & {
+  root_cause_slug?: string;
+  root_cause_note?: string;
+  root_cause_effect?: "eliminates_finding" | "eliminates_attack_path";
+  sibling_order?: number | null;
+  root_cause_link_id?: number;
+};
+
+export type AssessmentFindingGroup = {
+  root: AssessmentFindingDetail;
+  siblings: AssessmentFindingGroupMember[];
+  sibling_count: number;
+  residual_path_count: number;
+  highest_severity: string;
+};
+
+export type ReportReadinessBlocker = {
+  kind: string;
+  slug?: string;
+  slugs?: string[];
+  detail?: string;
+};
+
+export type ReportReadiness = {
+  ready: boolean;
+  blocker_count: number;
+  blockers: ReportReadinessBlocker[];
 };
 
 export type AssessmentProbe = {
@@ -363,6 +394,10 @@ export function getAssessmentSummary(engagementKey: string) {
   return request<AssessmentSummary>(`/engagements/${engagementKey}/assessment/summary`);
 }
 
+export function getReportReadiness(engagementKey: string) {
+  return request<ReportReadiness>(`/engagements/${engagementKey}/assessment/report-readiness`);
+}
+
 export function listAssessmentSurfaces(engagementKey: string) {
   return request<AssessmentSurface[]>(`/engagements/${engagementKey}/assessment/surfaces`);
 }
@@ -379,6 +414,10 @@ export function listAssessmentFindingTransitions(engagementKey: string, findingS
 
 export function listAssessmentFindingLinks(engagementKey: string) {
   return request<AssessmentFindingLink[]>(`/engagements/${engagementKey}/assessment/finding-links`);
+}
+
+export function listAssessmentFindingGroups(engagementKey: string) {
+  return request<AssessmentFindingGroup[]>(`/engagements/${engagementKey}/assessment/finding-groups`);
 }
 
 export function listAssessmentProbes(engagementKey: string) {

@@ -3,7 +3,7 @@
 **Purpose:** Classify URLs by vulnerability-parameter patterns using pre-baked JSON pattern
 files. Bug-bounty staple for triaging large historical URL corpora (gau, waybackurls, katana).
 
-**In this repo**: primary classifier in gau-triage Step 3. Invoke via `aith assess kali exec --technique RECON --intent "<why>" --probe-kind fingerprint --phase recon --timeout <seconds> -- gf ...` with the standard audit-flag set.
+**In this repo**: the gf bucket patterns are compiled into `assess.lib.classify_buckets._BUCKETS` and applied inline at ingest — operators do not need to run `gf` directly. The runtime image still ships `gf` plus the upstream pattern library for ad-hoc one-off triage, invokable via `aith assess kali exec --technique RECON --intent "<why>" --probe-kind fingerprint --phase recon --timeout <seconds> -- gf ...`.
 
 ## Install layout
 

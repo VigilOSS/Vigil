@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..services import activity as activity_service
 from ..services import state_manager
@@ -332,6 +332,17 @@ class FindingLinkRequest(BaseModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
 
 
+class RootCauseLinkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_cause_slug: str = Field(min_length=1, max_length=256)
+    sibling_order: int | None = Field(default=None, ge=1)
+    root_cause_effect: Literal["eliminates_finding", "eliminates_attack_path"] = "eliminates_finding"
+    note: str = Field(default="", max_length=4096)
+    source_name: str = Field(default="operator", min_length=1, max_length=128)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+
 class MergeFindingsRequest(BaseModel):
     source_slug: str = Field(min_length=1, max_length=256)
     target_slug: str = Field(min_length=1, max_length=256)
@@ -362,6 +373,12 @@ class FindingRecordRequest(BaseModel):
     service_id: int | None = None
     surface_id: int | None = None
     links: list[FindingLinkRequest] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _root_cause_links_use_helper(self) -> "FindingRecordRequest":
+        if any(link.link_kind == state_manager.ROOT_CAUSE_LINK_KIND for link in self.links):
+            raise ValueError("root_cause links must be created with link-finding / PUT /findings/{slug}/root-cause")
+        return self
 
 
 class FindingPatchRequest(BaseModel):
@@ -566,13 +583,16 @@ def get_finding_transitions(engagement_key: str, finding_slug: str) -> list[dict
 
 
 @router.get("/report-findings")
-def get_report_findings(engagement_key: str, mode: Literal["draft", "final"] = "draft") -> list[dict[str, Any]]:
-    """Findings formatted for report generation.
+def get_report_findings(
+    engagement_key: str,
+    mode: Literal["draft", "final"] = "draft",
+) -> Any:
+    """Grouped findings formatted for report generation.
 
     Sorted by severity (critical first), excludes merged and false-positive
     findings, and extracts CVSS, remediation, CWE, and steps-to-reproduce from
     the details blob.
-    Each finding includes a ``report_id`` (e.g. ``001``) for sequential
+    Root and sibling findings include a ``report_id`` (e.g. ``001``) for sequential
     report numbering and a ``slug`` field so the original backend ID remains
     available for cross-referencing.
     """
@@ -581,13 +601,28 @@ def get_report_findings(engagement_key: str, mode: Literal["draft", "final"] = "
         readiness = state_manager.report_readiness(engagement.id)
         if not readiness["ready"]:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=readiness)
-    return state_manager.list_report_findings(engagement.id, mode=mode)
+    return state_manager.list_report_finding_groups(engagement.id, mode=mode)
 
 
 @router.get("/finding-links")
 def get_finding_links(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.list_finding_links(engagement.id)
+
+
+@router.get("/finding-groups")
+def get_finding_groups(engagement_key: str) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_finding_groups(engagement.id)
+
+
+@router.get("/finding-groups/{root_slug}")
+def get_finding_group(engagement_key: str, root_slug: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    groups = state_manager.list_finding_groups(engagement.id, root_slug=root_slug)
+    if not groups:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding group not found")
+    return groups[0]
 
 
 @router.get("/attack-chains")
@@ -914,6 +949,85 @@ async def patch_finding(
     return record
 
 
+@router.put("/findings/{finding_slug}/root-cause")
+async def set_finding_root_cause(
+    engagement_key: str,
+    finding_slug: str,
+    request: RootCauseLinkRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.set_root_cause_link(
+        engagement.id,
+        finding_slug=finding_slug,
+        root_cause_slug=request.root_cause_slug,
+        sibling_order=request.sibling_order,
+        root_cause_effect=request.root_cause_effect,
+        note=request.note,
+        source_name=request.source_name,
+        provenance=request.provenance,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="link-finding",
+        action=f"finding={finding_slug} root_cause={request.root_cause_slug}",
+        actor_name=request.source_name,
+        result=request.root_cause_effect,
+        metadata={"finding_slug": finding_slug, "root_cause_slug": request.root_cause_slug},
+    )
+    await _broadcast(engagement.key, "finding_root_cause", record)
+    return record
+
+
+@router.delete("/findings/{finding_slug}/root-cause")
+async def clear_finding_root_cause(engagement_key: str, finding_slug: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.clear_root_cause_link(engagement.id, finding_slug=finding_slug)
+    _audit_assessment_mutation(
+        engagement.id,
+        title="unlink-finding",
+        action=f"finding={finding_slug} root_cause=clear",
+        actor_name="operator",
+        result=str(record.get("cleared", 0)),
+        metadata={"finding_slug": finding_slug},
+    )
+    await _broadcast(engagement.key, "finding_root_cause", record)
+    return record
+
+
+@router.post("/findings/{finding_slug}/links")
+async def create_finding_link(
+    engagement_key: str,
+    finding_slug: str,
+    request: FindingLinkRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    if request.link_kind == state_manager.ROOT_CAUSE_LINK_KIND:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="use PUT /findings/{slug}/root-cause for root-cause links",
+        )
+    record = state_manager.create_finding_link(
+        engagement.id,
+        finding_slug=finding_slug,
+        link_kind=request.link_kind,
+        target_kind=request.target_kind,
+        target_id=request.target_id,
+        target_ref=request.target_ref,
+        notes=request.notes,
+        provenance=request.provenance,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="finding-link",
+        action=f"finding={finding_slug} link={request.link_kind}:{request.target_kind}:{request.target_ref}",
+        actor_name="operator",
+        result="linked",
+        metadata={"finding_slug": finding_slug, "link_id": record.get("id")},
+    )
+    await _broadcast(engagement.key, "finding_link", record)
+    return record
+
+
 @router.post("/findings/{finding_slug}/verify")
 async def verify_finding(
     engagement_key: str,
@@ -1066,6 +1180,15 @@ _REASONING = Literal["low", "medium", "high"]
 _CONFIDENCE = Literal["low", "medium", "high"]
 
 
+# Roles exempt from declaring `skills` on dispatch. The operator coordinates
+# phases rather than executing a single skill, so requiring an explicit skill
+# list on operator dispatches would be misleading. Every other specialist role
+# must declare which skills it loaded so the dispatch row is a truthful audit
+# of the specialist context. Mirrors `_DISPATCH_ROLES_WITHOUT_SKILLS` in
+# `agent/scripts/assess/lib/contracts.py`; keep the two in sync.
+_DISPATCH_ROLES_WITHOUT_SKILLS: frozenset[str] = frozenset({"operator"})
+
+
 class DispatchCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1079,6 +1202,27 @@ class DispatchCreate(BaseModel):
     reasoning: _REASONING | None = None
     dispatch_mode: _DISPATCH_MODE | None = None
     finding_slugs: list[str] | None = None
+    skills: str | None = Field(default=None, max_length=4096)
+
+    @model_validator(mode="after")
+    def _enforce_skills_for_specialists(self) -> "DispatchCreate":
+        """Specialist dispatches must declare which skills the agent loaded.
+
+        The dispatch row is the audit surface for "what context did this
+        specialist actually carry"; without a skill list it loses the
+        provenance report-writer relies on. Operators are exempt because
+        they coordinate phases rather than executing a single skill.
+        """
+        role = (self.agent_role or "").strip()
+        if role in _DISPATCH_ROLES_WITHOUT_SKILLS:
+            return self
+        skills = (self.skills or "").strip()
+        if not skills:
+            raise ValueError(
+                f"skills is required for role '{role}'; "
+                "list at least one skill name from `aith assess list-skills`"
+            )
+        return self
 
 
 class DispatchUpdate(BaseModel):
@@ -1158,6 +1302,7 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
         reasoning=request.reasoning,
         dispatch_mode=request.dispatch_mode,
         finding_slugs=request.finding_slugs,
+        skills=request.skills,
     )
     _audit_assessment_mutation(
         engagement.id,
