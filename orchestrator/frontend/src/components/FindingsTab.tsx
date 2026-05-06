@@ -553,6 +553,9 @@ export function FindingsTab({
 
   const [allFindingLinks, setAllFindingLinks] = useState<AssessmentFindingLink[]>([]);
   const [allFindingGroups, setAllFindingGroups] = useState<AssessmentFindingGroup[]>([]);
+  const [findingLinksError, setFindingLinksError] = useState<string | null>(null);
+  const [findingGroupsLoading, setFindingGroupsLoading] = useState(false);
+  const [findingGroupsError, setFindingGroupsError] = useState<string | null>(null);
   const [transitions, setTransitions] = useState<AssessmentFindingTransition[]>([]);
   const [transitionsLoading, setTransitionsLoading] = useState(false);
   const [transitionsError, setTransitionsError] = useState<string | null>(null);
@@ -594,10 +597,16 @@ export function FindingsTab({
     let cancelled = false;
     listAssessmentFindingLinks(engagementKey)
       .then((rows) => {
-        if (!cancelled) setAllFindingLinks(rows);
+        if (!cancelled) {
+          setAllFindingLinks(rows);
+          setFindingLinksError(null);
+        }
       })
-      .catch(() => {
-        if (!cancelled) setAllFindingLinks([]);
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setAllFindingLinks([]);
+          setFindingLinksError(error instanceof Error ? error.message : String(error));
+        }
       });
     return () => {
       cancelled = true;
@@ -606,12 +615,25 @@ export function FindingsTab({
 
   useEffect(() => {
     let cancelled = false;
+    setFindingGroupsLoading(true);
+    setFindingGroupsError(null);
     listAssessmentFindingGroups(engagementKey)
       .then((rows) => {
-        if (!cancelled) setAllFindingGroups(rows);
+        if (!cancelled) {
+          setAllFindingGroups(rows);
+          setFindingGroupsError(null);
+        }
       })
-      .catch(() => {
-        if (!cancelled) setAllFindingGroups([]);
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setAllFindingGroups([]);
+          setFindingGroupsError(error instanceof Error ? error.message : String(error));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setFindingGroupsLoading(false);
+        }
       });
     return () => {
       cancelled = true;
@@ -1212,6 +1234,43 @@ export function FindingsTab({
       {/* List (detail renders as a centred modal below) */}
       <div className="findings-shell">
         <section className="list-panel panel">
+          <div className="grouping-status">
+            <div>
+              <strong>{filtered.length}</strong> of <strong>{derivedList.length}</strong> findings visible
+              {activeFilterCount > 0 || query.trim() ? (
+                <span className="meta-text"> · filtered by the current search or chips</span>
+              ) : (
+                <span className="meta-text"> · all findings shown</span>
+              )}
+            </div>
+            <div className="grouping-status-meta">
+              {findingGroupsLoading ? (
+                <span className="tag">Loading groups</span>
+              ) : findingGroupsError ? (
+                <span className="tag warning">Grouping unavailable</span>
+              ) : allFindingGroups.length > 0 ? (
+                <span className="tag root">{allFindingGroups.length} root-cause groups</span>
+              ) : (
+                <span className="tag">No root-cause groups</span>
+              )}
+            </div>
+          </div>
+          {(findingGroupsError || findingLinksError) && (
+            <div className="grouping-warning" role="status">
+              {findingGroupsError && (
+                <p>
+                  Root-cause grouping could not be loaded. Findings are still shown, but root/sibling
+                  grouping may be incomplete. Error: {findingGroupsError}
+                </p>
+              )}
+              {findingLinksError && (
+                <p>
+                  Finding links could not be loaded. Findings are still shown, but relationship and CVE
+                  links may be incomplete. Error: {findingLinksError}
+                </p>
+              )}
+            </div>
+          )}
           <GroupedFindingsList
             groups={groupedFiltered.groups}
             standalone={groupedFiltered.standalone}
