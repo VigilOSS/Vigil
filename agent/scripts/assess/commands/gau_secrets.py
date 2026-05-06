@@ -128,6 +128,10 @@ def _ensure_workdir(paths) -> None:
     paths.bodies_dir.mkdir(parents=True, exist_ok=True)
 
 
+def _directory_has_files(path: Path) -> bool:
+    return path.is_dir() and any(entry.is_file() for entry in path.rglob("*"))
+
+
 def _filter_url_list(input_path: Path, output_path: Path, max_targets: int) -> int:
     """Drop inert extensions and respect --max-targets when assembling the body-fetch list.
 
@@ -337,7 +341,7 @@ def _maybe_run_gau(paths, *, args, cfg, current_cache_key: str) -> tuple[bool, d
     command = " ".join(quote(part) for part in argv)
     cmd = [
         "bash", "-lc",
-        f"{command} | sort -u > {quote(paths.container_output_path)}",
+        f"set -o pipefail; {command} | sort -u > {quote(paths.container_output_path)}",
     ]
     result = kali_exec(
         cmd,
@@ -411,7 +415,7 @@ def run(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     httpx_summary: dict
-    if args.reuse_bodies and any(paths.bodies_dir.rglob("*")):
+    if args.reuse_bodies and _directory_has_files(paths.bodies_dir):
         httpx_summary = {
             "bodies_captured": sum(1 for _ in paths.bodies_dir.rglob("*") if _.is_file()),
             "httpx_results_path": str(paths.work_dir / "httpx_results.txt"),

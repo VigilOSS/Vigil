@@ -2854,6 +2854,21 @@ def set_root_cause_link(
         ).fetchone()
         if root_parent is not None:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="nested root-cause groups are not supported")
+        finding_is_root = connection.execute(
+            """
+            SELECT 1
+            FROM assessment_finding_links
+            WHERE engagement_id = ?
+              AND target_ref = ?
+              AND link_kind = ?
+              AND target_kind = 'finding'
+              AND finding_id != ?
+            LIMIT 1
+            """,
+            (engagement.id, finding_slug, ROOT_CAUSE_LINK_KIND, int(finding["id"])),
+        ).fetchone()
+        if finding_is_root is not None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="nested root-cause groups are not supported")
 
         if sibling_order is None:
             row = connection.execute(

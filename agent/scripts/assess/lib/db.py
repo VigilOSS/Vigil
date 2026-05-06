@@ -192,6 +192,7 @@ def db_insert_work_item(
     service_id: int | None = None,
     coverage_item_id: int | None = None,
     auth_context: str = "anonymous",
+    connection: sqlite3.Connection | None = None,
 ) -> None:
     """Insert a work item using parameterized SQL. No SQL injection surface."""
     if not url or url == "null":
@@ -219,9 +220,11 @@ def db_insert_work_item(
         path_params=path_params,
     )
 
-    conn = sqlite3.connect(db_path, timeout=5.0)
+    should_close = connection is None
+    conn = connection or sqlite3.connect(db_path, timeout=5.0)
     try:
-        conn.execute("PRAGMA busy_timeout=5000")
+        if should_close:
+            conn.execute("PRAGMA busy_timeout=5000")
         conn.execute(
             """INSERT OR IGNORE INTO work_items (
                 queue_key, request_variant_id, service_id, coverage_item_id, auth_context,
@@ -275,4 +278,5 @@ def db_insert_work_item(
         )
         conn.commit()
     finally:
-        conn.close()
+        if should_close:
+            conn.close()

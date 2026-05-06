@@ -580,6 +580,7 @@ class CaseCollector:
                 case_type=case_type,
                 source="proxy",
                 params_key_sig=params_key_sig,
+                connection=self.db,
             )
         except sqlite3.OperationalError as exc:
             ctx.log.warn(f"proxy_addon: DB busy/error — {exc}")

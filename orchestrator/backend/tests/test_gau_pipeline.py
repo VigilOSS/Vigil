@@ -26,6 +26,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -508,9 +509,42 @@ def test_gau_endpoints_shell_command_quotes_dynamic_args() -> None:
         args=args,
     )
     command = argv[-1]
+    assert command.startswith("set -o pipefail; ")
     assert "'wayback,otx;echo bad'" in command
     assert "'example.com;touch /tmp/pwned'" in command
     assert "> '/tmp/gau output.txt'" in command
+
+
+def test_gau_secrets_gau_command_uses_pipefail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _ensure_scripts_path()
+    from assess.commands import gau_secrets  # type: ignore[import-not-found]
+
+    captured: dict[str, list[str]] = {}
+    paths = SimpleNamespace(
+        output_path=tmp_path / "gau_output.txt",
+        meta_path=tmp_path / "gau_output.meta.json",
+        container_output_path="/engagements/demo/scans/gau_output.txt",
+    )
+
+    def fake_kali_exec(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        paths.output_path.write_text("https://example.com/app.js\n", encoding="utf-8")
+        return SimpleNamespace(return_code=0)
+
+    monkeypatch.setattr(gau_secrets, "kali_exec", fake_kali_exec)
+    args = SimpleNamespace(
+        target="example.com",
+        subs=False,
+        providers="",
+        refresh=True,
+        max_cache_age_hours=24,
+        phase="recon",
+        timeout=30,
+    )
+
+    gau_secrets._maybe_run_gau(paths, args=args, cfg=SimpleNamespace(), current_cache_key="test-key")
+
+    assert captured["cmd"][-1].startswith("set -o pipefail; ")
 
 
 def test_gau_js_host_match_requires_exact_host_or_subdomain() -> None:
@@ -519,8 +553,43 @@ def test_gau_js_host_match_requires_exact_host_or_subdomain() -> None:
     assert gau_js_endpoints._host_matches_target("example.com", "example.com")
     assert gau_js_endpoints._host_matches_target("api.example.com", "example.com")
     assert gau_js_endpoints._host_matches_target("api.example.com", "https://example.com")
+    assert gau_js_endpoints._host_matches_target("api.example.com", "*.example.com")
+    assert gau_js_endpoints._host_matches_target("api.example.com", "example.com:8443")
     assert not gau_js_endpoints._host_matches_target("badexample.com", "example.com")
     assert not gau_js_endpoints._host_matches_target("example.com.evil.test", "example.com")
+
+
+def test_gau_js_source_url_uses_http_scheme_hint_from_body_name(tmp_path: Path) -> None:
+    _ensure_scripts_path()
+    from assess.commands import gau_js_endpoints  # type: ignore[import-not-found]
+
+    body = tmp_path / "http-example.com-response.txt"
+    body.write_text("GET /static/app.js HTTP/1.1\nHost: example.com\n\n", encoding="utf-8")
+
+    assert gau_js_endpoints._extract_source_url_from_body(body) == "http://example.com/static/app.js"
+
+
+def test_gau_js_max_bodies_applies_to_suffix_matches(tmp_path: Path) -> None:
+    _ensure_scripts_path()
+    from assess.commands import gau_js_endpoints  # type: ignore[import-not-found]
+
+    for index in range(3):
+        (tmp_path / f"bundle-{index}.js").write_text("console.log('/api');", encoding="utf-8")
+
+    assert len(gau_js_endpoints._list_js_bodies(tmp_path, max_bodies=2)) == 2
+
+
+def test_gau_body_reuse_checks_require_files(tmp_path: Path) -> None:
+    _ensure_scripts_path()
+    from assess.commands import gau_js_endpoints, gau_secrets  # type: ignore[import-not-found]
+
+    (tmp_path / "nested").mkdir()
+    assert not gau_js_endpoints._directory_has_files(tmp_path)
+    assert not gau_secrets._directory_has_files(tmp_path)
+
+    (tmp_path / "nested" / "body.txt").write_text("HTTP/1.1 200 OK\n\n", encoding="utf-8")
+    assert gau_js_endpoints._directory_has_files(tmp_path)
+    assert gau_secrets._directory_has_files(tmp_path)
 
 
 # ─── Argparse registration ─────────────────────────────────────────────

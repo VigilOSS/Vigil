@@ -79,6 +79,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
   const [assessmentTargets, setAssessmentTargets] = useState<AssessmentTarget[]>([]);
   const [assessmentServices, setAssessmentServices] = useState<AssessmentService[]>([]);
   const [assessmentCoverageItems, setAssessmentCoverageItems] = useState<AssessmentCoverageItem[]>([]);
+  const [assessmentRefreshVersion, setAssessmentRefreshVersion] = useState(0);
   const [codeRepos, setCodeRepos] = useState<CodeRepo[]>([]);
   const [codeModules, setCodeModules] = useState<CodeModule[]>([]);
   const [codeQueueStats, setCodeQueueStats] = useState<CodeQueueStats | null>(null);
@@ -241,6 +242,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
       }
 
       await Promise.all(promises);
+      setAssessmentRefreshVersion((version) => version + 1);
 
       const nextSelectedName = selectedNameRef.current;
       if (tab === "artifacts" && nextSelectedName) {
@@ -456,6 +458,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
               chains={chains}
               chainLinks={assessmentChainLinks}
               currentPhase={activeEngagement.current_phase}
+              assessmentRefreshVersion={assessmentRefreshVersion}
             />
           )}
 
@@ -466,6 +469,7 @@ export function EngagementPage({ engagementKey, onBack }: EngagementPageProps) {
               fallbackFindings={displaySummary?.top_findings ?? []}
               chains={assessmentChains}
               chainLinks={assessmentChainLinks}
+              assessmentRefreshVersion={assessmentRefreshVersion}
             />
           )}
 

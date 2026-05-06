@@ -2884,8 +2884,7 @@ def test_alterx_domain_mode_uses_dash_d(monkeypatch):
     assert captured["cmd"][:3] == ["alterx", "-d", "example.com"]
 
 
-def test_dnsx_timeout_flag_passes_through(monkeypatch):
-    """F6 — `kali dnsx -timeout 5` translates to dnsx `-timeout 5`."""
+def _patch_dnsx_exec(monkeypatch):
     cli = _import("assess.cli")
     kali = _import("assess.lib.kali")
 
@@ -2909,11 +2908,95 @@ def test_dnsx_timeout_flag_passes_through(monkeypatch):
 
     mod = _import("assess.commands.kali_dnsx")
     monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    return cli, captured
+
+
+def _dnsx_base_argv(*extra: str) -> list[str]:
+    return [
+        "kali",
+        "dnsx",
+        *extra,
+        "--technique",
+        "RECON",
+        "--intent",
+        "polite-CDN-fronted-target dnsx profile",
+        "--probe-kind",
+        "fingerprint",
+        "--phase",
+        "recon",
+        "--timeout",
+        "1800",
+    ]
+
+
+def test_dnsx_defaults_to_docker_safe_tcp_profile(monkeypatch):
+    """dnsx gets conservative runtime defaults when operators omit tuning flags."""
+    cli, captured = _patch_dnsx_exec(monkeypatch)
+
+    cli.main(_dnsx_base_argv("-l", "/engagements/x/scans/cands.txt"))
+
+    cmd = captured["cmd"]
+    assert cmd[0] == "dnsx"
+    assert cmd[cmd.index("-r") + 1] == "tcp:1.1.1.1,tcp:8.8.8.8"
+    assert cmd[cmd.index("-rl") + 1] == "100"
+    assert cmd[cmd.index("-t") + 1] == "20"
+    assert cmd[cmd.index("-retry") + 1] == "3"
+    assert cmd[cmd.index("-timeout") + 1] == "5"
+
+
+def test_dnsx_help_explains_profiles_opt_ins_and_extra_args(capsys):
+    cli = _import("assess.cli")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["kali", "dnsx", "--help"])
+
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "default polite-cdn" in out
+    assert "--allow-bruteforce" in out
+    assert "--allow-bulk-json" in out
+    assert "--allow-unsafe-rate" in out
+    assert "Use typed flags for guarded knobs" in out
+    assert "--extra-args='-trace -stats'" in out
+    assert "-rcode noerror" in out
+
+
+def test_dnsx_common_record_filter_flags_are_typed(monkeypatch):
+    cli, captured = _patch_dnsx_exec(monkeypatch)
 
     cli.main(
-        [
-            "kali",
-            "dnsx",
+        _dnsx_base_argv(
+            "-l",
+            "/engagements/x/scans/cands.txt",
+            "-aaaa",
+            "-mx",
+            "-txt",
+            "-ns",
+            "-soa",
+            "-ptr",
+            "-asn",
+            "-cdn",
+            "-rcode",
+            "noerror,servfail",
+            "-wd",
+            "example.com",
+            "-omit-raw",
+        )
+    )
+
+    cmd = captured["cmd"]
+    for flag in ("-aaaa", "-mx", "-txt", "-ns", "-soa", "-ptr", "-asn", "-cdn", "-omit-raw"):
+        assert flag in cmd
+    assert cmd[cmd.index("-rcode") + 1] == "noerror,servfail"
+    assert cmd[cmd.index("-wd") + 1] == "example.com"
+
+
+def test_dnsx_timeout_flag_passes_through(monkeypatch):
+    """F6 — `kali dnsx -timeout 5` translates to dnsx `-timeout 5`."""
+    cli, captured = _patch_dnsx_exec(monkeypatch)
+
+    cli.main(
+        _dnsx_base_argv(
             "-l",
             "/engagements/x/scans/cands.txt",
             "-rl",
@@ -2924,23 +3007,144 @@ def test_dnsx_timeout_flag_passes_through(monkeypatch):
             "3",
             "-timeout",
             "5",
-            "--technique",
-            "RECON",
-            "--intent",
-            "polite-CDN-fronted-target dnsx profile",
-            "--probe-kind",
-            "fingerprint",
-            "--phase",
-            "recon",
-            "--timeout",
-            "1800",
-        ]
+        )
     )
     cmd = captured["cmd"]
     assert cmd[0] == "dnsx"
     # `-timeout 5` for dnsx must appear (NOT collapsed into the audit `--timeout`).
     idx = cmd.index("-timeout")
     assert cmd[idx + 1] == "5"
+
+
+def test_dnsx_rejects_unsafe_rate_without_opt_in(monkeypatch, capsys):
+    """High dnsx rates need an explicit opt-in because Docker UDP churn is host-side."""
+    cli, _captured = _patch_dnsx_exec(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(_dnsx_base_argv("-l", "/engagements/x/scans/cands.txt", "-rl", "600"))
+
+    assert exc.value.code != 0
+    err = capsys.readouterr().err
+    assert "--allow-unsafe-rate" in err
+    assert "bursty-ok" in err
+
+
+def test_dnsx_bursty_profile_sets_documented_ceiling(monkeypatch):
+    """bursty-ok is available only as an explicit profile selection."""
+    cli, captured = _patch_dnsx_exec(monkeypatch)
+
+    cli.main(
+        _dnsx_base_argv(
+            "-l",
+            "/engagements/x/scans/cands.txt",
+            "--dnsx-profile",
+            "bursty-ok",
+        )
+    )
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("-rl") + 1] == "500"
+    assert cmd[cmd.index("-t") + 1] == "100"
+
+
+def test_dnsx_response_modes_are_mutually_exclusive(monkeypatch):
+    """dnsx cannot emit both full responses and response-only output in one typed call."""
+    cli, _captured = _patch_dnsx_exec(monkeypatch)
+
+    with pytest.raises(SystemExit):
+        cli.main(
+            _dnsx_base_argv(
+                "-l",
+                "/engagements/x/scans/cands.txt",
+                "-resp",
+                "-resp-only",
+            )
+        )
+
+
+def test_dnsx_requires_bruteforce_opt_in(monkeypatch, capsys):
+    """dnsx -w is active enumeration, so the wrapper requires deliberate operator intent."""
+    cli, _captured = _patch_dnsx_exec(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(_dnsx_base_argv("-d", "example.com", "-w", "/lists/subs.txt"))
+
+    assert exc.value.code != 0
+    assert "--allow-bruteforce" in capsys.readouterr().err
+
+
+def test_dnsx_allows_bruteforce_with_opt_in(monkeypatch):
+    cli, captured = _patch_dnsx_exec(monkeypatch)
+
+    cli.main(
+        _dnsx_base_argv(
+            "-d",
+            "example.com",
+            "-w",
+            "/lists/subs.txt",
+            "--allow-bruteforce",
+        )
+    )
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("-w") + 1] == "/lists/subs.txt"
+
+
+def test_dnsx_bulk_json_response_guard_uses_local_line_count(monkeypatch, tmp_path, capsys):
+    cli, _captured = _patch_dnsx_exec(monkeypatch)
+    target_list = tmp_path / "many-subs.txt"
+    target_list.write_text("".join(f"sub{i}.example.com\n" for i in range(1001)))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(_dnsx_base_argv("-l", str(target_list), "-resp", "-json"))
+
+    assert exc.value.code != 0
+    err = capsys.readouterr().err
+    assert "--allow-bulk-json" in err
+
+
+def test_dnsx_bulk_json_response_requires_opt_in_when_list_size_unknown(monkeypatch, capsys):
+    cli, _captured = _patch_dnsx_exec(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(_dnsx_base_argv("-l", "/engagements/x/scans/survivors.txt", "-resp", "-json"))
+
+    assert exc.value.code != 0
+    err = capsys.readouterr().err
+    assert "--allow-bulk-json" in err
+    assert "cannot be verified" in err
+
+
+def test_dnsx_allows_small_local_response_json_list(monkeypatch, tmp_path):
+    cli, captured = _patch_dnsx_exec(monkeypatch)
+    target_list = tmp_path / "small-subs.txt"
+    target_list.write_text("one.example.com\ntwo.example.com\n")
+
+    cli.main(_dnsx_base_argv("-l", str(target_list), "-resp", "-json"))
+
+    cmd = captured["cmd"]
+    assert "-resp" in cmd
+    assert "-json" in cmd
+
+
+def test_dnsx_rejects_guarded_extra_args(monkeypatch, capsys):
+    cli, _captured = _patch_dnsx_exec(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(_dnsx_base_argv("-l", "/engagements/x/scans/cands.txt", "--extra-args=-rl 1000"))
+
+    assert exc.value.code != 0
+    err = capsys.readouterr().err
+    assert "--extra-args" in err
+    assert "-rl" in err
+
+
+def test_dnsx_allows_unguarded_extra_args(monkeypatch):
+    cli, captured = _patch_dnsx_exec(monkeypatch)
+
+    cli.main(_dnsx_base_argv("-l", "/engagements/x/scans/cands.txt", "--extra-args=-stats"))
+
+    assert captured["cmd"][-1] == "-stats"
 
 
 def test_cero_input_list_pipes_via_sh_wrapper(monkeypatch):

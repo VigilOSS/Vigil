@@ -53,7 +53,7 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
         print("runtime image\tbuild skipped")
     elif _image_outdated("security-research:latest", _runtime_image_inputs(install_root), runner=runner):
         print("runtime image\tbuilding")
-        build_runtime(install_root)
+        build_runtime(install_root, runner=runner)
         runtime_built = True
     else:
         print("runtime image\tcurrent")
@@ -64,7 +64,7 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
         print("mitmproxy image\tbuild skipped")
     elif _image_outdated("security-research-proxy:latest", _mitmproxy_image_inputs(install_root), runner=runner):
         print("mitmproxy image\tbuilding")
-        _build_mitmproxy_image(install_root)
+        _build_mitmproxy_image(install_root, runner=runner)
     else:
         print("mitmproxy image\tcurrent")
 

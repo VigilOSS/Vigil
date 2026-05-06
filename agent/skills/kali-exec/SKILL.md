@@ -240,9 +240,16 @@ aith assess kali puredns resolve /engagements/$ENGAGEMENT_KEY/scans/subs_passive
   --probe-kind fingerprint --phase recon --timeout 1800
 
 aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_resolved.txt \
-  -a -cname -resp -json \
+  --dnsx-profile polite-cdn --resolver-profile public-tcp -silent \
+  -o /engagements/$ENGAGEMENT_KEY/scans/dnsx_live.txt \
+  --technique RECON --intent "lean dnsx confirmation for resolved subs" \
+  --probe-kind baseline --phase recon --timeout 1200
+
+aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/dnsx_live.txt \
+  --dnsx-profile polite-cdn --resolver-profile public-tcp \
+  -a -cname -resp -json --allow-bulk-json \
   -o /engagements/$ENGAGEMENT_KEY/scans/dnsx.jsonl \
-  --technique RECON --intent "A+CNAME enrichment for resolved subs" \
+  --technique RECON --intent "A+CNAME enrichment for live dnsx survivors" \
   --probe-kind fingerprint --phase recon --timeout 1200
 ```
 

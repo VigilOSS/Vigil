@@ -37,9 +37,9 @@ DNS resolution success-rate parallels the egress reputation problem: if every ho
 
 ## Docker-resource-safe profiles
 
-Subdomain enumeration is the highest-CPU-burst phase of recon. Docker's cgroup limits (`AITH_RUNTIME_MEMORY_GB` / `AITH_RUNTIME_CPUS` / `AITH_RUNTIME_PIDS_LIMIT` / `AITH_RUNTIME_SHM_SIZE` from `.env.example`) bound the burst, but a default rate-limit profile against the wrong target tier still saturates the runtime. Pick the profile by target shape, not by what the apex looks like — wildcards expand the surface and the rate calibration must match the surface, not the seed.
+Subdomain enumeration is the highest-CPU-burst phase of recon. Docker's cgroup limits (`AITH_RUNTIME_MEMORY_GB` / `AITH_RUNTIME_CPUS` / `AITH_RUNTIME_PIDS_LIMIT` / `AITH_RUNTIME_SHM_SIZE` from `.env.example`) bound container userland, but a DNS-heavy profile against the wrong target tier can still saturate host-side Docker networking. Pick the profile by target shape, not by what the apex looks like — wildcards expand the surface and the rate calibration must match the surface, not the seed.
 
-> **Host-CPU note.** DNS bruteforce is the dominant host-CPU and host-network spike in the engagement runtime. massdns sends thousands of UDP packets per second; the host kernel's per-packet network-stack overhead is amplified well beyond what `--cpus` cgroup limits constrain (cgroup CPU limits the userland process, not the host's kernel networking path). Aggressive DNS profiles have crashed Docker on Standard-tier hardware. **Default to `polite-residential` everywhere.** `bursty-OK` is gated by runtime tier (see the matrix below); Standard tier never picks it. When in doubt, drop a tier.
+> **Host-CPU note.** DNS bruteforce is the dominant host-CPU and host-network spike in the engagement runtime. massdns and dnsx can send thousands of DNS packets per second; the host kernel's per-packet network-stack overhead is amplified well beyond what `--cpus` cgroup limits constrain (cgroup CPU limits the userland process, not the host's kernel networking path). Aggressive DNS profiles have crashed Docker on Standard-tier hardware. **The `aith assess kali dnsx` wrapper defaults to `--dnsx-profile polite-cdn --resolver-profile public-tcp`.** Step up to `polite-residential` only after assessing the target, and keep `bursty-OK` gated by runtime tier (see the matrix below). When in doubt, drop a tier.
 
 Profiles and full tier rationale live in `agent/references/tools/recon/subdomain-enumeration-tools.md`; the three operational tiers below are the load-bearing settings, listed from most cautious (default for any unknown target) down to opt-in only.
 
@@ -48,7 +48,7 @@ Profiles and full tier rationale live in `agent/references/tools/recon/subdomain
 > - `dnsx -rl 100 -t 20 -retry 3 -timeout 5`
 > - Use when: scope target is fronted by a major CDN, has a wildcard DNS that returns canonical CNAMEs, or is a household-name brand.
 
-> **polite-residential default** — small-medium target, public resolvers, available on every runtime tier. **This is the default for any new engagement** — only step away from it after explicit assessment.
+> **polite-residential profile** — small-medium target, public resolvers, available on every runtime tier. Use it after explicit assessment when the target is not CDN/WAF-sensitive.
 > - `puredns --rate-limit 2500 --wildcard-batch 100000`
 > - `dnsx -rl 300 -t 50 -retry 2`
 > - Use when: bug-bounty scope on residential/SMB infrastructure, shared resolver pool, no specific CDN signal.
@@ -192,7 +192,7 @@ aith assess kali cero -l /engagements/$ENGAGEMENT_KEY/scans/target_cidrs.txt \
 
 # Final pass: dnsx resolves the merged set, drives live-host confirmation
 aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
-  -a -cname -resp -silent \
+  --dnsx-profile polite-cdn --resolver-profile public-tcp -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/dnsx_final.txt \
   --technique RECON --intent "Phase 3 final dnsx resolution (lean — no JSON on bulk)" \
   --probe-kind baseline --phase recon --timeout 600
@@ -217,7 +217,7 @@ Phase 3 above treats TLS SAN extraction as a *feedback* step — applied after p
    covers a different name.
 
 In both cases, treat the SAN set as a primary subdomain source and feed it through
-`dnsx -resp` for live-host confirmation in the same dispatch:
+`dnsx -resp` for live-host confirmation after SAN extraction:
 
 ```bash
 # Per-host SAN extraction (full recipe in openssl-sans.md step 1)
@@ -232,15 +232,20 @@ aith assess kali exec --technique RECON \
   done < /engagements/$ENGAGEMENT_KEY/scans/in_scope_hosts.txt
 '
 
-# Merge SAN-discovered names and confirm via dnsx -resp
+# Merge SAN-discovered names.
 aith assess kali exec --technique RECON \
-  --intent "dnsx -resp confirmation of SAN-discovered subdomains" \
-  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
+  --intent "merge SAN-discovered subdomains" \
+  --probe-kind fingerprint --phase recon --timeout 300 -- bash -c '
   cat /engagements/$ENGAGEMENT_KEY/scans/sans_*.txt | sort -u \
     > /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt
-  aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt \
-    -a -resp -silent -o /engagements/$ENGAGEMENT_KEY/scans/san_live.txt
 '
+
+# Confirm the SAN-discovered names through the typed dnsx verb.
+aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt \
+  --dnsx-profile polite-cdn --resolver-profile public-tcp \
+  -a -resp -silent -o /engagements/$ENGAGEMENT_KEY/scans/san_live.txt \
+  --technique RECON --intent "dnsx -resp confirmation of SAN-discovered subdomains" \
+  --probe-kind fingerprint --phase recon --timeout 600
 ```
 
 `san_live.txt` is the primary input to `aith assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum` for this dispatch. The full openssl extraction loop, the cross-host collision counter, and the vhost-cert match check live in `agent/references/tools/recon/openssl-sans.md` — call into it from this section rather than duplicating mechanics here.

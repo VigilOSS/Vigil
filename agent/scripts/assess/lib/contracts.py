@@ -940,6 +940,12 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "--allow-deadly requires --destructive — bbot's deadly modules perform real attacks (fuzzing, brute-force, exploit). The CLI hard-fails if --allow-deadly is passed without --destructive so the audit row stays truthful.",
         "Long passive sweeps (`-p subdomain-enum`) regularly run 15-30 minutes — set --timeout 1800 or wrap in `kali job start`.",
     ),
+    "dnsx": (
+        "Docker-safe defaults are applied by the typed wrapper: --dnsx-profile polite-cdn, --resolver-profile public-tcp, -rl 100, -t 20, -retry 3, -timeout 5.",
+        "Use lean bulk resolution first (no -resp/-json), then enrich survivors with -resp -json. Unknown-size or bulk -resp/-json list inputs require --allow-bulk-json.",
+        "Rate/thread values above polite-residential require --dnsx-profile bursty-ok; values above bursty-ok require --allow-unsafe-rate.",
+        "Common record/filter flags are typed (-aaaa, -mx, -txt, -ns, -soa, -ptr, -asn, -cdn, -rcode, -wd). Use --extra-args for unmodeled dnsx flags that are not guarded load/transport knobs.",
+    ),
     "exec": (
         "Use only when no typed verb fits. Tool-name attribution falls back to argv[0] for audit recording.",
     ),
@@ -992,6 +998,11 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
     "bbot": (
         {
             "command": "aith assess kali bbot -t example.com -p subdomain-enum -rf passive -o /engagements/$ENGAGEMENT_KEY/scans/bbot_subs --technique OSINT --intent 'deep passive subdomain enum' --probe-kind fingerprint --phase recon --timeout 1800",
+        },
+    ),
+    "dnsx": (
+        {
+            "command": "aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates.txt --dnsx-profile polite-cdn --resolver-profile public-tcp -silent -o /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.txt --technique RECON --intent 'lean dnsx resolution without bulk JSON' --probe-kind baseline --phase recon --timeout 1200",
         },
     ),
     "job": (

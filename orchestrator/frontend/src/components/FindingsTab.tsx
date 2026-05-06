@@ -29,6 +29,7 @@ type FindingsTabProps = {
   fallbackFindings: AssessmentFinding[];
   chains: AssessmentAttackChainDetail[];
   chainLinks: AssessmentAttackChainLink[];
+  assessmentRefreshVersion: number;
 };
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const;
@@ -548,6 +549,7 @@ export function FindingsTab({
   fallbackFindings,
   chains,
   chainLinks,
+  assessmentRefreshVersion,
 }: FindingsTabProps) {
   const allFindingsRaw = findings.length > 0 ? findings : fallbackFindings;
 
@@ -611,7 +613,7 @@ export function FindingsTab({
     return () => {
       cancelled = true;
     };
-  }, [engagementKey]);
+  }, [engagementKey, assessmentRefreshVersion]);
 
   useEffect(() => {
     let cancelled = false;
@@ -638,7 +640,7 @@ export function FindingsTab({
     return () => {
       cancelled = true;
     };
-  }, [engagementKey]);
+  }, [engagementKey, assessmentRefreshVersion]);
 
   // ── Derived findings (one pass) ──
   const detailIdToSlug = useMemo(() => {
@@ -1008,7 +1010,7 @@ export function FindingsTab({
     return () => {
       cancelled = true;
     };
-  }, [engagementKey, selected]);
+  }, [engagementKey, selected, assessmentRefreshVersion]);
 
   // ── Keyboard ──
   const filteredRef = useRef(filtered);
