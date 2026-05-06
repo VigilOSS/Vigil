@@ -199,7 +199,7 @@ without reading the audit pipeline.
   "agent_id": "surf_c4d8",
   "agent_role": "surface-collector",
   "phase": "collect",
-  "summary": "Ingested 1,847 URLs across 12 clusters; classify-work scored 312 priority items above threshold; one large static-asset cluster deferred.",
+  "summary": "Ingested 1,847 URLs across 12 clusters; inline classification scored 312 priority items above threshold; one large static-asset cluster deferred.",
   "confidence": "high",
   "finding_slugs": [],
   "coverage_gaps": [],
@@ -492,7 +492,7 @@ reading `render-handoff` see whatever step you were on.
 - **source-analyzer** — after each major asset class processed (HTML routes
   extracted, JS routes extracted, secrets scanned, source maps inspected).
 - **surface-collector** — after Katana ingest, after gau ingest, after dedup
-  pass, after classify-work.
+  pass (classification runs inline at ingest, no separate step).
 - **vulnerability-analyst** — after each surface tested. The handoff's
   `finding_slugs` accumulates as you confirm.
 - **exploit-developer** — after each chain step proved (per cred captured,

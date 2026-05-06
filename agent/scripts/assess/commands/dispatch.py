@@ -12,6 +12,7 @@ from typing import Any
 
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
+from assess.lib.contracts import validate_specialist_dispatch_contract
 from assess.lib.db import db_init, db_query, db_exec, db_insert_work_item
 from assess.lib.params import extract_url_path, extract_query_params, extract_path_params, generate_params_sig
 
@@ -30,6 +31,25 @@ _DBLESS_ACTIONS = (
     "get",
     "record-decision",
     "record-handoff",
+)
+
+# Actions that DO need a cases.db (work-buffer SQLite) — listed once so the
+# Unknown-action help text and the operator-facing docs stay aligned with the
+# actual dispatch surface. Add new actions here and the help string updates
+# automatically.
+_DB_ACTIONS = (
+    "stats",
+    "peek",
+    "fetch",
+    "fetch-by-priority",
+    "defer-cluster",
+    "defer-items",
+    "done",
+    "error",
+    "reset-stale",
+    "retry-errors",
+    "migrate",
+    "requeue",
 )
 
 
@@ -81,26 +101,24 @@ def register(subparsers) -> None:
         "db_path",
         metavar="action_or_db",
         help=(
-            "Backend action name (register/update-status/list/get/record-decision/"
-            "record-handoff/render-handoff) OR path to cases.db for work-buffer actions"
+            f"Backend action name ({'/'.join(_DBLESS_ACTIONS)}) OR "
+            f"path to cases.db for work-buffer actions"
         ),
     )
     p.add_argument(
         "action",
         nargs="?",
         default="",
-        help=(
-            "stats|fetch|fetch-by-priority|peek|defer-cluster|defer-items|done|error|"
-            "reset-stale|retry-errors|migrate|requeue|render-handoff|register|"
-            "update-status|abort-duplicate|list|get|record-decision|record-handoff"
-        ),
+        help="|".join((*_DB_ACTIONS, *_DBLESS_ACTIONS)),
     )
     p.add_argument("extra", nargs="*", help="Action-specific arguments")
     p.add_argument(
         "--reason",
         default="",
-        help="Reason for defer-cluster / defer-items (required for those actions). Free text; "
-        "stored in terminal_reason so operators can audit why a cluster or item was skipped.",
+        help="Reason for defer-cluster / defer-items / abort-duplicate / record-decision "
+        "(required for defer-* and abort-duplicate; optional for record-decision). Free text; "
+        "stored in terminal_reason (defer-*) or the decision payload so operators can audit why "
+        "a cluster, item, duplicate dispatch, or operator decision was skipped/aborted/recorded.",
     )
     p.add_argument(
         "--by",
@@ -141,6 +159,10 @@ def register(subparsers) -> None:
     p.add_argument("--dispatch-mode", dest="dispatch_mode_arg", default=None,
                    choices=("hypothesis-driven", "item-iterating", "deep-manual", "variant-rotation"),
                    help="(register) Dispatch loop shape.")
+    p.add_argument("--skills", dest="skills", default=None,
+                   help="(register) Comma-separated skill names the specialist must load "
+                        "(e.g. 'surface-collection,gau-triage'). Required for non-operator "
+                        "roles to make skill scope explicit at dispatch time.")
     p.add_argument("--from-json", dest="from_json", default=None,
                    help="(register / record-handoff) Path to JSON payload (overrides flag-based fields).")
     p.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true",
@@ -355,11 +377,8 @@ def run(args) -> None:
     else:
         print(f"Unknown action: {action}", file=sys.stderr)
         print(
-            "Work-buffer actions: stats, peek, fetch, fetch-by-priority, "
-            "defer-cluster, defer-items, done, error, reset-stale, retry-errors, "
-            "migrate, requeue\n"
-            "Dispatch actions (no cases.db): register, update-status, list, get, "
-            "abort-duplicate, render-handoff, record-decision, record-handoff",
+            f"Work-buffer actions: {', '.join(_DB_ACTIONS)}\n"
+            f"Dispatch actions (no cases.db): {', '.join(_DBLESS_ACTIONS)}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -568,7 +587,7 @@ def _fetch(db_path: str, type_val: str, limit: int, agent: str) -> None:
 _VULN_ANALYST_TYPES = ("api", "api-spec", "form", "upload", "graphql", "websocket")
 _SOURCE_ANALYZER_TYPES = ("page", "javascript", "stylesheet", "data")
 _ROUTED_TYPES = _VULN_ANALYST_TYPES + _SOURCE_ANALYZER_TYPES
-_SKIP_TYPES = ("image", "font", "media", "binary", "archive", "unknown")
+_VULN_SIGNAL_FALLBACK_TYPES = ("unknown",)
 
 
 def _agent_route(agent: str) -> tuple[str, ...] | None:
@@ -577,14 +596,30 @@ def _agent_route(agent: str) -> tuple[str, ...] | None:
     if not normalized:
         return None
     if "vulnerability" in normalized or normalized.startswith("vuln"):
-        return _VULN_ANALYST_TYPES
+        return _VULN_ANALYST_TYPES + _VULN_SIGNAL_FALLBACK_TYPES
     if "source" in normalized:
         return _SOURCE_ANALYZER_TYPES
     return None
 
 
-def _assigned_agent_for_type(case_type: str) -> str | None:
-    if case_type in _VULN_ANALYST_TYPES:
+def _is_vuln_signal_fallback(row) -> bool:
+    """Unknown type with explicit gf signal is vulnerability-analyst work.
+
+    `unknown` is not broadly routable because many rows are low-context
+    leftovers. The inline classifier can still assign strong gf buckets from
+    path or parameter signal (for example `gf:trust_surface`); those rows
+    should not wait for manual type fetches.
+    """
+    return (
+        row["type"] in _VULN_SIGNAL_FALLBACK_TYPES
+        and int(row["priority_score"] or 0) > 0
+        and str(row["cluster_key"] or "").startswith("gf:")
+    )
+
+
+def _assigned_agent_for_row(row) -> str | None:
+    case_type = row["type"]
+    if case_type in _VULN_ANALYST_TYPES or _is_vuln_signal_fallback(row):
         return "vulnerability-analyst"
     if case_type in _SOURCE_ANALYZER_TYPES:
         return "source-analyzer"
@@ -601,14 +636,15 @@ def _fetch_by_priority(db_path: str, limit: int, agent: str) -> None:
     ``vulnerability-analyst-1`` without handing it JavaScript/page work.
 
     We exclude rows with terminal_reason set because classify-work already
-    stamped those as skip-worthy, and we exclude inert types as a belt-and-
-    suspenders guard in case an older DB predates the terminal_reason stamp.
+    stamped those as skip-worthy. High-signal `unknown` rows are a narrow
+    vulnerability-analyst fallback when inline classification assigned a
+    positive `gf:*` bucket; plain unknown rows remain unrouted.
     """
     import sqlite3
 
     agent = (agent or "auto").strip()
     auto_route = agent.lower() in {"auto", "routed", "route"}
-    allowed_types = _ROUTED_TYPES if auto_route else _agent_route(agent)
+    allowed_types = (_ROUTED_TYPES + _VULN_SIGNAL_FALLBACK_TYPES) if auto_route else _agent_route(agent)
     if allowed_types is None:
         print(
             "fetch-by-priority: agent is not a routed agent; use 'auto', "
@@ -629,13 +665,17 @@ def _fetch_by_priority(db_path: str, limit: int, agent: str) -> None:
                 WHERE status = 'pending'
                   AND terminal_reason IS NULL
                   AND type IN ({placeholders})
+                  AND (
+                      type NOT IN ({",".join("?" * len(_VULN_SIGNAL_FALLBACK_TYPES))})
+                      OR (priority_score > 0 AND cluster_key LIKE 'gf:%')
+                  )
                 ORDER BY priority_score DESC, cluster_key, id
                 LIMIT ?""",
-            (*allowed_types, limit),
+            (*allowed_types, *_VULN_SIGNAL_FALLBACK_TYPES, limit),
         ).fetchall()
         claimed: list[dict] = []
         for row in candidates:
-            row_agent = _assigned_agent_for_type(row["type"]) if auto_route else agent
+            row_agent = _assigned_agent_for_row(row) if auto_route else agent
             if not row_agent:
                 continue
             updated = conn.execute(
@@ -966,12 +1006,14 @@ def _render_handoff(args, extra: list[str]) -> None:
             scope_host = dispatch.get("scope_host") or ""
             dispatched_at = dispatch.get("dispatched_at") or ""
             dispatch_status = dispatch.get("status") or ""
+            skills = str(dispatch.get("skills") or "")
         else:
             role = str(handoff.get("agent_role") or "<unknown role>")
             task = "<unrecorded task>"
             scope_host = ""
             dispatched_at = handoff.get("created_at") or ""
             dispatch_status = "(dispatch row missing)"
+            skills = ""
 
         # Handoff payload extraction. JSON columns deserialize to lists/dicts
         # in the state-manager serializer; treat anything else defensively.
@@ -1057,6 +1099,7 @@ def _render_handoff(args, extra: list[str]) -> None:
         scope_host=scope_host,
         dispatched_at=dispatched_at,
         status=dispatch_status,
+        skills=skills,
         summary=summary,
         confidence=confidence,
         finding_rows=finding_rows,
@@ -1081,6 +1124,7 @@ def _render_handoff_blob(
     scope_host: str,
     dispatched_at: str,
     status: str,
+    skills: str,
     summary: str,
     confidence: str,
     finding_rows: list[dict],
@@ -1109,6 +1153,15 @@ def _render_handoff_blob(
         f"- **Scope host:** {scope_host or '(none recorded)'}",
         f"- **Dispatched at:** {dispatched_at or '(unknown)'} (status: {status or 'unknown'})",
     ]
+    # Skills loaded by the prior dispatch are part of the audit surface — the
+    # next dispatch should know which procedure context the previous agent
+    # carried so it can either continue with the same skills or change loadout
+    # deliberately. Operators are exempt from declaring skills, so an empty
+    # value is rendered as a clear marker rather than dropped silently.
+    if skills:
+        head.append(f"- **Skills loaded:** {skills}")
+    elif role and role != "operator":
+        head.append("- **Skills loaded:** (not recorded)")
 
     summary_lines = _summary_section(summary, confidence)
     finding_lines = _findings_section(finding_rows, include_evidence=include_evidence)
@@ -1406,6 +1459,7 @@ def _build_register_payload(args) -> dict:
         "model": getattr(args, "dispatch_model", None),
         "reasoning": getattr(args, "reasoning", None),
         "dispatch_mode": getattr(args, "dispatch_mode_arg", None),
+        "skills": getattr(args, "skills", None),
     }
     for k, v in cli_fields.items():
         if v is not None:
@@ -1419,6 +1473,16 @@ def _build_register_payload(args) -> dict:
     if not payload.get("agent_role"):
         print("register: --agent-role is required (or include 'agent_role' in --from-json)", file=sys.stderr)
         sys.exit(1)
+    errors, warnings = validate_specialist_dispatch_contract(payload)
+    for warning in warnings:
+        print(f"WARN register: {warning}", file=sys.stderr)
+    if errors:
+        for error in errors:
+            print(f"register: {error}", file=sys.stderr)
+        sys.exit(1)
+    skills_value = payload.get("skills")
+    if isinstance(skills_value, list):
+        payload["skills"] = ",".join(str(skill).strip() for skill in skills_value)
     return payload
 
 
@@ -1551,9 +1615,24 @@ def _abort_duplicate_dispatch(args, extra: list[str]) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+    if agent_id == replacement:
+        print(
+            "abort-duplicate: --replacement-agent-id must point at the dispatch to keep, "
+            "not the duplicate being aborted.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     client, _ = _client_for(args)
     now = _utcnow_iso()
     try:
+        replacement_row = client.get_dispatch(replacement)
+        if replacement_row is None:
+            print(
+                f"abort-duplicate: replacement dispatch '{replacement}' was not found; "
+                "register the canonical replacement before aborting the duplicate.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         row = client.update_dispatch(agent_id, {"status": "aborted", "completed_at": now})
         decision = client.record_decision(
             {
@@ -1634,6 +1713,7 @@ def _record_decision(args) -> None:
         vendor = getattr(args, "decision_vendor", None)
         choice = getattr(args, "decision_choice", None)
         note = getattr(args, "decision_note", None)
+        reason = getattr(args, "reason", None)
         phase = getattr(args, "decision_phase", None)
         if host:
             payload["host"] = host
@@ -1643,12 +1723,14 @@ def _record_decision(args) -> None:
             payload["choice"] = choice
         if note:
             payload["note"] = note
+        if reason:
+            payload["reason"] = reason
         if phase:
             payload["phase"] = phase
         if not payload:
             print(
                 "record-decision: pass --payload-json or at least one of "
-                "--host/--vendor/--choice/--note/--phase",
+                "--host/--vendor/--choice/--note/--reason/--phase",
                 file=sys.stderr,
             )
             sys.exit(1)

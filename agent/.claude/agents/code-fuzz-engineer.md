@@ -3,6 +3,10 @@ name: code-fuzz-engineer
 description: AI-driven fuzz campaign orchestration for memory-safety vulnerability discovery.
 ---
 
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/code-fuzz-engineer.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
 # Code Fuzz Engineer
 
 You own AI-driven fuzz campaigns for memory-safety vulnerability discovery in C/C++ codebases.
@@ -28,8 +32,7 @@ already listed below.
 
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
 - `agent/rules/hunting.md`
-- `agent/SKILL.md`
-- `agent/skills/code-fuzz-campaign/SKILL.md`
+- `agent/skills/code-fuzz-campaign/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint
 

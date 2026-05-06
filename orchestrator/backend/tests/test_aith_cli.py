@@ -1560,6 +1560,38 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
     assert calls[:3] == ["runtime", "orchestrator", "frp-prompt"]
 
 
+def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import up as up_module
+
+    seen: dict[str, object] = {}
+
+    def fake_runner(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(up_module, "resolve_source_root", lambda *_args, **_kwargs: tmp_path)
+    monkeypatch.setattr(up_module, "install_from_source", lambda *args, **kwargs: None)
+    monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: False)
+    monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: True)
+    monkeypatch.setattr(up_module, "_start_or_restart_runtime", lambda *args, **kwargs: None)
+    monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: None)
+    monkeypatch.setattr(up_module, "_start_mitmproxy_if_needed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(up_module, "_start_oob_if_needed", lambda *args, **kwargs: None)
+
+    def fake_build_runtime(_install_root, *, runner=None, **_kwargs):
+        seen["runtime_runner"] = runner
+
+    def fake_build_mitmproxy(_install_root, *, runner=None):
+        seen["mitmproxy_runner"] = runner
+
+    monkeypatch.setattr(up_module, "build_runtime", fake_build_runtime)
+    monkeypatch.setattr(up_module, "_build_mitmproxy_image", fake_build_mitmproxy)
+
+    up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=fake_runner)
+
+    assert seen["runtime_runner"] is fake_runner
+    assert seen["mitmproxy_runner"] is fake_runner
+
+
 # ---------------------------------------------------------------------------
 # Wave 3 W3-B mutation-helper coverage
 # ---------------------------------------------------------------------------
@@ -2208,12 +2240,79 @@ def test_validate_dispatch_contract_accepts_minimal_payload(
     payload = {
         "role": "vulnerability-analyst",
         "dispatch_mode": "item-iterating",
+        "skills": "auth-bypass",
     }
     contract_path = tmp_path / "dispatch.json"
     contract_path.write_text(json.dumps(payload), encoding="utf-8")
 
     assess_main(["validate-dispatch-contract", str(contract_path)])
     assert "OK" in capsys.readouterr().out
+
+
+def test_validate_dispatch_contract_accepts_dispatch_register_payload(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The contract preflight accepts the same role field used by dispatch register."""
+    assess_main = _load_assess_main()
+    payload = {
+        "agent_id": "VA-1",
+        "agent_role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+        "skills": "auth-bypass",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assess_main(["validate-dispatch-contract", str(contract_path)])
+    assert "OK" in capsys.readouterr().out
+
+
+def test_validate_dispatch_contract_rejects_role_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "recon-specialist",
+        "agent_role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+        "skills": "auth-bypass",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        assess_main(["validate-dispatch-contract", str(contract_path)])
+    assert "role and agent_role must match" in capsys.readouterr().err
+
+
+def test_list_skills_uses_directory_names_for_dispatch_audit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assess_main = _load_assess_main()
+
+    assess_main(["list-skills", "--json"])
+
+    rows = json.loads(capsys.readouterr().out)
+    google = next(row for row in rows if row["path"] == "agent/skills/google-workspaces/SKILL.md")
+    assert google["name"] == "google-workspaces"
+
+
+def test_validate_dispatch_contract_accepts_list_skills_canonical_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assess_main = _load_assess_main()
+    payload = {
+        "agent_role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+        "skills": "google-workspaces",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assess_main(["validate-dispatch-contract", str(contract_path)])
+    captured = capsys.readouterr()
+    assert "OK" in captured.out
+    assert "WARN skill" not in captured.err
 
 
 def test_validate_dispatch_contract_rejects_unknown_dispatch_mode(
@@ -2224,6 +2323,7 @@ def test_validate_dispatch_contract_rejects_unknown_dispatch_mode(
     payload = {
         "role": "vulnerability-analyst",
         "dispatch_mode": "turbo-mode",
+        "skills": "auth-bypass",
     }
     contract_path = tmp_path / "dispatch.json"
     contract_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -2234,6 +2334,40 @@ def test_validate_dispatch_contract_rejects_unknown_dispatch_mode(
     assert "dispatch_mode" in err and "turbo-mode" in err
 
 
+def test_validate_dispatch_contract_requires_skills_for_specialist(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Specialist dispatches must declare which skills the agent loaded."""
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        assess_main(["validate-dispatch-contract", str(contract_path)])
+    err = capsys.readouterr().err
+    assert "skills is required" in err
+
+
+def test_validate_dispatch_contract_operator_skills_optional(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Operator role coordinates phases; skills are not required on operator dispatches."""
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "operator",
+        "dispatch_mode": "deep-manual",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assess_main(["validate-dispatch-contract", str(contract_path)])
+    assert "OK" in capsys.readouterr().out
+
+
 def test_actor_kind_warn_on_non_log_subcommand(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2242,6 +2376,7 @@ def test_actor_kind_warn_on_non_log_subcommand(
     payload = {
         "role": "vulnerability-analyst",
         "dispatch_mode": "deep-manual",
+        "skills": "auth-bypass",
     }
     contract_path = tmp_path / "dispatch.json"
     contract_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -2786,6 +2921,7 @@ def test_dispatch_register_writes_payload(
         task="IDOR sweep",
         reasoning="high",
         dispatch_mode_arg="item-iterating",
+        skills="idor-testing",
     )
     out = capsys.readouterr().out
     body = json.loads(out)
@@ -2793,6 +2929,48 @@ def test_dispatch_register_writes_payload(
     assert body["status"] == "in-progress"
     assert fake.recorded[0]["agent_role"] == "vulnerability-analyst"
     assert fake.recorded[0]["dispatch_mode"] == "item-iterating"
+
+
+def test_dispatch_register_normalizes_list_skills_from_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload_path = tmp_path / "dispatch.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "agent_id": "AG-LIST-SKILLS",
+                "agent_role": "vulnerability-analyst",
+                "task": "IDOR sweep",
+                "dispatch_mode": "item-iterating",
+                "skills": ["idor-testing", "auth-bypass"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake = _run_dispatch_verb(monkeypatch, "register", from_json=str(payload_path))
+    capsys.readouterr()
+
+    assert fake.recorded[0]["skills"] == "idor-testing,auth-bypass"
+
+
+def test_dispatch_register_rejects_missing_skills_locally(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        _run_dispatch_verb(
+            monkeypatch,
+            "register",
+            agent_id="AG-NO-SKILL",
+            agent_role="vulnerability-analyst",
+            task="IDOR sweep",
+            dispatch_mode_arg="item-iterating",
+        )
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "skills is required for role 'vulnerability-analyst'" in err
 
 
 def test_dispatch_register_warns_on_structured_overlap(
@@ -2827,6 +3005,8 @@ def test_dispatch_register_warns_on_structured_overlap(
             agent_role="vulnerability-analyst",
             task="Follow-up exploitation attempt",
             finding_slugs="VA-001",
+            dispatch_mode_arg="item-iterating",
+            skills="idor-testing",
         )
     )
 
@@ -2870,6 +3050,7 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
             scope_host="app.example.test",
             dispatch_mode_arg="hypothesis-driven",
             task="Review account deletion flows",
+            skills="idor-testing",
         )
     )
 
@@ -2881,12 +3062,39 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
 def test_dispatch_abort_duplicate_marks_row_and_records_decision(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    fake = _run_dispatch_verb(
-        monkeypatch,
-        "abort-duplicate",
-        extra=["AG-DUP"],
-        replacement_agent_id="AG-KEEP",
-        reason="same exploit review was registered twice",
+    module = _load_dispatch_module()
+    fake = _CapturingClient()
+    fake.dispatches_by_id["AG-KEEP"] = {
+        "id": 1,
+        "agent_id": "AG-KEEP",
+        "agent_role": "vulnerability-analyst",
+        "status": "in-progress",
+    }
+    fake.dispatches_by_id["AG-DUP"] = {
+        "id": 2,
+        "agent_id": "AG-DUP",
+        "agent_role": "vulnerability-analyst",
+        "status": "in-progress",
+    }
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+
+    module.run(
+        _dispatch_args(
+            "abort-duplicate",
+            extra=["AG-DUP"],
+            replacement_agent_id="AG-KEEP",
+            reason="same exploit review was registered twice",
+        )
     )
 
     assert fake.patches[0][0] == "AG-DUP"
@@ -2894,6 +3102,38 @@ def test_dispatch_abort_duplicate_marks_row_and_records_decision(
     decision = fake.decisions_recorded[0]
     assert decision["kind"] == "dispatch_duplicate"
     assert decision["payload"]["replacement_agent_id"] == "AG-KEEP"
+
+
+def test_dispatch_abort_duplicate_rejects_missing_replacement(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        _run_dispatch_verb(
+            monkeypatch,
+            "abort-duplicate",
+            extra=["AG-DUP"],
+            replacement_agent_id="AG-MISSING",
+            reason="same exploit review was registered twice",
+        )
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "replacement dispatch 'AG-MISSING' was not found" in err
+
+
+def test_dispatch_abort_duplicate_rejects_same_replacement(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        _run_dispatch_verb(
+            monkeypatch,
+            "abort-duplicate",
+            extra=["AG-DUP"],
+            replacement_agent_id="AG-DUP",
+            reason="same exploit review was registered twice",
+        )
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "must point at the dispatch to keep" in err
 
 
 def test_dispatch_update_status_marks_completed(
@@ -2985,6 +3225,23 @@ def test_dispatch_record_decision_friendly_flags(
     assert body["kind"] == "scope_decision"
     assert body["payload"]["host"] == "vendor-saas.example.com"
     assert body["surfaced_to_user"] is True
+
+
+def test_dispatch_record_decision_includes_reason_flag(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "record-decision",
+        decision_kind="dispatch_blocked",
+        decision_phase="recon",
+        reason="missing massdns binary in runtime image",
+        surfaced_to_user=True,
+    )
+    body = fake.decisions_recorded[0]
+    assert body["kind"] == "dispatch_blocked"
+    assert body["payload"]["phase"] == "recon"
+    assert body["payload"]["reason"] == "missing massdns binary in runtime image"
 
 
 def test_dispatch_record_handoff_flag_based(

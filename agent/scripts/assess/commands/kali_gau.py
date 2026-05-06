@@ -45,7 +45,10 @@ def run(args) -> None:
     if args.providers:
         cmd.extend(["--providers", args.providers])
     if args.output:
-        cmd.extend(["-o", args.output])
+        # gau's CLI uses `--o` (double-dash, single-letter long flag), not
+        # the conventional `-o` short flag. Pass the long form so the
+        # underlying tool actually parses the value.
+        cmd.extend(["--o", args.output])
     if args.target_list:
         cmd.extend(["--list", args.target_list])
     extend_cmd_with_extra_args(cmd, args)

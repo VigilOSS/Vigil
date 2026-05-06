@@ -24,7 +24,7 @@ The operator's audit trail. One row per dispatched specialist agent.
 | `scope_host` | string | The host the dispatch operated against (or `multi` for multi-host). |
 | `dispatched_at` | ISO datetime | Set on `register`. |
 | `completed_at` | ISO datetime | Set on `update-status` when status moves to a terminal value. |
-| `status` | enum | `pending` / `running` / `completed` / `failed` / `aborted`. |
+| `status` | enum | `in-progress` / `completed` / `failed` / `aborted` / `blocked`. |
 | `model` | string | The model id (`claude-opus-4-7`, `gpt-5.4`, ...). |
 | `reasoning` | string | `low` / `medium` / `high`. |
 | `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation`. |
@@ -41,7 +41,8 @@ aith assess dispatch register \
     --scope-host saas.acme.example \
     --model claude-opus-4-7 \
     --reasoning high \
-    --dispatch-mode hypothesis-driven
+    --dispatch-mode hypothesis-driven \
+    --skills subdomain-enumeration,web-recon
 
 # Update status when the dispatch returns.
 aith assess dispatch update-status recon_a3f9 \
@@ -67,6 +68,7 @@ The contract fields recorded on every `dispatch register` call:
 | Field | Type | Values |
 |---|---|---|
 | `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Dispatch-Mode Declaration" in `agent/operator-core.md`) |
+| `skills` | string | Comma-separated skill names loaded by the specialist; required for non-operator roles. |
 | `model` | string (optional) | model id (`claude-opus-4-7`, `claude-sonnet-4-6`, `gpt-5.4`) |
 | `reasoning` | string (optional) | `low` / `medium` / `high` |
 

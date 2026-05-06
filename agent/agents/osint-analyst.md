@@ -25,8 +25,7 @@ already listed below.
 
 - `agent/shared-constraints.md` — scope, finding IDs, rule reminders
 - `agent/rules/hunting.md`
-- `agent/SKILL.md`
-- `agent/skills/osint-recon/SKILL.md`
+- `agent/skills/osint-recon/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint
 
@@ -119,5 +118,5 @@ allowed/required fields before authoring the JSON; intel schemas are strict.
 
 ## Handoffs
 
-- To `exploit-developer`: when the intel identifies a plausible exploit path or version-specific technique — bring the skill matching the CVE/finding class from `agent/SKILL.md`
+- To `exploit-developer`: when the intel identifies a plausible exploit path or version-specific technique — name the skill matching the CVE/finding class (discoverable via `aith assess list-skills`) so the operator includes it in the dispatch
 - To `operator`: when the intel should reprioritize the queue or change phase timing

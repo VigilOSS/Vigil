@@ -556,12 +556,33 @@ def _write_report(eng_dir: Path, engagement_type: str, *, name: str | None, targ
 
 
 def _init_cases_db(agent_root: Path, eng_dir: Path) -> None:
+    """Initialize the engagement work-buffer DB.
+
+    Delegates to `agent/scripts/assess/lib/db.py:db_init` so a fresh DB ends
+    up with the same schema, priority-column migration, and
+    `work_items_per_host` view as one created via the assess CLI. Reaching
+    into the agent module here keeps a single source of truth for cases.db
+    initialization — direct `executescript(schema.sql)` would skip the
+    runtime-applied view that owns IPv6/port-strip host extraction.
+    """
     db_path = eng_dir / "cases.db"
-    schema_path = agent_root / "scripts" / "schema.sql"
     db_path.touch()
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript(schema_path.read_text(encoding="utf-8"))
+
+    scripts_dir = agent_root / "scripts"
+    sys_path_added = False
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+        sys_path_added = True
+    try:
+        from assess.lib.db import db_init  # type: ignore[import-not-found]
+
+        db_init(str(db_path))
+    finally:
+        if sys_path_added:
+            try:
+                sys.path.remove(str(scripts_dir))
+            except ValueError:
+                pass
 
 
 def _snapshot_orchestrator_database(install_root: Path) -> None:
@@ -615,10 +636,25 @@ Artifact sync:
 - Start clients through this engagement directory's launcher so ENGAGEMENT_DIR is exported automatically
 - The local .orchestrator.env provides this engagement's orchestrator base URL; install-root env files are only fallbacks
 """
-    if client_kind in {"codex", "both"}:
-        (eng_dir / "AGENTS.md").write_text(f"# Engagement Workspace\n\nLoad workspace operator instructions from:\n- {agent_root / 'AGENTS.md'}\n\n{common}", encoding="utf-8")
+    # AGENTS.md is the canonical operator prompt (point engagement wrappers at
+    # it for both Codex and Claude). When the client kind requires a CLAUDE.md
+    # entrypoint, we write it as a thin local pointer to the engagement
+    # AGENTS.md rather than a second pointer to agent/CLAUDE.md — that prevents
+    # Cursor / Claude Code from loading the same ~16.5k-token prompt twice per
+    # turn (once via CLAUDE.md, once via AGENTS.md).
+    if client_kind in {"codex", "claude", "both"}:
+        (eng_dir / "AGENTS.md").write_text(
+            f"# Engagement Workspace\n\nLoad workspace operator instructions from:\n- {agent_root / 'AGENTS.md'}\n\n{common}",
+            encoding="utf-8",
+        )
     if client_kind in {"claude", "both"}:
-        (eng_dir / "CLAUDE.md").write_text(f"# Engagement Workspace\n\nLoad workspace operator instructions from:\n- {agent_root / 'CLAUDE.md'}\n\n{common}", encoding="utf-8")
+        (eng_dir / "CLAUDE.md").write_text(
+            "# Engagement Workspace\n\n"
+            "Read `AGENTS.md` (in this same directory) for operator instructions.\n"
+            "Do not also load this file — it is a pointer to AGENTS.md to avoid\n"
+            "double-loading the operator prompt.\n",
+            encoding="utf-8",
+        )
 
 
 def _write_codex_config(agent_root: Path, eng_dir: Path) -> None:

@@ -32,6 +32,20 @@ def run_command(argv: list[str], *, cwd: Path | None = None, env: dict[str, str]
     return DockerResult(completed.returncode, completed.stdout, completed.stderr)
 
 
+def run_command_streaming(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> DockerResult:
+    """Run a command with stdout/stderr inherited so output streams to the terminal."""
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        return DockerResult(127, "", str(exc))
+    return DockerResult(completed.returncode, "", "")
+
+
 def require_success(result: DockerResult, argv: list[str]) -> None:
     if result.returncode != 0:
         command = " ".join(argv)
