@@ -19,14 +19,10 @@ Use the helper script or `curl` — never query the SQLite database file directl
 ```bash
 # Final report gate and grouped final-mode findings
 aith assess check-report-readiness
-aith assess fetch "report-findings?mode=final&view=groups"
+aith assess list-report-findings --mode final --json
 
 # Interim grouped findings when the operator explicitly wants a draft before final readiness passes
-aith assess fetch "report-findings?mode=draft&view=groups"
-
-# Optional flat finding list for lifecycle cross-checks or troubleshooting
-aith assess fetch "report-findings?mode=final"
-aith assess fetch "report-findings?mode=draft"
+aith assess list-report-findings --mode draft --json
 
 # Attack chains with narrative and severity
 aith assess fetch attack-chains
@@ -44,15 +40,15 @@ aith assess fetch surfaces
 aith assess fetch summary
 ```
 
-The flat `report-findings` endpoint returns each finding with:
+The `list-report-findings --json` helper returns grouped report findings. Root and sibling finding rows include:
 - `report_id` — sequential `001`, `002`, etc. (for the report body)
 - `slug` — the original backend slug, e.g. `VA-003` (for publish-mode lifecycle updates only; do not expose in the report body)
 - `cvss_vector`, `cvss_score` — extracted from `details_json`
 - `remediation`, `steps_to_reproduce`, `cwe_id`, `owasp_category` — extracted from `details_json`
 - `impact`, `evidence_detail` — extracted from `details_json`
+- top-level `groups` and `standalone`; each group has a `root` finding and `siblings`
 
-The grouped `report-findings?view=groups` endpoint returns `groups` and `standalone`.
-Each group has a `root` finding and `siblings`; sibling rows include
+Sibling rows include
 `root_cause_effect`, `root_cause_note`, and `sibling_order`. Use this projection
 to keep one root-cause narrative while still naming downstream outcomes and residual
 standalone paths.
@@ -181,7 +177,7 @@ Tool output in `<details>` blocks, generated scripts, scope verification table, 
 Before generating the report body, run these checks against the backend data. If any check fails, **stop and flag the issue to the operator** — do not silently fix or ignore it.
 
 1. **Readiness gate:** for final reports, run `aith assess check-report-readiness`. If it fails, stop and flag the blockers to the operator.
-2. **Root-cause consolidation check:** use `report-findings?view=groups` and `aith assess check-report-readiness` to confirm intentional root/sibling groups are already represented. If two reportable findings still share the same vulnerable component or configuration and are not grouped, stop and ask the operator to run `aith assess link-finding` or merge them. Apply the BugCrowd/HackerOne standard: one root cause, one submission.
+2. **Root-cause consolidation check:** use `aith assess list-report-findings --mode final --json` and `aith assess check-report-readiness` to confirm intentional root/sibling groups are already represented. If two reportable findings still share the same vulnerable component or configuration and are not grouped, stop and ask the operator to run `aith assess link-finding` or merge them. Apply the BugCrowd/HackerOne standard: one root cause, one submission.
 3. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
 4. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
 
@@ -190,7 +186,7 @@ Only proceed to report generation after validation passes or the operator resolv
 ## Generation Procedure
 
 1. **Pull backend state** using the queries in "Query Backend First" above
-2. **Use `report-findings?mode=final&view=groups`** as the authoritative final finding structure, or `report-findings?mode=draft&view=groups` for interim drafts. Render one section per group root; include siblings as downstream outcomes under the root narrative, and explicitly call out `eliminates_attack_path` siblings as residual remediation paths.
+2. **Use `aith assess list-report-findings --mode final --json`** as the authoritative final finding structure, or `aith assess list-report-findings --mode draft --json` for interim drafts. Render one section per group root; include siblings as downstream outcomes under the root narrative, and explicitly call out `eliminates_attack_path` siblings as residual remediation paths.
 3. **Use pre-computed CVSS** from finding details. Recalculate only if proved impact at report time would shift at least one CVSS base metric (AV, AC, PR, UI, S, C, I, A) by one or more levels versus the validated vector
 4. **Use pre-computed remediation** from finding details. Augment only when one of these is true: (a) the chain revealed a prerequisite weakness the original remediation did not address, (b) the exploit bypassed the suggested fix, or (c) the chain spans multiple findings and fixing this one alone does not close the chain
 5. Populate all template fields (flag missing evidence with `[EVIDENCE MISSING]`, never fabricate)

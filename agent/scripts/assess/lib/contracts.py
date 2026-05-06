@@ -429,6 +429,27 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Use this before report generation to confirm sibling order, residual-path badges, and root/sibling membership.",
         ),
     ),
+    "list-report-findings": CommandContract(
+        name="list-report-findings",
+        summary="Fetch the grouped report finding projection that report-writer consumes.",
+        schema_name="backend grouped report-findings projection",
+        preferred_invocations=(
+            "aith assess list-report-findings --mode final --json",
+            "aith assess list-report-findings --mode draft --json",
+            "aith assess list-report-findings --mode final",
+        ),
+        author_supplied_fields=(
+            "mode",
+        ),
+        helper_defaults=(
+            ("mode", "final"),
+            ("view", "grouped root-cause projection"),
+        ),
+        notes=(
+            "Use this helper in prompts and report workflows instead of raw `aith assess fetch report-findings?...` calls. The helper makes grouped root-cause output the contract and keeps query-string details out of operator instructions.",
+            "`--json` is the report-writer/LLM ingestion form. The default text form is for quick human inspection before dispatch.",
+        ),
+    ),
     "verify-finding": CommandContract(
         name="verify-finding",
         summary="Apply a verification transition to an existing finding through the audit ledger.",

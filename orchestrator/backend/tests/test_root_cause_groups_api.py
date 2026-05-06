@@ -92,9 +92,7 @@ def test_root_cause_link_groups_findings_and_clears_duplicate_blocker(client, is
     readiness = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/report-readiness").json()
     assert not any(blocker["kind"] == "duplicate_root_cause" for blocker in readiness["blockers"])
 
-    report_groups = client.get(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-findings?mode=final&view=groups"
-    )
+    report_groups = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/report-findings?mode=final")
     assert report_groups.status_code == 200, report_groups.text
     body = report_groups.json()
     assert body["group_count"] == 1

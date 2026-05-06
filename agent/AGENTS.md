@@ -174,7 +174,7 @@ Every dispatch must include:
 - **Prior findings relevant to this dispatch:**
   - For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, and the specific hypothesis to test
   - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `aith assess fetch` — pass all B candidates (chain-target endpoints) through, since pre-filtering hides chain opportunities
-  - For `report-writer`: no finding context needed — the agent queries `report-findings?mode=final&view=groups` for final reports or `report-findings?mode=draft&view=groups` for interim reports
+  - For `report-writer`: no finding context needed — the agent runs `aith assess list-report-findings --mode final --json` for final reports or `aith assess list-report-findings --mode draft --json` for interim reports
 
 ### Runtime Identity Block
 
@@ -443,7 +443,7 @@ DB="$DIR/cases.db"
    e. After osint-analyst returns: read the recorded CVE intel via `aith assess list-intel cve`. **Do not promote CVE matches to findings yet.** If HIGH-value CVEs with public PoCs were identified, dispatch exploit-developer to validate each against the live target — backported patches, missing binaries, and disabled modules routinely invalidate version-only matches. Only record a CVE-based finding via `record-finding` after exploit-developer confirms exploitability or proves partial signal.
 6. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
 7. **REPORT** → keep reporting inside the existing `report` phase; use a draft → QA → publish gate so the report is reviewed before lifecycle state changes.
-   a. **Draft:** for a final report, run `aith assess check-report-readiness` first and resolve blockers before dispatch. Dispatch `report-writer` in draft-generation mode. Report-writer queries the backend directly for `report-findings?mode=final&view=groups` on final reports or `report-findings?mode=draft&view=groups` on interim reports, plus `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — let it self-serve rather than manually assembling findings context, since manual assembly risks stale or incomplete data. Draft-generation mode writes `report.md`, runs the 13-check self-review in `agent/skills/report-generation/SKILL.md`, fixes any local report issues it finds, and returns the completed checklist. It does not emit `report.generated` or mark findings `reported`.
+   a. **Draft:** for a final report, run `aith assess check-report-readiness` first and resolve blockers before dispatch. Dispatch `report-writer` in draft-generation mode. Report-writer queries the backend through `aith assess list-report-findings --mode final --json` on final reports or `aith assess list-report-findings --mode draft --json` on interim reports, plus `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — let it self-serve rather than manually assembling findings context, since manual assembly risks stale or incomplete data. Draft-generation mode writes `report.md`, runs the 13-check self-review in `agent/skills/report-generation/SKILL.md`, fixes any local report issues it finds, and returns the completed checklist. It does not emit `report.generated` or mark findings `reported`.
    b. **QA and fix:** dispatch a fresh `report-writer` in review-and-fix mode with `$DIR/report.md` plus the same backend context. The QA writer checks every item in the 13-check post-generation checklist against the rendered report and backend grouped report-findings output, fixes report-local issues directly, and returns `QA PASS` only when every checklist item passes. If a failure requires new evidence or backend finding changes, it returns `QA BLOCKED` with exact finding slugs and required operator action.
    c. **Publish:** only after `QA PASS`, emit the `report.generated` event, update included findings to `reported`, and transition phase: `aith assess transition-phase complete`. Publication before QA passes creates false workflow state, so keep `reported` transitions behind this gate.
 
@@ -559,7 +559,7 @@ interpretation.
 
 Use `aith assess record-finding <agent-name> <finding-json-file>` for findings (the prefix table, payload schema, severity↔CVSS rules, and lifecycle helpers live in `agent/shared-constraints.md` §4). For the canonical field list and examples, run `aith assess contract record-finding`. Use the lifecycle helpers — `verify-finding` / `kill-finding` for verification outcomes, `reset-finding` to reopen a previously verified or false-positive finding, `update-finding` for non-verification metadata — instead of raw `post` / `patch`.
 
-Use `aith assess record-intel <type> <json-file>` for `#### Intelligence` rows (intel types and dedup keys in §13). report-writer uses the `report-findings` backend endpoint in explicit draft/final mode, which assigns sequential `001~N` report IDs.
+Use `aith assess record-intel <type> <json-file>` for `#### Intelligence` rows (intel types and dedup keys in §13). report-writer uses `aith assess list-report-findings --mode <final|draft> --json`, which returns grouped root-cause findings with sequential `001~N` report IDs.
 
 ## Source Code Analysis Mode
 
@@ -590,7 +590,7 @@ Prioritization and sliding-window rules: `agent/references/subdomain-enumeration
 See `agent/references/handoff-protocols.md` for detailed agent-to-agent handoff rules.
 
 Each agent's Handoffs section specifies **which skill to bring** when passing work downstream.
-Summary: recon→source-analyzer (bring source-analysis skill) + vuln-analyst (bring matching vuln-class skill), source→vuln-analyst+fuzzer (bring matching skill), vuln-analyst→exploit-developer (bring matching finding-class skill) / fuzzer (bring fuzzing skill), exploit→report-writer (bring report-generation skill) / osint-analyst (bring osint-recon skill), osint→exploit-developer (bring matching skill), report←backend API (self-service via report-findings endpoint).
+Summary: recon→source-analyzer (bring source-analysis skill) + vuln-analyst (bring matching vuln-class skill), source→vuln-analyst+fuzzer (bring matching skill), vuln-analyst→exploit-developer (bring matching finding-class skill) / fuzzer (bring fuzzing skill), exploit→report-writer (bring report-generation skill) / osint-analyst (bring osint-recon skill), osint→exploit-developer (bring matching skill), report←backend API (self-service via `list-report-findings` helper).
 
 ## Optional Final Validation
 
