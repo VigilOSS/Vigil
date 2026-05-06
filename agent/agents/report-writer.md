@@ -48,9 +48,9 @@ Minimum backend pull set:
 
 ```bash
 aith assess check-report-readiness        # final reports only
-aith assess fetch "report-findings?mode=final&view=groups"
+aith assess list-report-findings --mode final --json
 # or for interim work:
-aith assess fetch "report-findings?mode=draft&view=groups"
+aith assess list-report-findings --mode draft --json
 aith assess fetch attack-chains
 aith assess fetch surfaces
 aith assess fetch credentials

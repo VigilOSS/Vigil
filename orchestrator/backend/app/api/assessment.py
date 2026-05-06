@@ -586,14 +586,13 @@ def get_finding_transitions(engagement_key: str, finding_slug: str) -> list[dict
 def get_report_findings(
     engagement_key: str,
     mode: Literal["draft", "final"] = "draft",
-    view: Literal["flat", "groups"] = "flat",
 ) -> Any:
-    """Findings formatted for report generation.
+    """Grouped findings formatted for report generation.
 
     Sorted by severity (critical first), excludes merged and false-positive
     findings, and extracts CVSS, remediation, CWE, and steps-to-reproduce from
     the details blob.
-    Each finding includes a ``report_id`` (e.g. ``001``) for sequential
+    Root and sibling findings include a ``report_id`` (e.g. ``001``) for sequential
     report numbering and a ``slug`` field so the original backend ID remains
     available for cross-referencing.
     """
@@ -602,9 +601,7 @@ def get_report_findings(
         readiness = state_manager.report_readiness(engagement.id)
         if not readiness["ready"]:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=readiness)
-    if view == "groups":
-        return state_manager.list_report_finding_groups(engagement.id, mode=mode)
-    return state_manager.list_report_findings(engagement.id, mode=mode)
+    return state_manager.list_report_finding_groups(engagement.id, mode=mode)
 
 
 @router.get("/finding-links")

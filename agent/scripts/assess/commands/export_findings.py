@@ -198,10 +198,7 @@ def run(args) -> None:
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
         findings = client.get("findings")
-        try:
-            groups = client.get("finding-groups")
-        except Exception:
-            groups = []
+        groups = client.get("finding-groups")
     finally:
         client.close()
 

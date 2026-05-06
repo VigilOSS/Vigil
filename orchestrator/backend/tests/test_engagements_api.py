@@ -611,7 +611,7 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
         "/engagements/2026-03-30-120000-example/assessment/report-findings?mode=final"
     )
     assert final_report.status_code == 200
-    assert [row["slug"] for row in final_report.json()] == ["VA-001"]
+    assert [row["slug"] for row in final_report.json()["standalone"]] == ["VA-001"]
 
 
 def test_events_synthesizes_legacy_log_artifact_timeline(client, isolate_settings):

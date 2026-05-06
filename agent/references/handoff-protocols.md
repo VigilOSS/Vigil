@@ -131,11 +131,11 @@ Output: backend intel-table updates via `record-intel` (technology, CVE, breach,
 ### REPORT-WRITER ← backend API (self-service)
 
 For final reports, run `aith assess check-report-readiness` first. Report-writer queries the backend
-directly via `aith assess fetch "report-findings?mode=final&view=groups"` for final output or
-`aith assess fetch "report-findings?mode=draft&view=groups"` for interim output, plus `attack-chains`,
+directly via `aith assess list-report-findings --mode final --json` for final output or
+`aith assess list-report-findings --mode draft --json` for interim output, plus `attack-chains`,
 `surfaces`, and `summary`. The operator does not pre-assemble findings context.
 
-Before dispatching a final report, resolve readiness blockers so `report-findings?mode=final&view=groups` succeeds:
+Before dispatching a final report, resolve readiness blockers so `aith assess list-report-findings --mode final --json` succeeds:
 - Check for overlapping `root_cause_key` or `canonical_location` + `defect_family` across agent findings
 - Use `aith assess link-finding <sibling-slug> --root-cause <root-slug>` for intentional root/sibling groups
 - Use `aith assess merge-finding <source-slug> <target-slug> "<reason>"` only for true duplicates

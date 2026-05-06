@@ -1720,31 +1720,6 @@ input {
   gap: 14px;
   align-items: center;
 }
-.findings-redesign .view-toggle {
-  display: inline-flex;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 2px;
-  background: rgba(255, 255, 255, 0.62);
-}
-.findings-redesign .view-toggle button {
-  border: 0;
-  background: transparent;
-  border-radius: 999px;
-  padding: 6px 10px;
-  font-size: 0.78rem;
-  color: var(--muted);
-  cursor: pointer;
-}
-.findings-redesign .view-toggle button.is-active {
-  background: rgba(23, 53, 76, 0.1);
-  color: var(--accent);
-  font-weight: 600;
-}
-.findings-redesign .view-toggle button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
 
 /* Severity sparkline */
 .findings-redesign .sev-sparkline {

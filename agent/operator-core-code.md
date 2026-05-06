@@ -807,8 +807,8 @@ aith assess transition-phase complete
 
 **Report dispatch:**
 For a final report, run `aith assess check-report-readiness` before dispatching
-`report-writer`. Report-writer queries `report-findings?mode=final&view=groups` for final output and
-`report-findings?mode=draft&view=groups` for interim output; both include code and web findings from the
+`report-writer`. Report-writer runs `aith assess list-report-findings --mode final --json` for final output and
+`aith assess list-report-findings --mode draft --json` for interim output; both include code and web findings from the
 shared backend with root-cause grouping applied. Fuzz findings (CF-xxx) include crash inputs and ASAN reports as evidence.
 Use the same draft → review-and-fix QA → publish gate as runtime engagements: draft generation
 writes `report.md` and returns the 13-check checklist, a fresh `report-writer` reviews and fixes
