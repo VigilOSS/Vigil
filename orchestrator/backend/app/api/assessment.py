@@ -332,6 +332,17 @@ class FindingLinkRequest(BaseModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
 
 
+class RootCauseLinkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_cause_slug: str = Field(min_length=1, max_length=256)
+    sibling_order: int | None = Field(default=None, ge=1)
+    root_cause_effect: Literal["eliminates_finding", "eliminates_attack_path"] = "eliminates_finding"
+    note: str = Field(default="", max_length=4096)
+    source_name: str = Field(default="operator", min_length=1, max_length=128)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+
 class MergeFindingsRequest(BaseModel):
     source_slug: str = Field(min_length=1, max_length=256)
     target_slug: str = Field(min_length=1, max_length=256)
@@ -362,6 +373,12 @@ class FindingRecordRequest(BaseModel):
     service_id: int | None = None
     surface_id: int | None = None
     links: list[FindingLinkRequest] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _root_cause_links_use_helper(self) -> "FindingRecordRequest":
+        if any(link.link_kind == state_manager.ROOT_CAUSE_LINK_KIND for link in self.links):
+            raise ValueError("root_cause links must be created with link-finding / PUT /findings/{slug}/root-cause")
+        return self
 
 
 class FindingPatchRequest(BaseModel):
@@ -566,13 +583,16 @@ def get_finding_transitions(engagement_key: str, finding_slug: str) -> list[dict
 
 
 @router.get("/report-findings")
-def get_report_findings(engagement_key: str, mode: Literal["draft", "final"] = "draft") -> list[dict[str, Any]]:
-    """Findings formatted for report generation.
+def get_report_findings(
+    engagement_key: str,
+    mode: Literal["draft", "final"] = "draft",
+) -> Any:
+    """Grouped findings formatted for report generation.
 
     Sorted by severity (critical first), excludes merged and false-positive
     findings, and extracts CVSS, remediation, CWE, and steps-to-reproduce from
     the details blob.
-    Each finding includes a ``report_id`` (e.g. ``001``) for sequential
+    Root and sibling findings include a ``report_id`` (e.g. ``001``) for sequential
     report numbering and a ``slug`` field so the original backend ID remains
     available for cross-referencing.
     """
@@ -581,13 +601,28 @@ def get_report_findings(engagement_key: str, mode: Literal["draft", "final"] = "
         readiness = state_manager.report_readiness(engagement.id)
         if not readiness["ready"]:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=readiness)
-    return state_manager.list_report_findings(engagement.id, mode=mode)
+    return state_manager.list_report_finding_groups(engagement.id, mode=mode)
 
 
 @router.get("/finding-links")
 def get_finding_links(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.list_finding_links(engagement.id)
+
+
+@router.get("/finding-groups")
+def get_finding_groups(engagement_key: str) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_finding_groups(engagement.id)
+
+
+@router.get("/finding-groups/{root_slug}")
+def get_finding_group(engagement_key: str, root_slug: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    groups = state_manager.list_finding_groups(engagement.id, root_slug=root_slug)
+    if not groups:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding group not found")
+    return groups[0]
 
 
 @router.get("/attack-chains")
@@ -911,6 +946,85 @@ async def patch_finding(
         metadata={"finding_slug": finding_slug},
     )
     await _broadcast(engagement.key, "finding_patch", record)
+    return record
+
+
+@router.put("/findings/{finding_slug}/root-cause")
+async def set_finding_root_cause(
+    engagement_key: str,
+    finding_slug: str,
+    request: RootCauseLinkRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.set_root_cause_link(
+        engagement.id,
+        finding_slug=finding_slug,
+        root_cause_slug=request.root_cause_slug,
+        sibling_order=request.sibling_order,
+        root_cause_effect=request.root_cause_effect,
+        note=request.note,
+        source_name=request.source_name,
+        provenance=request.provenance,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="link-finding",
+        action=f"finding={finding_slug} root_cause={request.root_cause_slug}",
+        actor_name=request.source_name,
+        result=request.root_cause_effect,
+        metadata={"finding_slug": finding_slug, "root_cause_slug": request.root_cause_slug},
+    )
+    await _broadcast(engagement.key, "finding_root_cause", record)
+    return record
+
+
+@router.delete("/findings/{finding_slug}/root-cause")
+async def clear_finding_root_cause(engagement_key: str, finding_slug: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.clear_root_cause_link(engagement.id, finding_slug=finding_slug)
+    _audit_assessment_mutation(
+        engagement.id,
+        title="unlink-finding",
+        action=f"finding={finding_slug} root_cause=clear",
+        actor_name="operator",
+        result=str(record.get("cleared", 0)),
+        metadata={"finding_slug": finding_slug},
+    )
+    await _broadcast(engagement.key, "finding_root_cause", record)
+    return record
+
+
+@router.post("/findings/{finding_slug}/links")
+async def create_finding_link(
+    engagement_key: str,
+    finding_slug: str,
+    request: FindingLinkRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    if request.link_kind == state_manager.ROOT_CAUSE_LINK_KIND:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="use PUT /findings/{slug}/root-cause for root-cause links",
+        )
+    record = state_manager.create_finding_link(
+        engagement.id,
+        finding_slug=finding_slug,
+        link_kind=request.link_kind,
+        target_kind=request.target_kind,
+        target_id=request.target_id,
+        target_ref=request.target_ref,
+        notes=request.notes,
+        provenance=request.provenance,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="finding-link",
+        action=f"finding={finding_slug} link={request.link_kind}:{request.target_kind}:{request.target_ref}",
+        actor_name="operator",
+        result="linked",
+        metadata={"finding_slug": finding_slug, "link_id": record.get("id")},
+    )
+    await _broadcast(engagement.key, "finding_link", record)
     return record
 
 

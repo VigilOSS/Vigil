@@ -192,6 +192,13 @@ class AssessmentClient:
         _, resp_body = self._request("POST", path, body=body)
         return json.loads(resp_body)
 
+    def put(self, endpoint: str, payload: dict) -> dict:
+        """PUT /assessment/{endpoint}."""
+        path = f"{self._assessment_prefix}/{endpoint}"
+        body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+        _, resp_body = self._request("PUT", path, body=body)
+        return json.loads(resp_body)
+
     def patch(self, endpoint: str, payload: dict, *, accept_409: bool = False) -> dict:
         """PATCH /assessment/{endpoint}.
 
@@ -213,6 +220,15 @@ class AssessmentClient:
                 row["finalize_409"] = True
                 return row
         return parsed
+
+    def delete(self, endpoint: str) -> dict:
+        """DELETE /assessment/{endpoint}."""
+        path = f"{self._assessment_prefix}/{endpoint}"
+        _, resp_body = self._request("DELETE", path)
+        try:
+            return json.loads(resp_body)
+        except json.JSONDecodeError:
+            return {"raw": resp_body}
 
     def get_engagement(self, endpoint: str, query: str = "") -> Any:
         """GET /engagements/{key}/{endpoint} — non-assessment scoped (intel, activity)."""

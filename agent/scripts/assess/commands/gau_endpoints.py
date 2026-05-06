@@ -87,7 +87,7 @@ def _build_gau_argv(*, target: str, output_path: str, args: argparse.Namespace) 
     command = " ".join(quote(part) for part in argv)
     return [
         "bash", "-lc",
-        f"{command} | sort -u > {quote(output_path)}",
+        f"set -o pipefail; {command} | sort -u > {quote(output_path)}",
     ]
 
 

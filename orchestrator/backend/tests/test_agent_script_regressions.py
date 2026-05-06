@@ -341,6 +341,8 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
             self.engagement_key = engagement_key
 
         def get(self, endpoint: str):
+            if endpoint == "finding-groups":
+                return []
             assert endpoint == "findings"
             return [
                 {
@@ -397,6 +399,66 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
     assert "- **References**: https://example.test/advisory, {'id': 7}, 42" in findings_md
     assert "1. send payload" in findings_md
     assert "2. 2" in findings_md
+
+
+def test_list_report_findings_uses_grouped_projection(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_script_module(
+        "test_list_report_findings_module",
+        "agent/scripts/assess/commands/list_report_findings.py",
+    )
+
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(base_url="http://backend", engagement_key="demo"),
+    )
+    requested: list[str] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            requested.append(endpoint)
+            return {
+                "groups": [
+                    {
+                        "root": {
+                            "report_id": "001",
+                            "slug": "VA-001",
+                            "title": "Missing authorization",
+                            "severity": "high",
+                        },
+                        "siblings": [
+                            {
+                                "slug": "VA-002",
+                                "title": "Account takeover outcome",
+                                "severity": "critical",
+                                "root_cause_effect": "eliminates_attack_path",
+                            }
+                        ],
+                        "sibling_count": 1,
+                        "residual_path_count": 1,
+                        "highest_severity": "critical",
+                    }
+                ],
+                "standalone": [],
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(SimpleNamespace(engagement_dir=engagement_dir, mode="final", json=False))
+
+    output = capsys.readouterr().out
+    assert requested == ["report-findings?mode=final"]
+    assert "1 root-cause groups, 0 standalone findings" in output
+    assert "VA-002 [critical] residual: Account takeover outcome" in output
 
 
 def test_export_findings_preserves_legacy_non_mapping_poc_headers() -> None:

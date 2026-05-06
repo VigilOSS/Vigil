@@ -310,6 +310,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Use details.poc_code for exploit scripts, or details.poc_request / details.poc_response for structured HTTP request/response pairs that demonstrate the vulnerability.",
             "Use details.references for CVE links, advisory URLs, or related documentation (array of strings).",
             "Use details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete and worth tracking, but only becomes exploitation-worthy as part of a larger chain. Specialists set or refine these fields through record-finding or update-finding; verification reviews them but does not own them.",
+            "Do not put `link_kind=root_cause` in the finding `links` array. Record the finding first, then use `aith assess link-finding` after verification so root/sibling grouping stays an explicit lifecycle action.",
         ),
         common_mistakes=(
             ("status", "use workflow_status for lifecycle overrides, or omit it and keep the helper default"),
@@ -318,6 +319,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("description", "use summary for the short finding statement or notes for replayable proof"),
             ("evidence", "use details.evidence"),
             ("impact", "use details.impact"),
+            ("links[].link_kind=root_cause", "use `aith assess link-finding <sibling-slug> --root-cause <root-slug>` after verification"),
         ),
         examples=(
             {
@@ -381,6 +383,71 @@ _CONTRACTS: dict[str, CommandContract] = {
                     "references": ["https://cwe.mitre.org/data/definitions/122.html"],
                 },
             },
+        ),
+    ),
+    "link-finding": CommandContract(
+        name="link-finding",
+        summary="Attach one finding as a sibling of a root-cause finding using backend-owned finding links.",
+        schema_name="backend RootCauseLinkRequest",
+        preferred_invocations=(
+            "aith assess link-finding <sibling-slug> --root-cause <root-slug> --effect eliminates_finding",
+            "aith assess link-finding <sibling-slug> --root-cause <root-slug> --effect eliminates_attack_path --note 'Root removes this exploit chain; residual XXE remains.'",
+            "aith assess link-finding <sibling-slug> --clear-root-cause",
+        ),
+        author_supplied_fields=(
+            "finding_slug",
+            "root_cause_slug",
+            "root_cause_effect",
+            "note when the relationship is not obvious",
+        ),
+        helper_defaults=(
+            ("source_name", "operator"),
+            ("sibling_order", "next available order when omitted"),
+            ("provenance", "{}"),
+        ),
+        notes=(
+            "Use this after findings are verified enough to consolidate. The helper records intentional grouping without changing root_cause_key, so deduplication and human grouping stay separate.",
+            "Choose eliminates_attack_path when fixing the root removes only the demonstrated chain and the sibling still needs remediation as a standalone issue.",
+        ),
+        common_mistakes=(
+            ("root_cause_key", "do not repurpose root_cause_key as a display grouping field; use link-finding for intentional groups"),
+            ("related", "generic related links do not suppress duplicate-root-cause report blockers"),
+        ),
+    ),
+    "list-finding-group": CommandContract(
+        name="list-finding-group",
+        summary="Inspect a root-cause finding group as the backend will present it to reporting and the UI.",
+        schema_name="backend finding group projection",
+        preferred_invocations=(
+            "aith assess list-finding-group <root-slug>",
+            "aith assess list-finding-group <root-slug> --json",
+        ),
+        author_supplied_fields=(
+            "root_slug",
+        ),
+        notes=(
+            "Use this before report generation to confirm sibling order, residual-path badges, and root/sibling membership.",
+        ),
+    ),
+    "list-report-findings": CommandContract(
+        name="list-report-findings",
+        summary="Fetch the grouped report finding projection that report-writer consumes.",
+        schema_name="backend grouped report-findings projection",
+        preferred_invocations=(
+            "aith assess list-report-findings --mode final --json",
+            "aith assess list-report-findings --mode draft --json",
+            "aith assess list-report-findings --mode final",
+        ),
+        author_supplied_fields=(
+            "mode",
+        ),
+        helper_defaults=(
+            ("mode", "final"),
+            ("view", "grouped root-cause projection"),
+        ),
+        notes=(
+            "Use this helper in prompts and report workflows instead of raw `aith assess fetch report-findings?...` calls. The helper makes grouped root-cause output the contract and keeps query-string details out of operator instructions.",
+            "`--json` is the report-writer/LLM ingestion form. The default text form is for quick human inspection before dispatch.",
         ),
     ),
     "verify-finding": CommandContract(
@@ -873,6 +940,12 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "--allow-deadly requires --destructive — bbot's deadly modules perform real attacks (fuzzing, brute-force, exploit). The CLI hard-fails if --allow-deadly is passed without --destructive so the audit row stays truthful.",
         "Long passive sweeps (`-p subdomain-enum`) regularly run 15-30 minutes — set --timeout 1800 or wrap in `kali job start`.",
     ),
+    "dnsx": (
+        "Docker-safe defaults are applied by the typed wrapper: --dnsx-profile polite-cdn, --resolver-profile public-tcp, -rl 100, -t 20, -retry 3, -timeout 5.",
+        "Use lean bulk resolution first (no -resp/-json), then enrich survivors with -resp -json. Unknown-size or bulk -resp/-json list inputs require --allow-bulk-json.",
+        "Rate/thread values above polite-residential require --dnsx-profile bursty-ok; values above bursty-ok require --allow-unsafe-rate.",
+        "Common record/filter flags are typed (-aaaa, -mx, -txt, -ns, -soa, -ptr, -asn, -cdn, -rcode, -wd). Use --extra-args for unmodeled dnsx flags that are not guarded load/transport knobs.",
+    ),
     "exec": (
         "Use only when no typed verb fits. Tool-name attribution falls back to argv[0] for audit recording.",
     ),
@@ -925,6 +998,11 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
     "bbot": (
         {
             "command": "aith assess kali bbot -t example.com -p subdomain-enum -rf passive -o /engagements/$ENGAGEMENT_KEY/scans/bbot_subs --technique OSINT --intent 'deep passive subdomain enum' --probe-kind fingerprint --phase recon --timeout 1800",
+        },
+    ),
+    "dnsx": (
+        {
+            "command": "aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates.txt --dnsx-profile polite-cdn --resolver-profile public-tcp -silent -o /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.txt --technique RECON --intent 'lean dnsx resolution without bulk JSON' --probe-kind baseline --phase recon --timeout 1200",
         },
     ),
     "job": (
