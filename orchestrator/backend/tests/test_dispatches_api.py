@@ -199,6 +199,18 @@ def test_dispatch_operator_role_skills_optional(client, isolate_settings) -> Non
     assert resp.json()["skills"] is None
 
 
+def test_dispatch_operator_role_skills_optional_case_insensitive(client, isolate_settings) -> None:
+    """Operator role casing should not accidentally turn operators into specialists."""
+    _seed(client, isolate_settings)
+    resp = client.post(f"{BASE}/dispatches", json={
+        "agent_id": "OP-CASE",
+        "agent_role": "Operator",
+    })
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["agent_role"] == "Operator"
+    assert resp.json()["skills"] is None
+
+
 def test_dispatch_skills_round_trip(client, isolate_settings) -> None:
     """skills value is persisted through POST and surfaces unchanged on GET."""
     _seed(client, isolate_settings)
