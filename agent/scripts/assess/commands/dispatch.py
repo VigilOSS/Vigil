@@ -584,7 +584,20 @@ def _fetch(db_path: str, type_val: str, limit: int, agent: str) -> None:
         conn.close()
 
 
-_VULN_ANALYST_TYPES = ("api", "api-spec", "form", "upload", "graphql", "websocket")
+_VULN_ANALYST_TYPES = (
+    "api",
+    "api-spec",
+    "form",
+    "upload",
+    "graphql",
+    "websocket",
+    "auth_entry",
+    "workflow",
+    "api_route",
+    "event_feed",
+    "debug_config",
+    "portal_session",
+)
 _SOURCE_ANALYZER_TYPES = ("page", "javascript", "stylesheet", "data")
 _ROUTED_TYPES = _VULN_ANALYST_TYPES + _SOURCE_ANALYZER_TYPES
 _VULN_SIGNAL_FALLBACK_TYPES = ("unknown",)

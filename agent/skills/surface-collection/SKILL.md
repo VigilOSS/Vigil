@@ -78,6 +78,15 @@ Ingest:
 cat "$DIR/scans/katana_output.txt" | aith assess ingest-endpoints "$DB" katana
 ```
 
+If triage produced metadata-rich candidate JSONL (for example `candidate_records.jsonl`
+with curated score, signals, rationale, selected signal, bucket, or live status), ingest
+that file through the metadata-preserving path instead of flattening it to URLs:
+
+```bash
+aith assess ingest-candidates "$DB" surface-collector-curated \
+  "$DIR/scans/surface-collector/candidate_records.jsonl"
+```
+
 ### Step 3: Historical URL Enrichment via gau
 
 Use the cache-aware pipeline wrapper. It runs gau (or reuses a fresh cached corpus),
@@ -254,7 +263,8 @@ with triage signals, recommended dispatch order, and suggested vuln-class skills
 
 - Keep all URL crawling and enrichment in `aith assess kali katana` / `aith assess gau-endpoints` (or `gau-secrets` / `gau-js-endpoints`) — host-side crawling bypasses the audit pipeline that downstream specialists rely on
 - Use the `gau-*` wrappers for gau collection — they pair gau with ingest in one shot and emit a structured JSON summary with cache-decision metadata
-- Use `aith assess ingest-endpoints` directly only for non-gau sources (katana output, OpenAPI specs, mitmproxy captures) — gau callers should use `gau-endpoints` instead
+- Use `aith assess ingest-candidates` whenever a triage step produced rich candidate JSONL — flattening those records to URLs discards the priority metadata specialists rely on
+- Use `aith assess ingest-endpoints` directly only for non-gau sources (katana output, OpenAPI specs, mitmproxy captures) — gau callers should use `gau-endpoints` unless they have a curated candidate JSONL output
 - Use `aith assess record-surface` for all surface writes — bypassing loses backend sync
 - Use `aith assess record-finding` for any findings — unrecorded findings are lost data
 - Triage is classification and pattern matching — analyze URLs without sending target-facing probes during triage

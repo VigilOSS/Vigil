@@ -90,7 +90,8 @@ def run(args) -> None:
     egress_blocked_count = 0
     egress_warned_hosts: set[str] = set()
 
-    input_stream = open(args.input_file, "r", encoding="utf-8") if args.input_file else sys.stdin
+    input_path = getattr(args, "input_file", None)
+    input_stream = open(input_path, "r", encoding="utf-8") if input_path else sys.stdin
     count = 0
 
     try:
@@ -270,7 +271,7 @@ def run(args) -> None:
             )
             count += 1
     finally:
-        if args.input_file and input_stream is not sys.stdin:
+        if input_path and input_stream is not sys.stdin:
             input_stream.close()
         client.close()
 
@@ -341,5 +342,3 @@ def _insert_egress_blocked_work_item(
         conn.commit()
     finally:
         conn.close()
-
-

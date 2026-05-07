@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import sqlite3
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import sys
@@ -252,6 +253,301 @@ def test_filter_scope_keeps_in_scope_hosts(monkeypatch, tmp_path: Path, capsys) 
         "https://app.other.test/v1",
         "api.example.net:8443",
     ]
+
+
+def test_ingest_candidates_preserve_metadata_and_route(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    ingest_module = _load_script_module(
+        "test_ingest_candidates_module",
+        "agent/scripts/assess/commands/ingest_candidates.py",
+    )
+    dispatch_module = _load_script_module(
+        "test_ingest_candidate_dispatch_module",
+        "agent/scripts/assess/commands/dispatch.py",
+    )
+    db_module = _load_script_module(
+        "test_ingest_candidate_db_module",
+        "agent/scripts/assess/lib/db.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    db_path = engagement_dir / "cases.db"
+    db_path.touch()
+    db_module.db_init(str(db_path))
+    db_module.db_insert_work_item(
+        str(db_path),
+        queue_key="variant:701:unknown",
+        request_variant_id=701,
+        method="GET",
+        url="https://portal.agency.example/taap-core/api/logout",
+        url_path="/taap-core/api/logout",
+        case_type="unknown",
+        source="plain-url-ingest",
+    )
+
+    candidate_path = tmp_path / "candidate_records.jsonl"
+    candidate_path.write_text(
+        json.dumps(
+            {
+                "url": "https://portal.agency.example/taap-core/api/logout",
+                "method": "GET",
+                "path": "/taap-core/api/logout",
+                "type": "auth_entry",
+                "priority_score": 245,
+                "priority_reason": "TAAP auth API workflow",
+                "cluster_key": "gf:auth_workflow",
+                "signals": ["api", "auth", "workflow"],
+                "selected_by": "auth",
+                "triage_rationale": "Selected from GAU because it is an auth workflow endpoint.",
+                "live_status": "live",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        ingest_module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+    monkeypatch.setattr(ingest_module, "auth_active_context", lambda _eng_dir: "anonymous")
+
+    posts: list[tuple[str, dict[str, object]]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            posts.append((endpoint, payload))
+            return {"request_variant": {"id": 701}}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(ingest_module, "AssessmentClient", FakeClient)
+
+    ingest_module.run(
+        SimpleNamespace(
+            db_path=str(db_path),
+            source="surface-collector-curated",
+            records_file=str(candidate_path),
+            engagement_dir=engagement_dir,
+        )
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            """SELECT type, status, priority_score, priority_reason, cluster_key,
+                      signals, selected_by, triage_rationale, live_status
+               FROM work_items
+               WHERE queue_key = ?""",
+            ("variant:701:auth_entry",),
+        ).fetchone()
+        row_count = conn.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert row_count == 1
+    assert row[0:5] == (
+        "auth_entry",
+        "pending",
+        245,
+        "TAAP auth API workflow",
+        "gf:auth_workflow",
+    )
+    assert json.loads(row[5]) == ["api", "auth", "workflow"]
+    assert row[6:] == (
+        "auth",
+        "Selected from GAU because it is an auth workflow endpoint.",
+        "live",
+    )
+    assert posts[0][1]["observation_payload"]["candidate_metadata"]["priority_score"] == 245
+
+    capsys.readouterr()
+    dispatch_module.run(
+        SimpleNamespace(
+            db_path=str(db_path),
+            action="fetch-by-priority",
+            extra=["10", "auto"],
+            by="status",
+            reason="",
+            max_lines=40,
+            include_evidence=False,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["queue_key"] for item in payload] == ["variant:701:auth_entry"]
+    assert payload[0]["assigned_agent"] == "vulnerability-analyst"
+
+
+def test_ingest_candidates_route_real_bia_candidate_shapes(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    ingest_module = _load_script_module(
+        "test_ingest_real_candidate_shapes_module",
+        "agent/scripts/assess/commands/ingest_candidates.py",
+    )
+    dispatch_module = _load_script_module(
+        "test_ingest_real_candidate_shapes_dispatch_module",
+        "agent/scripts/assess/commands/dispatch.py",
+    )
+    db_module = _load_script_module(
+        "test_ingest_real_candidate_shapes_db_module",
+        "agent/scripts/assess/lib/db.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    db_path = engagement_dir / "cases.db"
+    db_path.touch()
+    db_module.db_init(str(db_path))
+
+    candidate_path = tmp_path / "candidate_records.jsonl"
+    records = [
+        {
+            "url": "https://www.agency.example/org-event-feed/37221",
+            "path": "/org-event-feed/37221",
+            "score": 95,
+            "selection_reasons": [
+                "current Drupal workflow/auth route",
+                "operator/Phase 1 artifact",
+                "source-map/source-analysis route",
+            ],
+            "signals": [],
+            "sources": ["osint-gau", "source-analysis"],
+        },
+        {
+            "url": "https://www.agency.example/fb.log",
+            "path": "/fb.log",
+            "score": 80,
+            "selection_reasons": ["admin/debug/config/secret signal"],
+            "signals": ["backup_config"],
+            "sources": ["osint-gau"],
+        },
+        {
+            "url": "https://www.agency.example/web-guidance",
+            "path": "/web-guidance",
+            "score": 105,
+            "selection_reasons": [
+                "OSINT priority URL",
+                "operator/Phase 1 artifact",
+                "source-map/source-analysis route",
+            ],
+            "signals": [],
+            "sources": ["osint-gau", "osint-priority", "source-analysis"],
+        },
+    ]
+    candidate_path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        ingest_module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+    monkeypatch.setattr(ingest_module, "auth_active_context", lambda _eng_dir: "anonymous")
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+            self.next_id = 800
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            self.next_id += 1
+            return {"request_variant": {"id": self.next_id}}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(ingest_module, "AssessmentClient", FakeClient)
+
+    ingest_module.run(
+        SimpleNamespace(
+            db_path=str(db_path),
+            source="surface-collector-curated",
+            records_file=str(candidate_path),
+            engagement_dir=engagement_dir,
+        )
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                """SELECT url, type, priority_score, priority_reason, cluster_key,
+                          signals, selected_by, triage_rationale
+                   FROM work_items
+                   ORDER BY url"""
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+    assert rows["https://www.agency.example/org-event-feed/37221"][0:4] == (
+        "event_feed",
+        95,
+        "current Drupal workflow/auth route; operator/Phase 1 artifact; source-map/source-analysis route",
+        "gf:current_drupal_workflow_auth_route",
+    )
+    assert rows["https://www.agency.example/fb.log"][0:4] == (
+        "debug_config",
+        80,
+        "admin/debug/config/secret signal",
+        "gf:backup_config",
+    )
+    assert rows["https://www.agency.example/web-guidance"][0:4] == (
+        "unknown",
+        105,
+        "OSINT priority URL; operator/Phase 1 artifact; source-map/source-analysis route",
+        "gf:osint_priority_url",
+    )
+    assert json.loads(rows["https://www.agency.example/web-guidance"][4]) == [
+        "osint_priority_url",
+        "operator_phase_1_artifact",
+        "source-map_source-analysis_route",
+    ]
+    assert rows["https://www.agency.example/web-guidance"][5:] == (
+        "osint_priority_url",
+        "OSINT priority URL; operator/Phase 1 artifact; source-map/source-analysis route",
+    )
+
+    capsys.readouterr()
+    dispatch_module.run(
+        SimpleNamespace(
+            db_path=str(db_path),
+            action="fetch-by-priority",
+            extra=["10", "auto"],
+            by="status",
+            reason="",
+            max_lines=40,
+            include_evidence=False,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 3
+    assert {item["assigned_agent"] for item in payload} == {"vulnerability-analyst"}
 
 
 def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) -> None:
