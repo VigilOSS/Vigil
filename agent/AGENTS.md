@@ -12,7 +12,7 @@ When a session starts, display:
 - Operator instructions: `AGENTS.md` (canonical). `CLAUDE.md` is a pointer.
 - Specialist prompt sources: `agent/agents/*.md`
 - Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md`
-- Always-active rules: `agent/rules/hunting.md`, `agent/rules/reporting.md`
+- Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
 - Skill discovery: `aith assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
 - References: `agent/references/INDEX.md`
@@ -48,6 +48,7 @@ Primary methodology reference:
 - `agent/references/runtime-guides/engagement-methodology.md`
 
 Always-active rules:
+- `agent/rules/resume.md`
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
 - `agent/rules/adversarial-mindset.md`
@@ -55,11 +56,19 @@ Always-active rules:
 Path convention:
 - All assessment operations use `aith assess <subcommand>` from any directory.
 
+## Resume Gate
+
+Before taking a new action in an existing engagement, apply `agent/rules/resume.md` when
+`scope.json` shows `status: in_progress`, the phase is past initialization, backend rows may
+already exist, or the session state is uncertain. Resume hydration comes before planning because
+backend state is the canonical memory for prior findings, intel, operator decisions, null results,
+dispatch handoffs, and command coverage.
+
 ## Core Loop
 
 After engagement initialization completes, repeat until all attack paths exhausted or user signals stop:
 
-1. **ASSESS STATE** — Read scope.json. Query backend state via `aith assess list-findings` (findings), `aith assess list-intel` (intel summary), and `aith assess fetch activity-entries` (activity log). Findings are stored in the backend — use `aith assess export-findings` to generate a local export on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
+1. **ASSESS STATE** — Read scope.json. For resumed engagements, run the resume hydration in `agent/rules/resume.md` before planning. Query backend state via `aith assess list-findings` (findings), `aith assess list-intel` (intel summary), and `aith assess fetch activity-entries` (activity log). Findings are stored in the backend — use `aith assess export-findings` to generate a local export on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
 2. **DECIDE NEXT ACTION** — Prioritize by current phase first. In Phase 1-2, prioritize breadth of surface coverage. In Phase 3, prioritize risk class: object references, auth boundaries, and privileged writes before low-risk surfaces. Keep exploitation behind Verify: only findings that survived review as `confirmed` or `downgraded`, or findings explicitly marked `details.chain_required=true`, enter exploit review. Skip ahead only when an obviously actionable path is already in hand.
 3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.4` with `high` reasoning, and Claude operator and substantial Claude workers should use `Opus 4.6`. Only drop to `gpt-5.4` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
@@ -395,11 +404,11 @@ DB="$DIR/cases.db"
    c. Check stats: `aith assess dispatch "$DB" stats`
    d. Fetch and route — dispatch mode depends on pending-item volume:
       - **Pending < 2000 → type-based dispatch.** Independent types run in parallel:
-        - `api`, `api-spec`, `form`, `upload`, `graphql`, `websocket` → vulnerability-analyst (pick matching vuln-class skill via `aith assess list-skills`)
+        - `api`, `api-spec`, `form`, `upload`, `graphql`, `websocket`, `auth_entry`, `workflow`, `api_route`, `event_feed`, `debug_config`, `portal_session` → vulnerability-analyst (pick matching vuln-class skill via `aith assess list-skills`)
         - `page`, `javascript`, `stylesheet`, `data` → source-analyzer (load `source-analysis` skill)
         `aith assess dispatch "$DB" fetch <type> 10 <agent-name>`
       - **Pending ≥ 2000 → priority-first dispatch.** Type-based fetch orders only by id within a type, so at 2000+ pending items specialists churn through low-signal work before reaching the high-signal clusters `classify-work` already scored. Switch to priority mode. `fetch-by-priority` is route-aware: it only ever claims rows whose type maps to a specialist route, and rejects free-form agent names so stray labels can't silently mix work types.
-        - `aith assess dispatch "$DB" fetch-by-priority 10 auto` — claim the highest-signal routable rows globally and stamp each with its canonical owner (`vulnerability-analyst` for api/api-spec/form/upload/graphql/websocket, `source-analyzer` for page/javascript/stylesheet/data). Use this when dispatching both specialists in parallel off one queue.
+        - `aith assess dispatch "$DB" fetch-by-priority 10 auto` — claim the highest-signal routable rows globally and stamp each with its canonical owner (`vulnerability-analyst` for API/auth/workflow/debug/portal/event types, `source-analyzer` for page/javascript/stylesheet/data). Use this when dispatching both specialists in parallel off one queue.
         - `aith assess dispatch "$DB" fetch-by-priority 10 vulnerability-analyst` (or `source-analyzer`, or any `vulnerability-analyst-N` / `source-analyzer-N` instance label) — claim only the types that specialist can handle. Use this when you want parallel instances of one role without handing any of them work outside its route.
         Rows come back sorted by `priority_score DESC, cluster_key, id`. Run `aith assess list-clusters "$DB"` between batches to decide whether new clusters warrant `defer-cluster` before they reach specialists — cluster keys carry a prefix (`gf:` for vuln-class buckets like `gf:ssrf` / `gf:debug_logic`, `path:` for the two-segment fallback); see `agent/skills/case-dispatching/SKILL.md` for the full weight table.
       Pass the raw fetched JSON rows into the dispatch context. They carry canonical ids such as `request_variant_id`, `service_id`, and sometimes `coverage_item_id`, which subagents need for durable probe and coverage writes.
@@ -494,7 +503,7 @@ dominant host-CPU and host-network spike in the engagement runtime, and aggressi
 profiles have crashed Docker on standard laptop hardware. The runtime-tier matrix above is
 what gates the `bursty-OK` profile: Standard tier never picks `bursty-OK`; Heavy tier may
 opt in via `--intent`; Comfortable tier may use it by default for trait rows that allow it.
-When in doubt, default to `polite-residential` and let the trait row pick the tier.
+When in doubt, default to `polite-residential` for puredns/shuffledns and let the trait row pick the tier. For dnsx, the typed wrapper (`aith assess kali dnsx`) defaults to `--dnsx-profile polite-cdn --resolver-profile public-tcp`; step up only after assessing the target.
 
 ## Credential Auto-Use
 

@@ -248,11 +248,17 @@ def test_install_preserves_local_state_and_replaces_managed_files(tmp_path: Path
         (root / "docker").mkdir()
     (source_root / "README.md").write_text("new readme\n", encoding="utf-8")
     (source_root / "agent" / "AGENTS.md").write_text("managed agent\n", encoding="utf-8")
+    (source_root / "agent" / ".codex" / "agents").mkdir(parents=True)
+    (source_root / "agent" / ".codex" / "agents" / "vulnerability-analyst.toml").write_text(
+        "name = \"vulnerability-analyst\"\n",
+        encoding="utf-8",
+    )
     (source_root / "orchestrator" / "backend" / "app.py").write_text("managed backend\n", encoding="utf-8")
     (source_root / "docker" / "callback_listener.py").write_text("managed docker\n", encoding="utf-8")
 
     marker = install_root / "agent" / "engagements" / "existing" / "scope.json"
     marker.write_text('{"target":"https://old.example"}\n', encoding="utf-8")
+    (marker.parent / ".codex").mkdir()
     database = install_root / "orchestrator" / "backend" / "data" / "orchestrator.sqlite3"
     database.write_text("db", encoding="utf-8")
     (install_root / "README.md").write_text("old readme\n", encoding="utf-8")
@@ -274,6 +280,10 @@ def test_install_preserves_local_state_and_replaces_managed_files(tmp_path: Path
     assert (install_root / "AGENTS.md").read_text(encoding="utf-8") == "managed agent\n"
     assert (install_root / "agent" / "AGENTS.md").read_text(encoding="utf-8") == "managed agent\n"
     assert marker.exists()
+    codex_agents = marker.parent / ".codex" / "agents"
+    assert codex_agents.is_symlink()
+    assert codex_agents.resolve() == (install_root / "agent" / ".codex" / "agents").resolve()
+    assert (codex_agents / "vulnerability-analyst.toml").exists()
     assert database.read_text(encoding="utf-8") == "db"
     assert not (install_root / "agent" / "old-managed.txt").exists()
     assert not legacy_installer.exists()
@@ -2359,6 +2369,23 @@ def test_validate_dispatch_contract_operator_skills_optional(
     assess_main = _load_assess_main()
     payload = {
         "role": "operator",
+        "dispatch_mode": "deep-manual",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assess_main(["validate-dispatch-contract", str(contract_path)])
+    assert "OK" in capsys.readouterr().out
+
+
+def test_validate_dispatch_contract_operator_skills_optional_case_insensitive(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Operator casing variants are exempt from specialist skill requirements."""
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "Operator",
+        "agent_role": "operator",
         "dispatch_mode": "deep-manual",
     }
     contract_path = tmp_path / "dispatch.json"

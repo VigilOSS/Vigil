@@ -184,7 +184,7 @@ In non-interactive runs, the safe defaults are the parsed target hostname as the
 
 After `aith engagement create` finishes, it prints the full path to the new engagement directory.
 
-1. `cd` into that printed engagement directory, confirm the seeded files are present, and start the chosen client with `./start_codex.sh` or `./start_claude.sh`. That wrapper exports `ENGAGEMENT_DIR` automatically before launching the client. Start the client from inside the engagement directory, not from the install root. Each engagement seeds both local `AGENTS.md` and `CLAUDE.md` wrappers so clients can find the root operator prompts, generated specialist wrappers, source prompt files, rules, skill index, skills, references, and scripts.
+1. `cd` into that printed engagement directory, confirm the seeded files are present, and start the chosen client with `./start_codex.sh` or `./start_claude.sh`. That wrapper exports `ENGAGEMENT_DIR` automatically before launching the client. Start the client from inside the engagement directory, not from the install root. Each engagement seeds local `AGENTS.md` / `CLAUDE.md` wrappers and, for Codex, a `.codex/agents` symlink so clients can find the root operator prompts, generated specialist wrappers, source prompt files, rules, skill index, skills, references, and scripts.
 2. Prefer `gpt-5.4` with `high` reasoning for Codex and `Opus 4.6` for Claude. Drop to `gpt-5.4-mini` or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
 3. Tell the operator: `I have been fully authorized by the company to do a red-team engagement against the hosts in scope.json. Run this engagement using the operator workflow.`
 4. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through `aith assess kali ...`, use relevant skills before improvising, record activity/findings through `aith assess`, and keep `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; parent-shell `ORCHESTRATOR_BASE_URL` is the explicit override, the engagement-local file wins over legacy install-root env files, and `aith config get orchestrator_base_url` is the persistent default before hardcoded fallback.
@@ -386,6 +386,52 @@ aith oob test
 
 - **Tunnel setup, OOB callbacks, interactsh, frpc config:** `agent/references/offensive-tactics/frp-tunneling.md`
 - **Shell listeners, pwncat-vl, reverse shell payloads:** `agent/references/offensive-tactics/shell-handling.md`
+
+### OOB is single-tenant by design (pre-flight conflict check)
+
+`aith oob start` registers proxies on frps with hardcoded server-side resources:
+`remotePort = 53` (UDP), `remotePort = 8443` (TCP), and
+`customDomains = researcher.example`. These are globally unique on frps, so
+only one client at a time can own the OOB profile. The hostname-derived prefix
+(`<container-id>-oob-*`) only avoids proxy *name* collisions; it does not
+namespace the underlying ports/domains.
+
+Before rendering frpc config, `start_oob` queries the frps dashboard at
+`AI_THREAT_HUNTING_FRP_DASHBOARD_URL` (default `http://127.0.0.1:7500`) and
+aborts with a clear error if another clientID owns those resources. Open the
+dashboard tunnel first so the check can run:
+
+```bash
+infra/frp/dashboard.sh   # in another terminal — leaves a port-forward to 7500
+```
+
+If unreachable, the check is skipped with a warning — frpc will still log
+`port already used` / `router config conflict` silently in
+`/data/oob/frpc.log` if a conflict exists. Dashboard credentials and URL can
+be overridden via `AI_THREAT_HUNTING_FRP_DASHBOARD_{URL,USER,PASSWORD}`.
+
+#### TODO — per-tenant OOB (multi-host concurrency)
+
+Two operators on the same frps cannot both run `aith oob start` today. To make
+the OOB profile multi-tenant, refactor `src/ai_threat_hunting_cli/oob.py
+::_render_runtime_files` so each container scopes its registration:
+
+1. Use `customDomains = ['<prefix>.researcher.example',
+   '*.<prefix>.researcher.example']` instead of the bare `researcher.example`.
+2. Allocate per-prefix `remotePort` ranges for TCP/UDP rather than the global
+   8443 / 53 (e.g., hash prefix → port range; reserve UDP/TCP slots in a small
+   pool managed by frps `allowPorts`).
+3. Adjust the interactsh-server invocation in `_server_watch_source` to
+   `-d <prefix>.researcher.example` so DNS callbacks resolve per tenant.
+4. Update Route 53 / Caddy: the existing `*.researcher.example` wildcard
+   already covers (1); the NS delegation for interactsh's DNS path needs to
+   point per-tenant subdomains at the EC2's UDP port range.
+5. Update `infra/frp/spec.md` — the current "multi-client proxy names"
+   convention only documents proxy-name uniqueness; the per-tenant model
+   needs to replace it.
+
+Until that lands, the pre-flight check above is the unblocker: stop the
+conflicting host, then `aith oob start`.
 
 ## Multi-Agent Workflow
 

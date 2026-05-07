@@ -49,8 +49,8 @@ Each iteration (set `DB="$DIR/cases.db"`):
     # free-form agent names so stray labels can't mix work types.
     #   auto                      — claim the top N routable rows globally and
     #                               stamp each with its canonical owner.
-    #   vulnerability-analyst[-N] — claim only api/api-spec/form/upload/graphql/
-    #                               websocket rows (N is an optional instance label).
+    #   vulnerability-analyst[-N] — claim only API/auth/workflow/debug/portal/
+    #                               event rows (N is an optional instance label).
     #   source-analyzer[-N]       — claim only page/javascript/stylesheet/data rows.
     aith assess dispatch "$DB" fetch-by-priority 10 auto
     aith assess dispatch "$DB" fetch-by-priority 10 vulnerability-analyst
@@ -73,7 +73,8 @@ for the authoritative weight table):
 
 - `cluster_key` — `gf:<bucket>` when a parameter or path pattern matches a gf bucket; otherwise
   `path:/<first-two-url-segments>` as the fallback when nothing matches.
-- `priority_score` — integer 0-50. Weights (highest first): rce (50), ssrf (40), sqli/lfi (40),
+- `priority_score` — integer 0-50 for automatic gf buckets; curated candidate-record
+  ingest may carry higher operator scores. Weights (highest first): rce (50), ssrf (40), sqli/lfi (40),
   img_traversal (35), trust_surface (35), idor (35), upload_fields (30), debug_logic (30),
   redirect/ssti/cors (25), xss (20), interestingparams (15), interestingext (10).
   Cluster_key and priority_score track the single highest-weight match; when two buckets tie,
@@ -102,6 +103,12 @@ because the code is the source of truth.
 | upload      | vulnerability-analyst  |
 | graphql     | vulnerability-analyst  |
 | websocket   | vulnerability-analyst  |
+| auth_entry  | vulnerability-analyst  |
+| workflow    | vulnerability-analyst  |
+| api_route   | vulnerability-analyst  |
+| event_feed  | vulnerability-analyst  |
+| debug_config | vulnerability-analyst |
+| portal_session | vulnerability-analyst |
 | page        | source-analyzer        |
 | javascript  | source-analyzer        |
 | stylesheet  | source-analyzer        |
