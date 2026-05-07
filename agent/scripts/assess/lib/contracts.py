@@ -96,7 +96,7 @@ def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list
     if "role" in payload and "agent_role" in payload:
         role_text = str(payload.get("role") or "").strip()
         agent_role_text = str(payload.get("agent_role") or "").strip()
-        if role_text and agent_role_text and role_text != agent_role_text:
+        if role_text and agent_role_text and role_text.lower() != agent_role_text.lower():
             errors.append("role and agent_role must match when both are present")
 
     dispatch_mode = payload.get("dispatch_mode")
@@ -133,7 +133,7 @@ def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list
     elif skills_value is not None:
         errors.append("skills must be a comma-separated string or a list of strings")
 
-    if role_name and role_name not in _DISPATCH_ROLES_WITHOUT_SKILLS:
+    if role_name and role_name.lower() not in _DISPATCH_ROLES_WITHOUT_SKILLS:
         if not skills_list:
             errors.append(
                 f"skills is required for role '{role_name}'; "
