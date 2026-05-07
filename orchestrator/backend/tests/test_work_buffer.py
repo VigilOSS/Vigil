@@ -479,6 +479,19 @@ def test_classify_type_marks_archive_extensions_inert() -> None:
     assert module.classify_type("GET", "/exports/site.tar.gz", "", "") == "archive"
 
 
+def test_classify_type_marks_sourcemaps_before_generic_data_content_types() -> None:
+    module = _load_classify_lib_module()
+
+    assert (
+        module.classify_type("GET", "/static/app.js.map", "application/json", "")
+        == "sourcemap"
+    )
+    assert (
+        module.classify_type("GET", "/static/app.css.map", "text/plain", "")
+        == "sourcemap"
+    )
+
+
 def test_classify_work_path_fallback(tmp_path: Path) -> None:
     db_path = _make_fresh_db(tmp_path)
     _insert_work_item(
