@@ -245,17 +245,27 @@ def test_schema_migration_adds_priority_columns(tmp_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     try:
         columns = {row[1]: row for row in conn.execute("PRAGMA table_info(work_items)").fetchall()}
-        for name in ("priority_score", "priority_reason", "cluster_key", "terminal_reason"):
+        for name in (
+            "priority_score",
+            "priority_reason",
+            "cluster_key",
+            "terminal_reason",
+            "signals",
+            "selected_by",
+            "triage_rationale",
+            "live_status",
+        ):
             assert name in columns, f"missing migrated column {name}"
 
         # priority_score has NOT NULL DEFAULT 0; existing rows should reflect that
         # and the nullable columns should come back as NULL rather than empty strings.
         row = conn.execute(
-            "SELECT priority_score, priority_reason, cluster_key, terminal_reason "
+            "SELECT priority_score, priority_reason, cluster_key, terminal_reason, "
+            "signals, selected_by, triage_rationale, live_status "
             "FROM work_items WHERE queue_key = ?",
             ("legacy:1",),
         ).fetchone()
-        assert row == (0, None, None, None)
+        assert row == (0, None, None, None, None, None, None, None)
 
         # The priority index is created as part of schema.sql for fresh DBs; the
         # migration path must also leave it present so fetch-by-priority can rely

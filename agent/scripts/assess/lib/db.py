@@ -34,6 +34,10 @@ _WORK_ITEMS_PRIORITY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("priority_reason", "TEXT"),
     ("cluster_key", "TEXT"),
     ("terminal_reason", "TEXT"),
+    ("signals", "TEXT"),
+    ("selected_by", "TEXT"),
+    ("triage_rationale", "TEXT"),
+    ("live_status", "TEXT"),
 )
 
 
@@ -192,6 +196,15 @@ def db_insert_work_item(
     service_id: int | None = None,
     coverage_item_id: int | None = None,
     auth_context: str = "anonymous",
+    priority_score: int | None = None,
+    priority_reason: str | None = None,
+    cluster_key: str | None = None,
+    terminal_reason: str | None = None,
+    signals: str | None = None,
+    selected_by: str | None = None,
+    triage_rationale: str | None = None,
+    live_status: str | None = None,
+    curated: bool = False,
     connection: sqlite3.Connection | None = None,
 ) -> None:
     """Insert a work item using parameterized SQL. No SQL injection surface."""
@@ -219,37 +232,137 @@ def db_insert_work_item(
         body_params=body_params,
         path_params=path_params,
     )
+    curated_metadata = curated or any(
+        value is not None
+        for value in (
+            priority_score,
+            priority_reason,
+            cluster_key,
+            terminal_reason,
+            signals,
+            selected_by,
+            triage_rationale,
+            live_status,
+        )
+    )
 
     should_close = connection is None
     conn = connection or sqlite3.connect(db_path, timeout=5.0)
     try:
         if should_close:
             conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute(
-            """INSERT OR IGNORE INTO work_items (
-                queue_key, request_variant_id, service_id, coverage_item_id, auth_context,
-                method, url, url_path,
-                query_params, body_params, path_params, cookie_params,
-                headers, body, content_type, content_length,
-                response_status, response_headers, response_size, response_snippet,
-                type, source, status, params_key_sig
-            ) VALUES (
-                ?, ?, ?, ?, ?,
-                ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?, ?
-            )""",
-            (
-                queue_key, request_variant_id, service_id, coverage_item_id, auth_context,
-                method, url, url_path,
-                query_params, body_params, path_params, cookie_params,
-                headers, body, content_type, content_length,
-                response_status, response_headers, response_size, response_snippet,
-                case_type, source, status, params_key_sig,
-            ),
-        )
+        existing_id: int | None = None
+        if curated_metadata:
+            existing = conn.execute(
+                "SELECT id FROM work_items WHERE queue_key = ?",
+                (queue_key,),
+            ).fetchone()
+            if existing is None and request_variant_id is not None:
+                existing = conn.execute(
+                    "SELECT id FROM work_items WHERE request_variant_id = ? ORDER BY id LIMIT 1",
+                    (request_variant_id,),
+                ).fetchone()
+            if existing is None:
+                existing = conn.execute(
+                    "SELECT id FROM work_items WHERE method = ? AND url = ? ORDER BY id LIMIT 1",
+                    (method, url),
+                ).fetchone()
+            if existing is not None:
+                existing_id = int(existing[0])
+                conn.execute(
+                    """UPDATE work_items
+                    SET queue_key = ?,
+                        request_variant_id = ?,
+                        service_id = ?,
+                        coverage_item_id = ?,
+                        auth_context = ?,
+                        method = ?,
+                        url = ?,
+                        url_path = ?,
+                        query_params = ?,
+                        body_params = ?,
+                        path_params = ?,
+                        cookie_params = ?,
+                        headers = ?,
+                        body = ?,
+                        content_type = ?,
+                        content_length = ?,
+                        response_status = ?,
+                        response_headers = ?,
+                        response_size = ?,
+                        response_snippet = ?,
+                        type = ?,
+                        source = ?,
+                        params_key_sig = ?
+                    WHERE id = ?""",
+                    (
+                        queue_key, request_variant_id, service_id, coverage_item_id, auth_context,
+                        method, url, url_path,
+                        query_params, body_params, path_params, cookie_params,
+                        headers, body, content_type, content_length,
+                        response_status, response_headers, response_size, response_snippet,
+                        case_type, source, params_key_sig,
+                        existing_id,
+                    ),
+                )
+        if existing_id is None:
+            conn.execute(
+                """INSERT OR IGNORE INTO work_items (
+                    queue_key, request_variant_id, service_id, coverage_item_id, auth_context,
+                    method, url, url_path,
+                    query_params, body_params, path_params, cookie_params,
+                    headers, body, content_type, content_length,
+                    response_status, response_headers, response_size, response_snippet,
+                    type, source, status, params_key_sig
+                ) VALUES (
+                    ?, ?, ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?, ?, ?
+                )""",
+                (
+                    queue_key, request_variant_id, service_id, coverage_item_id, auth_context,
+                    method, url, url_path,
+                    query_params, body_params, path_params, cookie_params,
+                    headers, body, content_type, content_length,
+                    response_status, response_headers, response_size, response_snippet,
+                    case_type, source, status, params_key_sig,
+                ),
+            )
+        if curated_metadata:
+            # Candidate-record ingest is an explicit curated path. Apply its
+            # metadata even when a URL was already inserted through a plain URL
+            # path, so a high-signal candidate can be upgraded instead of being
+            # trapped behind the previous URL-shape default.
+            conn.execute(
+                """UPDATE work_items
+                SET priority_score = ?,
+                    priority_reason = ?,
+                    cluster_key = ?,
+                    terminal_reason = ?,
+                    signals = COALESCE(?, signals),
+                    selected_by = COALESCE(?, selected_by),
+                    triage_rationale = COALESCE(?, triage_rationale),
+                    live_status = COALESCE(?, live_status)
+                WHERE queue_key = ?
+                """,
+                (
+                    priority_score if priority_score is not None else assignment["priority_score"],
+                    priority_reason if priority_reason is not None else assignment["priority_reason"],
+                    cluster_key if cluster_key is not None else assignment["cluster_key"],
+                    terminal_reason if terminal_reason is not None else assignment["terminal_reason"],
+                    signals,
+                    selected_by,
+                    triage_rationale,
+                    live_status,
+                    queue_key,
+                ),
+            )
+            conn.commit()
+            return
+
         # `INSERT OR IGNORE` above means a re-ingest of the same `queue_key`
         # leaves the existing row untouched. The UPDATE here is scoped to
         # rows that are still at the schema-default classification — so a

@@ -109,6 +109,12 @@ CREATE TABLE IF NOT EXISTS work_items (
     cluster_key TEXT,
     terminal_reason TEXT,
 
+    -- Curated candidate metadata from metadata-preserving ingest paths.
+    signals TEXT,
+    selected_by TEXT,
+    triage_rationale TEXT,
+    live_status TEXT,
+
     UNIQUE(queue_key)
 );
 
