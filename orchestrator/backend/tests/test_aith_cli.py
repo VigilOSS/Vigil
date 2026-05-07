@@ -2378,6 +2378,23 @@ def test_validate_dispatch_contract_operator_skills_optional(
     assert "OK" in capsys.readouterr().out
 
 
+def test_validate_dispatch_contract_operator_skills_optional_case_insensitive(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Operator casing variants are exempt from specialist skill requirements."""
+    assess_main = _load_assess_main()
+    payload = {
+        "role": "Operator",
+        "agent_role": "operator",
+        "dispatch_mode": "deep-manual",
+    }
+    contract_path = tmp_path / "dispatch.json"
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assess_main(["validate-dispatch-contract", str(contract_path)])
+    assert "OK" in capsys.readouterr().out
+
+
 def test_actor_kind_warn_on_non_log_subcommand(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

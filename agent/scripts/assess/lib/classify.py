@@ -121,43 +121,43 @@ def classify_type(method: str, url_path: str, content_type: str = "", body_snipp
     if _PAGE_CT.search(ct_lower):
         return "page"
 
-    # 10. data
+    # 10. sourcemap (.map / .js.map / .css.map). Source maps are useful as
+    # source intel for `source-analyzer` (they reveal original file paths and
+    # symbols), but the URL itself never deserves a vulnerability-analyst
+    # probe. Check before generic data content-types so `.js.map` responses
+    # served as application/json or text/plain still get skipped at insert.
+    if _SOURCEMAP_EXT.search(path_no_query):
+        return "sourcemap"
+
+    # 11. data
     if _DATA_EXT.search(path_no_query):
         return "data"
     if _DATA_CT.search(ct_lower):
         return "data"
 
-    # 11. image (excluding svg, already handled as page)
+    # 12. image (excluding svg, already handled as page)
     if _IMAGE_CT.search(ct_lower) and not _SVG_CT.search(ct_lower):
         return "image"
     if _IMAGE_EXT.search(path_no_query):
         return "image"
 
-    # 12. video/audio
+    # 13. video/audio
     if _VIDEO_CT.search(ct_lower):
         return "video"
     if _VIDEO_EXT.search(path_no_query):
         return "video"
 
-    # 13. font
+    # 14. font
     if _FONT_CT.search(ct_lower):
         return "font"
     if _FONT_EXT.search(path_no_query):
         return "font"
 
-    # 14. archive
+    # 15. archive
     if _ARCHIVE_CT.search(ct_lower):
         return "archive"
     if _ARCHIVE_EXT.search(path_no_query):
         return "archive"
-
-    # 15. sourcemap (.map / .js.map / .css.map). Source maps are useful as
-    # source intel for `source-analyzer` (they reveal original file paths and
-    # symbols), but the URL itself never deserves a vulnerability-analyst
-    # probe — checked here so they get distinct case_type and land in
-    # `_SKIP_TYPES` at insert time.
-    if _SOURCEMAP_EXT.search(path_no_query):
-        return "sourcemap"
 
     # 16. PWA / web manifest. Pure metadata.
     if _MANIFEST_EXT.search(path_no_query):
