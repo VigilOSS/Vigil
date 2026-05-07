@@ -503,7 +503,7 @@ dominant host-CPU and host-network spike in the engagement runtime, and aggressi
 profiles have crashed Docker on standard laptop hardware. The runtime-tier matrix above is
 what gates the `bursty-OK` profile: Standard tier never picks `bursty-OK`; Heavy tier may
 opt in via `--intent`; Comfortable tier may use it by default for trait rows that allow it.
-When in doubt, default to `polite-residential` and let the trait row pick the tier.
+When in doubt, default to `polite-residential` for puredns/shuffledns and let the trait row pick the tier. For dnsx, the typed wrapper (`aith assess kali dnsx`) defaults to `--dnsx-profile polite-cdn --resolver-profile public-tcp`; step up only after assessing the target.
 
 ## Credential Auto-Use
 

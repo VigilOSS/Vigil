@@ -1214,7 +1214,7 @@ class DispatchCreate(BaseModel):
         they coordinate phases rather than executing a single skill.
         """
         role = (self.agent_role or "").strip()
-        if role in _DISPATCH_ROLES_WITHOUT_SKILLS:
+        if role.lower() in _DISPATCH_ROLES_WITHOUT_SKILLS:
             return self
         skills = (self.skills or "").strip()
         if not skills:
