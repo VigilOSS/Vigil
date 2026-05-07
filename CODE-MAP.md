@@ -27,7 +27,7 @@ Keep it light:
 - `agent/operator-core.md` - primary operator loop for web/runtime engagements. Why: phase order, dispatch rules, recording rules, and backend-vs-artifact truth boundaries start here.
 - `agent/operator-core-code.md` - operator loop for white-box code analysis. Why: same backend and CLI, different phase model.
 - `agent/shared-constraints.md` and `agent/shared-constraints-code.md` - first-load specialist constraints. Why: global safety, scope, and output rules live outside individual agent prompts.
-- `agent/rules/` - always-active policy overlays. Why: hunting/reporting guardrails that apply across prompts.
+- `agent/rules/` - always-active policy overlays. Why: resume hydration plus hunting/reporting/adversarial guardrails apply across prompts.
 - `agent/agents/` - canonical specialist prompt sources. Why: role-specific behavior belongs here, not in generated wrappers.
 
 ### Skill and reference library

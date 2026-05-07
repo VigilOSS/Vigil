@@ -12,7 +12,7 @@ When a session starts, display:
 - Operator instructions: `AGENTS.md` (canonical). `CLAUDE.md` is a pointer.
 - Specialist prompt sources: `agent/agents/*.md`
 - Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md`
-- Always-active rules: `agent/rules/hunting.md`, `agent/rules/reporting.md`
+- Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
 - Skill discovery: `aith assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
 - References: `agent/references/INDEX.md`
@@ -48,6 +48,7 @@ Primary methodology reference:
 - `agent/references/runtime-guides/engagement-methodology.md`
 
 Always-active rules:
+- `agent/rules/resume.md`
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
 - `agent/rules/adversarial-mindset.md`
@@ -55,11 +56,19 @@ Always-active rules:
 Path convention:
 - All assessment operations use `aith assess <subcommand>` from any directory.
 
+## Resume Gate
+
+Before taking a new action in an existing engagement, apply `agent/rules/resume.md` when
+`scope.json` shows `status: in_progress`, the phase is past initialization, backend rows may
+already exist, or the session state is uncertain. Resume hydration comes before planning because
+backend state is the canonical memory for prior findings, intel, operator decisions, null results,
+dispatch handoffs, and command coverage.
+
 ## Core Loop
 
 After engagement initialization completes, repeat until all attack paths exhausted or user signals stop:
 
-1. **ASSESS STATE** — Read scope.json. Query backend state via `aith assess list-findings` (findings), `aith assess list-intel` (intel summary), and `aith assess fetch activity-entries` (activity log). Findings are stored in the backend — use `aith assess export-findings` to generate a local export on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
+1. **ASSESS STATE** — Read scope.json. For resumed engagements, run the resume hydration in `agent/rules/resume.md` before planning. Query backend state via `aith assess list-findings` (findings), `aith assess list-intel` (intel summary), and `aith assess fetch activity-entries` (activity log). Findings are stored in the backend — use `aith assess export-findings` to generate a local export on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
 2. **DECIDE NEXT ACTION** — Prioritize by current phase first. In Phase 1-2, prioritize breadth of surface coverage. In Phase 3, prioritize risk class: object references, auth boundaries, and privileged writes before low-risk surfaces. Keep exploitation behind Verify: only findings that survived review as `confirmed` or `downgraded`, or findings explicitly marked `details.chain_required=true`, enter exploit review. Skip ahead only when an obviously actionable path is already in hand.
 3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.4` with `high` reasoning, and Claude operator and substantial Claude workers should use `Opus 4.6`. Only drop to `gpt-5.4` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.

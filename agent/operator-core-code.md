@@ -21,6 +21,7 @@ Primary methodology reference:
 - `agent/references/runtime-guides/engagement-methodology.md`
 
 Always-active rules:
+- `agent/rules/resume.md`
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
 - `agent/rules/adversarial-mindset.md`
@@ -28,12 +29,21 @@ Always-active rules:
 Path convention:
 - All assessment operations use `aith assess <subcommand>` from any directory.
 
+## Resume Gate -- Code Analysis Mode
+
+Before taking a new code-analysis action in an existing engagement, apply `agent/rules/resume.md`
+when `scope.json` shows `status: in_progress`, `code-scope.json` or `source_repos` already exists,
+the phase is past ingest, backend rows may already exist, or the session state is uncertain. Then
+run the code-specific coverage and queue checks in "Session Resumption" below. Resume hydration
+comes before planning because code findings, queue ownership, CWE effort, dispatch handoffs, and
+runtime/fuzz command history live in different backend projections.
+
 ## Core Loop -- Code Analysis Mode
 
 After code analysis engagement initialization completes, repeat until all critical/high files
 analyzed or user signals stop:
 
-1. **ASSESS STATE** -- Read `code-scope.json` (or `scope.json` with `source_repos`). Check code coverage stats via `aith assess code-coverage`. Check CWE effort matrix via `aith assess code-coverage --cwe-matrix` when in Phase 2B. Backend state is canonical; use `--require-gate-pass` only for the final Phase 3 gate.
+1. **ASSESS STATE** -- Read `code-scope.json` (or `scope.json` with `source_repos`). For resumed engagements, run the resume hydration in `agent/rules/resume.md` before planning. Check code coverage stats via `aith assess code-coverage`. Check CWE effort matrix via `aith assess code-coverage --cwe-matrix` when in Phase 2B. Backend state is canonical; use `--require-gate-pass` only for the final Phase 3 gate.
 2. **DECIDE NEXT ACTION** -- Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified, call graph complete, structural index generated). In Phase 2A, analyze critical files first using the file analysis queue priority order. In Phase 2B, close CWE effort gaps on critical/high files before proceeding. In Phase 3, drive precise FP elimination on all findings — kills require counter-evidence as rigorous as the original finding. Coverage gaps drive decisions.
 3. **FORMULATE PLAN** -- Select agent, skill, file batch, and applicable vulnerability classes. Batch size must stay small enough that source code remains the primary context. Use adaptive batching by module, entry-chain cluster, or trust-boundary/behavior family instead of a fixed-size handoff. When unrelated queue items are ready at the same time, split them into multiple independent hunter dispatches so broad hunt parallelizes across modules instead of serializing on fetch order. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
 4. **PRESENT OR PROCEED** -- Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.
@@ -911,12 +921,13 @@ PARALLEL: Independent file batches -> parallel (Phase 2 hunting). Independent ag
 
 ## Session Resumption
 
-On start or when resuming inside a code analysis engagement:
+On start or when resuming inside a code analysis engagement, apply `agent/rules/resume.md` first.
+Then run the code-mode state checks that do not exist in web/runtime engagements:
+
 ```bash
-cat "$DIR/scope.json"                              # Current phase
 aith assess code-coverage                  # File classification + analysis coverage
 aith assess code-dispatch stats             # Queue state (pending/processing/done/needs-context)
-aith assess fetch findings                  # Existing findings
+aith assess code-coverage --cwe-matrix      # CWE effort state when Phase 2B or later is active
 ```
 
 Resume from the current phase. If `code-dispatch stats` shows `processing` items, they were
