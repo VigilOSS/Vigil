@@ -335,6 +335,10 @@ def test_aith_engagement_create_writes_explicit_web_scope(tmp_path: Path, monkey
     assert (created.path / "start_codex.sh").exists()
     assert (created.path / "start_claude.sh").exists()
     assert (created.path / ".codex" / "config.toml").exists()
+    codex_agents = created.path / ".codex" / "agents"
+    assert codex_agents.is_symlink()
+    assert codex_agents.resolve() == (sandbox_root / ".codex" / "agents").resolve()
+    assert (codex_agents / "vulnerability-analyst.toml").exists()
 
 
 def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

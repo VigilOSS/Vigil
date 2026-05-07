@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .client_rosters import ensure_codex_agents_link
 from .paths import (
     DEFAULT_ORCHESTRATOR_BASE_URL,
     engagements_root,
@@ -658,10 +659,12 @@ Artifact sync:
 
 
 def _write_codex_config(agent_root: Path, eng_dir: Path) -> None:
+    codex_dir = eng_dir / ".codex"
     src = agent_root / ".codex" / "config.toml"
     if src.exists():
-        (eng_dir / ".codex").mkdir()
-        shutil.copy2(src, eng_dir / ".codex" / "config.toml")
+        codex_dir.mkdir(exist_ok=True)
+        shutil.copy2(src, codex_dir / "config.toml")
+    ensure_codex_agents_link(agent_root, codex_dir)
 
 
 def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_permissions: bool) -> None:

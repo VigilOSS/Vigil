@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
+import os
 import re
 import shlex
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,6 +15,14 @@ from . import docker
 DEFAULT_FRP_HOST = "oob-relay.example.com"
 DEFAULT_FRP_PORT = 7000
 DEFAULT_OOB_DOMAIN = "oob.example.com"
+DEFAULT_DASHBOARD_URL = "http://127.0.0.1:7500"
+DEFAULT_DASHBOARD_USER = "admin"
+DEFAULT_DASHBOARD_PASSWORD = "frp-dash-example-operatoreng"
+# Server-side resources hardcoded in the OOB profile. Globally unique on frps:
+# any other client holding these blocks our registration with port already used /
+# router config conflict. Stays in sync with _render_runtime_files() below.
+OOB_TCP_REMOTE_PORT = 8443
+OOB_UDP_REMOTE_PORT = 53
 OOB_ROOT = "/data/oob"
 
 
@@ -30,6 +42,7 @@ def start_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command
         raise SystemExit("Missing OOB FRP token. Set it with `aith config set oob.frp_token <token>`.")
     _require_runtime_tools(options.container_name, runner=runner)
     _kill_stale_oob_processes(options.container_name, runner=runner)
+    _check_oob_resources_free(options, runner=runner)
     _render_runtime_files(options, runner=runner)
     _ensure_tmux_session(
         options.container_name,
@@ -163,6 +176,91 @@ def _require_runtime_tools(container_name: str, *, runner: docker.Runner) -> Non
         result = _run_exec(container_name, f"command -v {shlex.quote(tool)} >/dev/null", runner=runner, check=False)
         if result.returncode != 0:
             raise SystemExit(f"OOB runtime tool missing: {tool}")
+
+
+def _check_oob_resources_free(options: OobOptions, *, runner: docker.Runner) -> None:
+    """Pre-flight check: abort if another frpc client owns our OOB resources.
+
+    The OOB profile is single-tenant by design — `remotePort = 53/8443` and
+    `customDomains = oob.example.com` are globally unique on frps. If
+    another client holds them when we register, frps replies with
+    `port already used` / `router config conflict` forever (frpc retries
+    silently every 33s with `loginFailExit = false`).
+
+    Best-effort: needs the frps dashboard reachable, typically via a port-forward
+    started by `infra/frp/dashboard.sh`. Skips with a warning if unreachable.
+    """
+    url = (os.environ.get("AI_THREAT_HUNTING_FRP_DASHBOARD_URL") or "").strip() or DEFAULT_DASHBOARD_URL
+    user = os.environ.get("AI_THREAT_HUNTING_FRP_DASHBOARD_USER") or DEFAULT_DASHBOARD_USER
+    password = os.environ.get("AI_THREAT_HUNTING_FRP_DASHBOARD_PASSWORD") or DEFAULT_DASHBOARD_PASSWORD
+
+    own_prefix = _own_frpc_prefix(options.container_name, runner=runner)
+
+    conflicts: list[str] = []
+    for proxy_type, predicate in (
+        ("udp", lambda p: p.get("conf", {}).get("remotePort") == OOB_UDP_REMOTE_PORT),
+        ("tcp", lambda p: p.get("conf", {}).get("remotePort") == OOB_TCP_REMOTE_PORT),
+        ("http", lambda p: options.oob_domain in (p.get("conf", {}).get("customDomains") or [])),
+    ):
+        try:
+            data = _frp_dashboard_get(f"{url.rstrip('/')}/api/proxy/{proxy_type}", user, password)
+        except _DashboardUnreachable as exc:
+            print(f"oob preflight\tdashboard unreachable at {url} ({exc}); skipping conflict check")
+            print("oob preflight\trun `infra/frp/dashboard.sh` in another terminal to enable this guard")
+            return
+        for proxy in data.get("proxies") or []:
+            if proxy.get("status") != "online":
+                continue
+            if proxy.get("conf") is None:
+                continue
+            name = proxy.get("name") or ""
+            if own_prefix and name.startswith(f"{own_prefix}-"):
+                continue
+            if predicate(proxy):
+                conflicts.append(
+                    f"  - {proxy_type} proxy {name!r} clientID={proxy.get('clientID')} (status={proxy.get('status')})"
+                )
+
+    if not conflicts:
+        return
+
+    raise SystemExit(
+        "OOB resources are already held by another frpc client:\n"
+        + "\n".join(conflicts)
+        + "\n\nThe OOB profile is single-tenant: remotePort 53/8443 and "
+        f"customDomains {options.oob_domain!r} can only be served by one client at a time.\n"
+        "Stop the other `aith oob start` instance, then retry. To inspect:\n"
+        f"  curl -s -u {DEFAULT_DASHBOARD_USER}:{DEFAULT_DASHBOARD_PASSWORD} {url}/api/proxy/http | jq\n"
+        "(See README §Callback, Listener & Tunnel Handling — TODO: per-tenant OOB.)"
+    )
+
+
+class _DashboardUnreachable(Exception):
+    pass
+
+
+def _frp_dashboard_get(url: str, user: str, password: str) -> dict:
+    auth = base64.b64encode(f"{user}:{password}".encode()).decode()
+    request = urllib.request.Request(url, headers={"Authorization": f"Basic {auth}"})
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise _DashboardUnreachable(f"HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise _DashboardUnreachable(str(exc.reason)) from exc
+    except (TimeoutError, ConnectionError, OSError) as exc:
+        raise _DashboardUnreachable(str(exc)) from exc
+    except json.JSONDecodeError as exc:
+        raise _DashboardUnreachable(f"non-JSON response: {exc}") from exc
+
+
+def _own_frpc_prefix(container_name: str, *, runner: docker.Runner) -> str:
+    """Mirrors the prefix derivation in `_render_runtime_files`."""
+    result = _run_exec(container_name, "hostname", runner=runner, check=False)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.split(".", 1)[0].strip().lower()[:8]
 
 
 def _render_runtime_files(options: OobOptions, *, runner: docker.Runner) -> None:

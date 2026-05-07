@@ -122,7 +122,7 @@ def test_scope_check_blocks_destructive_disk_operation(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Strict apex-wildcard semantics — `aith assess filter-scope` regressions (1F.1)
+# Wildcard-includes-apex semantics — `aith assess filter-scope` regressions (1F.1)
 # ---------------------------------------------------------------------------
 
 
@@ -360,11 +360,11 @@ def test_idn_apex_u_label_url_matches_a_label_scope(monkeypatch, tmp_path: Path,
 
 
 def test_apex_match_with_explicit_entry(monkeypatch, tmp_path: Path, capsys) -> None:
-    """An explicit apex entry alongside the wildcard admits apex URLs.
+    """An explicit apex entry alongside the wildcard still reports both entries.
 
-    Operators opt in to apex coverage by listing the apex (bare-host or URL)
-    in addition to the wildcard. With both present, both apex and subdomain
-    URLs pass through filter-scope and no strict-semantics warning fires.
+    The wildcard entry already admits apex coverage. Listing the apex separately
+    keeps a distinct reporting row for that explicit target while filter-scope
+    still passes both apex and subdomain URLs.
     """
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
@@ -390,11 +390,11 @@ def test_apex_match_with_explicit_entry(monkeypatch, tmp_path: Path, capsys) -> 
         "https://corp.example.test/api",
     ]
     # No warning when the apex is explicitly listed.
-    assert "bare apex is excluded by strict semantics" not in captured.err
+    assert "wildcard-only entries lacking explicit apex" not in captured.err
 
 
 # ---------------------------------------------------------------------------
-# Strict apex-wildcard semantics — `aith assess ingest-endpoints` regressions
+# Wildcard-includes-apex semantics — `aith assess ingest-endpoints` regressions
 # ---------------------------------------------------------------------------
 
 

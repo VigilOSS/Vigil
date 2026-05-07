@@ -71,7 +71,8 @@ of arbitrary type order.
 - Run Katana live crawl via `aith assess kali katana` against all in-scope targets
 - Run gau historical URL enrichment via `aith assess gau-endpoints` against all in-scope domains (cache-aware wrapper that runs `kali gau` and ingests in one shot)
 - Deduplicate raw URL output before ingestion (`sort -u` and param-structure dedup)
-- Ingest all collected URLs into the work buffer via `aith assess ingest-endpoints` (or the higher-level `gau-endpoints` for gau output specifically)
+- Ingest raw URL streams into the work buffer via `aith assess ingest-endpoints` (or the higher-level `gau-endpoints` for gau output specifically)
+- Ingest triage-created candidate JSONL via `aith assess ingest-candidates` so priority score, signals, bucket, rationale, and live-status metadata stay attached to the work item
 - Ingest OpenAPI/Swagger specs via `aith assess ingest-spec` when Phase 1 discovered them
 - Extract attack intelligence from URL corpus (leaked params, admin paths, version spread, backup files)
 - Record durable surfaces via `aith assess record-surface` for high-signal discoveries
@@ -86,10 +87,11 @@ Work through targets in this order unless the operator narrows the scope:
 2. **Live crawl** — `aith assess kali katana` with auth headers if `auth.json` is active
 3. **Historical enrichment** — `aith assess gau-endpoints` for Wayback, OTX, Common Crawl, URLScan (cache-aware; reuses `<engagement>/scans/gau-pipeline/<target>/<cache_key>/gau_output.txt` when fresh for this target + flag combination, prints `cache_reused: true|false` in JSON summary)
 4. **Spec ingestion** — OpenAPI/Swagger specs discovered in Phase 1
-5. **Dedup and ingest** — all sources through `aith assess ingest-endpoints` with source tagging
-6. **Intelligent triage** — analyze the full URL corpus for attack signals
-7. **Record surfaces and findings** — high-signal discoveries recorded before returning
-8. **Stats and priority manifest** — work-buffer summary with ranked attack surface clusters
+5. **Dedup and ingest raw URLs** — raw URL streams through `aith assess ingest-endpoints` with source tagging; gau uses `aith assess gau-endpoints` unless you are intentionally reusing an existing raw artifact
+6. **Intelligent triage** — analyze the full URL corpus for attack signals and write `candidate_records.jsonl` when you curate ranked candidates
+7. **Ingest curated candidates** — feed `candidate_records.jsonl` through `aith assess ingest-candidates` so curated metadata upgrades matching raw rows instead of being flattened back into plain URLs
+8. **Record surfaces and findings** — high-signal discoveries recorded before returning
+9. **Stats and priority manifest** — work-buffer summary with ranked attack surface clusters
 
 ## Intelligent Triage
 
@@ -157,7 +159,7 @@ When `auth.json` has `use_for_requests` set to `true` and `state` set to `availa
 
 - Keep all URL crawling and historical enrichment in `aith assess kali katana` / `aith assess gau-endpoints` — host-side crawling bypasses the audit pipeline that downstream specialists rely on
 - Deduplicate before ingestion to avoid inflating work-buffer counts
-- Use `aith assess ingest-endpoints` for all work-buffer writes — direct DB inserts bypass backend sync
+- Use `aith assess ingest-endpoints` for raw URL work-buffer writes and `aith assess ingest-candidates` for curated candidate JSONL — direct DB inserts bypass backend sync, and flattening curated records to URL lines discards the metadata Phase 3 dispatch needs
 - Use `aith assess record-surface` for all surface writes — calling helpers directly bypasses backend sync
 - Use `aith assess record-finding` for any decisive findings — unrecorded findings are lost data
 - Report tool failures clearly in Coverage Gaps — the operator needs to know which sources failed
@@ -182,7 +184,8 @@ Before producing output, verify against this checklist:
 - [ ] Priority manifest produced with ranked attack surface clusters
 
 ### Recording
-- [ ] All URLs ingested into work buffer via `aith assess ingest-endpoints`
+- [ ] Raw URLs ingested into work buffer via `aith assess ingest-endpoints` or `aith assess gau-endpoints`
+- [ ] Curated `candidate_records.jsonl` ingested via `aith assess ingest-candidates` when a triage pass produced one
 - [ ] High-signal surfaces recorded via `aith assess record-surface`
 - [ ] Decisive findings recorded via `aith assess record-finding`
 
@@ -199,9 +202,10 @@ Before your dispatch returns, run in this order:
 1. `aith assess record-finding surface-collector <finding-json>` for each finding (already required)
 2. `aith assess record-intel <type> <intel-json>` for each intel row
 3. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate (priority signals carry on the surface row's `priority_*` fields, not in markdown)
-4. `aith assess ingest-endpoints "$DIR/cases.db" katana|gau` for each ingestion source
-5. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `urls_ingested`, `clusters`, `deferred_clusters`)
-6. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+4. `aith assess ingest-endpoints "$DIR/cases.db" katana|recon|source-analysis` for each raw URL ingestion source not already handled by `aith assess gau-endpoints`
+5. `aith assess ingest-candidates "$DIR/cases.db" surface-collector-curated "$DIR/scans/surface-collector/candidate_records.jsonl"` when you produced curated candidate records
+6. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `urls_ingested`, `clusters`, `deferred_clusters`)
+7. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
