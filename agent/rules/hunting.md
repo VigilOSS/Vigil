@@ -149,7 +149,7 @@ report-writer and later operators rely on.
   cluster is specialist work.
 - **One specialist, one objective, one skill set.** Each dispatch names the
   role, the dispatch mode, and the explicit skill list (`--skills` on
-  `aith assess dispatch register`). Bundling multiple objectives into one
+  `aith assess agent start`). Bundling multiple objectives into one
   dispatch defeats the role boundary and produces handoffs that report-writer
   cannot map back to a coherent finding line.
 - **When in doubt, dispatch.** If the operator is about to run a Kali tool,

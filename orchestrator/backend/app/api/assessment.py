@@ -576,6 +576,12 @@ def get_findings(engagement_key: str) -> list[dict[str, Any]]:
     return state_manager.list_findings(engagement.id)
 
 
+@router.get("/findings/{finding_slug}")
+def get_finding(engagement_key: str, finding_slug: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_finding(engagement.id, finding_slug)
+
+
 @router.get("/findings/{finding_slug}/transitions")
 def get_finding_transitions(engagement_key: str, finding_slug: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
@@ -1200,6 +1206,10 @@ class DispatchCreate(BaseModel):
     status: _DISPATCH_STATUS = "in-progress"
     model: str | None = Field(default=None, max_length=128)
     reasoning: _REASONING | None = None
+    requested_model: str | None = Field(default=None, max_length=128)
+    actual_model: str | None = Field(default=None, max_length=128)
+    requested_reasoning: _REASONING | None = None
+    actual_reasoning: _REASONING | None = None
     dispatch_mode: _DISPATCH_MODE | None = None
     finding_slugs: list[str] | None = None
     skills: str | None = Field(default=None, max_length=4096)
@@ -1300,13 +1310,17 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
         status_value=request.status,
         model=request.model,
         reasoning=request.reasoning,
+        requested_model=request.requested_model,
+        actual_model=request.actual_model,
+        requested_reasoning=request.requested_reasoning,
+        actual_reasoning=request.actual_reasoning,
         dispatch_mode=request.dispatch_mode,
         finding_slugs=request.finding_slugs,
         skills=request.skills,
     )
     _audit_assessment_mutation(
         engagement.id,
-        title="dispatch register",
+        title="agent start",
         action=f"agent_id={request.agent_id} role={request.agent_role}",
         actor_name=request.agent_role,
         result=request.status,
@@ -1358,7 +1372,7 @@ async def patch_dispatch(
     )
     _audit_assessment_mutation(
         engagement.id,
-        title="dispatch update-status",
+        title="agent done",
         action=f"agent_id={agent_id}",
         actor_name=agent_id,
         result=request.status or "",
@@ -1389,7 +1403,7 @@ async def create_handoff(engagement_key: str, request: HandoffCreate) -> dict[st
     )
     _audit_assessment_mutation(
         engagement.id,
-        title="dispatch record-handoff",
+        title="agent handoff",
         action=f"agent_id={request.agent_id} role={request.agent_role}",
         actor_name=request.agent_role,
         result=request.summary,
@@ -1445,7 +1459,7 @@ async def patch_handoff(
     )
     _audit_assessment_mutation(
         engagement.id,
-        title="dispatch update-handoff",
+        title="agent handoff",
         action=f"agent_id={agent_id}",
         actor_name=agent_id,
         result=request.summary or "",
@@ -1466,7 +1480,7 @@ async def create_decision(engagement_key: str, request: DecisionCreate) -> dict[
     )
     _audit_assessment_mutation(
         engagement.id,
-        title="dispatch record-decision",
+        title="agent decision",
         action=f"kind={request.kind}",
         result="surfaced_to_user" if request.surfaced_to_user else "",
         metadata={"kind": request.kind, "surfaced_to_user": request.surfaced_to_user},
@@ -1507,7 +1521,7 @@ async def patch_decision(
     )
     _audit_assessment_mutation(
         engagement.id,
-        title="dispatch update-decision",
+        title="agent decision",
         action=f"decision_id={decision_id}",
         result="resolved" if request.resolved else "",
         metadata={"decision_id": int(decision_id)},

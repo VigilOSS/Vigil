@@ -99,6 +99,13 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 def _merge_cwe_entry(existing: dict[str, Any], entry: dict[str, Any]) -> None:
     """Merge one CWE coverage entry using the same max/sum rules everywhere."""
+    if _is_cwe_entry_not_applicable(entry):
+        existing["not_applicable"] = True
+        existing["disposition"] = entry.get("disposition", "not_applicable")
+        if entry.get("notes"):
+            existing["notes"] = entry.get("notes")
+        return
+
     if _coerce_float(entry.get("effort", 0)) > _coerce_float(existing.get("effort", 0)):
         existing["effort"] = entry.get("effort", 0)
 
@@ -115,6 +122,13 @@ def _merge_cwe_entry(existing: dict[str, Any], entry: dict[str, Any]) -> None:
     new_notes = entry.get("notes", "")
     if new_notes:
         existing["notes"] = new_notes
+
+
+def _is_cwe_entry_not_applicable(entry: dict[str, Any]) -> bool:
+    if entry.get("not_applicable") is True:
+        return True
+    disposition = str(entry.get("disposition", entry.get("status", ""))).strip().lower()
+    return disposition in {"not_applicable", "not-applicable", "n/a", "na"}
 
 
 def _merge_cwe_coverage_entries(
@@ -383,6 +397,24 @@ def _sync_module_rollup(connection, engagement_id: int, module_id: int) -> None:
 _TRIGGER_STATUS_PENDING = "pending"
 _TRIGGER_STATUS_QUEUED = "queued"
 _TRIGGER_STATUS_RESOLVED = "resolved"
+_TRIGGER_STATUS_EXTERNAL_CONTEXT = "external_context_unavailable"
+_TRIGGER_STATUS_SOURCE_EQUIVALENT = "source_equivalent_analyzed"
+_TRIGGER_STATUS_NOT_APPLICABLE = "not_applicable"
+_TERMINAL_TRIGGER_RESOLUTION_STATUSES = frozenset(
+    {
+        _TRIGGER_STATUS_EXTERNAL_CONTEXT,
+        _TRIGGER_STATUS_SOURCE_EQUIVALENT,
+        _TRIGGER_STATUS_NOT_APPLICABLE,
+    }
+)
+_TRIGGER_STATUSES = frozenset(
+    {
+        _TRIGGER_STATUS_PENDING,
+        _TRIGGER_STATUS_QUEUED,
+        _TRIGGER_STATUS_RESOLVED,
+        *_TERMINAL_TRIGGER_RESOLUTION_STATUSES,
+    }
+)
 
 
 def _trigger_status_for_file(connection, engagement_id: int, file_id: int) -> str:
@@ -415,13 +447,15 @@ def _trigger_status_for_file(connection, engagement_id: int, file_id: int) -> st
 def _sync_trigger_status_for_file(connection, engagement_id: int, file_id: int) -> None:
     file_row = _get_file_rows(connection, engagement_id, {file_id})[file_id]
     next_status = _trigger_status_for_file(connection, engagement_id, file_id)
+    terminal_placeholders = ",".join("?" for _ in _TERMINAL_TRIGGER_RESOLUTION_STATUSES)
     connection.execute(
-        """
+        f"""
         UPDATE code_analysis_triggers
         SET target_file_id = ?,
             status = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE engagement_id = ?
+          AND status NOT IN ({terminal_placeholders})
           AND (
               target_file_id = ?
               OR (
@@ -439,6 +473,7 @@ def _sync_trigger_status_for_file(connection, engagement_id: int, file_id: int) 
             file_id,
             next_status,
             engagement_id,
+            *_TERMINAL_TRIGGER_RESOLUTION_STATUSES,
             file_id,
             str(file_row["file_path"]),
             engagement_id,
@@ -1419,7 +1454,7 @@ def _record_cross_file_triggers(
         if target_file_id is not None:
             existing = connection.execute(
                 """
-                SELECT id
+                SELECT id, status, resolution_note
                 FROM code_analysis_triggers
                 WHERE engagement_id = ? AND target_file_id = ? AND vuln_class = ?
                 """,
@@ -1428,7 +1463,7 @@ def _record_cross_file_triggers(
         else:
             existing = connection.execute(
                 """
-                SELECT id
+                SELECT id, status, resolution_note
                 FROM code_analysis_triggers
                 WHERE engagement_id = ? AND source_file_id = ? AND target_file_id IS NULL
                   AND target_file_path = ? AND vuln_class = ?
@@ -1465,6 +1500,17 @@ def _record_cross_file_triggers(
             )
             continue
 
+        existing_status = str(existing["status"])
+        resolved_status = (
+            existing_status
+            if existing_status in _TERMINAL_TRIGGER_RESOLUTION_STATUSES
+            else trigger_status
+        )
+        resolved_note = (
+            str(existing["resolution_note"] or "")
+            if existing_status in _TERMINAL_TRIGGER_RESOLUTION_STATUSES
+            else resolution_note
+        )
         connection.execute(
             """
             UPDATE code_analysis_triggers
@@ -1486,8 +1532,8 @@ def _record_cross_file_triggers(
                 target_file_path,
                 vuln_class,
                 reason,
-                trigger_status,
-                resolution_note,
+                resolved_status,
+                resolved_note,
                 engagement_id,
                 int(existing["id"]),
             ),
@@ -2127,6 +2173,7 @@ def code_coverage_summary(
         ).fetchall()
         # Accumulate max effort per family per file
         file_efforts: dict[int, dict[str, float]] = {}
+        file_not_applicable: dict[int, set[str]] = {}
         file_meta: dict[int, dict[str, Any]] = {}
         for erow in effort_file_rows:
             fid = int(erow["file_id"])
@@ -2145,8 +2192,13 @@ def code_coverage_summary(
             cwe_cov = _json_decode(erow["cwe_coverage_json"], [])
             if fid not in file_efforts:
                 file_efforts[fid] = {}
+            if fid not in file_not_applicable:
+                file_not_applicable[fid] = set()
             for entry in cwe_cov:
                 family = entry.get("family", "")
+                if family and _is_cwe_entry_not_applicable(entry):
+                    file_not_applicable[fid].add(family)
+                    continue
                 effort = _coerce_float(entry.get("effort", 0))
                 if family and effort > file_efforts[fid].get(family, 0):
                     file_efforts[fid][family] = effort
@@ -2167,8 +2219,13 @@ def code_coverage_summary(
                 cwe_cov = _json_decode(drow["cwe_coverage_json"], [])
                 if fid not in file_efforts:
                     file_efforts[fid] = {}
+                if fid not in file_not_applicable:
+                    file_not_applicable[fid] = set()
                 for entry in cwe_cov:
                     family = entry.get("family", "")
+                    if family and _is_cwe_entry_not_applicable(entry):
+                        file_not_applicable[fid].add(family)
+                        continue
                     effort = _coerce_float(entry.get("effort", 0))
                     if family and effort > file_efforts[fid].get(family, 0):
                         file_efforts[fid][family] = effort
@@ -2200,7 +2257,10 @@ def code_coverage_summary(
                 continue
 
             efforts = file_efforts.get(fid, {})
+            not_applicable = file_not_applicable.get(fid, set())
             if not efforts:
+                if applicable and all(family in not_applicable for family in applicable):
+                    continue
                 if meta["analysis_status"] not in {"analyzed", "done"} and not meta["has_coverage_record"]:
                     continue
                 msg = (
@@ -2212,6 +2272,8 @@ def code_coverage_summary(
                 continue
 
             for family in applicable:
+                if family in not_applicable:
+                    continue
                 if efforts.get(family, 0) < threshold:
                     msg = (
                         f"{meta['classification'].capitalize()} file {meta['file_path']}: "
@@ -2245,6 +2307,9 @@ def code_coverage_summary(
             "pending": trigger_counts.get(_TRIGGER_STATUS_PENDING, 0),
             "queued": trigger_counts.get(_TRIGGER_STATUS_QUEUED, 0),
             "resolved": trigger_counts.get(_TRIGGER_STATUS_RESOLVED, 0),
+            "external_context_unavailable": trigger_counts.get(_TRIGGER_STATUS_EXTERNAL_CONTEXT, 0),
+            "source_equivalent_analyzed": trigger_counts.get(_TRIGGER_STATUS_SOURCE_EQUIVALENT, 0),
+            "not_applicable": trigger_counts.get(_TRIGGER_STATUS_NOT_APPLICABLE, 0),
         },
         "gate": {
             "passed": gate_passed,
@@ -2516,6 +2581,162 @@ def requeue_triggered_files(
         "ambiguous": ambiguous,
         "already_queued": already_queued,
         "already_completed": already_completed,
+    }
+
+
+def list_code_triggers(
+    engagement_id: int,
+    *,
+    status_filter: str | None = None,
+    repo_id: int | None = None,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    if status_filter and status_filter not in _TRIGGER_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid trigger status: {status_filter}",
+        )
+    clauses = ["t.engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    if status_filter:
+        clauses.append("t.status = ?")
+        params.append(status_filter)
+    if repo_id is not None:
+        _coerce_int(repo_id, field_name="repo_id")
+        clauses.append("sf.repo_id = ?")
+        params.append(repo_id)
+
+    with get_connection() as connection:
+        if repo_id is not None:
+            _get_repo_row(connection, engagement.id, int(repo_id))
+        rows = connection.execute(
+            f"""
+            SELECT
+                t.*,
+                sf.file_path AS source_file_path,
+                tf.file_path AS resolved_target_file_path
+            FROM code_analysis_triggers AS t
+            LEFT JOIN code_files AS sf
+              ON sf.id = t.source_file_id
+             AND sf.engagement_id = t.engagement_id
+            LEFT JOIN code_files AS tf
+              ON tf.id = t.target_file_id
+             AND tf.engagement_id = t.engagement_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY
+                CASE t.status
+                    WHEN 'pending' THEN 0
+                    WHEN 'queued' THEN 1
+                    WHEN 'resolved' THEN 2
+                    ELSE 3
+                END,
+                t.updated_at DESC,
+                t.id DESC
+            """,
+            tuple(params),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def resolve_code_triggers(
+    engagement_id: int,
+    *,
+    items: list[dict[str, Any]],
+    resolution_status: str,
+    resolution_note: str,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    normalized_status = resolution_status.strip()
+    if normalized_status not in _TERMINAL_TRIGGER_RESOLUTION_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "resolution_status must be one of: "
+                + ", ".join(sorted(_TERMINAL_TRIGGER_RESOLUTION_STATUSES))
+            ),
+        )
+    note = resolution_note.strip()
+    if not note:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="resolution_note is required",
+        )
+
+    resolved = 0
+    not_resolved: list[str] = []
+    with get_connection() as connection:
+        for idx, item in enumerate(items):
+            trigger_id = item.get("trigger_id", item.get("id"))
+            if trigger_id is not None:
+                validated_id = _coerce_int(trigger_id, field_name="trigger_id")
+                cursor = connection.execute(
+                    """
+                    UPDATE code_analysis_triggers
+                    SET status = ?,
+                        resolution_note = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND id = ? AND status = ?
+                    """,
+                    (
+                        normalized_status,
+                        note,
+                        engagement.id,
+                        validated_id,
+                        _TRIGGER_STATUS_PENDING,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    not_resolved.append(str(validated_id))
+                else:
+                    resolved += cursor.rowcount
+                continue
+
+            file_path = str(item.get("file_path", item.get("target_file_path", ""))).strip()
+            if not file_path:
+                not_resolved.append(f"item[{idx}]")
+                continue
+            vuln_class = str(item.get("vuln_class", "")).strip()
+            repo_id = item.get("repo_id")
+
+            clauses = [
+                "engagement_id = ?",
+                "target_file_path = ?",
+                "status = ?",
+            ]
+            params: list[Any] = [engagement.id, file_path, _TRIGGER_STATUS_PENDING]
+            if vuln_class:
+                clauses.append("vuln_class = ?")
+                params.append(vuln_class)
+            if repo_id is not None:
+                validated_repo_id = _coerce_int(repo_id, field_name="repo_id")
+                clauses.append(
+                    "source_file_id IN ("
+                    "SELECT id FROM code_files WHERE engagement_id = ? AND repo_id = ?"
+                    ")"
+                )
+                params.extend([engagement.id, validated_repo_id])
+
+            cursor = connection.execute(
+                f"""
+                UPDATE code_analysis_triggers
+                SET status = ?,
+                    resolution_note = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE {' AND '.join(clauses)}
+                """,
+                (normalized_status, note, *params),
+            )
+            if cursor.rowcount == 0:
+                label = f"{file_path}:{vuln_class}" if vuln_class else file_path
+                not_resolved.append(label)
+            else:
+                resolved += cursor.rowcount
+
+    return {
+        "resolved": resolved,
+        "total": len(items),
+        "not_resolved": not_resolved,
+        "resolution_status": normalized_status,
     }
 
 

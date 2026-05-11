@@ -92,6 +92,10 @@ reading the file, and continuing your analysis. You have full filesystem access 
 
 Code analysis findings record in the **same** `assessment_findings` table as web findings.
 Use `aith assess record-finding <agent-name> <finding-json-file>` to record.
+For new findings, omit `slug` from the JSON payload — `record-finding` allocates the next
+canonical slug under a lock and prints it on stdout. Use that returned slug in handoffs,
+analysis rows, and follow-up commands. Hand-authoring `CH-001` / `CV-001` style slugs in
+parallel dispatches risks collisions.
 
 **Code finding prefixes:**
 
@@ -119,6 +123,33 @@ If your CVSS score does not fall within the matching severity range, adjust one 
 before recording. A memory corruption primitive with attacker-controlled reachability needs the
 same severity discipline as a web auth bug because the report pipeline consumes one shared
 finding table.
+
+**White-box source access is not attacker access.** The operator and code agents can read the
+repository because the customer provided it for review; do not treat that reviewer capability as
+a public exposure path. For any finding whose impact depends on reading non-public source,
+deployment, or configuration files (committed secrets, `conn.php`, `Web.config`, XML config,
+private keys, service credentials), explicitly populate:
+
+- `details.attacker_access_path`: one of `public_web_exposure`, `runtime_file_read_lfi`,
+  `exposed_build_artifact`, `repository_or_backup_disclosure`, `privileged_insider`,
+  or `unknown`
+- `details.exposure_prerequisite`: the concrete condition that gives a real attacker the bytes
+  (for example: "file is served from public S3 path", "confirmed LFI reads this path",
+  "separate repo/backup disclosure required")
+
+Severity must follow that access path:
+
+- `critical` only when an unauthenticated or low-privilege attacker can obtain the file contents
+  through a confirmed live exposure/read primitive, or when the secret is already public and its
+  validated use grants full production compromise.
+- `high` only when the secret/config is production-grade and immediately useful, but the access
+  path is a plausible repo/backup/deploy-artifact disclosure rather than a confirmed live web read.
+- `medium` or lower when the finding is primarily defense-in-depth/source hygiene, requires
+  privileged repository/filesystem access, or cannot be tied to a realistic attacker read path.
+
+Do not use `AV:N` in CVSS solely because the reviewed application is network-facing. If the
+missing step is "attacker must first read a private repository or server filesystem path", model
+that prerequisite honestly or downgrade.
 
 **Code finding conventions:**
 - `canonical_location` format: `file:<relative-path>:<line-number>` (e.g., `file:lib/url.c:547`)
@@ -284,14 +315,14 @@ Before your dispatch returns, run in this order:
 
 1. `aith assess record-finding <agent-name> <finding-json>` for each confirmed finding.
 2. `aith assess code-record-analysis <analysis-json>` for each queue item disposition.
-3. `aith assess dispatch record-handoff --from-json <path>` — use the exact
+3. `aith assess agent handoff --from-json <path>` — use the exact
    `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the
    operator placed at the top of your dispatch prompt. The handoff row is keyed on
    `agent_id`; using a different value creates an orphaned row the operator cannot render.
-4. `aith assess dispatch render-handoff <agent_id>` — self-check before exiting.
+4. `aith assess agent render-handoff <agent_id>` — self-check before exiting.
    A 404 means the `agent_id` did not match the registered dispatch.
 
 `update-status` is operator-only — do not call it.
 
-`record-handoff` is idempotent; checkpoint after each major phase of work, not only at the end.
+`aith assess agent handoff` is idempotent; checkpoint after each major phase of work, not only at the end.
 Schema: `agent/references/runtime-guides/handoff-schema.md`.

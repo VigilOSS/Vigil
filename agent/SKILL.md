@@ -8,7 +8,7 @@
 
 Use this file only as a long-form human reference. For live dispatch selection, run
 `aith assess list-skills` and pass the directory-name skill value to
-`aith assess dispatch register --skills`; the validator resolves those names
+`aith assess agent start --skills`; the validator resolves those names
 against `agent/skills/<name>/SKILL.md` on disk.
 
 ## Deprecated Selection Note

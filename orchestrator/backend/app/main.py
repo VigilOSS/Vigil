@@ -13,7 +13,7 @@ from .api.engagements import router as engagements_router
 from .api.events import router as events_router
 from .api.intel import router as intel_router
 from .config import settings
-from .db import init_db
+from .db import database_readiness_flags, get_connection, init_db
 from .services.backup import start_scheduler as start_backup_scheduler, stop_scheduler as stop_backup_scheduler
 from .services.engagements import get_engagement_or_404, maybe_sync_engagements
 from .ws import broadcaster
@@ -57,6 +57,23 @@ app.include_router(activity_router)
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok", "app": settings.app_name}
+
+
+@app.get("/readyz", response_model=None)
+def readyz() -> JSONResponse | dict[str, object]:
+    with get_connection() as connection:
+        connection.execute("SELECT 1").fetchone()
+        schema_flags = database_readiness_flags(connection)
+    payload: dict[str, object] = {
+        "status": "ready",
+        "app": settings.app_name,
+        "database_connected": True,
+    }
+    payload.update(schema_flags)
+    if not all(schema_flags.values()):
+        payload["status"] = "not_ready"
+        return JSONResponse(status_code=503, content=payload)
+    return payload
 
 
 @app.websocket("/ws/engagements/{engagement_key}")

@@ -373,7 +373,16 @@ aith assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverag
 
 # cwe-coverage-json must be a file path, not inline JSON. Create it before the done call:
 cat > /tmp/cwe_<item-id>.json <<'JSON'
-[{"cwe": "CWE-122", "chains_traced": 3, "chains_total": 3, "verdict": "clean"}]
+[
+  {
+    "family": "buffer-overflow",
+    "effort": 85,
+    "functions_analyzed": 12,
+    "entry_chains_traced": 3,
+    "total_entry_chains": 3,
+    "notes": "Traced all applicable parser entry chains"
+  }
+]
 JSON
 
 # Mark one file done with structured cwe_coverage after the payload is correct
@@ -391,7 +400,10 @@ aith assess code-dispatch reset-stale 10
 
 Use `code-dispatch done` with one of `clean`, `finding`, or `suspicious`, because the queue
 history is only useful if every completion records a valid disposition and a complete
-`cwe_coverage` array instead of a half-formed backend 422.
+`cwe_coverage` array instead of a half-formed backend 422. The coverage file content is the
+bare JSON array that becomes `cwe_coverage`; do not wrap it in an object containing a
+`cwe_coverage` field. Include one entry for every `applicable_vuln_classes` value from the
+queue item, using explicit zero-effort gap entries for omitted/unexamined families.
 
 **Handling needs-context returns:** When items return as `needs-context`:
 1. Review the request -- what function, file, or dependency is missing and why.
@@ -845,6 +857,11 @@ the rendered report, and publication plus `reported` lifecycle transitions wait 
 | code-vuln-verifier | VF | (updates only, no new findings -- except spot-check) |
 | code-fuzz-engineer | CF | CF-001 |
 
+These examples describe the prefixes allocated by `aith assess record-finding`.
+Do not ask parallel specialists to hand-author `slug` values; new finding JSON
+omits `slug`, and the helper prints the canonical slug to reuse in handoffs and
+analysis rows.
+
 ## Dispatch Context Template
 
 Every code analysis dispatch must include:
@@ -884,7 +901,7 @@ authorized_phase: <phase>
 ```
 
 The operator obtains `agent_id` by:
-- **Claude Code**: use the id passed to `dispatch register --agent-id <id>` — choose a unique string per dispatch (e.g. `hunt-b7c2`).
+- **Claude Code**: use the id printed by `aith assess agent start` — choose or accept a unique string per dispatch (e.g. `hunt-b7c2`).
 - **Codex**: use the id returned by `spawn_agent`.
 
 Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting.
@@ -897,7 +914,7 @@ Before every dispatch, verify:
 - [ ] Current phase stated with specific task objective (not just "analyze this")
 - [ ] Skill name(s) identified from `aith assess list-skills` (the first column = `name`, matches `agent/skills/<name>/`)
 - [ ] Full skill path(s) `agent/skills/<name>/SKILL.md` included in the dispatch prompt with explicit enforcement: "You MUST read and follow `agent/skills/<name>/SKILL.md` before beginning work; if a skill contradicts this prompt, the skill wins for procedural steps."
-- [ ] Bare skill `name(s)` (not paths) passed to `--skills` on `aith assess dispatch register` for audit — the validator resolves names against `agent/skills/<name>/SKILL.md`
+- [ ] Bare skill `name(s)` (not paths) passed to `--skills` on `aith assess agent start` for audit — the validator resolves names against `agent/skills/<name>/SKILL.md`
 - [ ] For Phase 2: file paths from queue items included (NOT context IDs, NOT JSON metadata)
 - [ ] For Phase 2: applicable vulnerability classes copied from backend `applicable_vuln_classes` when present; otherwise derived from slot types + role/language fallback rules
 - [ ] For Phase 2: CWE pattern references selected via slot-type mapping table

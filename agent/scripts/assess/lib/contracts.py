@@ -60,18 +60,20 @@ def _agent_skills_root() -> Path:
 
 @dataclass
 class SpecialistDispatchContract:
-    """Mirror of the operator-core "Specialist Dispatch Contract" required-fields list.
+    """Documentation mirror of specialist dispatch payloads for ``aith assess agent start``.
 
-    Every field on this dataclass corresponds to a row in the contract table
-    documented in ``agent/operator-core.md`` (Specialist Dispatch Contract).
-    Use ``validate_specialist_dispatch_contract`` to check a JSON payload
-    parsed from disk or stdin — the validator returns a list of error strings.
+    Aligns with the Specialist Dispatch Contract table in ``agent/operator-core.md``.
+    Use ``validate_specialist_dispatch_contract`` to lint a parsed JSON payload.
+
+    The orchestrator expects ``requested_model`` / ``requested_reasoning`` (and optional
+    ``actual_model`` / ``actual_reasoning``). Legacy aliases ``model`` / ``reasoning``
+    remain valid on POST and populate the requested columns server-side.
     """
 
     role: str
     dispatch_mode: str
-    model: str | None = None
-    reasoning: str | None = None
+    requested_model: str | None = None
+    requested_reasoning: str | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -84,7 +86,7 @@ def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list
     warnings: list[str] = []
 
     if not isinstance(payload, dict):
-        return ["dispatch contract must be a JSON object"], warnings
+        return ["agent start contract must be a JSON object"], warnings
 
     for field_name in _SPECIALIST_DISPATCH_REQUIRED_FIELDS:
         if field_name not in payload:
@@ -670,6 +672,43 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
+    "code-dispatch": CommandContract(
+        name="code-dispatch",
+        summary="Operate the backend code-analysis queue and cross-file trigger lifecycle.",
+        schema_name="backend code-analysis queue / trigger request models",
+        preferred_invocations=(
+            "aith assess code-dispatch fetch <limit> <agent-name>",
+            "aith assess code-dispatch done <item-id> <disposition> <cwe-coverage-json-file> [notes]",
+            "aith assess code-dispatch list-triggers [status]",
+            "aith assess code-dispatch resolve-triggers <triggers-json-file> <resolution-status> <note>",
+            "aith assess code-dispatch requeue-triggers <triggers-json-file>",
+        ),
+        author_supplied_fields=(
+            "queue item id(s)",
+            "bare JSON array for cwe_coverage when completing a queue item",
+            "trigger_id/id or file_path/target_file_path when resolving triggers",
+            "resolution_status: external_context_unavailable, source_equivalent_analyzed, or not_applicable",
+            "resolution_note explaining why the trigger is accepted without requeue",
+        ),
+        notes=(
+            "`resolve-triggers` records accepted terminal trigger gaps; use it when the target implementation is outside the supplied source snapshot, a source equivalent was analyzed, or the trigger family is genuinely not applicable.",
+            "Do not inflate CWE effort numbers to satisfy the gate. Use explicit `disposition=not_applicable` on the coverage entry or `resolve-triggers` for cross-file gaps that cannot be queued.",
+            "`list-triggers` defaults to pending triggers so operators can inspect blockers before resolving or requeueing them.",
+        ),
+        common_mistakes=(
+            ("cwe_coverage object wrapper", "`done` requires a bare JSON array, not {'cwe_coverage': [...]}"),
+            ("missing resolution_note", "accepted trigger gaps need a durable rationale"),
+            ("using resolve-triggers for pending source that exists", "use requeue-triggers when the target file is available and needs analysis"),
+        ),
+        examples=(
+            {
+                "command": "aith assess code-dispatch resolve-triggers missing.json external_context_unavailable 'storage DLL source not provided'",
+            },
+            {
+                "command": "aith assess code-dispatch done 42 clean cwe/42.json 'reviewed parser'",
+            },
+        ),
+    ),
 }
 
 
@@ -707,8 +746,9 @@ def contract_names() -> list[str]:
     names.extend(f"record-intel {intel_type}" for intel_type in sorted(INTEL_TYPES))
     names.append("kali")
     names.extend(f"kali {verb}" for verb in KALI_VERBS)
-    names.append("dispatch")
-    names.extend(f"dispatch {verb}" for verb in DISPATCH_VERBS)
+    names.append("agent")
+    names.extend(f"agent {verb}" for verb in AGENT_VERBS)
+    names.append("work-buffer")
     return sorted(names)
 
 
@@ -721,11 +761,13 @@ def get_contract(name: str) -> CommandContract | None:
     if name.startswith("kali "):
         _, _, verb = name.partition(" ")
         return _kali_verb_contract(verb)
-    if name == "dispatch":
+    if name == "agent":
         return _dispatch_root_contract()
-    if name.startswith("dispatch "):
+    if name.startswith("agent "):
         _, _, verb = name.partition(" ")
         return _dispatch_verb_contract(verb)
+    if name == "work-buffer":
+        return _work_buffer_contract()
     return _CONTRACTS.get(name)
 
 
@@ -1224,76 +1266,71 @@ def _looks_like_verification_payload(payload: Any | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# dispatch namespace contracts
+# Agent / work-buffer command contracts
 #
-# Most dispatch verbs are work-buffer SQL primitives (stats, fetch, done, ...)
-# documented inline by `aith assess dispatch <db> --help`. The contract
-# surface is reserved for verbs whose output shape matters to other agents —
-# render-handoff is the first such verb because the rendered blob is meant to
-# be pasted verbatim into the next dispatch prompt and we want operators to
-# discover the helper rather than freelance their own handoff format.
+# Work-buffer primitives (stats, fetch, done, …) are documented inline on
+# ``aith assess work-buffer``. Contract entries advertise backend-backed agent
+# lifecycle helpers plus ``render-handoff``, whose markdown output is pasted into
+# the next dispatch prompt.
 # ---------------------------------------------------------------------------
 
-# Dispatch sub-verbs that have their own contract entry. The Contract-First
+# Agent lifecycle sub-verbs that have their own contract entry. The Contract-First
 # Rule directs operators to read these before first use, and the
 # `aith assess contract` resolver uses this tuple to advertise what is
 # discoverable. Read-only sub-verbs (`list`, `get`) are intentionally absent
 # because they do not mutate state and have nothing to validate.
-DISPATCH_VERBS: tuple[str, ...] = (
+AGENT_VERBS: tuple[str, ...] = (
     "render-handoff",
-    "register",
-    "update-status",
+    "start",
+    "done",
     "abort-duplicate",
-    "record-decision",
-    "record-handoff",
+    "decision",
+    "handoff",
 )
+
+DISPATCH_VERBS: tuple[str, ...] = AGENT_VERBS
 
 
 def _dispatch_root_contract() -> CommandContract:
     return CommandContract(
-        name="dispatch",
+        name="agent",
         summary=(
-            "SQLite work-buffer dispatch engine plus operator-glue helpers "
-            "(register / update-status / list / get / record-decision / "
-            "record-handoff / render-handoff for cross-dispatch continuity)."
+            "Backend agent lifecycle helpers (start / done / list / get / decision / "
+            "handoff / render-handoff for cross-dispatch continuity)."
         ),
         schema_name="(per-action argparse; backend-backed via assessment_dispatches / _dispatch_handoffs / _dispatch_decisions)",
         preferred_invocations=(
-            "aith assess dispatch <db_path> stats|fetch|done|...",
-            "aith assess dispatch register --agent-id <id> --agent-role <role> ...",
-            "aith assess dispatch update-status <agent-id> --status completed",
-            "aith assess dispatch record-handoff --agent-id <id> --agent-role <role> --summary '...'",
-            "aith assess dispatch list [--role <role>] [--status <status>]",
-            "aith assess dispatch render-handoff <agent-id>",
-            "aith assess contract dispatch render-handoff",
+            "aith assess agent start --role <role> --task \"...\" --dispatch-mode <mode> --skills <skills>",
+            "aith assess agent done <agent-id> --finding-slugs <slug1,slug2>",
+            "aith assess agent handoff --agent-id <id> --role <role> --summary '...'",
+            "aith assess agent list [--filter-role <role>] [--status <status>]",
+            "aith assess agent render-handoff <agent-id>",
+            "aith assess work-buffer <db_path> stats|fetch|done|...",
         ),
         author_supplied_fields=(
-            "<db_path> (cases.db) for work-buffer actions",
-            "<action> (e.g. stats, fetch, done, register, render-handoff, ...)",
+            "<action> (e.g. start, done, handoff, render-handoff, decision, ...)",
             "action-specific positional args",
         ),
         notes=(
-            "Work-buffer actions (stats/fetch/done/peek/defer-cluster/defer-items/error/"
-            "reset-stale/retry-errors/migrate/requeue) require <db_path> as the first "
-            "positional. Operator-glue actions (register, update-status, list, get, "
-            "record-decision, record-handoff, render-handoff) reject a cases.db prefix.",
-            "Dispatch state lives in the orchestrator backend. Use `register` to log a dispatch, `update-status` "
-            "to mark it complete, `record-handoff` to durably record the agent's exit "
-            "payload, and `render-handoff` to assemble the blob the next dispatch prompt "
+            "Work-buffer actions live under `aith assess work-buffer <db_path> ...`; "
+            "agent lifecycle actions never take a cases.db path.",
+            "Dispatch state lives in the orchestrator backend. Use `agent start` to log a dispatch, `agent done` "
+            "to mark it complete, `agent handoff` to durably record the agent's exit "
+            "payload, and `agent render-handoff` to assemble the blob the next dispatch prompt "
             "pastes verbatim.",
-            f"Verbs with their own contract entries: {', '.join(DISPATCH_VERBS)}.",
+            f"Verbs with their own contract entries: {', '.join(AGENT_VERBS)}.",
         ),
         common_mistakes=(
             (
                 "transcript paste",
-                "use `aith assess dispatch render-handoff <prior-agent-id>` and paste the "
+                "use `aith assess agent render-handoff <prior-agent-id>` and paste the "
                 "rendered blob verbatim — the helper pulls findings, artifacts, and "
                 "credentials from durable state so the prompt stays small",
             ),
             (
                 "stale local DB syntax",
-                "backend dispatch actions use `aith assess dispatch record-handoff ...`; "
-                "`aith assess dispatch cases.db record-handoff ...` is rejected so handoffs "
+                "backend dispatch actions use `aith assess agent handoff ...`; "
+                "`aith assess work-buffer cases.db handoff ...` is rejected so handoffs "
                 "cannot be written to the wrong state surface",
             ),
             (
@@ -1306,10 +1343,40 @@ def _dispatch_root_contract() -> CommandContract:
     )
 
 
+def _work_buffer_contract() -> CommandContract:
+    return CommandContract(
+        name="work-buffer",
+        summary="Operate on the local cases.db work-buffer queue.",
+        schema_name="local cases.db work_items schema",
+        preferred_invocations=(
+            "aith assess work-buffer <cases.db> stats --by status|source|cluster|host",
+            "aith assess work-buffer <cases.db> fetch <type> <limit> <agent-name>",
+            "aith assess work-buffer <cases.db> fetch-by-priority <limit> auto",
+            "aith assess work-buffer <cases.db> done <id1,id2,...>",
+            "aith assess work-buffer <cases.db> defer-cluster <cluster_key> --reason \"...\"",
+        ),
+        author_supplied_fields=(
+            "<cases.db>",
+            "<action>",
+            "action-specific item ids, type, limit, agent name, or reason",
+        ),
+        notes=(
+            "Work-buffer rows are local batching state, not backend agent lifecycle rows. "
+            "Use `aith assess agent …` for backend agent lifecycle rows, handoffs, and decisions.",
+            "Mark items done only after the specialist has written durable backend state for "
+            "findings, surfaces, probe runs, or coverage satisfied by the work.",
+        ),
+        common_mistakes=(
+            ("using agent handoff syntax here", "`work-buffer` never records handoffs; use `aith assess agent handoff`"),
+            ("reading cases.db directly", "use the helper so migrations, status transitions, and terminal_reason semantics stay consistent"),
+        ),
+    )
+
+
 def _dispatch_verb_contract(verb: str) -> CommandContract | None:
     if verb == "render-handoff":
         return CommandContract(
-            name="dispatch render-handoff",
+            name="agent render-handoff",
             summary=(
                 "Render a bounded handoff blob for a prior dispatch's agent_id, "
                 "pulled from the assessment backend (dispatch + handoff rows) plus "
@@ -1317,12 +1384,12 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             schema_name="(reads GET dispatch-handoffs/{agent_id} + GET dispatches/{agent_id} + GET findings/{slug})",
             preferred_invocations=(
-                "aith assess dispatch render-handoff <agent-id>",
-                "aith assess dispatch render-handoff <agent-id> --max-lines 60",
-                "aith assess dispatch render-handoff <agent-id> --include-evidence",
+                "aith assess agent render-handoff <agent-id>",
+                "aith assess agent render-handoff <agent-id> --max-lines 60",
+                "aith assess agent render-handoff <agent-id> --include-evidence",
             ),
             author_supplied_fields=(
-                "<agent-id> (the prior dispatch's agent_id from `aith assess dispatch list`)",
+                "<agent-id> (the prior dispatch's agent_id from `aith assess agent list`)",
             ),
             helper_defaults=(
                 ("--max-lines", "40 (hard cap; findings list collapses with '... and N more')"),
@@ -1364,31 +1431,31 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             examples=(
                 {
-                    "command": "aith assess dispatch render-handoff a424a88b02054913d",
+                    "command": "aith assess agent render-handoff a424a88b02054913d",
                 },
                 {
-                    "command": "aith assess dispatch render-handoff a424a88b02054913d --max-lines 60 --include-evidence",
+                    "command": "aith assess agent render-handoff a424a88b02054913d --max-lines 60 --include-evidence",
                 },
             ),
         )
-    if verb == "register":
+    if verb in {"register", "start"}:
         return CommandContract(
-            name="dispatch register",
+            name="agent start",
             summary=(
                 "Register a specialist dispatch in the backend audit ledger so the "
-                "row carries role, task, scope, model, dispatch-mode, and the skills "
+                "row carries role, task, scope, requested model/reasoning, dispatch-mode, and the skills "
                 "the agent loaded."
             ),
             schema_name="backend DispatchCreate (POST /dispatches)",
             preferred_invocations=(
-                "aith assess dispatch register --agent-id <id> --agent-role <role> "
+                "aith assess agent start --agent-id <id> --role <role> "
                 "--task \"...\" --scope-host <host> --model <name> --reasoning <level> "
                 "--dispatch-mode <mode> --skills \"<skill>[,<skill>...]\"",
-                "aith assess dispatch register --from-json <payload.json>",
+                "aith assess agent start --from-json <payload.json>",
             ),
             author_supplied_fields=(
                 "--agent-id (unique per dispatch)",
-                "--agent-role (specialist role; operator role is reserved for phase coordination)",
+                "--role (specialist role; operator role is reserved for phase coordination)",
                 "--dispatch-mode (hypothesis-driven|item-iterating|deep-manual|variant-rotation)",
                 "--skills (comma-separated; required for non-operator roles)",
                 "--task (one-line objective)",
@@ -1405,19 +1472,19 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "sending so typos surface locally.",
                 "Use `aith assess list-skills` to discover skill names — the value passed "
                 "here must match the directory under `agent/skills/<name>/`.",
-                "Pair with `update-status` when the dispatch finishes: leaving rows in "
+                "Pair with `agent done` when the dispatch finishes: leaving rows in "
                 "`in-progress` past the dispatch's actual lifetime corrupts dedup checks.",
             ),
             common_mistakes=(
-                ("role", "use --agent-role for the registry payload (the validator accepts both, but the registry stores agent_role)"),
+                ("role", "use --role for the agent command; the backend stores agent_role"),
                 ("operator role with --skills", "operator dispatches are exempt from the skills requirement; pass --skills only for specialist roles"),
                 ("--skills agent/skills/foo/SKILL.md", "pass the bare skill name (e.g. 'gau-triage'); the validator resolves it on disk"),
             ),
             examples=(
                 {
                     "command": (
-                        "aith assess dispatch register --agent-id va-7f3 "
-                        "--agent-role vulnerability-analyst --task 'review SSRF candidates' "
+                        "aith assess agent start --agent-id va-7f3 "
+                        "--role vulnerability-analyst --task 'review SSRF candidates' "
                         "--scope-host api.example.com --model claude-opus-4-7 "
                         "--reasoning high --dispatch-mode item-iterating "
                         "--skills 'ssrf-testing,case-dispatching'"
@@ -1425,15 +1492,15 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 },
             ),
         )
-    if verb == "update-status":
+    if verb in {"update-status", "done"}:
         return CommandContract(
-            name="dispatch update-status",
+            name="agent done",
             summary="Patch the lifecycle status (and optionally finding_slugs / completed_at) of a registered dispatch row.",
             schema_name="backend DispatchUpdate (PATCH /dispatches/{agent_id})",
             preferred_invocations=(
-                "aith assess dispatch update-status <agent-id> --status completed --finding-slugs <slug1,slug2>",
-                "aith assess dispatch update-status <agent-id> --status failed",
-                "aith assess dispatch update-status <agent-id> --status aborted",
+                "aith assess agent done <agent-id> --status completed --finding-slugs <slug1,slug2>",
+                "aith assess agent done <agent-id> --status failed",
+                "aith assess agent done <agent-id> --status aborted",
             ),
             author_supplied_fields=(
                 "<agent-id>",
@@ -1447,7 +1514,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "Use this when a dispatch returns so cross-dispatch dedup, reporting, "
                 "and report-writer's audit trail see the actual outcome.",
                 "Pair `--status completed --finding-slugs <slugs>` so the dispatch row "
-                "names the slugs the specialist produced; `aith assess dispatch render-handoff` "
+                "names the slugs the specialist produced; `aith assess agent render-handoff` "
                 "reads from there.",
             ),
             common_mistakes=(
@@ -1456,13 +1523,13 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             examples=(
                 {
-                    "command": "aith assess dispatch update-status va-7f3 --status completed --finding-slugs va-001,va-002",
+                    "command": "aith assess agent done va-7f3 --status completed --finding-slugs va-001,va-002",
                 },
             ),
         )
-    if verb == "record-handoff":
+    if verb in {"record-handoff", "handoff"}:
         return CommandContract(
-            name="dispatch record-handoff",
+            name="agent handoff",
             summary=(
                 "Persist a specialist's structured exit handoff (summary, next steps, "
                 "coverage gaps, runtime issues, working artifacts) into the backend "
@@ -1470,13 +1537,13 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             schema_name="backend handoff-record (POST /dispatch-handoffs, idempotent upsert)",
             preferred_invocations=(
-                "aith assess dispatch record-handoff --from-json <handoff.json>",
-                "aith assess dispatch record-handoff --agent-id <id> --agent-role <role> "
+                "aith assess agent handoff --from-json <handoff.json>",
+                "aith assess agent handoff --agent-id <id> --role <role> "
                 "--summary \"...\" --next-step \"...\" --coverage-gap \"<area>: <reason>\"",
             ),
             author_supplied_fields=(
                 "--agent-id",
-                "--agent-role",
+                "--role",
                 "--summary (≤2000 chars; required)",
                 "structured payload via --from-json OR repeated --next-step / --coverage-gap / --runtime-issue / --working-artifact / --open-question",
             ),
@@ -1499,8 +1566,8 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             examples=(
                 {
                     "command": (
-                        "aith assess dispatch record-handoff --agent-id va-7f3 "
-                        "--agent-role vulnerability-analyst "
+                        "aith assess agent handoff --agent-id va-7f3 "
+                        "--role vulnerability-analyst "
                         "--summary 'SSRF candidates triaged; 2 confirmed, 1 deferred for OOB' "
                         "--next-step 'Validate confirmed findings against staging' "
                         "--coverage-gap 'admin-panel: requires auth refresh'"
@@ -1508,18 +1575,18 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 },
             ),
         )
-    if verb == "record-decision":
+    if verb in {"record-decision", "decision"}:
         return CommandContract(
-            name="dispatch record-decision",
+            name="agent decision",
             summary=(
                 "Record a structured operator decision (scope, egress reputation, "
                 "dispatch-blocked, vendor-SaaS gate, etc.) into dispatch_decisions for audit."
             ),
             schema_name="backend decision-record (POST /dispatch-decisions)",
             preferred_invocations=(
-                "aith assess dispatch record-decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user",
-                "aith assess dispatch record-decision --kind egress_decision --choice browser-based-tool --payload-json '{\"egress_block_pct\": 67}'",
-                "aith assess dispatch record-decision --kind dispatch_blocked --phase recon --reason \"missing massdns binary in runtime image\" --surfaced-to-user",
+                "aith assess agent decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user",
+                "aith assess agent decision --kind egress_decision --choice browser-based-tool --payload-json '{\"egress_block_pct\": 67}'",
+                "aith assess agent decision --kind dispatch_blocked --phase recon --reason \"missing massdns binary in runtime image\" --surfaced-to-user",
             ),
             author_supplied_fields=(
                 "--kind (scope_decision|egress_decision|dispatch_blocked|... — the backend accepts any string but report-writer only renders known kinds)",
@@ -1545,7 +1612,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             examples=(
                 {
                     "command": (
-                        "aith assess dispatch record-decision --kind scope_decision "
+                        "aith assess agent decision --kind scope_decision "
                         "--host api.foo.com --vendor 'Vendor SaaS' --choice pending "
                         "--surfaced-to-user"
                     ),
@@ -1554,14 +1621,14 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
         )
     if verb == "abort-duplicate":
         return CommandContract(
-            name="dispatch abort-duplicate",
+            name="agent abort-duplicate",
             summary=(
                 "Mark an accidentally-duplicated specialist dispatch as aborted and "
                 "record a `dispatch_duplicate` decision pointing at the replacement."
             ),
             schema_name="backend DispatchUpdate (PATCH /dispatches/{agent_id}) + decision-record (POST /dispatch-decisions)",
             preferred_invocations=(
-                "aith assess dispatch abort-duplicate <agent-id> --replacement-agent-id <new-id> --reason \"<text>\"",
+                "aith assess agent abort-duplicate <agent-id> --replacement-agent-id <new-id> --reason \"<text>\"",
             ),
             author_supplied_fields=(
                 "<agent-id> (the duplicate to abort)",
@@ -1585,7 +1652,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             examples=(
                 {
-                    "command": "aith assess dispatch abort-duplicate va-bad --replacement-agent-id va-good --reason 'register fired twice — the second one is canonical'",
+                    "command": "aith assess agent abort-duplicate va-bad --replacement-agent-id va-good --reason 'start fired twice — the second one is canonical'",
                 },
             ),
         )

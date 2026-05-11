@@ -58,6 +58,16 @@ def test_dispatch_post_get_list_patch(client, isolate_settings) -> None:
     resp = client.post(f"{BASE}/dispatches", json=payload)
     assert resp.status_code == 201, resp.text
     row = resp.json()
+
+    titles = {
+        row["title"]
+        for row in client.get(
+            f"/engagements/{ENGAGEMENT_KEY}/activity-entries",
+            params={"q": "agent"},
+        ).json()["items"]
+    }
+    assert "agent start" in titles
+
     assert row["agent_id"] == "AG-001"
     assert row["agent_role"] == "vulnerability-analyst"
     assert row["status"] == "in-progress"
@@ -96,6 +106,15 @@ def test_dispatch_post_get_list_patch(client, isolate_settings) -> None:
     )
     assert resp.status_code == 200, resp.text
     updated = resp.json()
+    titles_done = {
+        row["title"]
+        for row in client.get(
+            f"/engagements/{ENGAGEMENT_KEY}/activity-entries",
+            params={"q": "agent done"},
+        ).json()["items"]
+    }
+    assert "agent done" in titles_done
+
     assert updated["status"] == "completed"
     assert updated["completed_at"] == "2026-04-28T13:00:00Z"
     assert updated["finding_slugs"] == ["VA-001", "VA-002"]
@@ -224,3 +243,48 @@ def test_dispatch_skills_round_trip(client, isolate_settings) -> None:
     fetched = client.get(f"{BASE}/dispatches/SK-1")
     assert fetched.status_code == 200
     assert fetched.json()["skills"] == "surface-collection,gau-triage"
+
+
+def test_dispatch_requested_actual_fields_post_get_list(client, isolate_settings) -> None:
+    """requested_* / actual_* model and reasoning fields round-trip via POST / GET / LIST."""
+    _seed(client, isolate_settings)
+    resp = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "RQ-ACT-1",
+            "agent_role": "vulnerability-analyst",
+            "skills": "auth-bypass",
+            "requested_model": "gpt-test-a",
+            "actual_model": "gpt-test-b",
+            "requested_reasoning": "high",
+            "actual_reasoning": "medium",
+            "dispatch_mode": "hypothesis-driven",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    posted = resp.json()
+    assert posted["requested_model"] == "gpt-test-a"
+    assert posted["actual_model"] == "gpt-test-b"
+    assert posted["requested_reasoning"] == "high"
+    assert posted["actual_reasoning"] == "medium"
+    assert posted["model"] == "gpt-test-a"
+    assert posted["reasoning"] == "high"
+
+    fetched = client.get(f"{BASE}/dispatches/RQ-ACT-1").json()
+    for key in (
+        "requested_model",
+        "actual_model",
+        "requested_reasoning",
+        "actual_reasoning",
+    ):
+        assert fetched[key] == posted[key]
+
+    listed = client.get(f"{BASE}/dispatches").json()
+    assert len(listed) == 1
+    for key in (
+        "requested_model",
+        "actual_model",
+        "requested_reasoning",
+        "actual_reasoning",
+    ):
+        assert listed[0][key] == posted[key]
