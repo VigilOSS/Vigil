@@ -40,6 +40,22 @@ def _load_proxy_addon_module():
     return _load_script_module("test_proxy_addon_module", "agent/scripts/proxy_addon.py")
 
 
+def test_assess_cli_imports_agent_work_buffer_without_legacy_dispatch_module() -> None:
+    """Top-level ``aith assess`` must not expose ``dispatch``; agent + work-buffer are canonical."""
+    import ast
+
+    repo_root = Path(__file__).resolve().parents[3]
+    path = repo_root / "agent/scripts/assess/cli.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "assess.commands":
+            imported.update(alias.name for alias in node.names)
+    assert "agent" in imported
+    assert "work_buffer" in imported
+    assert "dispatch" not in imported
+
+
 def test_kali_runtime_dockerfiles_package_audit_enum_module() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     required_copy = "COPY agent/scripts/assess/lib/audit_enums.py /opt/mcp-tools/audit_enums.py"
@@ -610,6 +626,137 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
     assert "file_hash" in files_call["files"][0]
     assert "path" not in files_call["files"][0]
     assert "sha256" not in files_call["files"][0]
+
+
+def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Path) -> None:
+    module = _load_script_module(
+        "test_code_ingest_skipped_manifest_module",
+        "agent/scripts/assess/commands/code_ingest.py",
+    )
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.js").write_text("fetch('/api/profile')\n", encoding="utf-8")
+    (repo_dir / "app.min.js").write_text("fetch('/api/profile')", encoding="utf-8")
+    build_dir = repo_dir / "build"
+    build_dir.mkdir()
+    (build_dir / "ResetPassword.min.js").write_text("fetch('/reset')", encoding="utf-8")
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir_arg: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            return None
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            calls.append((endpoint, payload))
+            if endpoint == "code/repos":
+                return {"id": 41}
+            if endpoint == "code/files":
+                return {"inserted": len(payload["files"])}
+            raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            repo_path=str(repo_dir),
+            name="demo-repo",
+            language=None,
+            repo_key="demo",
+            engagement_dir=engagement_dir,
+            include_minified=False,
+            include_skipped=False,
+            include_path=[],
+            max_included_skipped_bytes=2_000_000,
+            skipped_manifest=None,
+        )
+    )
+
+    files_call = next(payload for endpoint, payload in calls if endpoint == "code/files")
+    assert [row["file_path"] for row in files_call["files"]] == ["app.js"]
+    manifest_path = engagement_dir / "tools" / "analysis-state" / "skipped-artifacts" / "demo.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    skipped_paths = {row["path"]: row for row in manifest["skipped_artifacts"]}
+    assert skipped_paths["app.min.js"]["reason"] == "minified_or_bundle"
+    assert skipped_paths["app.min.js"]["source_equivalent_candidate"] == "app.js"
+    assert skipped_paths["build"]["reason"] == "skipped_dir:build"
+
+
+def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(monkeypatch, tmp_path: Path) -> None:
+    module = _load_script_module(
+        "test_code_ingest_include_path_module",
+        "agent/scripts/assess/commands/code_ingest.py",
+    )
+    repo_dir = tmp_path / "repo"
+    build_dir = repo_dir / "build"
+    build_dir.mkdir(parents=True)
+    (repo_dir / "app.js").write_text("console.log('source')\n", encoding="utf-8")
+    (build_dir / "ResetPassword.min.js").write_text("fetch('/reset')", encoding="utf-8")
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir_arg: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            return None
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            calls.append((endpoint, payload))
+            if endpoint == "code/repos":
+                return {"id": 42}
+            if endpoint == "code/files":
+                return {"inserted": len(payload["files"])}
+            raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            repo_path=str(repo_dir),
+            name="demo-repo",
+            language=None,
+            repo_key="demo",
+            engagement_dir=engagement_dir,
+            include_minified=False,
+            include_skipped=False,
+            include_path=["**/ResetPassword.min.js"],
+            max_included_skipped_bytes=2_000_000,
+            skipped_manifest=None,
+        )
+    )
+
+    files_call = next(payload for endpoint, payload in calls if endpoint == "code/files")
+    paths = {row["file_path"] for row in files_call["files"]}
+    assert paths == {"app.js", "build/ResetPassword.min.js"}
 
 
 def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch, tmp_path: Path, capsys) -> None:

@@ -262,7 +262,11 @@ Each function gets exactly one disposition:
   symbol needed. Only use this after filesystem self-service failed to resolve.
 
 In addition to per-function dispositions, produce a **`cwe_coverage`** array -- one entry per
-applicable vulnerability class for this file. Each entry records:
+applicable vulnerability class for this file. The coverage file passed to
+`aith assess code-dispatch done` must contain this bare JSON array, not an object wrapper
+with a `cwe_coverage` key. Include every family listed in the queue item's
+`applicable_vuln_classes`; for any family you could not analyze, add an explicit
+zero-effort gap entry with notes explaining the blocker. Each entry records:
 
 - `family`: vulnerability class name (e.g., `sql-injection`, `path-traversal`, `buffer-overflow`)
 - `effort`: 0-100 score reflecting analysis thoroughness (see effort guidelines below)
@@ -549,13 +553,13 @@ Before your dispatch returns, run in this order:
 
 1. `aith assess record-finding code-vuln-hunter <finding-json>` per finding
 2. `aith assess code-record-analysis <analysis-json>` per file (carries dispositions, CWE coverage, cross-file triggers)
-3. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
-4. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+3. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
+4. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-The `record-handoff` step is idempotent and called incrementally — checkpoint
+`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -580,6 +584,11 @@ all live in the analysis rows — so the response can stay focused on hunt
 narrative rather than restating canonical state.
 
 ## Finding Prefix: CH
+
+Do not put a `slug` field in new finding JSON. `aith assess record-finding
+code-vuln-hunter <finding-json>` allocates the next `CH-*` slug under a lock and
+prints the canonical slug; use that returned value in `finding_slug`, handoffs,
+and follow-up notes.
 
 ## Post-Batch Coverage Check
 

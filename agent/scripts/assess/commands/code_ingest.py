@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import fnmatch
 import json
 import os
 import subprocess
@@ -44,6 +45,9 @@ SKIP_EXTENSIONS = frozenset({
     '.mp3', '.mp4', '.wav', '.avi', '.mov', '.mkv',
     '.sqlite', '.sqlite3', '.db',
 })
+
+BUILD_ARTIFACT_DIRS = frozenset({'dist', 'build', '.next', '.nuxt'})
+DEFAULT_MAX_INCLUDED_SKIPPED_BYTES = 2_000_000
 
 
 _C_EXTENSIONS = frozenset({'.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hh'})
@@ -149,22 +153,165 @@ def register(subparsers) -> None:
     p.add_argument("--name", default=None, help="Repository name (default: directory basename)")
     p.add_argument("--language", default=None, help="Override primary language detection")
     p.add_argument("--repo-key", default=None, help="Explicit repository key (default: stable name+path hash)")
+    p.add_argument(
+        "--include-minified",
+        action="store_true",
+        help="Include .min.js/.bundle.js and .min.css/.bundle.css files instead of only listing them in the skipped manifest.",
+    )
+    p.add_argument(
+        "--include-skipped",
+        action="store_true",
+        help=(
+            "Include otherwise skipped generated/binary-extension files when they are encountered. "
+            "Skipped directories still require --include-path or build-artifact/minified handling."
+        ),
+    )
+    p.add_argument(
+        "--include-path",
+        action="append",
+        default=[],
+        help="Glob path to include even if it is normally skipped; repeatable (e.g. '**/ResetPassword.min.js').",
+    )
+    p.add_argument(
+        "--max-included-skipped-bytes",
+        type=int,
+        default=DEFAULT_MAX_INCLUDED_SKIPPED_BYTES,
+        help=f"Maximum size for an explicitly included skipped artifact (default {DEFAULT_MAX_INCLUDED_SKIPPED_BYTES}).",
+    )
+    p.add_argument(
+        "--skipped-manifest",
+        default=None,
+        help="Optional path for skipped-artifacts manifest (default: tools/analysis-state/skipped-artifacts/<repo-key>.json).",
+    )
     p.set_defaults(func=run)
 
 
-def _should_skip_file(rel_path: str, filename: str) -> bool:
-    """Return True if the file should be skipped based on patterns."""
+def _skip_file_reason(rel_path: str, filename: str) -> str | None:
+    """Return the skip reason for a file, or None if it is normally ingestible."""
     ext = Path(filename).suffix.lower()
     if ext in SKIP_EXTENSIONS:
-        return True
+        if ext in {'.min.js', '.bundle.js', '.min.css', '.bundle.css'}:
+            return 'minified_or_bundle'
+        if ext == '.map':
+            return 'source_map'
+        return f'skipped_extension:{ext}'
     # Check for compound extensions like .min.js, .bundle.js
     lower_name = filename.lower()
-    if lower_name.endswith('.min.js') or lower_name.endswith('.bundle.js'):
-        return True
+    if lower_name.endswith(('.min.js', '.bundle.js', '.min.css', '.bundle.css')):
+        return 'minified_or_bundle'
     # Check for .woff variants
     if lower_name.endswith('.woff') or lower_name.endswith('.woff2'):
+        return 'skipped_extension:font'
+    return None
+
+
+def _should_skip_file(rel_path: str, filename: str) -> bool:
+    """Return True if the file is normally skipped.
+
+    Kept as the boolean compatibility helper for code_index; code_ingest uses
+    _skip_file_reason when it needs auditable skip details.
+    """
+    return _skip_file_reason(rel_path, filename) is not None
+
+
+def _include_path_match(rel_path: str, patterns: list[str] | None) -> str | None:
+    normalized = rel_path.replace(os.sep, '/')
+    for pattern in patterns or []:
+        if fnmatch.fnmatch(normalized, pattern):
+            return pattern
+    return None
+
+
+def _should_descend_skipped_dir(rel_dir: str, dirname: str, args) -> bool:
+    """Descend into a skipped directory only when an explicit include can need it."""
+    patterns = getattr(args, "include_path", []) or []
+    normalized = rel_dir.replace(os.sep, '/')
+    if getattr(args, "include_minified", False) and dirname in BUILD_ARTIFACT_DIRS:
         return True
+    if getattr(args, "include_skipped", False) and dirname in BUILD_ARTIFACT_DIRS:
+        return True
+    for pattern in patterns:
+        if dirname in BUILD_ARTIFACT_DIRS and ("**" in pattern or ".min." in pattern or ".bundle." in pattern):
+            return True
+        if pattern.startswith(f"{normalized}/") or pattern.startswith(f"**/{normalized}/"):
+            return True
+        if fnmatch.fnmatch(normalized, pattern.rstrip('/')):
+            return True
     return False
+
+
+def _include_reason(rel_path: str, skip_reason: str | None, args) -> str | None:
+    pattern = _include_path_match(rel_path, getattr(args, "include_path", []) or [])
+    if pattern:
+        return f'include_path:{pattern}'
+    if skip_reason == 'minified_or_bundle' and getattr(args, "include_minified", False):
+        return 'include_minified'
+    if skip_reason and getattr(args, "include_skipped", False):
+        return 'include_skipped'
+    return None
+
+
+def _source_hints(rel_path: str) -> dict[str, str]:
+    lower = rel_path.lower()
+    hints: dict[str, str] = {}
+    if lower.endswith(('.min.js', '.min.css')):
+        stem = rel_path.rsplit('.min.', 1)
+        if len(stem) == 2:
+            hints['source_equivalent_candidate'] = f"{stem[0]}.{stem[1]}"
+        hints['source_map_candidate'] = f"{rel_path}.map"
+    elif lower.endswith(('.bundle.js', '.bundle.css')):
+        stem = rel_path.rsplit('.bundle.', 1)
+        if len(stem) == 2:
+            hints['source_equivalent_candidate'] = f"{stem[0]}.{stem[1]}"
+        hints['source_map_candidate'] = f"{rel_path}.map"
+    elif lower.endswith('.map'):
+        hints['mapped_artifact_candidate'] = rel_path[:-4]
+    return hints
+
+
+def _skipped_record(repo_path: str, rel_path: str, reason: str, *, kind: str = 'file') -> dict[str, object]:
+    filepath = os.path.join(repo_path, rel_path)
+    record: dict[str, object] = {
+        'path': rel_path,
+        'kind': kind,
+        'reason': reason,
+    }
+    if kind == 'file' and os.path.isfile(filepath):
+        try:
+            record['size'] = os.path.getsize(filepath)
+        except OSError:
+            record['size'] = 0
+        record['sha256'] = _sha256_file(filepath)
+        record['language'] = _detect_language(os.path.basename(filepath)) or ''
+        record.update(_source_hints(rel_path))
+    return record
+
+
+def _write_skipped_manifest(args, *, cfg, repo_key: str, repo_name: str, repo_path: str, records: list[dict[str, object]]) -> str | None:
+    if not records:
+        return None
+    manifest_path = getattr(args, "skipped_manifest", None)
+    if manifest_path:
+        path = Path(manifest_path).expanduser()
+    else:
+        eng_dir = Path(getattr(cfg, 'engagement_dir', '') or repo_path)
+        path = eng_dir / 'tools' / 'analysis-state' / 'skipped-artifacts' / f'{repo_key}.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        'repo_key': repo_key,
+        'repo_name': repo_name,
+        'repo_path': repo_path,
+        'policy': {
+            'default_skip_generated_output': True,
+            'include_minified': bool(getattr(args, 'include_minified', False)),
+            'include_skipped': bool(getattr(args, 'include_skipped', False)),
+            'include_path': list(getattr(args, 'include_path', []) or []),
+            'max_included_skipped_bytes': int(getattr(args, 'max_included_skipped_bytes', DEFAULT_MAX_INCLUDED_SKIPPED_BYTES)),
+        },
+        'skipped_artifacts': records,
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return str(path)
 
 
 def _is_regular_file(filepath: str) -> bool:
@@ -362,6 +509,8 @@ def run(args) -> None:
         sys.exit(1)
 
     repo_name = args.name or os.path.basename(repo_path)
+    repo_key = args.repo_key or _repo_key_for_path(repo_name, repo_path)
+    cfg = load_config(args.engagement_dir)
     has_git = os.path.isdir(os.path.join(repo_path, '.git'))
 
     # Collect git metadata if available
@@ -384,10 +533,19 @@ def run(args) -> None:
     files = []
     total_loc = 0
     skipped = 0
+    skipped_records: list[dict[str, object]] = []
+    included_skipped = 0
 
     for dirpath, dirnames, filenames in os.walk(repo_path):
-        # Prune skip directories
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        # Prune skip directories unless an explicit include may need descendants.
+        kept_dirs: list[str] = []
+        for dirname in dirnames:
+            rel_dir = os.path.relpath(os.path.join(dirpath, dirname), repo_path)
+            if dirname in SKIP_DIRS and not _should_descend_skipped_dir(rel_dir, dirname, args):
+                skipped_records.append(_skipped_record(repo_path, rel_dir, f'skipped_dir:{dirname}', kind='directory'))
+                continue
+            kept_dirs.append(dirname)
+        dirnames[:] = kept_dirs
 
         # Skip symlinked directories to prevent traversal outside repo
         dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
@@ -402,9 +560,26 @@ def run(args) -> None:
 
             rel_path = os.path.relpath(filepath, repo_path)
 
-            if _should_skip_file(rel_path, filename):
+            skip_reason = _skip_file_reason(rel_path, filename)
+            include_reason = _include_reason(rel_path, skip_reason, args)
+            if skip_reason and not include_reason:
                 skipped += 1
+                skipped_records.append(_skipped_record(repo_path, rel_path, skip_reason))
                 continue
+            if skip_reason and include_reason:
+                size = os.path.getsize(filepath)
+                max_bytes = int(getattr(args, "max_included_skipped_bytes", DEFAULT_MAX_INCLUDED_SKIPPED_BYTES))
+                if size > max_bytes:
+                    skipped += 1
+                    skipped_records.append(
+                        _skipped_record(
+                            repo_path,
+                            rel_path,
+                            f'{skip_reason}; include requested by {include_reason} but size {size} exceeds max {max_bytes}',
+                        )
+                    )
+                    continue
+                included_skipped += 1
 
             lang = _detect_language(filename)
             if args.language and lang is None:
@@ -429,16 +604,16 @@ def run(args) -> None:
             files.append(file_record)
 
     if not files:
+        _write_skipped_manifest(args, cfg=cfg, repo_key=repo_key, repo_name=repo_name, repo_path=repo_path, records=skipped_records)
         print("No analyzable files found.", file=sys.stderr)
         sys.exit(1)
 
     # POST to backend
-    cfg = load_config(args.engagement_dir)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
         # Create the repo record
         repo_payload = {
-            'repo_key': args.repo_key or _repo_key_for_path(repo_name, repo_path),
+            'repo_key': repo_key,
             'name': repo_name,
             'language': args.language or '',
             'repo_path': repo_path,
@@ -468,6 +643,15 @@ def run(args) -> None:
     finally:
         client.close()
 
+    skipped_manifest = _write_skipped_manifest(
+        args,
+        cfg=cfg,
+        repo_key=repo_key,
+        repo_name=repo_name,
+        repo_path=repo_path,
+        records=skipped_records,
+    )
+
     # Update scope.json with source_repos entry so operator-core-code.md can discover it
     eng_dir = getattr(cfg, 'engagement_dir', None)
     if eng_dir:
@@ -493,6 +677,10 @@ def run(args) -> None:
     print(f"Repository: {repo_name} (id: {repo_id})")
     print(f"Total files: {len(files)} ({skipped} skipped)")
     print(f"Analyzable files: {analyzable}")
+    if included_skipped:
+        print(f"Included skipped artifacts: {included_skipped}")
+    if skipped_manifest:
+        print(f"Skipped artifact manifest: {skipped_manifest}")
     print(f"Total LOC: {total_loc:,}")
 
     if churn_scores:

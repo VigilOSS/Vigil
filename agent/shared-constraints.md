@@ -192,17 +192,17 @@ emits the canonical schema and an example):
 - `record-finding` — `aith assess contract record-finding`
 - `record-intel <type>` — `aith assess contract record-intel <type>`
 - `record-surface` — `aith assess contract record-surface`
-- `dispatch <subverb>` for sub-verbs that mutate durable dispatch state or
+- `agent <subverb>` for sub-verbs that mutate durable dispatch state or
   emit the canonical handoff blob:
-  `register`, `update-status`, `record-handoff`, `record-decision`,
-  `abort-duplicate`, `render-handoff` — `aith assess contract dispatch <subverb>`
+  `start`, `done`, `handoff`, `decision`,
+  `abort-duplicate`, `render-handoff` — `aith assess contract agent <subverb>`
 - Lifecycle helpers (`verify-finding`, `kill-finding`, `update-finding`,
   `reset-finding`, `resolve-surface`) — `aith assess contract <verb>`
 
 Verbs **not** covered (skip the contract round-trip — they are read-only or
 have no payload to validate): `fetch`, `list-skills`, `list-clusters`,
 `list-command-runs`, `get-command-run`, `check-scope-coverage`,
-`filter-scope`, `dispatch <db> stats|peek|fetch|done`,
+`filter-scope`, `work-buffer <db> stats|peek|fetch|done`,
 `dispatch list`, `dispatch get`. Reading the contract for these adds
 latency without preventing any error class.
 
@@ -658,7 +658,7 @@ the findings table (`aith assess record-finding`), intel rows in `intel_*` table
 credentials and attack chains in their tables, and the cross-cutting handoff
 (summary / coverage gaps / next steps / runtime issues / working artifacts /
 open questions / specialty extras) in `assessment_dispatch_handoffs`
-(`aith assess dispatch record-handoff --from-json <path>`).
+(`aith assess agent handoff --from-json <path>`).
 
 The operator queries those tables directly — `render-handoff <agent-id>`, `fetch
 findings`, `list-intel`, `list-clusters` — to assemble the next dispatch's
@@ -670,18 +670,18 @@ the canonical record of it.
 1. `aith assess record-finding <agent-name> <finding-json>` per finding.
 2. `aith assess record-intel <type> <intel-json>` per intel row.
 3. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` per surface candidate.
-4. `aith assess dispatch record-handoff --from-json <path>` — use the exact
+4. `aith assess agent handoff --from-json <path>` — use the exact
    `agent_id`, `agent_role`, and `phase` values from the **Runtime Identity block**
    the operator placed at the top of your dispatch prompt. The handoff row is keyed
    on `agent_id`; using a different value creates an orphaned row the operator cannot render.
-5. `aith assess dispatch render-handoff <agent_id>` — run after step 4 as a self-check.
+5. `aith assess agent render-handoff <agent_id>` — run after step 4 as a self-check.
    Exit only after the render succeeds. A 404 means the `agent_id` in step 4 did not
    match the registered dispatch.
 
-`update-status` is operator-only — do not call it; the operator marks the dispatch
+`agent done` is operator-only — do not call it; the operator marks the dispatch
 complete after your return.
 
-`record-handoff` is idempotent — call it as a checkpoint after each major step, not
+`agent handoff` is idempotent — call it as a checkpoint after each major step, not
 only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md` "Checkpointing".
 
 ### Reasoning quality > response brevity

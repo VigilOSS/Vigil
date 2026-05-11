@@ -137,13 +137,13 @@ aith assess record-finding code-variant-hunter <finding-json>
 Before your dispatch returns, run in this order:
 
 1. `aith assess record-finding code-variant-hunter <finding-json>` per variant finding (each with `links.variant_of` pointing at the parent slug)
-2. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps (verifier dispatch on the new variants), runtime issues, working artifacts, open questions, and role-specific extras (`parent_finding`, `variants_found`, `files_scanned`)
-3. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+2. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (verifier dispatch on the new variants), runtime issues, working artifacts, open questions, and role-specific extras (`parent_finding`, `variants_found`, `files_scanned`)
+3. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-The `record-handoff` step is idempotent and called incrementally — checkpoint
+`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -164,6 +164,11 @@ response can stay focused on variant-pattern reasoning rather than restating
 canonical state.
 
 ## Finding Prefix: CV
+
+Do not put a `slug` field in new variant finding JSON. `aith assess
+record-finding code-variant-hunter <finding-json>` allocates the next `CV-*`
+slug under a lock and prints the canonical slug; use that returned value in
+handoffs and verifier follow-up.
 
 ## Key Principles
 

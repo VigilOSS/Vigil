@@ -130,7 +130,7 @@ export function OverviewTab({ engagementKey, events, assessmentSummary, findings
           <p className="meta-text">
             Surface the numbered checkpoint when recon identifies vendor-managed SaaS; record the
             choice as a backend scope_decision row with{" "}
-            <code>aith assess dispatch record-decision --kind scope_decision</code>.
+            <code>aith assess agent decision --kind scope_decision</code>.
           </p>
         </section>
       )}

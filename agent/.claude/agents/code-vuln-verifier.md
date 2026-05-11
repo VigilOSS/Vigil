@@ -148,13 +148,13 @@ Before your dispatch returns, run in this order:
 2. `aith assess kill-finding <slug> ...` for each kill decision
 3. `aith assess record-chain code-vuln-verifier <chain-json>` for any composed chains
 4. `aith assess record-finding code-vuln-verifier <new-finding-json>` for net-new spot-check bugs (rare)
-5. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
-6. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+5. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
+6. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-The `record-handoff` step is idempotent and called incrementally — checkpoint
+`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -181,7 +181,9 @@ narrative rather than restating canonical state.
 ## Finding Prefix: VF
 
 Your primary role is to update existing findings (confirm, downgrade, kill) and create attack
-chains linking them. Only net-new spot-check findings should create fresh `VF` finding slugs.
+chains linking them. Only net-new spot-check findings should create fresh `VF` finding slugs;
+omit `slug` from those rare new finding payloads and let `aith assess record-finding
+code-vuln-verifier <new-finding-json>` allocate the canonical slug.
 
 ## Key Principles
 

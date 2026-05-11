@@ -200,6 +200,10 @@ JSON structure grouping files into modules with descriptions:
 ```
 
 Use concrete repo-relative file paths in `files`. Do not use globs, ranges, or prose placeholders.
+`module_key` is a durable backend key, so make it meaningful and stable (`auth-reset-password`,
+`media-upload`, `tenant-routing`) rather than generic (`module_1`, `<repo>_module_N`) or copied
+from the repository slug. If you cannot name a module by behavior, split or merge it until the
+label describes a security-relevant subsystem.
 
 ### `#### Threat Model`
 Structured document covering:
@@ -210,7 +214,7 @@ Structured document covering:
 - Historical vulnerability patterns (from git history and known CVEs)
 
 ### `#### File Classifications`
-JSON array of per-file classifications:
+JSON array of per-file classifications matching `agent/schemas/code-file-classification.schema.json`:
 ```json
 [
   {
@@ -219,13 +223,12 @@ JSON array of per-file classifications:
     "language": "c++",
     "role": "protocol_parser",
     "slot_types": ["NETWORK-INPUT", "PROTOCOL-FIELD"],
-    "analysis_priority": 95,
-    "reasoning": "HTTP response header parser — processes untrusted server responses"
+    "analysis_priority": 95
   }
 ]
 ```
 
-Every classification record should include backend `file_id` when available. `file_path` is accepted as a fallback — `code-classify` resolves paths to `file_id` automatically during normalization.
+Every classification record should include backend `file_id` when available. `file_path` is accepted as a fallback — `code-classify` resolves paths to `file_id` automatically during normalization. The machine JSON is an array, not an object keyed by path, and only supports `file_id`, `file_path`, `repo_id`, `classification`, `role`, `slot_types`, `language`, and `analysis_priority`. Do not emit `classification_tier`, `priority_score`, or prose-only `reasoning` fields in the JSON; put rationale in the surrounding markdown or Recommended Analysis Order.
 
 ### `#### Recommended Analysis Order`
 Prioritized list of modules to analyze first, with reasoning.
@@ -278,13 +281,13 @@ Before your dispatch returns, run in this order:
 3. `aith assess code-classify <classifications-json>` (per-file)
 4. `aith assess record-intel note <intel-json>` for each attack hypothesis (so the hunter inherits them as intel notes)
 5. `aith assess record-finding code-architect <finding-json>` for each architectural finding (rare — only when an obvious vulnerability is visible from project structure)
-6. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
-7. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+6. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
+7. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-The `record-handoff` step is idempotent and called incrementally — checkpoint
+`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -292,7 +295,8 @@ after each major step in your methodology, not only at the end. See
 
 You rarely produce findings directly, but if an obvious vulnerability is visible from
 project structure alone (e.g., hardcoded credentials in config, known-vulnerable dependency
-version), record it with prefix CA.
+version), omit `slug` from the finding JSON and let `aith assess record-finding
+code-architect <finding-json>` allocate the next `CA-*` slug.
 
 ## Output Contract (Dispatch Response)
 

@@ -19,8 +19,8 @@ transitions, finding writes, or report work:
 aith assess list-findings
 aith assess list-intel
 aith assess fetch activity-entries
-aith assess dispatch list --limit 10
-aith assess dispatch render-handoff <last-agent-id>
+aith assess agent list --limit 10
+aith assess agent render-handoff <last-agent-id>
 aith assess list-command-runs --q <scope-host-or-keyword>
 ```
 

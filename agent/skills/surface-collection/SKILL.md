@@ -141,7 +141,7 @@ coverage candidates automatically.
 After all sources are ingested, verify the work buffer is clean:
 
 ```bash
-aith assess dispatch "$DB" stats
+aith assess work-buffer "$DB" stats
 ```
 
 The ingestion pipeline handles param-structure deduplication automatically (same endpoint
@@ -158,7 +158,7 @@ There is no per-host URL cap. Volume control happens at ingest:
   `db_insert_work_item()` so they never enter the priority-mode dispatch.
 - **Classification runs inline at ingestion** so every URL gets a `cluster_key` and
   `priority_score` immediately. Run `aith assess list-clusters "$DB"` to review the
-  resulting cluster set and `aith assess dispatch "$DB" defer-cluster <key> --reason "…"`
+  resulting cluster set and `aith assess work-buffer "$DB" defer-cluster <key> --reason "…"`
   to drop low-signal clusters before Phase 3.
 - **Egress-blocked hosts still defer** (see "Egress-blocked hosts" below) — that is a
   network-failure class, not a volume cap.
@@ -183,7 +183,7 @@ AFTER initial ingestion MUST receive their own gau pass — surface-collector ca
 skip them on the assumption that initial collection was exhaustive. A new host
 ingests through the standard path; inline classification scores its rows
 immediately, and any low-signal cluster gets explicit operator control via
-`aith assess dispatch defer-cluster` rather than an automatic URL cap.
+`aith assess work-buffer defer-cluster` rather than an automatic URL cap.
 
 #### Admin / internal / config URL preservation under egress block
 
@@ -207,16 +207,16 @@ replacement.
 
 **Retrieve work items for analysis:**
 ```bash
-aith assess dispatch "$DB" fetch api 50 surface-collector
-aith assess dispatch "$DB" fetch page 50 surface-collector
-aith assess dispatch "$DB" fetch unknown 50 surface-collector
+aith assess work-buffer "$DB" fetch api 50 surface-collector
+aith assess work-buffer "$DB" fetch page 50 surface-collector
+aith assess work-buffer "$DB" fetch unknown 50 surface-collector
 ```
 
 Analyze the fetched URLs (without testing them — triage is classification, not probing)
 and produce the priority manifest. Then release them back:
 
 ```bash
-aith assess dispatch "$DB" reset-stale 0
+aith assess work-buffer "$DB" reset-stale 0
 ```
 
 **Triage categories** (see agent prompt for full pattern lists):
@@ -253,7 +253,7 @@ aith assess record-finding surface-collector <finding-json-file>
 
 Produce the final stats:
 ```bash
-aith assess dispatch "$DB" stats
+aith assess work-buffer "$DB" stats
 ```
 
 Build the priority manifest in the output — a ranked list of attack surface clusters

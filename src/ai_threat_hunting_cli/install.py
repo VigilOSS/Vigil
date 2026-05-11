@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import docker
-from .client_rosters import repair_engagement_codex_agent_links
+from .client_rosters import repair_engagement_client_rosters
 
 
 def _rmtree(path: Path) -> None:
@@ -165,7 +165,7 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
         _copy_client_entrypoints(source_root, install_root)
         _ensure_install_dirs(install_root)
 
-    repair_engagement_codex_agent_links(install_root)
+    repair_engagement_client_rosters(install_root)
 
     image_built = False
     if options.verify_docker_image:

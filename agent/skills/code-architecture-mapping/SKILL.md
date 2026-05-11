@@ -89,7 +89,10 @@ Cluster files into modules using three signals:
 2. **Naming conventions** — shared prefixes/suffixes (e.g., `http_parse.c`, `http_header.c`, `http_conn.c`)
 3. **Include/import relationships** — files that include each other form a module even if in different directories
 
-Produce a module map: `module_name -> [file_list]` with a one-line description per module.
+Produce a module map with explicit `module_key`, human-readable `name`, one-line
+description, trust boundary, and repo-relative file list per module. The `module_key`
+is persisted in the backend, so it must be meaningful and stable (`auth-reset-password`,
+`media-upload`, `tenant-routing`) rather than generic (`module_1`, `<repo>_module_N`).
 
 ### Step 7: Identify Entry Points
 
@@ -202,7 +205,9 @@ Is this file executable source code?
 
 ## Priority Scoring
 
-Each file receives a priority score for analysis ordering:
+Each file receives an `analysis_priority` score for analysis ordering. The code-classify
+machine JSON field is named `analysis_priority`; do not emit `priority_score` or
+`classification_tier` in classification artifacts.
 
 ```
 priority = classification_base + git_churn_bonus + entry_point_proximity + past_cve_bonus

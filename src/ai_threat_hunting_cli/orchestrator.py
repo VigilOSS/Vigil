@@ -74,6 +74,10 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
         _terminate_process(process)
         pid_file.unlink(missing_ok=True)
         raise SystemExit(f"Orchestrator did not become healthy on http://{options.host}:{options.port}/healthz")
+    if not _wait_for_readiness(options.host, options.port, process=process):
+        _terminate_process(process)
+        pid_file.unlink(missing_ok=True)
+        raise SystemExit(f"Orchestrator did not become ready on http://{options.host}:{options.port}/readyz")
 
 
 def stop_orchestrator(install_root: Path) -> None:
@@ -113,7 +117,7 @@ def _already_running_message(pid_file: Path, pid: str, host: str, port: int) -> 
 
 def _build_frontend(install_root: Path) -> None:
     frontend_dir = install_root / "orchestrator" / "frontend"
-    subprocess.run(["npm", "install"], cwd=frontend_dir, check=True)
+    subprocess.run(["npm", "ci"], cwd=frontend_dir, check=True)
     subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True)
 
 
@@ -212,6 +216,15 @@ def _pid_alive(pid: int) -> bool:
 
 def _wait_for_health(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None) -> bool:
     url = f"http://{host}:{port}/healthz"
+    return _wait_for_http_200(url, process=process)
+
+
+def _wait_for_readiness(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None) -> bool:
+    url = f"http://{host}:{port}/readyz"
+    return _wait_for_http_200(url, process=process)
+
+
+def _wait_for_http_200(url: str, *, process: subprocess.Popen[bytes] | None = None) -> bool:
     for _ in range(30):
         if process is not None and process.poll() is not None:
             return False
