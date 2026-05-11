@@ -108,7 +108,7 @@ four-way checkpoint below when the second sample also stays >50%. Record
 the chosen option via:
 
 ```bash
-aith assess dispatch record-decision --kind egress_decision \
+aith assess agent decision --kind egress_decision \
     --choice <option> --payload-json '{"blocked_pct": N}' \
     --note "<one-line rationale>"
 ```
@@ -143,14 +143,14 @@ TLS fingerprint drift).
 `aith assess kali exec --technique HEALTH --intent "capture runtime egress IP" --probe-kind fingerprint --phase recon --timeout 30 -- curl -s https://api.ipify.org`. Email or message
 the program contact with the IP and the engagement scope. Wait for
 confirmation before retesting. Record the request via
-`aith assess dispatch record-decision --kind egress_decision --choice allowlist-requested --payload-json '{"egress_ip": "...", "program_contact": "..."}'`
+`aith assess agent decision --kind egress_decision --choice allowlist-requested --payload-json '{"egress_ip": "...", "program_contact": "..."}'`
 so a later operator can reproduce it.
 
 **Audit-pipeline considerations.** The audit row reflects the runtime egress
 IP only — the audit pipeline does not see the program's allowlist, so the
 audit story is the same whether the allowlist is in place or not. The
 operator records the allowlisting outcome via
-`aith assess dispatch record-decision` and the
+`aith assess agent decision` and the
 activity log; downstream specialists see clean responses again and treat
 them as the truth.
 
@@ -166,7 +166,7 @@ clean-IP VPS works when the target's reputation feed is conservative.
 runtime's standard `HTTPS_PROXY` / `HTTP_PROXY` env vars. Verify the egress
 IP shifted before re-running the egress reputation script. Document the
 proxy provider, the egress IP range, and the engagement-side authorization
-via `aith assess dispatch record-decision --kind egress_decision --choice residential-proxy --payload-json '{"provider": "...", "egress_range": "..."}'`.
+via `aith assess agent decision --kind egress_decision --choice residential-proxy --payload-json '{"provider": "...", "egress_range": "..."}'`.
 Do not route exploitation traffic through a
 proxy without explicit operator and program approval — proxy logs are
 out-of-pipeline and complicate the audit trail.
@@ -209,7 +209,7 @@ Phase-3 blocker and ships the report with the documented gap; this is a
 real failure mode for some heavily-CDN-fronted programs.
 
 **How to set up.** Record the decision via
-`aith assess dispatch record-decision --kind egress_decision --choice accept-gap --payload-json '{"blocked_pct": N}' --surfaced-to-user`,
+`aith assess agent decision --kind egress_decision --choice accept-gap --payload-json '{"blocked_pct": N}' --surfaced-to-user`,
 write the gap into `agent/skills/report-generation` Phase-3 coverage notes via
 `aith assess record-intel note` so the report-writer surfaces it. Mark
 affected scope entries `status=deferred` in `scope.json` so the scope

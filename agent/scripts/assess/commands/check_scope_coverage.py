@@ -246,7 +246,7 @@ def run(args: argparse.Namespace) -> None:
         for host, vendor in vendor_saas_pending:
             overall_gaps.append(
                 f"vendor-saas: {host} (vendor={vendor}) has no scope_decision recorded "
-                f"(record via `aith assess dispatch record-decision --kind scope_decision --host {host} --vendor {vendor} --choice ...`)"
+                f"(record via `aith assess agent decision --kind scope_decision --host {host} --vendor {vendor} --choice ...`)"
             )
     ready = not overall_gaps
 
@@ -691,7 +691,7 @@ def _render_text(report: dict[str, Any], *, verbose: bool) -> None:
         for row in vendor_saas_pending:
             print(
                 f"  - {row['host']} (vendor={row['vendor']}) — record a "
-                f"scope_decision via `aith assess dispatch record-decision "
+                f"scope_decision via `aith assess agent decision "
                 f"--kind scope_decision --host {row['host']} --vendor {row['vendor']} "
                 f"--choice ...` before recon dispatch"
             )

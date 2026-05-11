@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .client_rosters import ensure_codex_agents_link
+from .client_rosters import ensure_claude_agents_link, ensure_claude_settings, ensure_codex_agents_link
 from .paths import (
     DEFAULT_ORCHESTRATOR_BASE_URL,
     engagements_root,
@@ -216,6 +216,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
             "source_repos": [],
             "status": "in_progress",
             "current_phase": "recon",
+            "code_phase": "ingest",
         }
         manifest = {
             "key": key,
@@ -234,7 +235,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     # Dispatch tracking + handoff content live in the orchestrator backend
     # (assessment_dispatches / assessment_dispatch_handoffs /
     # assessment_dispatch_decisions). Write via
-    # `aith assess dispatch register|record-handoff|record-decision`.
+    # `aith assess agent start|handoff|decision`.
     #
     # AGENT_NAME defaulting to "operator" is handled in
     # agent/scripts/assess/lib/kali_audit.py (`_resolve_agent_name`) so the env
@@ -267,6 +268,8 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     _write_prompt_wrappers(agent_root, eng_dir, client_kind)
     if client_kind in {"codex", "both"}:
         _write_codex_config(agent_root, eng_dir)
+    if client_kind in {"claude", "both"}:
+        _write_claude_config(agent_root, eng_dir)
     _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
     _emit_bootstrap_scope_summary(scope)
     _verify_backend_install_root(install_root, eng_dir)
@@ -665,6 +668,12 @@ def _write_codex_config(agent_root: Path, eng_dir: Path) -> None:
         codex_dir.mkdir(exist_ok=True)
         shutil.copy2(src, codex_dir / "config.toml")
     ensure_codex_agents_link(agent_root, codex_dir)
+
+
+def _write_claude_config(agent_root: Path, eng_dir: Path) -> None:
+    claude_dir = eng_dir / ".claude"
+    ensure_claude_settings(agent_root, claude_dir)
+    ensure_claude_agents_link(agent_root, claude_dir)
 
 
 def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_permissions: bool) -> None:

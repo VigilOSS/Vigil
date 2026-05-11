@@ -10,14 +10,14 @@ governed by `exploit_policy` in scope.json and belongs after Verify in Phase 5, 
 Every specialist writes a structured handoff before its dispatch returns:
 
 ```bash
-aith assess dispatch record-handoff --from-json <handoff-json>
+aith assess agent handoff --from-json <handoff-json>
 ```
 
 The handoff captures summary, coverage gaps, next steps, runtime issues, working
 artifacts, open questions, and role-specific extras. This row is canonical for "what
 was done, what's missing, what's next" — schema in
 `agent/references/runtime-guides/handoff-schema.md`. The operator pulls a bounded
-markdown blob via `aith assess dispatch render-handoff <agent-id>` and pastes it into
+markdown blob via `aith assess agent render-handoff <agent-id>` and pastes it into
 the next dispatch's prompt.
 
 ## Skill Passing Protocol
@@ -61,7 +61,7 @@ Output: priority manifest, work-buffer stats, intelligence, coverage gaps, recor
 
 1. Translate each `#### Intelligence` row into a JSON payload and record it via `aith assess record-intel <type> <json-file>` (one call per row). Verify with `aith assess list-intel`.
 2. Review `#### Priority Attack Surfaces` for Phase 3 dispatch ordering
-3. Inspect work-buffer stats: `aith assess dispatch "$DIR/cases.db" stats`
+3. Inspect work-buffer stats: `aith assess work-buffer "$DIR/cases.db" stats`
 4. Update scope.json phase to `consume-test`
 
 ## Phase 3 Returns (CONSUME & TEST)
@@ -74,7 +74,7 @@ Output: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED sig
 2. Queue live findings for Phase 4 Verify, not exploitation. Verification decides which findings become confirmed, downgraded, killed, or chain-required before exploit work is spent.
 3. When a finding is real only as part of a chain, keep it in the normal finding table and set `details.chain_required`, `details.chain_rationale`, and `details.required_followup` via `record-finding` or `update-finding`
 4. FUZZER_NEEDED → dispatch fuzzer within Phase 3 — **bring `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md`**, feed results back through vuln-analyst
-5. Mark work-buffer batch done: `aith assess dispatch "$DB" done "id1,id2,..."`
+5. Mark work-buffer batch done: `aith assess work-buffer "$DB" done "id1,id2,..."`
 6. Continue the Phase 3 consumption loop (steps b–f in Phase Flow)
 
 ### FUZZER

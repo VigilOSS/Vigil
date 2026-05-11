@@ -921,6 +921,146 @@ def test_cross_file_triggers_block_gate_until_requeued_and_dedupe_targets(client
     assert final_payload["gate"]["passed"] is True
 
 
+def test_pending_trigger_can_be_resolved_as_external_context_gap(client, isolate_settings):
+    engagement_key = "2026-04-04-code-trigger-external-gap"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="trigger-external-gap-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    queue_item = claimed.json()[0]
+
+    analysis_result = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json={
+            "queue_item_id": queue_item["id"],
+            "file_id": parser_file["id"],
+            "agent_name": "code-vuln-hunter",
+            "function_name": "parse_message",
+            "evidence": "External DLL implements the storage call.",
+            "disposition": "clean",
+            "confidence": "medium",
+            "cross_file_triggers": [
+                {
+                    "file_path": "bin/StorageService.dll",
+                    "reason": "implementation not present in source snapshot",
+                    "vuln_class": "web-app-injection",
+                }
+            ],
+        },
+    )
+    assert analysis_result.status_code == 201
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "notes": "Reviewed parser",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+        },
+    )
+    assert done.status_code == 200
+
+    pending = client.get(f"/engagements/{engagement_key}/assessment/code/triggers?status=pending")
+    assert pending.status_code == 200
+    assert pending.json()[0]["target_file_path"] == "bin/StorageService.dll"
+
+    coverage_before = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage_before.json()["trigger_summary"]["pending"] == 1
+    assert coverage_before.json()["gate"]["passed"] is False
+
+    resolved = client.post(
+        f"/engagements/{engagement_key}/assessment/code/triggers/resolve",
+        json={
+            "items": [{"file_path": "bin/StorageService.dll", "vuln_class": "web-app-injection"}],
+            "resolution_status": "external_context_unavailable",
+            "resolution_note": "Implementation is outside the provided source snapshot.",
+        },
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["resolved"] == 1
+
+    resolve_again = client.post(
+        f"/engagements/{engagement_key}/assessment/code/triggers/resolve",
+        json={
+            "items": [{"file_path": "bin/StorageService.dll", "vuln_class": "web-app-injection"}],
+            "resolution_status": "not_applicable",
+            "resolution_note": "Second resolution should not overwrite terminal status.",
+        },
+    )
+    assert resolve_again.status_code == 200
+    assert resolve_again.json()["resolved"] == 0
+
+    coverage_after = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    payload = coverage_after.json()
+    assert payload["trigger_summary"]["pending"] == 0
+    assert payload["trigger_summary"]["external_context_unavailable"] == 1
+    assert payload["gate"]["passed"] is True
+
+
+def test_not_applicable_cwe_coverage_does_not_block_effort_gate(client, isolate_settings):
+    engagement_key = "2026-04-04-code-cwe-not-applicable"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="cwe-not-applicable-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queue_response.status_code == 201
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    queue_item = claimed.json()[0]
+
+    coverage = _network_input_coverage(
+        default_effort=80,
+        overrides={
+            "algorithmic-dos": {
+                "effort": 0,
+                "disposition": "not_applicable",
+                "notes": "Static XML/config path has no executable parser loop in this file.",
+            }
+        },
+    )
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "notes": "Reviewed parser",
+            "cwe_coverage": coverage,
+        },
+    )
+    assert done.status_code == 200
+
+    coverage_after = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage_after.status_code == 200
+    assert coverage_after.json()["gate"]["passed"] is True
+
+
 def test_analysis_result_triggers_are_recorded_before_requeue(client, isolate_settings):
     engagement_key = "2026-04-04-analysis-result-triggers"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)

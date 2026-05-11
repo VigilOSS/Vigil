@@ -18,7 +18,7 @@ def register(subparsers) -> None:
     p = subparsers.add_parser("code-dispatch", help="Code analysis queue dispatch engine")
     p.add_argument(
         "action",
-        help="stats|fetch|done|error|needs-context|reset-stale|queue|requeue-triggers",
+        help="stats|fetch|done|error|needs-context|reset-stale|queue|requeue-triggers|list-triggers|resolve-triggers",
     )
     p.add_argument("extra", nargs="*", help="Action-specific arguments")
     p.set_defaults(func=run)
@@ -87,10 +87,23 @@ def run(args) -> None:
             print("Usage: code-dispatch requeue-triggers <triggers-json-file>", file=sys.stderr)
             sys.exit(1)
         _requeue_triggers(cfg, extra[0])
+    elif action == "list-triggers":
+        status_filter = extra[0] if extra else "pending"
+        _list_triggers(cfg, status_filter)
+    elif action == "resolve-triggers":
+        if len(extra) < 3:
+            print(
+                "Usage: code-dispatch resolve-triggers <triggers-json-file> "
+                "<external_context_unavailable|source_equivalent_analyzed|not_applicable> <note>",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _resolve_triggers(cfg, extra[0], extra[1], " ".join(extra[2:]))
     else:
         print(f"Unknown action: {action}", file=sys.stderr)
         print(
-            "Actions: stats, fetch, done, error, needs-context, reset-stale, queue, requeue-triggers",
+            "Actions: stats, fetch, done, error, needs-context, reset-stale, queue, "
+            "requeue-triggers, list-triggers, resolve-triggers",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -629,6 +642,95 @@ def _requeue_triggers(cfg, triggers_file: str) -> None:
             print(f"Not found: {', '.join(str(item) for item in not_found)}")
         if ambiguous:
             print(f"Ambiguous without repo_id: {', '.join(str(item) for item in ambiguous)}")
+    print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
+    if isinstance(result, dict) and result:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _list_triggers(cfg, status_filter: str) -> None:
+    endpoint = "code/triggers"
+    if status_filter:
+        endpoint = f"{endpoint}?status={status_filter}"
+    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    try:
+        result = client.get(endpoint)
+    finally:
+        client.close()
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _resolve_triggers(cfg, triggers_file: str, resolution_status: str, note: str) -> None:
+    fp = Path(triggers_file)
+    if not fp.is_file():
+        print(f"Triggers JSON file not found: {triggers_file}", file=sys.stderr)
+        sys.exit(1)
+
+    raw = json.loads(fp.read_text(encoding="utf-8"))
+    if isinstance(raw, dict):
+        raw_items = raw.get("items", raw.get("triggers", raw.get("cross_file_triggers", [])))
+    elif isinstance(raw, list):
+        raw_items = raw
+    else:
+        print("Triggers file must contain a JSON array or object", file=sys.stderr)
+        sys.exit(1)
+
+    if not isinstance(raw_items, list) or not raw_items:
+        print("No triggers to resolve.", file=sys.stderr)
+        sys.exit(1)
+
+    items: list[dict] = []
+    for idx, trigger in enumerate(raw_items):
+        if not isinstance(trigger, dict):
+            print(f"Trigger item {idx} must be a JSON object", file=sys.stderr)
+            sys.exit(1)
+        item: dict = {}
+        for source_key, target_key in (
+            ("trigger_id", "trigger_id"),
+            ("id", "id"),
+            ("file_path", "file_path"),
+            ("target_file_path", "target_file_path"),
+            ("repo_id", "repo_id"),
+            ("vuln_class", "vuln_class"),
+        ):
+            if source_key in trigger and trigger[source_key] not in (None, ""):
+                item[target_key] = trigger[source_key]
+        if not any(key in item for key in ("trigger_id", "id", "file_path", "target_file_path")):
+            print(
+                f"Trigger item {idx} needs trigger_id/id or file_path/target_file_path",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        items.append(item)
+
+    payload = {
+        "items": items,
+        "resolution_status": resolution_status,
+        "resolution_note": note,
+    }
+    submit_snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-trigger-resolve",
+        label=fp.stem,
+        payload=payload,
+        source_path=str(fp),
+        metadata={"command": "code-dispatch resolve-triggers", "count": len(items)},
+    )
+    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    try:
+        result = client.post("code/triggers/resolve", payload)
+    finally:
+        client.close()
+
+    response_snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-trigger-resolve-response",
+        label=fp.stem,
+        payload=result,
+        source_path=str(submit_snapshot),
+        metadata={"command": "code-dispatch resolve-triggers", "count": len(items)},
+    )
+    resolved_count = result.get("resolved", 0) if isinstance(result, dict) else 0
+    print(f"Resolved {resolved_count} trigger(s)")
     print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))

@@ -3,7 +3,7 @@
 The structured handoff blob is the canonical "what was done, what's missing, what's
 next" record every specialist writes before its dispatch returns. The blob lives in
 the `assessment_dispatch_handoffs` table and is rendered into the next dispatch's
-prompt by `aith assess dispatch render-handoff <agent-id>`.
+prompt by `aith assess agent render-handoff <agent-id>`.
 
 ## Purpose
 
@@ -25,7 +25,7 @@ prompt by `aith assess dispatch render-handoff <agent-id>`.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `agent_id` | string | yes | The dispatching agent_id (the same id passed to `dispatch register`). |
+| `agent_id` | string | yes | The dispatching agent_id (the same id passed to `aith assess agent start` / `POST /dispatches`). |
 | `agent_role` | string | yes | The role file the dispatch ran under (`recon-specialist`, `vulnerability-analyst`, etc.). |
 | `phase` | string | yes | The phase tag the dispatch was authorized for (`recon`, `consume-test`, `verify`, `exploit`, `report`, `code-hunt`, ..., plus half-phase tags `recon-pivot` / `exploit-recon`). |
 | `summary` | string | yes | ≤2000 chars; one paragraph; what was done in your own words. |
@@ -444,13 +444,13 @@ cat > /tmp/handoff-recon-a3f9.json <<'JSON'
 }
 JSON
 
-aith assess dispatch record-handoff --from-json /tmp/handoff-recon-a3f9.json
+aith assess agent handoff --from-json /tmp/handoff-recon-a3f9.json
 # Self-check: confirm the row is readable before exiting (404 → agent_id mismatch)
-aith assess dispatch render-handoff a3f9
+aith assess agent render-handoff a3f9
 ```
 
 For simple cases (one or two findings, no nested fields), flag-based alternatives
-exist — see `aith assess dispatch record-handoff --help` for the live flag set.
+exist — see `aith assess agent handoff --help` for the live flag set.
 The `--from-json` form is the canonical path because it's the only way to record
 nested fields (`coverage_gaps`, `next_steps`, `runtime_issues`, `working_artifacts`)
 without shell-escaping pain.
@@ -458,7 +458,7 @@ without shell-escaping pain.
 The renderer reads the row back:
 
 ```bash
-aith assess dispatch render-handoff <agent-id>
+aith assess agent render-handoff <agent-id>
 ```
 
 The output is a markdown blob, hard-capped at `--max-lines` (default 40), with
@@ -466,23 +466,23 @@ findings collapsed to "... and N more" before runtime_issues / working_artifacts
 Summary, coverage_gaps, and next_steps are never trimmed. Paste it verbatim into
 the next dispatch's prompt.
 
-## Checkpointing — call `record-handoff` as you work
+## Checkpointing — call `aith assess agent handoff` as you work
 
-`aith assess dispatch record-handoff --from-json <path>` is idempotent: every
+`aith assess agent handoff --from-json <path>` is idempotent: every
 call against the same `agent_id` either inserts the row or replaces the prior
 payload. Call it after each major step in your methodology — not just at the
 end.
 
 The pattern: maintain a local handoff JSON file (e.g.
 `/tmp/handoff_<agent-id>.json`). After each tool or methodology step, update
-the file with everything-known-so-far, then re-run record-handoff against it.
-Latest write wins; the operator's `render-handoff` always reflects the most
+the file with everything-known-so-far, then re-run `aith assess agent handoff` against it.
+Latest write wins; `aith assess agent render-handoff <agent-id>` always reflects the most
 recent state.
 
 Why: durable progress accrues in the backend as you work. If your dispatch
 halts before the final closing call (e.g. context exhaustion in Claude Code
 sub-agents), the most recent checkpoint is your canonical record. Operators
-reading `render-handoff` see whatever step you were on.
+reading `aith assess agent render-handoff` see whatever step you were on.
 
 ### Suggested checkpoint cadence per role
 
@@ -526,7 +526,7 @@ reading `render-handoff` see whatever step you were on.
 ```
 
 After step 7 completes the same file is rewritten with the full coverage
-gaps, next steps, and a confident summary, and `record-handoff` is run again
+gaps, next steps, and a confident summary, and `aith assess agent handoff` is run again
 against the same path. The backend row is replaced in place.
 
 ### What gets persisted on halt

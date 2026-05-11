@@ -82,13 +82,13 @@ Before your dispatch returns, run in this order:
 
 1. `aith assess record-intel <type> <intel-json>` for every intel row — one call per row (cve, tech-component, person, email, domain, dns-record, social-profile, breach-record, org-fact, note). CVE matches are intel, not findings.
 2. `aith assess record-finding osint-analyst <finding-json>` ONLY when you have target-specific proof that does not require exploit-developer validation (breached credentials confirmed against the target, public data leak containing target-specific secrets).
-3. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (`cve_matches`, `high_value_cve_matches`, `intel_rows`, `github_orgs_enumerated`)
-4. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+3. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (`cve_matches`, `high_value_cve_matches`, `intel_rows`, `github_orgs_enumerated`)
+4. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-The `record-handoff` step is idempotent and called incrementally — checkpoint
+`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
