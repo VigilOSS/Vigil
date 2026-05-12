@@ -2734,6 +2734,7 @@ def resolve_code_triggers(
 
     return {
         "resolved": resolved,
+        "items_requested": len(items),
         "total": len(items),
         "not_resolved": not_resolved,
         "resolution_status": normalized_status,

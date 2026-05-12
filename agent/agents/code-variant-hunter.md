@@ -86,8 +86,8 @@ Each variant becomes a separate finding linked to the original:
 - Same CWE as original
 - Own severity assessment (same pattern in less-reachable code may be lower severity)
 - Link kind: `variant_of`
-- Include `details.impact` in every finding payload because `record-finding` requires both
-  `details.evidence` and `details.impact`
+- Include all report-readiness fields in `details`: `evidence`, `impact`, `remediation`,
+  `steps_to_reproduce`, `cvss_vector`, and `cvss_score` (CVSS must align with severity)
 
 ## Output Sections
 
@@ -106,7 +106,10 @@ New finding JSON payloads, each with a link to the original:
     "impact": "Remote attackers can trigger heap corruption in the FTP path parser with an overlong path",
     "evidence": "Same pattern as CH-001 but in FTP path parsing...",
     "taint_path": "...",
-    "remediation": "Apply same fix as CH-001: add bounds check before memcpy"
+    "remediation": "Apply same fix as CH-001: add bounds check before memcpy",
+    "steps_to_reproduce": ["Construct FTP URL with path > 256 chars", "Pass to ftp_connect()", "Observe heap corruption"],
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "cvss_score": 6.5
   },
   "links": [{"link_kind": "variant_of", "target_kind": "finding", "target_ref": "CH-001"}]
 }
