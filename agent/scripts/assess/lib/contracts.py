@@ -697,6 +697,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         common_mistakes=(
             ("cwe_coverage object wrapper", "`done` requires a bare JSON array, not {'cwe_coverage': [...]}"),
+            ("analysis_priority", "queue payloads use `priority`; classification payloads use `analysis_priority`. Preserve the architect's ordering by mapping analysis_priority to priority when queueing."),
             ("missing resolution_note", "accepted trigger gaps need a durable rationale"),
             ("using resolve-triggers for pending source that exists", "use requeue-triggers when the target file is available and needs analysis"),
         ),
@@ -706,6 +707,175 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
             {
                 "command": "aith assess code-dispatch done 42 clean cwe/42.json 'reviewed parser'",
+            },
+        ),
+    ),
+    "code-index": CommandContract(
+        name="code-index",
+        summary="Build the tree-sitter structural index under the engagement analysis-state directory.",
+        schema_name="structural-index manifest and per-file index JSON",
+        preferred_invocations=(
+            "aith assess code-index <repo-path> --repo-id <repo-id>",
+            "aith assess code-index <repo-path> --output-dir <engagement-dir>/tools/analysis-state",
+            "aith assess code-index-sync <repo-id>",
+        ),
+        author_supplied_fields=(
+            "repo_path",
+            "repo_id when available",
+            "--output-dir only for intentional non-engagement output",
+        ),
+        helper_defaults=(
+            ("output_dir", "<engagement_dir>/tools/analysis-state"),
+            ("manifest", "structural-index-manifest.json"),
+            ("per-file indexes", "structural-index/<sha16>.json"),
+        ),
+        notes=(
+            "The default output directory is the same directory consumed by code-index-sync, so indexing and sync stay in one engagement-owned analysis-state tree.",
+            "Pass --engagement-dir or set ENGAGEMENT_DIR when running outside an engagement directory. The helper fails closed instead of writing an unsynced .code-index tree into the source repo.",
+        ),
+        common_mistakes=(
+            ("running outside engagement context", "pass --engagement-dir or --output-dir explicitly"),
+            ("sync cannot find manifest", "use the default tools/analysis-state output or pass the same explicit output path consistently"),
+        ),
+    ),
+    "code-classify": CommandContract(
+        name="code-classify",
+        summary="Bulk-classify code files and persist architect-assigned analysis priority.",
+        schema_name="code-file-classification.schema.json",
+        preferred_invocations=(
+            "aith assess contract code-classify",
+            "aith assess code-classify <classifications-json-file>",
+        ),
+        author_supplied_fields=(
+            "file_id or file_path",
+            "classification",
+            "role",
+            "slot_types",
+            "analysis_priority",
+        ),
+        helper_defaults=(
+            ("file_path", "resolved client-side to file_id before posting"),
+            ("repo_id", "optional disambiguator for duplicate file_path values"),
+        ),
+        notes=(
+            "Use analysis_priority for classification ordering. The code-dispatch queue has its own priority field; operators map analysis_priority to priority only when queueing hunt work.",
+            "Classification tiers are critical/high/medium/low/skip. analysis_priority is a 0-100 score that preserves ordering inside those tiers.",
+            "Use `aith assess contract code-classify` before authoring the file instead of copying payload shapes into prompts.",
+        ),
+        common_mistakes=(
+            ("priority", "use analysis_priority in code-classify payloads"),
+            ("slot_types_json", "use slot_types"),
+            ("repo_id without file_path", "repo_id only disambiguates file_path lookup; file_id can stand alone"),
+        ),
+        examples=(
+            {
+                "file_id": 42,
+                "classification": "critical",
+                "role": "parser",
+                "slot_types": ["NETWORK-INPUT"],
+                "analysis_priority": 95,
+            },
+        ),
+    ),
+    "code-record-modules": CommandContract(
+        name="code-record-modules",
+        summary="Record repository module boundaries from the architecture mapping pass.",
+        schema_name="backend CodeModuleRecord list",
+        preferred_invocations=(
+            "aith assess contract code-record-modules",
+            "aith assess code-record-modules <repo-id> <modules-json-file>",
+        ),
+        author_supplied_fields=(
+            "repo_id",
+            "module_key or name",
+            "name",
+            "description",
+            "trust_boundary",
+            "files",
+            "file_ids",
+        ),
+        helper_defaults=(
+            ("module_key", "derived from name when omitted; collisions are rejected"),
+        ),
+        notes=(
+            "Use this contract as the module-map shape source for code-architect output. Prompts should name this helper instead of embedding a module JSON template.",
+            "Provide explicit module_key values when names normalize to the same slug.",
+        ),
+        common_mistakes=(
+            ("module map only in artifacts", "persist durable module boundaries with code-record-modules"),
+            ("duplicate auto-derived module_key", "provide explicit module_key values"),
+        ),
+    ),
+    "code-record-threat-model": CommandContract(
+        name="code-record-threat-model",
+        summary="Record the repository threat model produced by code-architect.",
+        schema_name="backend threat_model object",
+        preferred_invocations=(
+            "aith assess contract code-record-threat-model",
+            "aith assess code-record-threat-model <repo-id> <threat-model-json-file>",
+        ),
+        author_supplied_fields=(
+            "repo_id",
+            "threat_model object",
+        ),
+        notes=(
+            "Use this contract as the threat-model shape source for code-architect output. The backend stores the object as durable analysis context for later dispatches.",
+            "Keep implementation detail in the artifact, but persist durable attacker surfaces, trust boundaries, sensitive operations, and missing context through this helper.",
+        ),
+        common_mistakes=(
+            ("threat model only in markdown", "persist durable threat-model context with code-record-threat-model"),
+        ),
+    ),
+    "code-record-analysis": CommandContract(
+        name="code-record-analysis",
+        summary="Record a code-vuln-hunter result against the claimed queue item that produced it.",
+        schema_name="code-analysis-result.schema.json",
+        preferred_invocations=(
+            "aith assess contract code-record-analysis",
+            "aith assess code-record-analysis <analysis-results-json-file>",
+        ),
+        author_supplied_fields=(
+            "queue_item_id",
+            "agent_name",
+            "function_name",
+            "hypothesis",
+            "evidence",
+            "disposition",
+            "confidence",
+            "finding_slug when disposition=finding",
+            "cwe_coverage",
+            "cross_file_triggers",
+        ),
+        helper_defaults=(
+            ("file_id", "derived by the backend from queue_item_id; optional client-side consistency check only"),
+            ("confidence", "medium"),
+            ("audit_metadata", "{}"),
+            ("cwe_coverage", "[]"),
+            ("cross_file_triggers", "[]"),
+        ),
+        notes=(
+            "Record analysis results only for queue items fetched by code-dispatch. queue_item_id is required so stale or copied file_id values cannot attach work to the wrong file.",
+            "When file_id is supplied, the backend treats it as a consistency check and rejects it if it differs from the queue item.",
+            "For confirmed findings, create the finding with record-finding first, then place that slug in finding_slug.",
+        ),
+        common_mistakes=(
+            ("file_id-only result", "include queue_item_id; file_id is optional and queue-derived"),
+            ("confidence in finding record", "confidence belongs in code-record-analysis, not record-finding"),
+            ("cross_file_triggers object wrapper", "cross_file_triggers is a bare array on the analysis result"),
+        ),
+        examples=(
+            {
+                "queue_item_id": 42,
+                "agent_name": "code-vuln-hunter",
+                "function_name": "parse_message",
+                "hypothesis": "Attacker-controlled bytes reach length-sensitive copy code",
+                "evidence": "parse_message() bounds checks len before memcpy; no bypass found",
+                "disposition": "clean",
+                "confidence": "high",
+                "cwe_coverage": [
+                    {"family": "buffer-overflow", "effort": 85, "notes": "All parser entry chains traced"}
+                ],
+                "cross_file_triggers": [],
             },
         ),
     ),

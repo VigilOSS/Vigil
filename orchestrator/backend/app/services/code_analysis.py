@@ -1723,39 +1723,41 @@ def create_analysis_result(
     with get_connection() as connection:
         queue_item_id = result.get("queue_item_id")
         if queue_item_id is None:
-            connection.execute("BEGIN IMMEDIATE")
-        file_row = _get_file_rows(connection, engagement.id, {int(result["file_id"])})[
-            int(result["file_id"])
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="queue_item_id is required; analysis results must be tied to a claimed queue item",
+            )
+        queue_row = _get_queue_rows(connection, engagement.id, {int(queue_item_id)})[
+            int(queue_item_id)
         ]
+        queue_file_id = int(queue_row["file_id"])
+        payload_file_id = result.get("file_id")
+        if payload_file_id is not None and int(payload_file_id) != queue_file_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Analysis result file_id does not match the queue item",
+            )
+        file_row = _get_file_rows(connection, engagement.id, {queue_file_id})[queue_file_id]
         normalized_cross_file_triggers = _normalize_cross_file_triggers(result.get("cross_file_triggers"))
 
-        if queue_item_id is not None:
-            queue_row = _get_queue_rows(connection, engagement.id, {int(queue_item_id)})[
-                int(queue_item_id)
-            ]
-            if int(queue_row["file_id"]) != int(file_row["id"]):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Analysis result file/context references do not match the queue item",
-                )
-            _require_queue_status(
-                {int(queue_item_id): queue_row},
-                expected_status="processing",
-                action="record analysis results for",
+        _require_queue_status(
+            {int(queue_item_id): queue_row},
+            expected_status="processing",
+            action="record analysis results for",
+        )
+        cursor = connection.execute(
+            """
+            UPDATE code_analysis_queue
+            SET updated_at = updated_at
+            WHERE engagement_id = ? AND id = ? AND file_id = ? AND status = 'processing'
+            """,
+            (engagement.id, int(queue_item_id), int(file_row["id"])),
+        )
+        if cursor.rowcount != 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="queue item changed state before recording analysis result; refetch and retry",
             )
-            cursor = connection.execute(
-                """
-                UPDATE code_analysis_queue
-                SET updated_at = updated_at
-                WHERE engagement_id = ? AND id = ? AND file_id = ? AND status = 'processing'
-                """,
-                (engagement.id, int(queue_item_id), int(file_row["id"])),
-            )
-            if cursor.rowcount != 1:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="queue item changed state before recording analysis result; refetch and retry",
-                )
 
         cursor = connection.execute(
             """
@@ -1771,7 +1773,7 @@ def create_analysis_result(
             (
                 engagement.id,
                 queue_item_id,
-                result["file_id"],
+                int(file_row["id"]),
                 result.get("agent_name", ""),
                 result.get("function_name", ""),
                 result.get("hypothesis", ""),
@@ -1792,7 +1794,7 @@ def create_analysis_result(
         _record_cross_file_triggers(
             connection,
             engagement.id,
-            source_queue_item_id=int(queue_item_id) if queue_item_id is not None else None,
+            source_queue_item_id=int(queue_item_id),
             source_file_id=int(file_row["id"]),
             cross_file_triggers=normalized_cross_file_triggers,
         )

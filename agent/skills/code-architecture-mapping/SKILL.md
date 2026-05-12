@@ -207,7 +207,9 @@ Is this file executable source code?
 
 Each file receives an `analysis_priority` score for analysis ordering. The code-classify
 machine JSON field is named `analysis_priority`; do not emit `priority_score` or
-`classification_tier` in classification artifacts.
+`classification_tier` in classification artifacts. When building the Phase 2 file-analysis
+queue, map this value to the queue item's `priority` field; the two names belong to different
+helpers and should not be swapped.
 
 ```
 priority = classification_base + git_churn_bonus + entry_point_proximity + past_cve_bonus
@@ -322,12 +324,18 @@ Score = reachability x impact_severity x guard_absence. Include hypotheses scori
 
 ## Output Format
 
+Use `aith assess contract code-classify`, `aith assess contract code-record-modules`,
+`aith assess contract code-record-threat-model`, and `aith assess contract code-dispatch`
+as the canonical machine-artifact shape references. Cite those contract names in your handoff
+instead of duplicating payload templates, because the operator records your outputs through those
+helpers and their backend validation.
+
 Produce a structured architecture map containing:
 1. **Module Map**: module name, file list, description, primary slot types
 2. **Entry Point Catalog**: function, file, line, type (main/API/handler/callback/CLI)
 3. **Trust Boundary Map**: boundary name, entry function, data format, slot type
-4. **File Classification Table**: JSON records keyed by backend `file_id` (with `file_path` as helper context when useful), plus classification tier, slot types, and priority score. Do not emit path-only classifications.
-5. **File Analysis Queue**: flat ordered list of concrete files for Phase 2 (Hunt) dispatch, grouped by `batch_theme` for cross-file reasoning. Written to `tools/analysis-state/file-analysis-queue.json`. Every critical/high file appears regardless of whether a hypothesis names it. Emit one object per file with concrete `file_id` and `file_path` — no nested batch wrappers, no globs. Do not emit `context_id`; the queue is file-level and the supporting structure comes from metadata plus `tools/analysis-state/structural-index/`.
+4. **File Classification Table**: records keyed by backend `file_id` (with `file_path` as helper context when useful), plus classification tier, slot types, and `analysis_priority`. Do not emit path-only classifications.
+5. **File Analysis Queue**: flat ordered list of concrete files for Phase 2 (Hunt) dispatch, grouped by `batch_theme` for cross-file reasoning and using queue `priority` mapped from classification `analysis_priority`. Written to `tools/analysis-state/file-analysis-queue.json`. Every critical/high file appears regardless of whether a hypothesis names it. Emit one object per file with concrete `file_id` and `file_path` — no nested batch wrappers, no globs. Do not emit `context_id`; the queue is file-level and the supporting structure comes from metadata plus `tools/analysis-state/structural-index/`.
 6. **Call Graph**: JSON adjacency list with edges, entry points, and critical targets. Written to `tools/analysis-state/call-graph.json`.
 7. **Entry-Point Chains**: ranked list of complete data flow chains from entry to target.
 8. **Attack Hypotheses**: prioritized list of specific vulnerability hypotheses. Each includes: entry point, chain, target, CWE, concrete scenario, score. Written to `tools/analysis-state/attack-hypotheses.json`.
