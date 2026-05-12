@@ -16,6 +16,7 @@ repo_root = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(repo_root / "src"))
 
 from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
+from ai_threat_hunting_cli.client_rosters import repair_engagement_client_rosters
 
 
 def _copy_agent_fixture(agent_root: Path, sandbox_root: Path, *, client: str) -> None:
@@ -339,11 +340,48 @@ def test_aith_engagement_create_writes_explicit_web_scope(tmp_path: Path, monkey
     assert codex_agents.is_symlink()
     assert codex_agents.resolve() == (sandbox_root / ".codex" / "agents").resolve()
     assert (codex_agents / "vulnerability-analyst.toml").exists()
-    assert (created.path / ".claude" / "settings.json").exists()
+    claude_settings = (created.path / ".claude" / "settings.json").read_text(encoding="utf-8")
+    assert "AI_THREAT_HUNTING_AGENT_ROOT" in claude_settings
+    assert "agent/scripts/hooks/post-tool-log.sh" in claude_settings
+    assert "agent/scripts/hooks/scope-check.sh" in claude_settings
     claude_agents = created.path / ".claude" / "agents"
     assert claude_agents.is_symlink()
     assert claude_agents.resolve() == (sandbox_root / ".claude" / "agents").resolve()
     assert (claude_agents / "vulnerability-analyst.md").exists()
+
+
+def test_repair_refreshes_stale_claude_hook_settings(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    install_root = tmp_path / "install"
+    sandbox_root = install_root / "agent"
+    sandbox_root.mkdir(parents=True)
+    _copy_agent_fixture(repo_root / "agent", sandbox_root, client="claude")
+
+    engagement_dir = sandbox_root / "engagements" / "2026-05-12-stale-hooks"
+    claude_dir = engagement_dir / ".claude"
+    claude_dir.mkdir(parents=True)
+    (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
+    (engagement_dir / "start_claude.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (claude_dir / "settings.json").write_text(
+        '{"hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash scripts/hooks/post-tool-log.sh"}]}]}}',
+        encoding="utf-8",
+    )
+
+    repair_engagement_client_rosters(install_root)
+
+    repaired_settings = (claude_dir / "settings.json").read_text(encoding="utf-8")
+    repaired_payload = json.loads(repaired_settings)
+    repaired_commands = [
+        hook["command"]
+        for event_hooks in repaired_payload["hooks"].values()
+        for entry in event_hooks
+        for hook in entry["hooks"]
+    ]
+    assert all(command.startswith("bash -c ") for command in repaired_commands)
+    assert "AI_THREAT_HUNTING_AGENT_ROOT" in repaired_settings
+    assert "agent/scripts/hooks/post-tool-log.sh" in repaired_settings
+    assert "agent/scripts/hooks/scope-check.sh" in repaired_settings
+    assert (claude_dir / "agents").is_symlink()
 
 
 def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

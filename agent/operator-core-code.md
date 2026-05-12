@@ -430,6 +430,11 @@ them with `code-dispatch requeue-triggers` which adds the target files to the an
 if they are not already queued or completed. Unprocessed triggers are gate-blocking workflow
 state: the phase does not pass until each trigger is queued or already completed.
 
+**Findings-density signal:** After each hunter dispatch, if a single file yielded >= 2
+findings AND the file is > 500 LOC, note it for the Phase 2C adversarial pass. Finding
+density signals that more issues likely remain — the original hunter was anchored by its
+first discoveries.
+
 **Repeat** the fetch-dispatch-done loop until the queue is drained.
 
 **Phase 2A exit gate -- ALL of the following must be true:**
@@ -542,7 +547,7 @@ must reach `confirmed` (promoted to finding) or `clean` (hypothesis disproven). 
 unresolved suspicious findings to the verifier — the verifier's job is FP elimination on
 confirmed findings, not investigation of incomplete ones.
 
-**Phase 2 exit:** both 2A and 2B gates pass, AND no unresolved suspicious findings remain.
+**Phase 2 exit:** 2A, 2B, and 2C gates pass, AND no unresolved suspicious findings remain.
 
 ```bash
 aith assess transition-phase verify-variant
@@ -550,7 +555,37 @@ aith assess transition-phase verify-variant
 
 Exit: All critical/high files analyzed with effort thresholds met. CWE coverage gaps closed
 or documented. No unresolved needs-context. No pending triggers. No unresolved suspicious
-findings. Transition to Phase 3.
+findings. Adversarial depth pass complete. Transition to Phase 3.
+
+#### Phase 2C -- Adversarial Depth Pass
+
+After the coverage gate passes, select 10-20 files for an independent hostile reread.
+The broad coverage pass anchors agents on "complete correctly" — this pass resets the
+mission to "find the critical that survived."
+
+**File selection:** Use judgment. The coverage pass likely missed findings in files where:
+- Security decisions happen (auth, policy, access control, crypto)
+- Finding density was high — 2+ findings in a file signals more remain
+- Large files (>500 LOC) with entry points were analyzed under queue pressure
+- Config/policy files define execution behavior but were classified medium
+
+The operator picks 10-20 files that represent the highest-risk attack surface
+for the specific codebase. No fixed category list — the selection should reflect
+what an adversary would target given this project's architecture and threat model.
+
+**Dispatch rules:**
+- Use `deep-manual` mode (not item-iterating)
+- Do NOT include prior findings from Phase 2A in the dispatch context — the hunter
+  must approach fresh without anchoring on existing findings
+- Include: structural index, call graph, threat model, CWE patterns, but NOT
+  the list of already-found issues
+- Dispatch objective: "Find High/Critical vulnerabilities in these files. Ignore
+  coverage metrics. Focus on semantic fail-opens, logic bugs, and design flaws."
+
+**On return:** Record findings and analysis results normally. This pass does NOT need to
+satisfy CWE coverage thresholds — it produces findings, not coverage closure.
+
+**Phase 2C exit:** All dispatched files reviewed. Findings recorded.
 
 ### Phase 3: VERIFY + VARIANT
 

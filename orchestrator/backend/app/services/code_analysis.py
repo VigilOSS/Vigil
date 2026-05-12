@@ -1382,6 +1382,81 @@ def _validate_completion_coverage(file_row: dict[str, Any], cwe_coverage: list[d
         )
 
 
+def _compute_coverage_integrity(
+    connection,
+    engagement_id: int,
+    queue_item_id: int,
+    file_id: int,
+    total_functions: int,
+    cwe_coverage: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Cross-reference claimed coverage against actual analysis-result rows."""
+    actual_result_count = connection.execute(
+        """
+        SELECT COUNT(*) FROM code_analysis_results
+        WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
+        """,
+        (engagement_id, queue_item_id, file_id),
+    ).fetchone()[0] or 0
+
+    distinct_functions_analyzed = connection.execute(
+        """
+        SELECT COUNT(DISTINCT function_name) FROM code_analysis_results
+        WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
+          AND function_name != ''
+        """,
+        (engagement_id, queue_item_id, file_id),
+    ).fetchone()[0] or 0
+
+    analyzed_entries = [
+        e for e in cwe_coverage if not _is_cwe_entry_not_applicable(e)
+    ]
+    max_claimed_functions = max(
+        (_safe_int(e.get("functions_analyzed", 0)) for e in analyzed_entries),
+        default=0,
+    )
+    max_effort = max(
+        (_coerce_float(e.get("effort", 0)) for e in analyzed_entries),
+        default=0.0,
+    )
+
+    warnings: list[str] = []
+
+    if actual_result_count == 0 and max_claimed_functions > 0:
+        warnings.append(
+            f"functions_analyzed={max_claimed_functions} claimed but 0 analysis-result rows recorded"
+        )
+
+    if distinct_functions_analyzed > 0 and max_claimed_functions > 0:
+        ratio = distinct_functions_analyzed / max_claimed_functions
+        if ratio < 0.3:
+            warnings.append(
+                f"functions_analyzed={max_claimed_functions} claimed but only "
+                f"{distinct_functions_analyzed} distinct function results recorded (ratio={ratio:.2f})"
+            )
+
+    if total_functions > 0 and max_claimed_functions > total_functions:
+        warnings.append(
+            f"functions_analyzed={max_claimed_functions} exceeds file total_functions={total_functions}"
+        )
+
+    if total_functions > 0 and max_effort >= 60 and actual_result_count == 0:
+        warnings.append(
+            f"effort={max_effort:.0f} claimed for file with {total_functions} functions "
+            f"but 0 analysis-result rows"
+        )
+
+    return {
+        "actual_result_rows": actual_result_count,
+        "distinct_functions_with_results": distinct_functions_analyzed,
+        "max_claimed_functions_analyzed": max_claimed_functions,
+        "total_functions_on_file": total_functions,
+        "max_effort": max_effort,
+        "warnings": warnings,
+        "plausible": len(warnings) == 0,
+    }
+
+
 def _normalize_cross_file_triggers(
     cross_file_triggers: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
@@ -1598,7 +1673,20 @@ def complete_queue_items(
         for row in queue_rows.values():
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
             _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
-        return {"updated": cursor.rowcount, "total": len(item_ids)}
+        total_functions = _safe_int(file_row.get("total_functions", 0))
+        integrity = _compute_coverage_integrity(
+            connection,
+            engagement.id,
+            item_ids[0],
+            int(queue_row["file_id"]),
+            total_functions,
+            normalized_cwe_coverage,
+        )
+        return {
+            "updated": cursor.rowcount,
+            "total": len(item_ids),
+            "coverage_integrity": integrity,
+        }
 
 
 def error_queue_items(
@@ -2287,6 +2375,64 @@ def code_coverage_summary(
 
     gate_passed = len(gate_reasons) == 0
 
+    # -- Coverage integrity cross-reference (advisory, not blocking) --
+    integrity_warnings: list[dict[str, Any]] = []
+    if file_meta:
+        with get_connection() as connection:
+            file_id_list = list(file_meta.keys())
+            placeholders = ",".join("?" for _ in file_id_list)
+            result_count_rows = connection.execute(
+                f"""
+                SELECT file_id, COUNT(*) AS result_count,
+                       COUNT(DISTINCT CASE WHEN function_name != '' THEN function_name END) AS distinct_functions
+                FROM code_analysis_results
+                WHERE engagement_id = ? AND file_id IN ({placeholders})
+                GROUP BY file_id
+                """,
+                (engagement.id, *file_id_list),
+            ).fetchall()
+            result_counts = {
+                int(r["file_id"]): {
+                    "result_count": int(r["result_count"]),
+                    "distinct_functions": int(r["distinct_functions"]),
+                }
+                for r in result_count_rows
+            }
+            file_func_rows = connection.execute(
+                f"""
+                SELECT id, total_functions FROM code_files
+                WHERE engagement_id = ? AND id IN ({placeholders})
+                """,
+                (engagement.id, *file_id_list),
+            ).fetchall()
+            file_total_functions = {
+                int(r["id"]): _safe_int(r["total_functions"]) for r in file_func_rows
+            }
+
+            for fid, meta in file_meta.items():
+                if not meta["has_coverage_record"]:
+                    continue
+                actual = result_counts.get(fid, {"result_count": 0, "distinct_functions": 0})
+                total_funcs = file_total_functions.get(fid, 0)
+                file_warnings: list[str] = []
+                if actual["result_count"] == 0 and meta["has_coverage_record"]:
+                    efforts = file_efforts.get(fid, {})
+                    max_effort = max(efforts.values(), default=0.0)
+                    if max_effort >= 60 and total_funcs > 0:
+                        file_warnings.append(
+                            f"effort={max_effort:.0f} with 0 analysis-result rows"
+                        )
+                if file_warnings:
+                    integrity_warnings.append({
+                        "file_id": fid,
+                        "file_path": meta["file_path"],
+                        "classification": meta["classification"],
+                        "total_functions": total_funcs,
+                        "actual_result_rows": actual["result_count"],
+                        "distinct_functions_with_results": actual["distinct_functions"],
+                        "warnings": file_warnings,
+                    })
+
     return {
         "total_files": total_files,
         "by_classification": by_classification,
@@ -2317,6 +2463,7 @@ def code_coverage_summary(
             "passed": gate_passed,
             "reasons": gate_reasons,
             "effort_warnings": effort_warnings,
+            "coverage_integrity": integrity_warnings,
         },
     }
 
@@ -2343,6 +2490,7 @@ SLOT_VULN_CLASSES: dict[str, dict[str, list[str]]] = {
         "native": ["buffer-overflow", "integer-overflow", "type-confusion", "deserialization"],
         "managed": ["deserialization"],
     },
+    "EXEC-POLICY": {"all": ["injection", "auth-bypass", "crypto-misuse", "error-handling"]},
 }
 
 
