@@ -276,38 +276,24 @@ interpolation.
 
 ## 10. Recording Format
 
-Use the standard finding JSON schema. If you need the canonical field list or examples, run
-`aith assess contract record-finding`. Do not invent lifecycle fields from memory —
-`record-finding` fills the initial lifecycle defaults (`workflow_status=active`,
-`verification_state=unreviewed`, `verification_disposition=none`) when omitted.
+Use the helper contracts as the canonical shape source before authoring durable JSON. Run
+`aith assess contract record-finding` for finding payloads and
+`aith assess contract code-record-analysis` for analysis-result payloads; this keeps agent output
+aligned with backend validation instead of relying on copied prompt snippets.
+Do not invent lifecycle fields from memory — `record-finding` fills the initial lifecycle defaults
+(`workflow_status=active`, `verification_state=unreviewed`, `verification_disposition=none`) when
+omitted.
 For later finding lifecycle changes, use the dedicated helpers instead of raw `post` or `patch`:
 `verify-finding` for confirm/downgrade/dispute decisions, `kill-finding` for false-positive
 verification with kill metadata, `reset-finding` to reopen a previously verified or false-positive
 finding, and `update-finding` for non-verification metadata or workflow updates.
 
-Code-specific fields:
-
-```json
-{
-  "title": "Heap buffer overflow in URL parser via overlong scheme",
-  "severity": "high",
-  "defect_family": "buffer-overflow",
-  "canonical_location": "file:lib/urlapi.c:342",
-  "summary": "Attacker-controlled URL scheme exceeding 64 bytes overflows stack buffer in parseurl()",
-  "details": {
-    "cwe_id": "CWE-122",
-    "impact": "Remote code execution via heap corruption",
-    "evidence": "In parseurl() at line 342, scheme is copied via memcpy(buf, scheme, schemelen) where schemelen is derived from user input without bounds check...",
-    "taint_path": "curl_url_set(CURLURLPART_URL, attacker_url) -> parseurl() -> memcpy(buf, scheme, schemelen)",
-    "guards_evaluated": "No bounds check on schemelen before memcpy. The MAX_SCHEME_LEN check at line 298 uses signed int comparison, allowing negative values to bypass.",
-    "remediation": "Add size_t bounds check: if (schemelen > MAX_SCHEME_LEN) return CURLUE_BAD_SCHEME;",
-    "slot_type": "URL-COMPONENT",
-    "steps_to_reproduce": ["Construct URL with scheme > 64 chars", "Pass to curl_url_set()", "Observe heap corruption"],
-    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-    "cvss_score": 9.8
-  }
-}
-```
+For code findings, put code-specific proof fields under finding `details`: `cwe_id`, `impact`,
+`evidence`, `taint_path`, `guards_evaluated`, `remediation`, `slot_type`,
+`steps_to_reproduce`, `cvss_vector`, and `cvss_score` are all covered by the
+`record-finding` contract examples. For analysis rows, include the fetched `queue_item_id`;
+the backend derives `file_id` from that queue item and rejects mismatches when `file_id` is
+supplied as an optional consistency check.
 
 **Report-readiness mandate:** `check-report-readiness` blocks the final report if any
 verified finding is missing `cvss_score`, `cvss_vector`, `steps_to_reproduce`,
@@ -323,7 +309,8 @@ medium 4.0–6.9, low 0.1–3.9, info 0.0).
 Before your dispatch returns, run in this order:
 
 1. `aith assess record-finding <agent-name> <finding-json>` for each confirmed finding.
-2. `aith assess code-record-analysis <analysis-json>` for each queue item disposition.
+2. `aith assess code-record-analysis <analysis-json>` for each queue item disposition, with
+   `queue_item_id` from the fetched dispatch item.
 3. `aith assess agent handoff --from-json <path>` — use the exact
    `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the
    operator placed at the top of your dispatch prompt. The handoff row is keyed on

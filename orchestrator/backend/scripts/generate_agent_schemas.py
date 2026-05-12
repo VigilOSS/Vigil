@@ -452,7 +452,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                 "additionalProperties": False,
                 "examples": [
                     {
-                        "file_id": 15,
+                        "queue_item_id": 42,
                         "agent_name": "code-vuln-hunter",
                         "function_name": "parseurl",
                         "hypothesis": "Attacker-controlled URL scheme length passed to memcpy without bounds check",
@@ -492,11 +492,10 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                 ],
                 "properties": {
                     "queue_item_id": {
-                        "type": ["integer", "null"],
-                        "description": "ID of the code_analysis_queue item this result corresponds to.",
+                        "description": "ID of the claimed code_analysis_queue item this result corresponds to. The backend derives file_id from this queue item.",
                     },
                     "file_id": {
-                        "description": "ID of the code_files record containing the analyzed function.",
+                        "description": "Optional consistency check. When supplied, it must match the file_id on queue_item_id; the backend records the queue-derived file_id.",
                     },
                     "agent_name": {
                         "description": "Name of the agent that produced this result.",

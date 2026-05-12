@@ -129,6 +129,8 @@ Provide:
 
 Phase 1 produces six deliverables. The call graph and attack hypotheses provide navigational guidance for hunters. The file analysis queue ensures every critical/high file is analyzed regardless of hypothesis coverage.
 
+Use the helper contracts as the durable shape source before authoring or reviewing Phase 1 machine artifacts: `aith assess contract code-classify`, `aith assess contract code-record-modules`, `aith assess contract code-record-threat-model`, and `aith assess contract code-dispatch`. Point dispatches at those contracts instead of embedding copied JSON templates, because the CLI contract stays aligned with backend validation and catches field-name drift.
+
 **Deliverables from code-architect:**
 
 1. **File classifications** -- every file tagged with priority (critical/high/medium/low/skip) and
@@ -161,9 +163,10 @@ Phase 1 produces six deliverables. The call graph and attack hypotheses provide 
 6. **File analysis queue** -- every critical and high file queued for Phase 2 analysis regardless
    of whether a hypothesis names it. Files without hypotheses appear with an empty
    `guidance_hypotheses` array. The queue is grouped by `batch_theme` (logical module) so the
-   hunter can reason across related files in the same dispatch. Priority scores determine
-   dispatch order. The on-disk queue artifact is a flat per-file JSON array -- no nested batch
-   wrappers or glob patterns.
+   hunter can reason across related files in the same dispatch. Queue `priority` is mapped from
+   the classification `analysis_priority` so the backend dispatch order preserves the architect's
+   ranking. The on-disk queue artifact is a flat per-file JSON array -- no nested batch wrappers
+   or glob patterns.
 
 On return:
 ```bash
@@ -238,7 +241,8 @@ aith assess code-dispatch stats
 ```
 
 Broad-hunt queue items are file-level only. Do not add `context_id` to the queue artifact. Each
-item carries `file_id` and `file_path` plus metadata (`batch_theme`, `slot_types`,
+item carries `file_id` and `file_path` plus `priority` mapped from classification
+`analysis_priority`, plus metadata (`batch_theme`, `slot_types`,
 `guidance_hypotheses`). `code-dispatch queue` normalizes the artifact before posting: it strips
 `file_path` (resolving to `file_id` if only a path was provided) and sends only backend-accepted
 fields. Include both identifiers in the artifact so the queue is human-readable and the
@@ -365,6 +369,9 @@ All references are under `agent/references/code-vuln-patterns/`. Include the ful
 
 **On return:**
 ```bash
+# Confirm the analysis-result contract if the payload was hand-authored
+aith assess contract code-record-analysis
+
 # Record analysis results (with cwe_coverage and cross_file_triggers)
 aith assess code-record-analysis <analysis-json>
 
