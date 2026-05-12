@@ -302,10 +302,19 @@ Code-specific fields:
     "guards_evaluated": "No bounds check on schemelen before memcpy. The MAX_SCHEME_LEN check at line 298 uses signed int comparison, allowing negative values to bypass.",
     "remediation": "Add size_t bounds check: if (schemelen > MAX_SCHEME_LEN) return CURLUE_BAD_SCHEME;",
     "slot_type": "URL-COMPONENT",
-    "steps_to_reproduce": ["Construct URL with scheme > 64 chars", "Pass to curl_url_set()", "Observe heap corruption"]
+    "steps_to_reproduce": ["Construct URL with scheme > 64 chars", "Pass to curl_url_set()", "Observe heap corruption"],
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "cvss_score": 9.8
   }
 }
 ```
+
+**Report-readiness mandate:** `check-report-readiness` blocks the final report if any
+verified finding is missing `cvss_score`, `cvss_vector`, `steps_to_reproduce`,
+`remediation`, `impact`, or `evidence`. Include all six fields at recording time so
+findings pass readiness without a remediation loop. CVSS must align with severity per
+the ranges in `shared-constraints.md` §9 (critical 9.0–10.0, high 7.0–8.9,
+medium 4.0–6.9, low 0.1–3.9, info 0.0).
 
 ---
 

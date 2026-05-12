@@ -265,15 +265,21 @@ In addition to per-function dispositions, produce a **`cwe_coverage`** array -- 
 applicable vulnerability class for this file. The coverage file passed to
 `aith assess code-dispatch done` must contain this bare JSON array, not an object wrapper
 with a `cwe_coverage` key. Include every family listed in the queue item's
-`applicable_vuln_classes`; for any family you could not analyze, add an explicit
-zero-effort gap entry with notes explaining the blocker. Each entry records:
+`applicable_vuln_classes`; for any family that genuinely cannot apply to this file's
+language/runtime, emit a not-applicable entry. For families you could not analyze due to
+a blocker, emit a zero-effort gap entry with notes. Each entry records:
 
 - `family`: vulnerability class name (e.g., `sql-injection`, `path-traversal`, `buffer-overflow`)
 - `effort`: 0-100 score reflecting analysis thoroughness (see effort guidelines below)
+- `disposition`: `"analyzed"` (default) or `"not_applicable"` when the class cannot apply
 - `functions_analyzed`: count of functions examined for this class
 - `entry_chains_traced`: entry-point chains from the call graph traced end-to-end for this class
 - `total_entry_chains`: total chains relevant to this class (from Phase A.5 triage)
 - `notes`: what was and was not analyzed and why
+
+**Not-applicable entries** — use when a vulnerability class structurally cannot apply
+(e.g., `buffer-overflow` in pure Python, `sql-injection` in a file with no database
+access). Shape: `{"family": "buffer-overflow", "effort": 0, "disposition": "not_applicable", "notes": "Pure Python module — no native memory operations"}`.
 
 **Effort guidelines**: 0-20 = glanced at imports only. 20-40 = checked obvious sinks.
 40-60 = basic taint tracing from sources to sinks. 60-80 = full taint tracing plus error path
@@ -456,8 +462,11 @@ defaults when omitted.
     "sink": "dangerous operation receiving tainted data",
     "taint_path": "entry -> transform1 -> ... -> sink",
     "guards_evaluated": "What guards exist, why they fail",
+    "remediation": "Concrete fix or control recommendation",
     "slot_type": "NETWORK-INPUT|URL-COMPONENT|...",
     "steps_to_reproduce": ["Step 1", "Step 2", "..."],
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "cvss_score": 8.1,
     "references": ["https://cwe.mitre.org/data/definitions/XXX.html"],
     "poc_code": "optional PoC exploit script"
   }
