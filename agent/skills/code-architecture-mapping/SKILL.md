@@ -179,8 +179,12 @@ For each critical and high file, annotate which Shannon slot types apply:
 | `CALLBACK-DATA` | Data arriving through callbacks, webhooks, events | Signal handler data, timer callback arguments, IPC payloads |
 | `PROTOCOL-FIELD` | Structured protocol fields | TLS extension values, HTTP/2 frame fields, DNS record data |
 | `SERIALIZED-DATA` | Binary/structured serialization formats | protobuf, ASN.1, flatbuffers, CBOR, MessagePack, BSON |
+| `EXEC-POLICY` | Config defining execution behavior | Command templates, plugin loading, debug modes, crypto params, session policy |
 
 A file may have multiple slot types. Record the primary slot type and any secondary ones.
+Config files that define how commands are executed, what plugins load, what crypto parameters
+apply, or what access policies are enforced should receive `EXEC-POLICY` and classification
+`high` regardless of language.
 Use a precise role label for each critical/high file because the backend derives additional
 coverage families from role + language. Prefer labels like `auth_handler`, `crypto_impl`,
 `error_handler`, `memory_allocator`, `graphql_resolver`, `llm_orchestrator`, and

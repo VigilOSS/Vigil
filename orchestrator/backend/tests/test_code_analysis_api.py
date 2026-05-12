@@ -2699,3 +2699,236 @@ def test_coverage_detail_cwe(client, isolate_settings):
     assert "total_files" in payload
     assert "by_classification" in payload
     assert "gate" in payload
+
+
+def test_coverage_integrity_warns_when_no_results_recorded(client, isolate_settings):
+    """Completing a queue item with high effort but zero analysis results triggers a warning."""
+    engagement_key = "2026-05-12-integrity-no-results"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="integrity-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    # Set total_functions so the integrity check has something to compare
+    client.patch(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}",
+        json={"total_functions": 10},
+    )
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
+
+    # Complete WITHOUT recording any analysis results
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "cwe_coverage": _network_input_coverage(
+                default_effort=80,
+                overrides={"web-app-injection": {"effort": 80, "functions_analyzed": 8}},
+            ),
+            "notes": "Reviewed",
+        },
+    )
+    assert done.status_code == 200
+    integrity = done.json()["coverage_integrity"]
+    assert integrity["plausible"] is False
+    assert integrity["actual_result_rows"] == 0
+    assert len(integrity["warnings"]) > 0
+
+
+def test_coverage_integrity_passes_with_matching_results(client, isolate_settings):
+    """Proper analysis results backing the coverage claims produces no warnings."""
+    engagement_key = "2026-05-12-integrity-passes"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="integrity-pass-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    client.patch(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}",
+        json={"total_functions": 5},
+    )
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
+
+    # Record analysis results for distinct functions
+    for func_name in ["parse_message", "validate_input", "handle_request", "process_data"]:
+        client.post(
+            f"/engagements/{engagement_key}/assessment/code/analysis-results",
+            json={
+                "queue_item_id": queue_item["id"],
+                "agent_name": "code-vuln-hunter",
+                "function_name": func_name,
+                "hypothesis": f"Check {func_name}",
+                "evidence": "No issues found",
+                "disposition": "clean",
+                "confidence": "high",
+            },
+        )
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "cwe_coverage": _network_input_coverage(
+                default_effort=80,
+                overrides={"web-app-injection": {"effort": 85, "functions_analyzed": 5}},
+            ),
+            "notes": "Thorough review",
+        },
+    )
+    assert done.status_code == 200
+    integrity = done.json()["coverage_integrity"]
+    assert integrity["plausible"] is True
+    assert integrity["actual_result_rows"] == 4
+    assert integrity["distinct_functions_with_results"] == 4
+    assert len(integrity["warnings"]) == 0
+
+
+def test_coverage_integrity_warns_claimed_exceeds_total(client, isolate_settings):
+    """Claiming more functions_analyzed than total_functions on file triggers a warning."""
+    engagement_key = "2026-05-12-integrity-exceeds"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="integrity-exceeds-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    client.patch(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}",
+        json={"total_functions": 3},
+    )
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
+
+    # Record 2 results
+    for func_name in ["func_a", "func_b"]:
+        client.post(
+            f"/engagements/{engagement_key}/assessment/code/analysis-results",
+            json={
+                "queue_item_id": queue_item["id"],
+                "agent_name": "code-vuln-hunter",
+                "function_name": func_name,
+                "hypothesis": "Check",
+                "evidence": "Clean",
+                "disposition": "clean",
+            },
+        )
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "cwe_coverage": _network_input_coverage(
+                default_effort=70,
+                overrides={"web-app-injection": {"effort": 70, "functions_analyzed": 10}},
+            ),
+            "notes": "Done",
+        },
+    )
+    assert done.status_code == 200
+    integrity = done.json()["coverage_integrity"]
+    assert integrity["plausible"] is False
+    assert any("exceeds" in w for w in integrity["warnings"])
+
+
+def test_coverage_integrity_skips_not_applicable_entries(client, isolate_settings):
+    """Not-applicable entries do not trigger integrity warnings."""
+    engagement_key = "2026-05-12-integrity-na"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="integrity-na-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    client.patch(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}",
+        json={"total_functions": 5},
+    )
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
+
+    # Record 2 results — covers the non-NA families adequately
+    for func_name in ["main_handler", "auth_check"]:
+        client.post(
+            f"/engagements/{engagement_key}/assessment/code/analysis-results",
+            json={
+                "queue_item_id": queue_item["id"],
+                "agent_name": "code-vuln-hunter",
+                "function_name": func_name,
+                "hypothesis": "Check",
+                "evidence": "Clean",
+                "disposition": "clean",
+            },
+        )
+
+    # Coverage with some families as not_applicable
+    coverage = [
+        {"family": "web-app-injection", "effort": 70, "functions_analyzed": 2},
+        {"family": "web-app-auth", "effort": 70, "functions_analyzed": 2},
+        {"family": "ssrf", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
+        {"family": "open-redirect", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
+        {"family": "path-traversal", "effort": 70, "functions_analyzed": 2},
+        {"family": "algorithmic-dos", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
+    ]
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "cwe_coverage": coverage,
+            "notes": "Done",
+        },
+    )
+    assert done.status_code == 200
+    integrity = done.json()["coverage_integrity"]
+    assert integrity["plausible"] is True
+    assert len(integrity["warnings"]) == 0
+
+
+def test_coverage_integrity_graceful_when_total_functions_zero(client, isolate_settings):
+    """Files without structural index (total_functions=0) degrade gracefully."""
+    engagement_key = "2026-05-12-integrity-no-index"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="integrity-no-index-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    # Do NOT set total_functions — defaults to 0
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
+
+    # Record 1 result
+    client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json={
+            "queue_item_id": queue_item["id"],
+            "agent_name": "code-vuln-hunter",
+            "function_name": "main_entry",
+            "hypothesis": "Check",
+            "evidence": "Clean",
+            "disposition": "clean",
+        },
+    )
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "cwe_coverage": _network_input_coverage(
+                default_effort=70,
+                overrides={"web-app-injection": {"effort": 70, "functions_analyzed": 5}},
+            ),
+            "notes": "Done",
+        },
+    )
+    assert done.status_code == 200
+    integrity = done.json()["coverage_integrity"]
+    # total_functions=0 means "exceeds" and "effort with 0 rows" checks are skipped
+    assert integrity["total_functions_on_file"] == 0
+    # May still warn about ratio (1 distinct function vs 5 claimed = 0.2 < 0.3)
+    # but no "exceeds total_functions" warning
+    assert not any("exceeds" in w for w in integrity["warnings"])

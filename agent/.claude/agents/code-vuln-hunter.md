@@ -149,6 +149,12 @@ sink-bearing, stateful, and ambiguous functions deserve the deepest reasoning fi
 5. **Type transitions**: What signed/unsigned conversions occur? What narrow-to-wide
    or wide-to-narrow casts? What pointer type changes? What integer promotions does
    the compiler perform implicitly?
+6. **Guard dominance and fail-open**: For auth/policy/config functions, verify that
+   every success-path return actually depends on the computed guard. Patterns that
+   survive taint-trace methodology: guard computed but discarded on null/exception
+   return, partial validation followed by raw-value use downstream, loop that doesn't
+   break after match causing wrong binding. These are semantic bugs — the code looks
+   guarded but isn't.
 
 ### Phase C: 5 Whys on Each Suspicious Pattern
 

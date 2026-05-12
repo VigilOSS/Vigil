@@ -322,3 +322,20 @@ Before your dispatch returns, run in this order:
 
 `aith assess agent handoff` is idempotent; checkpoint after each major phase of work, not only at the end.
 Schema: `agent/references/runtime-guides/handoff-schema.md`.
+
+---
+
+## 12. Coverage Integrity
+
+CWE coverage claims are cross-referenced against analysis-result rows at queue completion.
+
+1. Record analysis results BEFORE `code-dispatch done`. Result rows must exist when
+   the backend validates coverage claims.
+2. `functions_analyzed` in each coverage entry must be backed by result rows: at least
+   30% of claimed functions must have a distinct `function_name` in analysis results for
+   that queue item.
+3. Each file's coverage must reflect its specific functions, entry chains, and code
+   structure. Never copy-paste identical coverage arrays across files without per-file
+   analysis.
+4. Not-applicable entries (`disposition: "not_applicable"`) are exempt from backing
+   requirements.

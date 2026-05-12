@@ -195,6 +195,7 @@ code-vuln-verifier <new-finding-json>` allocate the canonical slug.
 - **Construct the exploit, prove why you cannot, or identify probabilistic feasibility** — Check 4 requires one of the three
 - **ESCALATE is a first-class option at every check** — when evidence fits neither PASS nor KILL, record the specific ambiguity and route to multi-perspective voting instead of defaulting to either outcome
 - **Composable chains matter** — two medium findings may compose into a critical exploit
+- **Challenge absence, not just presence** — for each finding, also ask: "What configuration, user shape, or deployment variant would make this Higher severity?" If a permissive config or wildcard setting would escalate Medium to High, note that as a conditional severity in the verification output
 - **Full filesystem access** — use Read, Grep, Glob to verify call chains and guards independently
 - **Variant awareness** — when variants exist, a killed original may still have valid variants
 
