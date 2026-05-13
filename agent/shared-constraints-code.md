@@ -186,6 +186,18 @@ The same rule from web testing applies to code review:
 - A potential overflow that requires impossible input is not a finding.
 - Document the specific attacker-controlled input and the concrete impact.
 
+For resource-limit findings, do not confuse a named limit with a security
+boundary. Request caps, spool-buffer limits, decompression limits, timeouts, and
+protocol negotiation limits only justify High/Critical when the intended boundary
+and downstream impact are both proved. Read docs/blame/commit history for the
+limit, compare sibling default transports or protocol modes, and inspect the
+consumer after the bytes cross the boundary. If another default path already
+accepts the same logical stream and the consumer performs bounded, linear work,
+downgrade to Medium/hardening or documentation. High/Critical requires a proved
+second-order impact such as service-level DoS, superlinear CPU, unbounded retained
+memory/disk, output amplification, crash, memory corruption, or privilege-boundary
+crossing.
+
 ---
 
 ## 6. Account For Every Analyzed Function

@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -199,24 +200,33 @@ def _orchestrator_readyz_snapshot(install_root: Path) -> tuple[bool, dict[str, o
         with urllib.request.urlopen(url, timeout=1) as response:
             readiness["reachable"] = True
             readiness["http_status"] = response.status
-            raw = response.read().decode()
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, dict):
-                for key in (
-                    "status",
-                    "database_connected",
-                    "assessment_schema_ready",
-                    "code_analysis_schema_ready",
-                ):
-                    if key in parsed:
-                        readiness[key] = parsed[key]
+            _merge_readyz_payload(readiness, response.read())
             healthy = response.status == 200
             return healthy, readiness
+    except urllib.error.HTTPError as exc:
+        readiness["reachable"] = True
+        readiness["http_status"] = exc.code
+        _merge_readyz_payload(readiness, exc.read())
+        return False, readiness
     except OSError:
         return False, readiness
+
+
+def _merge_readyz_payload(readiness: dict[str, object], raw: bytes) -> None:
+    try:
+        parsed = json.loads(raw.decode())
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return
+    if not isinstance(parsed, dict):
+        return
+    for key in (
+        "status",
+        "database_connected",
+        "assessment_schema_ready",
+        "code_analysis_schema_ready",
+    ):
+        if key in parsed:
+            readiness[key] = parsed[key]
 
 
 def _orchestrator_readyz_bundle(install_root: Path) -> dict[str, object]:
@@ -224,6 +234,7 @@ def _orchestrator_readyz_bundle(install_root: Path) -> dict[str, object]:
     return {"healthy": healthy, "readiness": readiness}
 
 
+def list_failed_audit_markers(engagement_dir: Path) -> list[Path]:
     """Return ``<run_uuid>.failed-audit`` markers under ``scans/kali/`` for one engagement.
 
     Each marker is written by ``agent/scripts/assess/lib/kali.py`` when the

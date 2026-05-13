@@ -202,6 +202,39 @@ What external protections exist?
 - Network protections: rate limiting, connection limits, WAF rules
 - Deployment configuration: read-only filesystem, dropped capabilities
 
+**Protocol/resource-limit severity check:**
+Use this when a finding depends on bypassing a size limit, timeout, buffer cap,
+request spool, negotiation limit, compression ratio, or other resource control.
+Before confirming High/Critical, answer all of the following with source-backed
+evidence:
+
+1. **Intended boundary:** Read the docs, comments, blame, or introducing commit for
+   the limit. Is it documented or historically intended to cap total attacker work,
+   or only a local implementation detail such as an in-memory spool buffer?
+2. **Equivalent entry points:** Compare sibling transports and protocol modes. If
+   the same logical byte stream can already be sent over SSH, raw TCP, local IPC,
+   chunked HTTP, or another default path, the wrapper-specific bypass is usually
+   hardening/documentation unless it crosses an independent default deployment
+   boundary.
+3. **Default reachability:** Prove the path is enabled by default for the attacker
+   role. Downgrade when the path needs non-default config, authenticated service
+   selection, repository-controlled config, or write access that already implies a
+   stronger primitive.
+4. **Second-order impact:** Prove what the downstream component does with the extra
+   bytes. Look for superlinear CPU, unbounded retained memory, duplicate state that
+   survives deduplication, output amplification, child-process fanout, pack/build
+   amplification, crash, memory corruption, or privilege-boundary crossing. Linear
+   parsing of more valid protocol bytes is not enough for High.
+5. **Negative controls:** Test or inspect duplicate handling, feature gates, per-line
+   caps, parser state resets, and downstream deduplication. Record the result even
+   when it weakens the finding.
+
+Severity guidance: a resource-limit bypass can be High only when the proved default
+path creates service-level impact that ordinary protocol access cannot already
+create. If the best proof is "small compressed/request body becomes a larger valid
+protocol stream" and downstream work remains linear with bounded memory, treat it
+as Medium at most, often hardening or documentation.
+
 **Rigor requirement:** A DA counter-argument must meet the same evidence bar as the original finding. The hunter provided CWE, taint path, guard failure analysis, and concrete attacker impact. Your counter-argument must be equally specific: the exact guard code, proof it covers ALL paths (not just one branch), and a concrete explanation of why the attacker's input cannot reach the sink. Circumstantial evidence — a test case exists, a commit message mentions security, the code "looks well-written" — is not sufficient to kill.
 
 **Outcome:**

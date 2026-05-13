@@ -28,6 +28,19 @@ Do not let recon hints, CVEs, or intuition inflate severity beyond what the evid
 
 If you use CVSS, make it match the proved attack path, not the imagined best case for the attacker.
 
+For resource-limit and protocol-wrapper issues, prove the limit is a security
+boundary before using High/Critical language. A named cap being bypassed is not
+enough when the cap only protects a local buffer, spool, or compatibility path.
+Compare equivalent default transports and protocol modes. If the same logical input
+can already be sent through another supported path and the downstream component does
+only bounded, linear work, report it as Medium/hardening or documentation rather
+than a High vulnerability.
+
+High/Critical requires a proved second-order outcome: service-level denial of
+service, unbounded retained memory/disk, superlinear CPU, output amplification,
+crash, memory corruption, privilege-boundary crossing, or another concrete impact
+that ordinary protocol access cannot already produce.
+
 ## 4. Verify the data is actually non-public
 
 Before calling something exposure or disclosure, confirm the same information is not already intentionally public.
@@ -199,4 +212,3 @@ The following are internal-only and must not appear in client-facing deliverable
 - **Coverage Summary** — operational metrics (targets, services, probe counts) are engagement-internal and have no meaning to the client
 - **Finding Cross-Reference** — maps report IDs to backend slugs; internal traceability only, exclude from external reports
 - **Tested by / tester attribution** — not required in client deliverables
-
