@@ -458,6 +458,7 @@ These are the most commonly violated rules — internalize them before you start
 - **No theoretical findings.** "Can an attacker do this right now with real harm?" — if no, not a finding yet.
 - **Kill weak leads fast.** Theory without a real request, more than two fragile preconditions stacked, or "might be chainable" without a proved chain → kill it.
 - **Severity follows proved impact.** Do not let recon hints, CVEs, or intuition inflate severity beyond what the evidence shows.
+- **Named limit bypass is not automatically High.** For request caps, buffer limits, decompression limits, timeouts, and protocol negotiation limits, prove the limit is a security boundary and prove downstream second-order impact. If equivalent default transports already accept the same logical stream and downstream work is bounded and linear, downgrade to Medium/hardening or docs.
 - **No speculative language.** Write `An attacker can [exact action] by [exact method]`, never `could potentially`, `may allow`, or `might be possible`.
 - **No filler or padding.** Do not use `Furthermore`, `Additionally`, `It should be noted`, or similar filler transitions. Do not restate titles in descriptions. Do not define standard vulnerability classes to a security audience. Every sentence must contribute new information.
 - **Sibling rule.** When one route or method is vulnerable, inspect its siblings before moving on.
