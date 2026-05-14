@@ -100,11 +100,18 @@ def _safe_int(value: Any, default: int = 0) -> int:
 def _merge_cwe_entry(existing: dict[str, Any], entry: dict[str, Any]) -> None:
     """Merge one CWE coverage entry using the same max/sum rules everywhere."""
     if _is_cwe_entry_not_applicable(entry):
-        existing["not_applicable"] = True
-        existing["disposition"] = entry.get("disposition", "not_applicable")
-        if entry.get("notes"):
-            existing["notes"] = entry.get("notes")
+        if _is_cwe_entry_not_applicable(existing):
+            existing["not_applicable"] = True
+            existing["disposition"] = entry.get("disposition", "not_applicable")
+            if entry.get("notes"):
+                existing["notes"] = entry.get("notes")
         return
+
+    existing.pop("not_applicable", None)
+    if _is_cwe_entry_not_applicable(existing):
+        existing.pop("disposition", None)
+    if entry.get("disposition"):
+        existing["disposition"] = entry.get("disposition")
 
     if _coerce_float(entry.get("effort", 0)) > _coerce_float(existing.get("effort", 0)):
         existing["effort"] = entry.get("effort", 0)
@@ -129,6 +136,25 @@ def _is_cwe_entry_not_applicable(entry: dict[str, Any]) -> bool:
         return True
     disposition = str(entry.get("disposition", entry.get("status", ""))).strip().lower()
     return disposition in {"not_applicable", "not-applicable", "n/a", "na"}
+
+
+def _merge_file_effort_entry(
+    file_efforts: dict[int, dict[str, float]],
+    file_not_applicable: dict[int, set[str]],
+    file_id: int,
+    entry: dict[str, Any],
+) -> None:
+    family = entry.get("family", "")
+    if not family:
+        return
+    if _is_cwe_entry_not_applicable(entry):
+        if family not in file_efforts[file_id]:
+            file_not_applicable[file_id].add(family)
+        return
+    file_not_applicable[file_id].discard(family)
+    effort = _coerce_float(entry.get("effort", 0))
+    if family not in file_efforts[file_id] or effort > file_efforts[file_id][family]:
+        file_efforts[file_id][family] = effort
 
 
 def _merge_cwe_coverage_entries(
@@ -2285,13 +2311,7 @@ def code_coverage_summary(
             if fid not in file_not_applicable:
                 file_not_applicable[fid] = set()
             for entry in cwe_cov:
-                family = entry.get("family", "")
-                if family and _is_cwe_entry_not_applicable(entry):
-                    file_not_applicable[fid].add(family)
-                    continue
-                effort = _coerce_float(entry.get("effort", 0))
-                if family and effort > file_efforts[fid].get(family, 0):
-                    file_efforts[fid][family] = effort
+                _merge_file_effort_entry(file_efforts, file_not_applicable, fid, entry)
 
         if file_meta:
             placeholders = ",".join("?" for _ in file_meta)
@@ -2312,13 +2332,7 @@ def code_coverage_summary(
                 if fid not in file_not_applicable:
                     file_not_applicable[fid] = set()
                 for entry in cwe_cov:
-                    family = entry.get("family", "")
-                    if family and _is_cwe_entry_not_applicable(entry):
-                        file_not_applicable[fid].add(family)
-                        continue
-                    effort = _coerce_float(entry.get("effort", 0))
-                    if family and effort > file_efforts[fid].get(family, 0):
-                        file_efforts[fid][family] = effort
+                    _merge_file_effort_entry(file_efforts, file_not_applicable, fid, entry)
 
         for fid, meta in file_meta.items():
             threshold = 70 if meta["classification"] == "critical" else 50

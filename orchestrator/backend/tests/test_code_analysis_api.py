@@ -1084,6 +1084,83 @@ def test_not_applicable_cwe_coverage_does_not_block_effort_gate(client, isolate_
     assert coverage_after.json()["gate"]["passed"] is True
 
 
+def test_cwe_coverage_merge_clears_stale_not_applicable_entry():
+    cwe_by_file: dict[int, dict[str, dict[str, object]]] = {}
+
+    code_analysis._merge_cwe_coverage_entries(
+        cwe_by_file,
+        7,
+        [{"family": "ssrf", "disposition": "not_applicable", "effort": 0}],
+    )
+    code_analysis._merge_cwe_coverage_entries(
+        cwe_by_file,
+        7,
+        [{"family": "ssrf", "disposition": "clean", "effort": 70, "functions_analyzed": 3}],
+    )
+
+    merged = cwe_by_file[7]["ssrf"]
+    assert merged.get("not_applicable") is not True
+    assert merged["disposition"] == "clean"
+    assert merged["effort"] == 70
+    assert merged["functions_analyzed"] == 3
+
+
+def test_reanalysis_effort_gate_does_not_skip_family_with_stale_not_applicable(
+    client,
+    isolate_settings,
+):
+    engagement_key = "2026-05-14-code-cwe-reanalysis-na"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="cwe-reanalysis-na-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    file_id = int(parser_file["id"])
+    _classify_file(client, engagement_key, file_id, "critical", 100)
+
+    first_item = _claim_file_for_analysis(client, engagement_key, file_id, priority=100)
+    first_done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [first_item["id"]],
+            "disposition": "clean",
+            "notes": "Initial pass misclassified SSRF as not applicable.",
+            "cwe_coverage": _network_input_coverage(
+                default_effort=80,
+                overrides={
+                    "ssrf": {
+                        "effort": 0,
+                        "disposition": "not_applicable",
+                    }
+                },
+            ),
+        },
+    )
+    assert first_done.status_code == 200
+
+    second_item = _claim_file_for_analysis(client, engagement_key, file_id, priority=100)
+    second_done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [second_item["id"]],
+            "disposition": "clean",
+            "notes": "Re-analysis found SSRF applicable but under-reviewed.",
+            "cwe_coverage": _network_input_coverage(
+                default_effort=80,
+                overrides={"ssrf": {"effort": 10, "disposition": "clean"}},
+            ),
+        },
+    )
+    assert second_done.status_code == 200
+
+    coverage_after = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage_after.status_code == 200
+    gate = coverage_after.json()["gate"]
+    assert gate["passed"] is False
+    assert any("family 'ssrf' effort 10 < 70" in reason for reason in gate["reasons"])
+
+
 def test_analysis_result_triggers_are_recorded_before_requeue(client, isolate_settings):
     engagement_key = "2026-04-04-analysis-result-triggers"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
