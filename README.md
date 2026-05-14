@@ -218,6 +218,46 @@ Methodology references:
 - [engagement-methodology.md](agent/references/runtime-guides/engagement-methodology.md)
 - [athena-log-investigation](agent/skills/athena-log-investigation/SKILL.md)
 
+### Engagement operator start prompts
+
+Two forms. Use the **generic** form to start a fresh engagement after `cd`-ing into the engagement directory. Use the **resume** form when handing off between sessions or picking up where a previous agent left off.
+
+#### Generic — new or resumed engagement (simple form)
+
+After `aith engagement start <key>`:
+
+```
+Read AGENTS.md and assume Operator role.
+
+Authorized bug-bounty engagement: https://bugcrowd.com/engagements/<slug>
+Full authorization confirmed. Run the operator workflow. Take full advantage of specialist agents
+to delegate all target-facing work — dispatch in parallel where phases permit. Prefer
+claude-opus-4-7 / gpt-5.5 xhigh reasoning for operator-level and substantial specialist work;
+use sonnet / medium only for clearly bounded sidecar tasks. Exploitation policy is pause —
+explicit human approval required before any exploit-developer dispatch.
+```
+
+#### Refined — resume with prior context
+
+Use this when continuing across sessions. Paste the rendered handoff blob from the prior agent (run `aith assess agent render-handoff <agent-id>` before closing the previous session) in place of `<paste here>`.
+
+```
+Read AGENTS.md and assume Operator role. Run agent/rules/resume.md hydration before
+planning anything — read current backend state before deciding what to do next.
+
+Authorized engagement: https://bugcrowd.com/engagements/<slug>
+Continue phases <X, Y, Z> to completion. Use specialist agents for all dispatched work;
+you are the orchestrator brain. Track orchestration, prompt, and backend issues to ISSUES.md.
+Keep dispatching agents until [specify tools / objectives] have completed.
+
+Depth is the default. "Quick" is not desired — thorough and deep coverage is.
+Prefer claude-opus-4-7 / gpt-5.5 xhigh for substantial work; medium only for bounded sidecar tasks.
+Exploitation policy: <pause|selected|full_send> per scope.json.
+
+Previous agent context:
+<paste aith assess agent render-handoff <agent-id> output here>
+```
+
 ### Starting a code analysis engagement
 
 Code analysis uses a separate operator loop (`agent/operator-core-code.md`) with its own four-phase pipeline: Ingest+Index → Classify+Map → Hunt → Verify+Variant. Findings land in the same backend as web engagements.
