@@ -321,3 +321,11 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 | `bugbounty-submission-format.md` | Bug bounty submission format for Bugcrowd/HackerOne: per-finding submissions with POC, VRT, evidence |
 | `examples/disclosure-email-fast-import.txt` | Example: multi-sub-issue disclosure with control test and CI/CD framing |
 | `examples/bugbounty-submission-ldap-injection.md` | Example: LDAP injection bug bounty submission with working POC |
+
+## tenants/ — Client Tenant Context (IR)
+
+Per-tenant reference files for recurring Workspace IR work. Load the relevant file at the start of any alert investigation for that tenant — it eliminates rediscovery of GAM config, DWD quirks, key personnel, and known benign patterns.
+
+| File | Tenant | Contents |
+|------|--------|---------|
+| `tenants/acme-workspace.md` | tenant.acme.example | GAM/gcloud config, GCP project, DWD scope reality + Python bypass, key personnel, MFA posture, false positive register, common IR commands, previous engagements |
