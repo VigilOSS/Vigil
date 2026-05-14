@@ -133,8 +133,8 @@ class QueueResetStaleRequest(BaseModel):
 
 
 class AnalysisResultRecord(BaseModel):
-    queue_item_id: int | None = None
-    file_id: int
+    queue_item_id: int
+    file_id: int | None = None
     agent_name: str = Field(default="", max_length=128)
     function_name: str = Field(default="", max_length=512)
     hypothesis: str = Field(default="", max_length=20000)
@@ -541,11 +541,11 @@ async def create_analysis_result(engagement_key: str, request: AnalysisResultRec
     _audit_code_mutation(
         engagement.id,
         title="code-record-analysis",
-        action=f"file_id={request.file_id} function={request.function_name or '(file)'}",
+        action=f"file_id={record['file_id']} function={request.function_name or '(file)'}",
         actor_name=request.agent_name,
         result=request.disposition,
         metadata={
-            "file_id": request.file_id,
+            "file_id": record["file_id"],
             "queue_item_id": request.queue_item_id,
             "finding_slug": request.finding_slug,
             "disposition": request.disposition,

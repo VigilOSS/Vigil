@@ -95,7 +95,7 @@ def run(args) -> None:
         sys.exit(0)
 
     # Validate required fields
-    required = {"file_id", "disposition"}
+    required = {"queue_item_id", "disposition"}
     for i, result in enumerate(results):
         if not isinstance(result, dict):
             print(f"Item {i} is not a JSON object", file=sys.stderr)
@@ -107,6 +107,17 @@ def run(args) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
+        try:
+            int(result["queue_item_id"])
+        except (TypeError, ValueError):
+            print(f"Item {i} queue_item_id must be an integer", file=sys.stderr)
+            sys.exit(1)
+        if result.get("file_id") is not None:
+            try:
+                int(result["file_id"])
+            except (TypeError, ValueError):
+                print(f"Item {i} file_id must be an integer when supplied", file=sys.stderr)
+                sys.exit(1)
         _validate_cwe_coverage(i, result)
         _validate_cross_file_triggers(i, result)
 

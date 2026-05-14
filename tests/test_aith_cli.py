@@ -8,8 +8,10 @@ installable package surface even without backend test infrastructure.
 """
 from __future__ import annotations
 
+import io
 import shutil
 import sys
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -113,3 +115,36 @@ def test_doctor_failed_audit_no_engagements_dir(tmp_path):
     result = _failed_audit_marker_check(tmp_path)
     assert result.name == "failed-audit-markers"
     assert result.status == "OK"
+
+
+def test_readyz_http_error_preserves_readiness_payload(tmp_path, monkeypatch):
+    """HTTP 503 from /readyz is a reachable not-ready state, not a transport failure."""
+    from ai_threat_hunting_cli import status as status_module
+
+    body = (
+        b'{"status":"not_ready","database_connected":true,'
+        b'"assessment_schema_ready":false,"code_analysis_schema_ready":true}'
+    )
+
+    def fail_readyz(url, *, timeout):
+        assert url.endswith("/readyz")
+        assert timeout == 1
+        raise urllib.error.HTTPError(
+            url,
+            503,
+            "Service Unavailable",
+            hdrs=None,
+            fp=io.BytesIO(body),
+        )
+
+    monkeypatch.setattr(status_module.urllib.request, "urlopen", fail_readyz)
+
+    healthy, readiness = status_module._orchestrator_readyz_snapshot(tmp_path)
+
+    assert healthy is False
+    assert readiness["reachable"] is True
+    assert readiness["http_status"] == 503
+    assert readiness["status"] == "not_ready"
+    assert readiness["database_connected"] is True
+    assert readiness["assessment_schema_ready"] is False
+    assert readiness["code_analysis_schema_ready"] is True

@@ -44,6 +44,8 @@ Before producing any output, confirm:
 - [ ] **CWE-specific pattern reference loaded** -- the correct `code-vuln-patterns/*.md` file
       matching the slot types is present. WITHOUT IT, PATTERN-LEVEL DEPTH IS LOST.
 - [ ] **File batch provided**: file paths, priorities, batch theme, slot types, classification tier
+- [ ] **Queue item IDs provided**: each final `code-record-analysis` row will use the fetched
+      `queue_item_id` as the file identity source
 - [ ] **Structural index loaded (if available at `tools/analysis-state/structural-index/`)** -- provides
       function map as completeness anchor, plus entry points, sinks, exports, and import targets as advisory navigation metadata
 - [ ] **Threat model summary available** -- trust boundaries, entry points, high-value targets
@@ -143,6 +145,12 @@ sink-bearing, stateful, and ambiguous functions deserve the deepest reasoning fi
 5. **Type transitions**: What signed/unsigned conversions occur? What narrow-to-wide
    or wide-to-narrow casts? What pointer type changes? What integer promotions does
    the compiler perform implicitly?
+6. **Guard dominance and fail-open**: For auth/policy/config functions, verify that
+   every success-path return actually depends on the computed guard. Patterns that
+   survive taint-trace methodology: guard computed but discarded on null/exception
+   return, partial validation followed by raw-value use downstream, loop that doesn't
+   break after match causing wrong binding. These are semantic bugs — the code looks
+   guarded but isn't.
 
 ### Phase C: 5 Whys on Each Suspicious Pattern
 
@@ -545,11 +553,13 @@ When analysis is genuinely blocked on missing code (after self-service failed):
 ## State Recording
 
 ```bash
+aith assess contract record-finding
+aith assess contract code-record-analysis
 aith assess record-finding code-vuln-hunter <finding-json>
 aith assess code-record-analysis <analysis-json>
 ```
 
-Every `analysis-json` payload must include `audit_metadata`:
+Every `analysis-json` payload must include the fetched `queue_item_id` and `audit_metadata`:
 - `cross_ref_usage`: actual ctags/grep/Read lookups performed during analysis
 - `pattern_refs`: the `agent/references/code-vuln-patterns/*.md` files consulted for that verdict
 
@@ -558,7 +568,7 @@ Every `analysis-json` payload must include `audit_metadata`:
 Before your dispatch returns, run in this order:
 
 1. `aith assess record-finding code-vuln-hunter <finding-json>` per finding
-2. `aith assess code-record-analysis <analysis-json>` per file (carries dispositions, CWE coverage, cross-file triggers)
+2. `aith assess code-record-analysis <analysis-json>` per queue item (carries dispositions, CWE coverage, cross-file triggers, and the fetched `queue_item_id`)
 3. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
 4. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 

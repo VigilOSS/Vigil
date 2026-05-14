@@ -34,15 +34,25 @@ def ensure_claude_agents_link(agent_root: Path, claude_dir: Path) -> None:
 
 
 def ensure_claude_settings(agent_root: Path, claude_dir: Path) -> None:
-    """Copy the generated Claude settings into an engagement cwd when present."""
+    """Copy generated Claude settings into an engagement cwd when present.
+
+    Engagement directories get their own settings.json copy so Claude can load
+    hooks from the engagement cwd. Refresh stale copies during repair so hook
+    command path fixes reach existing engagements too.
+    """
     settings_src = agent_root / ".claude" / "settings.json"
     if not settings_src.is_file():
         return
     claude_dir.mkdir(parents=True, exist_ok=True)
     settings_dest = claude_dir / "settings.json"
-    if settings_dest.exists() or settings_dest.is_symlink():
+    settings_text = settings_src.read_text(encoding="utf-8")
+    if settings_dest.is_symlink():
+        settings_dest.unlink()
+    elif settings_dest.exists() and not settings_dest.is_file():
         return
-    settings_dest.write_text(settings_src.read_text(encoding="utf-8"), encoding="utf-8")
+    if settings_dest.exists() and settings_dest.read_text(encoding="utf-8") == settings_text:
+        return
+    settings_dest.write_text(settings_text, encoding="utf-8")
 
 
 def repair_engagement_client_rosters(install_root: Path) -> None:

@@ -14,6 +14,7 @@ from assess.commands.code_ingest import (
     _is_regular_file,
     _should_skip_file,
 )
+from assess.lib.config import resolve_engagement_dir
 from assess.lib.treesitter_index import (
     SUPPORTED_LANGUAGES,
     index_file,
@@ -119,11 +120,17 @@ def run(args) -> None:
     if args.output_dir:
         out_base = Path(args.output_dir)
     else:
-        eng_dir = getattr(args, "engagement_dir", None) or os.environ.get("ENGAGEMENT_DIR", "")
-        if eng_dir:
-            out_base = Path(eng_dir) / "tools" / "analysis-state"
-        else:
-            out_base = Path(repo_path) / ".code-index"
+        try:
+            eng_dir = resolve_engagement_dir(getattr(args, "engagement_dir", None))
+        except SystemExit:
+            print(
+                "Cannot resolve engagement directory for default code-index output. "
+                "Pass --engagement-dir or set ENGAGEMENT_DIR so the structural index "
+                "is written to tools/analysis-state, or pass --output-dir explicitly.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        out_base = Path(eng_dir) / "tools" / "analysis-state"
 
     idx_dir = out_base / "structural-index"
     idx_dir.mkdir(parents=True, exist_ok=True)

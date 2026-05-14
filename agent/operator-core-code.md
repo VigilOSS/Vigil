@@ -129,6 +129,8 @@ Provide:
 
 Phase 1 produces six deliverables. The call graph and attack hypotheses provide navigational guidance for hunters. The file analysis queue ensures every critical/high file is analyzed regardless of hypothesis coverage.
 
+Use the helper contracts as the durable shape source before authoring or reviewing Phase 1 machine artifacts: `aith assess contract code-classify`, `aith assess contract code-record-modules`, `aith assess contract code-record-threat-model`, and `aith assess contract code-dispatch`. Point dispatches at those contracts instead of embedding copied JSON templates, because the CLI contract stays aligned with backend validation and catches field-name drift.
+
 **Deliverables from code-architect:**
 
 1. **File classifications** -- every file tagged with priority (critical/high/medium/low/skip) and
@@ -161,9 +163,10 @@ Phase 1 produces six deliverables. The call graph and attack hypotheses provide 
 6. **File analysis queue** -- every critical and high file queued for Phase 2 analysis regardless
    of whether a hypothesis names it. Files without hypotheses appear with an empty
    `guidance_hypotheses` array. The queue is grouped by `batch_theme` (logical module) so the
-   hunter can reason across related files in the same dispatch. Priority scores determine
-   dispatch order. The on-disk queue artifact is a flat per-file JSON array -- no nested batch
-   wrappers or glob patterns.
+   hunter can reason across related files in the same dispatch. Queue `priority` is mapped from
+   the classification `analysis_priority` so the backend dispatch order preserves the architect's
+   ranking. The on-disk queue artifact is a flat per-file JSON array -- no nested batch wrappers
+   or glob patterns.
 
 On return:
 ```bash
@@ -238,7 +241,8 @@ aith assess code-dispatch stats
 ```
 
 Broad-hunt queue items are file-level only. Do not add `context_id` to the queue artifact. Each
-item carries `file_id` and `file_path` plus metadata (`batch_theme`, `slot_types`,
+item carries `file_id` and `file_path` plus `priority` mapped from classification
+`analysis_priority`, plus metadata (`batch_theme`, `slot_types`,
 `guidance_hypotheses`). `code-dispatch queue` normalizes the artifact before posting: it strips
 `file_path` (resolving to `file_id` if only a path was provided) and sends only backend-accepted
 fields. Include both identifiers in the artifact so the queue is human-readable and the
@@ -365,6 +369,9 @@ All references are under `agent/references/code-vuln-patterns/`. Include the ful
 
 **On return:**
 ```bash
+# Confirm the analysis-result contract if the payload was hand-authored
+aith assess contract code-record-analysis
+
 # Record analysis results (with cwe_coverage and cross_file_triggers)
 aith assess code-record-analysis <analysis-json>
 
@@ -422,6 +429,11 @@ finding or taint path in one file connects to another file that needs examinatio
 them with `code-dispatch requeue-triggers` which adds the target files to the analysis queue
 if they are not already queued or completed. Unprocessed triggers are gate-blocking workflow
 state: the phase does not pass until each trigger is queued or already completed.
+
+**Findings-density signal:** After each hunter dispatch, if a single file yielded >= 2
+findings AND the file is > 500 LOC, note it for the Phase 2C adversarial pass. Finding
+density signals that more issues likely remain — the original hunter was anchored by its
+first discoveries.
 
 **Repeat** the fetch-dispatch-done loop until the queue is drained.
 
@@ -535,7 +547,7 @@ must reach `confirmed` (promoted to finding) or `clean` (hypothesis disproven). 
 unresolved suspicious findings to the verifier — the verifier's job is FP elimination on
 confirmed findings, not investigation of incomplete ones.
 
-**Phase 2 exit:** both 2A and 2B gates pass, AND no unresolved suspicious findings remain.
+**Phase 2 exit:** 2A, 2B, and 2C gates pass, AND no unresolved suspicious findings remain.
 
 ```bash
 aith assess transition-phase verify-variant
@@ -543,7 +555,37 @@ aith assess transition-phase verify-variant
 
 Exit: All critical/high files analyzed with effort thresholds met. CWE coverage gaps closed
 or documented. No unresolved needs-context. No pending triggers. No unresolved suspicious
-findings. Transition to Phase 3.
+findings. Adversarial depth pass complete. Transition to Phase 3.
+
+#### Phase 2C -- Adversarial Depth Pass
+
+After the coverage gate passes, select 10-20 files for an independent hostile reread.
+The broad coverage pass anchors agents on "complete correctly" — this pass resets the
+mission to "find the critical that survived."
+
+**File selection:** Use judgment. The coverage pass likely missed findings in files where:
+- Security decisions happen (auth, policy, access control, crypto)
+- Finding density was high — 2+ findings in a file signals more remain
+- Large files (>500 LOC) with entry points were analyzed under queue pressure
+- Config/policy files define execution behavior but were classified medium
+
+The operator picks 10-20 files that represent the highest-risk attack surface
+for the specific codebase. No fixed category list — the selection should reflect
+what an adversary would target given this project's architecture and threat model.
+
+**Dispatch rules:**
+- Use `deep-manual` mode (not item-iterating)
+- Do NOT include prior findings from Phase 2A in the dispatch context — the hunter
+  must approach fresh without anchoring on existing findings
+- Include: structural index, call graph, threat model, CWE patterns, but NOT
+  the list of already-found issues
+- Dispatch objective: "Find High/Critical vulnerabilities in these files. Ignore
+  coverage metrics. Focus on semantic fail-opens, logic bugs, and design flaws."
+
+**On return:** Record findings and analysis results normally. This pass does NOT need to
+satisfy CWE coverage thresholds — it produces findings, not coverage closure.
+
+**Phase 2C exit:** All dispatched files reviewed. Findings recorded.
 
 ### Phase 3: VERIFY + VARIANT
 
