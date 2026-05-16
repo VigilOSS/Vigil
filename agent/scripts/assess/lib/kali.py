@@ -240,6 +240,39 @@ def kali_exec(
                     start_new_session=True,
                 )
             except FileNotFoundError as exc:
+                # ``docker`` binary missing on PATH. The pre-exec POST at
+                # line 186 already wrote a status=running audit row; without
+                # this finalize the row stays "running" forever and confuses
+                # sweep-orphans + operator audit. PATCH it to failed before
+                # raising so the row reflects what actually happened.
+                if run_id is not None and not audit_failed:
+                    try:
+                        _patch_finalize(
+                            client,
+                            run_id=run_id,
+                            status="failed",
+                            return_code=None,
+                            ended_at_iso=_utcnow_iso(),
+                            duration_ms=0,
+                            stdout_preview="",
+                            stderr_preview=f"docker not found: {exc}",
+                            timed_out=False,
+                            partial_results=False,
+                            peak_rss_bytes=None,
+                            cpu_user_seconds=None,
+                            cpu_system_seconds=None,
+                        )
+                    except AssessError as patch_exc:
+                        # Belt-and-braces: if the PATCH also fails, drop a
+                        # failed-audit marker so sweep-orphans can pick it up.
+                        _write_failed_audit_marker(
+                            eng_dir,
+                            run_uuid=run_uuid,
+                            error=(
+                                f"docker not found AND finalize PATCH failed: "
+                                f"{patch_exc}"
+                            ),
+                        )
                 raise AssessError(f"docker not found: {exc}") from exc
             timed_out = False
             partial_results = False
