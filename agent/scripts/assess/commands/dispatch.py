@@ -161,7 +161,9 @@ def register(subparsers) -> None:
     p.add_argument("--model", dest="dispatch_model", default=None,
                    help="(start) Requested model name (stored as requested_model / model).")
     p.add_argument("--reasoning", dest="reasoning", default=None,
-                   choices=("low", "medium", "high"), help="(start) Requested reasoning level.")
+                   choices=("low", "medium", "high", "xhigh", "max"),
+                   help="(start) Requested reasoning level. `max` is Claude-only; Codex caps at xhigh "
+                        "(operator records this in actual_reasoning when known).")
     p.add_argument("--dispatch-mode", dest="dispatch_mode_arg", default=None,
                    choices=("hypothesis-driven", "item-iterating", "deep-manual", "variant-rotation"),
                    help="(start) Dispatch loop shape.")
