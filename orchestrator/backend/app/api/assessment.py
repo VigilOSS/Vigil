@@ -95,7 +95,13 @@ class CommandRunRecordRequest(BaseModel):
     timed_out: bool = False
     success: bool | None = None
     started_at: str = Field(min_length=1, max_length=64)
-    completed_at: str = Field(min_length=1, max_length=64)
+    # Pre-exec POST (status="running") sends completed_at="" — the command
+    # hasn't completed yet. Finalize PATCH supplies the real value.
+    # Historically this was set to started_at to satisfy a NOT NULL/min_length
+    # constraint, which made in-flight rows look "completed at the same
+    # instant they started" and broke orphan-sweep heuristics. The model
+    # validator below requires a non-empty completed_at on terminal status.
+    completed_at: str = Field(default="", max_length=64)
     duration_ms: int = 0
     stdout: str = ""
     stderr: str = ""
@@ -130,6 +136,19 @@ class CommandRunRecordRequest(BaseModel):
     auth_context: str | None = Field(default=None, max_length=128)
     timeout_seconds_requested: int | None = Field(default=None, ge=0)
     force: bool = False
+
+    @model_validator(mode="after")
+    def _require_completed_at_for_terminal(self) -> "CommandRunRecordRequest":
+        """Empty completed_at is only valid for in-flight rows (status="running"
+        or "queued"). Any terminal status must supply a real timestamp so the
+        audit row reflects when the command actually finished."""
+        terminal = {"completed", "failed", "timed_out", "killed", "lost"}
+        if (self.status or "completed") in terminal and not (self.completed_at or "").strip():
+            raise ValueError(
+                f"completed_at is required when status='{self.status}'; "
+                "send the real terminal timestamp, not an empty string"
+            )
+        return self
 
 
 class CommandRunFinalize(BaseModel):

@@ -141,7 +141,12 @@ def _post_pre_exec_row(
         "agent_name": agent_name,
         "phase": phase,
         "started_at": started_at_iso,
-        "completed_at": started_at_iso,
+        # Empty until the post-exec PATCH-finalize writes the real terminal
+        # timestamp. Previously we wrote started_at here to satisfy the
+        # backend NOT NULL constraint, which made orphan rows look "completed
+        # at the same instant they started." Backend now accepts empty for
+        # status="running" rows and rejects empty on terminal status.
+        "completed_at": "",
         "duration_ms": 0,
         "stdout": "",
         "stderr": "",
