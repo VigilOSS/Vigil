@@ -47,6 +47,45 @@ Do not limit yourself to `url=`. The following parameter names and functional pa
 
 **Discovery technique:** Intercept all outbound requests during normal application use. Any feature that causes the server to make an HTTP request is a candidate. Look for parameters in POST bodies, JSON payloads, and HTTP headers — not just query strings.
 
+#### SaaS Integration Connector Pattern
+
+Modern SaaS admin/settings UIs concentrate SSRF surface in their "outbound integration" screens. Treat these as a first-class category, not as one-off webhook tests — the endpoint is *designed* to perform a server-side fetch, so the SSRF primitive is the feature, not a side effect.
+
+**Where to look** (admin / settings / enterprise pages):
+
+- SIEM forwarders: Splunk HEC `instanceUrl`, QRadar / LogRhythm / AlienVault `host`, generic syslog targets
+- Identity provider integrations: SAML `idpMetadataUrl`, OIDC discovery endpoints, ADFS `providerUrl`, JWKS URIs
+- MFA integrations: Duo `apiHost`, Okta tenant URL, RSA SecurID gateway
+- Webhook configuration: Slack/Teams/PagerDuty incoming webhooks, custom HTTP callback URLs, Zapier/Make trigger endpoints
+- Data import/export: RSS/Atom feed sources, Outlook/Exchange autodiscover, git-clone URLs in CI integrations, S3-compatible endpoint URLs
+
+**Why these are the highest-yield SSRF surface:**
+
+- Connection-test buttons return rich diagnostic errors that double as a side-channel oracle (see Differential Error Oracle below).
+- Validation logic is typically split between a validator (parses URL, checks scheme and host shape) and a fetcher (resolves DNS at connection time, opens TCP). Parser/fetcher differentials produce DNS-rebinding TOCTOU bugs.
+- Persisted integrations (audit-log forwarders, webhook subscriptions) keep firing after the initial save, turning a one-shot SSRF into a continuous channel — score the persistence separately.
+
+**Testing recipe:**
+
+1. Enumerate the integration list page. For each provider, POST a minimal body to surface the required-fields list (the validator typically leaks the schema in the 400 response). Providers with hard-coded ingestion endpoints (e.g. Azure Sentinel always uses `*.ods.opinsights.azure.com`) are NOT vulnerable.
+2. Test the IP-literal denylist (`http://169.254.169.254`, `http://127.0.0.1`, `http://10.0.0.1`). If the response is a generic 400/403 distinct from "connection failed," a denylist exists — that is the surface to bypass, not a reason to give up.
+3. Bypass via DNS-rebinding: register `attacker.tld` with an A record pointing at the target internal IP. Submit `https://attacker.tld/...` — the validator sees a hostname (passes), the fetcher resolves it (gets internal IP).
+4. For persistent channel proof: make the integration's connection-test PASS (point the URL at an attacker server returning the expected response shape — for Splunk HEC a `{"text":"Success","code":0}` body). Then GET the integration to confirm the config persisted, and watch for follow-on requests on the attacker server — those are the durable channel.
+5. Variant-hunt across sibling providers in the same controller. They almost always share the same code path. File as variants of one root finding, not four separate reports, so severity frames correctly for the triager.
+
+#### Differential Error Oracle
+
+When a connection-test, validator, or status endpoint returns *distinct error strings* for *distinct failure modes*, that error set is a side-channel oracle. Map it before exploitation:
+
+| Failure mode | Typical error string | What it tells you |
+|---|---|---|
+| Internal IP, port closed | `Timeout` | Host reachable from runtime, no listener on port |
+| External IP, port closed | `ConnectionRefusal` | Host reachable, OS-level reject (firewalled differently from above) |
+| Internal IP, port open but wrong protocol | `InvalidCertificate` / `Bad response shape` | Service is listening — fingerprint it |
+| Internal IP, port open and right protocol | `WrongCredentials` / 401 | You're talking to the right service; auth is the next gate |
+
+A 4-way differential is a port-mapping primitive even when response bodies are not returned. Score the oracle separately from the underlying SSRF primitive — it is independently a recon channel.
+
 ### Step 2: Confirm with OOB Callback
 
 OOB callback is the fastest confirmation method. If `aith oob status --json`
