@@ -1500,7 +1500,17 @@ def _build_register_payload(args) -> dict:
     if not payload.get("agent_role"):
         print("agent start: --agent-role is required (or include 'agent_role' in --from-json)", file=sys.stderr)
         sys.exit(1)
-    errors, warnings = validate_specialist_dispatch_contract(payload)
+    # Engagement dir lets the validator check scope_host against scope.json
+    # for vulnerability-analyst / exploit-developer dispatches.
+    try:
+        _cfg_for_validation = load_config(getattr(args, "engagement_dir", None))
+        _eng_dir_for_validation = _cfg_for_validation.engagement_dir
+    except Exception:
+        _eng_dir_for_validation = None
+    errors, warnings = validate_specialist_dispatch_contract(
+        payload,
+        engagement_dir=_eng_dir_for_validation,
+    )
     for warning in warnings:
         print(f"WARN agent start: {warning}", file=sys.stderr)
     if errors:
