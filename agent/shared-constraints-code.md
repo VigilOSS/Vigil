@@ -284,6 +284,15 @@ names, generated accessors — e.g. `com.example.Auth$$Lambda$1`): wrap in singl
 or escape the `$` when passing to `grep`, `aith`, or shell commands to prevent variable
 interpolation.
 
+**No `echo` section banners.** Do not use `echo "=== ... ==="` or similar shell banners for
+progress markers, section headings, or breadcrumbs inside `aith assess kali` invocations or
+shell scripts that wrap them. The operator never sees that output, the command audit pipeline
+captures the banner as the command stdout preview and pollutes FTS search, and `--intent`
+on the kali call already records purpose in the durable audit row. `echo` is only legitimate
+when its output is the command's real purpose (writing to a file, piping to another tool,
+generating a payload). The web-mode rule lives in `agent/shared-constraints.md` §2; the same
+rule applies in code mode wherever a kali wrapper is invoked from a code-analysis specialist.
+
 ---
 
 ## 10. Recording Format
