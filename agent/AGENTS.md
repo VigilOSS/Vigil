@@ -178,14 +178,30 @@ Generated specialist definitions embed the canonical prompt body from `agent/age
 
 ### Dispatch Context Template
 
-Every dispatch must include:
-- **Agent identity** and **target URL**
-- **Current phase** and **specific task objective**
-- **Which skill(s) to load** (selected from `aith assess list-skills` using "Use when:" criteria)
-- **Prior findings relevant to this dispatch:**
-  - For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, and the specific hypothesis to test
-  - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `aith assess fetch` — pass all B candidates (chain-target endpoints) through, since pre-filtering hides chain opportunities
-  - For `report-writer`: no finding context needed — the agent runs `aith assess list-report-findings --mode final --json` for final reports or `aith assess list-report-findings --mode draft --json` for interim reports
+The runtime dispatch contract is the same shape as the code-analysis contract — every field below is required when applicable to the role. Missing fields force the specialist to re-derive context it cannot fully reconstruct, which is the most common cause of shallow or duplicated dispatches.
+
+**Required for every dispatch:**
+
+- **Agent identity** and **target URL** (or repo / artifact path for code / android)
+- **Current phase** and **specific task objective** (not "test this"; name the hypothesis or the variant being checked)
+- **Which skill(s) to load** (selected from `aith assess list-skills` using "Use when:" criteria) plus the full skill path with the enforcement instruction (Pre-Dispatch Checklist)
+- **Depth expectation**: thorough and deep is the default. "Quick" is never implied. If the dispatch context does not constrain scope explicitly, the specialist exhausts the surface — it does not sample it.
+- **Rate-limit budget**: the per-call rate flag value the specialist should pass to `aith assess kali ...` (e.g. `nuclei -rate-limit 4 -c 2` for a 5 req/s program). Operator-owned; do not delegate aggregate-rate decisions to the specialist.
+- **OOB / listener availability**: `aith oob status --json` snapshot if the dispatch may need a callback URL (SSRF blind, command injection blind, deserialization callback). The specialist requests the URL via `aith oob client start <name>` — but only when the operator has named OOB as available.
+- **Auth context**: the `auth_context` field of any state the dispatch will operate under (anonymous / authenticated / authenticated-admin / a specific role). For credential-bearing dispatches, also pass the `credential_id` of the captured material so the specialist can reference it without re-extracting.
+- **Cross-agent prior work**: the rendered handoff blob from `aith assess agent render-handoff <prior-agent-id>` when a prior dispatch touched the same surface or finding (see Cross-Dispatch Continuity).
+- **Coverage gap statement**: name the specific variant / sibling / payload family / surface that has NOT been tried. Do not leave the gap inference to the specialist — the operator has the cross-dispatch view that the specialist cannot reconstruct.
+- **Cleanup constraints**: when the dispatch may leave server-side state (uploaded files, created accounts, persistent payloads), name the cleanup expectation up front so the specialist records cleanup obligations as the work happens, not retroactively.
+
+**Role-specific additions:**
+
+- For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, the specific hypothesis to test, and prior probe-run ids if relevant (`aith assess list-command-runs --q <target-keyword>`).
+- For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `aith assess fetch` — pass all B candidates (chain-target endpoints) through, since pre-filtering hides chain opportunities. Also pass any captured `credential_id` values from prior `vulnerability-analyst` runs so chain construction starts with the live material rather than re-extracting.
+- For `report-writer`: no finding context needed — the agent runs `aith assess list-report-findings --mode final --json` for final reports or `--mode draft --json` for interim. Operator names the QA mode (`generate` / `review-and-fix`) and any explicit blockers from `check-report-readiness`.
+- For `osint-analyst`: any tech-component intel already recorded, named so the agent does not re-enumerate. The agent reads `aith assess list-intel tech-component --json` itself; the operator names the *new* enumeration targets (recently identified component, new domain to triangulate).
+- For `code-vuln-hunter` / `code-variant-hunter`: the file batch (or the `code-dispatch` queue slice id), the slot types under test, the CWE patterns to apply, and any prior `code-record-modules` keys relevant to the batch.
+
+The Pre-Dispatch Checklist below operationalizes this template — every box in the checklist maps back to a field above.
 
 ### Runtime Identity Block
 
