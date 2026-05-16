@@ -828,9 +828,10 @@ def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_enga
         tool_name="nmap",
     )
     argv = captured["argv"]
-    # Shape: docker exec -w <engagement-mount> <container> sh -c '<wrapper>' sh <user-cmd...>
+    # Shape: docker exec --env ENGAGEMENT_KEY=<key> -w <engagement-mount> <container> sh -c '<wrapper>' sh <user-cmd...>
     assert argv[:2] == ["docker", "exec"]
-    assert argv[2:4] == ["-w", f"/engagements/{fake_engagement.name}"]
+    assert argv[2:4] == ["--env", f"ENGAGEMENT_KEY={fake_engagement.name}"]
+    assert argv[4:6] == ["-w", f"/engagements/{fake_engagement.name}"]
     container_index = argv.index("security-research")
     assert argv[container_index + 1:container_index + 3] == ["sh", "-c"]
     wrapper = argv[container_index + 3]
