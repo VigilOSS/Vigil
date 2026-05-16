@@ -487,6 +487,28 @@ Auth handling rules:
 - If `auth.json` is missing material or marked expired, warn and continue anonymously rather than halting the engagement.
 - The human may update `auth.json` directly or use mitmproxy-assisted login capture to refresh it.
 
+### Auth-expiry recovery loop
+
+Authenticated dispatches fail in a recognizable shape: 401/403 on routes that were 200 yesterday, redirect-to-login, session expired JSON, or a `WWW-Authenticate: Bearer error="invalid_token"` header. Specialists surface these in their handoff `runtime_issues` with auth-expiry keywords. When the operator sees that signal, do not blame the specialist or re-dispatch with the same expired material — recover the auth first, then re-dispatch.
+
+Recovery branch:
+
+1. **Detect.** Scan recent dispatch handoffs and command-run output for the failure shape:
+   ```bash
+   aith assess agent list --limit 5 --json \
+     | jq -r '.[] | select(.handoff.runtime_issues // [] | tostring | test("401|403|expired|invalid_token|redirect.*login"; "i")) | .agent_id'
+   aith assess list-command-runs --q "401\|403\|session\|expired" --limit 10
+   ```
+2. **Decide refresh path.**
+   - **Bearer / API token** in `auth.json.headers.Authorization`: refresh via the documented refresh endpoint (if the program offers one) or re-run the login flow. Operator action; do NOT dispatch a specialist for a token refresh — the refresh request itself is one-shot mechanical work.
+   - **Session cookie** in `auth.json.cookies` / `host_cookies[]`: re-capture via mitmproxy-assisted login. Restart browser flow through the proxy; `proxy_addon.py` writes the refreshed cookie set into `auth.json` automatically.
+   - **OAuth/OIDC**: re-run the authorization code grant against the discovery endpoint; check `auth.json.tokens.refresh_token` first.
+3. **Validate the refresh.** Re-run the same login check from Credential Auto-Use step 1 via `aith assess kali exec --technique AUTH --intent "post-refresh validation" ...`. The audit row records both the failed pre-refresh probe and the successful post-refresh probe so the timeline is unambiguous.
+4. **Re-dispatch only on success.** Re-dispatch the affected specialist (typically `vulnerability-analyst` or `exploit-developer`) with a dispatch-context note: "Auth refreshed at <iso>; the previous handoff's runtime_issues about 401/403 are stale — re-run from the same task objective with fresh credentials in `auth.json`."
+5. **Fallback to anonymous.** When the auth cannot be refreshed in-session (MFA challenge, human-in-the-loop required, credentials genuinely expired by the program), record the gap with `aith assess agent decision --kind dispatch_blocked --reason "auth expired; awaiting human refresh" --surfaced-to-user` and let the dispatch continue against anonymous scope. Do not silently retry against expired material — every retry burns a context window and the failure is deterministic.
+
+Do not loop step 4 indefinitely. If the refreshed auth fails the validation in step 3 twice, treat it as a genuine credential issue (not an in-session expiry) and switch to the fallback branch in step 5.
+
 ## Kali Execution
 
 Target-facing work must go through `aith assess kali ...`. Every call carries the audit fields — `engagement_key` and `agent_name` auto-derived from the engagement directory and the dispatching role context, plus `--phase` (REQUIRED on every call), the command, argv, stdout/stderr paths, exit code, timeout state, and timings. Full execution rules and the audit-flag value tables (`--technique`, `--probe-kind`, `--phase`, `--timeout`, `--destructive`) live in `agent/shared-constraints.md` §2 and "Command Metadata". Discovery is layered: load `agent/skills/kali-exec/SKILL.md` for the verb menu and audit-flag mapping; run `aith assess kali --help` and `aith assess kali <verb> --help` for the live flag set; run `aith assess contract kali <verb>` for the canonical schema, helper defaults, and example payload. See `agent/shared-constraints.md` "Contract-First Rule" — run `aith assess contract <verb>` before the first invocation of any verb in a dispatch.
