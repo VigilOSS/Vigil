@@ -159,6 +159,27 @@ sqlite3 "$DB" ".timeout 5000" "
   FROM work_items GROUP BY type ORDER BY total DESC;"
 ```
 
+## Out-of-Scope Triage (operator-only, before the dispatching pass)
+
+Before dispatching specialists against the surface-candidate list, walk the top of the queue and mark any candidates that are out of scope per the engagement's `scope.json` as `not_applicable` with a one-line rationale. Each out-of-scope dispatch costs a full specialist context window; the operator can kill those candidates in two seconds.
+
+Examples that recur in real engagements:
+
+- Subdomains explicitly excluded in the program brief (named in `scope.json` `exclusions` or scope-policy text)
+- `*.dev` / `*.staging` / `*.sandbox` subdomains when the brief is production-only
+- Third-party-hosted assets (CDN edges, marketing platforms, support portals, Helpdesk widgets) that surfaced because the in-scope domain links to them
+- Azure SCM / Kudu / `*.scm.azurewebsites.net` and other deployment-platform endpoints when the in-scope target is the application surface, not the deployment platform
+- Salesforce-managed vendor SaaS hosts when the brief covers the customer's app, not the vendor platform
+
+```bash
+aith assess resolve-surface <id> --status not_applicable \
+  --rationale "Out of scope per program brief: <quote the relevant exclusion>"
+```
+
+Triage these BEFORE the dispatching pass, not during. A specialist that opens an out-of-scope candidate runs the full skill methodology before realising the scope error, then writes a handoff explaining why it stopped — the operator could have prevented all of that with one `resolve-surface` call.
+
+This step pairs with `agent/scripts/assess/lib/contracts.py` `validate_specialist_dispatch_contract`, which gates active-probing dispatches (vulnerability-analyst, exploit-developer) on `scope_host` membership in `scope.json` `hosts`. The validator catches mistakes at register time; this step catches them before they reach the validator.
+
 ## Key Rules
 
 - Use `aith assess work-buffer "$DB" <action>` for all work-buffer operations — reading cases.db directly bypasses the backend sync layer and can produce stale or inconsistent state
