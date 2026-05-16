@@ -232,6 +232,29 @@ For each category, produce:
 - Representative examples (3-5 per category)
 - Recommended Phase 3 priority and vuln-class skill
 
+### Step 6.5: URL-shape body-field harvest (SSRF candidates)
+
+URL / host fields inside admin / settings POST and PUT bodies are SSRF candidates regardless of where the URL appears in the request *path*. The triage in Step 6 keys on URL path patterns; this step keys on *body field names* so SSRF-shaped fields are not missed.
+
+Run this against every captured POST/PUT body in the work buffer:
+
+```bash
+aith assess work-buffer "$DB" --json \
+  | jq -r '.[] | select(.method=="POST" or .method=="PUT")
+           | "\(.url)\t\(.body_params // empty)"' \
+  | grep -iE '\b(url|uri|host|hostname|endpoint|callback|webhook|notify|postback|target|destination|return|redirect|next|continue|origin|fetch|import|source|metadata|discovery)\b\s*[:=]'
+```
+
+For each hit, record the candidate so Phase 3 dispatching does not lose it:
+
+```bash
+aith assess record-surface ssrf-candidate "<endpoint>" surface-collector-url-shape \
+  --rationale "POST/PUT body field <field> accepts a URL — server-side fetch on save / connection-test (SaaS connector pattern)" \
+  --status discovered
+```
+
+Then dispatch `vulnerability-analyst` with `--skills ssrf-testing` against the highest-yield candidates — typically admin/settings/enterprise pages, integration list endpoints, and any connection-test handler. See `agent/skills/ssrf-testing/SKILL.md` "SaaS Integration Connector Pattern" for the full testing recipe.
+
 ### Step 7: Surface and Finding Recording
 
 Before returning to the operator:
