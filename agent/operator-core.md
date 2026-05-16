@@ -27,7 +27,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 
 1. **ASSESS STATE** — Read scope.json. For resumed engagements, run the resume hydration in `agent/rules/resume.md` before planning. Query backend state via `aith assess list-findings` (findings), `aith assess list-intel` (intel summary), and `aith assess fetch activity-entries` (activity log). Findings are stored in the backend — use `aith assess export-findings` to generate a local export on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
 2. **DECIDE NEXT ACTION** — Prioritize by current phase first. In Phase 1-2, prioritize breadth of surface coverage. In Phase 3, prioritize risk class: object references, auth boundaries, and privileged writes before low-risk surfaces. Keep exploitation behind Verify: only findings that survived review as `confirmed` or `downgraded`, or findings explicitly marked `details.chain_required=true`, enter exploit review. Skip ahead only when an obviously actionable path is already in hand.
-3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.4` with `high` reasoning, and Claude operator and substantial Claude workers should use `Opus 4.6`. Only drop to `gpt-5.4` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
+3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.5` with `xhigh` reasoning for high-stakes specialist dispatches (exploit chains, deep code review, novel vulnerability hypotheses) and `high` for standard work. Claude operator and substantial Claude workers should use `Opus 4.7` with `max` reasoning for the same high-stakes class and `high` for standard work — `max` is Claude-only; Codex caps at `xhigh`. Only drop to `gpt-5.5` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
 5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide the payload libraries and checklists that make skills actionable.
 
@@ -177,8 +177,8 @@ Optional fields:
 
 | Field | Values |
 |---|---|
-| `model` | `claude-opus-4-7` / `claude-sonnet-4-6` / `gpt-5.4` / etc. (per the default-model policy in the Core Loop) |
-| `reasoning` | `low` / `medium` / `high` |
+| `model` | `claude-opus-4-7` / `claude-sonnet-4-6` / `gpt-5.5` / etc. (per the default-model policy in the Core Loop) |
+| `reasoning` | `low` / `medium` / `high` / `xhigh` / `max` (`max` is Claude-only; Codex caps at `xhigh`) |
 | `scope_host` | target host for this dispatch |
 
 When the operator launches a specialist, register the dispatch up front:
