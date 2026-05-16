@@ -1182,7 +1182,7 @@ _DISPATCH_MODE = Literal[
     "deep-manual",
     "variant-rotation",
 ]
-_REASONING = Literal["low", "medium", "high"]
+_REASONING = Literal["low", "medium", "high", "xhigh", "max"]
 _CONFIDENCE = Literal["low", "medium", "high"]
 
 
