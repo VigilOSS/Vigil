@@ -24,6 +24,7 @@ already listed below.
 
 - `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
+- `agent/rules/adversarial-mindset.md`
 - `agent/skills/directory-fuzzing/SKILL.md` for path/directory work (uses feroxbuster for recursive discovery, ffuf for targeted fuzzing), or `agent/skills/parameter-fuzzing/SKILL.md` for parameter work — load both if the objective spans both surface types (for any other skill, run `aith assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint

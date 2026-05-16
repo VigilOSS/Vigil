@@ -28,6 +28,7 @@ already listed below.
 
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
 - `agent/rules/hunting.md`
+- `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-fuzz-campaign/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint
