@@ -288,6 +288,7 @@ Before every dispatch, verify:
 - [ ] Activity log checked for duplicate dispatch — `aith assess fetch activity-entries` (DEDUP rule)
 - [ ] Command history checked — `aith assess list-command-runs --q <keyword>` reviewed for prior runs that already cover the objective. Default to an unscoped search so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, open its preview with `aith assess get-command-run <id>` — `success=true` only means return_code=0, not that the output answers the current question
 - [ ] Parallelism decision made (independent → parallel, dependent → sequential)
+- [ ] For `vulnerability-analyst` and `exploit-developer` dispatches: `--scope-host` confirmed against `scope.json` `hosts` (with wildcard semantics). Adjacent-but-out-of-scope hosts surfaced during OSINT/recon are NOT in scope for active probing — reframe as recon or add the host to scope first. The CLI validator enforces this, but stating it in the dispatch context catches operator mistakes earlier.
 
 DEDUP: Check the activity log (`aith assess fetch activity-entries`) before dispatch — re-dispatching the same agent for the same objective wastes a full context window and risks duplicate findings.
 PARALLEL: Independent tasks → parallel. Dependent → sequential.

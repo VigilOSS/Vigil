@@ -33,6 +33,18 @@ _SPECIALIST_DISPATCH_REQUIRED_FIELDS: tuple[str, ...] = (
 _DISPATCH_ROLES_WITHOUT_SKILLS: frozenset[str] = frozenset({"operator"})
 
 
+# Roles whose dispatches must target a host that is actually in scope. OSINT
+# and recon are intentionally NOT here: OSINT is permissible against
+# adjacent/related domains (cert chains, DNS history, GitHub mirrors), and
+# recon-specialist fingerprinting fires before scope-host is even meaningful.
+# Vulnerability-analyst and exploit-developer probe live targets, so their
+# scope_host must be in `scope.json` hosts (with wildcard semantics applied).
+_SCOPE_GATED_ROLES: frozenset[str] = frozenset({
+    "vulnerability-analyst",
+    "exploit-developer",
+})
+
+
 def _agent_skills_root() -> Path:
     """Resolve agent/skills/ relative to this file or AITH_REPO_ROOT.
 
@@ -77,8 +89,19 @@ class SpecialistDispatchContract:
     extras: dict[str, Any] = field(default_factory=dict)
 
 
-def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list[str]]:
+def validate_specialist_dispatch_contract(
+    payload: Any,
+    *,
+    engagement_dir: str | None = None,
+) -> tuple[list[str], list[str]]:
     """Validate a parsed specialist dispatch payload.
+
+    When ``engagement_dir`` is provided, additionally check that ``scope_host``
+    is in the engagement's ``scope.json`` ``hosts`` for scope-gated roles
+    (``vulnerability-analyst``, ``exploit-developer``). This prevents the
+    operator-side mistake of dispatching active probing against a related-but-
+    out-of-scope domain that recon surfaced. OSINT and recon are NOT gated
+    because they legitimately reach adjacent/related domains during discovery.
 
     Returns ``(errors, warnings)``.
     """
@@ -152,6 +175,33 @@ def validate_specialist_dispatch_contract(payload: Any) -> tuple[list[str], list
                         f"skill '{skill_name}' has no SKILL.md under {skills_root} "
                         "— typo or repo-relative path mismatch?"
                     )
+
+    # Scope-host gate for active-probing roles. Imported lazily so the
+    # contracts module stays importable in test/CI contexts that do not have
+    # an engagement directory layout. Missing scope.json silently skips the
+    # gate — other paths surface that error; the validator should not
+    # duplicate it. Malformed scope.json (exists but unparseable) warns.
+    if engagement_dir and role_name and role_name.lower() in _SCOPE_GATED_ROLES:
+        scope_host = payload.get("scope_host")
+        if isinstance(scope_host, str) and scope_host.strip():
+            scope_path = Path(engagement_dir) / "scope.json"
+            if scope_path.is_file():
+                try:
+                    from .scope import host_in_scope, load_scope, scope_entries
+                    scope = load_scope(engagement_dir)
+                    entries = scope_entries(scope)
+                except SystemExit as exc:
+                    warnings.append(f"scope_host gate skipped: {exc}")
+                else:
+                    if entries and not host_in_scope(scope_host.strip(), entries):
+                        errors.append(
+                            f"scope_host '{scope_host}' is not in scope.json `hosts` "
+                            f"for role '{role_name}'. Active-probing dispatches "
+                            "(vulnerability-analyst, exploit-developer) must target a "
+                            "host that is explicitly in scope. If this is intentional "
+                            "(e.g. cert-chain pivot), reframe as recon/osint, or add "
+                            "the host to scope.json first."
+                        )
 
     return errors, warnings
 

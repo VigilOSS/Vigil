@@ -3819,3 +3819,100 @@ def test_assess_config_aith_config_wins_over_install_env(
         module.resolve_base_url(str(engagement_dir), str(install_root / "agent"))
         == "http://from-config:5678"
     )
+
+
+# ---------------------------------------------------------------------------
+# C7 — scope_host validation in dispatch contract
+# ---------------------------------------------------------------------------
+
+
+def _make_engagement_dir_with_scope(tmp_path: Path, hosts: list[str]) -> Path:
+    eng_dir = tmp_path / "eng"
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    (eng_dir / "scope.json").write_text(
+        json.dumps({"hosts": hosts, "status": "in_progress"}),
+        encoding="utf-8",
+    )
+    return eng_dir
+
+
+def test_validate_dispatch_blocks_out_of_scope_vuln_analyst(tmp_path: Path) -> None:
+    """C7: vulnerability-analyst dispatching against an out-of-scope host must
+    fail the contract validator with a clear error referencing scope.json."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    eng_dir = _make_engagement_dir_with_scope(tmp_path, ["app.example.test"])
+    payload = {
+        "agent_id": "va-1",
+        "agent_role": "vulnerability-analyst",
+        "task": "Probe IDOR",
+        "scope_host": "evil-attacker.test",
+        "dispatch_mode": "item-iterating",
+        "skills": "idor-testing",
+    }
+    errors, _warnings = validate_specialist_dispatch_contract(
+        payload, engagement_dir=str(eng_dir)
+    )
+    assert any("not in scope.json" in e for e in errors), errors
+
+
+def test_validate_dispatch_allows_in_scope_exploit_developer(tmp_path: Path) -> None:
+    """C7: exploit-developer dispatching against a host that IS in scope must
+    pass the scope gate (no scope-related errors)."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    eng_dir = _make_engagement_dir_with_scope(tmp_path, ["app.example.test"])
+    payload = {
+        "agent_id": "exp-1",
+        "agent_role": "exploit-developer",
+        "task": "Chain IDOR + token reuse",
+        "scope_host": "app.example.test",
+        "dispatch_mode": "deep-manual",
+        "skills": "idor-testing",
+    }
+    errors, _warnings = validate_specialist_dispatch_contract(
+        payload, engagement_dir=str(eng_dir)
+    )
+    assert not any("not in scope.json" in e for e in errors), errors
+
+
+def test_validate_dispatch_allows_recon_against_adjacent_host(tmp_path: Path) -> None:
+    """C7: recon and osint are NOT scope-gated because they legitimately
+    reach adjacent/related hosts during discovery (cert chains, DNS history,
+    GitHub mirrors). recon-specialist with an out-of-scope scope_host must
+    pass the scope gate (the skills-required check still applies separately)."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    eng_dir = _make_engagement_dir_with_scope(tmp_path, ["app.example.test"])
+    payload = {
+        "agent_id": "recon-1",
+        "agent_role": "recon-specialist",
+        "task": "Cert-chain pivot recon",
+        "scope_host": "related.example.test",
+        "dispatch_mode": "hypothesis-driven",
+        "skills": "web-recon",
+    }
+    errors, _warnings = validate_specialist_dispatch_contract(
+        payload, engagement_dir=str(eng_dir)
+    )
+    assert not any("not in scope.json" in e for e in errors), errors
+
+
+def test_validate_dispatch_skips_scope_check_when_engagement_dir_omitted(
+    tmp_path: Path,
+) -> None:
+    """C7: callers that do not pass engagement_dir keep the prior behavior —
+    no scope check fires. Keeps the validator usable for unit tests + stdin
+    linting where the engagement context is not available."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    payload = {
+        "agent_id": "va-1",
+        "agent_role": "vulnerability-analyst",
+        "task": "Probe IDOR",
+        "scope_host": "anywhere.test",
+        "dispatch_mode": "item-iterating",
+        "skills": "idor-testing",
+    }
+    errors, _warnings = validate_specialist_dispatch_contract(payload)
+    assert not any("scope" in e.lower() for e in errors), errors
