@@ -138,6 +138,19 @@ specialist skill context to triage correctly. Dropping them from the reactive pa
 intel/finding writes (and any future priority-boost mechanism) aligned with genuine
 CVE/misconfig/exposure signal rather than fuzzing noise.
 
+### Known fingerprint-suppression cases (`-as` returns 0 matches)
+
+`-as` selects templates via wappalyzer fingerprinting. On some host classes the fingerprint is too generic for auto-selection and the run returns zero matches even though the templates loaded fine. This is **expected behavior, not tool failure** — confirm via stderr (`Templates loaded for current scan: NNNN`) before treating zero results as a runtime issue.
+
+Hosts where `-as` is known to suppress:
+
+- **Salesforce Experience Cloud / Lightning** — the CDN edge serves a generic chrome that doesn't match any wappalyzer signature. Use explicit `-t http/technologies/salesforce*,http/cves/CVE-*-salesforce-*` (or the vendor-platform-enum skill's payload reference) instead.
+- **Akamai-fronted hosts** — the CDN layer hides the underlying stack from wappalyzer. Use `-t http/cves/,http/exposures/,http/misconfiguration/` with explicit paths and rely on dedup to avoid re-scanning.
+- **Cloudflare with aggressive bot rules** — fingerprint requests get challenged before wappalyzer can score them. Same workaround.
+- **WAF-fronted enterprise edges in general** — when `wafw00f` already flagged a WAF on the host, expect `-as` to underperform.
+
+When you see `Templates loaded for current scan: NNNN` in stderr but zero result rows in stdout, do NOT report nuclei as broken. Re-run with explicit `-t` paths against the same target. Confirm with `aith assess get-command-run <id>` — the stderr preview is the source of truth for "did the run actually execute templates."
+
 ### Dedup across runs (Option A — no schema change)
 
 Use `aith assess list-command-runs --q nuclei` to compute the "already-scanned" set from prior
