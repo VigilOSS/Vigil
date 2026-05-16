@@ -17,6 +17,25 @@ def _derive_module_key(name: str) -> str:
     return key.strip("_") or "unknown"
 
 
+# Generic names like 'auth_module_1', 'module_2', 'unknown_module' indicate the
+# agent emitting modules did not pick meaningful identifiers. Reject these at
+# the CLI so the backend never accumulates undescriptive rows that
+# code-architect / report-writer cannot map to a real subsystem.
+_GENERIC_MODULE_PATTERNS = (
+    re.compile(r"^module_\d+$"),
+    re.compile(r"^[a-z]+_module_\d+$"),
+    re.compile(r"^unknown(?:_module)?$"),
+    re.compile(r"^undefined(?:_module)?$"),
+)
+
+
+def _is_generic_label(value: str) -> bool:
+    candidate = (value or "").strip().lower()
+    if not candidate:
+        return True
+    return any(pattern.match(candidate) for pattern in _GENERIC_MODULE_PATTERNS)
+
+
 def _check_auto_derived_key_collisions(modules: list[dict], existing_modules: list[dict]) -> None:
     existing_by_key = {
         str(module.get("module_key", "")): str(module.get("name", "")).strip()
@@ -83,6 +102,22 @@ def run(args) -> None:
             mod['module_key'] = _derive_module_key(name)
             mod['_auto_derived_module_key'] = True
             print(f"Auto-derived module_key '{mod['module_key']}' from name '{name}'", file=sys.stderr)
+
+        # Reject generic auto-pattern labels: 'auth_module_1', 'module_2',
+        # 'unknown_module'. These come from agents that did not pick
+        # meaningful identifiers and end up unmappable downstream.
+        for label_field in ("module_key", "name"):
+            value = mod.get(label_field, "")
+            if isinstance(value, str) and _is_generic_label(value):
+                print(
+                    f"Item {i} {label_field}='{value}' is a generic auto-pattern "
+                    "(e.g. 'module_N', '*_module_N', 'unknown_module'). "
+                    "Pick a meaningful identifier reflecting the actual subsystem "
+                    "(auth_login, payment_settlement, ws_subscription, etc.) — "
+                    "the report and code-architect downstream depend on it.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     repo_id = int(args.repo_id)
 
