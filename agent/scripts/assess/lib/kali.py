@@ -174,6 +174,7 @@ def kali_exec(
         container_name=container_name,
         run_uuid=run_uuid,
         working_dir=container_working_dir,
+        engagement_key=eng_key,
     )
 
     client = AssessmentClient(cfg.base_url, eng_key)
