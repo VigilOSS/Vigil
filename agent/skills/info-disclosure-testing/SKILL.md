@@ -344,3 +344,4 @@ Severity mapping:
 
 - `agent/references/payloads/info-disclosure-probes.md` — standard endpoints checklist (/metrics, /.env, /actuator, cloud metadata)
 - `agent/references/payloads/csp-default-grep.md` — vendor-template CSP / CORS re-baseline; placeholder-literal grep, unsafe-inline+unsafe-eval check, overly-broad wildcard check, per-vendor known-default snippets. Use when a vendor product fingerprint matches and the headers may still reflect installer-template defaults.
+- `agent/skills/cloud-exposure/SKILL.md` — when the disclosure is an exposed cloud bucket (S3 / GCS / Azure). Drives the sample-then-classify-then-swarm workflow instead of mis-recording bucket-listing severity from the listing alone.
