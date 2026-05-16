@@ -62,6 +62,30 @@ aith assess kali exec \
     curl -s "https://api.github.com/search/repositories?q=CVE+<component>+poc&sort=updated&per_page=5" \
       | jq '.items[] | {name, html_url, description}'
 
+For every component+version row in the tech stack, the four lookups above are **mandatory** (not "if you have time"). Specialists historically rediscovered CVEs via initiative when the OSINT pass should have surfaced them. Walk the full `list-intel tech-component` output before moving to step 2.
+
+**Systematic nuclei CVE-template pass** — for containerized app platforms and well-known products with public CVE templates (ShinyProxy, R-Shiny, Jenkins, Confluence, GitLab, Grafana, Argo CD, Sentry, MinIO, Splunk Web, Spring Boot Actuator, anything with `http/cves/` template coverage), record the tech-component intel, then trigger a targeted nuclei pass scoped to that product:
+
+```bash
+aith assess kali nuclei \
+  -l /engagements/$ENGAGEMENT_KEY/scans/<product>-hosts.txt \
+  -t http/cves/ -tags <product-slug> \
+  -severity medium,high,critical -jsonl \
+  -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_<product>_$RID.jsonl \
+  --technique CVE-VALIDATION --intent "targeted CVE templates for <product> <version>" \
+  --probe-kind fingerprint --phase recon --timeout 1800
+```
+
+This is **not** the reactive Phase 1c sweep (which is `-as` against all live hosts); it's an explicit per-product validation that the reactive sweep would have missed because `-as` underperforms on the suppression cases documented in `agent/skills/nuclei-scanning/SKILL.md` "Known fingerprint-suppression cases."
+
+**Recording rule.** After the CVE lookup + targeted nuclei pass, record each version-matched CVE as intel:
+
+```bash
+aith assess record-intel cve <cve-json-file>
+```
+
+Then the operator dispatches `exploit-developer` to validate. Version-matched CVE is **intel, not finding** until the exploit-developer pass produces target-proven evidence. Do NOT call `record-finding` from the osint-recon pass — that breaks the no-theoretical-findings rule in `agent/rules/hunting.md`.
+
 ### 2. Breach & Credential Intelligence
 
 Pull emails and domains from the backend (`aith assess list-intel email` and `aith assess list-intel domain`):
