@@ -397,6 +397,53 @@ def list_engagements(install_root: Path) -> list[EngagementRow]:
     return sorted(rows, key=lambda row: (row.created_at or "", row.key))
 
 
+def _both_engagements_missing_code_phase(install_root: Path) -> list[Path]:
+    """Return engagement directories where engagement_type='both' but
+    scope.json has no `code_phase` field.
+
+    Dual-track phase tracking landed mid-flight: engagements created before
+    that change only carry `current_phase` and confuse `transition-phase
+    --track code`. The migration in `migrate_legacy_both_engagements` sets
+    code_phase='ingest' for those engagements; this helper is the read-only
+    detector used by `aith status` and the CLI summary.
+    """
+    affected: list[Path] = []
+    root = engagements_root(install_root)
+    if not root.is_dir():
+        return affected
+    for eng_dir in sorted(root.glob("*")):
+        scope_path = eng_dir / "scope.json"
+        if not eng_dir.is_dir() or not scope_path.is_file():
+            continue
+        try:
+            scope = _read_json(scope_path)
+        except Exception:
+            continue
+        if scope.get("engagement_type") != "both":
+            continue
+        if not scope.get("code_phase"):
+            affected.append(eng_dir)
+    return affected
+
+
+def migrate_legacy_both_engagements(install_root: Path, *, dry_run: bool = False) -> list[dict[str, str]]:
+    """Set code_phase='ingest' on legacy `engagement_type=both` engagements
+    that predate the dual-track phase change. Returns a list of
+    ``{"key", "from", "to"}`` dicts describing what was (or would be)
+    migrated. ``dry_run=True`` skips the write.
+    """
+    migrated: list[dict[str, str]] = []
+    for eng_dir in _both_engagements_missing_code_phase(install_root):
+        scope_path = eng_dir / "scope.json"
+        scope = _read_json(scope_path)
+        prior = str(scope.get("code_phase") or "")
+        scope["code_phase"] = "ingest"
+        migrated.append({"key": eng_dir.name, "from": prior, "to": "ingest"})
+        if not dry_run:
+            _write_json(scope_path, scope)
+    return migrated
+
+
 def resolve_engagement_path(install_root: Path, key: str | None = None, *, select: bool = False) -> Path:
     rows = list_engagements(install_root)
     if key:

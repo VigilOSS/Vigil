@@ -30,6 +30,14 @@ class Check:
 def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_command) -> dict[str, object]:
     install_root = install_root.expanduser().resolve()
     rows = list_engagements(install_root)
+    # C36: surface legacy engagement_type=both engagements that predate
+    # dual-track phase tracking. They are not broken — they just have no
+    # `code_phase` field, which makes `aith assess transition-phase --track
+    # code` confusing. `aith engagement migrate-scope` sets the default.
+    from .engagements import _both_engagements_missing_code_phase
+    legacy_both_missing_code_phase = [
+        eng_dir.name for eng_dir in _both_engagements_missing_code_phase(install_root)
+    ]
     runtime_state = runtime_status(runner=runner)
     mitm_running = docker.container_running("security-research-proxy", runner=runner)
     backup = latest_backup(install_root)
@@ -64,6 +72,7 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
             "latest": str(backup.path) if backup else None,
             "modified_at": backup.modified_at if backup else None,
         },
+        "legacy_both_missing_code_phase": legacy_both_missing_code_phase,
     }
 
 
@@ -106,6 +115,13 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     print(f"mitmproxy\t{mitmproxy['state']}\tca_volume={mitmproxy['ca_volume']}")  # type: ignore[index]
     print(f"oob\t{oob['state']}\tclients={len(oob['clients'])}\tdomain={oob.get('domain') or '-'}")  # type: ignore[index]
     print(f"backup\t{backup['latest'] or '-'}")  # type: ignore[index]
+    legacy_keys = status.get("legacy_both_missing_code_phase") or []
+    if isinstance(legacy_keys, list) and legacy_keys:
+        preview = ", ".join(legacy_keys[:3]) + (" ..." if len(legacy_keys) > 3 else "")
+        print(
+            f"warn\t{len(legacy_keys)} legacy `engagement_type=both` engagement(s) "
+            f"missing `code_phase` ({preview}); run `aith engagement migrate-scope`"
+        )
 
 
 def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.run_command) -> list[Check]:
