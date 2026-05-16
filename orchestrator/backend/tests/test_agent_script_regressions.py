@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import sqlite3
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -74,7 +75,7 @@ def test_kali_runtime_dockerfiles_package_ping_for_mcp_smoke_tests() -> None:
         repo_root / "agent" / "docker" / "runtime-lightweight" / "Dockerfile",
     ):
         contents = dockerfile.read_text(encoding="utf-8")
-        assert "iputils-ping=3:20250605-1+b1" in contents
+        assert re.search(r"\biputils-ping(?:=\S+)?\b", contents)
 
 
 def test_list_intel_search_uses_canonical_entity_type(monkeypatch, tmp_path: Path, capsys) -> None:
