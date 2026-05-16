@@ -606,6 +606,21 @@ Summary: recon→source-analyzer (bring source-analysis skill) + vuln-analyst (b
 
 If logs are available, run the optional Athena/log-investigation phase before closing the engagement — it determines whether the most important attack paths show signs of prior exploitation in the available telemetry window.
 
+## Definition of Done
+
+Do not declare the engagement complete or dispatch the final report-writer pass until every gate below holds. If you think you're done earlier, walk back through this list and name which gate is satisfied and how, before claiming completion.
+
+- [ ] **Phase 4 verification queue cleared.** `aith assess list-findings --verification-state unreviewed` returns empty (or every entry has a recorded kill rationale via `aith assess kill-finding`).
+- [ ] **Phase 4 workflow queue cleared.** `aith assess list-findings --workflow-status pending` returns empty.
+- [ ] **Sibling/variant pass per confirmed finding.** For each confirmed finding, the dispatch table shows at least one `vulnerability-analyst` run with `--task` referencing sibling routes / sibling controllers / sibling providers / sibling content-types / sibling auth contexts. Skipping the variant pass is the most common way real findings are missed in this codebase.
+- [ ] **Chain-construction pass run.** Before report-writer dispatch, at least one `exploit-developer` pass has enumerated A→B candidates across the confirmed finding set (info disclosure + open-redirect, SSRF + token leak, IDOR + impersonation are the standard chains worth checking even when they look unlikely).
+- [ ] **Severity↔CVSS alignment audit clean.** Per `agent/rules/hunting.md` §20, every finding's `severity` matches its `details.cvss_score` band. Mismatches are fixed via `aith assess update-finding --inline '{"details":{"cvss_score":...,"cvss_vector":"..."}}'`.
+- [ ] **Stale-text scrub clean.** Per `agent/rules/hunting.md` §21, no active finding's `summary` or `details` text references a state that no longer applies ("adjusted from X to Y" when severity is no longer Y, "originally rated as Z" after the rating shifted, etc.). The recipe lives in `agent/skills/report-generation/SKILL.md` Review-and-Fix QA Mode.
+- [ ] **`aith assess check-report-readiness` returns clean.** No blockers in the readiness response — coverage, unreviewed findings, root-cause groupings, chain-review state.
+- [ ] **Backend reflects submissions.** Findings actually submitted to the program (or marked accepted/duplicate) have a workflow status that matches reality; nothing remains "draft" if it was sent out.
+
+When all eight gates pass, dispatch `report-writer` for the final pass and then close the engagement.
+
 ## macOS/zsh Compatibility
 
 - Use absolute paths: `/usr/bin/curl`, `/bin/cat`, `/usr/bin/grep`, etc.
