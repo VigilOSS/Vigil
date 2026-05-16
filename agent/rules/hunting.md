@@ -168,3 +168,35 @@ Use these to generate testable hypotheses about where developers introduced flaw
 - **Naming anomaly signal**: If the API uses `userId` everywhere but one endpoint uses `user_id`, that endpoint was built by a different developer or team — it likely has different (weaker) security assumptions.
 - **Error response divergence**: Same 403 status code but different JSON structure on two endpoints = different backend systems with different trust boundaries. Test each independently.
 - **New feature window**: Features launched in the last 30 days have the lowest security maturity. Check changelogs and release notes for recent additions.
+
+## 20. Severity-CVSS alignment audit before report
+
+Before any report-writer dispatch, query `aith assess list-findings` and verify
+each finding's `severity` matches its `details.cvss_score` band:
+
+- `high` requires `cvss_score >= 7.0`
+- `medium` requires `4.0 <= cvss_score <= 6.9`
+- `low` requires `cvss_score < 4.0`
+
+Fix mismatches via `aith assess update-finding --inline '{"details":
+{"cvss_score": <n>, "cvss_vector": "..."}}'`. The JSON field is `details`,
+not `details_json`. A finding whose severity contradicts its CVSS makes the
+entire report look unverified to the triager, and mismatches are the single
+most common cleanup-time defect in this codebase. Run the audit before
+calling report-writer so the dispatch sees coherent state.
+
+## 21. Stale-text scrub before publishing
+
+Read each active finding's `summary` and `details` text fields and strip
+phrases that contradict the current state:
+
+- "severity adjusted from X to Y" when the severity is no longer Y
+- "originally rated as Z" when the rating has shifted twice since
+- "merged from W" when W has since been split off
+- "downgraded to medium" / "upgraded to high" / "previously low" against
+  the current severity field
+
+Stale narrative is invisible to backend status fields and ends up in
+report.md verbatim. The `aith assess list-findings --json | jq -r .[].slug`
+loop in `agent/skills/report-generation/SKILL.md` (Review-and-Fix QA Mode)
+provides the executable recipe; this rule is the reason to run it.
