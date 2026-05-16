@@ -252,6 +252,59 @@ def _check_web_preconditions(
                             + (" ..." if len(unverified_high) > 5 else "")
                         ),
                     })
+
+                # Variant-pass gate: every confirmed high/critical finding should have
+                # at least one vulnerability-analyst dispatch dedicated to sibling /
+                # variant / rotation hunting before the engagement advances to exploit.
+                # Skipping the variant pass is the single most common way real findings
+                # are missed. The check is permissive — task-text match on
+                # variant|sibling|rotat — so any reasonable phrasing satisfies it.
+                # --force overrides if the operator has a stated reason.
+                confirmed_high = [
+                    f for f in findings
+                    if f.get("severity") in ("critical", "high")
+                    and f.get("verification_state") == "verified"
+                    and f.get("workflow_status") == "active"
+                ]
+                if confirmed_high:
+                    try:
+                        dispatches = client.get("dispatches") or []
+                    except Exception:
+                        dispatches = []
+                    variant_tasks = [
+                        d for d in dispatches
+                        if d.get("agent_role") == "vulnerability-analyst"
+                        and any(
+                            kw in (d.get("task") or "").lower()
+                            for kw in ("variant", "sibling", "rotat")
+                        )
+                    ]
+                    missing_variant: list[str] = []
+                    for finding in confirmed_high:
+                        slug = finding.get("slug", "?")
+                        hit = False
+                        for d in variant_tasks:
+                            slugs = d.get("finding_slugs") or []
+                            task = (d.get("task") or "").lower()
+                            if slug in slugs or slug.lower() in task:
+                                hit = True
+                                break
+                        if not hit:
+                            missing_variant.append(slug)
+                    if missing_variant:
+                        sample = ", ".join(missing_variant[:5])
+                        blockers.append({
+                            "kind": "missing_variant_pass",
+                            "detail": (
+                                f"{len(missing_variant)} confirmed high/critical finding(s) "
+                                f"have no vulnerability-analyst variant/sibling pass: "
+                                f"{sample}"
+                                + (" ..." if len(missing_variant) > 5 else "")
+                                + " — dispatch the variant hunt before advancing "
+                                "(skipping is the most common way real findings are missed). "
+                                "Pass --force only with a stated reason."
+                            ),
+                        })
         except Exception as exc:
             blockers.append(_precondition_check_failed("exploit findings", exc))
 
