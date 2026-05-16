@@ -25,7 +25,8 @@ def register(subparsers) -> None:
     p.add_argument("--task", dest="task", default=None)
     p.add_argument("--scope-host", dest="scope_host", default=None)
     p.add_argument("--model", dest="dispatch_model", default=None)
-    p.add_argument("--reasoning", dest="reasoning", default=None, choices=("low", "medium", "high"))
+    p.add_argument("--reasoning", dest="reasoning", default=None,
+                   choices=("low", "medium", "high", "xhigh", "max"))
     p.add_argument(
         "--dispatch-mode",
         dest="dispatch_mode_arg",
