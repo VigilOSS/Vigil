@@ -17,6 +17,7 @@ SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
     "item-iterating",
     "deep-manual",
     "variant-rotation",
+    "swarm",
 )
 
 

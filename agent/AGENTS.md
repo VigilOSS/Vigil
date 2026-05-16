@@ -257,6 +257,7 @@ Every dispatch declares its mode explicitly. The wrong mode causes overrun: an i
 | `item-iterating` | 30–100 default; up to 200 acceptable when items cluster on a stable `cluster_key` | When variants share a cluster (vulnerability-analyst processing 5 IDOR variants × 30 hosts as one logical sweep, or fuzzer rotating 4 payload families × 50 hosts), the dispatch context may state the cluster and raise the cap. Process up to N, defer the rest with `aith assess work-buffer <db> defer-items <ids> --reason ...`. The dispatch context MAY override the cap with a stated rationale (e.g. `dispatch_mode=item-iterating, items=200, rationale="cluster on /api/v1/orders/{id}"`). |
 | `deep-manual` | 10–30 | 5–15 messages per item. |
 | `variant-rotation` | 1–3 hosts | Items are payload variants, not URLs. |
+| `swarm` | 30–100 per worker × N parallel workers | Many shallow scans fanned out across a corpus. Reasoning typically `low` or `medium`; the workload is broad pattern-matching (secret scanning, file classification at scale, large-corpus CWE pattern sweeps), not deep analysis. Use when `item-iterating` would run out of context at 30–100 and `hypothesis-driven` is the wrong shape because there is no hypothesis — there is a corpus. See "Swarm Dispatch" below for the helper. |
 
 The dispatch context names the mode and the agent adapts its loop accordingly. If the operator
 omits the mode, the agent picks the safest default for its role:
@@ -273,6 +274,44 @@ omits the mode, the agent picks the safest default for its role:
 - `code-vuln-hunter` → `item-iterating`
 - `code-variant-hunter` → `hypothesis-driven`
 - `code-vuln-verifier` → `deep-manual`
+
+(`swarm` has no per-role default — it is operator-chosen for corpus workloads.)
+
+### Swarm Dispatch
+
+Swarm fans a corpus workload out to N parallel workers. The helper `aith assess agent start-swarm` writes one dispatch row per worker, encodes each worker's batch range in its `task`, and prints the agent_id table — **it does NOT spawn specialists**. The operator fires the N specialists manually using the runtime's native wrapper (`@<role>` in Claude Code, `spawn_agent` in Codex), passing each row's `agent_id` in the Runtime Identity block. Each specialist reads its own batch range from its dispatch row via `aith assess agent get <agent_id>`.
+
+```bash
+aith assess agent start-swarm \
+    --role code-vuln-hunter \
+    --workers 10 --batch-size 50 \
+    --items-file /engagements/$ENGAGEMENT_KEY/scans/exposed-bucket/files.txt \
+    --skills code-vulnerability-analysis \
+    --model gpt-5.5 --reasoning low \
+    --task "scan batch for hardcoded credentials, API keys, exploitable patterns; record findings as code-vuln-hunter prefix"
+```
+
+Output shape:
+
+```
+## Swarm Dispatch Table
+items_file: .../files.txt (500 items)
+workers: 10 | batch_size: 50 | mode: swarm | role: code-vuln-hunter
+
+| worker | agent_id                              | items   | status      |
+|---|---|---|---|
+| 1      | code-vuln-hunter-swarm-a3f912-01      | 1-50    | in-progress |
+| 2      | code-vuln-hunter-swarm-a3f912-02      | 51-100  | in-progress |
+| ...
+```
+
+Worked example use cases:
+
+- **Exposed-bucket secret scan.** 500-file corpus → 10 workers × 50 files at `gpt-5.5 low`. Reasoning is `low` because the workload is grep-like pattern matching, not deep analysis.
+- **Large URL coverage sweep.** 2000-URL gau corpus → 20 workers × 100 URLs at `gpt-5.5 medium`, each agent classifying URL shape (admin/api/static/auth) and recording surfaces. Beats one `surface-collector` at iteration cap.
+- **Corpus-scale CWE pattern hunt.** 300-file code repo → 6 workers × 50 files at `gpt-5.5 medium` with `--skills code-vulnerability-analysis`, each agent applying one or two CWE-pattern references.
+
+When the swarm completes, the operator queries `aith assess agent list --filter-role <role> --task-q "[swarm"` to see all worker rows and their `status`/`finding_slugs`, then runs one consolidating dispatch (typically `vulnerability-analyst` or `exploit-developer`) over the union of recorded findings.
 
 ### Pre-Dispatch Checklist
 
