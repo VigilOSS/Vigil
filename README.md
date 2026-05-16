@@ -526,6 +526,20 @@ For repo-local development conventions used by Codex, see the root `AGENTS.md`.
 ## TODO
 
 - Evaluate an optional Web3-focused workflow and agent set only after the core web/app investigation model is stable.
+- **Rate-limit policy and aggregate enforcement.** Programs commonly cap aggregate
+  request rate (LastPass requested 5 req/s; many enterprise VDPs sit in the 5–20
+  range). Per-verb flags exist (`nuclei -rate-limit`, `ffuf -rate`, `feroxbuster
+  --rate-limit`, `sqlmap --delay`, `httpx -rate-limit`) but nothing enforces an
+  engagement-wide aggregate across parallel dispatches. As specialists migrate
+  from hand-rolled curl loops toward tool invocations (per
+  `agent/shared-constraints.md` §2bb Tool-First Rule) and toward larger SecLists
+  / Assetnote wordlists, the aggregate-rate concern grows. Design space:
+  (a) an optional `rate_limit_aggregate_rps` field in `scope.json` with a
+  shared-constraints rule that per-call flags must respect `aggregate ÷
+  active dispatch count`; (b) `aith assess kali` wrappers that read the field
+  and warn (or hard-reject with `--force`) when a per-call rate would breach;
+  (c) a reference doc mapping common programs' rate caps to per-tool flag
+  values. Deferred — pick a path before next batch of probing-heavy fixes.
 
 ## Verification Commands
 
