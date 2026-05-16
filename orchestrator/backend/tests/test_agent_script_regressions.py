@@ -1559,3 +1559,67 @@ def test_check_report_readiness_surfaces_backend_blockers(monkeypatch, tmp_path:
     err = capsys.readouterr().err
     assert "Final report blockers remain:" in err
     assert "verification | VA-001: Finding remains unreviewed." in err
+
+
+# ---------------------------------------------------------------------------
+# C3 — Curated adversarial-mindset rollout
+#
+# The rule drives "think like an attacker, not a test-case checker" framing
+# and only belongs in roles where adversarial framing materially improves
+# output. report-writer (pure backend-state transformation) and
+# surface-collector (rule-based triage) are explicitly excluded because
+# adversarial framing skews their output toward exaggeration / speculation.
+# operator loads it via the always-active rules list in operator-core.md.
+# ---------------------------------------------------------------------------
+
+_ADVERSARIAL_MINDSET_INCLUDED = {
+    # Roles that actively probe and were already wired up.
+    "recon-specialist",
+    "vulnerability-analyst",
+    "exploit-developer",
+    # Roles where adversarial framing materially improves output.
+    "source-analyzer",
+    "osint-analyst",
+    "fuzzer",
+    "code-vuln-hunter",
+    "code-variant-hunter",
+    "code-fuzz-engineer",
+    # Lean-add roles.
+    "code-architect",
+    "code-vuln-verifier",
+}
+
+_ADVERSARIAL_MINDSET_EXCLUDED = {
+    # Pure backend-state transformation — adversarial framing would push
+    # toward severity inflation, contradicting reporting.md §3.
+    "report-writer",
+    # Rule-based triage — adversarial framing would skew the work-buffer
+    # toward speculative entries.
+    "surface-collector",
+}
+
+
+def _agents_dir() -> Path:
+    return Path(__file__).resolve().parents[3] / "agent" / "agents"
+
+
+@pytest.mark.parametrize("role", sorted(_ADVERSARIAL_MINDSET_INCLUDED))
+def test_specialist_loads_adversarial_mindset(role: str) -> None:
+    """Roles in the curated include-set must list adversarial-mindset.md
+    in their Load First section so the wrapper carries it into specialist
+    context. Drift in either direction fails the test."""
+    body = (_agents_dir() / f"{role}.md").read_text(encoding="utf-8")
+    assert "agent/rules/adversarial-mindset.md" in body, (
+        f"{role} should load adversarial-mindset.md per the C3 curated rollout"
+    )
+
+
+@pytest.mark.parametrize("role", sorted(_ADVERSARIAL_MINDSET_EXCLUDED))
+def test_specialist_does_not_load_adversarial_mindset(role: str) -> None:
+    """Explicitly excluded roles must NOT load adversarial-mindset.md.
+    See C3 rationale in TODOv2.md V14."""
+    body = (_agents_dir() / f"{role}.md").read_text(encoding="utf-8")
+    assert "agent/rules/adversarial-mindset.md" not in body, (
+        f"{role} should NOT load adversarial-mindset.md "
+        "(would push toward inflation/speculation)"
+    )
