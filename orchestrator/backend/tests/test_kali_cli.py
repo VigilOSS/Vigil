@@ -795,6 +795,46 @@ def test_kali_exec_timeout_kills_process_group_and_marks_timed_out(
     assert patch_payload["partial_results"] is True
 
 
+def test_filenotfound_finalizes_running_audit_row_to_failed(monkeypatch, fake_engagement):
+    """C16: when `docker` is missing on PATH, Popen raises FileNotFoundError.
+    The pre-exec POST already wrote a status=running row; without the
+    finalize PATCH that row stays "running" forever and confuses sweep-orphans.
+    The handler must PATCH the row to failed before re-raising AssessError."""
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+
+    def fake_popen(*_a, **_kw):
+        raise FileNotFoundError("[Errno 2] No such file or directory: 'docker'")
+
+    monkeypatch.setattr(kali.subprocess, "Popen", fake_popen)
+
+    with pytest.raises(kali.AssessError, match="docker not found"):
+        kali.kali_exec(
+            ["nmap", "-sV", "10.0.0.1"],
+            technique="RECON",
+            intent="c16 docker-missing",
+            probe_kind="fingerprint",
+            phase="recon",
+            timeout=30,
+            agent_name="recon-specialist",
+            engagement_dir=fake_engagement,
+            engagement_key=fake_engagement.name,
+            tool_name="nmap",
+        )
+
+    # Exactly one pre-exec POST and one finalize PATCH to status=failed.
+    assert len(fake_client.posts) == 1
+    assert fake_client.posts[0][0] == "command-runs"
+    assert fake_client.posts[0][1]["status"] == "running"
+    assert len(fake_client.patches) == 1
+    endpoint, patch_payload = fake_client.patches[0]
+    assert endpoint == "command-runs/7"
+    assert patch_payload["status"] == "failed"
+    assert "docker not found" in patch_payload["stderr_preview"]
+
+
 def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_engagement):
     """B1: the docker-exec argv must wrap the user command in a tiny shell
     that records ``$$`` to ``/tmp/aith-pid-<run-uuid>.pid`` before ``exec``-ing
