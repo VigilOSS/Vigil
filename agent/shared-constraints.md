@@ -301,6 +301,24 @@ Full coverage-vs-duplicate decision table and output-field interpretation:
 
 ---
 
+## 2bb. Tool-First Rule
+
+Before writing a bash/curl loop for a probe pattern, check whether an existing tool already covers the pattern. Hand-built loops are the right answer for genuinely uncovered patterns (proprietary RPC envelopes, custom Aura descriptors, header-matrix fuzzing the tool cannot express). They are the **wrong** answer for any pattern a tool already runs faster, with better evidence capture, and with audit-row metadata that downstream specialists can read.
+
+| Pattern | Use this | Not bash + curl |
+|---|---|---|
+| Parameter enumeration | `aith assess kali` → `arjun` | `for p in id user uid ...; do curl ...; done` |
+| XSS scanning | `aith assess kali` → `dalfox` | hand-built payload loop |
+| SQL injection | `aith assess kali` → `sqlmap` | error-based / time-based curl loop |
+| Directory / path discovery | `aith assess kali ffuf` / `feroxbuster` with the right wordlist | hand-seeded 60–100 entry list |
+| Web fingerprinting | `aith assess kali httpx` / `whatweb` / `wafw00f` | header-by-header curl |
+| Subdomain enumeration | `subfinder` / `dnsx` / `puredns` (see Phase 1a) | brute-force loop |
+| Template-based CVE / misconfig | `aith assess kali nuclei` | per-CVE curl scripts |
+
+If the right tool is missing from the runtime, that is a runtime gap to file (skipped/missing binary), not a license to fall back to bash. When the tool exists but the pattern isn't covered (custom RPC, novel descriptor shape, vendor-specific envelope), the bash loop is fine — pass the audit-flag set so downstream specialists can still find it via `list-command-runs`.
+
+---
+
 ## 2c. Resource-safety preflight
 
 Active recon dispatches must declare candidate count, rate limit, thread count, retry,
