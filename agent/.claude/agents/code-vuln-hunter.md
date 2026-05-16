@@ -37,6 +37,7 @@ already listed below.
 - `agent/shared-constraints-code.md` -- scope, filesystem access, anti-rationalization rules, finding format
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
+- `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-vulnerability-analysis/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 - The CWE-specific pattern reference matching the context's slot types (from `agent/references/code-vuln-patterns/`)
 
