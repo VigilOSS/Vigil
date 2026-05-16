@@ -165,7 +165,7 @@ def register(subparsers) -> None:
                    help="(start) Requested reasoning level. `max` is Claude-only; Codex caps at xhigh "
                         "(operator records this in actual_reasoning when known).")
     p.add_argument("--dispatch-mode", dest="dispatch_mode_arg", default=None,
-                   choices=("hypothesis-driven", "item-iterating", "deep-manual", "variant-rotation"),
+                   choices=("hypothesis-driven", "item-iterating", "deep-manual", "variant-rotation", "swarm"),
                    help="(start) Dispatch loop shape.")
     p.add_argument("--skills", dest="skills", default=None,
                    help="(start) Comma-separated skill names the specialist must load "

@@ -1747,3 +1747,128 @@ def test_specialist_does_not_load_adversarial_mindset(role: str) -> None:
         f"{role} should NOT load adversarial-mindset.md "
         "(would push toward inflation/speculation)"
     )
+
+
+# ---------------------------------------------------------------------------
+# C21 — swarm dispatch mode + start-swarm helper
+# ---------------------------------------------------------------------------
+
+
+def test_start_swarm_records_N_rows_with_worker_encoded_task(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """C21: aith assess agent start-swarm splits an items file into worker
+    batches and writes one backend dispatch row per worker. Each row's task
+    encodes the worker index, batch range, and items file name so the
+    specialist can read its own slice via `agent get <agent_id>`. The helper
+    does NOT spawn specialists — that's the operator's manual step via
+    @agent-name (Claude Code) or spawn_agent (Codex)."""
+    agent_mod = _load_script_module(
+        "test_start_swarm_module",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    # Stub the dispatch helpers so the helper does not need a real backend.
+    recorded: list[dict] = []
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.seq = 0
+
+        def record_dispatch(self, payload: dict) -> dict:
+            self.seq += 1
+            recorded.append(dict(payload))
+            return {
+                "id": self.seq,
+                "agent_id": payload.get("agent_id"),
+                "agent_role": payload.get("agent_role"),
+                "status": "in-progress",
+            }
+
+        def close(self) -> None:
+            return None
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        agent_mod.dispatch,
+        "_client_for",
+        lambda _args: (fake_client, SimpleNamespace(engagement_dir=str(tmp_path))),
+    )
+    # _build_register_payload pulls from args; let it through unchanged so we
+    # exercise the real payload-construction path.
+    items_path = tmp_path / "items.txt"
+    items_path.write_text("\n".join(f"file_{i}.js" for i in range(1, 13)), encoding="utf-8")
+
+    args = SimpleNamespace(
+        action="start-swarm",
+        agent_id=None,
+        agent_role="code-vuln-hunter",
+        task="scan for hardcoded credentials and exploitable patterns",
+        scope_host=None,
+        dispatch_model="gpt-5.5",
+        reasoning="low",
+        dispatch_mode_arg=None,
+        skills="code-vulnerability-analysis",
+        from_json=None,
+        allow_duplicate=False,
+        swarm_workers=3,
+        swarm_batch_size=5,
+        swarm_items_file=str(items_path),
+        finding_slugs=None,
+        engagement_dir=str(tmp_path),
+        extra=[],
+    )
+
+    agent_mod._start_swarm(args)  # noqa: SLF001
+
+    # 12 items / batch_size 5 / workers 3 → 3 batches of 5+5+2 items.
+    assert len(recorded) == 3
+    assert all(r["agent_role"] == "code-vuln-hunter" for r in recorded)
+    assert all(r["dispatch_mode"] == "swarm" for r in recorded)
+    # Each task encodes worker index and contiguous item range.
+    assert "[swarm 1/3 items 1-5 from items.txt]" in recorded[0]["task"]
+    assert "[swarm 2/3 items 6-10 from items.txt]" in recorded[1]["task"]
+    assert "[swarm 3/3 items 11-12 from items.txt]" in recorded[2]["task"]
+    # agent_ids are unique, sequential, prefixed by role-swarm-<uuid>-NN.
+    agent_ids = [r["agent_id"] for r in recorded]
+    assert len(set(agent_ids)) == 3
+    for idx, aid in enumerate(agent_ids, start=1):
+        assert aid.startswith("code-vuln-hunter-swarm-")
+        assert aid.endswith(f"-{idx:02d}")
+    # Summary table printed to stdout for the operator to paste into spawn calls.
+    out = capsys.readouterr().out
+    assert "## Swarm Dispatch Table" in out
+    assert "workers: 3" in out
+    assert "batch_size: 5" in out
+
+
+def test_start_swarm_rejects_empty_items_file(monkeypatch, tmp_path: Path, capsys) -> None:
+    """C21: empty items file must error out instead of recording zero rows."""
+    agent_mod = _load_script_module(
+        "test_start_swarm_empty_module",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    items_path = tmp_path / "items.txt"
+    items_path.write_text("", encoding="utf-8")
+    args = SimpleNamespace(
+        action="start-swarm",
+        agent_id=None,
+        agent_role="code-vuln-hunter",
+        task="scan",
+        scope_host=None,
+        dispatch_model=None,
+        reasoning=None,
+        dispatch_mode_arg=None,
+        skills="code-vulnerability-analysis",
+        from_json=None,
+        allow_duplicate=False,
+        swarm_workers=3,
+        swarm_batch_size=5,
+        swarm_items_file=str(items_path),
+        finding_slugs=None,
+        engagement_dir=str(tmp_path),
+        extra=[],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        agent_mod._start_swarm(args)  # noqa: SLF001
+    assert excinfo.value.code == 1
+    assert "items file is empty" in capsys.readouterr().err

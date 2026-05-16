@@ -1200,6 +1200,7 @@ _DISPATCH_MODE = Literal[
     "item-iterating",
     "deep-manual",
     "variant-rotation",
+    "swarm",
 ]
 _REASONING = Literal["low", "medium", "high", "xhigh", "max"]
 _CONFIDENCE = Literal["low", "medium", "high"]
