@@ -30,6 +30,30 @@ origin: AI Threat Hunting
 - [ ] Determine where files are stored (same domain, CDN, S3)
 - [ ] Check if uploaded files are directly accessible via URL
 - [ ] Check if filename is preserved or randomized
+- [ ] Identify whether the upload is CSRF-gated (see next section)
+
+### 1a. CSRF-gated upload flows
+
+Most enterprise SaaS upload bridges require a CSRF token extracted from a prior authenticated request. Direct POST to the upload endpoint fails with a 403 / "Invalid token" response even when the auth cookies are correct. Specialists that skip the CSRF step waste dispatch time attempting bypasses against the wrong layer.
+
+**Where this pattern shows up:**
+
+- Salesforce Chatter attachment bridges (`/services/data/.../sobjects/Attachment/`, `/sfsites/c/aura?aura.token=...` POST envelopes)
+- ServiceNow attachment uploader (`/api/now/attachment/file?...` with `X-UserToken` header)
+- Confluence / Jira attach endpoints (`atl_token` query param required)
+- Microsoft 365 SharePoint document upload (`X-RequestDigest` header)
+- Custom Rails apps (`<meta name="csrf-token">` in the page HTML + `X-CSRF-Token` header on POST)
+
+**Extraction recipe:**
+
+1. GET an authenticated page where the upload UI is rendered (the upload form's host page, settings panel, or a connector configuration screen).
+2. Extract the token from one of: `<meta name="csrf-token" content="...">`, a hidden `<input name="authenticity_token">` / `<input name="atl_token">`, a cookie like `XSRF-TOKEN`, or an `X-RequestDigest`/`X-UserToken` response header on a prior GET.
+3. Replay the upload POST with the token in the **expected channel** — header (`X-CSRF-Token`, `X-RequestDigest`, `X-UserToken`) OR form field (`authenticity_token`, `atl_token`) OR query param. Mixing channels is a common failure shape: the server checks the header but the agent put the token in the body, or vice versa.
+4. Re-fetch the token between attempts when the server rotates per-request (Microsoft `X-RequestDigest` expires after one use).
+
+When the bridge passes the CSRF check, **then** apply the extension / content-type / magic-byte bypass methodology below. Most CSRF-gated bridges have weak post-CSRF validation because the developer assumed CSRF was the security boundary.
+
+If CSRF cannot be passed in-session (token-binding to the originating session works, but the form-encoding requires a browser-rendered nonce you can't reproduce), pivot the dispatch shape: capture the entire upload flow via mitmproxy with a live browser session, then replay the captured request with the magic-byte/content-type variation. The mitmproxy capture gives you a known-good baseline against which to diff.
 
 ### 2. Extension Bypass
 
