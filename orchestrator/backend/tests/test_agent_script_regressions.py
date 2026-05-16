@@ -1048,6 +1048,129 @@ def test_code_record_modules_rejects_auto_derived_key_collisions(monkeypatch, tm
     assert "Provide explicit module_key values" in capsys.readouterr().err
 
 
+def test_code_record_modules_rejects_generic_auto_pattern_labels(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """C25: reject 'auth_module_1' / 'module_2' / 'unknown_module' style labels
+    at the CLI so the backend never accumulates undescriptive rows that
+    code-architect + report-writer cannot map to a real subsystem."""
+    module = _load_script_module(
+        "test_code_record_modules_generic_module",
+        "agent/scripts/assess/commands/code_record_modules.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    modules_path = tmp_path / "modules.json"
+    modules_path.write_text(
+        json.dumps([{"module_key": "auth_module_1", "name": "Auth Module 1"}]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            raise AssertionError("should reject before fetching existing modules")
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            raise AssertionError("should reject before posting")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=engagement_dir,
+                repo_id="5",
+                modules_json=str(modules_path),
+            )
+        )
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "generic auto-pattern" in err
+    assert "Pick a meaningful identifier" in err
+
+
+def test_code_record_modules_accepts_meaningful_labels(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """C25: meaningful module keys/names continue to post normally."""
+    module = _load_script_module(
+        "test_code_record_modules_meaningful",
+        "agent/scripts/assess/commands/code_record_modules.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    modules_path = tmp_path / "modules.json"
+    modules_path.write_text(
+        json.dumps([
+            {"module_key": "auth_login", "name": "Authentication and login flow"},
+            {"module_key": "payment_settlement", "name": "Payment settlement"},
+        ]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    posted: dict = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            return []
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            posted["endpoint"] = endpoint
+            posted["payload"] = payload
+            return [
+                {"id": 1, "module_key": "auth_login", "name": "Authentication and login flow"},
+                {"id": 2, "module_key": "payment_settlement", "name": "Payment settlement"},
+            ]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=engagement_dir,
+            repo_id="5",
+            modules_json=str(modules_path),
+        )
+    )
+
+    assert posted["endpoint"] == "code/modules"
+    assert len(posted["payload"]["modules"]) == 2
+
+
 def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, tmp_path: Path) -> None:
     module = _load_script_module(
         "test_merge_session_module",

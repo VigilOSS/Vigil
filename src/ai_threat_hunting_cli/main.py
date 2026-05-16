@@ -162,6 +162,24 @@ def main(argv: list[str] | None = None) -> None:
     export_pdf_p.add_argument("key", nargs="?")
     export_pdf_p.add_argument("--select", action="store_true")
     export_pdf_p.add_argument("--output", help="Output PDF path (default: <engagement>/report.pdf)")
+    migrate_p = engagement_sub.add_parser(
+        "migrate-scope",
+        help=(
+            "One-shot migration: set code_phase=ingest on legacy "
+            "engagement_type=both engagements created before dual-track "
+            "phase tracking landed. Idempotent."
+        ),
+    )
+    migrate_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would change without writing scope.json.",
+    )
+    migrate_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit migrated entries as JSON.",
+    )
 
     orch_p = sub.add_parser("orchestrator")
     orch_sub = orch_p.add_subparsers(dest="orchestrator_command", required=True)
@@ -517,6 +535,22 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         output = Path(args.output).expanduser() if args.output else None
         print(export_pdf(path, output))
+    elif command == "migrate-scope":
+        from .engagements import migrate_legacy_both_engagements
+
+        migrated = migrate_legacy_both_engagements(install_root, dry_run=args.dry_run)
+        if args.json:
+            print(json.dumps(migrated, indent=2))
+        else:
+            prefix = "[dry-run] would migrate" if args.dry_run else "migrated"
+            if not migrated:
+                print(
+                    "No legacy `engagement_type=both` engagements need migration."
+                    + ("" if not args.dry_run else " (dry-run)")
+                )
+            else:
+                for entry in migrated:
+                    print(f"[aith] {prefix}: {entry['key']} code_phase -> {entry['to']}")
 
 
 def _looks_like_web_target(value: str) -> bool:
