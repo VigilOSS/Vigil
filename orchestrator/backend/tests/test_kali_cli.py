@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -793,6 +794,64 @@ def test_kali_exec_timeout_kills_process_group_and_marks_timed_out(
     assert patch_payload["status"] == "timed_out"
     assert patch_payload["timed_out"] is True
     assert patch_payload["partial_results"] is True
+
+
+def test_nuclei_lock_rejects_concurrent_invocation(monkeypatch, fake_engagement):
+    """C32: a per-engagement file lock prevents two concurrent
+    `aith assess kali nuclei` invocations from corrupting each other's output.
+    Acquire the lock once, then attempt to reacquire under the same engagement
+    and verify the second attempt raises AssessError with a clear message."""
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[3]
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.commands.kali_nuclei import _nuclei_engagement_lock  # type: ignore[import-not-found]
+    from assess.lib.client import AssessError  # type: ignore[import-not-found]
+
+    eng_dir = fake_engagement
+    (eng_dir / "scans").mkdir(parents=True, exist_ok=True)
+
+    # First holder takes the lock; second attempt must fail-fast.
+    with _nuclei_engagement_lock(Path(eng_dir)):
+        with pytest.raises(AssessError, match="nuclei lock already held"):
+            with _nuclei_engagement_lock(Path(eng_dir)):
+                pass  # pragma: no cover — should not reach
+
+
+def test_nuclei_lock_recovers_from_stale_pid(monkeypatch, fake_engagement, capsys):
+    """C32: if the lockfile records a PID that is no longer alive (crashed
+    prior run), the next invocation auto-recovers and acquires the lock."""
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[3]
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.commands.kali_nuclei import _nuclei_engagement_lock  # type: ignore[import-not-found]
+
+    eng_dir = fake_engagement
+    scans_dir = eng_dir / "scans"
+    scans_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = scans_dir / ".nuclei.lock"
+    # Write an obviously-dead PID. PID 1 is reserved and we don't own it,
+    # so write something deterministically dead — use a very high PID
+    # that's almost certainly not assigned.
+    lock_path.write_text("99999999\n", encoding="utf-8")
+
+    # Should succeed (stale PID detected → force-release → acquire).
+    with _nuclei_engagement_lock(Path(eng_dir)) as resolved_lock_path:
+        assert Path(resolved_lock_path) == lock_path
+        # Our PID is now recorded in the lockfile.
+        recorded = lock_path.read_text(encoding="utf-8").strip()
+        assert recorded == str(os.getpid())
 
 
 def test_filenotfound_finalizes_running_audit_row_to_failed(monkeypatch, fake_engagement):
