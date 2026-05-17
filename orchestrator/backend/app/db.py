@@ -807,6 +807,7 @@ def init_db() -> None:
                 notes TEXT NOT NULL DEFAULT '',
                 details_json TEXT NOT NULL DEFAULT '{}',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                evidence_type TEXT,
                 merged_into_finding_id INTEGER,
                 last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1573,6 +1574,12 @@ def init_db() -> None:
             "summary": "TEXT NOT NULL DEFAULT ''",
             "details_json": "TEXT NOT NULL DEFAULT '{}'",
             "provenance_json": "TEXT NOT NULL DEFAULT '{}'",
+            # C44: evidence_type categorizes confirmation mode for findings.
+            # Nullable; no backfill (existing rows stay NULL). New findings
+            # may carry: network-confirmed | code-inferred | theoretical |
+            # informational. Report-writer treats NULL as 'unknown' and falls
+            # back to its existing details-content inspection.
+            "evidence_type": "TEXT",
             "merged_into_finding_id": "INTEGER",
             "last_seen_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
         }

@@ -1654,6 +1654,7 @@ def create_finding(
     source_name: str,
     details: dict[str, Any] | None,
     provenance: dict[str, Any] | None,
+    evidence_type: str | None = None,
     request_variant_id: int | None,
     service_id: int | None,
     surface_id: int | None,
@@ -1693,9 +1694,9 @@ def create_finding(
                 """
                 INSERT INTO assessment_findings (
                     engagement_id, slug, title, severity, status, verification_state, verification_disposition, defect_family, root_cause_key, auth_context,
-                    canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json
+                    canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json, evidence_type
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     engagement.id,
@@ -1715,6 +1716,7 @@ def create_finding(
                     notes,
                     _json_text(details),
                     _json_text(provenance),
+                    evidence_type,
                 ),
             )
             row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (cursor.lastrowid,)).fetchone()
@@ -1742,6 +1744,7 @@ def create_finding(
                     notes = ?,
                     details_json = ?,
                     provenance_json = ?,
+                    evidence_type = COALESCE(?, evidence_type),
                     last_seen_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
@@ -1775,6 +1778,7 @@ def create_finding(
                     _append_notes(existing["notes"], notes),
                     _merge_object_text(existing["details_json"], details),
                     _merge_object_text(existing["provenance_json"], provenance),
+                    evidence_type,
                     existing["id"],
                 ),
             )
@@ -1848,6 +1852,7 @@ def update_finding(
     source_name: str,
     details: dict[str, Any] | None,
     provenance: dict[str, Any] | None,
+    evidence_type: str | None = None,
 ) -> dict[str, Any]:
     result = create_finding(
         engagement_id,
@@ -1867,6 +1872,7 @@ def update_finding(
         source_name=source_name,
         details=details,
         provenance=provenance,
+        evidence_type=evidence_type,
         request_variant_id=None,
         service_id=None,
         surface_id=None,
@@ -1898,6 +1904,7 @@ def patch_finding(
     source_name: str | None = None,
     details: dict[str, Any] | None = None,
     provenance: dict[str, Any] | None = None,
+    evidence_type: str | None = None,
     transition_action: str | None = None,
     transition_reason_code: str = "",
     transition_reason_text: str = "",
@@ -1958,6 +1965,7 @@ def patch_finding(
         source_name=source_name or "",
         details=details,
         provenance=provenance,
+        evidence_type=evidence_type,
         request_variant_id=None,
         service_id=None,
         surface_id=None,
