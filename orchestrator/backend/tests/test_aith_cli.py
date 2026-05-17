@@ -3916,3 +3916,77 @@ def test_validate_dispatch_skips_scope_check_when_engagement_dir_omitted(
     }
     errors, _warnings = validate_specialist_dispatch_contract(payload)
     assert not any("scope" in e.lower() for e in errors), errors
+
+
+# ---------------------------------------------------------------------------
+# Item 11 — scope_host rejection telemetry (audits the C7 gate)
+# ---------------------------------------------------------------------------
+
+
+def test_scope_rejection_writes_dispatch_decision_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Item 11: when the C7 scope_host gate rejects a vulnerability-analyst
+    dispatch, a `kind='scope_rejection'` decision row is written so the
+    rejection is queryable post-engagement. Telemetry is best-effort —
+    failures don't block the original error."""
+    eng_dir = tmp_path / "eng"
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    (eng_dir / "scope.json").write_text(
+        json.dumps({"hosts": ["app.example.test"], "status": "in_progress"}),
+        encoding="utf-8",
+    )
+
+    module = _load_dispatch_module()
+    recorded_decisions: list[dict] = []
+
+    class _DecisionCapturingClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            self.base_url = "http://example.test"
+            self.engagement_key = "eng"
+
+        def record_decision(self, body: dict) -> dict:
+            recorded_decisions.append(body)
+            return {"id": 1, **body}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _DecisionCapturingClient)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(eng_dir),
+            engagement_key="eng",
+            agent_root=str(tmp_path),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module._build_register_payload(
+            _dispatch_args(
+                "register",
+                agent_id="va-rej-1",
+                agent_role="vulnerability-analyst",
+                scope_host="evil-attacker.test",
+                dispatch_mode_arg="item-iterating",
+                task="probe IDOR",
+                skills="idor-testing",
+                engagement_dir=str(eng_dir),
+            )
+        )
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "not in scope.json" in err
+    # Exactly one telemetry row, with the rejected host + role + scope entries
+    assert len(recorded_decisions) == 1
+    row = recorded_decisions[0]
+    assert row["kind"] == "scope_rejection"
+    assert row["surfaced_to_user"] is True
+    payload = row["payload"]
+    assert payload["host"] == "evil-attacker.test"
+    assert payload["role"] == "vulnerability-analyst"
+    assert payload["scope_entries"] == ["app.example.test"]
+    assert "not in scope.json" in payload["reason"]
