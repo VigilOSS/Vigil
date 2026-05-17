@@ -1475,6 +1475,7 @@ def init_db() -> None:
                 assigned_agent TEXT NOT NULL DEFAULT '',
                 disposition TEXT NOT NULL DEFAULT '',
                 analysis_notes TEXT NOT NULL DEFAULT '',
+                skip_reason TEXT NOT NULL DEFAULT '',
                 expansion_request_json TEXT NOT NULL DEFAULT '{}',
                 batch_theme TEXT NOT NULL DEFAULT '',
                 slot_types_json TEXT NOT NULL DEFAULT '[]',
@@ -1628,6 +1629,11 @@ def init_db() -> None:
             "guidance_hypotheses_json": "TEXT NOT NULL DEFAULT '[]'",
             "cwe_coverage_json": "TEXT NOT NULL DEFAULT '[]'",
             "cross_file_triggers_json": "TEXT NOT NULL DEFAULT '[]'",
+            # C50: separate "analyzed and found clean" from "deliberately
+            # skipped" so code-coverage can distinguish 100% completion from
+            # silent deferral. Operators tag skips with a structured reason
+            # (test-fixture, generated-code, minified, out-of-scope-language).
+            "skip_reason": "TEXT NOT NULL DEFAULT ''",
         }
         for col_name, col_def in queue_new_columns.items():
             if queue_columns and col_name not in queue_columns:
