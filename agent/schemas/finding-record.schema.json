@@ -305,6 +305,20 @@
         }
       }
     },
+    "evidence_type": {
+      "enum": [
+        "network-confirmed",
+        "code-inferred",
+        "theoretical",
+        "informational"
+      ],
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "title": "Evidence Type"
+    },
     "request_variant_id": {
       "type": "integer",
       "default": null,
