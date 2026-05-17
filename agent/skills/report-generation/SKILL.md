@@ -46,6 +46,8 @@ The `list-report-findings --json` helper returns grouped report findings. Root a
 - `cvss_vector`, `cvss_score` — extracted from `details_json`
 - `remediation`, `steps_to_reproduce`, `cwe_id`, `owasp_category` — extracted from `details_json`
 - `impact`, `evidence_detail` — extracted from `details_json`
+
+> **Read vs write asymmetry.** The backend stores finding metadata in a column literally named `details_json` (a JSON string) — that's why the `list-report-findings` projection above references `details_json` as a source. When you **write** via `aith assess update-finding --inline`, the accepted shape is `{"details": {...}}` (a dict under the `details` key). The asymmetry is intentional: the API decodes/encodes the JSON column behind the field name `details` on writes, leaving `details_json` as the raw storage name on reads. If a prompt or recipe says to pass `details_json` to `update-finding`, that's drift — flag it.
 - top-level `groups` and `standalone`; each group has a `root` finding and `siblings`
 
 Sibling rows include
