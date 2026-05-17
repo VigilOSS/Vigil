@@ -1905,6 +1905,30 @@ def _agent_prompt_files() -> list[Path]:
     return files
 
 
+_C45_REVIEW_MODE_SECTIONS = {
+    "recon-specialist.md": "## Review Mode (Phase 1 → 2 exit)",
+    "exploit-developer.md": "## Review Mode (Phase 5 → 6 exit)",
+    "vulnerability-analyst.md": "## Root-Cause Review Mode (Phase 4 → 5 exit)",
+}
+
+
+@pytest.mark.parametrize(
+    "agent_file,heading",
+    sorted(_C45_REVIEW_MODE_SECTIONS.items()),
+)
+def test_c45_review_mode_section_present(agent_file: str, heading: str) -> None:
+    """C45: each of recon-specialist / exploit-developer / vulnerability-analyst
+    carries a review-mode section. The headings are exact so future renames
+    surface as a clear test failure. report-writer is intentionally NOT here —
+    it already has Review-and-Fix QA Mode in report-generation/SKILL.md."""
+    repo_root = Path(__file__).resolve().parents[3]
+    body = (repo_root / "agent" / "agents" / agent_file).read_text(encoding="utf-8")
+    assert heading in body, (
+        f"{agent_file} should carry the C45 review-mode section with heading "
+        f"'{heading}'"
+    )
+
+
 def test_no_operator_prompt_invokes_update_finding_with_details_json() -> None:
     """C64: an operator-facing prompt must not instruct passing
     `details_json` as the field name to `aith assess update-finding`.
