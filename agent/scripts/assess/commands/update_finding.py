@@ -100,7 +100,9 @@ def run(args) -> None:
             "source_name": args.source_name,
             "details": details,
             "provenance": provenance,
-            "evidence_type": args.evidence_type,
+            # getattr fallback so callers that build args via SimpleNamespace
+            # (test fixtures pre-dating C44) don't AttributeError.
+            "evidence_type": getattr(args, "evidence_type", None),
             "reason_code": args.reason_code,
             "reason_text": args.reason_text,
             "artifact_ref": args.artifact_ref,
