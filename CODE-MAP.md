@@ -176,7 +176,7 @@ When adding new patchable code-analysis fields or structural metadata totals:
 - `orchestrator/frontend/src/routes/EngagementsPage.tsx` - engagement index screen. Why: stable fleet-overview page.
 - `orchestrator/frontend/src/routes/EngagementPage.tsx` - engagement detail coordinator. Why: owns fetch fan-out, websocket updates, polling fallback, artifact selection, and tab composition.
 - `orchestrator/frontend/src/components/TabBar.tsx` - top-level tab contract. Why: defines the durable operator-facing areas: `overview`, `findings`, `coverage`, `code`, `activity`, `artifacts`.
-- `orchestrator/frontend/src/components/OverviewTab.tsx` - posture summary view. Why: quick scan of workflow state, report blockers, findings, chains, and recent activity.
+- `orchestrator/frontend/src/components/OverviewTab.tsx` - posture summary view. Why: quick scan of workflow state, report blockers, findings, chains, and recent activity. Hosts the C58 Readiness panel that renders the C40 per-host coverage matrix (5 objectives × N hosts), Definition-of-Done blocker count, and active `coverage_deferral` decisions inline. The panel reads `/coverage-readiness` plus the per-host projection embedded in `/report-readiness` — it is strictly read-only; operators dispatch missing work from the CLI.
 - `orchestrator/frontend/src/components/FindingsTab.tsx` - finding review boundary. Why: triage, root-cause group review, and proof inspection.
 - `orchestrator/frontend/src/components/CoverageTab.tsx` - coverage boundary. Why: tested surface by host/service/technique.
 - `orchestrator/frontend/src/components/CodeAnalysisTab.tsx` - code-analysis boundary. Why: separate file-centric review pipeline rendered in the same UI.

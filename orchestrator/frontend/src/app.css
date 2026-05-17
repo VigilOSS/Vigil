@@ -391,6 +391,42 @@ input {
   margin-left: 6px;
 }
 
+.readiness-matrix {
+  margin-top: 12px;
+  overflow-x: auto;
+}
+.readiness-matrix table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.readiness-matrix th,
+.readiness-matrix td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.readiness-matrix th {
+  font-weight: 600;
+  color: var(--text-muted);
+  background: rgba(0, 0, 0, 0.02);
+}
+.readiness-matrix .readiness-cell {
+  text-align: center;
+}
+.readiness-deferrals {
+  margin-top: 12px;
+}
+.readiness-deferrals h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+.readiness-deferrals ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
 /* ── Buttons ────────────────────────────────────────────── */
 
 .primary-button,
