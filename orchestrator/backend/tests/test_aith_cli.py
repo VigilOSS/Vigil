@@ -3923,6 +3923,159 @@ def test_validate_dispatch_skips_scope_check_when_engagement_dir_omitted(
 # ---------------------------------------------------------------------------
 
 
+def _load_auth_status_module():
+    """Bootstrap sys.path for the assess package, then import auth_status."""
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    # Reload assess modules so the injected sys.path takes effect even when
+    # earlier tests imported them under a different layout.
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.commands import auth_status  # type: ignore[import-not-found]
+    return auth_status
+
+
+def test_auth_status_reports_bearer_token_and_recommends_refresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C42a: aith assess auth-status reads auth.json and emits a structured
+    snapshot — auth_context, mode, expires_state, present token shapes, and
+    a refresh-path recommendation matching the C42 recovery loop. The
+    command does NOT write to auth.json or trigger a refresh."""
+    eng_dir = tmp_path / "eng"
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    (eng_dir / "auth.json").write_text(
+        json.dumps(
+            {
+                "auth_context": "authenticated",
+                "mode": "proxy_capture",
+                "use_for_requests": True,
+                "state": "available",
+                "expires_at": "2099-01-01T00:00:00Z",
+                "headers": {"Authorization": "Bearer aaa.bbb.ccc.ddd.eee.fff"},
+                "cookies": {"sessionid": "abc123"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    module = _load_auth_status_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(eng_dir),
+            engagement_key="eng-c42a",
+        ),
+    )
+
+    # Stub the AssessmentClient so last_auth_probe lookup does not require a
+    # live backend; return one fake AUTH-technique row.
+    class _FakeAuthClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            self.base_url = "http://example.test"
+            self.engagement_key = "eng-c42a"
+
+        def get_engagement(self, endpoint: str):
+            assert endpoint == "command-runs?technique=AUTH&limit=1"
+            return {
+                "items": [
+                    {
+                        "id": 7,
+                        "status": "completed",
+                        "intent": "credential validation",
+                        "started_at": "2026-05-16T20:00:00Z",
+                        "completed_at": "2026-05-16T20:00:01Z",
+                    }
+                ]
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _FakeAuthClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=str(eng_dir),
+            json_output=True,
+            expires_warning_seconds=300,
+        )
+    )
+    out = capsys.readouterr().out
+    snapshot = json.loads(out)
+    assert snapshot["auth_context"] == "authenticated"
+    assert snapshot["mode"] == "proxy_capture"
+    assert snapshot["expires_state"] == "valid"
+    assert any("Authorization: Bearer" in t for t in snapshot["tokens"])
+    assert any("flat_cookies" in t for t in snapshot["tokens"])
+    assert snapshot["last_auth_probe"]["run_id"] == 7
+    assert "Bearer token present" in snapshot["recommend"]
+
+
+def test_auth_status_flags_expired_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C42a: when expires_at is in the past, expires_state reports 'expired'
+    and the recommend line still names the appropriate refresh path."""
+    eng_dir = tmp_path / "eng-expired"
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    (eng_dir / "auth.json").write_text(
+        json.dumps(
+            {
+                "auth_context": "authenticated",
+                "mode": "proxy_capture",
+                "use_for_requests": True,
+                "state": "available",
+                "expires_at": "2000-01-01T00:00:00Z",
+                "headers": {"Authorization": "Bearer expired.token"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    module = _load_auth_status_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(eng_dir),
+            engagement_key="eng-expired",
+        ),
+    )
+
+    class _NoProbeClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            self.base_url = "http://example.test"
+            self.engagement_key = "eng-expired"
+
+        def get_engagement(self, endpoint: str):
+            return {"items": []}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _NoProbeClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=str(eng_dir),
+            json_output=True,
+            expires_warning_seconds=300,
+        )
+    )
+    snapshot = json.loads(capsys.readouterr().out)
+    assert snapshot["expires_state"] == "expired"
+    assert snapshot["expires_in_seconds"] is not None
+    assert snapshot["expires_in_seconds"] < 0
+    assert snapshot["last_auth_probe"] is None
+
+
 def test_scope_rejection_writes_dispatch_decision_row(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
