@@ -661,5 +661,6 @@ Do not declare the engagement complete or dispatch the final report-writer pass 
 - [ ] **Stale-text scrub clean.** Per `agent/rules/hunting.md` §21, no active finding's `summary` or `details` text references a state that no longer applies ("adjusted from X to Y" when severity is no longer Y, "originally rated as Z" after the rating shifted, etc.). The recipe lives in `agent/skills/report-generation/SKILL.md` Review-and-Fix QA Mode.
 - [ ] **`aith assess check-report-readiness` returns clean.** No blockers in the readiness response — coverage, unreviewed findings, root-cause groupings, chain-review state.
 - [ ] **Backend reflects submissions.** Findings actually submitted to the program (or marked accepted/duplicate) have a workflow status that matches reality; nothing remains "draft" if it was sent out.
+- [ ] **No `evidence_type='theoretical'` findings without `chain_required=true`.** Per C44, findings tagged `theoretical` must carry `details.chain_required=true` so the dispatcher knows a follow-up exploit-developer pass owes the runtime proof. Findings with NULL `evidence_type` are unaffected (legacy / pre-migration). Query: `aith assess list-findings --json | jq '.[] | select(.evidence_type=="theoretical" and (.details.chain_required != true))'`.
 
-When all eight gates pass, dispatch `report-writer` for the final pass and then close the engagement.
+When all nine gates pass, dispatch `report-writer` for the final pass and then close the engagement.
