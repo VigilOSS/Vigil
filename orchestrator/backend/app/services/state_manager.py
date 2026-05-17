@@ -4308,6 +4308,7 @@ def record_command_run(
     working_dir: str | None = None,
     scope_version: str | None = None,
     auth_context: str | None = None,
+    target_host: str = "",
     timeout_seconds_requested: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -4453,7 +4454,7 @@ def record_command_run(
                     technique, intent, probe_kind, destructive,
                     stdout_path, stderr_path,
                     peak_rss_bytes, cpu_user_seconds, cpu_system_seconds,
-                    working_dir, scope_version, auth_context,
+                    working_dir, scope_version, auth_context, target_host,
                     superseded_by_id, timeout_seconds_requested
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?,
@@ -4468,7 +4469,7 @@ def record_command_run(
                     ?, ?, ?, ?,
                     ?, ?,
                     ?, ?, ?,
-                    ?, ?, ?,
+                    ?, ?, ?, ?,
                     ?, ?
                 )
                 """,
@@ -4515,6 +4516,7 @@ def record_command_run(
                     working_dir,
                     scope_version,
                     auth_context,
+                    (target_host or "").strip(),
                     superseded_by_id,
                     timeout_seconds_requested,
                 ),
@@ -5005,6 +5007,7 @@ def list_command_runs(
     phase: str = "",
     tool_name: str = "",
     tool_bin: str = "",
+    target_host: str = "",
     audit_source: str = "",
     success: bool | None = None,
     timed_out: bool | None = None,
@@ -5056,6 +5059,11 @@ def list_command_runs(
     if tool_bin:
         where.append("r.tool_bin = ?")
         params.append(tool_bin)
+    if target_host:
+        # Case-insensitive exact match against the parsed target_host column.
+        # NULL-tolerant (LOWER(NULL) = NULL, which will not match the literal).
+        where.append("LOWER(r.target_host) = ?")
+        params.append(target_host.strip().lower())
     if audit_source:
         where.append("r.audit_source = ?")
         params.append(audit_source)
