@@ -134,6 +134,10 @@ class CommandRunRecordRequest(BaseModel):
     working_dir: str | None = Field(default=None, max_length=1024)
     scope_version: str | None = Field(default=None, max_length=128)
     auth_context: str | None = Field(default=None, max_length=128)
+    # C30: parsed target host extracted from argv by the kali wrapper for
+    # high-traffic verbs (httpx, nuclei, ffuf, sqlmap). Empty for unhandled
+    # verbs; the existing FTS `--q` search still matches those rows.
+    target_host: str = Field(default="", max_length=512)
     timeout_seconds_requested: int | None = Field(default=None, ge=0)
     force: bool = False
 
@@ -541,6 +545,7 @@ def get_command_runs(
     phase: str = "",
     tool_name: str = "",
     tool_bin: str = "",
+    target_host: str = "",
     audit_source: str = "",
     success: bool | None = Query(default=None),
     timed_out: bool | None = Query(default=None),
@@ -564,6 +569,7 @@ def get_command_runs(
         phase=phase,
         tool_name=tool_name,
         tool_bin=tool_bin,
+        target_host=target_host,
         audit_source=audit_source,
         success=success,
         timed_out=timed_out,

@@ -1082,6 +1082,7 @@ def init_db() -> None:
                 working_dir TEXT,
                 scope_version TEXT,
                 auth_context TEXT,
+                target_host TEXT NOT NULL DEFAULT '',
                 superseded_by_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
                 timeout_seconds_requested INTEGER,
                 partial_results INTEGER NOT NULL DEFAULT 0,
@@ -1163,6 +1164,13 @@ def init_db() -> None:
             connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN scope_version TEXT")
         if cmdrun_columns and "auth_context" not in cmdrun_columns:
             connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN auth_context TEXT")
+        # C30: target_host is the parsed target from argv for high-traffic verbs
+        # (httpx, nuclei, ffuf, sqlmap). Unhandled verbs leave it empty; FTS
+        # search via --q still finds those rows.
+        if cmdrun_columns and "target_host" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN target_host TEXT NOT NULL DEFAULT ''"
+            )
         # SQLite cannot ALTER a column to add a REFERENCES constraint, but the
         # FK is non-load-bearing — the application enforces the link, the
         # constraint is an integrity belt. Legacy rows simply have a plain
