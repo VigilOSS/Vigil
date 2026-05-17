@@ -1872,3 +1872,73 @@ def test_start_swarm_rejects_empty_items_file(monkeypatch, tmp_path: Path, capsy
         agent_mod._start_swarm(args)  # noqa: SLF001
     assert excinfo.value.code == 1
     assert "items file is empty" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# C64 — details_json / --inline drift guard
+#
+# The backend stores finding metadata in a column literally named
+# `details_json` (TEXT, JSON-encoded). The CLI write path on
+# `update-finding --inline` accepts `details` (dict) and the API
+# encodes it back into the column. Operators are warned about this
+# asymmetry in agent/rules/hunting.md §20 and the report-generation
+# skill. This regression test locks in the current correct state:
+# NO operator-facing prompt should instruct invoking
+# `update-finding --inline` (or its --details-json equivalent) with
+# the wrong field name. References to `details_json` as a READ-side
+# column or as part of a "not details_json" warning remain legitimate.
+# ---------------------------------------------------------------------------
+
+
+def _agent_prompt_files() -> list[Path]:
+    repo_root = Path(__file__).resolve().parents[3]
+    roots = [
+        repo_root / "agent" / "agents",
+        repo_root / "agent" / "skills",
+        repo_root / "agent" / "rules",
+        repo_root / "agent" / "references",
+    ]
+    files: list[Path] = []
+    for root in roots:
+        if root.is_dir():
+            files.extend(sorted(root.rglob("*.md")))
+    return files
+
+
+def test_no_operator_prompt_invokes_update_finding_with_details_json() -> None:
+    """C64: an operator-facing prompt must not instruct passing
+    `details_json` as the field name to `aith assess update-finding`.
+    The canonical write-side field is `details` (a dict); the
+    storage column happens to be `details_json` (a JSON string) and
+    is correctly referenced on the READ side. This test catches the
+    drift case where a future skill / rule mistakenly tells the
+    operator to write under `details_json`."""
+    offending: list[tuple[str, int, str]] = []
+    # Match actual invocation shapes only — JSON-style keys, --details-json
+    # flag, or "use details_json:" recipe phrasing. Lines that mention
+    # `details_json` in a warning context ("not details_json", "if a recipe
+    # says to pass details_json...") are LEGITIMATE and excluded.
+    bad_patterns = (
+        # JSON-literal: "details_json": {...}  inside an update/record-finding example
+        re.compile(r'update-finding[^\n]*--inline[^\n]*"details_json"\s*:', re.IGNORECASE),
+        re.compile(r'record-finding[^\n]*"details_json"\s*:', re.IGNORECASE),
+        # Hypothetical CLI flag form (does not exist; flag if anyone documents one)
+        re.compile(r"update-finding[^\n]*--details-json[ =]", re.IGNORECASE),
+    )
+    for path in _agent_prompt_files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            for pattern in bad_patterns:
+                if pattern.search(line):
+                    offending.append((str(path), line_no, line.strip()))
+                    break
+
+    assert offending == [], (
+        "Operator-facing prompts must not invoke update-finding / record-finding "
+        "with `details_json` as the field name (canonical write field is `details`). "
+        "Offending lines:\n"
+        + "\n".join(f"  {p}:{n}: {line}" for p, n, line in offending)
+    )
