@@ -210,10 +210,41 @@ export type ReportReadinessBlocker = {
   detail?: string;
 };
 
+export type PerHostOutcome = {
+  met: boolean;
+  evidence: string[];
+  deferred: boolean;
+};
+
+export type PerHostCoverageDeferral = {
+  id: number;
+  kind: string;
+  payload: Record<string, unknown>;
+  created_at?: string | null;
+};
+
+export type PerHostCoverageHost = {
+  host: string;
+  outcomes: Record<string, PerHostOutcome>;
+  unmet_objectives: string[];
+  deferred_objectives: string[];
+  deferrals: PerHostCoverageDeferral[];
+};
+
+export type PerHostCoverage = {
+  objectives: string[];
+  hosts: PerHostCoverageHost[];
+  engagement_signals: Record<string, number | undefined>;
+};
+
 export type ReportReadiness = {
   ready: boolean;
   blocker_count: number;
   blockers: ReportReadinessBlocker[];
+  // C58 — backend embeds the C40 per-host coverage projection here so the
+  // Readiness panel renders both Definition-of-Done gates and per-host
+  // outcomes from one fetch.
+  per_host_coverage?: PerHostCoverage;
 };
 
 export type AssessmentProbe = {
