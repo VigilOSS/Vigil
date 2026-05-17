@@ -108,6 +108,7 @@ def main(argv: list[str] | None = None) -> None:
     from assess.commands import (
         agent,
         approve_exploit,
+        auth_status,
         check_coverage,
         check_exploit_gate,
         check_report_readiness,
@@ -215,6 +216,7 @@ def main(argv: list[str] | None = None) -> None:
         list_finding_group,
         list_report_findings,
         agent,
+        auth_status,
         work_buffer,
         ingest_candidates,
         ingest_endpoints,
