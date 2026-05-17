@@ -132,11 +132,13 @@ class FakeClient:
         surfaces: list[dict[str, Any]] | None = None,
         decisions: list[dict[str, Any]] | None = None,
         endpoint_handler=None,
+        per_host_payload: dict[str, Any] | None = None,
     ) -> None:
         self._services = services or []
         self._surfaces = surfaces or []
         self._decisions = decisions or []
         self._endpoint_handler = endpoint_handler
+        self._per_host_payload = per_host_payload
         self.calls: list[str] = []
 
     def get(self, endpoint: str) -> Any:
@@ -149,6 +151,12 @@ class FakeClient:
             return self._services
         if endpoint == "surfaces":
             return self._surfaces
+        if endpoint == "coverage-readiness/by-host":
+            return getattr(self, "_per_host_payload", None) or {
+                "objectives": [],
+                "hosts": [],
+                "engagement_signals": {},
+            }
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
     def list_decisions(self, **filters: Any) -> list[dict[str, Any]]:
@@ -170,6 +178,7 @@ def _patch_client(
     surfaces=None,
     decisions=None,
     endpoint_handler=None,
+    per_host_payload=None,
 ) -> list[FakeClient]:
     fake_services = services or []
     fake_surfaces = surfaces or []
@@ -182,6 +191,7 @@ def _patch_client(
             surfaces=fake_surfaces,
             decisions=fake_decisions,
             endpoint_handler=endpoint_handler,
+            per_host_payload=per_host_payload,
         )
         created.append(client)
         return client
@@ -215,6 +225,8 @@ def _run(
     as_json: bool = True,
     verbose: bool = False,
     strict_vendor_saas: bool = False,
+    by_host: bool = False,
+    per_host_payload=None,
 ) -> FakeClient | None:
     module = _load_module()
     _patch_config(monkeypatch, module, engagement_dir)
@@ -225,6 +237,7 @@ def _run(
         surfaces=surfaces,
         decisions=decisions,
         endpoint_handler=endpoint_handler,
+        per_host_payload=per_host_payload,
     )
     module.run(
         SimpleNamespace(
@@ -233,6 +246,7 @@ def _run(
             as_json=as_json,
             verbose=verbose,
             strict_vendor_saas=strict_vendor_saas,
+            by_host=by_host,
         )
     )
     return clients[0] if clients else None
@@ -1085,3 +1099,243 @@ def test_vendor_saas_explicit_literal_in_scope_skips_gate(monkeypatch, tmp_path:
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
     assert report["vendor_saas_pending_decision"] == []
+
+
+# ---------------------------------------------------------------------------
+# C40 — per-host outcome gates + coverage_deferral honoring
+# ---------------------------------------------------------------------------
+
+
+def _per_host_payload(
+    *,
+    hosts: list[dict[str, Any]],
+    objectives: list[str] | None = None,
+    engagement_signals: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "objectives": objectives
+        or ["waf_tier", "service_inventory", "directory_fuzz", "nikto_trigger", "osint"],
+        "hosts": hosts,
+        "engagement_signals": engagement_signals or {},
+    }
+
+
+def _outcome(*, met: bool, evidence: list[str] | None = None, deferred: bool = False) -> dict[str, Any]:
+    return {
+        "met": bool(met),
+        "evidence": list(evidence or []),
+        "deferred": bool(deferred),
+    }
+
+
+def test_by_host_renders_outcome_table_and_warns_on_unmet(monkeypatch, tmp_path: Path, capsys) -> None:
+    """--by-host emits per-host outcome rows and per-host_warnings list (WARN-only)."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["api.target.example"])
+    _make_cases_db(eng)
+
+    services = [{"endpoint": "api.target.example", "state": "up"}]
+    surfaces = [{"target_descriptor": "https://api.target.example/v1"}]
+
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "api.target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=False),
+                    "service_inventory": _outcome(met=True, evidence=["services:1", "surfaces:1"]),
+                    "directory_fuzz": _outcome(met=False),
+                    "nikto_trigger": _outcome(met=False),
+                    "osint": _outcome(met=False),
+                },
+            },
+        ],
+    )
+
+    client = _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+        by_host=True,
+        per_host_payload=host_payload,
+    )
+
+    out = capsys.readouterr().out
+    report = json.loads(out)
+    # The scope-entry gate still passes — --by-host warns separately, never blocks.
+    assert report["ready"] is True, report
+    section = report["per_host_coverage"]
+    assert section["objectives"] == [
+        "waf_tier",
+        "service_inventory",
+        "directory_fuzz",
+        "nikto_trigger",
+        "osint",
+    ]
+    by_host = {row["host"]: row for row in section["hosts"]}
+    assert "api.target.example" in by_host
+    row = by_host["api.target.example"]
+    assert row["outcomes"]["service_inventory"]["met"] is True
+    assert row["outcomes"]["waf_tier"]["met"] is False
+    assert set(row["unmet_objectives"]) == {"waf_tier", "directory_fuzz", "nikto_trigger", "osint"}
+
+    warnings = report["per_host_warnings"]
+    # One warning per unmet objective for the single host.
+    assert len(warnings) == 4
+    assert any("waf_tier" in w and "api.target.example" in w for w in warnings)
+    assert any("coverage_deferral" in w for w in warnings)
+
+    # The CLI must NOT have asked for command-runs — strict abstraction test.
+    assert client is not None
+    assert "command-runs" not in client.calls
+    assert "summary" not in client.calls
+
+
+def test_by_host_deferral_clears_warning(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A coverage_deferral for an objective marks it as deferred (not unmet) in the report."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["api.target.example"])
+    _make_cases_db(eng)
+
+    services = [{"endpoint": "api.target.example", "state": "up"}]
+    surfaces = [{"target_descriptor": "https://api.target.example/v1"}]
+
+    # Backend payload reports waf_tier as deferred for this host.
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "api.target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=False, deferred=True),
+                    "service_inventory": _outcome(met=True),
+                    "directory_fuzz": _outcome(met=True),
+                    "nikto_trigger": _outcome(met=True),
+                    "osint": _outcome(met=True),
+                },
+                "deferrals": [
+                    {
+                        "id": 7,
+                        "kind": "coverage_deferral",
+                        "payload": {
+                            "host": "api.target.example",
+                            "deferred_objectives": ["waf_tier"],
+                            "reason": "vendor confirmed WAF tier in scope brief",
+                        },
+                        "created_at": "2026-05-17T12:00:00Z",
+                    }
+                ],
+            },
+        ],
+    )
+
+    _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+        by_host=True,
+        per_host_payload=host_payload,
+    )
+    report = json.loads(capsys.readouterr().out)
+    row = report["per_host_coverage"]["hosts"][0]
+    assert row["outcomes"]["waf_tier"]["deferred"] is True
+    assert row["unmet_objectives"] == []
+    assert "waf_tier" in row["deferred_objectives"]
+    # Empty warnings ↔ no actionable WARN-only lines.
+    assert report["per_host_warnings"] == []
+
+
+def test_by_host_does_not_query_command_runs_endpoint(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Contract assertion (C40): the CLI gate path NEVER hits assessment_command_runs.
+
+    Captures every endpoint the CLI requests and asserts the safelist is exactly
+    ``services``, ``surfaces``, and ``coverage-readiness/by-host``. If a regression
+    re-adds a command-runs fetch the FakeClient will raise AssertionError; this
+    test confirms that the new --by-host path stays inside the outcome-table
+    contract too.
+    """
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    _make_cases_db(eng)
+
+    services = [{"endpoint": "target.example", "state": "up"}]
+    surfaces = [{"target_descriptor": "https://target.example/"}]
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=True, evidence=["Cloudflare"]),
+                    "service_inventory": _outcome(met=True, evidence=["services:1"]),
+                    "directory_fuzz": _outcome(met=True),
+                    "nikto_trigger": _outcome(met=True),
+                    "osint": _outcome(met=True),
+                },
+            }
+        ],
+    )
+
+    client = _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+        by_host=True,
+        per_host_payload=host_payload,
+    )
+    capsys.readouterr()  # drain stdout
+
+    assert client is not None
+    # The only HTTP endpoints touched in --by-host mode.
+    assert set(client.calls) <= {"services", "surfaces", "coverage-readiness/by-host"}
+    assert "command-runs" not in client.calls
+    assert not any(call.startswith("command-runs") for call in client.calls)
+    # Verify the per-host fetch happened.
+    assert "coverage-readiness/by-host" in client.calls
+
+
+def test_by_host_without_flag_skips_per_host_section(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Without --by-host the backend per-host endpoint must not be called.
+
+    Preserves the prior CLI contract: the legacy gate path is unchanged when
+    operators run the command without --by-host.
+    """
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    _make_cases_db(eng)
+
+    services = [{"endpoint": "target.example", "state": "up"}]
+    surfaces = [{"target_descriptor": "https://target.example/"}]
+
+    client = _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+    )
+    capsys.readouterr()
+
+    assert client is not None
+    assert "coverage-readiness/by-host" not in client.calls
+    # Report must NOT carry a per_host_coverage key when --by-host is not set.
+    out = capsys.readouterr().out  # already drained; redrain produces ""
+    # Re-run to actually capture stdout via JSON path.
+    _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert "per_host_coverage" not in report
+    assert "per_host_warnings" not in report

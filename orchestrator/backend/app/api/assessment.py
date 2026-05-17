@@ -505,10 +505,35 @@ def get_coverage_readiness(engagement_key: str) -> dict[str, Any]:
     return state_manager.coverage_readiness(engagement.id)
 
 
+@router.get("/coverage-readiness/by-host")
+def get_per_host_coverage(engagement_key: str) -> dict[str, Any]:
+    """C40 outcome-based per-host coverage projection.
+
+    Surfaces the WAF / service-inventory / directory-fuzz / nikto-trigger /
+    OSINT outcome status for every host the engagement has signal for, plus
+    active ``coverage_deferral`` decision rows. The CLI consumes this via
+    ``aith assess check-scope-coverage --by-host``; the frontend Readiness
+    panel (C58) renders the same shape.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.per_host_coverage(engagement.id)
+
+
 @router.get("/report-readiness")
 def get_report_readiness(engagement_key: str) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.report_readiness(engagement.id)
+    readiness = state_manager.report_readiness(engagement.id)
+    # C58 — the Readiness panel renders per-host coverage outcomes alongside
+    # the Definition-of-Done blockers, so include the C40 projection in the
+    # same payload the frontend already fetches. The CLI keeps using
+    # ``/coverage-readiness/by-host`` directly; this is purely an additive
+    # extension for the UI consumer.
+    readiness = dict(readiness)
+    try:
+        readiness["per_host_coverage"] = state_manager.per_host_coverage(engagement.id)
+    except Exception:  # pragma: no cover — defensive; never block the call
+        readiness["per_host_coverage"] = {"objectives": [], "hosts": [], "engagement_signals": {}}
+    return readiness
 
 
 @router.get("/targets")

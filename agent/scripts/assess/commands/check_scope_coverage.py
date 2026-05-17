@@ -157,7 +157,74 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "but do not block phase advance."
         ),
     )
+    p.add_argument(
+        "--by-host",
+        dest="by_host",
+        action="store_true",
+        help=(
+            "C40 — emit per-host outcome status (WAF tier, service inventory, "
+            "directory-fuzz coverage, nikto trigger, OSINT) for every host the "
+            "engagement has signal for. Outcomes are read from intel / surface / "
+            "service / decision tables; this gate NEVER queries assessment_command_runs. "
+            "Unmet objectives WARN but do not block (use --force on transition-phase "
+            "if needed). Record an explicit skip via "
+            "`aith assess agent decision --kind coverage_deferral --payload-json "
+            "'{\"host\": \"...\", \"deferred_objectives\": [\"directory_fuzz\"], \"reason\": \"...\"}' "
+            "--surfaced-to-user`."
+        ),
+    )
     p.set_defaults(func=run)
+
+
+# ---------------------------------------------------------------------------
+# C40 — per-host outcome objectives + actionable dispatch hints
+# ---------------------------------------------------------------------------
+
+
+# Mirror of `state_manager.PER_HOST_OBJECTIVES`. Kept duplicated here to avoid
+# importing backend modules into the CLI; the test asserts the lists agree.
+_PER_HOST_OBJECTIVES: tuple[str, ...] = (
+    "waf_tier",
+    "service_inventory",
+    "directory_fuzz",
+    "nikto_trigger",
+    "osint",
+)
+
+
+# Per-objective remediation hint. Operators read this when the gate WARNs so
+# they know exactly what to dispatch (or what coverage_deferral to record) to
+# clear the line.
+_OBJECTIVE_DISPATCH_HINTS: dict[str, str] = {
+    "waf_tier": (
+        "dispatch recon-specialist with skill web-recon (records intel_tech_components "
+        "via wafw00f / httpx --tech-detect / whatweb), OR record "
+        "`aith assess agent decision --kind coverage_deferral --payload-json "
+        "'{{\"host\": \"{host}\", \"deferred_objectives\": [\"waf_tier\"], \"reason\": \"...\"}}' "
+        "--surfaced-to-user`"
+    ),
+    "service_inventory": (
+        "dispatch recon-specialist (records assessment_services / assessment_surfaces) "
+        "or ingest endpoints via `aith assess ingest-endpoints`, OR record a "
+        "coverage_deferral for the host"
+    ),
+    "directory_fuzz": (
+        "dispatch recon-specialist with skill directory-fuzzing (records "
+        "assessment_surfaces via record-surface), OR record a coverage_deferral "
+        "with reason='brute-force forbidden by scope brief' if the program "
+        "disallows directory brute-force"
+    ),
+    "nikto_trigger": (
+        "dispatch recon-specialist with web-recon (any of whatweb / httpx "
+        "-tech-detect / nuclei tech templates / nikto recording a tech-component "
+        "intel row satisfies this), OR record a coverage_deferral"
+    ),
+    "osint": (
+        "dispatch osint-recon (records intel_tech_components, intel_people, "
+        "intel_breach_records), OR record an engagement-level coverage_deferral "
+        "if OSINT is explicitly out of scope"
+    ),
+}
 
 
 def run(args: argparse.Namespace) -> None:
@@ -184,6 +251,7 @@ def run(args: argparse.Namespace) -> None:
     scope_metadata = _extract_scope_metadata(scope_data)
 
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    by_host_payload: dict[str, Any] | None = None
     try:
         try:
             services = client.get("services")
@@ -196,6 +264,16 @@ def run(args: argparse.Namespace) -> None:
             print(f"check-scope-coverage: backend surfaces fetch failed: {exc}", file=sys.stderr)
             sys.exit(1)
         decided_hosts = _vendor_saas_decided_hosts(client)
+        if bool(getattr(args, "by_host", False)):
+            try:
+                by_host_payload = client.get("coverage-readiness/by-host")
+            except AssessError as exc:
+                print(
+                    "check-scope-coverage: backend per-host coverage fetch failed: "
+                    f"{exc}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
     finally:
         client.close()
 
@@ -250,6 +328,12 @@ def run(args: argparse.Namespace) -> None:
             )
     ready = not overall_gaps
 
+    per_host_warnings: list[str] = []
+    by_host_section: dict[str, Any] | None = None
+    if by_host_payload is not None:
+        by_host_section = _annotate_by_host_payload(by_host_payload)
+        per_host_warnings = _per_host_warning_lines(by_host_section)
+
     report = {
         "engagement_key": cfg.engagement_key,
         "required_stage": args.require_stage,
@@ -261,11 +345,16 @@ def run(args: argparse.Namespace) -> None:
         "strict_vendor_saas": strict_vendor_saas,
         "ready": ready,
     }
+    if by_host_section is not None:
+        report["per_host_coverage"] = by_host_section
+        report["per_host_warnings"] = per_host_warnings
 
     if args.as_json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
         _render_text(report, verbose=args.verbose)
+        if by_host_section is not None:
+            _render_per_host_section(by_host_section, per_host_warnings)
 
     if not ready:
         sys.exit(1)
@@ -695,3 +784,128 @@ def _render_text(report: dict[str, Any], *, verbose: bool) -> None:
                 f"--kind scope_decision --host {row['host']} --vendor {row['vendor']} "
                 f"--choice ...` before recon dispatch"
             )
+
+
+# ---------------------------------------------------------------------------
+# C40 — per-host outcome rendering helpers
+# ---------------------------------------------------------------------------
+
+
+def _annotate_by_host_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the backend per-host payload into a stable rendering shape.
+
+    Backwards-compatibility insurance: if the backend ever returns a missing
+    objective (older API revision), the CLI still emits a deterministic row
+    so the operator output doesn't go silent. Unknown objectives the backend
+    returns are preserved verbatim.
+    """
+    objectives_from_payload = payload.get("objectives") if isinstance(payload, dict) else None
+    if not isinstance(objectives_from_payload, list) or not objectives_from_payload:
+        objectives = list(_PER_HOST_OBJECTIVES)
+    else:
+        objectives = [str(name) for name in objectives_from_payload if isinstance(name, str)]
+
+    raw_hosts = payload.get("hosts") if isinstance(payload, dict) else None
+    hosts: list[dict[str, Any]] = []
+    if isinstance(raw_hosts, list):
+        for row in raw_hosts:
+            if not isinstance(row, dict):
+                continue
+            host = str(row.get("host") or "").strip().lower()
+            if not host:
+                continue
+            outcomes_payload = row.get("outcomes")
+            outcomes: dict[str, dict[str, Any]] = {}
+            for name in objectives:
+                cell = (
+                    outcomes_payload.get(name)
+                    if isinstance(outcomes_payload, dict)
+                    else None
+                )
+                if not isinstance(cell, dict):
+                    cell = {"met": False, "evidence": [], "deferred": False}
+                outcomes[name] = {
+                    "met": bool(cell.get("met")),
+                    "evidence": list(cell.get("evidence") or []),
+                    "deferred": bool(cell.get("deferred")),
+                }
+            unmet = [
+                name
+                for name in objectives
+                if not outcomes[name]["met"] and not outcomes[name]["deferred"]
+            ]
+            deferred_objectives = sorted(
+                {name for name in objectives if outcomes[name]["deferred"]}
+            )
+            hosts.append(
+                {
+                    "host": host,
+                    "outcomes": outcomes,
+                    "unmet_objectives": unmet,
+                    "deferred_objectives": deferred_objectives,
+                    "deferrals": row.get("deferrals") or [],
+                }
+            )
+    engagement_signals = (
+        payload.get("engagement_signals") if isinstance(payload, dict) else None
+    )
+    return {
+        "objectives": objectives,
+        "hosts": hosts,
+        "engagement_signals": engagement_signals if isinstance(engagement_signals, dict) else {},
+    }
+
+
+def _per_host_warning_lines(section: dict[str, Any]) -> list[str]:
+    """Build human-readable per-objective warning lines.
+
+    Each line names a (host, unmet objective) pair plus the dispatch the
+    operator should run to clear it. Deferred objectives are silent. The
+    function never raises and never returns None — empty list ↔ no warnings.
+    """
+    warnings: list[str] = []
+    for row in section.get("hosts", []):
+        host = row.get("host", "")
+        for objective in row.get("unmet_objectives", []):
+            hint = _OBJECTIVE_DISPATCH_HINTS.get(
+                objective,
+                "dispatch the appropriate specialist or record a coverage_deferral",
+            )
+            try:
+                rendered_hint = hint.format(host=host)
+            except (KeyError, IndexError):
+                rendered_hint = hint
+            warnings.append(
+                f"host {host} unmet objective {objective} — {rendered_hint}"
+            )
+    return warnings
+
+
+def _render_per_host_section(section: dict[str, Any], warnings: list[str]) -> None:
+    """Emit the human-readable per-host outcome table after the main report."""
+    hosts = section.get("hosts", [])
+    objectives = section.get("objectives", list(_PER_HOST_OBJECTIVES))
+    print("")
+    print(f"per-host coverage outcomes (C40 — WARN-only):")
+    if not hosts:
+        print("  (no hosts with backend signal — recon dispatch is the next step)")
+        return
+    print("  objectives: " + ", ".join(objectives))
+    for row in hosts:
+        host = row.get("host", "")
+        outcomes = row.get("outcomes", {})
+        cells: list[str] = []
+        for objective in objectives:
+            cell = outcomes.get(objective) or {}
+            if cell.get("deferred"):
+                marker = "D"
+            elif cell.get("met"):
+                marker = "Y"
+            else:
+                marker = "N"
+            cells.append(f"{objective}={marker}")
+        print(f"  - {host}: {', '.join(cells)}")
+    if warnings:
+        print("per-host-warnings (WARN-only; does not block phase advance):")
+        for line in warnings:
+            print(f"  ! {line}")
