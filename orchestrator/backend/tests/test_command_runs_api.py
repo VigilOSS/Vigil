@@ -1594,3 +1594,92 @@ def test_legacy_command_runs_without_run_uuid_are_backfilled(client, isolate_set
         status="completed",
     )
     assert created["run_uuid"] == "fresh-run"
+
+
+# ---------------------------------------------------------------------------
+# C30 — target_host column + parser + --target-host filter
+# ---------------------------------------------------------------------------
+
+
+def test_extract_target_host_per_verb():
+    """C30: the parser must extract a target host for httpx / nuclei / ffuf /
+    sqlmap and return empty for unhandled verbs. The host is lowercased,
+    scheme/port/path stripped, and credentials dropped."""
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location(
+        "kali_audit_c30",
+        repo_root / "agent" / "scripts" / "assess" / "lib" / "kali_audit.py",
+    )
+    assert spec and spec.loader
+    # Bootstrap sys.path so `from .audit_enums import ...` resolves
+    import sys as _sys
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in _sys.path:
+        _sys.path.insert(0, str(scripts_root))
+    # Reload to pick up the path
+    for module_name in list(_sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            _sys.modules.pop(module_name, None)
+    from assess.lib.kali_audit import _extract_target_host  # type: ignore[import-not-found]
+
+    # httpx -u <url>
+    assert _extract_target_host("httpx", ["-u", "https://www.example.com:8443/path"]) == "www.example.com"
+    # nuclei -u <target>
+    assert _extract_target_host("nuclei", ["-u", "http://api.target.test"]) == "api.target.test"
+    # nuclei -l <file> → list mode, no single host
+    assert _extract_target_host("nuclei", ["-l", "/engagements/x/hosts.txt"]) == ""
+    # ffuf -u with FUZZ marker
+    assert _extract_target_host("ffuf", ["-u", "https://Admin.Example.test/FUZZ"]) == "admin.example.test"
+    # sqlmap -u <url> with credentials
+    assert _extract_target_host("sqlmap", ["-u", "https://user:pass@target.test/v1?id=1"]) == "target.test"
+    # Unhandled verb returns empty
+    assert _extract_target_host("nmap-scan", ["--target", "10.0.0.1"]) == ""
+
+
+def test_list_command_runs_filters_by_target_host(client, isolate_settings):
+    """C30: --target-host (exact, case-insensitive) returns only matching rows."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    # POST a row with target_host=app.example.test
+    payload_one = _base_payload()
+    payload_one["command"] = "nuclei -u https://app.example.test"
+    payload_one["argv"] = ["nuclei", "-u", "https://app.example.test"]
+    payload_one["tool_name"] = "nuclei"
+    payload_one["target_host"] = "app.example.test"
+    _post(client, payload_one)
+    # And a row against a different host
+    payload_two = _base_payload(run_uuid="run-other")
+    payload_two["command"] = "nuclei -u https://other.example.test"
+    payload_two["argv"] = ["nuclei", "-u", "https://other.example.test"]
+    payload_two["tool_name"] = "nuclei"
+    payload_two["target_host"] = "other.example.test"
+    _post(client, payload_two)
+    # And a row with empty target_host (unhandled verb)
+    payload_three = _base_payload(run_uuid="run-bare")
+    payload_three["command"] = "echo no-target"
+    payload_three["tool_name"] = "exec"
+    _post(client, payload_three)
+
+    # Filter to app.example.test → exactly one row
+    response = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs",
+        params={"target_host": "app.example.test"},
+    )
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 1
+    assert rows[0]["target_host"] == "app.example.test"
+
+    # Case-insensitive match
+    response = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs",
+        params={"target_host": "APP.EXAMPLE.TEST"},
+    )
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+
+    # No filter returns all rows
+    response = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs")
+    assert response.status_code == 200
+    assert len(response.json()) == 3
