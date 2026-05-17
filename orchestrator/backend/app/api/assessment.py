@@ -392,6 +392,12 @@ class FindingRecordRequest(BaseModel):
     source_name: str = Field(default="", max_length=128)
     details: dict[str, Any] = Field(default_factory=dict)
     provenance: dict[str, Any] = Field(default_factory=dict)
+    # C44: evidence_type categorizes confirmation mode so report-writer can
+    # sort/downrate without re-parsing details. Nullable; agents that don't
+    # set it leave NULL (legacy behavior preserved).
+    evidence_type: Literal[
+        "network-confirmed", "code-inferred", "theoretical", "informational"
+    ] | None = None
     request_variant_id: int | None = None
     service_id: int | None = None
     surface_id: int | None = None
@@ -420,6 +426,10 @@ class FindingPatchRequest(BaseModel):
     source_name: str | None = Field(default=None, max_length=128)
     details: dict[str, Any] | None = None
     provenance: dict[str, Any] | None = None
+    # C44: allow retroactive labeling via aith assess update-finding.
+    evidence_type: Literal[
+        "network-confirmed", "code-inferred", "theoretical", "informational"
+    ] | None = None
     reason_code: str = Field(default="", max_length=128)
     reason_text: str = Field(default="", max_length=4096)
     artifact_ref: str = Field(default="", max_length=1024)
@@ -924,6 +934,7 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
         source_name=request.source_name,
         details=request.details,
         provenance=request.provenance,
+        evidence_type=request.evidence_type,
         request_variant_id=request.request_variant_id,
         service_id=request.service_id,
         surface_id=request.surface_id,
@@ -964,6 +975,7 @@ async def patch_finding(
         source_name=request.source_name,
         details=request.details,
         provenance=request.provenance,
+        evidence_type=request.evidence_type,
         transition_reason_code=request.reason_code,
         transition_reason_text=request.reason_text,
         transition_artifact_ref=request.artifact_ref,
