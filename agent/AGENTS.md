@@ -368,6 +368,20 @@ Two coverage passes are not optional. They are gates the operator clears before 
 - **Verify → Exploit: variant/sibling pass per confirmed finding.** For each confirmed high/critical finding, dispatch a `vulnerability-analyst` run that explicitly hunts sibling routes / sibling controllers / sibling providers / sibling content-types / sibling auth contexts sharing the same code path. The dispatch `task` must contain `variant`, `sibling`, or `rotat` so `transition-phase --check` recognizes it. Skipping the variant pass is the single most common way real findings are missed in this codebase — `transition-phase verify` will block with `kind=missing_variant_pass` until satisfied (or `--force` with a stated reason).
 - **Exploit → Report: chain-construction pass across the confirmed set.** Before report-writer dispatch, run at least one `exploit-developer` pass that enumerates A→B candidates across confirmed findings. Information disclosure + open-redirect, SSRF + token leak, IDOR + impersonation are the standard chains worth checking even when they look unlikely; the chain pass is what turns a list of mediums into a high.
 
+### Phase-Exit Review Dispatches (C45)
+
+Three review-mode dispatches gate phase transitions. Each is a separate read-only dispatch (no new probing) that emits a structured gap report so the operator can dispatch missing work before transitioning. They complement, not replace, the mandatory-pass gates above.
+
+| Phase boundary | Review mode | Dispatch shape | Role prompt section |
+|---|---|---|---|
+| Phase 1 → 2 | `recon-specialist` with `mode=review` | task: "review recon coverage before Phase 1 exit"; skills: `web-recon` | Review Mode in `agent/agents/recon-specialist.md` |
+| Phase 4 → 5 | `vulnerability-analyst` with `mode=root_cause_review` | task: "root-cause review across confirmed findings before Phase 5"; skills: pick the dominant vuln-class skill | Root-Cause Review Mode in `agent/agents/vulnerability-analyst.md` |
+| Phase 5 → 6 | `exploit-developer` with `mode=review` | task: "chain-readiness review before report-writer dispatch"; skills: `exploit-playbook-authoring` | Review Mode in `agent/agents/exploit-developer.md` |
+
+Each review dispatch reads its own checklist from the role prompt section above, emits a backend handoff naming the gaps, and proposes specific follow-up dispatches in the `next_steps` field. The operator runs those follow-ups before the transition. Review-mode dispatches do NOT run new probes or write findings; they are pure read-only assessment.
+
+Report-review is intentionally NOT in this list — the `report-generation/SKILL.md` Review-and-Fix QA Mode already exists for that purpose; dispatch `report-writer` with `--mode review-and-fix` for report cleanup.
+
 ### Cross-Dispatch Continuity
 
 Every dispatch launches a fresh agent — treat each dispatch as a clean-room environment that inherits only what the operator explicitly hands it. Session tokens, discovered endpoints, partial PoC steps, and next-step plans travel through the dispatch prompt and durable state (backend records, engagement files), because the harness rebuilds subagent context from those sources on each launch.

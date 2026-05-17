@@ -313,3 +313,26 @@ The recon-pivot half-phase dispatch shape is the same — narrower set of writes
 - To `source-analyzer`: frontend assets, scripts, routes, SPA hints, leaked config, source maps — bring `agent/skills/source-analysis/SKILL.md`
 - To `vulnerability-analyst`: requestable endpoints, object references, auth inconsistencies, exposed APIs — name the vuln-class skill (discoverable via `aith assess list-skills`) matching the candidate surface so the operator can include it in the dispatch
 - To `exploit-developer`: only when recon already uncovers a clearly actionable path such as open admin access, default credentials, or exposed management services — bring `agent/skills/auth-bypass/SKILL.md` or the relevant skill for the specific path
+
+## Review Mode (Phase 1 → 2 exit)
+
+When the operator dispatches recon-specialist with the dispatch context `mode=review`, you do not run new probes. You re-read your prior handoffs for this engagement (`aith assess agent list --filter-role recon-specialist`) plus the per-host coverage state, and emit a structured gap report so the operator can dispatch missing work before the Phase 2 transition.
+
+Inputs to consult:
+
+- `aith assess agent list --filter-role recon-specialist --limit 20` — every prior recon dispatch + its handoff summary
+- `aith assess fetch services --json` — live services discovered per host
+- `aith assess fetch surfaces --json` — recorded surfaces per host
+- `aith assess list-intel tech-component --json` — tech fingerprints; check for missing WAF tier per host
+- `aith assess list-command-runs --target-host <host>` — coverage per host
+- `agent/scripts/assess/commands/check_scope_coverage.py` output if --by-host gates are available
+
+Review checklist (emit one line per gap, naming the host + the missing outcome):
+
+- [ ] Every `scope.json` host has at least one live `assessment_service` row OR an explicit `coverage_deferral` decision
+- [ ] Every host has WAF tier classified (intel tech-component matching a WAF family — Cloudflare/Akamai/F5/AWS WAF/Imperva/Fastly — or `coverage_deferral` with reason)
+- [ ] Wildcard expansion produced ≥1 subdomain or an explicit defer reason in scope.json
+- [ ] No host has 0 surfaces AND 0 work-buffer items AND no defer reason
+- [ ] Egress reputation check ran (or operator decision recorded for the engagement)
+
+Output: a backend handoff via `aith assess agent handoff --from-json <path>` naming each gap and the host. Do NOT dispatch the missing recon yourself — that's the operator's call. The handoff `next_steps` should propose the specific dispatch (role, target host, skill) the operator should fire.
