@@ -192,37 +192,47 @@ _PER_HOST_OBJECTIVES: tuple[str, ...] = (
 )
 
 
+# Canonical specialist names referenced in dispatch hints below. Centralizing
+# them keeps a future role-file rename (e.g. recon-specialist -> web-recon-lead)
+# from silently leaving stale references in the hint strings. The regression
+# test in `test_check_scope_coverage_specialist_roster_exists` asserts each
+# value here has a matching `agent/agents/<name>.md` file on disk, so a rename
+# without a hint update fails the test suite.
+_HINT_RECON_SPECIALIST = "recon-specialist"
+_HINT_OSINT_ANALYST = "osint-analyst"
+
+
 # Per-objective remediation hint. Operators read this when the gate WARNs so
 # they know exactly what to dispatch (or what coverage_deferral to record) to
 # clear the line.
 _OBJECTIVE_DISPATCH_HINTS: dict[str, str] = {
     "waf_tier": (
-        "dispatch recon-specialist with skill web-recon (records intel_tech_components "
-        "via wafw00f / httpx --tech-detect / whatweb), OR record "
-        "`aith assess agent decision --kind coverage_deferral --payload-json "
-        "'{{\"host\": \"{host}\", \"deferred_objectives\": [\"waf_tier\"], \"reason\": \"...\"}}' "
-        "--surfaced-to-user`"
+        f"dispatch {_HINT_RECON_SPECIALIST} with skill web-recon (records "
+        "intel_tech_components via wafw00f / httpx --tech-detect / whatweb), "
+        "OR record `aith assess agent decision --kind coverage_deferral "
+        "--payload-json '{{\"host\": \"{host}\", \"deferred_objectives\": "
+        "[\"waf_tier\"], \"reason\": \"...\"}}' --surfaced-to-user`"
     ),
     "service_inventory": (
-        "dispatch recon-specialist (records assessment_services / assessment_surfaces) "
-        "or ingest endpoints via `aith assess ingest-endpoints`, OR record a "
-        "coverage_deferral for the host"
+        f"dispatch {_HINT_RECON_SPECIALIST} (records assessment_services / "
+        "assessment_surfaces) or ingest endpoints via `aith assess "
+        "ingest-endpoints`, OR record a coverage_deferral for the host"
     ),
     "directory_fuzz": (
-        "dispatch recon-specialist with skill directory-fuzzing (records "
-        "assessment_surfaces via record-surface), OR record a coverage_deferral "
-        "with reason='brute-force forbidden by scope brief' if the program "
-        "disallows directory brute-force"
+        f"dispatch {_HINT_RECON_SPECIALIST} with skill directory-fuzzing "
+        "(records assessment_surfaces via record-surface), OR record a "
+        "coverage_deferral with reason='brute-force forbidden by scope brief' "
+        "if the program disallows directory brute-force"
     ),
     "nikto_trigger": (
-        "dispatch recon-specialist with web-recon (any of whatweb / httpx "
-        "-tech-detect / nuclei tech templates / nikto recording a tech-component "
-        "intel row satisfies this), OR record a coverage_deferral"
+        f"dispatch {_HINT_RECON_SPECIALIST} with web-recon (any of whatweb / "
+        "httpx -tech-detect / nuclei tech templates / nikto recording a "
+        "tech-component intel row satisfies this), OR record a coverage_deferral"
     ),
     "osint": (
-        "dispatch osint-recon (records intel_tech_components, intel_people, "
-        "intel_breach_records), OR record an engagement-level coverage_deferral "
-        "if OSINT is explicitly out of scope"
+        f"dispatch {_HINT_OSINT_ANALYST} (records intel_tech_components, "
+        "intel_people, intel_breach_records), OR record an engagement-level "
+        "coverage_deferral if OSINT is explicitly out of scope"
     ),
 }
 
