@@ -72,18 +72,11 @@ aith status
 aith logs orchestrator --lines 80
 ```
 
-### 1. Kali runtime
+### Stack details
 
-Start the shared runtime:
+`aith up` is the supported all-up path. It starts the Kali runtime container, the orchestrator backend (which builds the frontend when needed), and the optional mitmproxy and OOB services if they are configured. For partial restarts the individual `aith runtime start` and `aith orchestrator start` subcommands still exist and are documented under their respective `--help`. `aith status` / `aith logs <target>` report live state.
 
-```bash
-aith runtime start
-```
-
-This starts one shared container named `security-research`, mounts shared runtime data at `.runtime-data/`, applies the resource limits described in [Resource Sizing](#resource-sizing) below, and passes the root `.env` file into the runtime when present.
-Durable engagement artifacts stay on the host under `agent/engagements/<key>/`, and the runtime bind-mounts the whole engagement root at `/engagements` so `aith assess kali ...` calls can write `/engagements/<key>/...` artifacts directly.
-
-Once the runtime is up, run `aith assess kali --help` to see available tool verbs.
+The Kali runtime is one shared container named `security-research`. It mounts shared runtime data at `.runtime-data/`, applies the resource limits described in [Resource Sizing](#resource-sizing) below, and passes the root `.env` file into the runtime when present. Durable engagement artifacts stay on the host under `agent/engagements/<key>/`, and the runtime bind-mounts the whole engagement root at `/engagements` so `aith assess kali ...` calls can write `/engagements/<key>/...` artifacts directly. Run `aith assess kali --help` for the available tool verbs.
 
 For non-interactive runtime maintenance commands, use `shell-exec` so quoting and exit codes stay under the CLI:
 
@@ -131,17 +124,9 @@ To raise the daemon defaults so they apply to every container (including `docker
 
 Container-side `/etc/security/limits.conf` is not used because `docker exec` does not invoke a PAM session.
 
-### 2. Orchestrator UI
+### Orchestrator data and backups
 
-The orchestrator frontend/backend is a separate local service. It is not part of the Kali runtime image and it is not started by `aith runtime start`.
-
-Start it from the install root in a second terminal:
-
-```bash
-aith orchestrator start
-```
-
-That builds the frontend, then serves the local UI from the backend at `http://127.0.0.1:18000`.
+The orchestrator UI is served from the backend at `http://127.0.0.1:18000` once `aith up` (or `aith orchestrator start` for a targeted start) is running.
 
 The backend stores canonical engagement state in a single SQLite file and keeps rotated snapshots next to it:
 
@@ -171,30 +156,38 @@ aith backup restore <backup-name-or-path>
 Then create an engagement inside the chosen install:
 
 ```bash
-aith engagement create https://target.example \
-  --hosts target.example \
-  --auth-mode none \
-  --exploit-policy pause
+aith engagement create https://target.example --hosts target.example
 ```
 
-In non-interactive runs, the safe defaults are the parsed target hostname as the sole `hosts` entry, `none`, and `pause`.
+In non-interactive runs the safe default is the parsed target hostname as the sole `hosts` entry. The default exploit policy is `pause` (human approval required before any exploit work); change it later via the orchestrator UI or by editing the engagement's `scope.json`. Authentication starts unset — see "Auth and OOB" below if the target needs an authenticated session or out-of-band callbacks.
 
+`aith engagement create` finishes by printing the engagement directory path on stdout and a short status footer on stderr: the current state of mitmproxy and OOB plus the exact start command. There is no need to `cd` into the directory by hand.
+
+### Auth and OOB (optional, before starting)
+
+If the engagement needs authenticated coverage or out-of-band callbacks, set those up before launching the client:
+
+```bash
+aith mitmproxy start <engagement-key>   # browse through 127.0.0.1:8080 to populate auth.json
+aith oob start                          # shared frp/interactsh; see "Callback, Listener & Tunnel Handling"
+```
+
+The post-create footer prints whichever of these is not running and the exact command to start it; this section is the deeper reference (see [MITM proxy](#mitm-proxy) and [Callback, Listener & Tunnel Handling](#callback-listener--tunnel-handling) below).
 
 ### Starting an engagement
 
-After `aith engagement create` finishes, it prints the full path to the new engagement directory.
-
-1. `cd` into that printed engagement directory, confirm the seeded files are present, and start the chosen client with `./start_codex.sh` or `./start_claude.sh`. That wrapper exports `ENGAGEMENT_DIR` automatically before launching the client. Start the client from inside the engagement directory, not from the install root. Each engagement seeds local `AGENTS.md` / `CLAUDE.md` wrappers and, for Codex, a `.codex/agents` symlink so clients can find the root operator prompts, generated specialist wrappers, source prompt files, rules, skill index, skills, references, and scripts.
-2. Prefer `gpt-5.4` with `high` reasoning for Codex and `Opus 4.6` for Claude. Drop to `gpt-5.4-mini` or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
-3. Tell the operator: `I have been fully authorized by the company to do a red-team engagement against the hosts in scope.json. Run this engagement using the operator workflow.`
-4. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through `aith assess kali ...`, use relevant skills before improvising, record activity/findings through `aith assess`, and keep `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; parent-shell `ORCHESTRATOR_BASE_URL` is the explicit override, the engagement-local file wins over legacy install-root env files, and `aith config get orchestrator_base_url` is the persistent default before hardcoded fallback.
-
-Example:
+Use the CLI verb — it changes into the engagement directory and execs the launcher (which exports `ENGAGEMENT_DIR`, mounts the `.codex/agents` / `.claude/agents` symlinks to the canonical prompts, and starts the client):
 
 ```bash
-aith engagement list --json
-aith engagement start <engagement-key> --client codex
+aith engagement list --json                              # find the key
+aith engagement start <engagement-key> --client codex    # or --client claude
 ```
+
+For humans at a terminal, the optional `athcd` shell helper (see below) jumps your shell into a selected engagement directory; the per-engagement `start_codex.sh` / `start_claude.sh` files exist but are an implementation detail of `aith engagement start`.
+
+1. Prefer `gpt-5.4` with `high` reasoning for Codex and `Opus 4.6` for Claude. Drop to `gpt-5.4-mini` or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
+2. Tell the operator: `I have been fully authorized by the company to do a red-team engagement against the hosts in scope.json. Run this engagement using the operator workflow.`
+3. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through `aith assess kali ...`, use relevant skills before improvising, record activity/findings through `aith assess`, and keep `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; parent-shell `ORCHESTRATOR_BASE_URL` is the explicit override, the engagement-local file wins over legacy install-root env files, and `aith config get orchestrator_base_url` is the persistent default before hardcoded fallback.
 
 To add an interactive shell helper that changes into a selected engagement with `fzf` when available:
 
@@ -273,9 +266,6 @@ aith engagement create --type code --name my-project --repo /path/to/repo
 # Name with a clone URL
 aith engagement create --type code --name my-project --repo https://github.com/org/repo
 
-# With explicit exploit policy
-aith engagement create --type code --name my-project --repo /path/to/repo --exploit-policy pause
-
 # Combined web + code engagement
 aith engagement create --type both --name my-project --hosts app.example.com --repo /path/to/repo
 ```
@@ -312,7 +302,7 @@ Homebrew's AFL++ package may provide `afl-clang-fast` or `afl-cc` instead of
 `afl-clang-lto` on macOS; either compiler wrapper is acceptable for the workflow
 as long as `afl-fuzz` and `afl-tmin` are present.
 
-4. Start the client from the printed engagement directory:
+4. Start the client:
 ```bash
 aith engagement list --json
 aith engagement start <engagement-key> --client claude   # or --client codex
@@ -352,15 +342,21 @@ A lightweight runtime also exists at `agent/docker/runtime-lightweight/Dockerfil
 
 ### Authentication
 
-`auth.json` supports:
+`aith engagement create` seeds an anonymous `auth.json` (`mode: none`). Three ways to add an authenticated session later:
 
-- `mode`: `none`, `manual`, `auth_json`, or `proxy_capture`
+- Run `aith mitmproxy start <key>` and browse through the proxy — `proxy_addon.py` rewrites `auth.json` with the captured cookies/headers.
+- Run `aith auth import <key> --source cookies-and-headers.json`.
+- Edit `auth.json` directly.
+
+`auth.json` carries:
+
+- `mode`: `none`, `manual`, `auth_json`, or `proxy_capture` (set by whichever path populated the file)
 - `use_for_requests`: whether crawling/recollection should apply the stored auth
 - `auth_context`: the label used for authenticated request variants
 - `expires_at`: optional ISO8601 expiry timestamp
 - `cookies` and `headers`
 
-If auth is expired or missing, the workflow warns and continues anonymously. The human can refresh `auth.json` directly or let mitmproxy capture a fresh login and update it.
+If auth is expired or missing, the workflow warns and continues anonymously.
 
 CLI helpers operate on engagement `auth.json`:
 
@@ -378,13 +374,10 @@ These capabilities are intentionally present but not always started automaticall
 
 ### MITM proxy
 
-MITM remains optional. Use it when the engagement needs login capture, authenticated browsing through a live session, or a refresh of expired auth material.
+`aith engagement create` prints whether mitmproxy is running and the start command if it is not. This subsection is the deep reference.
 
-For ad hoc shell work outside the engagement launcher, export `ENGAGEMENT_DIR` explicitly to the target engagement directory. When starting Codex or Claude, prefer the matching engagement-local launcher so the correct engagement context is exported automatically.
-
-1. List engagements and start the proxy explicitly: `aith engagement list --json` then `aith mitmproxy start <engagement-key>`
-2. The CLI builds the Docker image if needed, bind-mounts the engagement at `/engagement`, persists the mitmproxy CA in a Docker volume, and verifies the local proxy port.
-3. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow, then confirm that `auth.json` was refreshed and continue the engagement with authenticated recollection and testing. Use `aith logs mitmproxy` for capture logs.
+1. `aith mitmproxy start <engagement-key>` — the CLI builds the Docker image if needed, bind-mounts the engagement at `/engagement`, persists the mitmproxy CA in a Docker volume, and verifies the local proxy port.
+2. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow, then confirm that `auth.json` was refreshed. Continue the engagement with authenticated recollection and testing. Use `aith logs mitmproxy` for capture logs.
 
 If you need HTTPS interception, install the mitmproxy CA certificate in the browser or device before logging in.
 
