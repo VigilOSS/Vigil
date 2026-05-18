@@ -103,8 +103,11 @@ def main(argv: list[str] | None = None) -> None:
     status_p = sub.add_parser("status")
     status_p.add_argument("--json", action="store_true")
     up_p = sub.add_parser("up", help="Build stale images and start the local runtime stack")
-    up_p.add_argument("--engagement")
-    up_p.add_argument("--select", action="store_true")
+    # Legacy shims — the proxy now serves every active engagement, so the
+    # selector is a no-op. Kept for back-compat with operator scripts that
+    # still pass them.
+    up_p.add_argument("--engagement", help=argparse.SUPPRESS)
+    up_p.add_argument("--select", action="store_true", help=argparse.SUPPRESS)
     up_p.add_argument("--no-build", action="store_true")
     up_p.add_argument("--runtime-restart-timeout", type=int, default=10)
     up_p.add_argument("--yes-restart-runtime", action="store_true")
@@ -309,13 +312,14 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "up":
         if args.yes_restart_runtime and args.no_restart_runtime:
             raise SystemExit("Specify only one of --yes-restart-runtime or --no-restart-runtime.")
-        if args.engagement and args.select:
-            raise SystemExit("Specify either --engagement or --select, not both.")
+        if args.engagement or args.select:
+            print(
+                "[aith] `aith up --engagement/--select` is a no-op now; the proxy serves every active engagement.",
+                file=sys.stderr,
+            )
         run_up(
             UpOptions(
                 install_root=install_root,
-                engagement=args.engagement,
-                select=args.select,
                 no_build=args.no_build,
                 runtime_restart_timeout=args.runtime_restart_timeout,
                 yes_restart_runtime=args.yes_restart_runtime,

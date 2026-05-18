@@ -20,8 +20,6 @@ from .runtime import RuntimeOptions, build_runtime, start_runtime, stop_runtime
 @dataclass(frozen=True, slots=True)
 class UpOptions:
     install_root: Path
-    engagement: str | None = None
-    select: bool = False
     no_build: bool = False
     runtime_restart_timeout: int = 10
     yes_restart_runtime: bool = False
@@ -136,8 +134,7 @@ def _start_mitmproxy_if_needed(install_root: Path, options: UpOptions, *, runner
         MitmproxyOptions(install_root=install_root, engagements_root=engagements_root),
         runner=runner,
     )
-    # `options` is unused for proxy selection now — engagement pinning is gone.
-    _ = options
+    del options  # accepted for signature parity; the proxy no longer pins to an engagement
 
 
 def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
