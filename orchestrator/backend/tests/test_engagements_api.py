@@ -75,6 +75,87 @@ def test_list_engagements_discovers_filesystem_engagements(client, isolate_setti
     assert payload[0]["session_count"] == 1
 
 
+def test_list_engagements_surfaces_scope_hosts_for_proxy_router(client, isolate_settings):
+    """The multi-engagement mitmproxy router fetches the active engagement set
+    from this endpoint; scope_hosts must be present so the addon can route
+    captured flows without a second round-trip to read scope.json.
+    """
+    engagements_dir = isolate_settings["engagements_dir"]
+    engagement_dir = engagements_dir / "2026-04-01-100000-multi"
+    (engagement_dir / "sessions").mkdir(parents=True)
+    (engagement_dir / "engagement.json").write_text(
+        json.dumps(
+            {
+                "key": "2026-04-01-100000-multi",
+                "target": "https://multi.example",
+                "created_at": "2026-04-01T10:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (engagement_dir / "scope.json").write_text(
+        json.dumps(
+            {
+                "hostname": "multi.example",
+                "hosts": ["multi.example", "*.multi.example"],
+                "scope": ["legacy.multi.example"],
+                "status": "in_progress",
+                "current_phase": "recon",
+                "scope_priority": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (engagement_dir / "sessions" / "index.json").write_text("[]", encoding="utf-8")
+
+    response = client.get("/engagements")
+    assert response.status_code == 200
+    row = next(item for item in response.json() if item["key"] == "2026-04-01-100000-multi")
+    assert row["scope_hosts"] == ["multi.example", "*.multi.example", "legacy.multi.example"]
+    assert row["scope_priority"] == 5
+
+
+def test_list_engagements_filters_by_status(client, isolate_settings):
+    """The proxy registry asks for ?status=in_progress so completed engagements
+    don't keep claiming traffic. The filter must apply to the same payload
+    shape as the unfiltered list.
+    """
+    engagements_dir = isolate_settings["engagements_dir"]
+    active_dir = engagements_dir / "2026-04-02-100000-active"
+    completed_dir = engagements_dir / "2026-04-02-100100-completed"
+    for path, status in ((active_dir, "in_progress"), (completed_dir, "completed")):
+        (path / "sessions").mkdir(parents=True)
+        (path / "engagement.json").write_text(
+            json.dumps(
+                {
+                    "key": path.name,
+                    "target": f"https://{path.name}.example",
+                    "created_at": "2026-04-02T10:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (path / "scope.json").write_text(
+            json.dumps(
+                {
+                    "hostname": f"{path.name}.example",
+                    "hosts": [f"{path.name}.example"],
+                    "status": status,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (path / "sessions" / "index.json").write_text("[]", encoding="utf-8")
+
+    all_keys = {row["key"] for row in client.get("/engagements").json()}
+    assert active_dir.name in all_keys
+    assert completed_dir.name in all_keys
+
+    active_only = {row["key"] for row in client.get("/engagements?status=in_progress").json()}
+    assert active_dir.name in active_only
+    assert completed_dir.name not in active_only
+
+
 def test_maybe_sync_engagements_skips_repeated_resync_without_filesystem_changes(isolate_settings, monkeypatch):
     write_engagement(isolate_settings["engagements_dir"])
     db_module.init_db()

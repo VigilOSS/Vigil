@@ -4,9 +4,9 @@ RUN pip install --no-cache-dir mitmproxy
 
 COPY scripts/proxy_addon.py /opt/proxy_addon.py
 
-WORKDIR /engagement
+WORKDIR /engagements
 
 EXPOSE 8080
 
 ENTRYPOINT ["mitmdump", "-p", "8080", "-s", "/opt/proxy_addon.py"]
-CMD ["--set", "engagement_dir=/engagement"]
+CMD ["--set", "engagements_root=/engagements"]

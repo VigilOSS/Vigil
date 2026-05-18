@@ -27,7 +27,13 @@ from .engagements import (
     start_engagement,
 )
 from .install import InstallOptions, InstallResult, install_from_source
-from .mitmproxy import MitmproxyOptions, start_proxy, stop_proxy
+from .mitmproxy import (
+    MitmproxyOptions,
+    read_proxy_routes,
+    request_proxy_reload,
+    start_proxy,
+    stop_proxy,
+)
 from .oob import (
     DEFAULT_FRP_HOST,
     DEFAULT_FRP_PORT,
@@ -213,12 +219,17 @@ def main(argv: list[str] | None = None) -> None:
     mitm_p = sub.add_parser("mitmproxy")
     mitm_sub = mitm_p.add_subparsers(dest="mitmproxy_command", required=True)
     mitm_start = mitm_sub.add_parser("start")
-    mitm_start.add_argument("engagement", nargs="?")
-    mitm_start.add_argument("--select", action="store_true")
+    # Positional kept as a deprecated shim — one or two release cycles of grace
+    # so existing operator habits don't error out.
+    mitm_start.add_argument("engagement", nargs="?", help=argparse.SUPPRESS)
+    mitm_start.add_argument("--select", action="store_true", help=argparse.SUPPRESS)
     mitm_start.add_argument("--port", type=int, default=8080)
     mitm_sub.add_parser("stop")
     mitm_sub.add_parser("status")
     mitm_sub.add_parser("cert")
+    mitm_sub.add_parser("reload", help="Force the proxy to refresh its engagement registry")
+    mitm_routes = mitm_sub.add_parser("routes", help="Print the proxy's loaded engagement→scope mapping")
+    mitm_routes.add_argument("--json", action="store_true")
 
     # `aith mcp` retired in the typed-CLI cutover. Keep the parser so calls fail with a clear message
     # instead of argparse's generic "unknown command" error; downstream handler prints the deprecation note.
@@ -613,16 +624,24 @@ def _runtime_shell_exec(command_parts: list[str]) -> None:
 
 
 def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
+    engagements_root = install_root / "agent" / "engagements"
     if args.mitmproxy_command == "start":
-        if args.engagement:
-            engagement = _resolve_engagement_reference(install_root, args.engagement)
-        elif args.select:
-            engagement = resolve_engagement_path(install_root, select=True)
-        elif current := current_engagement_path():
-            engagement = current
-        else:
-            raise SystemExit("Specify an engagement key/path or --select, or run from inside an engagement")
-        start_proxy(MitmproxyOptions(install_root=install_root, engagement_dir=engagement, port=args.port))
+        if args.engagement or args.select:
+            # The engagement positional / --select is a legacy shim. The proxy
+            # now serves every active engagement at once, so we silently ignore
+            # the value after printing one line so the operator knows.
+            print(
+                "[aith] mitmproxy now serves all active engagements; ignoring engagement selector.",
+                file=sys.stderr,
+            )
+        engagements_root.mkdir(parents=True, exist_ok=True)
+        start_proxy(
+            MitmproxyOptions(
+                install_root=install_root,
+                engagements_root=engagements_root,
+                port=args.port,
+            )
+        )
     elif args.mitmproxy_command == "stop":
         stop_proxy()
     elif args.mitmproxy_command == "status":
@@ -630,6 +649,26 @@ def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
     elif args.mitmproxy_command == "cert":
         print("docker cp security-research-proxy:/root/.mitmproxy/mitmproxy-ca-cert.pem ~/Desktop/mitmproxy-ca-cert.pem")
         print("sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Desktop/mitmproxy-ca-cert.pem")
+    elif args.mitmproxy_command == "reload":
+        request_proxy_reload(engagements_root)
+        print(f"[aith] mitmproxy reload requested ({engagements_root})")
+    elif args.mitmproxy_command == "routes":
+        snapshot = read_proxy_routes(engagements_root)
+        if snapshot is None:
+            raise SystemExit(
+                f"No routes cache at {engagements_root}/.mitmproxy-routes.json — "
+                "is the proxy running and has it loaded its registry yet?"
+            )
+        if args.json:
+            print(json.dumps(snapshot, indent=2))
+            return
+        print(f"generated_at: {snapshot.get('generated_at', '-')}")
+        for entry in snapshot.get("engagements", []):
+            patterns = ", ".join(entry.get("scope_patterns", []) or ["(no scope hosts)"])
+            print(
+                f"  {entry.get('key', '-'):30s}  priority={entry.get('scope_priority', 0):>3}  "
+                f"updated={entry.get('updated_at', '-'):>20}  scope=[{patterns}]"
+            )
 
 
 def _mcp(args: argparse.Namespace) -> None:

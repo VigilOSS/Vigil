@@ -2658,17 +2658,15 @@ def _coverage_deferral_objectives(payload: dict[str, Any]) -> list[str]:
     return out
 
 
-def _coverage_deferrals_by_host(engagement_id: int) -> dict[str, list[dict[str, Any]]]:
-    """Map host → list of active coverage_deferral decision rows.
+def _active_coverage_deferrals(engagement_id: int) -> list[dict[str, Any]]:
+    """Return every active (``resolved=0``) coverage_deferral decision row
+    for the engagement, ordered newest-first.
 
-    Active = `resolved=0`. Resolved deferrals stay queryable via the decision
-    list endpoint but no longer satisfy the gate.
-
-    Reads decisions directly through ``get_connection`` instead of
-    ``list_decisions(...)`` to avoid the public endpoint's ``limit`` cap —
-    large wildcard engagements can legitimately accumulate thousands of
-    operator-approved deferrals, and a silent truncation here would let
-    objectives appear unmet again in the per-host gate.
+    Reads directly through ``get_connection`` to avoid the public
+    ``list_decisions`` endpoint's ``limit`` cap — large wildcard engagements
+    can legitimately accumulate thousands of operator-approved deferrals,
+    and a silent truncation would let objectives reappear as unmet in the
+    per-host gate.
     """
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
@@ -2678,17 +2676,24 @@ def _coverage_deferrals_by_host(engagement_id: int) -> dict[str, list[dict[str, 
             "ORDER BY created_at DESC, id DESC",
             (engagement.id, "coverage_deferral"),
         )
-        rows = [_serialize_decision(row) for row in cursor.fetchall()]
-    out: dict[str, list[dict[str, Any]]] = {}
+        return [_serialize_decision(row) for row in cursor.fetchall()]
+
+
+def _coverage_engagement_wide_deferrals(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return active deferral rows tagged ``engagement_wide=true``.
+
+    These apply to EVERY host with signal — operators use them for objectives
+    that are not host-scoped (e.g., "OSINT is out of scope for this whole
+    engagement"). Validated at POST time to be mutually exclusive with host
+    fields, so a row is either engagement-wide or per-host but not both.
+    """
+    out: list[dict[str, Any]] = []
     for row in rows:
         payload = row.get("payload") or {}
-        if not isinstance(payload, dict):
-            continue
-        hosts = _coverage_deferral_payload_hosts(payload)
-        if not hosts:
-            continue
-        for host in hosts:
-            out.setdefault(host, []).append(row)
+        if isinstance(payload, dict) and payload.get("engagement_wide") is True:
+            out.append(row)
     return out
 
 
@@ -2789,9 +2794,27 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
         hosts.add(host)
         surfaces_by_host.setdefault(host, []).append(row)
 
-    deferrals_by_host = _coverage_deferrals_by_host(eng_id)
+    all_deferral_rows = _active_coverage_deferrals(eng_id)
+    deferrals_by_host: dict[str, list[dict[str, Any]]] = {}
+    for row in all_deferral_rows:
+        payload = row.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("engagement_wide") is True:
+            continue  # handled below — applies to every host with signal
+        row_hosts = _coverage_deferral_payload_hosts(payload)
+        if not row_hosts:
+            continue
+        for host in row_hosts:
+            deferrals_by_host.setdefault(host, []).append(row)
     for host in deferrals_by_host.keys():
         hosts.add(host)
+
+    engagement_wide_deferral_rows = _coverage_engagement_wide_deferrals(all_deferral_rows)
+    engagement_wide_deferred_objectives: set[str] = set()
+    for row in engagement_wide_deferral_rows:
+        for obj in _coverage_deferral_objectives(row.get("payload") or {}):
+            engagement_wide_deferred_objectives.add(obj)
 
     # Engagement-level signals (apply to every host).
     osint_met = (
@@ -2867,10 +2890,13 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
                 break
 
         deferral_rows = deferrals_by_host.get(host, [])
-        deferred_objectives: set[str] = set()
+        deferred_objectives: set[str] = set(engagement_wide_deferred_objectives)
         for row in deferral_rows:
             for obj in _coverage_deferral_objectives(row.get("payload") or {}):
                 deferred_objectives.add(obj)
+        # Surface engagement-wide rows in the per-host audit list too so
+        # operators can see WHY an objective is marked deferred for this host.
+        deferral_rows = deferral_rows + engagement_wide_deferral_rows
 
         outcomes: dict[str, dict[str, Any]] = {
             "waf_tier": {
