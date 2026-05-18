@@ -98,6 +98,14 @@ def test_decision_post_list_filter_patch(client, isolate_settings) -> None:
     assert len(resolved) == 1
     assert resolved[0]["id"] == decision_id
 
+    activity = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/activity-entries",
+        params={"q": "decision"},
+    )
+    assert activity.status_code == 200, activity.text
+    decision_titles = [row["title"] for row in activity.json()["items"]]
+    assert decision_titles.count("agent decision") >= 2
+
 
 def test_decision_kind_required(client, isolate_settings) -> None:
     _seed(client, isolate_settings)

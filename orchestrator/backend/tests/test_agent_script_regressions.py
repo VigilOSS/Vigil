@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import sqlite3
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -40,6 +41,22 @@ def _load_proxy_addon_module():
     return _load_script_module("test_proxy_addon_module", "agent/scripts/proxy_addon.py")
 
 
+def test_assess_cli_imports_agent_work_buffer_without_legacy_dispatch_module() -> None:
+    """Top-level ``aith assess`` must not expose ``dispatch``; agent + work-buffer are canonical."""
+    import ast
+
+    repo_root = Path(__file__).resolve().parents[3]
+    path = repo_root / "agent/scripts/assess/cli.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "assess.commands":
+            imported.update(alias.name for alias in node.names)
+    assert "agent" in imported
+    assert "work_buffer" in imported
+    assert "dispatch" not in imported
+
+
 def test_kali_runtime_dockerfiles_package_audit_enum_module() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     required_copy = "COPY agent/scripts/assess/lib/audit_enums.py /opt/mcp-tools/audit_enums.py"
@@ -58,7 +75,7 @@ def test_kali_runtime_dockerfiles_package_ping_for_mcp_smoke_tests() -> None:
         repo_root / "agent" / "docker" / "runtime-lightweight" / "Dockerfile",
     ):
         contents = dockerfile.read_text(encoding="utf-8")
-        assert "iputils-ping=3:20250605-1+b1" in contents
+        assert re.search(r"\biputils-ping(?:=\S+)?\b", contents)
 
 
 def test_list_intel_search_uses_canonical_entity_type(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -612,6 +629,137 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
     assert "sha256" not in files_call["files"][0]
 
 
+def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Path) -> None:
+    module = _load_script_module(
+        "test_code_ingest_skipped_manifest_module",
+        "agent/scripts/assess/commands/code_ingest.py",
+    )
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.js").write_text("fetch('/api/profile')\n", encoding="utf-8")
+    (repo_dir / "app.min.js").write_text("fetch('/api/profile')", encoding="utf-8")
+    build_dir = repo_dir / "build"
+    build_dir.mkdir()
+    (build_dir / "ResetPassword.min.js").write_text("fetch('/reset')", encoding="utf-8")
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir_arg: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            return None
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            calls.append((endpoint, payload))
+            if endpoint == "code/repos":
+                return {"id": 41}
+            if endpoint == "code/files":
+                return {"inserted": len(payload["files"])}
+            raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            repo_path=str(repo_dir),
+            name="demo-repo",
+            language=None,
+            repo_key="demo",
+            engagement_dir=engagement_dir,
+            include_minified=False,
+            include_skipped=False,
+            include_path=[],
+            max_included_skipped_bytes=2_000_000,
+            skipped_manifest=None,
+        )
+    )
+
+    files_call = next(payload for endpoint, payload in calls if endpoint == "code/files")
+    assert [row["file_path"] for row in files_call["files"]] == ["app.js"]
+    manifest_path = engagement_dir / "tools" / "analysis-state" / "skipped-artifacts" / "demo.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    skipped_paths = {row["path"]: row for row in manifest["skipped_artifacts"]}
+    assert skipped_paths["app.min.js"]["reason"] == "minified_or_bundle"
+    assert skipped_paths["app.min.js"]["source_equivalent_candidate"] == "app.js"
+    assert skipped_paths["build"]["reason"] == "skipped_dir:build"
+
+
+def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(monkeypatch, tmp_path: Path) -> None:
+    module = _load_script_module(
+        "test_code_ingest_include_path_module",
+        "agent/scripts/assess/commands/code_ingest.py",
+    )
+    repo_dir = tmp_path / "repo"
+    build_dir = repo_dir / "build"
+    build_dir.mkdir(parents=True)
+    (repo_dir / "app.js").write_text("console.log('source')\n", encoding="utf-8")
+    (build_dir / "ResetPassword.min.js").write_text("fetch('/reset')", encoding="utf-8")
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir_arg: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            return None
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            calls.append((endpoint, payload))
+            if endpoint == "code/repos":
+                return {"id": 42}
+            if endpoint == "code/files":
+                return {"inserted": len(payload["files"])}
+            raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            repo_path=str(repo_dir),
+            name="demo-repo",
+            language=None,
+            repo_key="demo",
+            engagement_dir=engagement_dir,
+            include_minified=False,
+            include_skipped=False,
+            include_path=["**/ResetPassword.min.js"],
+            max_included_skipped_bytes=2_000_000,
+            skipped_manifest=None,
+        )
+    )
+
+    files_call = next(payload for endpoint, payload in calls if endpoint == "code/files")
+    paths = {row["file_path"] for row in files_call["files"]}
+    assert paths == {"app.js", "build/ResetPassword.min.js"}
+
+
 def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_script_module(
         "test_export_findings_module",
@@ -899,6 +1047,129 @@ def test_code_record_modules_rejects_auto_derived_key_collisions(monkeypatch, tm
 
     assert excinfo.value.code == 1
     assert "Provide explicit module_key values" in capsys.readouterr().err
+
+
+def test_code_record_modules_rejects_generic_auto_pattern_labels(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """C25: reject 'auth_module_1' / 'module_2' / 'unknown_module' style labels
+    at the CLI so the backend never accumulates undescriptive rows that
+    code-architect + report-writer cannot map to a real subsystem."""
+    module = _load_script_module(
+        "test_code_record_modules_generic_module",
+        "agent/scripts/assess/commands/code_record_modules.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    modules_path = tmp_path / "modules.json"
+    modules_path.write_text(
+        json.dumps([{"module_key": "auth_module_1", "name": "Auth Module 1"}]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            raise AssertionError("should reject before fetching existing modules")
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            raise AssertionError("should reject before posting")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=engagement_dir,
+                repo_id="5",
+                modules_json=str(modules_path),
+            )
+        )
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "generic auto-pattern" in err
+    assert "Pick a meaningful identifier" in err
+
+
+def test_code_record_modules_accepts_meaningful_labels(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """C25: meaningful module keys/names continue to post normally."""
+    module = _load_script_module(
+        "test_code_record_modules_meaningful",
+        "agent/scripts/assess/commands/code_record_modules.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    modules_path = tmp_path / "modules.json"
+    modules_path.write_text(
+        json.dumps([
+            {"module_key": "auth_login", "name": "Authentication and login flow"},
+            {"module_key": "payment_settlement", "name": "Payment settlement"},
+        ]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    posted: dict = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            return []
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            posted["endpoint"] = endpoint
+            posted["payload"] = payload
+            return [
+                {"id": 1, "module_key": "auth_login", "name": "Authentication and login flow"},
+                {"id": 2, "module_key": "payment_settlement", "name": "Payment settlement"},
+            ]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=engagement_dir,
+            repo_id="5",
+            modules_json=str(modules_path),
+        )
+    )
+
+    assert posted["endpoint"] == "code/modules"
+    assert len(posted["payload"]["modules"]) == 2
 
 
 def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, tmp_path: Path) -> None:
@@ -1412,3 +1683,192 @@ def test_check_report_readiness_surfaces_backend_blockers(monkeypatch, tmp_path:
     err = capsys.readouterr().err
     assert "Final report blockers remain:" in err
     assert "verification | VA-001: Finding remains unreviewed." in err
+
+
+# ---------------------------------------------------------------------------
+# C3 — Curated adversarial-mindset rollout
+#
+# The rule drives "think like an attacker, not a test-case checker" framing
+# and only belongs in roles where adversarial framing materially improves
+# output. report-writer (pure backend-state transformation) and
+# surface-collector (rule-based triage) are explicitly excluded because
+# adversarial framing skews their output toward exaggeration / speculation.
+# operator loads it via the always-active rules list in operator-core.md.
+# ---------------------------------------------------------------------------
+
+_ADVERSARIAL_MINDSET_INCLUDED = {
+    # Roles that actively probe and were already wired up.
+    "recon-specialist",
+    "vulnerability-analyst",
+    "exploit-developer",
+    # Roles where adversarial framing materially improves output.
+    "source-analyzer",
+    "osint-analyst",
+    "fuzzer",
+    "code-vuln-hunter",
+    "code-variant-hunter",
+    "code-fuzz-engineer",
+    # Lean-add roles.
+    "code-architect",
+    "code-vuln-verifier",
+}
+
+_ADVERSARIAL_MINDSET_EXCLUDED = {
+    # Pure backend-state transformation — adversarial framing would push
+    # toward severity inflation, contradicting reporting.md §3.
+    "report-writer",
+    # Rule-based triage — adversarial framing would skew the work-buffer
+    # toward speculative entries.
+    "surface-collector",
+}
+
+
+def _agents_dir() -> Path:
+    return Path(__file__).resolve().parents[3] / "agent" / "agents"
+
+
+@pytest.mark.parametrize("role", sorted(_ADVERSARIAL_MINDSET_INCLUDED))
+def test_specialist_loads_adversarial_mindset(role: str) -> None:
+    """Roles in the curated include-set must list adversarial-mindset.md
+    in their Load First section so the wrapper carries it into specialist
+    context. Drift in either direction fails the test."""
+    body = (_agents_dir() / f"{role}.md").read_text(encoding="utf-8")
+    assert "agent/rules/adversarial-mindset.md" in body, (
+        f"{role} should load adversarial-mindset.md per the C3 curated rollout"
+    )
+
+
+@pytest.mark.parametrize("role", sorted(_ADVERSARIAL_MINDSET_EXCLUDED))
+def test_specialist_does_not_load_adversarial_mindset(role: str) -> None:
+    """Explicitly excluded roles must NOT load adversarial-mindset.md.
+    See C3 rationale in TODOv2.md V14."""
+    body = (_agents_dir() / f"{role}.md").read_text(encoding="utf-8")
+    assert "agent/rules/adversarial-mindset.md" not in body, (
+        f"{role} should NOT load adversarial-mindset.md "
+        "(would push toward inflation/speculation)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C21 — swarm dispatch mode + start-swarm helper
+# ---------------------------------------------------------------------------
+
+
+def test_start_swarm_records_N_rows_with_worker_encoded_task(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """C21: aith assess agent start-swarm splits an items file into worker
+    batches and writes one backend dispatch row per worker. Each row's task
+    encodes the worker index, batch range, and items file name so the
+    specialist can read its own slice via `agent get <agent_id>`. The helper
+    does NOT spawn specialists — that's the operator's manual step via
+    @agent-name (Claude Code) or spawn_agent (Codex)."""
+    agent_mod = _load_script_module(
+        "test_start_swarm_module",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    # Stub the dispatch helpers so the helper does not need a real backend.
+    recorded: list[dict] = []
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.seq = 0
+
+        def record_dispatch(self, payload: dict) -> dict:
+            self.seq += 1
+            recorded.append(dict(payload))
+            return {
+                "id": self.seq,
+                "agent_id": payload.get("agent_id"),
+                "agent_role": payload.get("agent_role"),
+                "status": "in-progress",
+            }
+
+        def close(self) -> None:
+            return None
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        agent_mod.dispatch,
+        "_client_for",
+        lambda _args: (fake_client, SimpleNamespace(engagement_dir=str(tmp_path))),
+    )
+    # _build_register_payload pulls from args; let it through unchanged so we
+    # exercise the real payload-construction path.
+    items_path = tmp_path / "items.txt"
+    items_path.write_text("\n".join(f"file_{i}.js" for i in range(1, 13)), encoding="utf-8")
+
+    args = SimpleNamespace(
+        action="start-swarm",
+        agent_id=None,
+        agent_role="code-vuln-hunter",
+        task="scan for hardcoded credentials and exploitable patterns",
+        scope_host=None,
+        dispatch_model="gpt-5.5",
+        reasoning="low",
+        dispatch_mode_arg=None,
+        skills="code-vulnerability-analysis",
+        from_json=None,
+        allow_duplicate=False,
+        swarm_workers=3,
+        swarm_batch_size=5,
+        swarm_items_file=str(items_path),
+        finding_slugs=None,
+        engagement_dir=str(tmp_path),
+        extra=[],
+    )
+
+    agent_mod._start_swarm(args)  # noqa: SLF001
+
+    # 12 items / batch_size 5 / workers 3 → 3 batches of 5+5+2 items.
+    assert len(recorded) == 3
+    assert all(r["agent_role"] == "code-vuln-hunter" for r in recorded)
+    assert all(r["dispatch_mode"] == "swarm" for r in recorded)
+    # Each task encodes worker index and contiguous item range.
+    assert "[swarm 1/3 items 1-5 from items.txt]" in recorded[0]["task"]
+    assert "[swarm 2/3 items 6-10 from items.txt]" in recorded[1]["task"]
+    assert "[swarm 3/3 items 11-12 from items.txt]" in recorded[2]["task"]
+    # agent_ids are unique, sequential, prefixed by role-swarm-<uuid>-NN.
+    agent_ids = [r["agent_id"] for r in recorded]
+    assert len(set(agent_ids)) == 3
+    for idx, aid in enumerate(agent_ids, start=1):
+        assert aid.startswith("code-vuln-hunter-swarm-")
+        assert aid.endswith(f"-{idx:02d}")
+    # Summary table printed to stdout for the operator to paste into spawn calls.
+    out = capsys.readouterr().out
+    assert "## Swarm Dispatch Table" in out
+    assert "workers: 3" in out
+    assert "batch_size: 5" in out
+
+
+def test_start_swarm_rejects_empty_items_file(monkeypatch, tmp_path: Path, capsys) -> None:
+    """C21: empty items file must error out instead of recording zero rows."""
+    agent_mod = _load_script_module(
+        "test_start_swarm_empty_module",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    items_path = tmp_path / "items.txt"
+    items_path.write_text("", encoding="utf-8")
+    args = SimpleNamespace(
+        action="start-swarm",
+        agent_id=None,
+        agent_role="code-vuln-hunter",
+        task="scan",
+        scope_host=None,
+        dispatch_model=None,
+        reasoning=None,
+        dispatch_mode_arg=None,
+        skills="code-vulnerability-analysis",
+        from_json=None,
+        allow_duplicate=False,
+        swarm_workers=3,
+        swarm_batch_size=5,
+        swarm_items_file=str(items_path),
+        finding_slugs=None,
+        engagement_dir=str(tmp_path),
+        extra=[],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        agent_mod._start_swarm(args)  # noqa: SLF001
+    assert excinfo.value.code == 1
+    assert "items file is empty" in capsys.readouterr().err

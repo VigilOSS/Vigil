@@ -2,7 +2,7 @@
 
 Groups pending work_items by `cluster_key` and emits per-cluster summaries so
 the operator can decide which clusters deserve specialist dispatch and which
-should be deferred (via `dispatch defer-cluster`). The ordering — by max
+should be deferred (via `aith assess work-buffer <db> defer-cluster …`). The ordering — by max
 priority_score DESC then count DESC — mirrors the priority-first dispatch
 heuristic: the cluster with the single highest-signal row wins, and for ties
 the noisier cluster surfaces first because deferring it buys the most

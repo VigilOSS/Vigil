@@ -184,8 +184,8 @@ re-sample loop) is owned by `agent/skills/web-recon/SKILL.md` Step 0b and the
 `agent/references/runtime-guides/cdn-ip-blocking.md` reference; this role file just
 verifies it ran and the right durable rows were written.
 
-- [ ] **Vendor-SaaS hosts warned to the operator with a scope_decision row recorded.** Any host whose CNAME / rDNS shape, banner, or HTTP fingerprint matches a vendor-managed SaaS platform (per `agent/scripts/assess/lib/scope.py:host_is_vendor_saas`) has been surfaced to the operator with a one-line warning AND a scope_decision row written via `aith assess dispatch record-decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user`. The warning is informational (default-permissive); the operator decides in/out/partial scope and updates the row. Hosts authored as an explicit literal in `scope.json` skip the warning — the literal is already an in-scope decision.
-- [ ] **Egress reputation check run after subdomain-enum + httpx populated `live_hosts.txt`.** Procedure ran per `agent/skills/web-recon/SKILL.md` Step 0b. If `egress_block_pct > 50`, the skill's re-sample-and-checkpoint loop fired and the four-option choice was recorded via `aith assess dispatch record-decision --kind egress_decision`. Hosts that returned 100% 403 were written to `$DIR/scans/egress_blocked_hosts.txt` so subsequent ingestion defers them with `cluster_key=deferred:egress-blocked`. Continuing through nmap/ffuf/nuclei from a confirmed blocked egress wastes the dispatch — declare it in `#### Coverage Gaps` instead.
+- [ ] **Vendor-SaaS hosts warned to the operator with a scope_decision row recorded.** Any host whose CNAME / rDNS shape, banner, or HTTP fingerprint matches a vendor-managed SaaS platform (per `agent/scripts/assess/lib/scope.py:host_is_vendor_saas`) has been surfaced to the operator with a one-line warning AND a scope_decision row written via `aith assess agent decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user`. The warning is informational (default-permissive); the operator decides in/out/partial scope and updates the row. Hosts authored as an explicit literal in `scope.json` skip the warning — the literal is already an in-scope decision.
+- [ ] **Egress reputation check run after subdomain-enum + httpx populated `live_hosts.txt`.** Procedure ran per `agent/skills/web-recon/SKILL.md` Step 0b. If `egress_block_pct > 50`, the skill's re-sample-and-checkpoint loop fired and the four-option choice was recorded via `aith assess agent decision --kind egress_decision`. Hosts that returned 100% 403 were written to `$DIR/scans/egress_blocked_hosts.txt` so subsequent ingestion defers them with `cluster_key=deferred:egress-blocked`. Continuing through nmap/ffuf/nuclei from a confirmed blocked egress wastes the dispatch — declare it in `#### Coverage Gaps` instead.
 
 ### Network Layer
 - [ ] All non-web services identified and triaged (SSH, FTP, SMTP, database, custom)
@@ -265,13 +265,13 @@ Before your dispatch returns, run in this order:
 1. `aith assess record-finding recon-specialist <finding-json>` for each finding (already required)
 2. `aith assess record-intel <type> <intel-json>` for each intel row (already required)
 3. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate (already required)
-4. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `live_host_count`, `egress_block_pct`, `wildcard_subs_resolved`)
-5. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+4. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `live_host_count`, `egress_block_pct`, `wildcard_subs_resolved`)
+5. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. The handoff row IS the next dispatch's input. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-The `record-handoff` step is idempotent and called incrementally — checkpoint
+`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 

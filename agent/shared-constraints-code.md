@@ -92,6 +92,10 @@ reading the file, and continuing your analysis. You have full filesystem access 
 
 Code analysis findings record in the **same** `assessment_findings` table as web findings.
 Use `aith assess record-finding <agent-name> <finding-json-file>` to record.
+For new findings, omit `slug` from the JSON payload — `record-finding` allocates the next
+canonical slug under a lock and prints it on stdout. Use that returned slug in handoffs,
+analysis rows, and follow-up commands. Hand-authoring `CH-001` / `CV-001` style slugs in
+parallel dispatches risks collisions.
 
 **Code finding prefixes:**
 
@@ -119,6 +123,33 @@ If your CVSS score does not fall within the matching severity range, adjust one 
 before recording. A memory corruption primitive with attacker-controlled reachability needs the
 same severity discipline as a web auth bug because the report pipeline consumes one shared
 finding table.
+
+**White-box source access is not attacker access.** The operator and code agents can read the
+repository because the customer provided it for review; do not treat that reviewer capability as
+a public exposure path. For any finding whose impact depends on reading non-public source,
+deployment, or configuration files (committed secrets, `conn.php`, `Web.config`, XML config,
+private keys, service credentials), explicitly populate:
+
+- `details.attacker_access_path`: one of `public_web_exposure`, `runtime_file_read_lfi`,
+  `exposed_build_artifact`, `repository_or_backup_disclosure`, `privileged_insider`,
+  or `unknown`
+- `details.exposure_prerequisite`: the concrete condition that gives a real attacker the bytes
+  (for example: "file is served from public S3 path", "confirmed LFI reads this path",
+  "separate repo/backup disclosure required")
+
+Severity must follow that access path:
+
+- `critical` only when an unauthenticated or low-privilege attacker can obtain the file contents
+  through a confirmed live exposure/read primitive, or when the secret is already public and its
+  validated use grants full production compromise.
+- `high` only when the secret/config is production-grade and immediately useful, but the access
+  path is a plausible repo/backup/deploy-artifact disclosure rather than a confirmed live web read.
+- `medium` or lower when the finding is primarily defense-in-depth/source hygiene, requires
+  privileged repository/filesystem access, or cannot be tied to a realistic attacker read path.
+
+Do not use `AV:N` in CVSS solely because the reviewed application is network-facing. If the
+missing step is "attacker must first read a private repository or server filesystem path", model
+that prerequisite honestly or downgrade.
 
 **Code finding conventions:**
 - `canonical_location` format: `file:<relative-path>:<line-number>` (e.g., `file:lib/url.c:547`)
@@ -154,6 +185,18 @@ The same rule from web testing applies to code review:
 - A missing bounds check in dead code is not a finding.
 - A potential overflow that requires impossible input is not a finding.
 - Document the specific attacker-controlled input and the concrete impact.
+
+For resource-limit findings, do not confuse a named limit with a security
+boundary. Request caps, spool-buffer limits, decompression limits, timeouts, and
+protocol negotiation limits only justify High/Critical when the intended boundary
+and downstream impact are both proved. Read docs/blame/commit history for the
+limit, compare sibling default transports or protocol modes, and inspect the
+consumer after the bytes cross the boundary. If another default path already
+accepts the same logical stream and the consumer performs bounded, linear work,
+downgrade to Medium/hardening or documentation. High/Critical requires a proved
+second-order impact such as service-level DoS, superlinear CPU, unbounded retained
+memory/disk, output amplification, crash, memory corruption, or privilege-boundary
+crossing.
 
 ---
 
@@ -241,40 +284,44 @@ names, generated accessors — e.g. `com.example.Auth$$Lambda$1`): wrap in singl
 or escape the `$` when passing to `grep`, `aith`, or shell commands to prevent variable
 interpolation.
 
+**No `echo` section banners.** Do not use `echo "=== ... ==="` or similar shell banners for
+progress markers, section headings, or breadcrumbs inside `aith assess kali` invocations or
+shell scripts that wrap them. The operator never sees that output, the command audit pipeline
+captures the banner as the command stdout preview and pollutes FTS search, and `--intent`
+on the kali call already records purpose in the durable audit row. `echo` is only legitimate
+when its output is the command's real purpose (writing to a file, piping to another tool,
+generating a payload). The web-mode rule lives in `agent/shared-constraints.md` §2; the same
+rule applies in code mode wherever a kali wrapper is invoked from a code-analysis specialist.
+
 ---
 
 ## 10. Recording Format
 
-Use the standard finding JSON schema. If you need the canonical field list or examples, run
-`aith assess contract record-finding`. Do not invent lifecycle fields from memory —
-`record-finding` fills the initial lifecycle defaults (`workflow_status=active`,
-`verification_state=unreviewed`, `verification_disposition=none`) when omitted.
+Use the helper contracts as the canonical shape source before authoring durable JSON. Run
+`aith assess contract record-finding` for finding payloads and
+`aith assess contract code-record-analysis` for analysis-result payloads; this keeps agent output
+aligned with backend validation instead of relying on copied prompt snippets.
+Do not invent lifecycle fields from memory — `record-finding` fills the initial lifecycle defaults
+(`workflow_status=active`, `verification_state=unreviewed`, `verification_disposition=none`) when
+omitted.
 For later finding lifecycle changes, use the dedicated helpers instead of raw `post` or `patch`:
 `verify-finding` for confirm/downgrade/dispute decisions, `kill-finding` for false-positive
 verification with kill metadata, `reset-finding` to reopen a previously verified or false-positive
 finding, and `update-finding` for non-verification metadata or workflow updates.
 
-Code-specific fields:
+For code findings, put code-specific proof fields under finding `details`: `cwe_id`, `impact`,
+`evidence`, `taint_path`, `guards_evaluated`, `remediation`, `slot_type`,
+`steps_to_reproduce`, `cvss_vector`, and `cvss_score` are all covered by the
+`record-finding` contract examples. For analysis rows, include the fetched `queue_item_id`;
+the backend derives `file_id` from that queue item and rejects mismatches when `file_id` is
+supplied as an optional consistency check.
 
-```json
-{
-  "title": "Heap buffer overflow in URL parser via overlong scheme",
-  "severity": "high",
-  "defect_family": "buffer-overflow",
-  "canonical_location": "file:lib/urlapi.c:342",
-  "summary": "Attacker-controlled URL scheme exceeding 64 bytes overflows stack buffer in parseurl()",
-  "details": {
-    "cwe_id": "CWE-122",
-    "impact": "Remote code execution via heap corruption",
-    "evidence": "In parseurl() at line 342, scheme is copied via memcpy(buf, scheme, schemelen) where schemelen is derived from user input without bounds check...",
-    "taint_path": "curl_url_set(CURLURLPART_URL, attacker_url) -> parseurl() -> memcpy(buf, scheme, schemelen)",
-    "guards_evaluated": "No bounds check on schemelen before memcpy. The MAX_SCHEME_LEN check at line 298 uses signed int comparison, allowing negative values to bypass.",
-    "remediation": "Add size_t bounds check: if (schemelen > MAX_SCHEME_LEN) return CURLUE_BAD_SCHEME;",
-    "slot_type": "URL-COMPONENT",
-    "steps_to_reproduce": ["Construct URL with scheme > 64 chars", "Pass to curl_url_set()", "Observe heap corruption"]
-  }
-}
-```
+**Report-readiness mandate:** `check-report-readiness` blocks the final report if any
+verified finding is missing `cvss_score`, `cvss_vector`, `steps_to_reproduce`,
+`remediation`, `impact`, or `evidence`. Include all six fields at recording time so
+findings pass readiness without a remediation loop. CVSS must align with severity per
+the ranges in `shared-constraints.md` §9 (critical 9.0–10.0, high 7.0–8.9,
+medium 4.0–6.9, low 0.1–3.9, info 0.0).
 
 ---
 
@@ -283,15 +330,33 @@ Code-specific fields:
 Before your dispatch returns, run in this order:
 
 1. `aith assess record-finding <agent-name> <finding-json>` for each confirmed finding.
-2. `aith assess code-record-analysis <analysis-json>` for each queue item disposition.
-3. `aith assess dispatch record-handoff --from-json <path>` — use the exact
+2. `aith assess code-record-analysis <analysis-json>` for each queue item disposition, with
+   `queue_item_id` from the fetched dispatch item.
+3. `aith assess agent handoff --from-json <path>` — use the exact
    `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the
    operator placed at the top of your dispatch prompt. The handoff row is keyed on
    `agent_id`; using a different value creates an orphaned row the operator cannot render.
-4. `aith assess dispatch render-handoff <agent_id>` — self-check before exiting.
+4. `aith assess agent render-handoff <agent_id>` — self-check before exiting.
    A 404 means the `agent_id` did not match the registered dispatch.
 
 `update-status` is operator-only — do not call it.
 
-`record-handoff` is idempotent; checkpoint after each major phase of work, not only at the end.
+`aith assess agent handoff` is idempotent; checkpoint after each major phase of work, not only at the end.
 Schema: `agent/references/runtime-guides/handoff-schema.md`.
+
+---
+
+## 12. Coverage Integrity
+
+CWE coverage claims are cross-referenced against analysis-result rows at queue completion.
+
+1. Record analysis results BEFORE `code-dispatch done`. Result rows must exist when
+   the backend validates coverage claims.
+2. `functions_analyzed` in each coverage entry must be backed by result rows: at least
+   30% of claimed functions must have a distinct `function_name` in analysis results for
+   that queue item.
+3. Each file's coverage must reflect its specific functions, entry chains, and code
+   structure. Never copy-paste identical coverage arrays across files without per-file
+   analysis.
+4. Not-applicable entries (`disposition: "not_applicable"`) are exempt from backing
+   requirements.

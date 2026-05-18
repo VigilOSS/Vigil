@@ -127,7 +127,11 @@
       "type": "object",
       "required": [
         "evidence",
-        "impact"
+        "impact",
+        "remediation",
+        "steps_to_reproduce",
+        "cvss_vector",
+        "cvss_score"
       ],
       "properties": {
         "discovered_by": {

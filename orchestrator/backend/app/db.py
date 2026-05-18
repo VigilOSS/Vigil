@@ -1975,6 +1975,10 @@ def init_db() -> None:
                 status TEXT NOT NULL,
                 model TEXT,
                 reasoning TEXT,
+                requested_model TEXT,
+                actual_model TEXT,
+                requested_reasoning TEXT,
+                actual_reasoning TEXT,
                 dispatch_mode TEXT,
                 finding_slugs_json TEXT,
                 skills TEXT,
@@ -1987,6 +1991,16 @@ def init_db() -> None:
         dispatch_columns = _table_columns(connection, "assessment_dispatches")
         if dispatch_columns and "skills" not in dispatch_columns:
             connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN skills TEXT")
+        if dispatch_columns and "requested_model" not in dispatch_columns:
+            connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN requested_model TEXT")
+            connection.execute("UPDATE assessment_dispatches SET requested_model = model WHERE requested_model IS NULL")
+        if dispatch_columns and "actual_model" not in dispatch_columns:
+            connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN actual_model TEXT")
+        if dispatch_columns and "requested_reasoning" not in dispatch_columns:
+            connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN requested_reasoning TEXT")
+            connection.execute("UPDATE assessment_dispatches SET requested_reasoning = reasoning WHERE requested_reasoning IS NULL")
+        if dispatch_columns and "actual_reasoning" not in dispatch_columns:
+            connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN actual_reasoning TEXT")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_at "
             "ON assessment_dispatches(engagement_id, dispatched_at DESC)"
@@ -2242,6 +2256,30 @@ def init_db() -> None:
         connection.commit()
 
     _startup_database_fingerprint = _database_fingerprint(db_path)
+
+
+_READINESS_SUBSYSTEM_TABLES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("assessment_schema", frozenset({"engagements", "assessment_dispatches", "assessment_findings"})),
+    ("code_analysis_schema", frozenset({"code_repos", "code_files", "code_analysis_queue"})),
+)
+
+
+def database_readiness_flags(connection: sqlite3.Connection) -> dict[str, bool]:
+    """Return schema-level readiness for assessment vs code-analysis subsystems.
+
+    These checks confirm ``init_db`` created the durable tables backing each
+    API router; they are not HTTP-level router probes.
+
+    Returns keys like ``assessment_schema_ready`` and ``code_analysis_schema_ready``.
+    """
+    names = {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    flags: dict[str, bool] = {}
+    for prefix, required in _READINESS_SUBSYSTEM_TABLES:
+        flags[f"{prefix}_ready"] = required.issubset(names)
+    return flags
 
 
 @contextmanager

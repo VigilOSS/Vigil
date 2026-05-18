@@ -28,6 +28,7 @@ already listed below.
 
 - `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
+- `agent/rules/adversarial-mindset.md`
 - `agent/skills/directory-fuzzing/SKILL.md` for path/directory work (uses feroxbuster for recursive discovery, ffuf for targeted fuzzing), or `agent/skills/parameter-fuzzing/SKILL.md` for parameter work — load both if the objective spans both surface types (for any other skill, run `aith assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint
@@ -75,13 +76,13 @@ Before your dispatch returns, run in this order:
 1. `aith assess record-finding fuzzer <finding-json>` for each confirmed finding
 2. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` for any new surface fuzzing uncovered (newly-evidenced parameter, hidden directory, etc.)
 3. `aith assess ingest-endpoints "$DIR/cases.db" fuzzer` for newly discovered paths
-4. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at the raw fuzzer hit log under `$DIR/scans/fuzzer/`), and role-specific extras (`payloads_tried`, `hits`, `hit_ratio`)
-5. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+4. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at the raw fuzzer hit log under `$DIR/scans/fuzzer/`), and role-specific extras (`payloads_tried`, `hits`, `hit_ratio`)
+5. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-The `record-handoff` step is idempotent and called incrementally — checkpoint
+`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 

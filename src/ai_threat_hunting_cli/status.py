@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,14 @@ class Check:
 def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_command) -> dict[str, object]:
     install_root = install_root.expanduser().resolve()
     rows = list_engagements(install_root)
+    # C36: surface legacy engagement_type=both engagements that predate
+    # dual-track phase tracking. They are not broken — they just have no
+    # `code_phase` field, which makes `aith assess transition-phase --track
+    # code` confusing. `aith engagement migrate-scope` sets the default.
+    from .engagements import _both_engagements_missing_code_phase
+    legacy_both_missing_code_phase = [
+        eng_dir.name for eng_dir in _both_engagements_missing_code_phase(install_root)
+    ]
     runtime_state = runtime_status(runner=runner)
     mitm_running = docker.container_running("security-research-proxy", runner=runner)
     backup = latest_backup(install_root)
@@ -45,7 +54,7 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
         "orchestrator": {
             "state": orchestrator_status(install_root),
             "base_url": resolve_orchestrator_base_url(install_root),
-            "healthy": _orchestrator_healthy(install_root),
+            **(_orchestrator_readyz_bundle(install_root)),
         },
         "runtime": {
             "state": runtime_state,
@@ -63,6 +72,7 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
             "latest": str(backup.path) if backup else None,
             "modified_at": backup.modified_at if backup else None,
         },
+        "legacy_both_missing_code_phase": legacy_both_missing_code_phase,
     }
 
 
@@ -71,12 +81,21 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
         print(json.dumps(status, indent=2))
         return
     print(f"install\t{status['install_root']}")
-    orchestrator = status["orchestrator"]  # type: ignore[index]
+    orchestrator_blk = status["orchestrator"]  # type: ignore[index]
     runtime = status["runtime"]  # type: ignore[index]
     mitmproxy = status["mitmproxy"]  # type: ignore[index]
     oob = status["oob"]  # type: ignore[index]
     backup = status["backup"]  # type: ignore[index]
-    print(f"orchestrator\t{orchestrator['state']}\thealthy={orchestrator['healthy']}")  # type: ignore[index]
+    readiness = orchestrator_blk.get("readiness") if isinstance(orchestrator_blk, dict) else None
+    ready_bits = ""
+    if isinstance(readiness, dict):
+        if readiness.get("reachable"):
+            ready_bits = f"\treadyz_status={readiness.get('status')}\thttp={readiness.get('http_status')}"
+        else:
+            ready_bits = "\treadyz=unreachable"
+    print(
+        f"orchestrator\t{orchestrator_blk['state']}\thealthy={orchestrator_blk['healthy']}{ready_bits}"  # type: ignore[index]
+    )
     print(f"runtime\t{runtime['state']}\tmounts_ok={runtime['mounts_ok']}")  # type: ignore[index]
     resources = runtime.get("resources") if isinstance(runtime, dict) else None  # type: ignore[union-attr]
     if isinstance(resources, dict):
@@ -96,6 +115,13 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     print(f"mitmproxy\t{mitmproxy['state']}\tca_volume={mitmproxy['ca_volume']}")  # type: ignore[index]
     print(f"oob\t{oob['state']}\tclients={len(oob['clients'])}\tdomain={oob.get('domain') or '-'}")  # type: ignore[index]
     print(f"backup\t{backup['latest'] or '-'}")  # type: ignore[index]
+    legacy_keys = status.get("legacy_both_missing_code_phase") or []
+    if isinstance(legacy_keys, list) and legacy_keys:
+        preview = ", ".join(legacy_keys[:3]) + (" ..." if len(legacy_keys) > 3 else "")
+        print(
+            f"warn\t{len(legacy_keys)} legacy `engagement_type=both` engagement(s) "
+            f"missing `code_phase` ({preview}); run `aith engagement migrate-scope`"
+        )
 
 
 def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.run_command) -> list[Check]:
@@ -126,7 +152,16 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
         checks.append(Check("runtime-image", "SKIPPED", detail))
         checks.append(Check("mitmproxy-image", "SKIPPED", detail))
     if orchestrator_status(install_root) == "running":
-        checks.append(Check("orchestrator-health", "OK" if _orchestrator_healthy(install_root) else "FAIL"))
+        healthy, readiness = _orchestrator_readyz_snapshot(install_root)
+        detail = ""
+        if not healthy:
+            if not readiness.get("reachable"):
+                detail = "/readyz unreachable"
+            elif readiness.get("status") == "not_ready":
+                detail = "/readyz reports not_ready (schema/database)"
+            elif readiness.get("http_status") is not None:
+                detail = f"/readyz HTTP {readiness['http_status']}"
+        checks.append(Check("orchestrator-health", "OK" if healthy else "FAIL", detail))
     backup = latest_backup(install_root)
     checks.append(Check("backup-latest", "OK" if backup else "MISSING", str(backup.path) if backup else ""))
     checks.append(_failed_audit_marker_check(install_root))
@@ -161,13 +196,58 @@ def _database_check(path: Path) -> Check:
     return Check("orchestrator-db", "OK", str(path))
 
 
-def _orchestrator_healthy(install_root: Path) -> bool:
-    url = f"{resolve_orchestrator_base_url(install_root)}/healthz"
+def _orchestrator_readyz_snapshot(install_root: Path) -> tuple[bool, dict[str, object]]:
+    """Fetch ``/readyz`` and return ``(healthy, readiness)``.
+
+    ``healthy`` is True when the endpoint returns HTTP 200 (orchestrator ready for work).
+    ``readiness`` surfaces connection reachability, HTTP status, and parsed JSON fields
+    when the response body is JSON (mirrors the backend ``/readyz`` payload shape).
+    """
+    url = f"{resolve_orchestrator_base_url(install_root)}/readyz"
+    readiness: dict[str, object] = {
+        "reachable": False,
+        "http_status": None,
+        "status": None,
+        "database_connected": None,
+        "assessment_schema_ready": None,
+        "code_analysis_schema_ready": None,
+    }
     try:
         with urllib.request.urlopen(url, timeout=1) as response:
-            return response.status == 200
+            readiness["reachable"] = True
+            readiness["http_status"] = response.status
+            _merge_readyz_payload(readiness, response.read())
+            healthy = response.status == 200
+            return healthy, readiness
+    except urllib.error.HTTPError as exc:
+        readiness["reachable"] = True
+        readiness["http_status"] = exc.code
+        _merge_readyz_payload(readiness, exc.read())
+        return False, readiness
     except OSError:
-        return False
+        return False, readiness
+
+
+def _merge_readyz_payload(readiness: dict[str, object], raw: bytes) -> None:
+    try:
+        parsed = json.loads(raw.decode())
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return
+    if not isinstance(parsed, dict):
+        return
+    for key in (
+        "status",
+        "database_connected",
+        "assessment_schema_ready",
+        "code_analysis_schema_ready",
+    ):
+        if key in parsed:
+            readiness[key] = parsed[key]
+
+
+def _orchestrator_readyz_bundle(install_root: Path) -> dict[str, object]:
+    healthy, readiness = _orchestrator_readyz_snapshot(install_root)
+    return {"healthy": healthy, "readiness": readiness}
 
 
 def list_failed_audit_markers(engagement_dir: Path) -> list[Path]:

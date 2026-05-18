@@ -102,6 +102,13 @@ When scanning saved artifacts for secrets, invoke `trufflehog filesystem` via
 against `/engagements/$ENGAGEMENT_KEY/...` paths so the runtime-owned install is used consistently
 and the run lands in the audit pipeline.
 
+For code-analysis engagements, remember that `aith assess code-ingest` skips generated/minified
+build output by default while writing a skipped-artifacts manifest under
+`tools/analysis-state/skipped-artifacts/`. If a browser-visible minified bundle is security-relevant,
+prefer the source equivalent or source map for deep review; if neither exists, ask the operator to
+rerun `code-ingest` with a targeted `--include-path` / `--include-minified` include so the bundle is
+explicitly queued rather than silently absent from backend `code/files`.
+
 - API calls: fetch(), axios, XHR, $.ajax patterns
 - SPA routes: React `path="/..."`, Vue `{ path: }`, Angular `{ path: }`
 - Secrets: api_key, token, secret, password assignments; AWS `AKIA[A-Z0-9]{16}`; JWT `eyJ...`
@@ -126,7 +133,7 @@ aith assess kali exec --technique DISCOVERY \
   curl -sL "https://TARGET/openapi.json" -o /engagements/$ENGAGEMENT_KEY/scans/openapi.json
 # Host-side: ingest the downloaded spec into the backend work buffer
 aith assess ingest-spec "$ENGAGEMENT_DIR/cases.db" "$ENGAGEMENT_DIR/scans/openapi.json"
-aith assess dispatch "$ENGAGEMENT_DIR/cases.db" stats
+aith assess work-buffer "$ENGAGEMENT_DIR/cases.db" stats
 ```
 
 This creates durable request/service coverage candidates and, when the local buffer is in use,
@@ -252,7 +259,7 @@ exposed.
 
 The skill produces these structured sections in the source-analyzer's return payload.
 Backend writes (`record-finding`, `record-intel`, `record-surface`,
-`ingest-endpoints`, `record-handoff`) are the durable record; this contract names what
+`ingest-endpoints`, `aith assess agent handoff`) are the durable record; this contract names what
 each markdown section should hold so downstream specialists can parse the output
 consistently.
 

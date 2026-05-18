@@ -24,14 +24,14 @@ This skill is coordination-only. Use it to inspect the work buffer, route batche
 
 Each iteration (set `DB="$DIR/cases.db"`):
 ```
-1. Reset stale: aith assess dispatch "$DB" reset-stale 10
-2. Check stats: aith assess dispatch "$DB" stats    # read total pending
+1. Reset stale: aith assess work-buffer "$DB" reset-stale 10
+2. Check stats: aith assess work-buffer "$DB" stats    # read total pending
 3a. Pending < 2000 → type-based dispatch (vulnerability-analyst and source-analyzer can run IN PARALLEL):
 
     vulnerability-analyst: api, api-spec, form, upload, graphql, websocket
     source-analyzer: page, javascript, stylesheet, data
 
-    aith assess dispatch "$DB" fetch <type> 10 <agent_name>
+    aith assess work-buffer "$DB" fetch <type> 10 <agent_name>
 
 3b. Pending >= 2000 → priority-first dispatch:
 
@@ -42,7 +42,7 @@ Each iteration (set `DB="$DIR/cases.db"`):
 
     # Review clusters and defer low-signal ones before dispatch:
     aith assess list-clusters "$DB"
-    aith assess dispatch "$DB" defer-cluster <cluster_key> --reason "..."
+    aith assess work-buffer "$DB" defer-cluster <cluster_key> --reason "..."
 
     # Fetch across types by priority. `fetch-by-priority` is route-aware: it
     # only claims rows whose type maps to a real specialist route and rejects
@@ -52,15 +52,15 @@ Each iteration (set `DB="$DIR/cases.db"`):
     #   vulnerability-analyst[-N] — claim only API/auth/workflow/debug/portal/
     #                               event rows (N is an optional instance label).
     #   source-analyzer[-N]       — claim only page/javascript/stylesheet/data rows.
-    aith assess dispatch "$DB" fetch-by-priority 10 auto
-    aith assess dispatch "$DB" fetch-by-priority 10 vulnerability-analyst
-    aith assess dispatch "$DB" fetch-by-priority 10 source-analyzer-2
+    aith assess work-buffer "$DB" fetch-by-priority 10 auto
+    aith assess work-buffer "$DB" fetch-by-priority 10 vulnerability-analyst
+    aith assess work-buffer "$DB" fetch-by-priority 10 source-analyzer-2
 
 4. On subagent return:
-   - Done: aith assess dispatch "$DB" done "id1,id2,..."
+   - Done: aith assess work-buffer "$DB" done "id1,id2,..."
    - New endpoints: feed them back through `aith assess ingest-endpoints "$DB" <source>` or `aith assess ingest-spec "$DB" <spec-file>` — those paths run inline classification so the new rows enter the priority queue with scores immediately
    - Findings: write structured finding state with `aith assess record-finding`
-   - Errors: aith assess dispatch "$DB" error "id1,id2,..."
+   - Errors: aith assess work-buffer "$DB" error "id1,id2,..."
 5. pending=0 and producers stopped → report completion
 6. Otherwise → loop back to step 1
 ```
@@ -119,7 +119,7 @@ because the code is the source of truth.
 ## Signal → Skill Trigger Table
 
 Before dispatching a batch, scan the work items for these signals. When a signal matches,
-the named skill MUST be included in the dispatch context (`--skills` on `dispatch register`)
+the named skill MUST be included in the dispatch context (`--skills` on `agent start`)
 in addition to the specialist's default skill. This prevents new skills from going unused.
 
 | Signal in Work Item / Intel | Required Skill | Agent |
@@ -159,9 +159,30 @@ sqlite3 "$DB" ".timeout 5000" "
   FROM work_items GROUP BY type ORDER BY total DESC;"
 ```
 
+## Out-of-Scope Triage (operator-only, before the dispatching pass)
+
+Before dispatching specialists against the surface-candidate list, walk the top of the queue and mark any candidates that are out of scope per the engagement's `scope.json` as `not_applicable` with a one-line rationale. Each out-of-scope dispatch costs a full specialist context window; the operator can kill those candidates in two seconds.
+
+Examples that recur in real engagements:
+
+- Subdomains explicitly excluded in the program brief (named in `scope.json` `exclusions` or scope-policy text)
+- `*.dev` / `*.staging` / `*.sandbox` subdomains when the brief is production-only
+- Third-party-hosted assets (CDN edges, marketing platforms, support portals, Helpdesk widgets) that surfaced because the in-scope domain links to them
+- Azure SCM / Kudu / `*.scm.azurewebsites.net` and other deployment-platform endpoints when the in-scope target is the application surface, not the deployment platform
+- Salesforce-managed vendor SaaS hosts when the brief covers the customer's app, not the vendor platform
+
+```bash
+aith assess resolve-surface <id> --status not_applicable \
+  --rationale "Out of scope per program brief: <quote the relevant exclusion>"
+```
+
+Triage these BEFORE the dispatching pass, not during. A specialist that opens an out-of-scope candidate runs the full skill methodology before realising the scope error, then writes a handoff explaining why it stopped — the operator could have prevented all of that with one `resolve-surface` call.
+
+This step pairs with `agent/scripts/assess/lib/contracts.py` `validate_specialist_dispatch_contract`, which gates active-probing dispatches (vulnerability-analyst, exploit-developer) on `scope_host` membership in `scope.json` `hosts`. The validator catches mistakes at register time; this step catches them before they reach the validator.
+
 ## Key Rules
 
-- Use `aith assess dispatch "$DB" <action>` for all work-buffer operations — reading cases.db directly bypasses the backend sync layer and can produce stale or inconsistent state
+- Use `aith assess work-buffer "$DB" <action>` for all work-buffer operations — reading cases.db directly bypasses the backend sync layer and can produce stale or inconsistent state
 - Treat this skill as host-side coordination only. All real target testing stays in `aith assess kali ...`.
 - Record findings in backend state immediately via `aith assess record-finding`
 - Re-ingest new endpoints through backend-first producers; let the work buffer mirror the resulting canonical ids
@@ -176,11 +197,11 @@ sqlite3 "$DB" ".timeout 5000" "
 
 ```bash
 DB="$DIR/cases.db"
-aith assess dispatch "$DB" stats
-aith assess dispatch "$DB" fetch <type> <limit> <agent_name>
-aith assess dispatch "$DB" done "id1,id2,id3"
-aith assess dispatch "$DB" error "id1,id2,id3"
-aith assess dispatch "$DB" reset-stale <minutes>
-echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | aith assess dispatch "$DB" requeue
-echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | aith assess dispatch "$DB" requeue
+aith assess work-buffer "$DB" stats
+aith assess work-buffer "$DB" fetch <type> <limit> <agent_name>
+aith assess work-buffer "$DB" done "id1,id2,id3"
+aith assess work-buffer "$DB" error "id1,id2,id3"
+aith assess work-buffer "$DB" reset-stale <minutes>
+echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | aith assess work-buffer "$DB" requeue
+echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | aith assess work-buffer "$DB" requeue
 ```

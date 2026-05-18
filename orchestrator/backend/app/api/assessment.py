@@ -95,7 +95,13 @@ class CommandRunRecordRequest(BaseModel):
     timed_out: bool = False
     success: bool | None = None
     started_at: str = Field(min_length=1, max_length=64)
-    completed_at: str = Field(min_length=1, max_length=64)
+    # Pre-exec POST (status="running") sends completed_at="" — the command
+    # hasn't completed yet. Finalize PATCH supplies the real value.
+    # Historically this was set to started_at to satisfy a NOT NULL/min_length
+    # constraint, which made in-flight rows look "completed at the same
+    # instant they started" and broke orphan-sweep heuristics. The model
+    # validator below requires a non-empty completed_at on terminal status.
+    completed_at: str = Field(default="", max_length=64)
     duration_ms: int = 0
     stdout: str = ""
     stderr: str = ""
@@ -130,6 +136,19 @@ class CommandRunRecordRequest(BaseModel):
     auth_context: str | None = Field(default=None, max_length=128)
     timeout_seconds_requested: int | None = Field(default=None, ge=0)
     force: bool = False
+
+    @model_validator(mode="after")
+    def _require_completed_at_for_terminal(self) -> "CommandRunRecordRequest":
+        """Empty completed_at is only valid for in-flight rows (status="running"
+        or "queued"). Any terminal status must supply a real timestamp so the
+        audit row reflects when the command actually finished."""
+        terminal = {"completed", "failed", "timed_out", "killed", "lost"}
+        if (self.status or "completed") in terminal and not (self.completed_at or "").strip():
+            raise ValueError(
+                f"completed_at is required when status='{self.status}'; "
+                "send the real terminal timestamp, not an empty string"
+            )
+        return self
 
 
 class CommandRunFinalize(BaseModel):
@@ -574,6 +593,12 @@ def get_surfaces(engagement_key: str) -> list[dict[str, Any]]:
 def get_findings(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.list_findings(engagement.id)
+
+
+@router.get("/findings/{finding_slug}")
+def get_finding(engagement_key: str, finding_slug: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_finding(engagement.id, finding_slug)
 
 
 @router.get("/findings/{finding_slug}/transitions")
@@ -1175,8 +1200,9 @@ _DISPATCH_MODE = Literal[
     "item-iterating",
     "deep-manual",
     "variant-rotation",
+    "swarm",
 ]
-_REASONING = Literal["low", "medium", "high"]
+_REASONING = Literal["low", "medium", "high", "xhigh", "max"]
 _CONFIDENCE = Literal["low", "medium", "high"]
 
 
@@ -1200,6 +1226,10 @@ class DispatchCreate(BaseModel):
     status: _DISPATCH_STATUS = "in-progress"
     model: str | None = Field(default=None, max_length=128)
     reasoning: _REASONING | None = None
+    requested_model: str | None = Field(default=None, max_length=128)
+    actual_model: str | None = Field(default=None, max_length=128)
+    requested_reasoning: _REASONING | None = None
+    actual_reasoning: _REASONING | None = None
     dispatch_mode: _DISPATCH_MODE | None = None
     finding_slugs: list[str] | None = None
     skills: str | None = Field(default=None, max_length=4096)
@@ -1300,13 +1330,17 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
         status_value=request.status,
         model=request.model,
         reasoning=request.reasoning,
+        requested_model=request.requested_model,
+        actual_model=request.actual_model,
+        requested_reasoning=request.requested_reasoning,
+        actual_reasoning=request.actual_reasoning,
         dispatch_mode=request.dispatch_mode,
         finding_slugs=request.finding_slugs,
         skills=request.skills,
     )
     _audit_assessment_mutation(
         engagement.id,
-        title="dispatch register",
+        title="agent start",
         action=f"agent_id={request.agent_id} role={request.agent_role}",
         actor_name=request.agent_role,
         result=request.status,
@@ -1358,7 +1392,7 @@ async def patch_dispatch(
     )
     _audit_assessment_mutation(
         engagement.id,
-        title="dispatch update-status",
+        title="agent done",
         action=f"agent_id={agent_id}",
         actor_name=agent_id,
         result=request.status or "",
@@ -1389,7 +1423,7 @@ async def create_handoff(engagement_key: str, request: HandoffCreate) -> dict[st
     )
     _audit_assessment_mutation(
         engagement.id,
-        title="dispatch record-handoff",
+        title="agent handoff",
         action=f"agent_id={request.agent_id} role={request.agent_role}",
         actor_name=request.agent_role,
         result=request.summary,
@@ -1445,7 +1479,7 @@ async def patch_handoff(
     )
     _audit_assessment_mutation(
         engagement.id,
-        title="dispatch update-handoff",
+        title="agent handoff",
         action=f"agent_id={agent_id}",
         actor_name=agent_id,
         result=request.summary or "",
@@ -1466,7 +1500,7 @@ async def create_decision(engagement_key: str, request: DecisionCreate) -> dict[
     )
     _audit_assessment_mutation(
         engagement.id,
-        title="dispatch record-decision",
+        title="agent decision",
         action=f"kind={request.kind}",
         result="surfaced_to_user" if request.surfaced_to_user else "",
         metadata={"kind": request.kind, "surfaced_to_user": request.surfaced_to_user},
@@ -1507,7 +1541,7 @@ async def patch_decision(
     )
     _audit_assessment_mutation(
         engagement.id,
-        title="dispatch update-decision",
+        title="agent decision",
         action=f"decision_id={decision_id}",
         result="resolved" if request.resolved else "",
         metadata={"decision_id": int(decision_id)},

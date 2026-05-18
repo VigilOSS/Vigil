@@ -229,6 +229,34 @@ When the operator dispatches report-writer in review-and-fix QA mode, load the e
 - Return `QA PASS` only when all 13 checks pass after fixes.
 - Return `QA BLOCKED` when the report cannot be corrected without new backend state: missing evidence, missing remediation, unresolved duplicate findings, severity/CVSS mismatch, or a finding that no longer belongs in final output. Include exact finding slugs and the required operator action.
 
+### Stale-text scrub (runs before every QA pass)
+
+Per `agent/rules/hunting.md` §21, no finding's `summary` or `details` text may contradict the current state. Stale narrative ("severity adjusted from X to Y" when severity is no longer Y, "originally rated as Z" after the rating shifted twice, "merged from W" after W was split off, "previously high" / "downgraded to medium" / "upgraded to high" mismatched against the current `severity` field) is invisible to status fields and ends up verbatim in `report.md`.
+
+Run this scan against the backend BEFORE rendering the report so the underlying findings are clean — fixing it in `report.md` alone leaks back the next time the report is regenerated.
+
+```bash
+for slug in $(aith assess list-findings --status active --json | jq -r '.[].slug'); do
+  hit=$(aith assess fetch findings/$slug --jq '.summary,.details' \
+    | grep -iE 'adjusted from|originally rated|previously (high|medium|low)|severity (was|changed)|merged from|downgraded to|upgraded to')
+  if [ -n "$hit" ]; then
+    echo "==> stale text in $slug:"
+    echo "$hit"
+  fi
+done
+```
+
+For each hit, fix the source-of-truth on the finding (NOT in `report.md`):
+
+```bash
+aith assess update-finding <slug> \
+  --summary "<rewritten summary without stale narrative>" \
+  --inline '{"details": { ... rewritten details ... }}' \
+  --reason "stale-text scrub before report QA"
+```
+
+The field name on `update-finding --inline` is `details` (dict), not `details_json`. Re-run the scan after the fix to confirm zero hits, then proceed with the 13 checks. `QA BLOCKED` if any finding still carries stale text after the fix attempt.
+
 ## Publish After QA Pass
 
 Run these publication steps only after the operator confirms the report QA gate passed:

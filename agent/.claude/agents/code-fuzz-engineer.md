@@ -32,6 +32,7 @@ already listed below.
 
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
 - `agent/rules/hunting.md`
+- `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-fuzz-campaign/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint
@@ -197,17 +198,19 @@ Finding JSON must include:
 
 ## Finding Prefix: CF
 
-All findings from fuzz campaigns use the CF prefix: `CF-001`, `CF-002`, etc.
+Do not put a `slug` field in new fuzz finding JSON. `aith assess
+record-finding code-fuzz-engineer <finding-json>` allocates the next `CF-*`
+slug under a lock and prints the canonical slug.
 
 ## Mandatory Closing Sequence
 
 Before your dispatch returns, run in this order:
 
 1. `aith assess record-finding code-fuzz-engineer <finding-json>` for each confirmed crash finding.
-2. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (harness paths, crash inputs, campaign configs), open questions, and role-specific extras (`crash_count`, `harnesses_written`, `campaigns_run`, `false_positive_count`). Use the exact `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the operator placed at the top of your dispatch prompt.
-3. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+2. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (harness paths, crash inputs, campaign configs), open questions, and role-specific extras (`crash_count`, `harnesses_written`, `campaigns_run`, `false_positive_count`). Use the exact `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the operator placed at the top of your dispatch prompt.
+3. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-`record-handoff` is idempotent — checkpoint after each major campaign stage, not only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md`.
+`aith assess agent handoff` is idempotent — checkpoint after each major campaign stage, not only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md`.
 
 ## Handoffs
 

@@ -31,6 +31,7 @@ def _build_docker_exec(
     container_name: str,
     run_uuid: str,
     working_dir: str | None = None,
+    engagement_key: str | None = None,
 ) -> list[str]:
     """Wrap the user command in a tiny shell that records the in-container
     PID before ``exec``-ing the real command.
@@ -67,6 +68,12 @@ def _build_docker_exec(
         "docker",
         "exec",
     ]
+    # Surface ENGAGEMENT_KEY inside the runtime so skill examples like
+    # `nuclei -l /engagements/$ENGAGEMENT_KEY/scans/...` expand correctly
+    # under the wrapper shell. Without this, the variable expanded to the
+    # empty string and output landed at `/engagements//scans/...`.
+    if engagement_key:
+        docker_argv.extend(["--env", f"ENGAGEMENT_KEY={engagement_key}"])
     if working_dir:
         docker_argv.extend(["-w", working_dir])
     docker_argv.extend(

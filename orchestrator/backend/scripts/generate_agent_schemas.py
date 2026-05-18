@@ -351,7 +351,14 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     "details": {
                         "type": "object",
                         "additionalProperties": False,
-                        "required": ["evidence", "impact"],
+                        "required": [
+                            "evidence",
+                            "impact",
+                            "remediation",
+                            "steps_to_reproduce",
+                            "cvss_vector",
+                            "cvss_score",
+                        ],
                         "properties": _FINDING_DETAIL_PROPERTIES,
                     },
                     "provenance": {
@@ -445,7 +452,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                 "additionalProperties": False,
                 "examples": [
                     {
-                        "file_id": 15,
+                        "queue_item_id": 42,
                         "agent_name": "code-vuln-hunter",
                         "function_name": "parseurl",
                         "hypothesis": "Attacker-controlled URL scheme length passed to memcpy without bounds check",
@@ -485,11 +492,10 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                 ],
                 "properties": {
                     "queue_item_id": {
-                        "type": ["integer", "null"],
-                        "description": "ID of the code_analysis_queue item this result corresponds to.",
+                        "description": "ID of the claimed code_analysis_queue item this result corresponds to. The backend derives file_id from this queue item.",
                     },
                     "file_id": {
-                        "description": "ID of the code_files record containing the analyzed function.",
+                        "description": "Optional consistency check. When supplied, it must match the file_id on queue_item_id; the backend records the queue-derived file_id.",
                     },
                     "agent_name": {
                         "description": "Name of the agent that produced this result.",
@@ -537,6 +543,17 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                                     "minimum": 0,
                                     "maximum": 100,
                                     "description": "How thoroughly this class was analyzed. 0-20: glanced at imports/exports. 20-40: checked obvious sinks. 40-60: examined entry-point functions with basic taint tracing. 60-80: full taint tracing on entry-point chains + error paths. 80-100: exhaustive analysis including cross-file flows and bypass attempts.",
+                                },
+                                "disposition": {
+                                    "type": "string",
+                                    "enum": ["analyzed", "not_applicable"],
+                                    "default": "analyzed",
+                                    "description": "Whether this class was analyzed or marked not-applicable for this file. Use not_applicable when the class cannot apply (e.g., buffer-overflow in a pure Python module).",
+                                },
+                                "not_applicable": {
+                                    "type": "boolean",
+                                    "default": False,
+                                    "description": "Shorthand flag: true means disposition=not_applicable. Backend accepts either form.",
                                 },
                                 "functions_analyzed": {
                                     "type": "integer",

@@ -77,6 +77,7 @@ def _dockerfile_has_install_line(text: str, binary: str) -> bool:
         rf"cp /root/go/bin/{re.escape(binary)}\b",
         rf"apt-get install[^\n]*\b{re.escape(binary)}\b",
         rf"\b{re.escape(binary)}=\S+",  # apt package=version pin
+        rf"ARG APT_[A-Z_]*PACKAGES=.*\b{re.escape(binary)}\b",
         rf"pipx install\s+{re.escape(binary)}\b",
         rf"pip install[^\n]*\b{re.escape(binary)}\b",
     )
