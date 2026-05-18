@@ -106,6 +106,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Import and register every subcommand
     from assess.commands import (
+        agent,
         approve_exploit,
         check_coverage,
         check_exploit_gate,
@@ -123,7 +124,6 @@ def main(argv: list[str] | None = None) -> None:
         code_record_modules,
         code_record_threat_model,
         code_size_summary,
-        dispatch,
         emit_event,
         export_findings,
         export_surfaces,
@@ -185,6 +185,7 @@ def main(argv: list[str] | None = None) -> None:
         transition_phase,
         validate_dispatch_contract,
         verify_finding,
+        work_buffer,
     )
 
     for mod in (
@@ -213,7 +214,8 @@ def main(argv: list[str] | None = None) -> None:
         link_finding,
         list_finding_group,
         list_report_findings,
-        dispatch,
+        agent,
+        work_buffer,
         ingest_candidates,
         ingest_endpoints,
         ingest_spec,

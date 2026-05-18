@@ -493,7 +493,7 @@ aith assess kali exec --technique RECON --intent "OpenAPI / Swagger / GraphQL en
 ## Output Contract
 
 The skill produces these structured sections in the recon-specialist's return payload.
-Backend writes (`record-finding`, `record-intel`, `record-surface`, `record-handoff`) are
+Backend writes (`record-finding`, `record-intel`, `record-surface`, `aith assess agent handoff`) are
 the durable record; this contract names what each markdown section should hold so
 downstream specialists can parse the output consistently.
 

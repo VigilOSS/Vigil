@@ -8,7 +8,7 @@
 
 Use this file only as a long-form human reference. For live dispatch selection, run
 `aith assess list-skills` and pass the directory-name skill value to
-`aith assess dispatch register --skills`; the validator resolves those names
+`aith assess agent start --skills`; the validator resolves those names
 against `agent/skills/<name>/SKILL.md` on disk.
 
 ## Deprecated Selection Note
@@ -154,6 +154,10 @@ Load the relevant skill before starting validation or exploitation of a candidat
 - `agent/skills/info-disclosure-testing/SKILL.md`
   **Use when:** Probing for exposed debug endpoints, error responses, environment files, metadata endpoints, or stack traces.
   **Paired references:** `references/payloads/info-disclosure-probes.md`
+
+- `agent/skills/cloud-exposure/SKILL.md`
+  **Use when:** Publicly accessible cloud storage (S3 / GCS / Azure) listings or buckets that back an in-scope domain — sample / classify / swarm-dispatch / TruffleHog / severity escalation.
+  **Paired references:** `agent/skills/info-disclosure-testing/SKILL.md` (verbose disclosure), `agent/skills/source-analysis/SKILL.md` (downstream source review), `agent/operator-core.md` Swarm Dispatch (the start-swarm helper).
 
 - `agent/skills/jwt-testing/SKILL.md`
   **Use when:** Target uses JWT authentication; testing `alg:none`, key confusion, JWK/kid injection, or weak secret brute-force. Use in addition to auth-bypass when JWT is the mechanism.

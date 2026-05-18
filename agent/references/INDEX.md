@@ -304,8 +304,8 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 | File | Purpose |
 |------|---------|
 | `runtime-guides/engagement-methodology.md` | Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase |
-| `runtime-guides/subagent-registry.md` | Backend dispatch tables (`assessment_dispatches`, `assessment_dispatch_handoffs`, `assessment_dispatch_decisions`) and their `aith assess dispatch ...` CLI verbs — engagement audit trail, DEDUP input, handoff renderer source, decision audit |
-| `runtime-guides/handoff-schema.md` | Structured handoff schema written by every specialist via `aith assess dispatch record-handoff --from-json <path>` — fields, length caps, per-role examples, CLI usage |
+| `runtime-guides/subagent-registry.md` | Backend dispatch tables (`assessment_dispatches`, `assessment_dispatch_handoffs`, `assessment_dispatch_decisions`) and their `aith assess agent ...` CLI verbs — engagement audit trail, DEDUP input, handoff renderer source, decision audit |
+| `runtime-guides/handoff-schema.md` | Structured handoff schema written by every specialist via `aith assess agent handoff --from-json <path>` — fields, length caps, per-role examples, CLI usage |
 | `runtime-guides/command-history-auditing.md` | How to read `aith assess list-command-runs` as a coverage map — use it to pick variants that haven't been probed, not to gate-keep reruns; includes field-interpretation guide for retention/suppression |
 | `runtime-guides/kali-cli.md` | `aith assess kali` troubleshooting: discovery failures, dispatch-time guardrails (no broad pkill, per-agent binary copy, docker-exec parallelism cap), common errors (`audit POST 422 phase required`, dedup window, dtach missing), and the canonical smoke test |
 | `runtime-guides/cdn-ip-blocking.md` | CDN/edge IP-reputation block detection signals (403 + reference codes, TCP reset, 000-status), the egress reputation curl script, four mitigation options (program allowlist / residential proxy / browser-based tool / accept-gap), give-up-vs-escalate rule, and the `aith assess ingest-endpoints --egress-blocked-hosts` cross-reference |
@@ -321,3 +321,11 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 | `bugbounty-submission-format.md` | Bug bounty submission format for Bugcrowd/HackerOne: per-finding submissions with POC, VRT, evidence |
 | `examples/disclosure-email-fast-import.txt` | Example: multi-sub-issue disclosure with control test and CI/CD framing |
 | `examples/bugbounty-submission-ldap-injection.md` | Example: LDAP injection bug bounty submission with working POC |
+
+## tenants/ — Client Tenant Context (IR)
+
+Per-tenant reference files for recurring Workspace IR work. Load the relevant file at the start of any alert investigation for that tenant — it eliminates rediscovery of GAM config, DWD quirks, key personnel, and known benign patterns.
+
+| File | Tenant | Contents |
+|------|--------|---------|
+| `tenants/acme-workspace.md` | tenant.acme.example | GAM/gcloud config, GCP project, DWD scope reality + Python bypass, key personnel, MFA posture, false positive register, common IR commands, previous engagements |

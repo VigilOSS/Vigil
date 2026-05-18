@@ -2346,6 +2346,23 @@ def list_findings(engagement_id: int) -> list[dict[str, Any]]:
     return [_serialize_finding_record(row) for row in rows]
 
 
+def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT findings.*, merged.slug AS merged_into_slug
+            FROM assessment_findings AS findings
+            LEFT JOIN assessment_findings AS merged ON merged.id = findings.merged_into_finding_id
+            WHERE findings.engagement_id = ? AND findings.slug = ?
+            """,
+            (engagement.id, slug),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
+    return _serialize_finding_record(row)
+
+
 def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
@@ -5120,6 +5137,10 @@ def record_dispatch(
     status_value: str = "in-progress",
     model: str | None = None,
     reasoning: str | None = None,
+    requested_model: str | None = None,
+    actual_model: str | None = None,
+    requested_reasoning: str | None = None,
+    actual_reasoning: str | None = None,
     dispatch_mode: str | None = None,
     finding_slugs: list[str] | None = None,
     skills: str | None = None,
@@ -5130,6 +5151,8 @@ def record_dispatch(
     dispatched_value = dispatched_at or _utcnow_iso_dispatch()
     findings_json = json.dumps(list(finding_slugs)) if finding_slugs is not None else None
     skills_value = (skills or "").strip() or None
+    requested_model_value = requested_model if requested_model is not None else model
+    requested_reasoning_value = requested_reasoning if requested_reasoning is not None else reasoning
     with get_connection() as connection:
         existing = connection.execute(
             "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
@@ -5145,8 +5168,9 @@ def record_dispatch(
             INSERT INTO assessment_dispatches (
                 engagement_id, agent_id, agent_role, task, scope_host,
                 dispatched_at, status, model, reasoning,
+                requested_model, actual_model, requested_reasoning, actual_reasoning,
                 dispatch_mode, finding_slugs_json, skills
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -5156,8 +5180,12 @@ def record_dispatch(
                 scope_host,
                 dispatched_value,
                 status_value,
-                model,
-                reasoning,
+                requested_model_value,
+                requested_reasoning_value,
+                requested_model_value,
+                actual_model,
+                requested_reasoning_value,
+                actual_reasoning,
                 dispatch_mode,
                 findings_json,
                 skills_value,

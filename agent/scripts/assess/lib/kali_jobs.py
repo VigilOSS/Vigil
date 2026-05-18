@@ -147,10 +147,16 @@ def start_job(
             f"echo $$ > {shlex.quote(pid_file)}; "
             f"exec sh -c {shlex.quote(f'{joined} >>{shlex.quote(container_stdout)} 2>>{shlex.quote(container_stderr)}')}"
         )
+        # ENGAGEMENT_KEY env mirrors the sync exec path in
+        # ``kali_runtime_exec._build_docker_exec`` so skill commands launched as
+        # background jobs see ``$ENGAGEMENT_KEY`` expand to the engagement name
+        # rather than the empty string.
         dtach_argv = [
             "docker",
             "exec",
             "-d",
+            "--env",
+            f"ENGAGEMENT_KEY={cfg.engagement_key}",
             "-w",
             f"/engagements/{cfg.engagement_key}",
             container_name,

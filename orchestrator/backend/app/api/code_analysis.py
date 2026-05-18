@@ -133,8 +133,8 @@ class QueueResetStaleRequest(BaseModel):
 
 
 class AnalysisResultRecord(BaseModel):
-    queue_item_id: int | None = None
-    file_id: int
+    queue_item_id: int
+    file_id: int | None = None
     agent_name: str = Field(default="", max_length=128)
     function_name: str = Field(default="", max_length=512)
     hypothesis: str = Field(default="", max_length=20000)
@@ -168,6 +168,32 @@ class RequeueRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     items: list[RequeueItemRecord]
+
+
+TriggerResolutionStatus: TypeAlias = Literal[
+    "external_context_unavailable",
+    "source_equivalent_analyzed",
+    "not_applicable",
+]
+
+
+class TriggerResolutionItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trigger_id: int | None = None
+    id: int | None = None
+    file_path: str = Field(default="", max_length=4096)
+    target_file_path: str = Field(default="", max_length=4096)
+    repo_id: int | None = None
+    vuln_class: str = Field(default="", max_length=128)
+
+
+class TriggerResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[TriggerResolutionItem] = Field(min_length=1)
+    resolution_status: TriggerResolutionStatus
+    resolution_note: str = Field(min_length=1, max_length=20000)
 
 
 class StructuralMetadataItem(BaseModel):
@@ -470,6 +496,40 @@ async def requeue_triggered_files(engagement_key: str, request: RequeueRequest) 
     return record
 
 
+@router.get("/triggers")
+def list_code_triggers(
+    engagement_key: str,
+    status_filter: str | None = Query(default=None, alias="status"),
+    repo_id: int | None = Query(default=None),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return code_analysis.list_code_triggers(
+        engagement.id,
+        status_filter=status_filter,
+        repo_id=repo_id,
+    )
+
+
+@router.post("/triggers/resolve")
+async def resolve_code_triggers(engagement_key: str, request: TriggerResolveRequest) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = code_analysis.resolve_code_triggers(
+        engagement.id,
+        items=[item.model_dump() for item in request.items],
+        resolution_status=request.resolution_status,
+        resolution_note=request.resolution_note,
+    )
+    _audit_code_mutation(
+        engagement.id,
+        title="code-dispatch resolve-triggers",
+        action=f"status={request.resolution_status} count={len(request.items)}",
+        result=request.resolution_note,
+        metadata={"count": len(request.items), "resolution_status": request.resolution_status},
+    )
+    await _broadcast(engagement.key, "triggers_resolve", record)
+    return record
+
+
 # ---------------------------------------------------------------------------
 # Analysis results endpoints
 # ---------------------------------------------------------------------------
@@ -481,11 +541,11 @@ async def create_analysis_result(engagement_key: str, request: AnalysisResultRec
     _audit_code_mutation(
         engagement.id,
         title="code-record-analysis",
-        action=f"file_id={request.file_id} function={request.function_name or '(file)'}",
+        action=f"file_id={record['file_id']} function={request.function_name or '(file)'}",
         actor_name=request.agent_name,
         result=request.disposition,
         metadata={
-            "file_id": request.file_id,
+            "file_id": record["file_id"],
             "queue_item_id": request.queue_item_id,
             "finding_slug": request.finding_slug,
             "disposition": request.disposition,

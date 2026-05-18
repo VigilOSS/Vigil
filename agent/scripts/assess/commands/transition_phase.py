@@ -48,6 +48,12 @@ def register(subparsers) -> None:
         action="store_true",
         help="Override blockers (transition proceeds with warnings)",
     )
+    p.add_argument(
+        "--track",
+        choices=("auto", "web", "code"),
+        default="auto",
+        help="Phase track for `both` engagements (default: infer from target phase).",
+    )
     p.set_defaults(func=run)
 
 
@@ -63,21 +69,23 @@ def run(args) -> None:
     with open(scope_path) as f:
         scope = json.load(f)
 
-    current_phase = scope.get("current_phase", "")
     target_phase = args.target_phase
     engagement_type = scope.get("engagement_type", "web")
+    track = _phase_track(engagement_type, target_phase, getattr(args, "track", "auto"))
 
-    if engagement_type == "code":
+    if track == "code":
         order = CODE_TRANSITION_ORDER
         phases = CODE_PHASES
     else:
         order = WEB_TRANSITION_ORDER
         phases = WEB_PHASES
+    phase_key = "code_phase" if engagement_type == "both" and track == "code" else "current_phase"
+    current_phase = scope.get(phase_key, "ingest" if phase_key == "code_phase" else "")
 
     if target_phase not in order:
         print(
             f"transition-phase: unknown phase '{target_phase}' "
-            f"for engagement type '{engagement_type}'. "
+            f"for engagement type '{engagement_type}' track '{track}'. "
             f"Valid phases: {', '.join(phases)}",
             file=sys.stderr,
         )
@@ -95,7 +103,7 @@ def run(args) -> None:
                 sys.exit(1)
 
     blockers = _check_preconditions(
-        target_phase, engagement_type, engagement_dir, args, cfg,
+        target_phase, track, engagement_dir, args, cfg,
     )
 
     if blockers and not args.force:
@@ -109,19 +117,39 @@ def run(args) -> None:
         for b in blockers:
             print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
 
-    scope["current_phase"] = target_phase
+    scope[phase_key] = target_phase
     tmp_path = scope_path + ".tmp"
     with open(tmp_path, "w") as f:
         json.dump(scope, f, indent=2, ensure_ascii=False)
         f.write("\n")
     os.replace(tmp_path, scope_path)
 
-    print(f"Phase transitioned: {current_phase or '(none)'} -> {target_phase}")
+    print(f"Phase transitioned ({track}): {current_phase or '(none)'} -> {target_phase}")
+
+
+def _phase_track(engagement_type: str, target_phase: str, requested_track: str) -> str:
+    if engagement_type == "code":
+        return "code"
+    if engagement_type != "both":
+        return "web"
+    if requested_track in {"web", "code"}:
+        return requested_track
+    in_web = target_phase in WEB_TRANSITION_ORDER
+    in_code = target_phase in CODE_TRANSITION_ORDER
+    if in_web and in_code:
+        print(
+            f"transition-phase: phase '{target_phase}' is valid for both tracks; pass --track web or --track code",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if in_code:
+        return "code"
+    return "web"
 
 
 def _check_preconditions(
     target_phase: str,
-    engagement_type: str,
+    track: str,
     engagement_dir: str,
     args,
     cfg: Config | None = None,
@@ -132,7 +160,7 @@ def _check_preconditions(
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
 
     try:
-        if engagement_type == "code":
+        if track == "code":
             blockers.extend(_check_code_preconditions(target_phase, client))
         else:
             blockers.extend(_check_web_preconditions(target_phase, engagement_dir, client))
@@ -224,6 +252,59 @@ def _check_web_preconditions(
                             + (" ..." if len(unverified_high) > 5 else "")
                         ),
                     })
+
+                # Variant-pass gate: every confirmed high/critical finding should have
+                # at least one vulnerability-analyst dispatch dedicated to sibling /
+                # variant / rotation hunting before the engagement advances to exploit.
+                # Skipping the variant pass is the single most common way real findings
+                # are missed. The check is permissive — task-text match on
+                # variant|sibling|rotat — so any reasonable phrasing satisfies it.
+                # --force overrides if the operator has a stated reason.
+                confirmed_high = [
+                    f for f in findings
+                    if f.get("severity") in ("critical", "high")
+                    and f.get("verification_state") == "verified"
+                    and f.get("workflow_status") == "active"
+                ]
+                if confirmed_high:
+                    try:
+                        dispatches = client.get("dispatches") or []
+                    except Exception:
+                        dispatches = []
+                    variant_tasks = [
+                        d for d in dispatches
+                        if d.get("agent_role") == "vulnerability-analyst"
+                        and any(
+                            kw in (d.get("task") or "").lower()
+                            for kw in ("variant", "sibling", "rotat")
+                        )
+                    ]
+                    missing_variant: list[str] = []
+                    for finding in confirmed_high:
+                        slug = finding.get("slug", "?")
+                        hit = False
+                        for d in variant_tasks:
+                            slugs = d.get("finding_slugs") or []
+                            task = (d.get("task") or "").lower()
+                            if slug in slugs or slug.lower() in task:
+                                hit = True
+                                break
+                        if not hit:
+                            missing_variant.append(slug)
+                    if missing_variant:
+                        sample = ", ".join(missing_variant[:5])
+                        blockers.append({
+                            "kind": "missing_variant_pass",
+                            "detail": (
+                                f"{len(missing_variant)} confirmed high/critical finding(s) "
+                                f"have no vulnerability-analyst variant/sibling pass: "
+                                f"{sample}"
+                                + (" ..." if len(missing_variant) > 5 else "")
+                                + " — dispatch the variant hunt before advancing "
+                                "(skipping is the most common way real findings are missed). "
+                                "Pass --force only with a stated reason."
+                            ),
+                        })
         except Exception as exc:
             blockers.append(_precondition_check_failed("exploit findings", exc))
 

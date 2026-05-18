@@ -33,7 +33,7 @@ Audit trail requirement:
 
 ## Methodology — Five-Check Protocol
 
-Every check produces one of four outcomes: PASS, KILL, DOWNGRADE, or ESCALATE. PASS and KILL carry the same evidence cost — PASS requires cited supporting evidence at the hunter's rigor bar, KILL requires cited counter-evidence at the same bar. DOWNGRADE applies when counter-evidence reduces exploitability but does not eliminate the bug. ESCALATE routes to the multi-perspective voting step (lines 215-249) when evidence fits neither PASS nor KILL — absence of counter-evidence is not PASS evidence, and plausibility of counter-evidence is not KILL evidence.
+Every check produces one of four outcomes: PASS, KILL, DOWNGRADE, or ESCALATE. PASS and KILL carry the same evidence cost — PASS requires cited supporting evidence at the hunter's rigor bar, KILL requires cited counter-evidence at the same bar. DOWNGRADE applies when counter-evidence reduces exploitability but does not eliminate the bug. ESCALATE routes to the Multi-Perspective Voting Protocol section when evidence fits neither PASS nor KILL — absence of counter-evidence is not PASS evidence, and plausibility of counter-evidence is not KILL evidence.
 
 ### Check 1: Reachability from External Entry
 
@@ -62,7 +62,7 @@ grep '^parse_header_value\t' tags
 - Entry point found but data is hardcoded/constant by the time it reaches vulnerable function: **KILL** ("unreachable with untrusted data — all callers pass constants")
 - No external entry point found (dead code, internal-only function): **KILL** ("no external entry point — function is unreachable from attack surface")
 - Entry point found but only through test code: **KILL** ("only reachable from test harness, not production code")
-- **ESCALATE**: the evidence does not fit PASS or KILL — record the specific ambiguity (missing reachability witness, unresolved indirect call, callback registered at runtime, plugin-dispatched sink) and route to the **multi-perspective voting** step defined below (lines 215-249). Do not default to KILL or PASS.
+- **ESCALATE**: the evidence does not fit PASS or KILL — record the specific ambiguity (missing reachability witness, unresolved indirect call, callback registered at runtime, plugin-dispatched sink) and route to the **Multi-Perspective Voting Protocol** section below. Do not default to KILL or PASS.
 
 ### Check 2: Upstream Guards
 
@@ -78,7 +78,7 @@ The vulnerability analysis (Phase 3) evaluated guards within the vulnerable func
 - Complete guard found upstream that covers all paths: **KILL** ("upstream guard in `validate_request()` at request.c:85 bounds-checks length before passing to vulnerable function")
 - Partial guard found (some paths guarded, wrong bound, incomplete coverage): **DOWNGRADE** — the bug is real but exploitability is reduced. Document which paths are guarded and which remain unguarded. Do not KILL on a partial guard; partial means the attacker still has at least one unguarded path.
 - **PASS**: cite the specific callers examined 3-5 levels up (file:line for each) and confirm no guard is present on the tainted variable, OR name a present-but-ineffective check and show why it does not constrain the attacker-controlled value (wrong variable, wrong bound, wrong branch, executed after use). "No guard found" asserted without naming the callers inspected is not PASS evidence.
-- **ESCALATE**: a guard exists but its completeness is contested — macro-expanded check whose definition is conditional, guard enforced by a caller invariant that may or may not hold, compile-time check whose predicate depends on unverified config. Record the specific ambiguity and route to the **multi-perspective voting** step (lines 215-249).
+- **ESCALATE**: a guard exists but its completeness is contested — macro-expanded check whose definition is conditional, guard enforced by a caller invariant that may or may not hold, compile-time check whose predicate depends on unverified config. Record the specific ambiguity and route to the **Multi-Perspective Voting Protocol** section.
 
 **Common upstream guard locations:**
 - Request validation layers (input sanitization before dispatch)
@@ -116,7 +116,7 @@ rg "FEATURE_NAME" .config defconfig
 - Code behind debug-only flag (`#ifdef DEBUG`, `#[cfg(test)]`): **KILL** ("debug-only code, not compiled in production")
 - Code behind optional feature flag: **DOWNGRADE** severity + note the flag ("vulnerable code requires `--enable-experimental-parser` flag, not enabled by default")
 - Code excluded on common platforms: **DOWNGRADE** + note platforms affected
-- **ESCALATE**: the guarding symbol's default state is contested (vendor patch flips it, distro configs disagree, feature is on-by-default upstream but off in common downstreams). Record the specific config ambiguity and route to the **multi-perspective voting** step (lines 215-249).
+- **ESCALATE**: the guarding symbol's default state is contested (vendor patch flips it, distro configs disagree, feature is on-by-default upstream but off in common downstreams). Record the specific config ambiguity and route to the **Multi-Perspective Voting Protocol** section.
 
 ### Check 4: Exploitation Feasibility (PoC-or-Proof Required)
 
@@ -158,7 +158,7 @@ Apply the constrained attacker persona with maximum rigor. You must reach one of
 - **PASS (probabilistic)**: cite the standard attacker technique that closes the gap (heap spray shape, ASLR brute-force budget, race-window widening mechanism, info-leak chain partner) and the conditions under which it succeeds. Name the technique — "probabilistic but feasible" asserted without naming the technique is not PASS evidence.
 - Exploit theoretically possible but mitigations make it impractical: **DOWNGRADE** severity + document mitigation effectiveness
 - No concrete or probabilistic exploit path AND specific blocking constraint identified: **KILL** — you must cite (a) the specific constraint (guard, type-system limit, allocator cap, mitigation) with file:line, AND (b) demonstrate that the attacker cannot route around it. Enumerate and rule out: alternative input channels that bypass the constraint, encoding/normalization mismatches (UTF-8 vs. byte count, canonicalization before vs. after the check), partial-match or prefix bypasses, pre-guard-state mutation (TOCTOU on the checked value), integer-width or signedness escapes, and chained primitives that satisfy the constraint's precondition under attacker control. "Mitigation exists" is not sufficient; "mitigation exists AND these N routes around it are each closed by [specific evidence]" is.
-- **ESCALATE**: exploit construction is blocked by a condition whose attacker-controllability is contested (heap grooming feasibility on this allocator, timing window width on this scheduler, availability of a companion info leak). Record the specific ambiguity and route to the **multi-perspective voting** step (lines 215-249).
+- **ESCALATE**: exploit construction is blocked by a condition whose attacker-controllability is contested (heap grooming feasibility on this allocator, timing window width on this scheduler, availability of a companion info leak). Record the specific ambiguity and route to the **Multi-Perspective Voting Protocol** section.
 
 ### Check 5: Devil's Advocate (Trail of Bits fp-check methodology)
 
@@ -208,9 +208,45 @@ What external protections exist?
 - Counter-argument with specific code evidence **as rigorous as the original finding**: **KILL** with full counter-argument documentation
 - Counter-evidence weakens but does not fully refute the finding: **DOWNGRADE** severity — the bug is real but the counter-evidence reduces impact or exploitability
 - **PASS (survives)**: cite what you tried to disprove in each of the 4 steps (guard search, constraint search, intent search, mitigation search), the file:line evidence you inspected in each, and why the counter-hypotheses fail. A survival asserted without naming the disproof attempts is not PASS evidence — silence across the 4 steps is not the same as discharge of the 4 steps.
-- **ESCALATE (multi-perspective voting)**: counter-argument is plausible but rests on assumptions, implicit invariants, or incomplete coverage proof — route to the **multi-perspective voting** step (lines 215-249). Do not kill on uncertainty, do not pass on absence of counter-evidence. Record the specific ambiguity that blocks a clean PASS or KILL.
+- **ESCALATE (multi-perspective voting)**: counter-argument is plausible but rests on assumptions, implicit invariants, or incomplete coverage proof — route to the **Multi-Perspective Voting Protocol** section. Do not kill on uncertainty, do not pass on absence of counter-evidence. Record the specific ambiguity that blocks a clean PASS or KILL.
 
 Document: what you tried to disprove, what evidence you found for and against, and the final determination. This documentation strengthens confirmed findings and makes kills auditable.
+
+### Protocol/Resource-Limit Severity Check
+
+Use this when a finding depends on bypassing a size limit, timeout, buffer cap,
+request spool, negotiation limit, compression ratio, or other resource control.
+Before confirming High/Critical, answer all of the following with source-backed
+evidence:
+
+1. **Intended boundary:** Read the docs, comments, blame, or introducing commit for
+   the limit. Is it documented or historically intended to cap total attacker work,
+   or only a local implementation detail such as an in-memory spool buffer?
+2. **Equivalent entry points:** Compare sibling transports and protocol modes. If
+   the same logical byte stream can already be sent over SSH, raw TCP, local IPC,
+   chunked HTTP, or another default path, the wrapper-specific bypass is usually
+   hardening/documentation unless it crosses an independent default deployment
+   boundary.
+3. **Default reachability:** Prove the path is enabled by default for the attacker
+   role. Downgrade when the path needs non-default config, authenticated service
+   selection, repository-controlled config, or write access that already implies a
+   stronger primitive.
+4. **Second-order impact:** Prove what the downstream component does with the extra
+   bytes. Look for superlinear CPU, unbounded retained memory, duplicate state that
+   survives deduplication, output amplification, child-process fanout, pack/build
+   amplification, crash, memory corruption, or privilege-boundary crossing. Linear
+   parsing of more valid protocol bytes is not enough for High.
+5. **Negative controls:** Test or inspect duplicate handling, feature gates, per-line
+   caps, parser state resets, and downstream deduplication. Record the result even
+   when it weakens the finding.
+
+Severity guidance: a resource-limit bypass can be High only when the proved default
+path creates service-level impact that ordinary protocol access cannot already
+create. If the best proof is "small compressed/request body becomes a larger valid
+protocol stream" and downstream work remains linear with bounded memory, treat it
+as Medium at most, often hardening or documentation. See
+`agent/references/code-vuln-patterns/algorithmic-dos.md` "Decompression Bombs"
+for concrete examples of the boundary between High and Medium.
 
 ## Multi-Perspective Voting Protocol
 

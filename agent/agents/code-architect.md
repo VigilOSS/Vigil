@@ -26,6 +26,7 @@ already listed below.
 
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
 - `agent/rules/hunting.md`
+- `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-architecture-mapping/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint
@@ -37,7 +38,8 @@ Before producing any output, confirm:
 - [ ] Full file listing from code-ingest is available with path, language, LOC, and file hash for every file
 - [ ] Git churn data attached (or confirmed unavailable)
 - [ ] Structural index checked — if `tools/analysis-state/structural-index/` exists, it's loaded for call graph construction
-- [ ] Threat model output template is clear — you know the exact sections to produce
+- [ ] Helper contracts checked — `code-classify`, `code-record-modules`,
+      `code-record-threat-model`, and `code-dispatch` are the machine-output shape source
 
 If any item is missing, stop and request it from the operator before proceeding.
 
@@ -48,6 +50,7 @@ If any item is missing, stop and request it from the operator before proceeding.
 - Classify every file by security relevance (critical/high/medium/low/skip)
 - Annotate critical and high files with slot types (what kind of untrusted data flows into them)
 - Compute analysis priority scores (1-100) combining classification, module criticality, and git churn
+- Map `analysis_priority` to queue `priority` when producing the Phase 2 file-analysis queue
 - Produce the project-specific threat model that anchors all subsequent analysis
 - Build the cross-module call graph that enables multi-function reasoning in Phase 2
 - Generate attack hypotheses for entry-point chains reaching security-relevant decisions,
@@ -196,6 +199,10 @@ JSON structure grouping files into modules with descriptions:
 ```
 
 Use concrete repo-relative file paths in `files`. Do not use globs, ranges, or prose placeholders.
+`module_key` is a durable backend key, so make it meaningful and stable (`auth-reset-password`,
+`media-upload`, `tenant-routing`) rather than generic (`module_1`, `<repo>_module_N`) or copied
+from the repository slug. If you cannot name a module by behavior, split or merge it until the
+label describes a security-relevant subsystem.
 
 ### `#### Threat Model`
 Structured document covering:
@@ -206,22 +213,11 @@ Structured document covering:
 - Historical vulnerability patterns (from git history and known CVEs)
 
 ### `#### File Classifications`
-JSON array of per-file classifications:
-```json
-[
-  {
-    "file_id": 42,
-    "classification": "critical",
-    "language": "c++",
-    "role": "protocol_parser",
-    "slot_types": ["NETWORK-INPUT", "PROTOCOL-FIELD"],
-    "analysis_priority": 95,
-    "reasoning": "HTTP response header parser — processes untrusted server responses"
-  }
-]
-```
-
-Every classification record should include backend `file_id` when available. `file_path` is accepted as a fallback — `code-classify` resolves paths to `file_id` automatically during normalization.
+Use `aith assess contract code-classify` as the classification shape source. Every classification
+record should include backend `file_id`; `file_path` is helper context and `repo_id` only
+disambiguates path lookup. The machine JSON is an array, not an object keyed by path, and uses
+`analysis_priority` for ordering. Put rationale in the surrounding markdown or Recommended
+Analysis Order instead of adding prose-only fields to the JSON.
 
 ### `#### Recommended Analysis Order`
 Prioritized list of modules to analyze first, with reasoning.
@@ -233,22 +229,12 @@ JSON adjacency list with entry-point chains and untrusted-data annotations.
 Prioritized list of specific vulnerability hypotheses for the file analysis queue.
 
 ### `#### File Analysis Queue`
-Flat JSON array written to `tools/analysis-state/file-analysis-queue.json`. Every critical and high file MUST appear in this queue. Files without hypotheses appear with an empty `guidance_hypotheses` array — the hunter provides unconstrained analysis first, then checks hypotheses. The queue is grouped by `batch_theme` (logical module) so the hunter can reason across related files in the same dispatch. Priority scores from Step 9 determine dispatch order.
-
-```json
-[
-  {
-    "file_id": 42,
-    "file_path": "com/example/RemotePrint.java",
-    "priority": 95,
-    "classification": "critical",
-    "batch_theme": "auth-module",
-    "slot_types": ["NETWORK-INPUT"],
-    "guidance_hypotheses": ["Hypothesis text here..."],
-    "related_files": ["com/example/FileUtils.java"]
-  }
-]
-```
+Flat JSON array written to `tools/analysis-state/file-analysis-queue.json`; use
+`aith assess contract code-dispatch` as the queue shape source. Every critical and high file MUST
+appear in this queue. Files without hypotheses appear with an empty `guidance_hypotheses` array —
+the hunter provides unconstrained analysis first, then checks hypotheses. The queue is grouped by
+`batch_theme` (logical module) so the hunter can reason across related files in the same dispatch.
+Map Step 9 `analysis_priority` to queue `priority` so dispatch order remains consistent.
 
 Emit one queue object per concrete file. Every queue object must include concrete `file_id` and `file_path`. Do not emit nested batch wrappers, and do not use globs in `file_path` or `related_files`.
 Do not emit `context_id` in the broad-hunt queue artifact. The queue is file-level and carries `file_id` plus metadata such as `batch_theme`, `slot_types`, and `guidance_hypotheses`. `repo_id` is only a path-disambiguation helper during queue normalization; it is not a queue field.
@@ -260,6 +246,9 @@ REQUIRED. Declare every self-check item you could NOT complete. If none, state "
 
 After producing output, the operator records via:
 ```bash
+aith assess contract code-classify
+aith assess contract code-record-threat-model
+aith assess contract code-record-modules
 aith assess code-classify <classifications-json>
 aith assess code-record-threat-model <repo-id> <threat-model-json>
 aith assess code-record-modules <repo-id> <modules-json>
@@ -274,13 +263,13 @@ Before your dispatch returns, run in this order:
 3. `aith assess code-classify <classifications-json>` (per-file)
 4. `aith assess record-intel note <intel-json>` for each attack hypothesis (so the hunter inherits them as intel notes)
 5. `aith assess record-finding code-architect <finding-json>` for each architectural finding (rare — only when an obvious vulnerability is visible from project structure)
-6. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
-7. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+6. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
+7. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-The `record-handoff` step is idempotent and called incrementally — checkpoint
+`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -288,7 +277,8 @@ after each major step in your methodology, not only at the end. See
 
 You rarely produce findings directly, but if an obvious vulnerability is visible from
 project structure alone (e.g., hardcoded credentials in config, known-vulnerable dependency
-version), record it with prefix CA.
+version), omit `slug` from the finding JSON and let `aith assess record-finding
+code-architect <finding-json>` allocate the next `CA-*` slug.
 
 ## Output Contract (Dispatch Response)
 

@@ -424,11 +424,15 @@ class CaseCollector:
             except (json.JSONDecodeError, OSError):
                 auth_data = {}
 
-        auth_data.setdefault("mode", "proxy_capture")
-        auth_data.setdefault("use_for_requests", True)
-        auth_data.setdefault("auth_context", "authenticated")
+        # Container shapes that callers expect to exist; never overwrite if
+        # already set.
         auth_data.setdefault("headers", {})
         auth_data.setdefault("cookies", {})
+        # Note: ``mode`` / ``use_for_requests`` / ``auth_context`` are deliberately
+        # NOT setdefault'd here. Doing so let stale "anonymous" defaults persist
+        # after a fresh Bearer/session was captured, so downstream consumers
+        # skipped the credentials. The auth-state fields are assigned below in
+        # the ``if updated:`` block only when capture actually happened.
         host_cookies_list: list[dict] = auth_data.get("host_cookies", [])
         if not isinstance(host_cookies_list, list):
             host_cookies_list = []
@@ -513,6 +517,21 @@ class CaseCollector:
                     continue
                 if h == primary_host or (primary_host and h.endswith("." + primary_host)):
                     flat_cookies.update(entry_cookies)
+
+            # Force auth-state fields to reflect the just-captured material.
+            # This is where the previous ``setdefault`` calls produced silent
+            # corruption: a stale ``mode``/``auth_context`` from a prior init
+            # would survive a fresh Bearer capture and downstream consumers
+            # treated the request as anonymous. We always own ``mode`` and
+            # ``use_for_requests`` here because we just captured live traffic.
+            # ``auth_context`` is upgraded from "anonymous"/unset to
+            # "authenticated"; non-anonymous values (e.g. "admin") set
+            # explicitly by the operator are preserved.
+            auth_data["mode"] = "proxy_capture"
+            auth_data["use_for_requests"] = True
+            existing_context = auth_data.get("auth_context")
+            if not existing_context or existing_context == "anonymous":
+                auth_data["auth_context"] = "authenticated"
 
             auth_data["cookies"] = flat_cookies
             auth_data["host_cookies"] = host_cookies_list

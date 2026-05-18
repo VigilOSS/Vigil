@@ -65,6 +65,15 @@ def start_proxy(options: MitmproxyOptions, *, runner: docker.Runner = docker.run
         "engagement_dir=/engagement",
         "--set",
         "block_global=false",
+        # Akamai-fronted sites (LastPass, Salesforce Experience Cloud, and
+        # other large CDNs) serve CSP / cache-control headers with trailing
+        # whitespace that hyper-h2 strict mode rejects per RFC 7540
+        # §8.1.2.2. Without disabling h2 the proxy 502s every admin-portal
+        # request. Disabling h2 forces the upstream to HTTP/1.1, which all
+        # Akamai edges still serve; performance loss is negligible inside
+        # an engagement and the capture rate goes from ~30% to 100%.
+        "--set",
+        "http2=false",
     ]
     docker.run_with_host_gateway_fallback(argv, runner=runner)
     if verify_port and not _wait_for_port("127.0.0.1", options.port):

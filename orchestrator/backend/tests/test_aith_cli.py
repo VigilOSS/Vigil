@@ -572,7 +572,7 @@ def test_orchestrator_start_builds_frontend_then_errors_when_backend_already_run
     with pytest.raises(SystemExit) as excinfo:
         orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
 
-    assert calls == [["npm", "install"], ["npm", "run", "build"]]
+    assert calls == [["npm", "ci"], ["npm", "run", "build"]]
     message = str(excinfo.value)
     assert "Orchestrator is already running" in message
     assert "PID: 123" in message
@@ -647,6 +647,46 @@ def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Pat
     assert signals_sent == [(4321, signal.SIGTERM)]
     assert fake_process.terminated is False
     assert fake_process.killed is False
+    assert not pid_file.exists()
+
+
+def test_orchestrator_start_terminates_child_when_readiness_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+
+    install_root = tmp_path / "install"
+    frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
+    frontend_dist.mkdir(parents=True)
+    (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
+    pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
+
+    class FakeProcess:
+        pid = 4322
+
+        def poll(self) -> int | None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    fake_process = FakeProcess()
+    signals_sent: list[tuple[int, signal.Signals]] = []
+
+    def fake_popen(*_: object, **kwargs: object) -> FakeProcess:
+        assert kwargs["start_new_session"] is True
+        return fake_process
+
+    def fake_killpg(pid: int, sig: signal.Signals) -> None:
+        signals_sent.append((pid, sig))
+
+    monkeypatch.setattr(orchestrator_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orchestrator_module.os, "killpg", fake_killpg)
+    monkeypatch.setattr(orchestrator_module, "_wait_for_health", lambda *_, **__: True)
+    monkeypatch.setattr(orchestrator_module, "_wait_for_readiness", lambda *_, **__: False)
+
+    with pytest.raises(SystemExit, match="did not become ready"):
+        orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
+
+    assert signals_sent == [(4322, signal.SIGTERM)]
     assert not pid_file.exists()
 
 
@@ -1853,6 +1893,88 @@ def test_transition_phase_backend_error_blocks_precondition_check(
     assert json.loads(scope_path.read_text(encoding="utf-8"))["current_phase"] == "recon"
 
 
+def test_transition_phase_both_engagement_advances_code_track_separately(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_assess_module(
+        "round3_transition_phase_both_code_module",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    engagement = tmp_path / "agent" / "engagements" / "eng-test"
+    engagement.mkdir(parents=True)
+    scope_path = engagement / "scope.json"
+    scope_path.write_text(
+        json.dumps({"engagement_type": "both", "current_phase": "recon", "code_phase": "ingest"}),
+        encoding="utf-8",
+    )
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def get(self, path: str) -> dict:
+            if path == "code/coverage":
+                return {"total_files": 2, "by_classification": {"critical": {"count": 1}}}
+            return {}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(engagement),
+            engagement_key=engagement.name,
+            agent_root=str(tmp_path / "agent"),
+        ),
+    )
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=str(engagement),
+            target_phase="classify-map",
+            force=False,
+            track="auto",
+        )
+    )
+
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    assert scope["current_phase"] == "recon"
+    assert scope["code_phase"] == "classify-map"
+    assert "Phase transitioned (code)" in capsys.readouterr().out
+
+
+def test_transition_phase_both_engagement_requires_track_for_ambiguous_complete(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_assess_module(
+        "round3_transition_phase_both_ambiguous_module",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    engagement = tmp_path / "agent" / "engagements" / "eng-test"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text(
+        json.dumps({"engagement_type": "both", "current_phase": "report", "code_phase": "verify-variant"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(engagement),
+                target_phase="complete",
+                force=False,
+                track="auto",
+            )
+        )
+
+    assert exc.value.code == 2
+    assert "pass --track web or --track code" in capsys.readouterr().err
+
+
 def test_check_coverage_reports_partially_covered_surfaces(
     monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2262,7 +2384,7 @@ def test_validate_dispatch_contract_accepts_minimal_payload(
 def test_validate_dispatch_contract_accepts_dispatch_register_payload(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The contract preflight accepts the same role field used by dispatch register."""
+    """The contract preflight accepts the same role field used by agent start."""
     assess_main = _load_assess_main()
     payload = {
         "agent_id": "VA-1",
@@ -2421,7 +2543,7 @@ def test_actor_kind_warn_on_non_log_subcommand(
 
 
 # ---------------------------------------------------------------------------
-# Round 9 — `aith assess dispatch render-handoff` tests against the backend
+# Round 9 — handoff render tests against the backend
 #
 # The renderer now reads from the orchestrator's assessment_dispatches and
 # assessment_dispatch_handoffs tables.
@@ -2484,8 +2606,10 @@ def _stub_render_handoff_environment(
 
 
 def _load_dispatch_module():
-    """Load dispatch.py with AssessError, AssessmentClient, and load_config
-    visible on the module namespace for monkeypatching.
+    """Load ``dispatch.py`` (internal lifecycle + work-buffer implementation).
+
+    The operator CLI routes to ``aith assess agent`` / ``aith assess work-buffer``;
+    this module remains shared implementations and legacy argparse for tests.
     """
     return _load_assess_module(
         "round9_dispatch_module",
@@ -2614,7 +2738,7 @@ def test_render_handoff_404s_unknown_agent_id(
     err = capsys.readouterr().err
     assert "AGENT-DOES-NOT-EXIST" in err
     # Helpful hint about where the data should come from.
-    assert "record-handoff" in err
+    assert "agent handoff" in err
 
 
 def test_render_handoff_truncates_at_max_lines(
@@ -2720,7 +2844,7 @@ def test_render_handoff_missing_slug_distinct_from_fetch_error(
 
 
 # ---------------------------------------------------------------------------
-# Round 9 — `aith assess dispatch register / update-status / list / get /
+# Round 9 — backend agent lifecycle / handoff / decision tests
 # record-decision / record-handoff` smoke tests. The CLI calls the
 # AssessmentClient's helper methods, so we wire a fake client and assert
 # the CLI builds the right payloads / prints the right output.
@@ -2904,7 +3028,7 @@ def test_dispatch_backend_actions_reject_cases_db_prefix(capsys: pytest.CaptureF
     assert exc_info.value.code == 1
     err = capsys.readouterr().err
     assert "must not take a cases.db path" in err
-    assert "aith assess dispatch record-handoff" in err
+    assert "aith assess agent handoff" in err
 
 
 def test_dispatch_record_handoff_from_json_rejects_agent_id_mismatch(
@@ -3038,7 +3162,7 @@ def test_dispatch_register_warns_on_structured_overlap(
     )
 
     err = capsys.readouterr().err
-    assert "WARN dispatch register" in err
+    assert "WARN agent start" in err
     assert "same finding_slugs: VA-001" in err
     assert fake.recorded[0]["agent_id"] == "AG-NEW"
 
@@ -3082,7 +3206,7 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
     )
 
     err = capsys.readouterr().err
-    assert "WARN dispatch register" not in err
+    assert "WARN agent start" not in err
     assert fake.recorded[0]["agent_id"] == "AG-NEW"
 
 
@@ -3695,3 +3819,100 @@ def test_assess_config_aith_config_wins_over_install_env(
         module.resolve_base_url(str(engagement_dir), str(install_root / "agent"))
         == "http://from-config:5678"
     )
+
+
+# ---------------------------------------------------------------------------
+# C7 — scope_host validation in dispatch contract
+# ---------------------------------------------------------------------------
+
+
+def _make_engagement_dir_with_scope(tmp_path: Path, hosts: list[str]) -> Path:
+    eng_dir = tmp_path / "eng"
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    (eng_dir / "scope.json").write_text(
+        json.dumps({"hosts": hosts, "status": "in_progress"}),
+        encoding="utf-8",
+    )
+    return eng_dir
+
+
+def test_validate_dispatch_blocks_out_of_scope_vuln_analyst(tmp_path: Path) -> None:
+    """C7: vulnerability-analyst dispatching against an out-of-scope host must
+    fail the contract validator with a clear error referencing scope.json."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    eng_dir = _make_engagement_dir_with_scope(tmp_path, ["app.example.test"])
+    payload = {
+        "agent_id": "va-1",
+        "agent_role": "vulnerability-analyst",
+        "task": "Probe IDOR",
+        "scope_host": "evil-attacker.test",
+        "dispatch_mode": "item-iterating",
+        "skills": "idor-testing",
+    }
+    errors, _warnings = validate_specialist_dispatch_contract(
+        payload, engagement_dir=str(eng_dir)
+    )
+    assert any("not in scope.json" in e for e in errors), errors
+
+
+def test_validate_dispatch_allows_in_scope_exploit_developer(tmp_path: Path) -> None:
+    """C7: exploit-developer dispatching against a host that IS in scope must
+    pass the scope gate (no scope-related errors)."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    eng_dir = _make_engagement_dir_with_scope(tmp_path, ["app.example.test"])
+    payload = {
+        "agent_id": "exp-1",
+        "agent_role": "exploit-developer",
+        "task": "Chain IDOR + token reuse",
+        "scope_host": "app.example.test",
+        "dispatch_mode": "deep-manual",
+        "skills": "idor-testing",
+    }
+    errors, _warnings = validate_specialist_dispatch_contract(
+        payload, engagement_dir=str(eng_dir)
+    )
+    assert not any("not in scope.json" in e for e in errors), errors
+
+
+def test_validate_dispatch_allows_recon_against_adjacent_host(tmp_path: Path) -> None:
+    """C7: recon and osint are NOT scope-gated because they legitimately
+    reach adjacent/related hosts during discovery (cert chains, DNS history,
+    GitHub mirrors). recon-specialist with an out-of-scope scope_host must
+    pass the scope gate (the skills-required check still applies separately)."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    eng_dir = _make_engagement_dir_with_scope(tmp_path, ["app.example.test"])
+    payload = {
+        "agent_id": "recon-1",
+        "agent_role": "recon-specialist",
+        "task": "Cert-chain pivot recon",
+        "scope_host": "related.example.test",
+        "dispatch_mode": "hypothesis-driven",
+        "skills": "web-recon",
+    }
+    errors, _warnings = validate_specialist_dispatch_contract(
+        payload, engagement_dir=str(eng_dir)
+    )
+    assert not any("not in scope.json" in e for e in errors), errors
+
+
+def test_validate_dispatch_skips_scope_check_when_engagement_dir_omitted(
+    tmp_path: Path,
+) -> None:
+    """C7: callers that do not pass engagement_dir keep the prior behavior —
+    no scope check fires. Keeps the validator usable for unit tests + stdin
+    linting where the engagement context is not available."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    payload = {
+        "agent_id": "va-1",
+        "agent_role": "vulnerability-analyst",
+        "task": "Probe IDOR",
+        "scope_host": "anywhere.test",
+        "dispatch_mode": "item-iterating",
+        "skills": "idor-testing",
+    }
+    errors, _warnings = validate_specialist_dispatch_contract(payload)
+    assert not any("scope" in e.lower() for e in errors), errors

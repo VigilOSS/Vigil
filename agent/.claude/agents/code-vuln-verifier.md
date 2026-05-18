@@ -36,6 +36,7 @@ already listed below.
 - `agent/shared-constraints-code.md`
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
+- `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-finding-verification/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 - CWE pattern references matching the findings' defect families
 
@@ -148,13 +149,13 @@ Before your dispatch returns, run in this order:
 2. `aith assess kill-finding <slug> ...` for each kill decision
 3. `aith assess record-chain code-vuln-verifier <chain-json>` for any composed chains
 4. `aith assess record-finding code-vuln-verifier <new-finding-json>` for net-new spot-check bugs (rare)
-5. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
-6. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+5. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
+6. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-The `record-handoff` step is idempotent and called incrementally — checkpoint
+`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -181,7 +182,9 @@ narrative rather than restating canonical state.
 ## Finding Prefix: VF
 
 Your primary role is to update existing findings (confirm, downgrade, kill) and create attack
-chains linking them. Only net-new spot-check findings should create fresh `VF` finding slugs.
+chains linking them. Only net-new spot-check findings should create fresh `VF` finding slugs;
+omit `slug` from those rare new finding payloads and let `aith assess record-finding
+code-vuln-verifier <new-finding-json>` allocate the canonical slug.
 
 ## Key Principles
 
@@ -194,6 +197,7 @@ chains linking them. Only net-new spot-check findings should create fresh `VF` f
 - **Construct the exploit, prove why you cannot, or identify probabilistic feasibility** — Check 4 requires one of the three
 - **ESCALATE is a first-class option at every check** — when evidence fits neither PASS nor KILL, record the specific ambiguity and route to multi-perspective voting instead of defaulting to either outcome
 - **Composable chains matter** — two medium findings may compose into a critical exploit
+- **Challenge absence, not just presence** — for each finding, also ask: "What configuration, user shape, or deployment variant would make this Higher severity?" If a permissive config or wildcard setting would escalate Medium to High, note that as a conditional severity in the verification output
 - **Full filesystem access** — use Read, Grep, Glob to verify call chains and guards independently
 - **Variant awareness** — when variants exist, a killed original may still have valid variants
 

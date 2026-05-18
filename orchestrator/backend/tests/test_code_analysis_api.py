@@ -129,6 +129,29 @@ def _classify_file(
     assert response.status_code == 200
 
 
+def _claim_file_for_analysis(
+    client,
+    engagement_key: str,
+    file_id: int,
+    *,
+    priority: int = 90,
+    agent_name: str = "code-vuln-hunter",
+) -> dict[str, object]:
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": file_id, "priority": priority}]},
+    )
+    assert queue_response.status_code == 201
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": agent_name},
+    )
+    assert claimed.status_code == 200
+    queue_item = claimed.json()[0]
+    assert queue_item["file_id"] == file_id
+    return queue_item
+
+
 def test_bulk_classify_rejects_unknown_fields(client, isolate_settings):
     engagement_key = "2026-04-09-code-classify-extra-fields"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
@@ -919,6 +942,223 @@ def test_cross_file_triggers_block_gate_until_requeued_and_dedupe_targets(client
     final_payload = final_coverage.json()
     assert final_payload["trigger_summary"]["resolved"] == 1
     assert final_payload["gate"]["passed"] is True
+
+
+def test_pending_trigger_can_be_resolved_as_external_context_gap(client, isolate_settings):
+    engagement_key = "2026-04-04-code-trigger-external-gap"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="trigger-external-gap-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    queue_item = claimed.json()[0]
+
+    analysis_result = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json={
+            "queue_item_id": queue_item["id"],
+            "file_id": parser_file["id"],
+            "agent_name": "code-vuln-hunter",
+            "function_name": "parse_message",
+            "evidence": "External DLL implements the storage call.",
+            "disposition": "clean",
+            "confidence": "medium",
+            "cross_file_triggers": [
+                {
+                    "file_path": "bin/StorageService.dll",
+                    "reason": "implementation not present in source snapshot",
+                    "vuln_class": "web-app-injection",
+                }
+            ],
+        },
+    )
+    assert analysis_result.status_code == 201
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "notes": "Reviewed parser",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+        },
+    )
+    assert done.status_code == 200
+
+    pending = client.get(f"/engagements/{engagement_key}/assessment/code/triggers?status=pending")
+    assert pending.status_code == 200
+    assert pending.json()[0]["target_file_path"] == "bin/StorageService.dll"
+
+    coverage_before = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage_before.json()["trigger_summary"]["pending"] == 1
+    assert coverage_before.json()["gate"]["passed"] is False
+
+    resolved = client.post(
+        f"/engagements/{engagement_key}/assessment/code/triggers/resolve",
+        json={
+            "items": [{"file_path": "bin/StorageService.dll", "vuln_class": "web-app-injection"}],
+            "resolution_status": "external_context_unavailable",
+            "resolution_note": "Implementation is outside the provided source snapshot.",
+        },
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["resolved"] == 1
+
+    resolve_again = client.post(
+        f"/engagements/{engagement_key}/assessment/code/triggers/resolve",
+        json={
+            "items": [{"file_path": "bin/StorageService.dll", "vuln_class": "web-app-injection"}],
+            "resolution_status": "not_applicable",
+            "resolution_note": "Second resolution should not overwrite terminal status.",
+        },
+    )
+    assert resolve_again.status_code == 200
+    assert resolve_again.json()["resolved"] == 0
+
+    coverage_after = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    payload = coverage_after.json()
+    assert payload["trigger_summary"]["pending"] == 0
+    assert payload["trigger_summary"]["external_context_unavailable"] == 1
+    assert payload["gate"]["passed"] is True
+
+
+def test_not_applicable_cwe_coverage_does_not_block_effort_gate(client, isolate_settings):
+    engagement_key = "2026-04-04-code-cwe-not-applicable"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="cwe-not-applicable-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queue_response.status_code == 201
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    queue_item = claimed.json()[0]
+
+    coverage = _network_input_coverage(
+        default_effort=80,
+        overrides={
+            "algorithmic-dos": {
+                "effort": 0,
+                "disposition": "not_applicable",
+                "notes": "Static XML/config path has no executable parser loop in this file.",
+            }
+        },
+    )
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "notes": "Reviewed parser",
+            "cwe_coverage": coverage,
+        },
+    )
+    assert done.status_code == 200
+
+    coverage_after = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage_after.status_code == 200
+    assert coverage_after.json()["gate"]["passed"] is True
+
+
+def test_cwe_coverage_merge_clears_stale_not_applicable_entry():
+    cwe_by_file: dict[int, dict[str, dict[str, object]]] = {}
+
+    code_analysis._merge_cwe_coverage_entries(
+        cwe_by_file,
+        7,
+        [{"family": "ssrf", "disposition": "not_applicable", "effort": 0}],
+    )
+    code_analysis._merge_cwe_coverage_entries(
+        cwe_by_file,
+        7,
+        [{"family": "ssrf", "disposition": "clean", "effort": 70, "functions_analyzed": 3}],
+    )
+
+    merged = cwe_by_file[7]["ssrf"]
+    assert merged.get("not_applicable") is not True
+    assert merged["disposition"] == "clean"
+    assert merged["effort"] == 70
+    assert merged["functions_analyzed"] == 3
+
+
+def test_reanalysis_effort_gate_does_not_skip_family_with_stale_not_applicable(
+    client,
+    isolate_settings,
+):
+    engagement_key = "2026-05-14-code-cwe-reanalysis-na"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="cwe-reanalysis-na-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    file_id = int(parser_file["id"])
+    _classify_file(client, engagement_key, file_id, "critical", 100)
+
+    first_item = _claim_file_for_analysis(client, engagement_key, file_id, priority=100)
+    first_done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [first_item["id"]],
+            "disposition": "clean",
+            "notes": "Initial pass misclassified SSRF as not applicable.",
+            "cwe_coverage": _network_input_coverage(
+                default_effort=80,
+                overrides={
+                    "ssrf": {
+                        "effort": 0,
+                        "disposition": "not_applicable",
+                    }
+                },
+            ),
+        },
+    )
+    assert first_done.status_code == 200
+
+    second_item = _claim_file_for_analysis(client, engagement_key, file_id, priority=100)
+    second_done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [second_item["id"]],
+            "disposition": "clean",
+            "notes": "Re-analysis found SSRF applicable but under-reviewed.",
+            "cwe_coverage": _network_input_coverage(
+                default_effort=80,
+                overrides={"ssrf": {"effort": 10, "disposition": "clean"}},
+            ),
+        },
+    )
+    assert second_done.status_code == 200
+
+    coverage_after = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    )
+    assert coverage_after.status_code == 200
+    gate = coverage_after.json()["gate"]
+    assert gate["passed"] is False
+    assert any("family 'ssrf' effort 10 < 70" in reason for reason in gate["reasons"])
 
 
 def test_analysis_result_triggers_are_recorded_before_requeue(client, isolate_settings):
@@ -2163,8 +2403,8 @@ def test_analysis_result_rejects_queue_item_reclaimed_after_validation(client, i
     assert "changed state before recording analysis result" in result.json()["detail"]
 
 
-def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
-    """Analysis results can be recorded with queue_item_id=None."""
+def test_analysis_result_requires_queue_item_id(client, isolate_settings):
+    """Analysis results must be tied to a claimed queue item."""
     engagement_key = "2026-04-04-result-no-queue"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
     repo = _create_repo(client, engagement_key, repo_key="result-repo")
@@ -2172,7 +2412,6 @@ def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
 
-    # Record an analysis result without a queue_item_id
     result_response = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-results",
         json={
@@ -2196,55 +2435,28 @@ def test_analysis_result_with_optional_queue_item_id(client, isolate_settings):
             ],
         },
     )
-    assert result_response.status_code == 201
-    result = result_response.json()
-    assert result["queue_item_id"] is None
-    assert result["file_id"] == parser_file["id"]
-    assert result["cwe_coverage"] == _network_input_coverage(default_effort=80)
-    assert result["cross_file_triggers"] == [
-        {
-            "file_path": "src/helpers.py",
-            "reason": "helper receives attacker-controlled bytes",
-            "vuln_class": "buffer-overflow",
-        }
-    ]
-
-    file_row = client.get(
-        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
-    )
-    assert file_row.status_code == 200
-    assert file_row.json()["analysis_status"] == "analyzed"
-
-    coverage = client.get(
-        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
-    )
-    assert coverage.status_code == 200
-    coverage_payload = coverage.json()
-    assert coverage_payload["by_classification"]["critical"]["analyzed"] == 1
-    assert coverage_payload["gate"]["passed"] is False
-    assert coverage_payload["trigger_summary"]["pending"] == 1
-
-    cwe_detail = client.get(
-        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}&detail=cwe"
-    )
-    assert cwe_detail.status_code == 200
-    parser_detail = next(f for f in cwe_detail.json()["files"] if f["file_id"] == parser_file["id"])
-    assert parser_detail["cwe_coverage"]
-    assert next(e for e in parser_detail["cwe_coverage"] if e["family"] == "web-app-injection")["effort"] == 80
+    assert result_response.status_code == 422
+    assert "queue_item_id" in result_response.text
 
 
-def test_direct_analysis_result_without_queue_can_satisfy_coverage_gate(client, isolate_settings):
+def test_analysis_result_uses_queue_item_file_id_for_coverage_gate(client, isolate_settings):
     engagement_key = "2026-04-04-direct-result-coverage"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
     repo = _create_repo(client, engagement_key, repo_key="direct-coverage-repo")
     files = _create_files(client, engagement_key, int(repo["id"]))
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(
+        client,
+        engagement_key,
+        int(parser_file["id"]),
+        priority=100,
+    )
 
     result_response = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-results",
         json={
-            "file_id": parser_file["id"],
+            "queue_item_id": queue_item["id"],
             "agent_name": "code-vuln-hunter",
             "function_name": "parse_message",
             "hypothesis": "All applicable network-input families were reviewed.",
@@ -2256,6 +2468,18 @@ def test_direct_analysis_result_without_queue_can_satisfy_coverage_gate(client, 
         },
     )
     assert result_response.status_code == 201
+    assert result_response.json()["file_id"] == parser_file["id"]
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "cwe_coverage": _network_input_coverage(default_effort=80),
+            "notes": "Reviewed",
+        },
+    )
+    assert done.status_code == 200
 
     coverage = client.get(
         f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
@@ -2267,6 +2491,33 @@ def test_direct_analysis_result_without_queue_can_satisfy_coverage_gate(client, 
     assert payload["gate"]["passed"] is True
 
 
+def test_analysis_result_rejects_file_id_mismatched_with_queue_item(client, isolate_settings):
+    engagement_key = "2026-04-04-result-file-mismatch"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="file-mismatch-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
+
+    result_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json={
+            "queue_item_id": queue_item["id"],
+            "file_id": helper_file["id"],
+            "agent_name": "code-vuln-hunter",
+            "function_name": "parse_message",
+            "hypothesis": "Payload file_id should not override the queue item.",
+            "evidence": "The queue item belongs to src/parser.py.",
+            "disposition": "clean",
+            "confidence": "medium",
+        },
+    )
+    assert result_response.status_code == 400
+    assert "does not match the queue item" in result_response.json()["detail"]
+
+
 def test_analysis_results_dedupe_cross_file_triggers_across_writers(client, isolate_settings):
     engagement_key = "2026-04-09-analysis-result-trigger-dedupe"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
@@ -2276,9 +2527,10 @@ def test_analysis_results_dedupe_cross_file_triggers_across_writers(client, isol
     helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
     _classify_file(client, engagement_key, int(helper_file["id"]), "high", 80)
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
 
     payload = {
-        "file_id": parser_file["id"],
+        "queue_item_id": queue_item["id"],
         "agent_name": "code-vuln-hunter",
         "function_name": "parse_message",
         "hypothesis": "Shared helper may reintroduce taint.",
@@ -2356,11 +2608,13 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
         },
     )
     assert finding.status_code == 201
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
 
     result_response = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-results",
         json={
-            "file_id": parser_file["id"],
+            "queue_item_id": queue_item["id"],
             "agent_name": "code-vuln-hunter",
             "function_name": "parse_message",
             "hypothesis": "Potential parser overflow",
@@ -2522,3 +2776,236 @@ def test_coverage_detail_cwe(client, isolate_settings):
     assert "total_files" in payload
     assert "by_classification" in payload
     assert "gate" in payload
+
+
+def test_coverage_integrity_warns_when_no_results_recorded(client, isolate_settings):
+    """Completing a queue item with high effort but zero analysis results triggers a warning."""
+    engagement_key = "2026-05-12-integrity-no-results"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="integrity-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    # Set total_functions so the integrity check has something to compare
+    client.patch(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}",
+        json={"total_functions": 10},
+    )
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
+
+    # Complete WITHOUT recording any analysis results
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "cwe_coverage": _network_input_coverage(
+                default_effort=80,
+                overrides={"web-app-injection": {"effort": 80, "functions_analyzed": 8}},
+            ),
+            "notes": "Reviewed",
+        },
+    )
+    assert done.status_code == 200
+    integrity = done.json()["coverage_integrity"]
+    assert integrity["plausible"] is False
+    assert integrity["actual_result_rows"] == 0
+    assert len(integrity["warnings"]) > 0
+
+
+def test_coverage_integrity_passes_with_matching_results(client, isolate_settings):
+    """Proper analysis results backing the coverage claims produces no warnings."""
+    engagement_key = "2026-05-12-integrity-passes"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="integrity-pass-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    client.patch(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}",
+        json={"total_functions": 5},
+    )
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
+
+    # Record analysis results for distinct functions
+    for func_name in ["parse_message", "validate_input", "handle_request", "process_data"]:
+        client.post(
+            f"/engagements/{engagement_key}/assessment/code/analysis-results",
+            json={
+                "queue_item_id": queue_item["id"],
+                "agent_name": "code-vuln-hunter",
+                "function_name": func_name,
+                "hypothesis": f"Check {func_name}",
+                "evidence": "No issues found",
+                "disposition": "clean",
+                "confidence": "high",
+            },
+        )
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "cwe_coverage": _network_input_coverage(
+                default_effort=80,
+                overrides={"web-app-injection": {"effort": 85, "functions_analyzed": 5}},
+            ),
+            "notes": "Thorough review",
+        },
+    )
+    assert done.status_code == 200
+    integrity = done.json()["coverage_integrity"]
+    assert integrity["plausible"] is True
+    assert integrity["actual_result_rows"] == 4
+    assert integrity["distinct_functions_with_results"] == 4
+    assert len(integrity["warnings"]) == 0
+
+
+def test_coverage_integrity_warns_claimed_exceeds_total(client, isolate_settings):
+    """Claiming more functions_analyzed than total_functions on file triggers a warning."""
+    engagement_key = "2026-05-12-integrity-exceeds"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="integrity-exceeds-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    client.patch(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}",
+        json={"total_functions": 3},
+    )
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
+
+    # Record 2 results
+    for func_name in ["func_a", "func_b"]:
+        client.post(
+            f"/engagements/{engagement_key}/assessment/code/analysis-results",
+            json={
+                "queue_item_id": queue_item["id"],
+                "agent_name": "code-vuln-hunter",
+                "function_name": func_name,
+                "hypothesis": "Check",
+                "evidence": "Clean",
+                "disposition": "clean",
+            },
+        )
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "cwe_coverage": _network_input_coverage(
+                default_effort=70,
+                overrides={"web-app-injection": {"effort": 70, "functions_analyzed": 10}},
+            ),
+            "notes": "Done",
+        },
+    )
+    assert done.status_code == 200
+    integrity = done.json()["coverage_integrity"]
+    assert integrity["plausible"] is False
+    assert any("exceeds" in w for w in integrity["warnings"])
+
+
+def test_coverage_integrity_skips_not_applicable_entries(client, isolate_settings):
+    """Not-applicable entries do not trigger integrity warnings."""
+    engagement_key = "2026-05-12-integrity-na"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="integrity-na-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    client.patch(
+        f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}",
+        json={"total_functions": 5},
+    )
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
+
+    # Record 2 results — covers the non-NA families adequately
+    for func_name in ["main_handler", "auth_check"]:
+        client.post(
+            f"/engagements/{engagement_key}/assessment/code/analysis-results",
+            json={
+                "queue_item_id": queue_item["id"],
+                "agent_name": "code-vuln-hunter",
+                "function_name": func_name,
+                "hypothesis": "Check",
+                "evidence": "Clean",
+                "disposition": "clean",
+            },
+        )
+
+    # Coverage with some families as not_applicable
+    coverage = [
+        {"family": "web-app-injection", "effort": 70, "functions_analyzed": 2},
+        {"family": "web-app-auth", "effort": 70, "functions_analyzed": 2},
+        {"family": "ssrf", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
+        {"family": "open-redirect", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
+        {"family": "path-traversal", "effort": 70, "functions_analyzed": 2},
+        {"family": "algorithmic-dos", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
+    ]
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "cwe_coverage": coverage,
+            "notes": "Done",
+        },
+    )
+    assert done.status_code == 200
+    integrity = done.json()["coverage_integrity"]
+    assert integrity["plausible"] is True
+    assert len(integrity["warnings"]) == 0
+
+
+def test_coverage_integrity_graceful_when_total_functions_zero(client, isolate_settings):
+    """Files without structural index (total_functions=0) degrade gracefully."""
+    engagement_key = "2026-05-12-integrity-no-index"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="integrity-no-index-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+
+    # Do NOT set total_functions — defaults to 0
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
+
+    # Record 1 result
+    client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json={
+            "queue_item_id": queue_item["id"],
+            "agent_name": "code-vuln-hunter",
+            "function_name": "main_entry",
+            "hypothesis": "Check",
+            "evidence": "Clean",
+            "disposition": "clean",
+        },
+    )
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "clean",
+            "cwe_coverage": _network_input_coverage(
+                default_effort=70,
+                overrides={"web-app-injection": {"effort": 70, "functions_analyzed": 5}},
+            ),
+            "notes": "Done",
+        },
+    )
+    assert done.status_code == 200
+    integrity = done.json()["coverage_integrity"]
+    # total_functions=0 means "exceeds" and "effort with 0 rows" checks are skipped
+    assert integrity["total_functions_on_file"] == 0
+    # May still warn about ratio (1 distinct function vs 5 claimed = 0.2 < 0.3)
+    # but no "exceeds total_functions" warning
+    assert not any("exceeds" in w for w in integrity["warnings"])
