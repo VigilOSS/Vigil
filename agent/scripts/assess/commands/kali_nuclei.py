@@ -65,8 +65,22 @@ def _nuclei_engagement_lock(engagement_dir: Path):
                 stale = True
             if stale:
                 # Force-acquire: re-flock LOCK_EX | LOCK_NB after the prior
-                # owner released by dying.
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # owner released by dying. If the re-flock itself races
+                # (another writer is mid-acquire — lock taken but PID not yet
+                # written), convert BlockingIOError into the same actionable
+                # AssessError as a normal contention so operators see a clean
+                # message instead of an internal traceback.
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    os.close(fd)
+                    raise AssessError(
+                        f"nuclei lock contention on retry "
+                        f"(lockfile: {lock_path}). Another process is "
+                        "mid-acquire (lock taken but PID not yet recorded). "
+                        "Wait a moment and re-run, or remove the lockfile "
+                        "manually if no nuclei process is actually running."
+                    ) from exc
             else:
                 os.close(fd)
                 raise AssessError(
@@ -92,7 +106,33 @@ def _nuclei_engagement_lock(engagement_dir: Path):
             pass
 
 
-def _zero_byte_post_check(args, result) -> None:
+def _resolve_output_host_path(output_arg: str, engagement_dir: Path | None) -> Path | None:
+    """Map the operator-supplied `-o` path (engagement-relative inside the
+    container) to a path on the host filesystem under the engagement mount.
+
+    - `scans/foo.jsonl`               → `<engagement_dir>/scans/foo.jsonl`
+    - `/engagements/<key>/scans/foo`  → `<engagement_dir>/scans/foo`
+    - `/some/absolute/host/path`      → returned as-is when it exists on host
+
+    Returns None when no plausible host path can be derived (no engagement
+    context, or path shape we do not recognize).
+    """
+    if not output_arg or engagement_dir is None:
+        return None
+    candidate = Path(output_arg)
+    if candidate.is_absolute():
+        parts = candidate.parts
+        # /engagements/<key>/<rest...> → <engagement_dir>/<rest...>
+        if len(parts) >= 4 and parts[1] == "engagements":
+            return engagement_dir.joinpath(*parts[3:])
+        # Some non-mount absolute path — fall back to the literal path so a
+        # test or operator running nuclei with a host-side `-o` still gets
+        # inspected.
+        return candidate
+    return engagement_dir / candidate
+
+
+def _zero_byte_post_check(args, result, engagement_dir: Path | None) -> None:
     """C32: distinguish "no nuclei matches" (legitimate zero result) from
     "template loader failed at startup" (failure mode). The stderr line
     'Templates loaded for current scan: N' is the source of truth — if the
@@ -101,27 +141,24 @@ def _zero_byte_post_check(args, result) -> None:
     Does NOT raise — the audit row already records the run. Surfaces a warning
     so the operator does not record a phantom "no matches" finding when nuclei
     actually failed to start.
+
+    Inspects the `-o` output artifact (resolved to a host path under the
+    engagement mount), NOT the wrapper's stdout capture: `-jsonl`/`-silent`
+    workflows route findings through the `-o` file while stdout stays quiet,
+    so keying on `stdout_path` would warn on legitimate runs and miss real
+    loader failures.
     """
-    output_path = (getattr(args, "output", "") or "").strip()
-    if not output_path:
+    output_arg = (getattr(args, "output", "") or "").strip()
+    if not output_arg:
         return
-    # The output path is engagement-relative inside the container
-    # (/engagements/<key>/scans/...). On the host the same artifact lives
-    # under the engagement directory's mount, but resolving that here is
-    # brittle; instead key on the on-disk artifact path the runner reported.
-    try:
-        stdout_path = getattr(result, "stdout_path", None) or (
-            result.get("stdout_path") if isinstance(result, dict) else None
-        )
-    except AttributeError:
-        stdout_path = None
-    # If we cannot inspect the artifact path the runner reported, skip
-    # silently — the audit row is the source of truth, and the operator can
-    # still spot the failure via stderr.
-    if not stdout_path:
+    host_path = _resolve_output_host_path(output_arg, engagement_dir)
+    # No engagement context or unresolvable path: cannot stat the artifact.
+    # The audit row still records the run, and the operator can spot the
+    # failure via stderr — fail-open rather than warn on incomplete data.
+    if host_path is None or not host_path.exists():
         return
     try:
-        size = os.path.getsize(stdout_path)
+        size = host_path.stat().st_size
     except OSError:
         return
     if size > 0:
@@ -133,10 +170,11 @@ def _zero_byte_post_check(args, result) -> None:
         stderr_preview = getattr(result, "stderr_preview", "") or ""
     if "Templates loaded for current scan:" not in stderr_preview:
         print(
-            "WARN nuclei: zero-byte stdout AND no 'Templates loaded for current scan:' "
-            "in stderr — template loader likely failed at startup, NOT a legitimate "
-            "no-match run. Re-run with explicit -t paths and confirm the template "
-            "set loads cleanly. (See agent/skills/nuclei-scanning/SKILL.md "
+            f"WARN nuclei: output file {host_path} is zero bytes AND "
+            "'Templates loaded for current scan:' is absent from stderr — "
+            "template loader likely failed at startup, NOT a legitimate no-match "
+            "run. Re-run with explicit -t paths and confirm the template set "
+            "loads cleanly. (See agent/skills/nuclei-scanning/SKILL.md "
             "'Known fingerprint-suppression cases' for context.)",
             file=sys.stderr,
         )
@@ -211,5 +249,5 @@ def run(args) -> None:
             result = kali_exec(cmd, tool_name="nuclei", **kali_args_to_kwargs(args))
     else:
         result = kali_exec(cmd, tool_name="nuclei", **kali_args_to_kwargs(args))
-    _zero_byte_post_check(args, result)
+    _zero_byte_post_check(args, result, engagement_dir)
     emit_result(result)

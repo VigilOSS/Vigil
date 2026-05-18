@@ -144,7 +144,11 @@ def _last_auth_probe(client: AssessmentClient | None) -> dict | None:
     if client is None:
         return None
     try:
-        rows = client.get_engagement("command-runs?technique=AUTH&limit=1")
+        # /command-runs is registered on the assessment router
+        # (/engagements/{key}/assessment/command-runs), so go through
+        # `.get()` which carries the /assessment prefix — `.get_engagement()`
+        # targets the non-assessment scope and 404s here.
+        rows = client.get("command-runs?technique=AUTH&limit=1")
     except Exception:  # noqa: BLE001 — best-effort read
         return None
     items: list[dict] = []

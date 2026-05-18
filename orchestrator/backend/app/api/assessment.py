@@ -1671,6 +1671,7 @@ def get_decisions(
     kind: str = "",
     resolved: bool | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.list_decisions(
@@ -1678,6 +1679,7 @@ def get_decisions(
         kind=kind,
         resolved=resolved,
         limit=limit,
+        offset=offset,
     )
 
 
