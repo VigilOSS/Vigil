@@ -173,6 +173,20 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "--surfaced-to-user`."
         ),
     )
+    p.add_argument(
+        "--include-discovered",
+        dest="include_discovered",
+        action="store_true",
+        help=(
+            "FU1 — render the per-host matrix for ALL hosts with backend signal, "
+            "including those discovered under wildcard expansion. Default is "
+            "scope.json explicit literals only (bare_host + url entries) plus a "
+            "summary line for wildcard-discovered hosts. Pass this flag on "
+            "wildcard-light engagements where every discovered subdomain is "
+            "worth seeing in the matrix, or when debugging why a specific "
+            "discovered host's outcomes aren't passing."
+        ),
+    )
     p.set_defaults(func=run)
 
 
@@ -342,6 +356,10 @@ def run(args: argparse.Namespace) -> None:
     by_host_section: dict[str, Any] | None = None
     if by_host_payload is not None:
         by_host_section = _annotate_by_host_payload(by_host_payload)
+        if not bool(getattr(args, "include_discovered", False)):
+            by_host_section = _filter_to_scope_literals(
+                by_host_section, explicit_literal_hosts
+            )
         per_host_warnings = _per_host_warning_lines(by_host_section)
 
     report = {
@@ -866,6 +884,81 @@ def _annotate_by_host_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _filter_to_scope_literals(
+    section: dict[str, Any],
+    scope_literals: set[str],
+) -> dict[str, Any]:
+    """FU1 — fold wildcard-discovered hosts into a summary row.
+
+    The C40 projection returns every host with backend signal — on
+    wildcard-heavy engagements (a scope.json entry like ``*.example.com``
+    that recon expanded into hundreds of subdomains), the resulting
+    matrix becomes unreadable. This filter keeps hosts that the operator
+    explicitly authored in scope.json (bare_host + url entries) as full
+    matrix rows, and folds everything else into ``discovered_summary``:
+    counts of total / unmet / deferred discovered hosts plus the top
+    three most-frequent unmet objectives.
+
+    When ``scope_literals`` is empty (scope.json had no explicit literals,
+    only wildcards), this function returns the section unchanged — the
+    operator has no other anchor to filter against.
+
+    Operators who want to see every discovered host can pass
+    ``--include-discovered`` to bypass this filter at the run() level.
+    """
+    if not scope_literals:
+        return section
+
+    literal_hosts: list[dict[str, Any]] = []
+    discovered_hosts: list[dict[str, Any]] = []
+    for row in section.get("hosts", []):
+        host = str(row.get("host", "")).strip().lower()
+        if host in scope_literals:
+            literal_hosts.append(row)
+        else:
+            discovered_hosts.append(row)
+
+    if not discovered_hosts:
+        # Nothing was wildcard-discovered. Don't add a noise summary block.
+        return section
+
+    objectives = section.get("objectives", list(_PER_HOST_OBJECTIVES))
+    unmet_counter: dict[str, int] = {obj: 0 for obj in objectives}
+    hosts_with_unmet = 0
+    hosts_with_deferral = 0
+    for row in discovered_hosts:
+        if row.get("unmet_objectives"):
+            hosts_with_unmet += 1
+        if row.get("deferrals"):
+            hosts_with_deferral += 1
+        for objective in row.get("unmet_objectives", []):
+            unmet_counter[objective] = unmet_counter.get(objective, 0) + 1
+
+    top_unmet = sorted(
+        (
+            (objective, count)
+            for objective, count in unmet_counter.items()
+            if count > 0
+        ),
+        key=lambda kv: (-kv[1], kv[0]),
+    )[:3]
+
+    summary = {
+        "discovered_count": len(discovered_hosts),
+        "hosts_with_unmet_count": hosts_with_unmet,
+        "hosts_with_deferral_count": hosts_with_deferral,
+        "top_unmet_objectives": [
+            {"objective": objective, "host_count": count}
+            for objective, count in top_unmet
+        ],
+    }
+    return {
+        **section,
+        "hosts": literal_hosts,
+        "discovered_summary": summary,
+    }
+
+
 def _per_host_warning_lines(section: dict[str, Any]) -> list[str]:
     """Build human-readable per-objective warning lines.
 
@@ -895,26 +988,45 @@ def _render_per_host_section(section: dict[str, Any], warnings: list[str]) -> No
     """Emit the human-readable per-host outcome table after the main report."""
     hosts = section.get("hosts", [])
     objectives = section.get("objectives", list(_PER_HOST_OBJECTIVES))
+    discovered_summary = section.get("discovered_summary")
     print("")
     print(f"per-host coverage outcomes (C40 — WARN-only):")
-    if not hosts:
+    if not hosts and not discovered_summary:
         print("  (no hosts with backend signal — recon dispatch is the next step)")
         return
-    print("  objectives: " + ", ".join(objectives))
-    for row in hosts:
-        host = row.get("host", "")
-        outcomes = row.get("outcomes", {})
-        cells: list[str] = []
-        for objective in objectives:
-            cell = outcomes.get(objective) or {}
-            if cell.get("deferred"):
-                marker = "D"
-            elif cell.get("met"):
-                marker = "Y"
-            else:
-                marker = "N"
-            cells.append(f"{objective}={marker}")
-        print(f"  - {host}: {', '.join(cells)}")
+    if hosts:
+        print("  objectives: " + ", ".join(objectives))
+        for row in hosts:
+            host = row.get("host", "")
+            outcomes = row.get("outcomes", {})
+            cells: list[str] = []
+            for objective in objectives:
+                cell = outcomes.get(objective) or {}
+                if cell.get("deferred"):
+                    marker = "D"
+                elif cell.get("met"):
+                    marker = "Y"
+                else:
+                    marker = "N"
+                cells.append(f"{objective}={marker}")
+            print(f"  - {host}: {', '.join(cells)}")
+    if discovered_summary:
+        count = discovered_summary.get("discovered_count", 0)
+        with_unmet = discovered_summary.get("hosts_with_unmet_count", 0)
+        with_deferral = discovered_summary.get("hosts_with_deferral_count", 0)
+        top_unmet = discovered_summary.get("top_unmet_objectives") or []
+        top_unmet_str = (
+            ", ".join(
+                f"{entry['objective']} ({entry['host_count']})" for entry in top_unmet
+            )
+            or "—"
+        )
+        print(
+            f"  + {count} discovered host(s) from wildcard expansion: "
+            f"{with_unmet} unmet, {with_deferral} with deferrals. "
+            f"top unmet objectives: {top_unmet_str}. "
+            "Pass --include-discovered for the full matrix."
+        )
     if warnings:
         print("per-host-warnings (WARN-only; does not block phase advance):")
         for line in warnings:
