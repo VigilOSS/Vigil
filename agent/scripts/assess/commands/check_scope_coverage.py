@@ -91,9 +91,14 @@ def _vendor_saas_decided_hosts(client: AssessmentClient) -> set[str]:
     ``kind='scope_decision'``. Hosts in that set are excluded from the
     phase-advance gate. A backend failure returns the empty set (the gate
     fires conservatively).
+
+    Uses ``list_all_decisions`` (paginated) instead of ``list_decisions`` —
+    the latter caps at the backend's 100-row default and would silently drop
+    older decisions on long-running engagements, causing the phase gate to
+    block transitions even when the operator already recorded the decision.
     """
     try:
-        rows = client.list_decisions(kind="scope_decision")
+        rows = client.list_all_decisions(kind="scope_decision")
     except AssessError:
         return set()
     decisions: set[str] = set()
@@ -157,7 +162,98 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "but do not block phase advance."
         ),
     )
+    p.add_argument(
+        "--by-host",
+        dest="by_host",
+        action="store_true",
+        help=(
+            "C40 — emit per-host outcome status (WAF tier, service inventory, "
+            "directory-fuzz coverage, nikto trigger, OSINT) for every host the "
+            "engagement has signal for. Outcomes are read from intel / surface / "
+            "service / decision tables; this gate NEVER queries assessment_command_runs. "
+            "Unmet objectives WARN but do not block (use --force on transition-phase "
+            "if needed). Record an explicit skip via "
+            "`aith assess agent decision --kind coverage_deferral --payload-json "
+            "'{\"host\": \"...\", \"deferred_objectives\": [\"directory_fuzz\"], \"reason\": \"...\"}' "
+            "--surfaced-to-user`."
+        ),
+    )
+    p.add_argument(
+        "--include-discovered",
+        dest="include_discovered",
+        action="store_true",
+        help=(
+            "FU1 — render the per-host matrix for ALL hosts with backend signal, "
+            "including those discovered under wildcard expansion. Default is "
+            "scope.json explicit literals only (bare_host + url entries) plus a "
+            "summary line for wildcard-discovered hosts. Pass this flag on "
+            "wildcard-light engagements where every discovered subdomain is "
+            "worth seeing in the matrix, or when debugging why a specific "
+            "discovered host's outcomes aren't passing."
+        ),
+    )
     p.set_defaults(func=run)
+
+
+# ---------------------------------------------------------------------------
+# C40 — per-host outcome objectives + actionable dispatch hints
+# ---------------------------------------------------------------------------
+
+
+# Mirror of `state_manager.PER_HOST_OBJECTIVES`. Kept duplicated here to avoid
+# importing backend modules into the CLI; the test asserts the lists agree.
+_PER_HOST_OBJECTIVES: tuple[str, ...] = (
+    "waf_tier",
+    "service_inventory",
+    "directory_fuzz",
+    "nikto_trigger",
+    "osint",
+)
+
+
+# Canonical specialist names referenced in dispatch hints below. Centralizing
+# them keeps a future role-file rename (e.g. recon-specialist -> web-recon-lead)
+# from silently leaving stale references in the hint strings. The regression
+# test in `test_check_scope_coverage_specialist_roster_exists` asserts each
+# value here has a matching `agent/agents/<name>.md` file on disk, so a rename
+# without a hint update fails the test suite.
+_HINT_RECON_SPECIALIST = "recon-specialist"
+_HINT_OSINT_ANALYST = "osint-analyst"
+
+
+# Per-objective remediation hint. Operators read this when the gate WARNs so
+# they know exactly what to dispatch (or what coverage_deferral to record) to
+# clear the line.
+_OBJECTIVE_DISPATCH_HINTS: dict[str, str] = {
+    "waf_tier": (
+        f"dispatch {_HINT_RECON_SPECIALIST} with skill web-recon (records "
+        "intel_tech_components via wafw00f / httpx --tech-detect / whatweb), "
+        "OR record `aith assess agent decision --kind coverage_deferral "
+        "--payload-json '{{\"host\": \"{host}\", \"deferred_objectives\": "
+        "[\"waf_tier\"], \"reason\": \"...\"}}' --surfaced-to-user`"
+    ),
+    "service_inventory": (
+        f"dispatch {_HINT_RECON_SPECIALIST} (records assessment_services / "
+        "assessment_surfaces) or ingest endpoints via `aith assess "
+        "ingest-endpoints`, OR record a coverage_deferral for the host"
+    ),
+    "directory_fuzz": (
+        f"dispatch {_HINT_RECON_SPECIALIST} with skill directory-fuzzing "
+        "(records assessment_surfaces via record-surface), OR record a "
+        "coverage_deferral with reason='brute-force forbidden by scope brief' "
+        "if the program disallows directory brute-force"
+    ),
+    "nikto_trigger": (
+        f"dispatch {_HINT_RECON_SPECIALIST} with web-recon (any of whatweb / "
+        "httpx -tech-detect / nuclei tech templates / nikto recording a "
+        "tech-component intel row satisfies this), OR record a coverage_deferral"
+    ),
+    "osint": (
+        f"dispatch {_HINT_OSINT_ANALYST} (records intel_tech_components, "
+        "intel_people, intel_breach_records), OR record an engagement-level "
+        "coverage_deferral if OSINT is explicitly out of scope"
+    ),
+}
 
 
 def run(args: argparse.Namespace) -> None:
@@ -184,6 +280,7 @@ def run(args: argparse.Namespace) -> None:
     scope_metadata = _extract_scope_metadata(scope_data)
 
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    by_host_payload: dict[str, Any] | None = None
     try:
         try:
             services = client.get("services")
@@ -196,6 +293,16 @@ def run(args: argparse.Namespace) -> None:
             print(f"check-scope-coverage: backend surfaces fetch failed: {exc}", file=sys.stderr)
             sys.exit(1)
         decided_hosts = _vendor_saas_decided_hosts(client)
+        if bool(getattr(args, "by_host", False)):
+            try:
+                by_host_payload = client.get("coverage-readiness/by-host")
+            except AssessError as exc:
+                print(
+                    "check-scope-coverage: backend per-host coverage fetch failed: "
+                    f"{exc}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
     finally:
         client.close()
 
@@ -250,6 +357,16 @@ def run(args: argparse.Namespace) -> None:
             )
     ready = not overall_gaps
 
+    per_host_warnings: list[str] = []
+    by_host_section: dict[str, Any] | None = None
+    if by_host_payload is not None:
+        by_host_section = _annotate_by_host_payload(by_host_payload)
+        if not bool(getattr(args, "include_discovered", False)):
+            by_host_section = _filter_to_scope_literals(
+                by_host_section, explicit_literal_hosts
+            )
+        per_host_warnings = _per_host_warning_lines(by_host_section)
+
     report = {
         "engagement_key": cfg.engagement_key,
         "required_stage": args.require_stage,
@@ -261,11 +378,16 @@ def run(args: argparse.Namespace) -> None:
         "strict_vendor_saas": strict_vendor_saas,
         "ready": ready,
     }
+    if by_host_section is not None:
+        report["per_host_coverage"] = by_host_section
+        report["per_host_warnings"] = per_host_warnings
 
     if args.as_json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
         _render_text(report, verbose=args.verbose)
+        if by_host_section is not None:
+            _render_per_host_section(by_host_section, per_host_warnings)
 
     if not ready:
         sys.exit(1)
@@ -695,3 +817,222 @@ def _render_text(report: dict[str, Any], *, verbose: bool) -> None:
                 f"--kind scope_decision --host {row['host']} --vendor {row['vendor']} "
                 f"--choice ...` before recon dispatch"
             )
+
+
+# ---------------------------------------------------------------------------
+# C40 — per-host outcome rendering helpers
+# ---------------------------------------------------------------------------
+
+
+def _annotate_by_host_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the backend per-host payload into a stable rendering shape.
+
+    Backwards-compatibility insurance: if the backend ever returns a missing
+    objective (older API revision), the CLI still emits a deterministic row
+    so the operator output doesn't go silent. Unknown objectives the backend
+    returns are preserved verbatim.
+    """
+    objectives_from_payload = payload.get("objectives") if isinstance(payload, dict) else None
+    if not isinstance(objectives_from_payload, list) or not objectives_from_payload:
+        objectives = list(_PER_HOST_OBJECTIVES)
+    else:
+        objectives = [str(name) for name in objectives_from_payload if isinstance(name, str)]
+
+    raw_hosts = payload.get("hosts") if isinstance(payload, dict) else None
+    hosts: list[dict[str, Any]] = []
+    if isinstance(raw_hosts, list):
+        for row in raw_hosts:
+            if not isinstance(row, dict):
+                continue
+            host = str(row.get("host") or "").strip().lower()
+            if not host:
+                continue
+            outcomes_payload = row.get("outcomes")
+            outcomes: dict[str, dict[str, Any]] = {}
+            for name in objectives:
+                cell = (
+                    outcomes_payload.get(name)
+                    if isinstance(outcomes_payload, dict)
+                    else None
+                )
+                if not isinstance(cell, dict):
+                    cell = {"met": False, "evidence": [], "deferred": False}
+                outcomes[name] = {
+                    "met": bool(cell.get("met")),
+                    "evidence": list(cell.get("evidence") or []),
+                    "deferred": bool(cell.get("deferred")),
+                }
+            unmet = [
+                name
+                for name in objectives
+                if not outcomes[name]["met"] and not outcomes[name]["deferred"]
+            ]
+            deferred_objectives = sorted(
+                {name for name in objectives if outcomes[name]["deferred"]}
+            )
+            hosts.append(
+                {
+                    "host": host,
+                    "outcomes": outcomes,
+                    "unmet_objectives": unmet,
+                    "deferred_objectives": deferred_objectives,
+                    "deferrals": row.get("deferrals") or [],
+                }
+            )
+    engagement_signals = (
+        payload.get("engagement_signals") if isinstance(payload, dict) else None
+    )
+    return {
+        "objectives": objectives,
+        "hosts": hosts,
+        "engagement_signals": engagement_signals if isinstance(engagement_signals, dict) else {},
+    }
+
+
+def _filter_to_scope_literals(
+    section: dict[str, Any],
+    scope_literals: set[str],
+) -> dict[str, Any]:
+    """FU1 — fold wildcard-discovered hosts into a summary row.
+
+    The C40 projection returns every host with backend signal — on
+    wildcard-heavy engagements (a scope.json entry like ``*.example.com``
+    that recon expanded into hundreds of subdomains), the resulting
+    matrix becomes unreadable. This filter keeps hosts that the operator
+    explicitly authored in scope.json (bare_host + url entries) as full
+    matrix rows, and folds everything else into ``discovered_summary``:
+    counts of total / unmet / deferred discovered hosts plus the top
+    three most-frequent unmet objectives.
+
+    When ``scope_literals`` is empty (scope.json had no explicit literals,
+    only wildcards), this function returns the section unchanged — the
+    operator has no other anchor to filter against.
+
+    Operators who want to see every discovered host can pass
+    ``--include-discovered`` to bypass this filter at the run() level.
+    """
+    if not scope_literals:
+        return section
+
+    literal_hosts: list[dict[str, Any]] = []
+    discovered_hosts: list[dict[str, Any]] = []
+    for row in section.get("hosts", []):
+        host = str(row.get("host", "")).strip().lower()
+        if host in scope_literals:
+            literal_hosts.append(row)
+        else:
+            discovered_hosts.append(row)
+
+    if not discovered_hosts:
+        # Nothing was wildcard-discovered. Don't add a noise summary block.
+        return section
+
+    objectives = section.get("objectives", list(_PER_HOST_OBJECTIVES))
+    unmet_counter: dict[str, int] = {obj: 0 for obj in objectives}
+    hosts_with_unmet = 0
+    hosts_with_deferral = 0
+    for row in discovered_hosts:
+        if row.get("unmet_objectives"):
+            hosts_with_unmet += 1
+        if row.get("deferrals"):
+            hosts_with_deferral += 1
+        for objective in row.get("unmet_objectives", []):
+            unmet_counter[objective] = unmet_counter.get(objective, 0) + 1
+
+    top_unmet = sorted(
+        (
+            (objective, count)
+            for objective, count in unmet_counter.items()
+            if count > 0
+        ),
+        key=lambda kv: (-kv[1], kv[0]),
+    )[:3]
+
+    summary = {
+        "discovered_count": len(discovered_hosts),
+        "hosts_with_unmet_count": hosts_with_unmet,
+        "hosts_with_deferral_count": hosts_with_deferral,
+        "top_unmet_objectives": [
+            {"objective": objective, "host_count": count}
+            for objective, count in top_unmet
+        ],
+    }
+    return {
+        **section,
+        "hosts": literal_hosts,
+        "discovered_summary": summary,
+    }
+
+
+def _per_host_warning_lines(section: dict[str, Any]) -> list[str]:
+    """Build human-readable per-objective warning lines.
+
+    Each line names a (host, unmet objective) pair plus the dispatch the
+    operator should run to clear it. Deferred objectives are silent. The
+    function never raises and never returns None — empty list ↔ no warnings.
+    """
+    warnings: list[str] = []
+    for row in section.get("hosts", []):
+        host = row.get("host", "")
+        for objective in row.get("unmet_objectives", []):
+            hint = _OBJECTIVE_DISPATCH_HINTS.get(
+                objective,
+                "dispatch the appropriate specialist or record a coverage_deferral",
+            )
+            try:
+                rendered_hint = hint.format(host=host)
+            except (KeyError, IndexError):
+                rendered_hint = hint
+            warnings.append(
+                f"host {host} unmet objective {objective} — {rendered_hint}"
+            )
+    return warnings
+
+
+def _render_per_host_section(section: dict[str, Any], warnings: list[str]) -> None:
+    """Emit the human-readable per-host outcome table after the main report."""
+    hosts = section.get("hosts", [])
+    objectives = section.get("objectives", list(_PER_HOST_OBJECTIVES))
+    discovered_summary = section.get("discovered_summary")
+    print("")
+    print(f"per-host coverage outcomes (C40 — WARN-only):")
+    if not hosts and not discovered_summary:
+        print("  (no hosts with backend signal — recon dispatch is the next step)")
+        return
+    if hosts:
+        print("  objectives: " + ", ".join(objectives))
+        for row in hosts:
+            host = row.get("host", "")
+            outcomes = row.get("outcomes", {})
+            cells: list[str] = []
+            for objective in objectives:
+                cell = outcomes.get(objective) or {}
+                if cell.get("deferred"):
+                    marker = "D"
+                elif cell.get("met"):
+                    marker = "Y"
+                else:
+                    marker = "N"
+                cells.append(f"{objective}={marker}")
+            print(f"  - {host}: {', '.join(cells)}")
+    if discovered_summary:
+        count = discovered_summary.get("discovered_count", 0)
+        with_unmet = discovered_summary.get("hosts_with_unmet_count", 0)
+        with_deferral = discovered_summary.get("hosts_with_deferral_count", 0)
+        top_unmet = discovered_summary.get("top_unmet_objectives") or []
+        top_unmet_str = (
+            ", ".join(
+                f"{entry['objective']} ({entry['host_count']})" for entry in top_unmet
+            )
+            or "—"
+        )
+        print(
+            f"  + {count} discovered host(s) from wildcard expansion: "
+            f"{with_unmet} unmet, {with_deferral} with deferrals. "
+            f"top unmet objectives: {top_unmet_str}. "
+            "Pass --include-discovered for the full matrix."
+        )
+    if warnings:
+        print("per-host-warnings (WARN-only; does not block phase advance):")
+        for line in warnings:
+            print(f"  ! {line}")

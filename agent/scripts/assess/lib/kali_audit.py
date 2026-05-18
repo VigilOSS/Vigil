@@ -42,6 +42,76 @@ ALLOWED_PHASES: tuple[str, ...] = (
 _INTENT_MAX_LEN = 200
 
 
+def _extract_target_host(tool_name: str, cmd: list[str]) -> str:
+    """C30: extract a parsed target host from argv for high-traffic verbs.
+
+    Operators query coverage with ``aith assess list-command-runs
+    --target-host <host>``; the backend stores this in the
+    ``target_host`` column. Per-verb extraction keeps the logic simple
+    and deterministic — each kali wrapper knows its argv shape, so the
+    parser is a switch on tool_name rather than a generic URL/host
+    regex over the whole command string.
+
+    Unhandled tools return ''. The existing FTS ``--q`` search still
+    matches those rows, so no row is hidden from coverage queries —
+    only the exact-match filter is empty.
+    """
+    if not cmd:
+        return ""
+    tool = (tool_name or "").lower()
+
+    def _host_from_url(value: str) -> str:
+        # Strip scheme, port, path. Tolerate '@user:pass' shapes.
+        # Returns the canonical bare host so `--target-host <host>` queries
+        # match — for bracketed IPv6 URLs that means the address inside the
+        # brackets (e.g. `https://[2001:db8::1]:8443` → `2001:db8::1`), not
+        # the `[addr]:port` literal.
+        v = value.strip()
+        if not v:
+            return ""
+        if "://" in v:
+            v = v.split("://", 1)[1]
+        # Drop everything after the first '/'
+        v = v.split("/", 1)[0]
+        # Drop credentials
+        if "@" in v:
+            v = v.split("@", 1)[1]
+        # Bracketed IPv6 with optional :port suffix — extract the address
+        # inside the brackets. URLs MUST bracket IPv6 literals per RFC 3986,
+        # so unbracketed-IPv6 input is out of scope.
+        if v.startswith("["):
+            end = v.find("]")
+            if end > 0:
+                return v[1:end].lower()
+            # Malformed input — fall through and emit the lowercased literal.
+        elif ":" in v:
+            # plain host:port
+            v = v.split(":", 1)[0]
+        return v.lower()
+
+    def _next_value(flag_names: tuple[str, ...]) -> str:
+        for idx, token in enumerate(cmd):
+            if token in flag_names and idx + 1 < len(cmd):
+                return cmd[idx + 1]
+        return ""
+
+    if tool == "httpx":
+        # httpx supports -u <url> (single) or -l <file> (list); for list mode
+        # we cannot pin a single target, leave empty.
+        return _host_from_url(_next_value(("-u", "--url", "-target")))
+    if tool == "nuclei":
+        # nuclei -u <target> or -l <list>; list mode leaves target_host empty.
+        return _host_from_url(_next_value(("-u", "--target", "-target")))
+    if tool == "ffuf":
+        # ffuf -u <url-with-fuzz-marker>; strip the FUZZ marker before host parse.
+        raw = _next_value(("-u", "--url"))
+        return _host_from_url(raw.split("FUZZ", 1)[0] if raw else "")
+    if tool == "sqlmap":
+        # sqlmap -u <url>; the URL is the canonical target.
+        return _host_from_url(_next_value(("-u", "--url")))
+    return ""
+
+
 def _validate_inputs(
     *,
     technique: str,
@@ -140,6 +210,7 @@ def _post_pre_exec_row(
         "route": f"aith assess kali/{tool_name}",
         "agent_name": agent_name,
         "phase": phase,
+        "target_host": _extract_target_host(tool_name, cmd),
         "started_at": started_at_iso,
         # Empty until the post-exec PATCH-finalize writes the real terminal
         # timestamp. Previously we wrote started_at here to satisfy the

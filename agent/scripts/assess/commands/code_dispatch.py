@@ -11,7 +11,16 @@ from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
 _CODE_FILE_LOOKUP_PAGE_SIZE = 10000
-_DONE_DISPOSITIONS = ("clean", "finding", "suspicious")
+_DONE_DISPOSITIONS = ("clean", "finding", "suspicious", "skipped")
+# C50: when disposition=skipped the operator must supply --skip-reason so
+# code-coverage can attribute the skip. Common reasons:
+_SKIP_REASONS_HINT = (
+    "test-fixture",
+    "generated-code",
+    "minified",
+    "out-of-scope-language",
+    "vendored-dependency",
+)
 
 
 def register(subparsers) -> None:
@@ -40,22 +49,36 @@ def run(args) -> None:
     elif action == "done":
         if len(extra) < 3:
             print(
-                "Usage: code-dispatch done <item-id> <disposition> <cwe-coverage-json-file> [notes] [--dry-run]\n"
+                "Usage: code-dispatch done <item-id> <disposition> <cwe-coverage-json-file> [notes] [--dry-run] [--skip-reason <reason>]\n"
                 f"Valid dispositions: {', '.join(_DONE_DISPOSITIONS)}\n"
                 "CWE coverage must be a JSON array like "
-                "[{\"family\":\"ssrf\",\"effort\":80}]",
+                "[{\"family\":\"ssrf\",\"effort\":80}]\n"
+                f"--skip-reason is required when disposition=skipped. "
+                f"Suggested values: {', '.join(_SKIP_REASONS_HINT)}",
                 file=sys.stderr,
             )
             sys.exit(1)
         notes_parts: list[str] = []
         dry_run = False
-        for token in extra[3:]:
+        skip_reason = ""
+        tokens = list(extra[3:])
+        idx = 0
+        while idx < len(tokens):
+            token = tokens[idx]
             if token == "--dry-run":
                 dry_run = True
+                idx += 1
+            elif token == "--skip-reason":
+                if idx + 1 >= len(tokens):
+                    print("ERROR: --skip-reason requires a value", file=sys.stderr)
+                    sys.exit(1)
+                skip_reason = tokens[idx + 1]
+                idx += 2
             else:
                 notes_parts.append(token)
+                idx += 1
         notes = " ".join(notes_parts)
-        _done(cfg, extra[0], extra[1], extra[2], notes, dry_run=dry_run)
+        _done(cfg, extra[0], extra[1], extra[2], notes, dry_run=dry_run, skip_reason=skip_reason)
     elif action == "error":
         if not extra:
             print("Usage: code-dispatch error <id1,id2,...> [notes]", file=sys.stderr)
@@ -169,6 +192,7 @@ def _done(
     notes: str = "",
     *,
     dry_run: bool = False,
+    skip_reason: str = "",
 ) -> None:
     ids = _validate_id_list(id_list)
     if len(ids) != 1:
@@ -178,6 +202,15 @@ def _done(
     if normalized_disposition not in _DONE_DISPOSITIONS:
         print(
             f"ERROR: invalid disposition {disposition!r}; expected one of: {', '.join(_DONE_DISPOSITIONS)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # C50: client-side check (backend also enforces) for clearer operator
+    # feedback before the round-trip.
+    if normalized_disposition == "skipped" and not skip_reason.strip():
+        print(
+            "ERROR: --skip-reason is required when disposition=skipped; "
+            f"suggested values: {', '.join(_SKIP_REASONS_HINT)}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -212,6 +245,8 @@ def _done(
     if notes:
         payload['notes'] = notes
     payload['cwe_coverage'] = cwe_data
+    if skip_reason:
+        payload['skip_reason'] = skip_reason
     if dry_run:
         print("Dry run only; no queue state was changed.")
         print(json.dumps({"endpoint": "code/analysis-queue/done", "payload": payload}, indent=2, ensure_ascii=False))

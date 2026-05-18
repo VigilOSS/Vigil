@@ -1,0 +1,37 @@
+name: render-check
+
+# Verify that AGENTS.md / CLAUDE.md / .claude/agents/ / .codex/agents/ are
+# in sync with their source (agent/operator-core.md + agent/agents/*.md).
+#
+# This catches the kind of drift that fired in May 2026: the publish-step
+# fix landed in operator-core.md but AGENTS.md was not re-rendered, so
+# dual-track operators reading from AGENTS.md hit a sys.exit(2) in
+# transition_phase._phase_track. The render script's `check` mode renders
+# to a tempdir and diffs against the on-disk copies, exiting 1 with a
+# unified diff if anything is stale.
+#
+# To fix a failing check, run from the repo root:
+#   cd agent && ./scripts/render-operator-prompts.sh repo
+
+on:
+  pull_request:
+    paths:
+      - "agent/operator-core.md"
+      - "agent/agents/**"
+      - "agent/scripts/render-operator-prompts.sh"
+      - "agent/AGENTS.md"
+      - "agent/CLAUDE.md"
+      - "agent/.claude/agents/**"
+      - "agent/.codex/agents/**"
+  push:
+    branches: [main]
+
+jobs:
+  render-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify rendered prompts match source
+        run: |
+          cd agent
+          ./scripts/render-operator-prompts.sh check

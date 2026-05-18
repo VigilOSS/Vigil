@@ -121,3 +121,55 @@ def test_decision_404_on_missing_patch(client, isolate_settings) -> None:
     _seed(client, isolate_settings)
     resp = client.patch(f"{BASE}/dispatch-decisions/9999", json={"resolved": True})
     assert resp.status_code == 404
+
+
+def test_decision_list_supports_offset_pagination(client, isolate_settings) -> None:
+    """`/dispatch-decisions` accepts `offset` so callers can paginate past the
+    100-row default. Required for internal gating (vendor-SaaS, etc.) where
+    silently dropping older decisions on long-running engagements would let
+    previously-approved hosts re-appear as undecided.
+    """
+    _seed(client, isolate_settings)
+
+    # Insert 150 scope_decision rows.
+    for i in range(150):
+        resp = client.post(f"{BASE}/dispatch-decisions", json={
+            "kind": "scope_decision",
+            "payload": {"host": f"h{i:03d}.example.com", "choice": "in_scope"},
+        })
+        assert resp.status_code == 201, resp.text
+
+    # Default page caps at 100.
+    first = client.get(
+        f"{BASE}/dispatch-decisions",
+        params={"kind": "scope_decision"},
+    ).json()
+    assert len(first) == 100
+
+    # offset=100 returns the rest. Ordering is DESC by created_at + id, so the
+    # first page is the NEWEST 100 and the second page is the oldest 50.
+    second = client.get(
+        f"{BASE}/dispatch-decisions",
+        params={"kind": "scope_decision", "limit": 100, "offset": 100},
+    ).json()
+    assert len(second) == 50
+
+    # No row appears on both pages.
+    first_ids = {row["id"] for row in first}
+    second_ids = {row["id"] for row in second}
+    assert first_ids.isdisjoint(second_ids)
+    assert len(first_ids | second_ids) == 150
+
+    # offset beyond the row count returns empty.
+    empty = client.get(
+        f"{BASE}/dispatch-decisions",
+        params={"kind": "scope_decision", "offset": 150},
+    ).json()
+    assert empty == []
+
+    # offset must be non-negative.
+    bad = client.get(
+        f"{BASE}/dispatch-decisions",
+        params={"kind": "scope_decision", "offset": -1},
+    )
+    assert bad.status_code == 422

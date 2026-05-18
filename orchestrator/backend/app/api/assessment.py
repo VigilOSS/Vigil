@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..models.engagement import Engagement
 from ..services import activity as activity_service
 from ..services import state_manager
 from ..services.engagements import get_engagement_or_404
@@ -134,6 +137,10 @@ class CommandRunRecordRequest(BaseModel):
     working_dir: str | None = Field(default=None, max_length=1024)
     scope_version: str | None = Field(default=None, max_length=128)
     auth_context: str | None = Field(default=None, max_length=128)
+    # C30: parsed target host extracted from argv by the kali wrapper for
+    # high-traffic verbs (httpx, nuclei, ffuf, sqlmap). Empty for unhandled
+    # verbs; the existing FTS `--q` search still matches those rows.
+    target_host: str = Field(default="", max_length=512)
     timeout_seconds_requested: int | None = Field(default=None, ge=0)
     force: bool = False
 
@@ -388,6 +395,12 @@ class FindingRecordRequest(BaseModel):
     source_name: str = Field(default="", max_length=128)
     details: dict[str, Any] = Field(default_factory=dict)
     provenance: dict[str, Any] = Field(default_factory=dict)
+    # C44: evidence_type categorizes confirmation mode so report-writer can
+    # sort/downrate without re-parsing details. Nullable; agents that don't
+    # set it leave NULL (legacy behavior preserved).
+    evidence_type: Literal[
+        "network-confirmed", "code-inferred", "theoretical", "informational"
+    ] | None = None
     request_variant_id: int | None = None
     service_id: int | None = None
     surface_id: int | None = None
@@ -416,6 +429,10 @@ class FindingPatchRequest(BaseModel):
     source_name: str | None = Field(default=None, max_length=128)
     details: dict[str, Any] | None = None
     provenance: dict[str, Any] | None = None
+    # C44: allow retroactive labeling via aith assess update-finding.
+    evidence_type: Literal[
+        "network-confirmed", "code-inferred", "theoretical", "informational"
+    ] | None = None
     reason_code: str = Field(default="", max_length=128)
     reason_text: str = Field(default="", max_length=4096)
     artifact_ref: str = Field(default="", max_length=1024)
@@ -491,10 +508,70 @@ def get_coverage_readiness(engagement_key: str) -> dict[str, Any]:
     return state_manager.coverage_readiness(engagement.id)
 
 
+def _scope_hosts_for(engagement: Engagement) -> list[str]:
+    """Read the raw scope.json `hosts` entries for the engagement.
+
+    Returned verbatim (no classification) so the frontend can render the
+    P1#3 scope-literals-only toggle and still see wildcard entries for
+    context. Best-effort — a missing or malformed scope.json yields an
+    empty list, not an error, because the per-host coverage projection
+    must continue to render.
+    """
+    scope_path = Path(engagement.engagement_root) / "scope.json"
+    if not scope_path.is_file():
+        return []
+    try:
+        scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    hosts = scope.get("hosts") or []
+    if not isinstance(hosts, list):
+        return []
+    return [entry for entry in hosts if isinstance(entry, str) and entry.strip()]
+
+
+@router.get("/coverage-readiness/by-host")
+def get_per_host_coverage(engagement_key: str) -> dict[str, Any]:
+    """C40 outcome-based per-host coverage projection.
+
+    Surfaces the WAF / service-inventory / directory-fuzz / nikto-trigger /
+    OSINT outcome status for every host the engagement has signal for, plus
+    active ``coverage_deferral`` decision rows. The CLI consumes this via
+    ``aith assess check-scope-coverage --by-host``; the frontend Readiness
+    panel (C58) renders the same shape.
+
+    P1#3: also embeds ``scope_hosts`` (the raw scope.json hosts list) so
+    the frontend can partition rows into scope literals vs wildcard
+    discoveries without a second fetch.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    payload = dict(state_manager.per_host_coverage(engagement.id))
+    payload["scope_hosts"] = _scope_hosts_for(engagement)
+    return payload
+
+
 @router.get("/report-readiness")
 def get_report_readiness(engagement_key: str) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.report_readiness(engagement.id)
+    readiness = state_manager.report_readiness(engagement.id)
+    # C58 — the Readiness panel renders per-host coverage outcomes alongside
+    # the Definition-of-Done blockers, so include the C40 projection in the
+    # same payload the frontend already fetches. The CLI keeps using
+    # ``/coverage-readiness/by-host`` directly; this is purely an additive
+    # extension for the UI consumer.
+    readiness = dict(readiness)
+    try:
+        per_host = dict(state_manager.per_host_coverage(engagement.id))
+        per_host["scope_hosts"] = _scope_hosts_for(engagement)
+        readiness["per_host_coverage"] = per_host
+    except Exception:  # pragma: no cover — defensive; never block the call
+        readiness["per_host_coverage"] = {
+            "objectives": [],
+            "hosts": [],
+            "engagement_signals": {},
+            "scope_hosts": [],
+        }
+    return readiness
 
 
 @router.get("/targets")
@@ -541,6 +618,7 @@ def get_command_runs(
     phase: str = "",
     tool_name: str = "",
     tool_bin: str = "",
+    target_host: str = "",
     audit_source: str = "",
     success: bool | None = Query(default=None),
     timed_out: bool | None = Query(default=None),
@@ -564,6 +642,7 @@ def get_command_runs(
         phase=phase,
         tool_name=tool_name,
         tool_bin=tool_bin,
+        target_host=target_host,
         audit_source=audit_source,
         success=success,
         timed_out=timed_out,
@@ -918,6 +997,7 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
         source_name=request.source_name,
         details=request.details,
         provenance=request.provenance,
+        evidence_type=request.evidence_type,
         request_variant_id=request.request_variant_id,
         service_id=request.service_id,
         surface_id=request.surface_id,
@@ -958,6 +1038,7 @@ async def patch_finding(
         source_name=request.source_name,
         details=request.details,
         provenance=request.provenance,
+        evidence_type=request.evidence_type,
         transition_reason_code=request.reason_code,
         transition_reason_text=request.reason_text,
         transition_artifact_ref=request.artifact_ref,
@@ -1297,6 +1378,70 @@ class HandoffUpdate(BaseModel):
     extras: dict[str, Any] | None = None
 
 
+_COVERAGE_DEFERRAL_OBJECTIVES = (
+    "waf_tier",
+    "service_inventory",
+    "directory_fuzz",
+    "nikto_trigger",
+    "osint",
+)
+
+
+class CoverageDeferralPayload(BaseModel):
+    """Strict shape for ``kind='coverage_deferral'`` decision rows.
+
+    Per the C40 design, the gate at ``per_host_coverage()`` consults this
+    payload to decide whether a host has explicitly skipped a sub-objective.
+    A malformed payload silently breaks the gate (the host appears unmet
+    despite the operator's intent to defer), so kind-aware validation
+    catches the bad shape at POST time rather than at gate-eval time.
+
+    Free-form ``extras`` are allowed for context (timestamp, ticket link,
+    etc.); only the load-bearing fields are constrained.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    deferred_objectives: list[
+        Literal[
+            "waf_tier",
+            "service_inventory",
+            "directory_fuzz",
+            "nikto_trigger",
+            "osint",
+        ]
+    ] = Field(
+        min_length=1,
+        description="One or more sub-objectives the operator is explicitly skipping for the host.",
+    )
+    reason: str = Field(
+        min_length=1,
+        description="Why the deferral was approved. Read by report-writer + audit views.",
+    )
+    host: str | None = Field(default=None, min_length=1)
+    target: str | None = Field(default=None, min_length=1)
+    hostname: str | None = Field(default=None, min_length=1)
+    hosts: list[str] | None = Field(default=None)
+    approved_by: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _require_at_least_one_host_field(self) -> "CoverageDeferralPayload":
+        if not any(
+            [self.host, self.target, self.hostname, self.hosts and any(self.hosts)]
+        ):
+            raise ValueError(
+                "coverage_deferral payload requires at least one of: "
+                "host, target, hostname, or hosts[] (non-empty)"
+            )
+        if self.hosts is not None:
+            for entry in self.hosts:
+                if not isinstance(entry, str) or not entry.strip():
+                    raise ValueError(
+                        "coverage_deferral payload `hosts` entries must be non-empty strings"
+                    )
+        return self
+
+
 class DecisionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1304,9 +1449,20 @@ class DecisionCreate(BaseModel):
     # checkpoint kinds (scope_decision, egress_decision, dispatch_blocked,
     # license_decision, ...) without a backend redeploy. The CLI helper layer
     # validates the well-known shapes; the table just stores the bytes.
+    #
+    # The exception is kinds whose payload is consumed by a backend gate
+    # (currently: ``coverage_deferral`` → ``per_host_coverage()``). For those,
+    # validate the payload shape at POST time so malformed payloads can't
+    # silently neuter the gate that depends on them.
     kind: str = Field(min_length=1, max_length=128)
     payload: dict[str, Any]
     surfaced_to_user: bool = False
+
+    @model_validator(mode="after")
+    def _validate_known_kind_payload(self) -> "DecisionCreate":
+        if self.kind == "coverage_deferral":
+            CoverageDeferralPayload.model_validate(self.payload)
+        return self
 
 
 class DecisionUpdate(BaseModel):
@@ -1515,6 +1671,7 @@ def get_decisions(
     kind: str = "",
     resolved: bool | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.list_decisions(
@@ -1522,6 +1679,7 @@ def get_decisions(
         kind=kind,
         resolved=resolved,
         limit=limit,
+        offset=offset,
     )
 
 

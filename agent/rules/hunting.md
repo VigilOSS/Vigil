@@ -200,3 +200,39 @@ Stale narrative is invisible to backend status fields and ends up in
 report.md verbatim. The `aith assess list-findings --json | jq -r .[].slug`
 loop in `agent/skills/report-generation/SKILL.md` (Review-and-Fix QA Mode)
 provides the executable recipe; this rule is the reason to run it.
+
+## 22. Smallest probe that answers the question
+
+Prefer the smallest probe that gets you the answer. If you already know what
+to test — a discovered path from `robots.txt` / sitemap / JS, a known
+parameter pulled from source analysis, a specific endpoint — `curl` that
+thing directly via `aith assess kali exec -- curl ...`. If you have NO
+knowledge and need to discover from scratch, AND brute-force is in scope per
+the engagement VDP, then use the appropriate Kali verb (`ffuf` for paths,
+`arjun` for params, `puredns` for DNS, `sqlmap` for SQLi, `dalfox` for XSS,
+`nuclei` for template-based CVE/misconfig, `httpx`/`whatweb`/`wafw00f` for
+fingerprinting).
+
+Both modes are valid. The failure modes are symmetrical: a fan-out tool
+fired when you have specific targets wastes traffic, may trip WAFs, and
+loses the surgical evidence quality triagers want; a hand-built `curl` loop
+fired when you genuinely need wordlist fan-out wastes context-window and
+produces lower-quality evidence than the equivalent tool run.
+
+**The VDP overrides this.** Bug-bounty programs frequently mark
+brute-force, automated-scanner-only, and excessive-traffic findings as
+out-of-scope. When the VDP forbids brute-force (Acme Bank, many financial
+programs) or rejects scanner-only evidence ("Reports based only on
+automated tool/scanner results... will not be accepted"), do not run
+`ffuf` / `arjun` / `puredns` / generic-template `nuclei` regardless of
+what's "more efficient" — fall back to surgical `curl` against
+specifically-discovered targets. Read scope before reaching for any
+fan-out tool.
+
+**Evidence-capture follow-ups are surgical.** When a tool surfaces a
+candidate (arjun flags `?debug=` as reflected, ffuf finds `/admin/users`,
+nuclei flags a CVE), the next step is almost always a `curl` against the
+specific endpoint to capture the request/response that becomes the finding
+evidence. That follow-up `curl` is not "noisy curl that should have been a
+tool" — it is the surgical capture step the tool cannot perform. Keep
+doing them.

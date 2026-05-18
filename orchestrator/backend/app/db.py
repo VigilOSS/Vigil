@@ -807,6 +807,7 @@ def init_db() -> None:
                 notes TEXT NOT NULL DEFAULT '',
                 details_json TEXT NOT NULL DEFAULT '{}',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                evidence_type TEXT,
                 merged_into_finding_id INTEGER,
                 last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1082,6 +1083,7 @@ def init_db() -> None:
                 working_dir TEXT,
                 scope_version TEXT,
                 auth_context TEXT,
+                target_host TEXT NOT NULL DEFAULT '',
                 superseded_by_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
                 timeout_seconds_requested INTEGER,
                 partial_results INTEGER NOT NULL DEFAULT 0,
@@ -1163,6 +1165,13 @@ def init_db() -> None:
             connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN scope_version TEXT")
         if cmdrun_columns and "auth_context" not in cmdrun_columns:
             connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN auth_context TEXT")
+        # C30: target_host is the parsed target from argv for high-traffic verbs
+        # (httpx, nuclei, ffuf, sqlmap). Unhandled verbs leave it empty; FTS
+        # search via --q still finds those rows.
+        if cmdrun_columns and "target_host" not in cmdrun_columns:
+            connection.execute(
+                "ALTER TABLE assessment_command_runs ADD COLUMN target_host TEXT NOT NULL DEFAULT ''"
+            )
         # SQLite cannot ALTER a column to add a REFERENCES constraint, but the
         # FK is non-load-bearing — the application enforces the link, the
         # constraint is an integrity belt. Legacy rows simply have a plain
@@ -1475,6 +1484,7 @@ def init_db() -> None:
                 assigned_agent TEXT NOT NULL DEFAULT '',
                 disposition TEXT NOT NULL DEFAULT '',
                 analysis_notes TEXT NOT NULL DEFAULT '',
+                skip_reason TEXT NOT NULL DEFAULT '',
                 expansion_request_json TEXT NOT NULL DEFAULT '{}',
                 batch_theme TEXT NOT NULL DEFAULT '',
                 slot_types_json TEXT NOT NULL DEFAULT '[]',
@@ -1564,6 +1574,12 @@ def init_db() -> None:
             "summary": "TEXT NOT NULL DEFAULT ''",
             "details_json": "TEXT NOT NULL DEFAULT '{}'",
             "provenance_json": "TEXT NOT NULL DEFAULT '{}'",
+            # C44: evidence_type categorizes confirmation mode for findings.
+            # Nullable; no backfill (existing rows stay NULL). New findings
+            # may carry: network-confirmed | code-inferred | theoretical |
+            # informational. Report-writer treats NULL as 'unknown' and falls
+            # back to its existing details-content inspection.
+            "evidence_type": "TEXT",
             "merged_into_finding_id": "INTEGER",
             "last_seen_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
         }
@@ -1628,6 +1644,11 @@ def init_db() -> None:
             "guidance_hypotheses_json": "TEXT NOT NULL DEFAULT '[]'",
             "cwe_coverage_json": "TEXT NOT NULL DEFAULT '[]'",
             "cross_file_triggers_json": "TEXT NOT NULL DEFAULT '[]'",
+            # C50: separate "analyzed and found clean" from "deliberately
+            # skipped" so code-coverage can distinguish 100% completion from
+            # silent deferral. Operators tag skips with a structured reason
+            # (test-fixture, generated-code, minified, out-of-scope-language).
+            "skip_reason": "TEXT NOT NULL DEFAULT ''",
         }
         for col_name, col_def in queue_new_columns.items():
             if queue_columns and col_name not in queue_columns:

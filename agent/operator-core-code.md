@@ -866,7 +866,7 @@ ls tools/fuzz-state/reports/*-triage.json
 - [ ] Campaign summary written to `tools/fuzz-state/reports/campaign-summary.json`
 
 ```bash
-aith assess transition-phase complete
+aith assess transition-phase complete --track code
 ```
 
 **Report dispatch:**

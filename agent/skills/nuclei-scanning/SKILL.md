@@ -138,6 +138,18 @@ specialist skill context to triage correctly. Dropping them from the reactive pa
 intel/finding writes (and any future priority-boost mechanism) aligned with genuine
 CVE/misconfig/exposure signal rather than fuzzing noise.
 
+### Single-instance lock + zero-byte detection (C32)
+
+The wrapper now enforces a per-engagement file lock at `$ENGAGEMENT_DIR/scans/.nuclei.lock`. Concurrent `aith assess kali nuclei` invocations against the same engagement fail-fast with a clear error naming the holding PID — the second run does not start. This prevents two parallel runs from corrupting each other's jsonl output when artifact paths collide.
+
+If the holding PID has died (crashed mid-run), the lock auto-recovers on the next invocation. Manual cleanup: `rm $ENGAGEMENT_DIR/scans/.nuclei.lock` only when both the PID is dead AND the engagement directory is otherwise stable.
+
+After each run, the wrapper checks the output artifact and stderr together:
+- Empty `stdout_path` + stderr lacks `"Templates loaded for current scan: N"` → loader failed at startup; the wrapper prints a WARN telling the operator the run is not a legitimate "no matches" result. The audit row records the failed run for sweep-orphans.
+- Empty output AND stderr contains the templates-loaded line → legitimate no-match run; nothing to flag.
+
+This complements the `-as` suppression-cases section above: that section explains why `-as` returns 0 matches on Salesforce/Akamai/CDN edges; the zero-byte detection here distinguishes those legitimate 0-match runs from actual loader failures.
+
 ### Known fingerprint-suppression cases (`-as` returns 0 matches)
 
 `-as` selects templates via wappalyzer fingerprinting. On some host classes the fingerprint is too generic for auto-selection and the run returns zero matches even though the templates loaded fine. This is **expected behavior, not tool failure** — confirm via stderr (`Templates loaded for current scan: NNNN`) before treating zero results as a runtime issue.

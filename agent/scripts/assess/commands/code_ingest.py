@@ -237,6 +237,12 @@ def _should_descend_skipped_dir(rel_dir: str, dirname: str, args) -> bool:
             return True
         if fnmatch.fnmatch(normalized, pattern.rstrip('/')):
             return True
+        # Pattern names dirname as a path segment (e.g. '**/vendor/foo.min.js'
+        # for rel_dir='src/vendor'). Walking pattern segments lets nested
+        # skipped directories be reached without the user having to pre-encode
+        # the parent prefix.
+        if pattern == dirname or pattern.startswith(f"{dirname}/") or f"/{dirname}/" in pattern:
+            return True
     return False
 
 

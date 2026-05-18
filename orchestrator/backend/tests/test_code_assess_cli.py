@@ -460,6 +460,50 @@ def test_git_security_history_args_limits_large_repos():
     assert module._git_security_history_args(None) == ["--all"]
 
 
+def test_should_descend_skipped_dir_honors_nested_glob_includes():
+    """`--include-path '**/vendor/foo.min.js'` must let the walker descend
+    into nested 'src/vendor', not just a top-level 'vendor'. Regression for
+    PR 14 Codex P2."""
+    module = _load_code_ingest_module()
+
+    assert "vendor" in module.SKIP_DIRS, "vendor must remain a skipped dir for this test"
+
+    args = SimpleNamespace(
+        include_path=["**/vendor/foo.min.js"],
+        include_minified=False,
+        include_skipped=False,
+    )
+    assert module._should_descend_skipped_dir("src/vendor", "vendor", args) is True
+    assert module._should_descend_skipped_dir("apps/web/src/vendor", "vendor", args) is True
+
+    # Pattern targets a descendant of the skipped dir (file is several
+    # segments below vendor). The walker must still descend into the
+    # vendor directory so it can keep going.
+    deep_args = SimpleNamespace(
+        include_path=["**/vendor/generated/foo.js"],
+        include_minified=False,
+        include_skipped=False,
+    )
+    assert module._should_descend_skipped_dir("packages/app/vendor", "vendor", deep_args) is True
+
+    # Top-level vendor was already covered by the prefix path; confirm it
+    # still works.
+    assert module._should_descend_skipped_dir("vendor", "vendor", args) is True
+
+    # An unrelated skip dir should still be pruned when the pattern names
+    # a different dirname.
+    assert module._should_descend_skipped_dir("src/node_modules", "node_modules", args) is False
+
+    # Pattern that does not name the skipped dir as a segment must not
+    # force descent (otherwise we would defeat the skip list).
+    bare_glob = SimpleNamespace(
+        include_path=["**/*.js"],
+        include_minified=False,
+        include_skipped=False,
+    )
+    assert module._should_descend_skipped_dir("src/vendor", "vendor", bare_glob) is False
+
+
 def test_git_security_files_parses_streamed_output(monkeypatch, tmp_path):
     module = _load_code_ingest_module()
 
