@@ -761,13 +761,13 @@ export function CodeAnalysisTab({
                       </div>
                     )}
                     {r.hypothesis && (
-                      <div className="code-result-detail" style={isExpanded ? { whiteSpace: "pre-wrap" } : undefined}>
+                      <div className={`code-result-detail ${isExpanded ? "is-expanded" : ""}`}>
                         <span className="code-result-label">Hypothesis:</span>
                         <span>{!isExpanded && r.hypothesis.length > truncateAt ? `${r.hypothesis.slice(0, truncateAt)}...` : r.hypothesis}</span>
                       </div>
                     )}
                     {r.evidence && (
-                      <div className="code-result-detail" style={isExpanded ? { whiteSpace: "pre-wrap" } : undefined}>
+                      <div className={`code-result-detail ${isExpanded ? "is-expanded" : ""}`}>
                         <span className="code-result-label">Evidence:</span>
                         <span>{!isExpanded && r.evidence.length > truncateAt ? `${r.evidence.slice(0, truncateAt)}...` : r.evidence}</span>
                       </div>
