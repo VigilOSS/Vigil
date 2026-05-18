@@ -476,6 +476,16 @@ def test_should_descend_skipped_dir_honors_nested_glob_includes():
     assert module._should_descend_skipped_dir("src/vendor", "vendor", args) is True
     assert module._should_descend_skipped_dir("apps/web/src/vendor", "vendor", args) is True
 
+    # Pattern targets a descendant of the skipped dir (file is several
+    # segments below vendor). The walker must still descend into the
+    # vendor directory so it can keep going.
+    deep_args = SimpleNamespace(
+        include_path=["**/vendor/generated/foo.js"],
+        include_minified=False,
+        include_skipped=False,
+    )
+    assert module._should_descend_skipped_dir("packages/app/vendor", "vendor", deep_args) is True
+
     # Top-level vendor was already covered by the prefix path; confirm it
     # still works.
     assert module._should_descend_skipped_dir("vendor", "vendor", args) is True
