@@ -2420,6 +2420,13 @@ input {
   display: grid;
   gap: 18px;
   min-height: 0;
+  /* min-width: 0 on the grid container + overflow-wrap on prose
+   * children prevents long unbreakable strings (pasted URLs, JWTs,
+   * stack frames) from establishing a min-content width that forces
+   * horizontal scroll. Without these, an analyst pasting a long token
+   * into `summary` or `impact` overflows the modal panel even though
+   * the `<p>` would otherwise wrap. */
+  min-width: 0;
 }
 
 .findings-redesign .section-title {
@@ -2449,8 +2456,13 @@ input {
   line-height: 1.55;
   font-size: 0.92rem;
   color: var(--ink);
+  /* overflow-wrap: anywhere wraps long unbreakable strings (URLs,
+   * tokens, paths) at character boundaries when no soft-break exists.
+   * Without it, a pasted URL in a Summary/Impact field would force
+   * horizontal scroll through the entire modal. */
+  overflow-wrap: anywhere;
 }
-.findings-redesign .section { display: grid; gap: 4px; }
+.findings-redesign .section { display: grid; gap: 4px; min-width: 0; }
 
 .findings-redesign .kv-grid {
   display: grid;
@@ -2487,6 +2499,10 @@ input {
   background: rgba(255, 255, 255, 0.6);
   display: grid;
   gap: 6px;
+  min-width: 0;
+}
+.findings-redesign .callout p {
+  overflow-wrap: anywhere;
 }
 /* Tinted backgrounds + wider left stripe so Impact/Remediation/Kill pop
  * against neighboring plain sections. The section-title's ::before bar
