@@ -1637,6 +1637,21 @@ def test_extract_target_host_per_verb():
     # Unhandled verb returns empty
     assert _extract_target_host("nmap-scan", ["--target", "10.0.0.1"]) == ""
 
+    # Bracketed IPv6 URLs: extract the address inside the brackets so
+    # `--target-host 2001:db8::1` matches rows produced from
+    # `https://[2001:db8::1]:8443`. Without this, the row stored
+    # `[2001:db8::1]:8443` and host-scoped queries silently missed it.
+    assert (
+        _extract_target_host("httpx", ["-u", "https://[2001:db8::1]:8443/path"])
+        == "2001:db8::1"
+    )
+    assert _extract_target_host("nuclei", ["-u", "http://[::1]/"]) == "::1"
+    assert _extract_target_host("ffuf", ["-u", "https://[2001:DB8::1]/FUZZ"]) == "2001:db8::1"
+    assert (
+        _extract_target_host("sqlmap", ["-u", "https://user:pw@[fe80::1]:443/v1?id=1"])
+        == "fe80::1"
+    )
+
 
 def test_list_command_runs_filters_by_target_host(client, isolate_settings):
     """C30: --target-host (exact, case-insensitive) returns only matching rows."""

@@ -349,6 +349,33 @@ class AssessmentClient:
         rows = self.get(endpoint)
         return rows if isinstance(rows, list) else []
 
+    def list_all_decisions(self, **filters: Any) -> list[dict]:
+        """Paginate ``/dispatch-decisions`` to return EVERY row matching the
+        filters, not just the first page. Use for internal gating/coverage
+        projections where silently dropping older decisions (the
+        ``list_decisions`` default behavior, intended for paginated UI
+        consumption) would let stage transitions miss previously-recorded
+        scope decisions on long-running engagements.
+
+        Pages at the backend's per-request cap (1000). Stops when a page
+        returns fewer rows than the page size.
+        """
+        page_size = 1000
+        all_rows: list[dict] = []
+        offset = 0
+        # Caller-supplied limit/offset would conflict with our pagination —
+        # drop them so callers don't accidentally re-cap the result.
+        scoped = {k: v for k, v in filters.items() if k not in ("limit", "offset")}
+        while True:
+            page = self.list_decisions(limit=page_size, offset=offset, **scoped)
+            if not page:
+                break
+            all_rows.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+        return all_rows
+
     def post_event(self, payload: dict) -> dict | None:
         """POST /events. Fire-and-forget: warn on failure, never raise."""
         try:

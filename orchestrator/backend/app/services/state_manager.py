@@ -2624,17 +2624,26 @@ def _row_is_tech_scan_evidence(row: dict[str, Any]) -> bool:
 
 
 def _coverage_deferral_payload_hosts(payload: dict[str, Any]) -> list[str]:
-    """Return host strings referenced by a coverage_deferral decision payload."""
+    """Return host strings referenced by a coverage_deferral decision payload.
+
+    Normalizes each value through ``_coverage_endpoint_host`` so URL or
+    host:port shapes (``https://api.example.com/v1``, ``api.example.com:8443``)
+    collapse to the same bare-hostname key used by ``services_by_host`` /
+    ``surfaces_by_host``. Without this, an operator-recorded deferral with a
+    URL value silently fails to match and the gate stays unmet.
+    """
     candidates: list[str] = []
     for key in ("host", "target", "hostname"):
         val = payload.get(key)
         if isinstance(val, str) and val.strip():
-            candidates.append(val.strip().lower())
+            normalized = _coverage_endpoint_host(val) or val.strip().lower()
+            candidates.append(normalized)
     hosts_field = payload.get("hosts")
     if isinstance(hosts_field, list):
         for entry in hosts_field:
             if isinstance(entry, str) and entry.strip():
-                candidates.append(entry.strip().lower())
+                normalized = _coverage_endpoint_host(entry) or entry.strip().lower()
+                candidates.append(normalized)
     return candidates
 
 
@@ -2654,8 +2663,22 @@ def _coverage_deferrals_by_host(engagement_id: int) -> dict[str, list[dict[str, 
 
     Active = `resolved=0`. Resolved deferrals stay queryable via the decision
     list endpoint but no longer satisfy the gate.
+
+    Reads decisions directly through ``get_connection`` instead of
+    ``list_decisions(...)`` to avoid the public endpoint's ``limit`` cap —
+    large wildcard engagements can legitimately accumulate thousands of
+    operator-approved deferrals, and a silent truncation here would let
+    objectives appear unmet again in the per-host gate.
     """
-    rows = list_decisions(engagement_id, kind="coverage_deferral", resolved=False, limit=500)
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "SELECT * FROM assessment_dispatch_decisions "
+            "WHERE engagement_id = ? AND kind = ? AND resolved = 0 "
+            "ORDER BY created_at DESC, id DESC",
+            (engagement.id, "coverage_deferral"),
+        )
+        rows = [_serialize_decision(row) for row in cursor.fetchall()]
     out: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         payload = row.get("payload") or {}
@@ -6079,6 +6102,7 @@ def list_decisions(
     kind: str = "",
     resolved: bool | None = None,
     limit: int = 100,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     where = ["engagement_id = ?"]
@@ -6090,9 +6114,10 @@ def list_decisions(
         where.append("resolved = ?")
         params.append(1 if resolved else 0)
     params.append(int(limit))
+    params.append(int(offset))
     query = (
         f"SELECT * FROM assessment_dispatch_decisions WHERE {' AND '.join(where)} "
-        "ORDER BY created_at DESC, id DESC LIMIT ?"
+        "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
     )
     with get_connection() as connection:
         rows = connection.execute(query, tuple(params)).fetchall()

@@ -1966,3 +1966,44 @@ def test_no_operator_prompt_invokes_update_finding_with_details_json() -> None:
         "Offending lines:\n"
         + "\n".join(f"  {p}:{n}: {line}" for p, n, line in offending)
     )
+
+
+# ---------------------------------------------------------------------------
+# render-operator-prompts.sh check — drift detection
+# ---------------------------------------------------------------------------
+
+
+def test_render_check_flags_missing_wrapper_as_drift(tmp_path: Path) -> None:
+    """A deleted/missing specialist wrapper must be reported as drift.
+
+    Before this guard, the per-wrapper diff block was wrapped in `[[ -f ]]`,
+    so deleting `.claude/agents/recon-specialist.md` from the repo silently
+    passed render-check — operators reading from the wrapper directory then
+    hit a missing file at dispatch time.
+    """
+    import shutil
+    import subprocess
+
+    agent_root = _scripts_root().parent  # .../agent
+    output_dir = tmp_path / "agent-tree"
+    shutil.copytree(agent_root, output_dir, symlinks=False)
+
+    # Sanity: the file should exist before we delete it.
+    victim = output_dir / ".claude" / "agents" / "recon-specialist.md"
+    assert victim.is_file()
+    victim.unlink()
+
+    script = _scripts_root() / "render-operator-prompts.sh"
+    proc = subprocess.run(
+        ["bash", str(script), "check", str(output_dir)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode != 0, (
+        "render-check should exit non-zero when a wrapper is missing. "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "recon-specialist.md" in proc.stderr
+    assert "missing" in proc.stderr.lower()

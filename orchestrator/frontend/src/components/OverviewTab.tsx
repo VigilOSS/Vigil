@@ -354,13 +354,32 @@ type ReadinessPanelProps = {
 // in this codebase: backend tables are canonical, the UI is a view onto them.
 
 function isWildcardScopeEntry(raw: string): boolean {
-  return raw.includes("*") || raw.includes("?");
+  // Mirror the backend scope classifier (agent/scripts/assess/lib/scope.py:
+  // `classify_scope_entry`): only the `*.<host>` shape is treated as a
+  // wildcard. The previous heuristic flagged any `?` as a wildcard, which
+  // misclassified URL scope entries like `https://app.example.com/path?x=1`
+  // — those would then drop out of `scopeLiterals`, leaving an in-scope
+  // literal host hidden from the matrix under the default filter.
+  return raw.trim().startsWith("*.");
 }
 
 // Classify scope.json `hosts` entries into the set of explicit literal
 // hostnames (bare hosts + URL hosts), lowercased for matching against
 // per-host coverage row hostnames. Wildcard entries are excluded — those
 // expand to subdomains the operator did not author by hand.
+// Per WHATWG URL spec, `URL.hostname` returns IPv6 literals wrapped in
+// brackets (`[2001:db8::1]`). Per-host coverage rows emit the same hosts
+// WITHOUT brackets because the backend's `_coverage_endpoint_host`
+// (state_manager.py) calls `.strip("[]")`. Match that normalization here so
+// IPv6 scope entries actually pair up with per-host rows under the
+// "scope literals only" filter.
+function stripIpv6Brackets(host: string): string {
+  if (host.length >= 2 && host.startsWith("[") && host.endsWith("]")) {
+    return host.slice(1, -1);
+  }
+  return host;
+}
+
 function deriveScopeLiterals(scopeHosts: string[] | undefined): Set<string> {
   const out = new Set<string>();
   if (!scopeHosts) return out;
@@ -376,6 +395,7 @@ function deriveScopeLiterals(scopeHosts: string[] | undefined): Set<string> {
     } catch {
       // not a URL — keep the raw lowercased value
     }
+    host = stripIpv6Brackets(host);
     if (host) out.add(host);
   }
   return out;
@@ -637,9 +657,15 @@ function ActiveDeferralsList({ perHost }: { perHost: PerHostCoverage | undefined
         ))}
       </ul>
       <p className="meta-text">
-        Deferrals are queryable via{" "}
-        <code>aith assess agent list --kind coverage_deferral</code>; resolve via{" "}
-        <code>aith assess agent decision-update</code> when the work is done.
+        Record new deferrals via{" "}
+        <code>
+          aith assess agent decision --kind coverage_deferral --host &lt;host&gt; --reason &lt;why&gt;
+        </code>
+        . Resolve via{" "}
+        <code>
+          PATCH /engagements/&lt;key&gt;/assessment/dispatch-decisions/&lt;id&gt;
+        </code>{" "}
+        with <code>{`{"resolved": true}`}</code> when the deferred work is done.
       </p>
     </div>
   );

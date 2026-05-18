@@ -164,7 +164,19 @@ class FakeClient:
         kind = filters.get("kind")
         if kind:
             rows = [r for r in rows if r.get("kind") == kind]
+        limit = filters.get("limit")
+        offset = int(filters.get("offset") or 0)
+        if offset:
+            rows = rows[offset:]
+        if limit is not None:
+            rows = rows[: int(limit)]
         return rows
+
+    def list_all_decisions(self, **filters: Any) -> list[dict[str, Any]]:
+        # Mirror the real client's paginating helper: return everything
+        # matching `filters`, ignoring the per-page cap.
+        scoped = {k: v for k, v in filters.items() if k not in ("limit", "offset")}
+        return self.list_decisions(**scoped)
 
     def close(self) -> None:
         return None
