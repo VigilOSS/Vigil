@@ -62,6 +62,10 @@ def _extract_target_host(tool_name: str, cmd: list[str]) -> str:
 
     def _host_from_url(value: str) -> str:
         # Strip scheme, port, path. Tolerate '@user:pass' shapes.
+        # Returns the canonical bare host so `--target-host <host>` queries
+        # match — for bracketed IPv6 URLs that means the address inside the
+        # brackets (e.g. `https://[2001:db8::1]:8443` → `2001:db8::1`), not
+        # the `[addr]:port` literal.
         v = value.strip()
         if not v:
             return ""
@@ -72,8 +76,16 @@ def _extract_target_host(tool_name: str, cmd: list[str]) -> str:
         # Drop credentials
         if "@" in v:
             v = v.split("@", 1)[1]
-        # Drop port
-        if ":" in v and not v.startswith("["):  # plain host:port; IPv6 lives inside [..]
+        # Bracketed IPv6 with optional :port suffix — extract the address
+        # inside the brackets. URLs MUST bracket IPv6 literals per RFC 3986,
+        # so unbracketed-IPv6 input is out of scope.
+        if v.startswith("["):
+            end = v.find("]")
+            if end > 0:
+                return v[1:end].lower()
+            # Malformed input — fall through and emit the lowercased literal.
+        elif ":" in v:
+            # plain host:port
             v = v.split(":", 1)[0]
         return v.lower()
 

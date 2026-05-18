@@ -191,6 +191,99 @@ def test_per_host_coverage_deferral_marks_objective_deferred(client, isolate_set
     assert any(d["kind"] == "coverage_deferral" for d in row["deferrals"])
 
 
+def test_per_host_coverage_deferral_normalizes_url_shaped_target(client, isolate_settings):
+    """A deferral whose `target` is a URL or host:port must match the bare-hostname key."""
+    _seed(client, isolate_settings)
+    _create_service(client, endpoint="api.target.example")
+    _record_decision(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "target": "https://api.target.example/v1/users",
+            "deferred_objectives": ["directory_fuzz"],
+            "reason": "OAS-only contract, no fuzz",
+            "approved_by": "operator",
+        },
+    )
+    _record_decision(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "hosts": ["api.target.example:8443"],
+            "deferred_objectives": ["nikto_trigger"],
+            "reason": "TLS-only endpoint",
+            "approved_by": "operator",
+        },
+    )
+
+    body = client.get(f"{ASSESSMENT_BASE}/coverage-readiness/by-host").json()
+    rows = {row["host"]: row for row in body["hosts"]}
+    row = rows["api.target.example"]
+    assert row["outcomes"]["directory_fuzz"]["deferred"] is True
+    assert row["outcomes"]["nikto_trigger"]["deferred"] is True
+    assert "directory_fuzz" not in row["unmet_objectives"]
+    assert "nikto_trigger" not in row["unmet_objectives"]
+
+
+def test_per_host_coverage_deferral_lookup_not_capped_at_500(client, isolate_settings):
+    """Large engagements can legitimately accumulate >500 active
+    coverage_deferral rows; the per-host projection must read all of them so
+    deferred objectives do not silently reappear as unmet beyond the cap.
+
+    Regression: the helper previously called
+    ``list_decisions(..., limit=500)`` which truncated silently.
+    """
+    _seed(client, isolate_settings)
+    _create_service(client, endpoint="api.target.example")
+    # 510 distinct host deferrals covering directory_fuzz for tail-host.test
+    # plus 509 unrelated hosts. Use --inline-style POSTs.
+    for i in range(509):
+        _record_decision(
+            client,
+            kind="coverage_deferral",
+            payload={
+                "host": f"h{i:04d}.target.example",
+                "deferred_objectives": ["directory_fuzz"],
+                "reason": f"bulk skip {i}",
+                "approved_by": "operator",
+            },
+        )
+    # The 510th deferral — would be silently dropped at limit=500 because
+    # the ordering is created_at DESC, so the OLDEST inserts fall off.
+    _record_decision(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "host": "tail-host.test",
+            "deferred_objectives": ["directory_fuzz"],
+            "reason": "must survive the cap",
+            "approved_by": "operator",
+        },
+    )
+    # tail-host.test was inserted LAST so it's the newest — under DESC
+    # ordering it's at position 0 and would be kept by any limit.
+    # Insert one MORE so the OLDEST row (h0000) is past the 500-cap boundary
+    # and must be returned for its host outcome to be `deferred`.
+    _record_decision(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "host": "h0000.target.example",
+            "deferred_objectives": ["nikto_trigger"],
+            "reason": "second deferral for h0000",
+            "approved_by": "operator",
+        },
+    )
+
+    body = client.get(f"{ASSESSMENT_BASE}/coverage-readiness/by-host").json()
+    rows = {row["host"]: row for row in body["hosts"]}
+
+    # h0000 was the oldest insert — at limit=500 with DESC order it would be
+    # dropped. Confirm it's present and its directory_fuzz objective is deferred.
+    assert "h0000.target.example" in rows
+    assert rows["h0000.target.example"]["outcomes"]["directory_fuzz"]["deferred"] is True
+
+
 def test_per_host_coverage_resolved_deferral_no_longer_satisfies(client, isolate_settings):
     """A resolved coverage_deferral (the operator un-deferred) returns the host to unmet status."""
     eng_id = _seed(client, isolate_settings)

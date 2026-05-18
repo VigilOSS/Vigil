@@ -310,19 +310,23 @@ check_render() {
     local codex_rel=".codex/agents/$agent_name.toml"
     local target_claude="$source_output_dir/$claude_rel"
     local target_codex="$source_output_dir/$codex_rel"
-    if [[ -f "$target_claude" ]]; then
-      if ! diff -q "$target_claude" "$tmp_dir/$claude_rel" >/dev/null 2>&1; then
-        printf 'DRIFT: %s differs from source render\n' "$claude_rel" >&2
-        diff -u "$target_claude" "$tmp_dir/$claude_rel" >&2 || true
-        drift=1
-      fi
+    # Missing wrapper IS drift — the render produced it but the checked-in
+    # copy is absent. Operators reading from .claude/.codex hit nothing.
+    if [[ ! -f "$target_claude" ]]; then
+      printf 'DRIFT: %s missing — expected rendered wrapper not present in repo\n' "$claude_rel" >&2
+      drift=1
+    elif ! diff -q "$target_claude" "$tmp_dir/$claude_rel" >/dev/null 2>&1; then
+      printf 'DRIFT: %s differs from source render\n' "$claude_rel" >&2
+      diff -u "$target_claude" "$tmp_dir/$claude_rel" >&2 || true
+      drift=1
     fi
-    if [[ -f "$target_codex" ]]; then
-      if ! diff -q "$target_codex" "$tmp_dir/$codex_rel" >/dev/null 2>&1; then
-        printf 'DRIFT: %s differs from source render\n' "$codex_rel" >&2
-        diff -u "$target_codex" "$tmp_dir/$codex_rel" >&2 || true
-        drift=1
-      fi
+    if [[ ! -f "$target_codex" ]]; then
+      printf 'DRIFT: %s missing — expected rendered wrapper not present in repo\n' "$codex_rel" >&2
+      drift=1
+    elif ! diff -q "$target_codex" "$tmp_dir/$codex_rel" >/dev/null 2>&1; then
+      printf 'DRIFT: %s differs from source render\n' "$codex_rel" >&2
+      diff -u "$target_codex" "$tmp_dir/$codex_rel" >&2 || true
+      drift=1
     fi
   done
 

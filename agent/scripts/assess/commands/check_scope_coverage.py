@@ -91,9 +91,14 @@ def _vendor_saas_decided_hosts(client: AssessmentClient) -> set[str]:
     ``kind='scope_decision'``. Hosts in that set are excluded from the
     phase-advance gate. A backend failure returns the empty set (the gate
     fires conservatively).
+
+    Uses ``list_all_decisions`` (paginated) instead of ``list_decisions`` —
+    the latter caps at the backend's 100-row default and would silently drop
+    older decisions on long-running engagements, causing the phase gate to
+    block transitions even when the operator already recorded the decision.
     """
     try:
-        rows = client.list_decisions(kind="scope_decision")
+        rows = client.list_all_decisions(kind="scope_decision")
     except AssessError:
         return set()
     decisions: set[str] = set()

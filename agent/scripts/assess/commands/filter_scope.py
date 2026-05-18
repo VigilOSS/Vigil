@@ -24,11 +24,16 @@ def _vendor_saas_decided_hosts(cfg: Config) -> set[str]:
     failed fetch returns the empty set so the warning fires conservatively
     (better to over-warn than miss a host the operator has not yet decided
     on).
+
+    Uses ``list_all_decisions`` (paginated) instead of ``list_decisions`` —
+    the latter caps at the backend's 100-row default and would silently drop
+    older decisions on long-running engagements, causing previously-approved
+    hosts to be treated as undecided.
     """
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
         try:
-            rows = client.list_decisions(kind="scope_decision")
+            rows = client.list_all_decisions(kind="scope_decision")
         except AssessError:
             return set()
     finally:
