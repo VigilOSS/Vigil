@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   AssessmentAttackChain,
   AssessmentAttackChainDetail,
@@ -343,9 +343,44 @@ type ReadinessPanelProps = {
 //  3. Active coverage_deferral decision rows surfaced inline so operators
 //     can audit which objectives were intentionally skipped.
 //
+// P1#3 adds a scope-literals-only toggle on the per-host matrix so
+// wildcard-heavy engagements (a scope.json *.example.com that recon
+// expands into hundreds of subdomains) stay readable. Default matches
+// the CLI's `aith assess check-scope-coverage --by-host` behavior: hide
+// wildcard-discovered hosts, summarize them inline.
+//
 // The panel is read-only. Operators dispatch missing work from the CLI; the
 // UI reports state, it does not fix it. That mirrors the prevailing pattern
 // in this codebase: backend tables are canonical, the UI is a view onto them.
+
+function isWildcardScopeEntry(raw: string): boolean {
+  return raw.includes("*") || raw.includes("?");
+}
+
+// Classify scope.json `hosts` entries into the set of explicit literal
+// hostnames (bare hosts + URL hosts), lowercased for matching against
+// per-host coverage row hostnames. Wildcard entries are excluded — those
+// expand to subdomains the operator did not author by hand.
+function deriveScopeLiterals(scopeHosts: string[] | undefined): Set<string> {
+  const out = new Set<string>();
+  if (!scopeHosts) return out;
+  for (const raw of scopeHosts) {
+    const entry = raw.trim();
+    if (!entry || isWildcardScopeEntry(entry)) continue;
+    let host = entry.toLowerCase();
+    // URL entries (https://www.example.com[/path]) → extract hostname.
+    // Bare hosts pass through unchanged.
+    try {
+      const url = new URL(entry.includes("://") ? entry : `https://${entry}`);
+      host = url.hostname.toLowerCase();
+    } catch {
+      // not a URL — keep the raw lowercased value
+    }
+    if (host) out.add(host);
+  }
+  return out;
+}
+
 function ReadinessPanel({ readiness }: ReadinessPanelProps) {
   const perHost = readiness.per_host_coverage;
   const hasHosts = !!perHost && perHost.hosts.length > 0;
@@ -355,6 +390,17 @@ function ReadinessPanel({ readiness }: ReadinessPanelProps) {
   const totalDeferrals = perHost
     ? perHost.hosts.reduce((sum, row) => sum + row.deferrals.length, 0)
     : 0;
+
+  // P1#3 scope-literal filter state. Default = ON (matches CLI default).
+  // Disabled when scope.json had no literal entries (wildcard-only scope)
+  // because the filter would hide every row.
+  const scopeLiterals = useMemo(
+    () => deriveScopeLiterals(perHost?.scope_hosts),
+    [perHost?.scope_hosts],
+  );
+  const filterAvailable = scopeLiterals.size > 0;
+  const [scopeLiteralsOnly, setScopeLiteralsOnly] = useState(true);
+  const effectiveFilter = filterAvailable && scopeLiteralsOnly;
 
   return (
     <section className="panel" data-testid="readiness-panel">
@@ -387,7 +433,13 @@ function ReadinessPanel({ readiness }: ReadinessPanelProps) {
         </article>
       </div>
 
-      <PerHostCoverageMatrix perHost={perHost} />
+      <PerHostCoverageMatrix
+        perHost={perHost}
+        scopeLiterals={scopeLiterals}
+        filterEnabled={effectiveFilter}
+        filterAvailable={filterAvailable}
+        onToggleFilter={() => setScopeLiteralsOnly((v) => !v)}
+      />
 
       <EngagementSignalsCard perHost={perHost} />
 
@@ -438,7 +490,19 @@ function EngagementSignalsCard({ perHost }: { perHost: PerHostCoverage | undefin
   );
 }
 
-function PerHostCoverageMatrix({ perHost }: { perHost: PerHostCoverage | undefined }) {
+function PerHostCoverageMatrix({
+  perHost,
+  scopeLiterals,
+  filterEnabled,
+  filterAvailable,
+  onToggleFilter,
+}: {
+  perHost: PerHostCoverage | undefined;
+  scopeLiterals: Set<string>;
+  filterEnabled: boolean;
+  filterAvailable: boolean;
+  onToggleFilter: () => void;
+}) {
   if (!perHost) {
     return (
       <p className="meta-text" data-testid="readiness-no-per-host">
@@ -454,8 +518,37 @@ function PerHostCoverageMatrix({ perHost }: { perHost: PerHostCoverage | undefin
       </p>
     );
   }
+
+  // Partition rows into scope literals vs wildcard-discovered when the
+  // filter is on. Matches FU1's CLI behavior in
+  // agent/scripts/assess/commands/check_scope_coverage.py.
+  const visibleRows = filterEnabled
+    ? perHost.hosts.filter((row) => scopeLiterals.has(row.host.toLowerCase()))
+    : perHost.hosts;
+  const hiddenRows = filterEnabled
+    ? perHost.hosts.filter((row) => !scopeLiterals.has(row.host.toLowerCase()))
+    : [];
+  const hiddenWithUnmet = hiddenRows.filter((row) => row.unmet_objectives.length > 0).length;
+  const hiddenWithDeferral = hiddenRows.filter((row) => row.deferrals.length > 0).length;
+
   return (
     <div className="readiness-matrix" data-testid="readiness-matrix">
+      <div className="readiness-matrix-controls">
+        <button
+          type="button"
+          className={`filter-chip ${filterEnabled ? "is-active" : ""}`}
+          disabled={!filterAvailable}
+          onClick={onToggleFilter}
+          data-testid="readiness-scope-literal-toggle"
+          title={
+            filterAvailable
+              ? "Toggle between scope.json literals only and the full discovered-host matrix"
+              : "Scope-literal filter unavailable — scope.json has no explicit literal hosts"
+          }
+        >
+          Scope literals only
+        </button>
+      </div>
       <table>
         <thead>
           <tr>
@@ -468,11 +561,19 @@ function PerHostCoverageMatrix({ perHost }: { perHost: PerHostCoverage | undefin
           </tr>
         </thead>
         <tbody>
-          {perHost.hosts.map((row) => (
+          {visibleRows.map((row) => (
             <ReadinessMatrixRow key={row.host} row={row} objectives={perHost.objectives} />
           ))}
         </tbody>
       </table>
+      {filterEnabled && hiddenRows.length > 0 && (
+        <p className="meta-text" data-testid="readiness-discovered-summary">
+          {hiddenRows.length} discovered host{hiddenRows.length === 1 ? "" : "s"} from
+          wildcard expansion hidden: {hiddenWithUnmet} unmet, {hiddenWithDeferral} with
+          deferrals. Click <strong>Scope literals only</strong> above to show the full
+          matrix.
+        </p>
+      )}
       <p className="meta-text">
         Cells: <strong>Y</strong> objective met, <strong>D</strong> intentionally
         deferred via <code>coverage_deferral</code>, <strong>N</strong> unmet

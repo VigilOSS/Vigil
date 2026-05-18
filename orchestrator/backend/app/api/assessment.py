@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..models.engagement import Engagement
 from ..services import activity as activity_service
 from ..services import state_manager
 from ..services.engagements import get_engagement_or_404
@@ -505,6 +508,28 @@ def get_coverage_readiness(engagement_key: str) -> dict[str, Any]:
     return state_manager.coverage_readiness(engagement.id)
 
 
+def _scope_hosts_for(engagement: Engagement) -> list[str]:
+    """Read the raw scope.json `hosts` entries for the engagement.
+
+    Returned verbatim (no classification) so the frontend can render the
+    P1#3 scope-literals-only toggle and still see wildcard entries for
+    context. Best-effort — a missing or malformed scope.json yields an
+    empty list, not an error, because the per-host coverage projection
+    must continue to render.
+    """
+    scope_path = Path(engagement.engagement_root) / "scope.json"
+    if not scope_path.is_file():
+        return []
+    try:
+        scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    hosts = scope.get("hosts") or []
+    if not isinstance(hosts, list):
+        return []
+    return [entry for entry in hosts if isinstance(entry, str) and entry.strip()]
+
+
 @router.get("/coverage-readiness/by-host")
 def get_per_host_coverage(engagement_key: str) -> dict[str, Any]:
     """C40 outcome-based per-host coverage projection.
@@ -514,9 +539,15 @@ def get_per_host_coverage(engagement_key: str) -> dict[str, Any]:
     active ``coverage_deferral`` decision rows. The CLI consumes this via
     ``aith assess check-scope-coverage --by-host``; the frontend Readiness
     panel (C58) renders the same shape.
+
+    P1#3: also embeds ``scope_hosts`` (the raw scope.json hosts list) so
+    the frontend can partition rows into scope literals vs wildcard
+    discoveries without a second fetch.
     """
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.per_host_coverage(engagement.id)
+    payload = dict(state_manager.per_host_coverage(engagement.id))
+    payload["scope_hosts"] = _scope_hosts_for(engagement)
+    return payload
 
 
 @router.get("/report-readiness")
@@ -530,9 +561,16 @@ def get_report_readiness(engagement_key: str) -> dict[str, Any]:
     # extension for the UI consumer.
     readiness = dict(readiness)
     try:
-        readiness["per_host_coverage"] = state_manager.per_host_coverage(engagement.id)
+        per_host = dict(state_manager.per_host_coverage(engagement.id))
+        per_host["scope_hosts"] = _scope_hosts_for(engagement)
+        readiness["per_host_coverage"] = per_host
     except Exception:  # pragma: no cover — defensive; never block the call
-        readiness["per_host_coverage"] = {"objectives": [], "hosts": [], "engagement_signals": {}}
+        readiness["per_host_coverage"] = {
+            "objectives": [],
+            "hosts": [],
+            "engagement_signals": {},
+            "scope_hosts": [],
+        }
     return readiness
 
 

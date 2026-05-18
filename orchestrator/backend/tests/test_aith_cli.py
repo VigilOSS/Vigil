@@ -1975,6 +1975,82 @@ def test_transition_phase_both_engagement_requires_track_for_ambiguous_complete(
     assert "pass --track web or --track code" in capsys.readouterr().err
 
 
+def test_transition_phase_exploit_variant_gate_requests_full_dispatch_page(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The variant-pass gate must request a page large enough that engagements
+    with hundreds of dispatches do not drop the variant run behind the
+    default backend limit=100. Regression for PR 14 Codex P1."""
+    module = _load_assess_module(
+        "transition_phase_variant_pagination_module",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    engagement = tmp_path / "agent" / "engagements" / "eng-test"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text(
+        json.dumps({"engagement_type": "web", "current_phase": "verify"}),
+        encoding="utf-8",
+    )
+
+    confirmed_finding = {
+        "slug": "ssrf-host-header",
+        "severity": "high",
+        "verification_state": "verified",
+        "workflow_status": "active",
+    }
+    older_variant_dispatch = {
+        "agent_role": "vulnerability-analyst",
+        "task": "Variant hunt for ssrf-host-header siblings",
+        "finding_slugs": ["ssrf-host-header"],
+    }
+    captured_paths: list[str] = []
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def get(self, path: str):
+            captured_paths.append(path)
+            if path == "findings":
+                return [confirmed_finding]
+            if path.startswith("dispatches"):
+                return [older_variant_dispatch]
+            return []
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(engagement),
+            engagement_key=engagement.name,
+            agent_root=str(tmp_path / "agent"),
+        ),
+    )
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=str(engagement),
+            target_phase="exploit",
+            force=False,
+        )
+    )
+
+    dispatch_paths = [p for p in captured_paths if p.startswith("dispatches")]
+    assert dispatch_paths, "transition-phase did not query dispatches"
+    dispatch_query = dispatch_paths[0]
+    assert "limit=1000" in dispatch_query, (
+        f"variant-pass gate must request the full backend page, got: {dispatch_query!r}"
+    )
+    assert "role=vulnerability-analyst" in dispatch_query
+    err = capsys.readouterr().err
+    assert "missing_variant_pass" not in err
+
+
 def test_check_coverage_reports_partially_covered_surfaces(
     monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
