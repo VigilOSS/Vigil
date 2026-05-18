@@ -278,6 +278,65 @@ render_all_wrappers() {
   done
 }
 
+check_render() {
+  local source_output_dir="$OUTPUT_DIR"
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  trap "rm -rf '$tmp_dir'" EXIT
+
+  OUTPUT_DIR="$tmp_dir"
+  CLAUDE_OUT="$OUTPUT_DIR/CLAUDE.md"
+  AGENTS_OUT="$OUTPUT_DIR/AGENTS.md"
+  CLAUDE_AGENTS_DIR="$OUTPUT_DIR/.claude/agents"
+  CODEX_AGENTS_DIR="$OUTPUT_DIR/.codex/agents"
+
+  render_claude
+  render_agents
+  render_all_wrappers
+
+  local drift=0
+  local f
+  for f in CLAUDE.md AGENTS.md; do
+    if ! diff -q "$source_output_dir/$f" "$tmp_dir/$f" >/dev/null 2>&1; then
+      printf 'DRIFT: %s differs from source render\n' "$f" >&2
+      diff -u "$source_output_dir/$f" "$tmp_dir/$f" >&2 || true
+      drift=1
+    fi
+  done
+
+  local agent_name
+  for agent_name in "${AGENT_NAMES[@]}"; do
+    local claude_rel=".claude/agents/$agent_name.md"
+    local codex_rel=".codex/agents/$agent_name.toml"
+    local target_claude="$source_output_dir/$claude_rel"
+    local target_codex="$source_output_dir/$codex_rel"
+    # Missing wrapper IS drift — the render produced it but the checked-in
+    # copy is absent. Operators reading from .claude/.codex hit nothing.
+    if [[ ! -f "$target_claude" ]]; then
+      printf 'DRIFT: %s missing — expected rendered wrapper not present in repo\n' "$claude_rel" >&2
+      drift=1
+    elif ! diff -q "$target_claude" "$tmp_dir/$claude_rel" >/dev/null 2>&1; then
+      printf 'DRIFT: %s differs from source render\n' "$claude_rel" >&2
+      diff -u "$target_claude" "$tmp_dir/$claude_rel" >&2 || true
+      drift=1
+    fi
+    if [[ ! -f "$target_codex" ]]; then
+      printf 'DRIFT: %s missing — expected rendered wrapper not present in repo\n' "$codex_rel" >&2
+      drift=1
+    elif ! diff -q "$target_codex" "$tmp_dir/$codex_rel" >/dev/null 2>&1; then
+      printf 'DRIFT: %s differs from source render\n' "$codex_rel" >&2
+      diff -u "$target_codex" "$tmp_dir/$codex_rel" >&2 || true
+      drift=1
+    fi
+  done
+
+  if [[ "$drift" -ne 0 ]]; then
+    printf '\nRender drift detected. Re-run from repo root:\n  cd agent && ./scripts/render-operator-prompts.sh repo\n' >&2
+    exit 1
+  fi
+  echo "render-check: clean (CLAUDE.md, AGENTS.md, ${#AGENT_NAMES[@]} specialist wrappers match source)"
+}
+
 case "$MODE" in
   repo)
     render_claude
@@ -292,8 +351,13 @@ case "$MODE" in
     render_agents
     render_all_wrappers
     ;;
+  check)
+    check_render
+    ;;
   *)
-    echo "Usage: $0 [repo|claude-install|codex-install] [output-dir]" >&2
+    echo "Usage: $0 [repo|claude-install|codex-install|check] [output-dir]" >&2
+    echo "" >&2
+    echo "  check  Render to a temp dir and diff against existing files. Exits 1 if any drift." >&2
     exit 1
     ;;
 esac

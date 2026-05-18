@@ -130,8 +130,6 @@ def main(argv: list[str] | None = None) -> None:
     create_p.add_argument("--name")
     create_p.add_argument("--target")
     create_p.add_argument("--hosts")
-    create_p.add_argument("--auth-mode", choices=["none", "manual", "auth_json", "proxy_capture"], default=None)
-    create_p.add_argument("--exploit-policy", choices=["pause", "full_send", "selected"], default=None)
     create_p.add_argument("--repo", action="append", default=[])
     create_p.add_argument("--apk", action="append", default=[], help="Android APK/AAB/XAPK artifact path")
     create_p.add_argument("--package-name", help="Android package name, for example com.example.app")
@@ -483,12 +481,6 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
                 name = input("Engagement name: ").strip()
             if engagement_type == "android" and not name and not args.package_name and not artifacts:
                 name = input("Engagement name: ").strip()
-            if engagement_type in {"web", "both"} and args.auth_mode is None:
-                args.auth_mode = _prompt_choice("Auth mode", "none", ["none", "auth_json", "manual", "proxy_capture"])
-            if args.exploit_policy is None:
-                args.exploit_policy = _prompt_choice("Exploit policy", "pause", ["pause", "full_send", "selected"])
-        auth_mode = args.auth_mode or "none"
-        exploit_policy = args.exploit_policy or "pause"
         created = create_engagement(
             CreateEngagementOptions(
                 install_root=install_root,
@@ -496,8 +488,6 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
                 target=target,
                 name=name,
                 hosts=hosts,
-                auth_mode=auth_mode,
-                exploit_policy=exploit_policy,
                 repos=args.repo,
                 artifacts=artifacts,
                 android_package=android_package,

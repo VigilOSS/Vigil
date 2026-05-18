@@ -37,6 +37,19 @@ def register(subparsers) -> None:
     p.add_argument("--artifact-ref", default="")
     p.add_argument("--details-inline", help="Inline JSON object for details")
     p.add_argument("--provenance-inline", help="Inline JSON object for provenance")
+    p.add_argument(
+        "--evidence-type",
+        dest="evidence_type",
+        default=None,
+        choices=("network-confirmed", "code-inferred", "theoretical", "informational"),
+        help=(
+            "C44: classify confirmation mode. network-confirmed = captured "
+            "HTTP request/response; code-inferred = pattern present in source, "
+            "no runtime proof; theoretical = chain-dependent; informational = "
+            "observation without proven attack path. Nullable — existing rows "
+            "stay NULL until an operator labels them."
+        ),
+    )
     p.set_defaults(func=run)
 
 
@@ -87,6 +100,9 @@ def run(args) -> None:
             "source_name": args.source_name,
             "details": details,
             "provenance": provenance,
+            # getattr fallback so callers that build args via SimpleNamespace
+            # (test fixtures pre-dating C44) don't AttributeError.
+            "evidence_type": getattr(args, "evidence_type", None),
             "reason_code": args.reason_code,
             "reason_text": args.reason_text,
             "artifact_ref": args.artifact_ref,

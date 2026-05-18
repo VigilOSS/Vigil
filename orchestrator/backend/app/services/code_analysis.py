@@ -1641,8 +1641,8 @@ def _record_cross_file_triggers(
         )
 
 
-_VALID_DISPOSITIONS = frozenset({"finding", "suspicious", "clean"})
-_VALID_ANALYSIS_RESULT_DISPOSITIONS = frozenset({"finding", "suspicious", "clean", "needs_context"})
+_VALID_DISPOSITIONS = frozenset({"finding", "suspicious", "clean", "skipped"})
+_VALID_ANALYSIS_RESULT_DISPOSITIONS = frozenset({"finding", "suspicious", "clean", "needs_context", "skipped"})
 
 
 def complete_queue_items(
@@ -1651,6 +1651,7 @@ def complete_queue_items(
     disposition: str,
     notes: str = "",
     cwe_coverage: list[dict[str, Any]] | None = None,
+    skip_reason: str = "",
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not item_ids:
@@ -1665,8 +1666,27 @@ def complete_queue_items(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid disposition '{disposition}'. Must be one of: {', '.join(sorted(_VALID_DISPOSITIONS))}",
         )
+    # C50: when disposition='skipped', a skip_reason is mandatory so the
+    # coverage report can attribute the skip (test-fixture, generated-code,
+    # minified, out-of-scope-language). For other dispositions the field
+    # stays empty and the existing notes blob carries any free-text context.
+    if disposition == "skipped" and not (skip_reason or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "skip_reason is required when disposition='skipped'. "
+                "Standard reasons: test-fixture, generated-code, minified, "
+                "out-of-scope-language, vendored-dependency."
+            ),
+        )
     now = _now_iso()
-    normalized_cwe_coverage = _normalize_cwe_coverage(cwe_coverage)
+    # Skipped items had no CWE analysis run; empty cwe_coverage is the
+    # natural payload. Skip both the required-non-empty check and the
+    # per-CWE shape normalization.
+    if disposition == "skipped":
+        normalized_cwe_coverage: list[dict[str, Any]] = []
+    else:
+        normalized_cwe_coverage = _normalize_cwe_coverage(cwe_coverage)
     cwe_coverage_text = _json_list_text(normalized_cwe_coverage)
     placeholders = ",".join("?" for _ in item_ids)
     with get_connection() as connection:
@@ -1676,7 +1696,11 @@ def complete_queue_items(
         file_row = _get_file_rows(connection, engagement.id, {int(queue_row["file_id"])})[
             int(queue_row["file_id"])
         ]
-        _validate_completion_coverage(file_row, normalized_cwe_coverage)
+        # Skipped items bypass the cwe-coverage completeness check — by
+        # definition the analyst did not analyze the file. Other dispositions
+        # still enforce the existing coverage rule.
+        if disposition != "skipped":
+            _validate_completion_coverage(file_row, normalized_cwe_coverage)
         next_status = "done"
         cursor = connection.execute(
             f"""
@@ -1684,12 +1708,13 @@ def complete_queue_items(
             SET status = ?,
                 disposition = ?,
                 analysis_notes = ?,
+                skip_reason = ?,
                 cwe_coverage_json = ?,
                 completed_at = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE engagement_id = ? AND status = 'processing' AND id IN ({placeholders})
             """,
-            (next_status, disposition, notes, cwe_coverage_text, now, engagement.id, *item_ids),
+            (next_status, disposition, notes, skip_reason, cwe_coverage_text, now, engagement.id, *item_ids),
         )
         if cursor.rowcount != len(item_ids):
             raise HTTPException(

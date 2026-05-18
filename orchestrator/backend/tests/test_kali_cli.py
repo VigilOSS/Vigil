@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -793,6 +794,64 @@ def test_kali_exec_timeout_kills_process_group_and_marks_timed_out(
     assert patch_payload["status"] == "timed_out"
     assert patch_payload["timed_out"] is True
     assert patch_payload["partial_results"] is True
+
+
+def test_nuclei_lock_rejects_concurrent_invocation(monkeypatch, fake_engagement):
+    """C32: a per-engagement file lock prevents two concurrent
+    `aith assess kali nuclei` invocations from corrupting each other's output.
+    Acquire the lock once, then attempt to reacquire under the same engagement
+    and verify the second attempt raises AssessError with a clear message."""
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[3]
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.commands.kali_nuclei import _nuclei_engagement_lock  # type: ignore[import-not-found]
+    from assess.lib.client import AssessError  # type: ignore[import-not-found]
+
+    eng_dir = fake_engagement
+    (eng_dir / "scans").mkdir(parents=True, exist_ok=True)
+
+    # First holder takes the lock; second attempt must fail-fast.
+    with _nuclei_engagement_lock(Path(eng_dir)):
+        with pytest.raises(AssessError, match="nuclei lock already held"):
+            with _nuclei_engagement_lock(Path(eng_dir)):
+                pass  # pragma: no cover — should not reach
+
+
+def test_nuclei_lock_recovers_from_stale_pid(monkeypatch, fake_engagement, capsys):
+    """C32: if the lockfile records a PID that is no longer alive (crashed
+    prior run), the next invocation auto-recovers and acquires the lock."""
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[3]
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.commands.kali_nuclei import _nuclei_engagement_lock  # type: ignore[import-not-found]
+
+    eng_dir = fake_engagement
+    scans_dir = eng_dir / "scans"
+    scans_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = scans_dir / ".nuclei.lock"
+    # Write an obviously-dead PID. PID 1 is reserved and we don't own it,
+    # so write something deterministically dead — use a very high PID
+    # that's almost certainly not assigned.
+    lock_path.write_text("99999999\n", encoding="utf-8")
+
+    # Should succeed (stale PID detected → force-release → acquire).
+    with _nuclei_engagement_lock(Path(eng_dir)) as resolved_lock_path:
+        assert Path(resolved_lock_path) == lock_path
+        # Our PID is now recorded in the lockfile.
+        recorded = lock_path.read_text(encoding="utf-8").strip()
+        assert recorded == str(os.getpid())
 
 
 def test_filenotfound_finalizes_running_audit_row_to_failed(monkeypatch, fake_engagement):
@@ -3734,3 +3793,143 @@ def test_read_safely_seeks_to_end_for_true_tail(tmp_path):
     assert "line 000800" not in preview, (
         "_read_safely must not include the middle of the file (only head + tail)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Nuclei _zero_byte_post_check — inspects the -o artifact, not stdout capture
+# ---------------------------------------------------------------------------
+
+
+def _load_nuclei_module():
+    """Import assess.commands.kali_nuclei after fixing up sys.path."""
+    repo_root = Path(__file__).resolve().parents[3]
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.commands import kali_nuclei  # type: ignore[import-not-found]
+    return kali_nuclei
+
+
+def test_nuclei_resolve_output_host_path_translates_container_and_relative_forms(tmp_path):
+    """The post-check must inspect the operator-supplied `-o` artifact under
+    the engagement mount, regardless of whether the operator passed a
+    container-absolute path (/engagements/<key>/scans/foo) or an
+    engagement-relative path (scans/foo).
+    """
+    mod = _load_nuclei_module()
+    eng_dir = tmp_path / "engagements" / "eng-key"
+    eng_dir.mkdir(parents=True)
+
+    relative = mod._resolve_output_host_path("scans/nuclei.jsonl", eng_dir)
+    assert relative == eng_dir / "scans" / "nuclei.jsonl"
+
+    container_abs = mod._resolve_output_host_path(
+        "/engagements/eng-key/scans/nuclei.jsonl", eng_dir
+    )
+    assert container_abs == eng_dir / "scans" / "nuclei.jsonl"
+
+    # No engagement context → unresolvable.
+    assert mod._resolve_output_host_path("scans/nuclei.jsonl", None) is None
+    assert mod._resolve_output_host_path("", eng_dir) is None
+
+
+def test_nuclei_zero_byte_post_check_silent_no_match_does_not_warn(tmp_path, capsys):
+    """`-silent -jsonl -o file` with zero findings produces an empty output
+    file and may produce an empty stdout. If 'Templates loaded for current
+    scan:' is present in stderr, this is a legitimate no-match run — no
+    warning should fire. (Regression: the old check keyed on stdout_path,
+    which always returned early when stdout had banner content but never
+    actually inspected the `-o` artifact.)
+    """
+    mod = _load_nuclei_module()
+    eng_dir = tmp_path / "engagements" / "eng-key"
+    (eng_dir / "scans").mkdir(parents=True)
+    out_file = eng_dir / "scans" / "nuclei.jsonl"
+    out_file.write_text("", encoding="utf-8")  # zero bytes — legitimate "no matches"
+
+    args = SimpleNamespace(output="scans/nuclei.jsonl", engagement_dir=str(eng_dir))
+    result = {
+        "stdout_path": str(tmp_path / "stdout.txt"),  # irrelevant under the new logic
+        "stderr_preview": "[INF] Templates loaded for current scan: 4823\n",
+    }
+    mod._zero_byte_post_check(args, result, eng_dir)
+    captured = capsys.readouterr()
+    assert "WARN nuclei" not in captured.err
+
+
+def test_nuclei_zero_byte_post_check_loader_failure_warns(tmp_path, capsys):
+    """Zero-byte output AND missing 'Templates loaded for current scan:' →
+    the template loader failed at startup. Warning must fire so the operator
+    does not record a phantom 'no matches' finding."""
+    mod = _load_nuclei_module()
+    eng_dir = tmp_path / "engagements" / "eng-key"
+    (eng_dir / "scans").mkdir(parents=True)
+    out_file = eng_dir / "scans" / "nuclei.jsonl"
+    out_file.write_text("", encoding="utf-8")
+
+    args = SimpleNamespace(output="scans/nuclei.jsonl", engagement_dir=str(eng_dir))
+    result = {
+        "stdout_path": str(tmp_path / "stdout.txt"),
+        "stderr_preview": "panic: invalid template directory\n",
+    }
+    mod._zero_byte_post_check(args, result, eng_dir)
+    captured = capsys.readouterr()
+    assert "WARN nuclei" in captured.err
+    assert "zero bytes" in captured.err
+    assert "Templates loaded for current scan" in captured.err
+
+
+def test_nuclei_stale_lock_reacquire_race_raises_assess_error(fake_engagement):
+    """C32 race: when the lockfile records no PID (prior holder mid-acquire —
+    O_CREAT raced with flock), the helper treats the lock as stale and
+    re-flocks. If that re-flock itself races with another live holder, the
+    raw BlockingIOError must NOT escape — operators should see the same
+    actionable AssessError as a normal contention, not an internal traceback.
+    """
+    import fcntl
+    import os as _os
+    from contextlib import ExitStack
+
+    mod = _load_nuclei_module()
+    from assess.lib.client import AssessError  # type: ignore[import-not-found]
+
+    eng_dir = fake_engagement
+    scans_dir = eng_dir / "scans"
+    scans_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = scans_dir / ".nuclei.lock"
+
+    # Simulate the race: lockfile exists, holds the flock, but has no PID
+    # recorded yet (the empty-PID branch is exactly what triggers the
+    # "treat as stale → re-flock" path the fix guards).
+    fd = _os.open(str(lock_path), _os.O_RDWR | _os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with ExitStack() as stack:
+        stack.callback(_os.close, fd)
+        stack.callback(lambda: fcntl.flock(fd, fcntl.LOCK_UN))
+
+        with pytest.raises(AssessError, match="nuclei lock contention on retry"):
+            with mod._nuclei_engagement_lock(eng_dir):
+                pass  # pragma: no cover — should not reach
+
+
+def test_nuclei_zero_byte_post_check_non_empty_output_does_not_warn(tmp_path, capsys):
+    """Findings present in the `-o` file → no warning, regardless of stdout."""
+    mod = _load_nuclei_module()
+    eng_dir = tmp_path / "engagements" / "eng-key"
+    (eng_dir / "scans").mkdir(parents=True)
+    out_file = eng_dir / "scans" / "nuclei.jsonl"
+    out_file.write_text(
+        '{"template-id":"CVE-2099-0001","matched-at":"https://x"}\n',
+        encoding="utf-8",
+    )
+
+    args = SimpleNamespace(output="scans/nuclei.jsonl", engagement_dir=str(eng_dir))
+    # Even if stderr lacks the templates-loaded line, a non-empty output file
+    # proves the run produced findings.
+    result = {"stdout_path": str(tmp_path / "stdout.txt"), "stderr_preview": ""}
+    mod._zero_byte_post_check(args, result, eng_dir)
+    captured = capsys.readouterr()
+    assert "WARN nuclei" not in captured.err

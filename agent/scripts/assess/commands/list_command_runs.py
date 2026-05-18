@@ -25,6 +25,16 @@ def register(subparsers) -> None:
     p.add_argument("--phase", default="", help="Filter to a specific engagement phase")
     p.add_argument("--tool-name", dest="tool_name", default="", help="Filter to the route-derived tool label (e.g. nmap, command)")
     p.add_argument("--tool-bin", dest="tool_bin", default="", help="Filter to the argv[0] binary (e.g. curl, sqlmap) — useful for execute_command runs")
+    p.add_argument(
+        "--target-host",
+        dest="target_host",
+        default="",
+        help=(
+            "C30: filter to the parsed target host for httpx / nuclei / ffuf / sqlmap runs. "
+            "Exact match (case-insensitive) against the target_host column. Unhandled verbs "
+            "store an empty value; use --q for substring search on those rows."
+        ),
+    )
     p.add_argument("--audit-source", dest="audit_source", default="", choices=["", "header", "env_fallback", "mixed"], help="Filter by attribution provenance")
     p.add_argument(
         "--technique",
@@ -87,6 +97,8 @@ def _build_query(args) -> str:
         params.append(("tool_name", args.tool_name))
     if args.tool_bin:
         params.append(("tool_bin", args.tool_bin))
+    if getattr(args, "target_host", ""):
+        params.append(("target_host", args.target_host))
     if args.audit_source:
         params.append(("audit_source", args.audit_source))
     if getattr(args, "technique", ""):

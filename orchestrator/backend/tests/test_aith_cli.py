@@ -55,8 +55,6 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
             engagement_type="web",
             target="https://app.example.com",
             hosts=["app.example.com", "admin.example.com"],
-            auth_mode="manual",
-            exploit_policy="selected",
             skip_permissions=True,
         )
     )
@@ -69,9 +67,12 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     assert scope["engagement_type"] == "web"
     assert scope["hostname"] == "app.example.com"
     assert scope["hosts"] == ["app.example.com", "admin.example.com"]
-    assert scope["exploit_policy"] == "selected"
-    assert auth["mode"] == "manual"
-    assert auth["state"] == "missing"
+    assert scope["exploit_policy"] == "pause"
+    assert scope["exploit_review_state"] == "pending"
+    assert scope["approved_targets"] == []
+    assert auth["mode"] == "none"
+    assert auth["state"] == "none"
+    assert auth["use_for_requests"] is False
     assert manifest["key"] == created.key
     assert (created.path / "cases.db").exists()
     assert (created.path / "start_codex.sh").exists()
@@ -81,6 +82,94 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     rows = list_engagements(install_root)
     assert [row.key for row in rows] == [created.key]
     assert rows[0].target == "https://app.example.com"
+
+
+def test_engagement_create_does_not_accept_exploit_policy_or_auth_mode_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    for flag, value in (("--exploit-policy", "selected"), ("--auth-mode", "manual")):
+        with pytest.raises(SystemExit):
+            main_module.main(
+                [
+                    "--root",
+                    str(install_root),
+                    "engagement",
+                    "create",
+                    "--type",
+                    "web",
+                    "https://app.example.com",
+                    "--hosts",
+                    "app.example.com",
+                    "--no-prompt",
+                    flag,
+                    value,
+                ]
+            )
+
+
+def test_engagement_create_emits_post_create_footer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ai_threat_hunting_cli import docker as docker_mod
+    from ai_threat_hunting_cli import oob as oob_mod
+    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    monkeypatch.setattr(docker_mod, "container_running", lambda *_a, **_k: False)
+    monkeypatch.setattr(oob_mod, "oob_status", lambda *_a, **_k: {"state": "stopped"})
+
+    created = create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="web",
+            target="https://app.example.com",
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "mitmproxy: stopped" in captured.err
+    assert "oob:" in captured.err and "stopped" in captured.err
+    assert f"aith mitmproxy start {created.key}" in captured.err
+    assert "aith oob start" in captured.err
+    assert f"aith engagement start {created.key} --client codex" in captured.err
+
+
+def test_engagement_create_footer_suppresses_hints_when_services_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ai_threat_hunting_cli import docker as docker_mod
+    from ai_threat_hunting_cli import oob as oob_mod
+    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    monkeypatch.setattr(docker_mod, "container_running", lambda *_a, **_k: True)
+    monkeypatch.setattr(oob_mod, "oob_status", lambda *_a, **_k: {"state": "running"})
+
+    create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="web",
+            target="https://app.example.com",
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "mitmproxy: running" in captured.err
+    assert "oob:       running" in captured.err
+    assert "aith mitmproxy start" not in captured.err
+    assert "aith oob start" not in captured.err
 
 
 def test_engagement_create_android_uses_artifact_only_scope(
@@ -181,8 +270,6 @@ def test_engagement_create_android_cli_infers_apk_without_interactive_prompt(
             "create",
             "--apk",
             str(apk_path),
-            "--exploit-policy",
-            "pause",
         ]
     )
 
@@ -1973,6 +2060,82 @@ def test_transition_phase_both_engagement_requires_track_for_ambiguous_complete(
 
     assert exc.value.code == 2
     assert "pass --track web or --track code" in capsys.readouterr().err
+
+
+def test_transition_phase_exploit_variant_gate_requests_full_dispatch_page(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The variant-pass gate must request a page large enough that engagements
+    with hundreds of dispatches do not drop the variant run behind the
+    default backend limit=100. Regression for PR 14 Codex P1."""
+    module = _load_assess_module(
+        "transition_phase_variant_pagination_module",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    engagement = tmp_path / "agent" / "engagements" / "eng-test"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text(
+        json.dumps({"engagement_type": "web", "current_phase": "verify"}),
+        encoding="utf-8",
+    )
+
+    confirmed_finding = {
+        "slug": "ssrf-host-header",
+        "severity": "high",
+        "verification_state": "verified",
+        "workflow_status": "active",
+    }
+    older_variant_dispatch = {
+        "agent_role": "vulnerability-analyst",
+        "task": "Variant hunt for ssrf-host-header siblings",
+        "finding_slugs": ["ssrf-host-header"],
+    }
+    captured_paths: list[str] = []
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def get(self, path: str):
+            captured_paths.append(path)
+            if path == "findings":
+                return [confirmed_finding]
+            if path.startswith("dispatches"):
+                return [older_variant_dispatch]
+            return []
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(engagement),
+            engagement_key=engagement.name,
+            agent_root=str(tmp_path / "agent"),
+        ),
+    )
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=str(engagement),
+            target_phase="exploit",
+            force=False,
+        )
+    )
+
+    dispatch_paths = [p for p in captured_paths if p.startswith("dispatches")]
+    assert dispatch_paths, "transition-phase did not query dispatches"
+    dispatch_query = dispatch_paths[0]
+    assert "limit=1000" in dispatch_query, (
+        f"variant-pass gate must request the full backend page, got: {dispatch_query!r}"
+    )
+    assert "role=vulnerability-analyst" in dispatch_query
+    err = capsys.readouterr().err
+    assert "missing_variant_pass" not in err
 
 
 def test_check_coverage_reports_partially_covered_surfaces(
@@ -3916,3 +4079,391 @@ def test_validate_dispatch_skips_scope_check_when_engagement_dir_omitted(
     }
     errors, _warnings = validate_specialist_dispatch_contract(payload)
     assert not any("scope" in e.lower() for e in errors), errors
+
+
+# ---------------------------------------------------------------------------
+# Item 11 — scope_host rejection telemetry (audits the C7 gate)
+# ---------------------------------------------------------------------------
+
+
+def _load_auth_status_module():
+    """Bootstrap sys.path for the assess package, then import auth_status."""
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    # Reload assess modules so the injected sys.path takes effect even when
+    # earlier tests imported them under a different layout.
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.commands import auth_status  # type: ignore[import-not-found]
+    return auth_status
+
+
+def test_auth_status_reports_bearer_token_and_recommends_refresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C42a: aith assess auth-status reads auth.json and emits a structured
+    snapshot — auth_context, mode, expires_state, present token shapes, and
+    a refresh-path recommendation matching the C42 recovery loop. The
+    command does NOT write to auth.json or trigger a refresh."""
+    eng_dir = tmp_path / "eng"
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    (eng_dir / "auth.json").write_text(
+        json.dumps(
+            {
+                "auth_context": "authenticated",
+                "mode": "proxy_capture",
+                "use_for_requests": True,
+                "state": "available",
+                "expires_at": "2099-01-01T00:00:00Z",
+                "headers": {"Authorization": "Bearer aaa.bbb.ccc.ddd.eee.fff"},
+                "cookies": {"sessionid": "abc123"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    module = _load_auth_status_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(eng_dir),
+            engagement_key="eng-c42a",
+        ),
+    )
+
+    # Stub the AssessmentClient so last_auth_probe lookup does not require a
+    # live backend; return one fake AUTH-technique row. Stubs `.get` because
+    # /command-runs is an assessment-scoped endpoint.
+    class _FakeAuthClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            self.base_url = "http://example.test"
+            self.engagement_key = "eng-c42a"
+
+        def get(self, endpoint: str):
+            assert endpoint == "command-runs?technique=AUTH&limit=1"
+            return {
+                "items": [
+                    {
+                        "id": 7,
+                        "status": "completed",
+                        "intent": "credential validation",
+                        "started_at": "2026-05-16T20:00:00Z",
+                        "completed_at": "2026-05-16T20:00:01Z",
+                    }
+                ]
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _FakeAuthClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=str(eng_dir),
+            json_output=True,
+            expires_warning_seconds=300,
+        )
+    )
+    out = capsys.readouterr().out
+    snapshot = json.loads(out)
+    assert snapshot["auth_context"] == "authenticated"
+    assert snapshot["mode"] == "proxy_capture"
+    assert snapshot["expires_state"] == "valid"
+    assert any("Authorization: Bearer" in t for t in snapshot["tokens"])
+    assert any("flat_cookies" in t for t in snapshot["tokens"])
+    assert snapshot["last_auth_probe"]["run_id"] == 7
+    assert "Bearer token present" in snapshot["recommend"]
+
+
+def test_auth_status_flags_expired_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C42a: when expires_at is in the past, expires_state reports 'expired'
+    and the recommend line still names the appropriate refresh path."""
+    eng_dir = tmp_path / "eng-expired"
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    (eng_dir / "auth.json").write_text(
+        json.dumps(
+            {
+                "auth_context": "authenticated",
+                "mode": "proxy_capture",
+                "use_for_requests": True,
+                "state": "available",
+                "expires_at": "2000-01-01T00:00:00Z",
+                "headers": {"Authorization": "Bearer expired.token"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    module = _load_auth_status_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(eng_dir),
+            engagement_key="eng-expired",
+        ),
+    )
+
+    class _NoProbeClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            self.base_url = "http://example.test"
+            self.engagement_key = "eng-expired"
+
+        def get(self, endpoint: str):
+            return {"items": []}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _NoProbeClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=str(eng_dir),
+            json_output=True,
+            expires_warning_seconds=300,
+        )
+    )
+    snapshot = json.loads(capsys.readouterr().out)
+    assert snapshot["expires_state"] == "expired"
+    assert snapshot["expires_in_seconds"] is not None
+    assert snapshot["expires_in_seconds"] < 0
+    assert snapshot["last_auth_probe"] is None
+
+
+def test_auth_status_last_probe_uses_assessment_scoped_route(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`/command-runs` is registered on the assessment router. `_last_auth_probe`
+    must route through `client.get(...)` (which carries the /assessment prefix);
+    using `client.get_engagement(...)` 404s and silently returns None, so the
+    operator never sees the last AUTH probe even when one exists."""
+    eng_dir = tmp_path / "eng-route"
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    (eng_dir / "auth.json").write_text(
+        json.dumps(
+            {
+                "auth_context": "authenticated",
+                "mode": "proxy_capture",
+                "use_for_requests": True,
+                "state": "available",
+                "expires_at": "2099-01-01T00:00:00Z",
+                "headers": {"Authorization": "Bearer route.token"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    module = _load_auth_status_module()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(eng_dir),
+            engagement_key="eng-route",
+        ),
+    )
+
+    class _RouteAssertingClient:
+        """Fails loudly if production hits the non-assessment route."""
+
+        def __init__(self, *_: object, **__: object) -> None:
+            self.base_url = "http://example.test"
+            self.engagement_key = "eng-route"
+
+        def get(self, endpoint: str):
+            assert endpoint == "command-runs?technique=AUTH&limit=1"
+            return {
+                "items": [
+                    {
+                        "id": 42,
+                        "status": "completed",
+                        "intent": "auth probe",
+                        "started_at": "2026-05-18T10:00:00Z",
+                        "completed_at": "2026-05-18T10:00:01Z",
+                    }
+                ]
+            }
+
+        def get_engagement(self, endpoint: str):
+            raise AssertionError(
+                "_last_auth_probe routed through .get_engagement(); "
+                "/command-runs lives under the assessment router so it must use .get()"
+            )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _RouteAssertingClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=str(eng_dir),
+            json_output=True,
+            expires_warning_seconds=300,
+        )
+    )
+    snapshot = json.loads(capsys.readouterr().out)
+    assert snapshot["last_auth_probe"]["run_id"] == 42
+
+
+def test_assessment_client_list_all_decisions_paginates_until_exhausted() -> None:
+    """`list_all_decisions` must paginate `/dispatch-decisions` until the
+    backend returns fewer rows than the page size, so internal gating
+    (vendor-SaaS, etc.) sees every recorded decision instead of the first
+    page's worth.
+
+    Drives a real AssessmentClient with `.get` monkeypatched to return three
+    synthetic pages — full, full, partial — and asserts the helper:
+      1. Sends the right offsets (0, 1000, 2000)
+      2. Concatenates every row
+      3. Stops at the partial page (no spurious offset=3000 call)
+    """
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.lib.client import AssessmentClient  # type: ignore[import-not-found]
+
+    client = AssessmentClient.__new__(AssessmentClient)
+    # Bypass __init__ — we override the only method `list_all_decisions` needs.
+    captured: list[str] = []
+
+    def _fake_get(endpoint: str):
+        captured.append(endpoint)
+        if "offset=0" in endpoint or ("offset=" not in endpoint and "limit=1000" in endpoint):
+            return [{"id": i, "kind": "scope_decision"} for i in range(1000)]
+        if "offset=1000" in endpoint:
+            return [{"id": i, "kind": "scope_decision"} for i in range(1000, 2000)]
+        if "offset=2000" in endpoint:
+            return [{"id": i, "kind": "scope_decision"} for i in range(2000, 2350)]
+        raise AssertionError(f"unexpected pagination request: {endpoint}")
+
+    client.get = _fake_get  # type: ignore[method-assign]
+
+    rows = client.list_all_decisions(kind="scope_decision")
+
+    assert len(rows) == 2350
+    assert {row["id"] for row in rows} == set(range(2350))
+    # Three requests, no fourth (the partial page short-circuits).
+    assert len(captured) == 3
+    # Each request scoped to the kind filter.
+    assert all("kind=scope_decision" in url for url in captured)
+    # Offsets in order, with the paginating page size.
+    assert "offset=0" in captured[0]
+    assert "limit=1000" in captured[0]
+    assert "offset=1000" in captured[1]
+    assert "offset=2000" in captured[2]
+
+
+def test_assessment_client_list_all_decisions_strips_caller_limit_offset() -> None:
+    """Callers must not be able to neuter `list_all_decisions` by passing
+    their own `limit`/`offset` — the helper drives pagination itself.
+    """
+    scripts_root = repo_root / "agent" / "scripts"
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    for module_name in list(sys.modules):
+        if module_name == "assess" or module_name.startswith("assess."):
+            sys.modules.pop(module_name, None)
+    from assess.lib.client import AssessmentClient  # type: ignore[import-not-found]
+
+    client = AssessmentClient.__new__(AssessmentClient)
+    captured: list[str] = []
+
+    def _fake_get(endpoint: str):
+        captured.append(endpoint)
+        # Single short page so the loop exits.
+        return [{"id": 1, "kind": "scope_decision"}]
+
+    client.get = _fake_get  # type: ignore[method-assign]
+
+    # Caller tries to pin a tiny limit and a nonsense offset.
+    client.list_all_decisions(kind="scope_decision", limit=5, offset=999)
+
+    # The helper rewrote limit to 1000 and offset to 0.
+    assert "limit=1000" in captured[0]
+    assert "offset=0" in captured[0]
+    assert "limit=5" not in captured[0]
+    assert "offset=999" not in captured[0]
+
+
+def test_scope_rejection_writes_dispatch_decision_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Item 11: when the C7 scope_host gate rejects a vulnerability-analyst
+    dispatch, a `kind='scope_rejection'` decision row is written so the
+    rejection is queryable post-engagement. Telemetry is best-effort —
+    failures don't block the original error."""
+    eng_dir = tmp_path / "eng"
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    (eng_dir / "scope.json").write_text(
+        json.dumps({"hosts": ["app.example.test"], "status": "in_progress"}),
+        encoding="utf-8",
+    )
+
+    module = _load_dispatch_module()
+    recorded_decisions: list[dict] = []
+
+    class _DecisionCapturingClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            self.base_url = "http://example.test"
+            self.engagement_key = "eng"
+
+        def record_decision(self, body: dict) -> dict:
+            recorded_decisions.append(body)
+            return {"id": 1, **body}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _DecisionCapturingClient)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(eng_dir),
+            engagement_key="eng",
+            agent_root=str(tmp_path),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module._build_register_payload(
+            _dispatch_args(
+                "register",
+                agent_id="va-rej-1",
+                agent_role="vulnerability-analyst",
+                scope_host="evil-attacker.test",
+                dispatch_mode_arg="item-iterating",
+                task="probe IDOR",
+                skills="idor-testing",
+                engagement_dir=str(eng_dir),
+            )
+        )
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "not in scope.json" in err
+    # Exactly one telemetry row, with the rejected host + role + scope entries
+    assert len(recorded_decisions) == 1
+    row = recorded_decisions[0]
+    assert row["kind"] == "scope_rejection"
+    assert row["surfaced_to_user"] is True
+    payload = row["payload"]
+    assert payload["host"] == "evil-attacker.test"
+    assert payload["role"] == "vulnerability-analyst"
+    assert payload["scope_entries"] == ["app.example.test"]
+    assert "not in scope.json" in payload["reason"]
