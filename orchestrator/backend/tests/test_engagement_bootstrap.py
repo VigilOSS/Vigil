@@ -313,8 +313,6 @@ def test_aith_engagement_create_writes_explicit_web_scope(tmp_path: Path, monkey
             engagement_type="web",
             target="https://app.example.com",
             hosts=["app.example.com", "admin.example.com"],
-            auth_mode="manual",
-            exploit_policy="selected",
         )
     )
 
@@ -324,12 +322,12 @@ def test_aith_engagement_create_writes_explicit_web_scope(tmp_path: Path, monkey
 
     assert scope["hostname"] == "app.example.com"
     assert scope["hosts"] == ["app.example.com", "admin.example.com"]
-    assert scope["exploit_policy"] == "selected"
+    assert scope["exploit_policy"] == "pause"
     assert scope["exploit_review_state"] == "pending"
     assert scope["approved_targets"] == []
-    assert auth["mode"] == "manual"
-    assert auth["state"] == "missing"
-    assert auth["use_for_requests"] is True
+    assert auth["mode"] == "none"
+    assert auth["state"] == "none"
+    assert auth["use_for_requests"] is False
     assert manifest["key"] == created.key
     assert manifest["target"] == "https://app.example.com"
     assert (created.path / "sessions" / "index.json").exists()
@@ -401,7 +399,6 @@ def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path, monkey
             engagement_type="code",
             name="my-cool-project",
             repos=[str(fake_repo)],
-            exploit_policy="pause",
         )
     )
 

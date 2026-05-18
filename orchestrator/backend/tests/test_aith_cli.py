@@ -55,8 +55,6 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
             engagement_type="web",
             target="https://app.example.com",
             hosts=["app.example.com", "admin.example.com"],
-            auth_mode="manual",
-            exploit_policy="selected",
             skip_permissions=True,
         )
     )
@@ -69,9 +67,12 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     assert scope["engagement_type"] == "web"
     assert scope["hostname"] == "app.example.com"
     assert scope["hosts"] == ["app.example.com", "admin.example.com"]
-    assert scope["exploit_policy"] == "selected"
-    assert auth["mode"] == "manual"
-    assert auth["state"] == "missing"
+    assert scope["exploit_policy"] == "pause"
+    assert scope["exploit_review_state"] == "pending"
+    assert scope["approved_targets"] == []
+    assert auth["mode"] == "none"
+    assert auth["state"] == "none"
+    assert auth["use_for_requests"] is False
     assert manifest["key"] == created.key
     assert (created.path / "cases.db").exists()
     assert (created.path / "start_codex.sh").exists()
@@ -81,6 +82,94 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     rows = list_engagements(install_root)
     assert [row.key for row in rows] == [created.key]
     assert rows[0].target == "https://app.example.com"
+
+
+def test_engagement_create_does_not_accept_exploit_policy_or_auth_mode_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    for flag, value in (("--exploit-policy", "selected"), ("--auth-mode", "manual")):
+        with pytest.raises(SystemExit):
+            main_module.main(
+                [
+                    "--root",
+                    str(install_root),
+                    "engagement",
+                    "create",
+                    "--type",
+                    "web",
+                    "https://app.example.com",
+                    "--hosts",
+                    "app.example.com",
+                    "--no-prompt",
+                    flag,
+                    value,
+                ]
+            )
+
+
+def test_engagement_create_emits_post_create_footer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ai_threat_hunting_cli import docker as docker_mod
+    from ai_threat_hunting_cli import oob as oob_mod
+    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    monkeypatch.setattr(docker_mod, "container_running", lambda *_a, **_k: False)
+    monkeypatch.setattr(oob_mod, "oob_status", lambda *_a, **_k: {"state": "stopped"})
+
+    created = create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="web",
+            target="https://app.example.com",
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "mitmproxy: stopped" in captured.err
+    assert "oob:" in captured.err and "stopped" in captured.err
+    assert f"aith mitmproxy start {created.key}" in captured.err
+    assert "aith oob start" in captured.err
+    assert f"aith engagement start {created.key} --client codex" in captured.err
+
+
+def test_engagement_create_footer_suppresses_hints_when_services_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ai_threat_hunting_cli import docker as docker_mod
+    from ai_threat_hunting_cli import oob as oob_mod
+    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    monkeypatch.setattr(docker_mod, "container_running", lambda *_a, **_k: True)
+    monkeypatch.setattr(oob_mod, "oob_status", lambda *_a, **_k: {"state": "running"})
+
+    create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="web",
+            target="https://app.example.com",
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "mitmproxy: running" in captured.err
+    assert "oob:       running" in captured.err
+    assert "aith mitmproxy start" not in captured.err
+    assert "aith oob start" not in captured.err
 
 
 def test_engagement_create_android_uses_artifact_only_scope(
@@ -181,8 +270,6 @@ def test_engagement_create_android_cli_infers_apk_without_interactive_prompt(
             "create",
             "--apk",
             str(apk_path),
-            "--exploit-policy",
-            "pause",
         ]
     )
 
