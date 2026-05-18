@@ -2477,6 +2477,16 @@ input {
   background: rgba(23, 53, 76, 0.035);
   border: 1px solid var(--border);
   border-radius: 12px;
+  /* Same root cause as .drawer-body's min-width:0 — without this the
+   * 1fr columns refuse to shrink below the largest child's intrinsic
+   * minimum width, so a long unbreakable value (defect_family,
+   * auth_context, root_cause_key) forces horizontal scroll of the
+   * entire kv-grid block. */
+  min-width: 0;
+}
+.findings-redesign .kv {
+  /* Each .kv cell is itself a flex/grid child; let it shrink. */
+  min-width: 0;
 }
 .findings-redesign .kv .k {
   font-size: 0.7rem;
@@ -2489,6 +2499,10 @@ input {
   font-size: 0.88rem;
   color: var(--ink);
   margin: 0;
+  /* Mono variant has its own break-all rule below; this wraps the
+   * non-mono prose variants (defect_family, root_cause_key,
+   * auth_context) at character boundaries when needed. */
+  overflow-wrap: anywhere;
 }
 .findings-redesign .kv .v.mono {
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
