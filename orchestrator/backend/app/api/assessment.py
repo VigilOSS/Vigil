@@ -1340,6 +1340,70 @@ class HandoffUpdate(BaseModel):
     extras: dict[str, Any] | None = None
 
 
+_COVERAGE_DEFERRAL_OBJECTIVES = (
+    "waf_tier",
+    "service_inventory",
+    "directory_fuzz",
+    "nikto_trigger",
+    "osint",
+)
+
+
+class CoverageDeferralPayload(BaseModel):
+    """Strict shape for ``kind='coverage_deferral'`` decision rows.
+
+    Per the C40 design, the gate at ``per_host_coverage()`` consults this
+    payload to decide whether a host has explicitly skipped a sub-objective.
+    A malformed payload silently breaks the gate (the host appears unmet
+    despite the operator's intent to defer), so kind-aware validation
+    catches the bad shape at POST time rather than at gate-eval time.
+
+    Free-form ``extras`` are allowed for context (timestamp, ticket link,
+    etc.); only the load-bearing fields are constrained.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    deferred_objectives: list[
+        Literal[
+            "waf_tier",
+            "service_inventory",
+            "directory_fuzz",
+            "nikto_trigger",
+            "osint",
+        ]
+    ] = Field(
+        min_length=1,
+        description="One or more sub-objectives the operator is explicitly skipping for the host.",
+    )
+    reason: str = Field(
+        min_length=1,
+        description="Why the deferral was approved. Read by report-writer + audit views.",
+    )
+    host: str | None = Field(default=None, min_length=1)
+    target: str | None = Field(default=None, min_length=1)
+    hostname: str | None = Field(default=None, min_length=1)
+    hosts: list[str] | None = Field(default=None)
+    approved_by: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _require_at_least_one_host_field(self) -> "CoverageDeferralPayload":
+        if not any(
+            [self.host, self.target, self.hostname, self.hosts and any(self.hosts)]
+        ):
+            raise ValueError(
+                "coverage_deferral payload requires at least one of: "
+                "host, target, hostname, or hosts[] (non-empty)"
+            )
+        if self.hosts is not None:
+            for entry in self.hosts:
+                if not isinstance(entry, str) or not entry.strip():
+                    raise ValueError(
+                        "coverage_deferral payload `hosts` entries must be non-empty strings"
+                    )
+        return self
+
+
 class DecisionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1347,9 +1411,20 @@ class DecisionCreate(BaseModel):
     # checkpoint kinds (scope_decision, egress_decision, dispatch_blocked,
     # license_decision, ...) without a backend redeploy. The CLI helper layer
     # validates the well-known shapes; the table just stores the bytes.
+    #
+    # The exception is kinds whose payload is consumed by a backend gate
+    # (currently: ``coverage_deferral`` → ``per_host_coverage()``). For those,
+    # validate the payload shape at POST time so malformed payloads can't
+    # silently neuter the gate that depends on them.
     kind: str = Field(min_length=1, max_length=128)
     payload: dict[str, Any]
     surfaced_to_user: bool = False
+
+    @model_validator(mode="after")
+    def _validate_known_kind_payload(self) -> "DecisionCreate":
+        if self.kind == "coverage_deferral":
+            CoverageDeferralPayload.model_validate(self.payload)
+        return self
 
 
 class DecisionUpdate(BaseModel):
