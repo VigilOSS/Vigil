@@ -389,8 +389,52 @@ function ReadinessPanel({ readiness }: ReadinessPanelProps) {
 
       <PerHostCoverageMatrix perHost={perHost} />
 
+      <EngagementSignalsCard perHost={perHost} />
+
       <ActiveDeferralsList perHost={perHost} />
     </section>
+  );
+}
+
+// FU4 — engagement-level signal counts shipped by `per_host_coverage()` but
+// not previously rendered. waf_intel_count satisfies the WAF tier objective
+// engagement-wide (CDN WAFs typically front the whole property);
+// tech_scan_intel_count powers the nikto-trigger objective; osint_intel_total
+// is the OSINT objective. Surfacing them makes the matrix Y/D/N marks
+// self-explanatory — operators can see why a row went green at engagement
+// level even when no host-specific intel was recorded.
+const ENGAGEMENT_SIGNAL_LABELS: Record<string, string> = {
+  waf_intel_count: "WAF intel rows (engagement-wide)",
+  tech_scan_intel_count: "Tech-scan intel rows",
+  osint_intel_total: "OSINT intel rows",
+};
+
+function EngagementSignalsCard({ perHost }: { perHost: PerHostCoverage | undefined }) {
+  if (!perHost) return null;
+  const signals = perHost.engagement_signals ?? {};
+  const entries = Object.entries(ENGAGEMENT_SIGNAL_LABELS);
+  // Render even when every value is 0/undefined — a row of zeros is itself
+  // useful operator signal ("OSINT hasn't run yet").
+  return (
+    <div className="readiness-engagement-signals" data-testid="readiness-engagement-signals">
+      <h3>Engagement-level signals</h3>
+      <div className="stats-grid">
+        {entries.map(([key, label]) => {
+          const value = typeof signals[key] === "number" ? (signals[key] as number) : 0;
+          return (
+            <article className="stat-card" key={key} data-testid={`readiness-signal-${key}`}>
+              <span className="stat-value">{value}</span>
+              <span className="meta-text">{label}</span>
+            </article>
+          );
+        })}
+      </div>
+      <p className="meta-text">
+        Engagement-wide intel feeds matrix objectives without per-host
+        evidence: WAF-class intel satisfies <code>waf_tier</code> for every
+        host, OSINT intel satisfies <code>osint</code> engagement-wide.
+      </p>
+    </div>
   );
 }
 

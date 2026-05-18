@@ -426,6 +426,13 @@ input {
   margin: 0;
   padding-left: 18px;
 }
+.readiness-engagement-signals {
+  margin-top: 12px;
+}
+.readiness-engagement-signals h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
 
 /* ── Buttons ────────────────────────────────────────────── */
 
