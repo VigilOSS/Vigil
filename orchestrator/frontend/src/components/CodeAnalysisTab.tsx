@@ -181,7 +181,13 @@ type CodeAnalysisTabProps = {
   results: CodeAnalysisResult[];
 };
 
-const DISPOSITION_ORDER = ["finding", "suspicious", "needs_context", "clean"];
+// C50 added `skipped` (with `skip_reason`) to the code-analysis queue
+// dispositions. Keep this list in sync with `_VALID_DISPOSITIONS` in
+// `orchestrator/backend/app/services/code_analysis.py` — UI drift here
+// means operators who skipped a result (test fixture, generated code,
+// minified, vendored dep) see an unstyled badge and the disposition
+// filter chip is missing from the chip row.
+const DISPOSITION_ORDER = ["finding", "suspicious", "needs_context", "clean", "skipped"];
 const CONFIDENCE_ORDER = ["high", "medium", "low"];
 
 export function CodeAnalysisTab({
