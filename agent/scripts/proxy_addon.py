@@ -285,6 +285,11 @@ class CaseCollector:
                         old.db.close()
                     except Exception:
                         pass
+                    # Clear the cached connection so a flow still holding a
+                    # reference to the dropped entry re-opens (or no-ops via
+                    # ``_open_db_for``) instead of writing through a closed
+                    # handle.
+                    old.db = None
             self.registry = new_registry
             self._last_reload_at = time.monotonic()
             self._write_routes_cache()
@@ -321,9 +326,10 @@ class CaseCollector:
             key = str(row.get("key") or "").strip()
             if not key:
                 continue
-            engagement_root_raw = row.get("engagement_root")
-            # Backend paths are install-host paths; container sees them under
-            # /engagements/<key>. Map by basename to stay portable.
+            # The ``engagement_root`` field in the backend response is an
+            # install-host path; inside the container the engagement always
+            # lives at ``/engagements/<key>``, so resolve by basename to keep
+            # the bind mount portable.
             root = self.engagements_root / key
             scope_hosts = row.get("scope_hosts")
             if not isinstance(scope_hosts, list):
@@ -348,7 +354,6 @@ class CaseCollector:
                     updated_at=updated_at,
                 )
             )
-            del engagement_root_raw  # unused; we resolve via engagements_root/key
         return entries
 
     def _fetch_registry_from_filesystem(self) -> list[EngagementEntry]:
