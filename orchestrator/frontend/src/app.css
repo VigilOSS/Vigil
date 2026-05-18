@@ -1495,6 +1495,19 @@ input {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* FU8: when the row is expanded, let the span actually wrap. The
+ * default rule above (white-space: nowrap on the child span) won the
+ * specificity battle against an inline `whiteSpace: 'pre-wrap'` on the
+ * parent div, so the click-to-expand toggle was visually inert for
+ * long hypothesis/evidence text. Scoping the override to a parent
+ * `is-expanded` class keeps the collapsed default and unlocks wrap
+ * only on demand. */
+.code-result-detail.is-expanded > span:last-child {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 .code-result-label {
   font-weight: 600;
