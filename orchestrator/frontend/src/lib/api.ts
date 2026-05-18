@@ -235,6 +235,11 @@ export type PerHostCoverage = {
   objectives: string[];
   hosts: PerHostCoverageHost[];
   engagement_signals: Record<string, number | undefined>;
+  // P1#3 — raw scope.json `hosts` entries (bare host / url / wildcard
+  // forms preserved). Used by the Readiness panel to render a
+  // scope-literals-only toggle. Empty list = backend has no scope.json
+  // or the engagement is pre-migration.
+  scope_hosts?: string[];
 };
 
 export type ReportReadiness = {

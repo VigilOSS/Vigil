@@ -412,3 +412,32 @@ def test_coverage_deferral_validator_does_not_constrain_other_kinds(client, isol
         payload={"host": "foo", "anything_goes": True, "deferred_objectives": "not even a list"},
     )
     assert response.status_code == 201, response.text
+
+
+# ---------------------------------------------------------------------------
+# P1#3: per-host coverage embeds scope_hosts for FE filter toggle
+# ---------------------------------------------------------------------------
+
+
+def test_per_host_coverage_embeds_scope_hosts_when_scope_json_present(
+    client, isolate_settings, tmp_path
+):
+    """The /coverage-readiness/by-host endpoint surfaces the raw scope.json
+    hosts list so the frontend can render the scope-literals-only toggle."""
+    eng_id = _seed(client, isolate_settings)
+    # _seed writes a scope.json — verify the response carries it back.
+    body = client.get(f"{ASSESSMENT_BASE}/coverage-readiness/by-host").json()
+    assert "scope_hosts" in body
+    # The seed scope.json contains at least one host entry.
+    assert isinstance(body["scope_hosts"], list)
+
+
+def test_report_readiness_per_host_coverage_embeds_scope_hosts(client, isolate_settings):
+    """The /report-readiness endpoint (which the FE Readiness panel fetches)
+    also embeds scope_hosts under per_host_coverage so the toggle works
+    without a second request."""
+    _seed(client, isolate_settings)
+    body = client.get(f"{ASSESSMENT_BASE}/report-readiness").json()
+    assert "per_host_coverage" in body
+    assert "scope_hosts" in body["per_host_coverage"]
+    assert isinstance(body["per_host_coverage"]["scope_hosts"], list)
