@@ -267,14 +267,18 @@ def _check_web_preconditions(
                     and f.get("workflow_status") == "active"
                 ]
                 if confirmed_high:
+                    # Filter by role server-side and request the max page size
+                    # so engagements with many dispatches don't drop older
+                    # variant-pass runs behind the default limit=100.
                     try:
-                        dispatches = client.get("dispatches") or []
+                        dispatches = client.get(
+                            "dispatches?role=vulnerability-analyst&limit=1000"
+                        ) or []
                     except Exception:
                         dispatches = []
                     variant_tasks = [
                         d for d in dispatches
-                        if d.get("agent_role") == "vulnerability-analyst"
-                        and any(
+                        if any(
                             kw in (d.get("task") or "").lower()
                             for kw in ("variant", "sibling", "rotat")
                         )

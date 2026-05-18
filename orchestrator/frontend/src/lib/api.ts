@@ -210,10 +210,46 @@ export type ReportReadinessBlocker = {
   detail?: string;
 };
 
+export type PerHostOutcome = {
+  met: boolean;
+  evidence: string[];
+  deferred: boolean;
+};
+
+export type PerHostCoverageDeferral = {
+  id: number;
+  kind: string;
+  payload: Record<string, unknown>;
+  created_at?: string | null;
+};
+
+export type PerHostCoverageHost = {
+  host: string;
+  outcomes: Record<string, PerHostOutcome>;
+  unmet_objectives: string[];
+  deferred_objectives: string[];
+  deferrals: PerHostCoverageDeferral[];
+};
+
+export type PerHostCoverage = {
+  objectives: string[];
+  hosts: PerHostCoverageHost[];
+  engagement_signals: Record<string, number | undefined>;
+  // P1#3 — raw scope.json `hosts` entries (bare host / url / wildcard
+  // forms preserved). Used by the Readiness panel to render a
+  // scope-literals-only toggle. Empty list = backend has no scope.json
+  // or the engagement is pre-migration.
+  scope_hosts?: string[];
+};
+
 export type ReportReadiness = {
   ready: boolean;
   blocker_count: number;
   blockers: ReportReadinessBlocker[];
+  // C58 — backend embeds the C40 per-host coverage projection here so the
+  // Readiness panel renders both Definition-of-Done gates and per-host
+  // outcomes from one fetch.
+  per_host_coverage?: PerHostCoverage;
 };
 
 export type AssessmentProbe = {
@@ -335,6 +371,47 @@ function resolveAppUrl(path: string): string {
   return new URL(relativePath, appBaseUrl()).toString();
 }
 
+// FastAPI / Pydantic shape for a single 422 entry:
+//   { loc: ["body", "payload", "reason"], msg: "Field required", type: "..." }
+// We pretty-print these into a human-readable list rather than dumping
+// the raw JSON, so operators hitting a backend validation error (e.g.
+// the FU2 coverage_deferral validator) get an actionable message
+// instead of an unreadable [object Object]-style blob.
+type PydanticErrorEntry = {
+  loc?: unknown;
+  msg?: unknown;
+  type?: unknown;
+};
+
+function isPydanticErrorList(value: unknown): value is PydanticErrorEntry[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(
+      (entry) =>
+        entry !== null &&
+        typeof entry === "object" &&
+        "msg" in (entry as Record<string, unknown>),
+    )
+  );
+}
+
+function formatPydanticErrors(entries: PydanticErrorEntry[]): string {
+  const lines = entries.map((entry) => {
+    const locParts = Array.isArray(entry.loc)
+      ? (entry.loc as unknown[])
+          // The first segment is conventionally "body" / "query" / "path"
+          // / "header" — useful when debugging but noise for end users.
+          .filter((segment, idx) => idx > 0 || segment !== "body")
+          .map((segment) => String(segment))
+      : [];
+    const path = locParts.length ? locParts.join(".") : "request";
+    const msg = typeof entry.msg === "string" ? entry.msg : "validation error";
+    return `${path}: ${msg}`;
+  });
+  return lines.join("\n");
+}
+
 async function readError(response: Response): Promise<string> {
   const text = await response.text();
   if (!text) {
@@ -345,6 +422,9 @@ async function readError(response: Response): Promise<string> {
     const payload = JSON.parse(text) as { detail?: unknown };
     if (typeof payload.detail === "string") {
       return payload.detail;
+    }
+    if (isPydanticErrorList(payload.detail)) {
+      return formatPydanticErrors(payload.detail);
     }
   } catch {
     // Fall back to raw body.

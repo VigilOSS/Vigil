@@ -572,6 +572,53 @@ def test_coverage_gate_stays_closed_until_queue_items_are_completed(client, isol
     assert coverage_after_done.json()["gate"]["passed"] is True
 
 
+def test_queue_done_skipped_disposition_requires_skip_reason(client, isolate_settings):
+    """C50: disposition='skipped' must carry a structured skip_reason; the
+    cwe-coverage completeness check is bypassed for skipped items (analyst
+    did not analyze)."""
+    engagement_key = "2026-04-04-code-skipped"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="skip-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+
+    client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    queue_item = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    ).json()[0]
+
+    # Missing skip_reason → 400
+    rejected = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "skipped",
+            "notes": "",
+            "cwe_coverage": [],
+        },
+    )
+    assert rejected.status_code == 400
+    assert "skip_reason is required" in rejected.json()["detail"]
+
+    # With skip_reason → 200 and cwe_coverage completeness check is bypassed
+    accepted = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json={
+            "item_ids": [queue_item["id"]],
+            "disposition": "skipped",
+            "notes": "",
+            "cwe_coverage": [],
+            "skip_reason": "test-fixture",
+        },
+    )
+    assert accepted.status_code == 200
+
+
 def test_queue_done_rejects_multi_item_completion(client, isolate_settings):
     engagement_key = "2026-04-04-code-done-single-item"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)

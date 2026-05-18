@@ -368,6 +368,20 @@ Two coverage passes are not optional. They are gates the operator clears before 
 - **Verify → Exploit: variant/sibling pass per confirmed finding.** For each confirmed high/critical finding, dispatch a `vulnerability-analyst` run that explicitly hunts sibling routes / sibling controllers / sibling providers / sibling content-types / sibling auth contexts sharing the same code path. The dispatch `task` must contain `variant`, `sibling`, or `rotat` so `transition-phase --check` recognizes it. Skipping the variant pass is the single most common way real findings are missed in this codebase — `transition-phase verify` will block with `kind=missing_variant_pass` until satisfied (or `--force` with a stated reason).
 - **Exploit → Report: chain-construction pass across the confirmed set.** Before report-writer dispatch, run at least one `exploit-developer` pass that enumerates A→B candidates across confirmed findings. Information disclosure + open-redirect, SSRF + token leak, IDOR + impersonation are the standard chains worth checking even when they look unlikely; the chain pass is what turns a list of mediums into a high.
 
+### Phase-Exit Review Dispatches (C45)
+
+Three review-mode dispatches gate phase transitions. Each is a separate read-only dispatch (no new probing) that emits a structured gap report so the operator can dispatch missing work before transitioning. They complement, not replace, the mandatory-pass gates above.
+
+| Phase boundary | Review mode | Dispatch shape | Role prompt section |
+|---|---|---|---|
+| Phase 1 → 2 | `recon-specialist` with `mode=review` | task: "review recon coverage before Phase 1 exit"; skills: `web-recon` | Review Mode in `agent/agents/recon-specialist.md` |
+| Phase 4 → 5 | `vulnerability-analyst` with `mode=root_cause_review` | task: "root-cause review across confirmed findings before Phase 5"; skills: pick the dominant vuln-class skill | Root-Cause Review Mode in `agent/agents/vulnerability-analyst.md` |
+| Phase 5 → 6 | `exploit-developer` with `mode=review` | task: "chain-readiness review before report-writer dispatch"; skills: `exploit-playbook-authoring` | Review Mode in `agent/agents/exploit-developer.md` |
+
+Each review dispatch reads its own checklist from the role prompt section above, emits a backend handoff naming the gaps, and proposes specific follow-up dispatches in the `next_steps` field. The operator runs those follow-ups before the transition. Review-mode dispatches do NOT run new probes or write findings; they are pure read-only assessment.
+
+Report-review is intentionally NOT in this list — the `report-generation/SKILL.md` Review-and-Fix QA Mode already exists for that purpose; dispatch `report-writer` with `--mode review-and-fix` for report cleanup.
+
 ### Cross-Dispatch Continuity
 
 Every dispatch launches a fresh agent — treat each dispatch as a clean-room environment that inherits only what the operator explicitly hands it. Session tokens, discovered endpoints, partial PoC steps, and next-step plans travel through the dispatch prompt and durable state (backend records, engagement files), because the harness rebuilds subagent context from those sources on each launch.
@@ -444,6 +458,8 @@ DB="$DIR/cases.db"
    **1c. Reactive nuclei sweep against Phase 1 URL delta** — before leaving Phase 1, fire a reactive nuclei sweep via `aith assess kali nuclei` against the URL delta produced by 1a and 1b (methodology + dedup in `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Running it in-phase — instead of holding every URL until Phase 3 — turns template hits into `record-intel` / `record-finding` writes *before* Phase 3 specialists dispatch, so specialists inherit the signal as intel and findings. The dedup pattern (`list-command-runs` + jq) ensures this pass and the Phase-2 reactive pass below do not re-scan the same host+template combo.
 
    **Phase 1 exit gate.** Before leaving Phase 1, run `aith assess check-scope-coverage --require-stage enum`. The gate checks whether each scope entry has downstream evidence — live services, recorded surfaces, or work-buffer rows under the entry's host. Bare hosts and URL entries pass trivially; wildcards fail when enumeration produced nothing real. If a wildcard fails, dispatch the missing enum work or mark the entry deferred in `scope.json` before advancing, because entering Phase 2 with empty scope branches leaves whole subtrees of the attack surface untested.
+
+   **Per-host outcome audit (C40, WARN-only).** Pair the scope-entry gate with `aith assess check-scope-coverage --require-stage enum --by-host` to surface a per-host outcome table: WAF tier, service inventory, directory-fuzz coverage, nikto trigger, OSINT. The audit reads outcome tables (`intel_tech_components`, `assessment_services`, `assessment_surfaces`, `assessment_dispatch_decisions`) — never `assessment_command_runs` — so any tool that wrote the durable row satisfies the corresponding objective. Unmet objectives WARN with an actionable dispatch hint but do not block phase advance. When an objective is intentionally skipped (scope brief forbids brute-force, vendor confirms WAF tier out-of-band, OSINT carve-out), record an explicit deferral: `aith assess agent decision --kind coverage_deferral --payload-json '{"host": "api.example.com", "deferred_objectives": ["directory_fuzz"], "reason": "scope brief forbids brute-force"}' --surfaced-to-user`. The deferral row is queryable post-engagement via `aith assess agent list --kind coverage_deferral`, so gaming the gate is audited rather than invisible.
 2. **COLLECT** → dispatch surface-collector with `agent/skills/surface-collection/SKILL.md`.
    Provide: targets from scope.json, Phase 1 endpoint artifacts (paths to `endpoints.txt` and any source-analyzer output in `scans/`), auth.json state, and `$DIR/cases.db` path.
    On return:
@@ -456,6 +472,8 @@ DB="$DIR/cases.db"
    - **Review clusters, defer low-signal ones** — `aith assess list-clusters "$DIR/cases.db"` prints cluster counts, max/avg priority, and representative URLs. Any cluster that is clearly not worth specialist attention (e.g., 10k static-asset URLs, out-of-scope-adjacent paths, already-covered admin endpoints) gets deferred with `aith assess work-buffer "$DIR/cases.db" defer-cluster <cluster_key> --reason "…"` before Phase 3 begins — leaving low-signal clusters pending pollutes the priority queue and forces specialists to re-triage what the operator already judged.
    Surface-collector records surfaces via `aith assess record-surface` and findings via `aith assess record-finding` before returning.
    **Phase 2 exit gate.** Run `aith assess check-scope-coverage --require-stage collection`. Every scoped entry must have collection evidence — a recorded surface or a work-buffer row under its host. If an entry has neither, redispatch surface-collector against it or mark the entry deferred in `scope.json` before advancing. Skipping this gate lets scope-entries drift into Phase 3 with zero work in the buffer.
+
+   **Per-host outcome audit (C40, WARN-only).** Run the per-host audit alongside the scope-entry gate: `aith assess check-scope-coverage --require-stage collection --by-host`. The per-host view catches hosts that have squeaked through the scope-entry gate without one of the five Phase-1/2 outcomes (WAF tier, service inventory, directory-fuzz coverage, nikto trigger, OSINT). Same WARN-only contract as Phase 1 exit; record a `coverage_deferral` decision when an objective is intentionally skipped.
    Transition phase: `aith assess transition-phase consume-test` (checks work-buffer, scope coverage).
 3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
    a. **Nuclei coverage audit** (once, before the work-buffer loop) — audit what Phase 1/2 reactive sweeps already covered and run nuclei only against gaps. Do not blindly re-sweep: if every in-scope live host already received the reactive template set, this step prints a coverage summary and advances.
@@ -519,7 +537,7 @@ DB="$DIR/cases.db"
 7. **REPORT** → keep reporting inside the existing `report` phase; use a draft → QA → publish gate so the report is reviewed before lifecycle state changes.
    a. **Draft:** for a final report, run `aith assess check-report-readiness` first and resolve blockers before dispatch. Dispatch `report-writer` in draft-generation mode. Report-writer queries the backend through `aith assess list-report-findings --mode final --json` on final reports or `aith assess list-report-findings --mode draft --json` on interim reports, plus `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — let it self-serve rather than manually assembling findings context, since manual assembly risks stale or incomplete data. Draft-generation mode writes `report.md`, runs the 13-check self-review in `agent/skills/report-generation/SKILL.md`, fixes any local report issues it finds, and returns the completed checklist. It does not emit `report.generated` or mark findings `reported`.
    b. **QA and fix:** dispatch a fresh `report-writer` in review-and-fix mode with `$DIR/report.md` plus the same backend context. The QA writer checks every item in the 13-check post-generation checklist against the rendered report and backend grouped report-findings output, fixes report-local issues directly, and returns `QA PASS` only when every checklist item passes. If a failure requires new evidence or backend finding changes, it returns `QA BLOCKED` with exact finding slugs and required operator action.
-   c. **Publish:** only after `QA PASS`, emit the `report.generated` event, update included findings to `reported`, and transition phase: `aith assess transition-phase complete`. Publication before QA passes creates false workflow state, so keep `reported` transitions behind this gate.
+   c. **Publish:** only after `QA PASS`, emit the `report.generated` event, update included findings to `reported`, and transition phase: `aith assess transition-phase complete --track web`. Publication before QA passes creates false workflow state, so keep `reported` transitions behind this gate.
 
 After each phase, use the guarded transition helper:
 ```bash
@@ -704,8 +722,9 @@ Do not declare the engagement complete or dispatch the final report-writer pass 
 - [ ] **Stale-text scrub clean.** Per `agent/rules/hunting.md` §21, no active finding's `summary` or `details` text references a state that no longer applies ("adjusted from X to Y" when severity is no longer Y, "originally rated as Z" after the rating shifted, etc.). The recipe lives in `agent/skills/report-generation/SKILL.md` Review-and-Fix QA Mode.
 - [ ] **`aith assess check-report-readiness` returns clean.** No blockers in the readiness response — coverage, unreviewed findings, root-cause groupings, chain-review state.
 - [ ] **Backend reflects submissions.** Findings actually submitted to the program (or marked accepted/duplicate) have a workflow status that matches reality; nothing remains "draft" if it was sent out.
+- [ ] **No `evidence_type='theoretical'` findings without `chain_required=true`.** Per C44, findings tagged `theoretical` must carry `details.chain_required=true` so the dispatcher knows a follow-up exploit-developer pass owes the runtime proof. Findings with NULL `evidence_type` are unaffected (legacy / pre-migration). Query: `aith assess list-findings --json | jq '.[] | select(.evidence_type=="theoretical" and (.details.chain_required != true))'`.
 
-When all eight gates pass, dispatch `report-writer` for the final pass and then close the engagement.
+When all nine gates pass, dispatch `report-writer` for the final pass and then close the engagement.
 
 ## macOS/zsh Compatibility
 

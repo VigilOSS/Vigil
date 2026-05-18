@@ -1654,6 +1654,7 @@ def create_finding(
     source_name: str,
     details: dict[str, Any] | None,
     provenance: dict[str, Any] | None,
+    evidence_type: str | None = None,
     request_variant_id: int | None,
     service_id: int | None,
     surface_id: int | None,
@@ -1693,9 +1694,9 @@ def create_finding(
                 """
                 INSERT INTO assessment_findings (
                     engagement_id, slug, title, severity, status, verification_state, verification_disposition, defect_family, root_cause_key, auth_context,
-                    canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json
+                    canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json, evidence_type
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     engagement.id,
@@ -1715,6 +1716,7 @@ def create_finding(
                     notes,
                     _json_text(details),
                     _json_text(provenance),
+                    evidence_type,
                 ),
             )
             row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (cursor.lastrowid,)).fetchone()
@@ -1742,6 +1744,7 @@ def create_finding(
                     notes = ?,
                     details_json = ?,
                     provenance_json = ?,
+                    evidence_type = COALESCE(?, evidence_type),
                     last_seen_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
@@ -1775,6 +1778,7 @@ def create_finding(
                     _append_notes(existing["notes"], notes),
                     _merge_object_text(existing["details_json"], details),
                     _merge_object_text(existing["provenance_json"], provenance),
+                    evidence_type,
                     existing["id"],
                 ),
             )
@@ -1848,6 +1852,7 @@ def update_finding(
     source_name: str,
     details: dict[str, Any] | None,
     provenance: dict[str, Any] | None,
+    evidence_type: str | None = None,
 ) -> dict[str, Any]:
     result = create_finding(
         engagement_id,
@@ -1867,6 +1872,7 @@ def update_finding(
         source_name=source_name,
         details=details,
         provenance=provenance,
+        evidence_type=evidence_type,
         request_variant_id=None,
         service_id=None,
         surface_id=None,
@@ -1898,6 +1904,7 @@ def patch_finding(
     source_name: str | None = None,
     details: dict[str, Any] | None = None,
     provenance: dict[str, Any] | None = None,
+    evidence_type: str | None = None,
     transition_action: str | None = None,
     transition_reason_code: str = "",
     transition_reason_text: str = "",
@@ -1958,6 +1965,7 @@ def patch_finding(
         source_name=source_name or "",
         details=details,
         provenance=provenance,
+        evidence_type=evidence_type,
         request_variant_id=None,
         service_id=None,
         surface_id=None,
@@ -2432,6 +2440,498 @@ def coverage_readiness(engagement_id: int) -> dict[str, Any]:
         "unresolved_surfaces": unresolved,
         "partially_covered_surfaces": partially_covered,
         "high_risk_deferred_surfaces": high_risk_deferred,
+    }
+
+
+# ---------------------------------------------------------------------------
+# C40 — outcome-based per-host coverage projection
+#
+# The five sub-objectives the recon phase nominally produces per host. None of
+# them check `assessment_command_runs` — every signal is a row in an outcome
+# table the specialists are already writing to. That is the contract: rename
+# wafw00f → wafw00f-ng tomorrow and the gate keeps working as long as the
+# tech-component row still gets recorded.
+# ---------------------------------------------------------------------------
+
+
+PER_HOST_OBJECTIVES: tuple[str, ...] = (
+    "waf_tier",
+    "service_inventory",
+    "directory_fuzz",
+    "nikto_trigger",
+    "osint",
+)
+
+# WAF families operators classify hosts into. Matched case-insensitively as a
+# substring of the `component` field on `intel_tech_components`. Extending this
+# tuple (e.g., new CDN entrant) is the canonical drift-prone seam — keep it
+# small and additive.
+_WAF_FAMILY_TOKENS: tuple[str, ...] = (
+    "cloudflare",
+    "akamai",
+    "f5",
+    "aws waf",
+    "awswaf",
+    "imperva",
+    "fastly",
+    "incapsula",
+    "sucuri",
+    "cloudfront",
+    "azure front door",
+    "barracuda",
+)
+
+# Tokens that suggest a tech-component row came from a "nikto-equivalent"
+# scanner (whatweb, httpx -tech-detect, wappalyzer, nuclei tech templates,
+# nmap http-* scripts, nikto itself). We do NOT hardcode tool names in the
+# CLI side of the gate — this list is the BACKEND'S read-only interpretation
+# of "scanner that produced a tech fingerprint". Operators recording intel
+# manually still satisfy the gate because they set `source_name` to their
+# agent identity.
+_TECH_SCAN_SOURCE_TOKENS: tuple[str, ...] = (
+    "whatweb",
+    "httpx",
+    "wappalyzer",
+    "nuclei",
+    "nikto",
+    "nmap",
+    "recon-specialist",
+    "wafw00f",
+    "wafw0of",
+    "source-analyzer",
+    "operator",
+)
+
+_NON_LIVE_SERVICE_STATES_FOR_INVENTORY: frozenset[str] = frozenset(
+    {"down", "filtered", "unreachable"}
+)
+
+
+def _coverage_endpoint_host(endpoint: str) -> str:
+    """Lowercased host portion of a service endpoint or surface descriptor.
+
+    Mirrors `_endpoint_host` in `check_scope_coverage.py` but the CLI version
+    cannot be imported here. Keep the two in sync — they extract the same
+    host string from the same shapes (bare host, host:port, full URL).
+    """
+    raw = (endpoint or "").strip().lower()
+    if not raw:
+        return ""
+    first = raw.split()[0]
+    if "://" in first:
+        parsed = urlparse(first)
+        return (parsed.hostname or "").strip("[]")
+    # Strip leading/trailing wrappers and trailing punctuation.
+    stripped = first.strip("'\"<>()").rstrip(",;").rstrip(".")
+    if stripped.startswith("[") and "]" in stripped:
+        # Bracketed IPv6 with optional :port suffix.
+        host = stripped[1 : stripped.find("]")]
+        return host
+    if stripped.count(":") >= 2:
+        # IPv6 literal without brackets (e.g., 2001:db8::1 or 2001:db8::1:443).
+        # Splitting on rpartition risks chopping the address; only strip a
+        # trailing port if the suffix is purely numeric AND the prefix parses
+        # as an IPv6 address.
+        host, _, port = stripped.rpartition(":")
+        if port.isdigit():
+            try:
+                import ipaddress
+
+                ipaddress.ip_address(host)
+                return host
+            except ValueError:
+                return stripped
+        return stripped
+    host, _, port = stripped.rpartition(":")
+    if port.isdigit() and host:
+        return host
+    return stripped
+
+
+def _string_contains_host(haystack: str, host: str) -> bool:
+    """True when `host` appears as a token in `haystack` (case-insensitive).
+
+    Avoids substring false positives like "evil.target.example" matching
+    "target.example" — we require the match to be on a word boundary so
+    `notes='banner=cf-cf'` does not falsely satisfy `host='cf'`.
+    """
+    if not haystack or not host:
+        return False
+    lower_hay = haystack.lower()
+    lower_host = host.lower()
+    if lower_host not in lower_hay:
+        return False
+    idx = 0
+    while True:
+        pos = lower_hay.find(lower_host, idx)
+        if pos == -1:
+            return False
+        left_ok = pos == 0 or not (lower_hay[pos - 1].isalnum() or lower_hay[pos - 1] in ".-")
+        end = pos + len(lower_host)
+        right_ok = end == len(lower_hay) or not (
+            lower_hay[end].isalnum() or lower_hay[end] in ".-"
+        )
+        if left_ok and right_ok:
+            return True
+        idx = pos + 1
+
+
+def _intel_row_references_host(row: dict[str, Any], host: str) -> bool:
+    """True when an intel row's evidence/notes/provenance mentions the host."""
+    if not host:
+        return False
+    for key in ("evidence_ref", "notes", "source_name"):
+        if _string_contains_host(str(row.get(key, "") or ""), host):
+            return True
+    raw_provenance = row.get("provenance_json", row.get("provenance"))
+    provenance: Any = raw_provenance
+    if isinstance(raw_provenance, str) and raw_provenance:
+        try:
+            provenance = json.loads(raw_provenance)
+        except (ValueError, TypeError):
+            return _string_contains_host(raw_provenance, host)
+    if isinstance(provenance, dict):
+        for k in ("host", "target", "url", "endpoint"):
+            val = provenance.get(k)
+            if isinstance(val, str) and _string_contains_host(val, host):
+                return True
+        return _string_contains_host(json.dumps(provenance, ensure_ascii=False), host)
+    return False
+
+
+def _row_is_waf_classification(row: dict[str, Any]) -> bool:
+    component = str(row.get("component", "") or "").lower()
+    if not component:
+        return False
+    for token in _WAF_FAMILY_TOKENS:
+        if token in component:
+            return True
+    return False
+
+
+def _row_is_tech_scan_evidence(row: dict[str, Any]) -> bool:
+    """True when a tech-component row plausibly came from a 'nikto-equivalent'
+    scanner — i.e., any active fingerprinting tool or operator recording."""
+    source = str(row.get("source_name", "") or "").lower()
+    if not source:
+        # An empty source_name is still a tech-component row that records a
+        # real classification — count it as satisfying the trigger.
+        return True
+    for token in _TECH_SCAN_SOURCE_TOKENS:
+        if token in source:
+            return True
+    return False
+
+
+def _coverage_deferral_payload_hosts(payload: dict[str, Any]) -> list[str]:
+    """Return host strings referenced by a coverage_deferral decision payload.
+
+    Normalizes each value through ``_coverage_endpoint_host`` so URL or
+    host:port shapes (``https://api.example.com/v1``, ``api.example.com:8443``)
+    collapse to the same bare-hostname key used by ``services_by_host`` /
+    ``surfaces_by_host``. Without this, an operator-recorded deferral with a
+    URL value silently fails to match and the gate stays unmet.
+    """
+    candidates: list[str] = []
+    for key in ("host", "target", "hostname"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            normalized = _coverage_endpoint_host(val) or val.strip().lower()
+            candidates.append(normalized)
+    hosts_field = payload.get("hosts")
+    if isinstance(hosts_field, list):
+        for entry in hosts_field:
+            if isinstance(entry, str) and entry.strip():
+                normalized = _coverage_endpoint_host(entry) or entry.strip().lower()
+                candidates.append(normalized)
+    return candidates
+
+
+def _coverage_deferral_objectives(payload: dict[str, Any]) -> list[str]:
+    raw = payload.get("deferred_objectives")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+    return out
+
+
+def _coverage_deferrals_by_host(engagement_id: int) -> dict[str, list[dict[str, Any]]]:
+    """Map host → list of active coverage_deferral decision rows.
+
+    Active = `resolved=0`. Resolved deferrals stay queryable via the decision
+    list endpoint but no longer satisfy the gate.
+
+    Reads decisions directly through ``get_connection`` instead of
+    ``list_decisions(...)`` to avoid the public endpoint's ``limit`` cap —
+    large wildcard engagements can legitimately accumulate thousands of
+    operator-approved deferrals, and a silent truncation here would let
+    objectives appear unmet again in the per-host gate.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "SELECT * FROM assessment_dispatch_decisions "
+            "WHERE engagement_id = ? AND kind = ? AND resolved = 0 "
+            "ORDER BY created_at DESC, id DESC",
+            (engagement.id, "coverage_deferral"),
+        )
+        rows = [_serialize_decision(row) for row in cursor.fetchall()]
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        payload = row.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        hosts = _coverage_deferral_payload_hosts(payload)
+        if not hosts:
+            continue
+        for host in hosts:
+            out.setdefault(host, []).append(row)
+    return out
+
+
+def per_host_coverage(engagement_id: int) -> dict[str, Any]:
+    """Outcome-based per-host coverage projection (C40).
+
+    Five sub-objectives per host, each evaluated against an outcome table:
+
+    1. ``waf_tier`` — an ``intel_tech_components`` row whose ``component`` matches
+       a known WAF family. Engagement-level WAF intel (no host evidence in
+       evidence_ref/notes/provenance) counts for every host: CDN-class WAFs
+       typically sit in front of an entire property, and demanding per-host
+       evidence would produce false negatives that don't reflect operator
+       reality.
+    2. ``service_inventory`` — at least one ``assessment_services`` row in a live
+       state for the host, OR at least one ``assessment_surfaces`` row.
+    3. ``directory_fuzz`` — at least one ``assessment_surfaces`` row for the host.
+       Specialists running ffuf / feroxbuster / dirsearch record their
+       findings as surfaces (via ``record-surface``) so the gate cares about
+       the surface row, not the binary that produced it.
+    4. ``nikto_trigger`` — at least one ``intel_tech_components`` row whose
+       ``source_name`` plausibly came from a fingerprinting scanner (whatweb,
+       httpx, wappalyzer, nuclei, nmap, nikto, recon-specialist, etc.). The
+       trigger is "did fingerprinting happen", which the operator can satisfy
+       with any of those tools — or by recording the row manually.
+    5. ``osint`` — engagement-level. ≥1 row in any of ``intel_tech_components``,
+       ``intel_people``, or ``intel_breach_records`` proves OSINT happened.
+       OSINT is not naturally host-keyed (people, breach corpora, org facts
+       are organization-level), so this objective is the same answer for
+       every host in the engagement.
+
+    A host with an active ``coverage_deferral`` decision row whose payload
+    lists an objective passes that objective regardless of the underlying
+    signal. The deferral is the operator's explicit "we decided not to do
+    this for this host" record; the gate trusts it.
+
+    NOTE: this function deliberately does NOT consult
+    ``assessment_command_runs``. The whole point of the C40 reframe is that
+    the gate reads outcomes, not tool runs. Adding a `command-runs` join
+    here is the regression we're trying to prevent — `test_check_scope_coverage`
+    asserts the CLI does not query it.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    eng_id = engagement.id
+
+    with get_connection() as connection:
+        services = _fetch_all(
+            connection,
+            "SELECT endpoint, state FROM assessment_services WHERE engagement_id = ?",
+            (eng_id,),
+        )
+        surfaces = _fetch_all(
+            connection,
+            "SELECT surface_type, target_descriptor, status FROM assessment_surfaces "
+            "WHERE engagement_id = ?",
+            (eng_id,),
+        )
+        tech_components = _fetch_all(
+            connection,
+            "SELECT component, version, source_name, evidence_ref, notes, "
+            "provenance_json, superseded_by_id "
+            "FROM intel_tech_components WHERE engagement_id = ?",
+            (eng_id,),
+        )
+        people_count = _scalar_row(
+            connection,
+            "SELECT COUNT(*) FROM intel_people WHERE engagement_id = ? "
+            "AND superseded_by_id IS NULL",
+            (eng_id,),
+        )
+        breach_count = _scalar_row(
+            connection,
+            "SELECT COUNT(*) FROM intel_breach_records WHERE engagement_id = ? "
+            "AND superseded_by_id IS NULL",
+            (eng_id,),
+        )
+
+    # Filter out superseded tech-component rows from outcome consideration —
+    # the current row is the canonical answer.
+    live_tech_components = [
+        row for row in tech_components if row.get("superseded_by_id") is None
+    ]
+
+    # Discover every host the engagement actually has signal for.
+    hosts: set[str] = set()
+    services_by_host: dict[str, list[dict[str, Any]]] = {}
+    surfaces_by_host: dict[str, list[dict[str, Any]]] = {}
+    for row in services:
+        host = _coverage_endpoint_host(str(row.get("endpoint") or ""))
+        if not host:
+            continue
+        hosts.add(host)
+        services_by_host.setdefault(host, []).append(row)
+    for row in surfaces:
+        host = _coverage_endpoint_host(str(row.get("target_descriptor") or ""))
+        if not host:
+            continue
+        hosts.add(host)
+        surfaces_by_host.setdefault(host, []).append(row)
+
+    deferrals_by_host = _coverage_deferrals_by_host(eng_id)
+    for host in deferrals_by_host.keys():
+        hosts.add(host)
+
+    # Engagement-level signals (apply to every host).
+    osint_met = (
+        len(live_tech_components) > 0 or people_count > 0 or breach_count > 0
+    )
+    osint_evidence: list[str] = []
+    if live_tech_components:
+        osint_evidence.append(f"tech_components:{len(live_tech_components)}")
+    if people_count:
+        osint_evidence.append(f"people:{int(people_count)}")
+    if breach_count:
+        osint_evidence.append(f"breach_records:{int(breach_count)}")
+
+    waf_rows = [row for row in live_tech_components if _row_is_waf_classification(row)]
+    engagement_has_waf_intel = bool(waf_rows)
+
+    nikto_trigger_rows = [row for row in live_tech_components if _row_is_tech_scan_evidence(row)]
+    engagement_has_nikto_trigger = bool(nikto_trigger_rows)
+
+    host_outcomes: list[dict[str, Any]] = []
+    for host in sorted(hosts):
+        host_services = services_by_host.get(host, [])
+        host_surfaces = surfaces_by_host.get(host, [])
+
+        # waf_tier — engagement-level WAF intel is sufficient; per-host
+        # specificity is a tighter signal when the evidence_ref/notes
+        # mention the host.
+        waf_host_specific = any(_intel_row_references_host(row, host) for row in waf_rows)
+        waf_met = waf_host_specific or engagement_has_waf_intel
+        waf_evidence: list[str] = []
+        for row in waf_rows:
+            label = str(row.get("component") or "").strip()
+            if not label:
+                continue
+            host_specific = _intel_row_references_host(row, host)
+            waf_evidence.append(f"{label}{'(host)' if host_specific else ''}")
+
+        # service_inventory — live service or surface row for the host
+        live_services = [
+            row
+            for row in host_services
+            if str(row.get("state") or "").lower() not in _NON_LIVE_SERVICE_STATES_FOR_INVENTORY
+        ]
+        service_met = bool(live_services) or bool(host_surfaces)
+        service_evidence: list[str] = []
+        if live_services:
+            service_evidence.append(f"services:{len(live_services)}")
+        if host_surfaces:
+            service_evidence.append(f"surfaces:{len(host_surfaces)}")
+
+        # directory_fuzz — surface presence proves URL-level discovery.
+        # Backend cannot see the local cases.db `work_items` count, so the
+        # CLI layer (`--by-host`) may upgrade this outcome based on the
+        # local work-buffer rollup. From the backend's perspective a
+        # surface is the durable proof.
+        dirfuzz_met = bool(host_surfaces)
+        dirfuzz_evidence: list[str] = []
+        if host_surfaces:
+            dirfuzz_evidence.append(f"surfaces:{len(host_surfaces)}")
+
+        # nikto_trigger — any fingerprinting-equivalent intel row, host-specific
+        # preferred but engagement-level acceptable.
+        nikto_host_specific = any(
+            _intel_row_references_host(row, host) for row in nikto_trigger_rows
+        )
+        nikto_met = nikto_host_specific or engagement_has_nikto_trigger
+        nikto_evidence: list[str] = []
+        for row in nikto_trigger_rows:
+            label = str(row.get("source_name") or "").strip() or "unknown"
+            host_specific = _intel_row_references_host(row, host)
+            nikto_evidence.append(f"{label}{'(host)' if host_specific else ''}")
+            if len(nikto_evidence) >= 5:
+                break
+
+        deferral_rows = deferrals_by_host.get(host, [])
+        deferred_objectives: set[str] = set()
+        for row in deferral_rows:
+            for obj in _coverage_deferral_objectives(row.get("payload") or {}):
+                deferred_objectives.add(obj)
+
+        outcomes: dict[str, dict[str, Any]] = {
+            "waf_tier": {
+                "met": waf_met,
+                "evidence": waf_evidence,
+                "deferred": "waf_tier" in deferred_objectives,
+            },
+            "service_inventory": {
+                "met": service_met,
+                "evidence": service_evidence,
+                "deferred": "service_inventory" in deferred_objectives,
+            },
+            "directory_fuzz": {
+                "met": dirfuzz_met,
+                "evidence": dirfuzz_evidence,
+                "deferred": "directory_fuzz" in deferred_objectives,
+            },
+            "nikto_trigger": {
+                "met": nikto_met,
+                "evidence": nikto_evidence,
+                "deferred": "nikto_trigger" in deferred_objectives,
+            },
+            "osint": {
+                "met": osint_met,
+                "evidence": osint_evidence,
+                "deferred": "osint" in deferred_objectives,
+            },
+        }
+
+        unmet = [
+            name
+            for name, info in outcomes.items()
+            if not info["met"] and not info["deferred"]
+        ]
+
+        host_outcomes.append(
+            {
+                "host": host,
+                "outcomes": outcomes,
+                "unmet_objectives": unmet,
+                "deferred_objectives": sorted(deferred_objectives),
+                "deferrals": [
+                    {
+                        "id": int(row.get("id", 0)),
+                        "kind": str(row.get("kind", "") or ""),
+                        "payload": row.get("payload") or {},
+                        "created_at": row.get("created_at"),
+                    }
+                    for row in deferral_rows
+                ],
+            }
+        )
+
+    return {
+        "objectives": list(PER_HOST_OBJECTIVES),
+        "hosts": host_outcomes,
+        "engagement_signals": {
+            "waf_intel_count": len(waf_rows),
+            "tech_scan_intel_count": len(nikto_trigger_rows),
+            "osint_intel_total": len(live_tech_components) + int(people_count) + int(breach_count),
+        },
     }
 
 
@@ -4308,6 +4808,7 @@ def record_command_run(
     working_dir: str | None = None,
     scope_version: str | None = None,
     auth_context: str | None = None,
+    target_host: str = "",
     timeout_seconds_requested: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -4453,7 +4954,7 @@ def record_command_run(
                     technique, intent, probe_kind, destructive,
                     stdout_path, stderr_path,
                     peak_rss_bytes, cpu_user_seconds, cpu_system_seconds,
-                    working_dir, scope_version, auth_context,
+                    working_dir, scope_version, auth_context, target_host,
                     superseded_by_id, timeout_seconds_requested
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?,
@@ -4468,7 +4969,7 @@ def record_command_run(
                     ?, ?, ?, ?,
                     ?, ?,
                     ?, ?, ?,
-                    ?, ?, ?,
+                    ?, ?, ?, ?,
                     ?, ?
                 )
                 """,
@@ -4515,6 +5016,7 @@ def record_command_run(
                     working_dir,
                     scope_version,
                     auth_context,
+                    (target_host or "").strip(),
                     superseded_by_id,
                     timeout_seconds_requested,
                 ),
@@ -5005,6 +5507,7 @@ def list_command_runs(
     phase: str = "",
     tool_name: str = "",
     tool_bin: str = "",
+    target_host: str = "",
     audit_source: str = "",
     success: bool | None = None,
     timed_out: bool | None = None,
@@ -5056,6 +5559,11 @@ def list_command_runs(
     if tool_bin:
         where.append("r.tool_bin = ?")
         params.append(tool_bin)
+    if target_host:
+        # Case-insensitive exact match against the parsed target_host column.
+        # NULL-tolerant (LOWER(NULL) = NULL, which will not match the literal).
+        where.append("LOWER(r.target_host) = ?")
+        params.append(target_host.strip().lower())
     if audit_source:
         where.append("r.audit_source = ?")
         params.append(audit_source)
@@ -5594,6 +6102,7 @@ def list_decisions(
     kind: str = "",
     resolved: bool | None = None,
     limit: int = 100,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     where = ["engagement_id = ?"]
@@ -5605,9 +6114,10 @@ def list_decisions(
         where.append("resolved = ?")
         params.append(1 if resolved else 0)
     params.append(int(limit))
+    params.append(int(offset))
     query = (
         f"SELECT * FROM assessment_dispatch_decisions WHERE {' AND '.join(where)} "
-        "ORDER BY created_at DESC, id DESC LIMIT ?"
+        "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
     )
     with get_connection() as connection:
         rows = connection.execute(query, tuple(params)).fetchall()

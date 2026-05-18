@@ -8,6 +8,7 @@ import datetime as _dt
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from assess.lib.client import AssessmentClient, AssessError
@@ -1469,6 +1470,46 @@ def _client_for(args) -> tuple[AssessmentClient, Any]:
     return AssessmentClient(cfg.base_url, cfg.engagement_key), cfg
 
 
+def _emit_scope_rejection_telemetry(args, payload: dict, scope_errors: list[str]) -> None:
+    """Item 11: record a kind='scope_rejection' decision row when the
+    validator rejects a dispatch for scope_host reasons. Audited per
+    engagement so the C7 gate's false-positive rate is queryable via
+    the existing dispatch-decisions list endpoint.
+
+    Best-effort: the caller wraps this in try/except so a failed telemetry
+    write does not block the original rejection error. No network failure
+    path here raises through to the caller.
+    """
+    client, _cfg = _client_for(args)
+    try:
+        scope_entries_summary: list[str] = []
+        scope_path = Path(_cfg.engagement_dir) / "scope.json"
+        if scope_path.is_file():
+            try:
+                scope = json.loads(scope_path.read_text(encoding="utf-8"))
+                raw_hosts = scope.get("hosts") or []
+                if isinstance(raw_hosts, list):
+                    scope_entries_summary = [
+                        str(entry) for entry in raw_hosts if isinstance(entry, (str, int))
+                    ]
+            except (OSError, ValueError):
+                scope_entries_summary = []
+        body = {
+            "kind": "scope_rejection",
+            "payload": {
+                "host": payload.get("scope_host"),
+                "role": payload.get("agent_role") or payload.get("role"),
+                "scope_entries": scope_entries_summary,
+                "reason": scope_errors[0] if scope_errors else "scope_host not in scope.json",
+                "rejected_at": _utcnow_iso(),
+            },
+            "surfaced_to_user": True,
+        }
+        client.record_decision(body)
+    finally:
+        client.close()
+
+
 def _build_register_payload(args) -> dict:
     payload: dict[str, Any] = {}
     if getattr(args, "from_json", None):
@@ -1514,6 +1555,20 @@ def _build_register_payload(args) -> dict:
     for warning in warnings:
         print(f"WARN agent start: {warning}", file=sys.stderr)
     if errors:
+        # Item 11: when the scope_host gate is the cause of rejection, record
+        # a dispatch decision row (kind='scope_rejection') so the C7 gate's
+        # false-positive rate is auditable across engagements. Best-effort —
+        # failures here do NOT block the original rejection error.
+        scope_errors = [e for e in errors if "not in scope.json" in e]
+        if scope_errors and _eng_dir_for_validation:
+            try:
+                _emit_scope_rejection_telemetry(args, payload, scope_errors)
+            except Exception as telemetry_exc:  # noqa: BLE001
+                print(
+                    f"WARN agent start: scope-rejection telemetry write failed: "
+                    f"{telemetry_exc}",
+                    file=sys.stderr,
+                )
         for error in errors:
             print(f"agent start: {error}", file=sys.stderr)
         sys.exit(1)

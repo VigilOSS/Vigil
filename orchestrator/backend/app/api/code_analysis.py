@@ -116,6 +116,9 @@ class QueueCompleteRequest(BaseModel):
     disposition: str = Field(min_length=1, max_length=64)
     notes: str = Field(default="", max_length=20000)
     cwe_coverage: list[dict[str, Any]] = Field(default_factory=list)
+    # C50: structured reason when disposition='skipped'. Required at the
+    # service layer when skipping; ignored for other dispositions.
+    skip_reason: str = Field(default="", max_length=512)
 
 
 class QueueErrorRequest(BaseModel):
@@ -432,6 +435,7 @@ async def complete_queue_items(engagement_key: str, request: QueueCompleteReques
         disposition=request.disposition,
         notes=request.notes,
         cwe_coverage=request.cwe_coverage,
+        skip_reason=request.skip_reason,
     )
     _audit_code_mutation(
         engagement.id,

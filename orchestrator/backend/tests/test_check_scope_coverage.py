@@ -132,11 +132,13 @@ class FakeClient:
         surfaces: list[dict[str, Any]] | None = None,
         decisions: list[dict[str, Any]] | None = None,
         endpoint_handler=None,
+        per_host_payload: dict[str, Any] | None = None,
     ) -> None:
         self._services = services or []
         self._surfaces = surfaces or []
         self._decisions = decisions or []
         self._endpoint_handler = endpoint_handler
+        self._per_host_payload = per_host_payload
         self.calls: list[str] = []
 
     def get(self, endpoint: str) -> Any:
@@ -149,6 +151,12 @@ class FakeClient:
             return self._services
         if endpoint == "surfaces":
             return self._surfaces
+        if endpoint == "coverage-readiness/by-host":
+            return getattr(self, "_per_host_payload", None) or {
+                "objectives": [],
+                "hosts": [],
+                "engagement_signals": {},
+            }
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
     def list_decisions(self, **filters: Any) -> list[dict[str, Any]]:
@@ -156,7 +164,19 @@ class FakeClient:
         kind = filters.get("kind")
         if kind:
             rows = [r for r in rows if r.get("kind") == kind]
+        limit = filters.get("limit")
+        offset = int(filters.get("offset") or 0)
+        if offset:
+            rows = rows[offset:]
+        if limit is not None:
+            rows = rows[: int(limit)]
         return rows
+
+    def list_all_decisions(self, **filters: Any) -> list[dict[str, Any]]:
+        # Mirror the real client's paginating helper: return everything
+        # matching `filters`, ignoring the per-page cap.
+        scoped = {k: v for k, v in filters.items() if k not in ("limit", "offset")}
+        return self.list_decisions(**scoped)
 
     def close(self) -> None:
         return None
@@ -170,6 +190,7 @@ def _patch_client(
     surfaces=None,
     decisions=None,
     endpoint_handler=None,
+    per_host_payload=None,
 ) -> list[FakeClient]:
     fake_services = services or []
     fake_surfaces = surfaces or []
@@ -182,6 +203,7 @@ def _patch_client(
             surfaces=fake_surfaces,
             decisions=fake_decisions,
             endpoint_handler=endpoint_handler,
+            per_host_payload=per_host_payload,
         )
         created.append(client)
         return client
@@ -215,6 +237,9 @@ def _run(
     as_json: bool = True,
     verbose: bool = False,
     strict_vendor_saas: bool = False,
+    by_host: bool = False,
+    include_discovered: bool = False,
+    per_host_payload=None,
 ) -> FakeClient | None:
     module = _load_module()
     _patch_config(monkeypatch, module, engagement_dir)
@@ -225,6 +250,7 @@ def _run(
         surfaces=surfaces,
         decisions=decisions,
         endpoint_handler=endpoint_handler,
+        per_host_payload=per_host_payload,
     )
     module.run(
         SimpleNamespace(
@@ -233,6 +259,8 @@ def _run(
             as_json=as_json,
             verbose=verbose,
             strict_vendor_saas=strict_vendor_saas,
+            by_host=by_host,
+            include_discovered=include_discovered,
         )
     )
     return clients[0] if clients else None
@@ -1085,3 +1113,511 @@ def test_vendor_saas_explicit_literal_in_scope_skips_gate(monkeypatch, tmp_path:
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
     assert report["vendor_saas_pending_decision"] == []
+
+
+# ---------------------------------------------------------------------------
+# C40 — per-host outcome gates + coverage_deferral honoring
+# ---------------------------------------------------------------------------
+
+
+def _per_host_payload(
+    *,
+    hosts: list[dict[str, Any]],
+    objectives: list[str] | None = None,
+    engagement_signals: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "objectives": objectives
+        or ["waf_tier", "service_inventory", "directory_fuzz", "nikto_trigger", "osint"],
+        "hosts": hosts,
+        "engagement_signals": engagement_signals or {},
+    }
+
+
+def _outcome(*, met: bool, evidence: list[str] | None = None, deferred: bool = False) -> dict[str, Any]:
+    return {
+        "met": bool(met),
+        "evidence": list(evidence or []),
+        "deferred": bool(deferred),
+    }
+
+
+def test_by_host_renders_outcome_table_and_warns_on_unmet(monkeypatch, tmp_path: Path, capsys) -> None:
+    """--by-host emits per-host outcome rows and per-host_warnings list (WARN-only)."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["api.target.example"])
+    _make_cases_db(eng)
+
+    services = [{"endpoint": "api.target.example", "state": "up"}]
+    surfaces = [{"target_descriptor": "https://api.target.example/v1"}]
+
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "api.target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=False),
+                    "service_inventory": _outcome(met=True, evidence=["services:1", "surfaces:1"]),
+                    "directory_fuzz": _outcome(met=False),
+                    "nikto_trigger": _outcome(met=False),
+                    "osint": _outcome(met=False),
+                },
+            },
+        ],
+    )
+
+    client = _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+        by_host=True,
+        per_host_payload=host_payload,
+    )
+
+    out = capsys.readouterr().out
+    report = json.loads(out)
+    # The scope-entry gate still passes — --by-host warns separately, never blocks.
+    assert report["ready"] is True, report
+    section = report["per_host_coverage"]
+    assert section["objectives"] == [
+        "waf_tier",
+        "service_inventory",
+        "directory_fuzz",
+        "nikto_trigger",
+        "osint",
+    ]
+    by_host = {row["host"]: row for row in section["hosts"]}
+    assert "api.target.example" in by_host
+    row = by_host["api.target.example"]
+    assert row["outcomes"]["service_inventory"]["met"] is True
+    assert row["outcomes"]["waf_tier"]["met"] is False
+    assert set(row["unmet_objectives"]) == {"waf_tier", "directory_fuzz", "nikto_trigger", "osint"}
+
+    warnings = report["per_host_warnings"]
+    # One warning per unmet objective for the single host.
+    assert len(warnings) == 4
+    assert any("waf_tier" in w and "api.target.example" in w for w in warnings)
+    assert any("coverage_deferral" in w for w in warnings)
+
+    # The CLI must NOT have asked for command-runs — strict abstraction test.
+    assert client is not None
+    assert "command-runs" not in client.calls
+    assert "summary" not in client.calls
+
+
+def test_by_host_deferral_clears_warning(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A coverage_deferral for an objective marks it as deferred (not unmet) in the report."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["api.target.example"])
+    _make_cases_db(eng)
+
+    services = [{"endpoint": "api.target.example", "state": "up"}]
+    surfaces = [{"target_descriptor": "https://api.target.example/v1"}]
+
+    # Backend payload reports waf_tier as deferred for this host.
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "api.target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=False, deferred=True),
+                    "service_inventory": _outcome(met=True),
+                    "directory_fuzz": _outcome(met=True),
+                    "nikto_trigger": _outcome(met=True),
+                    "osint": _outcome(met=True),
+                },
+                "deferrals": [
+                    {
+                        "id": 7,
+                        "kind": "coverage_deferral",
+                        "payload": {
+                            "host": "api.target.example",
+                            "deferred_objectives": ["waf_tier"],
+                            "reason": "vendor confirmed WAF tier in scope brief",
+                        },
+                        "created_at": "2026-05-17T12:00:00Z",
+                    }
+                ],
+            },
+        ],
+    )
+
+    _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+        by_host=True,
+        per_host_payload=host_payload,
+    )
+    report = json.loads(capsys.readouterr().out)
+    row = report["per_host_coverage"]["hosts"][0]
+    assert row["outcomes"]["waf_tier"]["deferred"] is True
+    assert row["unmet_objectives"] == []
+    assert "waf_tier" in row["deferred_objectives"]
+    # Empty warnings ↔ no actionable WARN-only lines.
+    assert report["per_host_warnings"] == []
+
+
+def test_by_host_does_not_query_command_runs_endpoint(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Contract assertion (C40): the CLI gate path NEVER hits assessment_command_runs.
+
+    Captures every endpoint the CLI requests and asserts the safelist is exactly
+    ``services``, ``surfaces``, and ``coverage-readiness/by-host``. If a regression
+    re-adds a command-runs fetch the FakeClient will raise AssertionError; this
+    test confirms that the new --by-host path stays inside the outcome-table
+    contract too.
+    """
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    _make_cases_db(eng)
+
+    services = [{"endpoint": "target.example", "state": "up"}]
+    surfaces = [{"target_descriptor": "https://target.example/"}]
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=True, evidence=["Cloudflare"]),
+                    "service_inventory": _outcome(met=True, evidence=["services:1"]),
+                    "directory_fuzz": _outcome(met=True),
+                    "nikto_trigger": _outcome(met=True),
+                    "osint": _outcome(met=True),
+                },
+            }
+        ],
+    )
+
+    client = _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+        by_host=True,
+        per_host_payload=host_payload,
+    )
+    capsys.readouterr()  # drain stdout
+
+    assert client is not None
+    # The only HTTP endpoints touched in --by-host mode.
+    assert set(client.calls) <= {"services", "surfaces", "coverage-readiness/by-host"}
+    assert "command-runs" not in client.calls
+    assert not any(call.startswith("command-runs") for call in client.calls)
+    # Verify the per-host fetch happened.
+    assert "coverage-readiness/by-host" in client.calls
+
+
+def test_by_host_without_flag_skips_per_host_section(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Without --by-host the backend per-host endpoint must not be called.
+
+    Preserves the prior CLI contract: the legacy gate path is unchanged when
+    operators run the command without --by-host.
+    """
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    _make_cases_db(eng)
+
+    services = [{"endpoint": "target.example", "state": "up"}]
+    surfaces = [{"target_descriptor": "https://target.example/"}]
+
+    client = _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+    )
+    capsys.readouterr()
+
+    assert client is not None
+    assert "coverage-readiness/by-host" not in client.calls
+    # Report must NOT carry a per_host_coverage key when --by-host is not set.
+    out = capsys.readouterr().out  # already drained; redrain produces ""
+    # Re-run to actually capture stdout via JSON path.
+    _run(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert "per_host_coverage" not in report
+    assert "per_host_warnings" not in report
+
+
+# ---------------------------------------------------------------------------
+# FU3: hint-referenced specialist names must exist as agent role files.
+# ---------------------------------------------------------------------------
+
+
+def test_specialist_roster_names_in_hints_have_role_files_on_disk():
+    """Every specialist name referenced by a C40 dispatch hint must be a
+    real role file under `agent/agents/<name>.md`. Catches the class of
+    drift where the C40 subagent wrote `osint-recon` (no such file) when
+    the canonical name is `osint-analyst`. A rename of any role file will
+    fail this test too — the hint must move with the rename."""
+    module = _load_module()
+    repo_root = Path(__file__).resolve().parents[3]
+    referenced_names = {
+        module._HINT_RECON_SPECIALIST,
+        module._HINT_OSINT_ANALYST,
+    }
+    for name in referenced_names:
+        role_file = repo_root / "agent" / "agents" / f"{name}.md"
+        assert role_file.is_file(), (
+            f"check_scope_coverage hint references specialist '{name}' but "
+            f"{role_file} does not exist. Either fix the constant in "
+            "check_scope_coverage.py or restore the role file."
+        )
+
+
+# ---------------------------------------------------------------------------
+# FU1: discovered-host filtering / --include-discovered
+# ---------------------------------------------------------------------------
+
+
+def test_by_host_default_filters_wildcard_discovered_into_summary(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """Hosts NOT authored in scope.json are folded into discovered_summary."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    # Scope.json: one literal host + one wildcard. The wildcard's expansions
+    # should NOT show up in the matrix by default.
+    _write_scope(eng, hosts=["api.target.example", "*.target.example"])
+    _make_cases_db(eng)
+
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "api.target.example",  # explicit literal — kept
+                "outcomes": {
+                    "waf_tier": _outcome(met=True, evidence=["intel:1"]),
+                    "service_inventory": _outcome(met=True, evidence=["services:1"]),
+                    "directory_fuzz": _outcome(met=True, evidence=["surfaces:1"]),
+                    "nikto_trigger": _outcome(met=True),
+                    "osint": _outcome(met=True),
+                },
+            },
+            {
+                "host": "discovered-a.target.example",  # wildcard expansion — folded
+                "outcomes": {
+                    "waf_tier": _outcome(met=False),
+                    "service_inventory": _outcome(met=False),
+                    "directory_fuzz": _outcome(met=False),
+                    "nikto_trigger": _outcome(met=False),
+                    "osint": _outcome(met=False),
+                },
+            },
+            {
+                "host": "discovered-b.target.example",  # wildcard expansion — folded
+                "outcomes": {
+                    "waf_tier": _outcome(met=False),
+                    "service_inventory": _outcome(met=True),
+                    "directory_fuzz": _outcome(met=False),
+                    "nikto_trigger": _outcome(met=False),
+                    "osint": _outcome(met=True),
+                },
+            },
+        ],
+    )
+
+    _run(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "api.target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://api.target.example/v1"}],
+        require_stage="enum",
+        by_host=True,
+        per_host_payload=host_payload,
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    section = report["per_host_coverage"]
+    hosts = {row["host"]: row for row in section["hosts"]}
+
+    # Literal stays.
+    assert "api.target.example" in hosts
+    # Discovered hosts are filtered out of `hosts[]`.
+    assert "discovered-a.target.example" not in hosts
+    assert "discovered-b.target.example" not in hosts
+
+    # Summary present + correct.
+    summary = section["discovered_summary"]
+    assert summary["discovered_count"] == 2
+    # Both discovered hosts have at least one unmet objective.
+    assert summary["hosts_with_unmet_count"] == 2
+    assert summary["hosts_with_deferral_count"] == 0
+    # top_unmet_objectives: most-frequent unmet across discovered.
+    top_objectives = {entry["objective"] for entry in summary["top_unmet_objectives"]}
+    # waf_tier, directory_fuzz, nikto_trigger all unmet on both discovered hosts.
+    # service_inventory unmet on a but met on b → 1 instance.
+    # osint unmet on a but met on b → 1 instance.
+    assert "waf_tier" in top_objectives
+    assert "directory_fuzz" in top_objectives
+    assert "nikto_trigger" in top_objectives
+
+
+def test_by_host_include_discovered_keeps_full_matrix(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """--include-discovered restores wildcard-discovered hosts to the matrix."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["api.target.example", "*.target.example"])
+    _make_cases_db(eng)
+
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "api.target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=True),
+                    "service_inventory": _outcome(met=True),
+                    "directory_fuzz": _outcome(met=True),
+                    "nikto_trigger": _outcome(met=True),
+                    "osint": _outcome(met=True),
+                },
+            },
+            {
+                "host": "discovered.target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=False),
+                    "service_inventory": _outcome(met=False),
+                    "directory_fuzz": _outcome(met=False),
+                    "nikto_trigger": _outcome(met=False),
+                    "osint": _outcome(met=False),
+                },
+            },
+        ],
+    )
+
+    _run(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "api.target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://api.target.example/v1"}],
+        require_stage="enum",
+        by_host=True,
+        include_discovered=True,
+        per_host_payload=host_payload,
+    )
+
+    section = json.loads(capsys.readouterr().out)["per_host_coverage"]
+    hosts = {row["host"] for row in section["hosts"]}
+    assert hosts == {"api.target.example", "discovered.target.example"}
+    # No summary when full matrix is rendered.
+    assert "discovered_summary" not in section
+
+
+def test_by_host_wildcard_only_scope_skips_filtering(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """When scope.json has no explicit literals (only wildcards), filtering is a no-op.
+
+    Run without require_stage so the scope-entry gate doesn't sys.exit on
+    the wildcard having no enum evidence — this test is exclusively about
+    the FU1 filter behavior, not the enum-evidence audit.
+    """
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["*.target.example"])  # wildcard only — no literals
+    _make_cases_db(eng)
+
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "a.target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=False),
+                    "service_inventory": _outcome(met=False),
+                    "directory_fuzz": _outcome(met=False),
+                    "nikto_trigger": _outcome(met=False),
+                    "osint": _outcome(met=False),
+                },
+            },
+        ],
+    )
+
+    _run(
+        monkeypatch,
+        eng,
+        by_host=True,
+        per_host_payload=host_payload,
+    )
+
+    section = json.loads(capsys.readouterr().out)["per_host_coverage"]
+    hosts = {row["host"] for row in section["hosts"]}
+    # With no literal anchor, the filter cannot run — full matrix is preserved.
+    assert "a.target.example" in hosts
+    assert "discovered_summary" not in section
+
+
+def test_by_host_no_discovered_hosts_skips_summary(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """When every backend-signal host is a scope literal, no summary block."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["api.target.example", "edge.target.example"])
+    _make_cases_db(eng)
+
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "api.target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=True),
+                    "service_inventory": _outcome(met=True),
+                    "directory_fuzz": _outcome(met=True),
+                    "nikto_trigger": _outcome(met=True),
+                    "osint": _outcome(met=True),
+                },
+            },
+        ],
+    )
+
+    _run(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "api.target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://api.target.example/v1"}],
+        require_stage="enum",
+        by_host=True,
+        per_host_payload=host_payload,
+    )
+
+    section = json.loads(capsys.readouterr().out)["per_host_coverage"]
+    # api.target.example is the only signal host AND it's a literal — summary
+    # is suppressed because there are no discovered hosts to summarize.
+    assert "discovered_summary" not in section
+
+
+def test_specialist_roster_substituted_into_hints():
+    """The hints must actually substitute the roster constants, not leave
+    a stale literal in the string."""
+    module = _load_module()
+    hints = module._OBJECTIVE_DISPATCH_HINTS
+    # `osint-recon` was the C40-introduced typo; assert it's gone everywhere.
+    for objective, hint in hints.items():
+        assert "osint-recon" not in hint, (
+            f"objective={objective!r} still references 'osint-recon'; "
+            "canonical name is 'osint-analyst'"
+        )
+    # `osint-analyst` should appear in the osint hint.
+    assert "osint-analyst" in hints["osint"]
+    # `recon-specialist` should appear in every non-osint hint.
+    for objective in ("waf_tier", "service_inventory", "directory_fuzz", "nikto_trigger"):
+        assert "recon-specialist" in hints[objective], (
+            f"objective={objective!r} missing recon-specialist reference"
+        )

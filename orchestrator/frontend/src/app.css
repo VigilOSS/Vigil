@@ -391,6 +391,55 @@ input {
   margin-left: 6px;
 }
 
+.readiness-matrix-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.readiness-matrix {
+  margin-top: 12px;
+  overflow-x: auto;
+}
+.readiness-matrix table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.readiness-matrix th,
+.readiness-matrix td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.readiness-matrix th {
+  font-weight: 600;
+  color: var(--text-muted);
+  background: rgba(0, 0, 0, 0.02);
+}
+.readiness-matrix .readiness-cell {
+  text-align: center;
+}
+.readiness-deferrals {
+  margin-top: 12px;
+}
+.readiness-deferrals h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+.readiness-deferrals ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.readiness-engagement-signals {
+  margin-top: 12px;
+}
+.readiness-engagement-signals h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+
 /* ── Buttons ────────────────────────────────────────────── */
 
 .primary-button,
@@ -1446,6 +1495,19 @@ input {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* FU8: when the row is expanded, let the span actually wrap. The
+ * default rule above (white-space: nowrap on the child span) won the
+ * specificity battle against an inline `whiteSpace: 'pre-wrap'` on the
+ * parent div, so the click-to-expand toggle was visually inert for
+ * long hypothesis/evidence text. Scoping the override to a parent
+ * `is-expanded` class keeps the collapsed default and unlocks wrap
+ * only on demand. */
+.code-result-detail.is-expanded > span:last-child {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 .code-result-label {
   font-weight: 600;
@@ -1457,6 +1519,11 @@ input {
 .code-disposition-suspicious { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
 .code-disposition-clean { background: rgba(23, 53, 76, 0.08); color: var(--accent); }
 .code-disposition-needs_context { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
+/* C50: `skipped` is an intentional analyst opt-out (test fixture,
+ * generated code, minified, vendored dep, out-of-scope language). Muted
+ * gray distinguishes it visually from `clean` (which implies a real
+ * review happened and found nothing). */
+.code-disposition-skipped { background: rgba(23, 53, 76, 0.06); color: var(--muted); }
 
 .code-confidence-high { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
 .code-confidence-medium { background: rgba(161, 98, 7, 0.14); color: #a16207; }
@@ -2377,6 +2444,13 @@ input {
   display: grid;
   gap: 18px;
   min-height: 0;
+  /* min-width: 0 on the grid container + overflow-wrap on prose
+   * children prevents long unbreakable strings (pasted URLs, JWTs,
+   * stack frames) from establishing a min-content width that forces
+   * horizontal scroll. Without these, an analyst pasting a long token
+   * into `summary` or `impact` overflows the modal panel even though
+   * the `<p>` would otherwise wrap. */
+  min-width: 0;
 }
 
 .findings-redesign .section-title {
@@ -2406,8 +2480,13 @@ input {
   line-height: 1.55;
   font-size: 0.92rem;
   color: var(--ink);
+  /* overflow-wrap: anywhere wraps long unbreakable strings (URLs,
+   * tokens, paths) at character boundaries when no soft-break exists.
+   * Without it, a pasted URL in a Summary/Impact field would force
+   * horizontal scroll through the entire modal. */
+  overflow-wrap: anywhere;
 }
-.findings-redesign .section { display: grid; gap: 4px; }
+.findings-redesign .section { display: grid; gap: 4px; min-width: 0; }
 
 .findings-redesign .kv-grid {
   display: grid;
@@ -2417,6 +2496,16 @@ input {
   background: rgba(23, 53, 76, 0.035);
   border: 1px solid var(--border);
   border-radius: 12px;
+  /* Same root cause as .drawer-body's min-width:0 — without this the
+   * 1fr columns refuse to shrink below the largest child's intrinsic
+   * minimum width, so a long unbreakable value (defect_family,
+   * auth_context, root_cause_key) forces horizontal scroll of the
+   * entire kv-grid block. */
+  min-width: 0;
+}
+.findings-redesign .kv {
+  /* Each .kv cell is itself a flex/grid child; let it shrink. */
+  min-width: 0;
 }
 .findings-redesign .kv .k {
   font-size: 0.7rem;
@@ -2429,6 +2518,10 @@ input {
   font-size: 0.88rem;
   color: var(--ink);
   margin: 0;
+  /* Mono variant has its own break-all rule below; this wraps the
+   * non-mono prose variants (defect_family, root_cause_key,
+   * auth_context) at character boundaries when needed. */
+  overflow-wrap: anywhere;
 }
 .findings-redesign .kv .v.mono {
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
@@ -2444,6 +2537,10 @@ input {
   background: rgba(255, 255, 255, 0.6);
   display: grid;
   gap: 6px;
+  min-width: 0;
+}
+.findings-redesign .callout p {
+  overflow-wrap: anywhere;
 }
 /* Tinted backgrounds + wider left stripe so Impact/Remediation/Kill pop
  * against neighboring plain sections. The section-title's ::before bar
