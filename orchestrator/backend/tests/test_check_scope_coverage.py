@@ -1339,3 +1339,49 @@ def test_by_host_without_flag_skips_per_host_section(monkeypatch, tmp_path: Path
     report = json.loads(capsys.readouterr().out)
     assert "per_host_coverage" not in report
     assert "per_host_warnings" not in report
+
+
+# ---------------------------------------------------------------------------
+# FU3: hint-referenced specialist names must exist as agent role files.
+# ---------------------------------------------------------------------------
+
+
+def test_specialist_roster_names_in_hints_have_role_files_on_disk():
+    """Every specialist name referenced by a C40 dispatch hint must be a
+    real role file under `agent/agents/<name>.md`. Catches the class of
+    drift where the C40 subagent wrote `osint-recon` (no such file) when
+    the canonical name is `osint-analyst`. A rename of any role file will
+    fail this test too — the hint must move with the rename."""
+    module = _load_module()
+    repo_root = Path(__file__).resolve().parents[3]
+    referenced_names = {
+        module._HINT_RECON_SPECIALIST,
+        module._HINT_OSINT_ANALYST,
+    }
+    for name in referenced_names:
+        role_file = repo_root / "agent" / "agents" / f"{name}.md"
+        assert role_file.is_file(), (
+            f"check_scope_coverage hint references specialist '{name}' but "
+            f"{role_file} does not exist. Either fix the constant in "
+            "check_scope_coverage.py or restore the role file."
+        )
+
+
+def test_specialist_roster_substituted_into_hints():
+    """The hints must actually substitute the roster constants, not leave
+    a stale literal in the string."""
+    module = _load_module()
+    hints = module._OBJECTIVE_DISPATCH_HINTS
+    # `osint-recon` was the C40-introduced typo; assert it's gone everywhere.
+    for objective, hint in hints.items():
+        assert "osint-recon" not in hint, (
+            f"objective={objective!r} still references 'osint-recon'; "
+            "canonical name is 'osint-analyst'"
+        )
+    # `osint-analyst` should appear in the osint hint.
+    assert "osint-analyst" in hints["osint"]
+    # `recon-specialist` should appear in every non-osint hint.
+    for objective in ("waf_tier", "service_inventory", "directory_fuzz", "nikto_trigger"):
+        assert "recon-specialist" in hints[objective], (
+            f"objective={objective!r} missing recon-specialist reference"
+        )
