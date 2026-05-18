@@ -95,10 +95,10 @@ def test_handoff_post_get_round_trip(client, isolate_settings) -> None:
     assert fetched["working_artifacts"][0]["path"].endswith("EX-001-payload.sql")
     assert fetched["recommended_next_agent"] == "exploit-developer"
 
-    activity = client.get(f"/engagements/{ENGAGEMENT_KEY}/activity-entries", params={"q": "record-handoff"})
+    activity = client.get(f"/engagements/{ENGAGEMENT_KEY}/activity-entries", params={"q": "handoff"})
     assert activity.status_code == 200, activity.text
     titles = {row["title"] for row in activity.json()["items"]}
-    assert "dispatch record-handoff" in titles
+    assert "agent handoff" in titles
 
 
 def test_handoff_summary_required_and_bounded(client, isolate_settings) -> None:
@@ -143,6 +143,13 @@ def test_handoff_duplicate_returns_409_and_patch_updates(client, isolate_setting
     assert updated["summary"] == "Updated summary text"
     assert updated["confidence"] == "medium"
     assert updated["finding_slugs"] == ["VA-001", "VA-002"]
+
+    activity = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/activity-entries",
+        params={"q": "handoff"},
+    )
+    assert activity.status_code == 200, activity.text
+    assert sum(1 for row in activity.json()["items"] if row["title"] == "agent handoff") >= 2
 
 
 def test_handoff_list_filters(client, isolate_settings) -> None:

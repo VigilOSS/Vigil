@@ -26,6 +26,13 @@ def _format_effort(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else f"{value:g}"
 
 
+def _is_not_applicable_cwe_entry(entry: dict) -> bool:
+    if entry.get("not_applicable") is True:
+        return True
+    disposition = str(entry.get("disposition", entry.get("status", ""))).strip().lower()
+    return disposition in {"not_applicable", "not-applicable", "n/a", "na"}
+
+
 def register(subparsers) -> None:
     p = subparsers.add_parser("code-coverage", help="Display code analysis coverage summary")
     p.add_argument("--repo-id", default=None, help="Filter by repository ID")
@@ -157,8 +164,13 @@ def _print_cwe_matrix(files: list[dict]) -> None:
         display_name = display_name[:name_width]
 
         effort_map: dict[str, float] = {}
+        not_applicable: set[str] = set()
         for cwe in f.get('cwe_coverage', []):
-            effort_map[cwe.get('family', '')] = _coerce_effort(cwe.get('effort', 0))
+            fam = cwe.get('family', '')
+            if _is_not_applicable_cwe_entry(cwe):
+                not_applicable.add(fam)
+                continue
+            effort_map[fam] = _coerce_effort(cwe.get('effort', 0))
 
         applicable = f.get('applicable_families', set())
         if isinstance(applicable, list):
@@ -176,6 +188,8 @@ def _print_cwe_matrix(files: list[dict]) -> None:
         for fam in all_families:
             if applicable and fam not in applicable:
                 cell = "--"
+            elif fam in not_applicable:
+                cell = "N/A"
             elif fam in effort_map:
                 val = effort_map[fam]
                 marker = "!" if threshold > 0 and val < threshold else ""
@@ -246,10 +260,17 @@ def _check_effort_gaps(files: list[dict]) -> bool:
             applicable = set(applicable)
 
         effort_map: dict[str, float] = {}
+        not_applicable: set[str] = set()
         for cwe in f.get('cwe_coverage', []):
-            effort_map[cwe.get('family', '')] = _coerce_effort(cwe.get('effort', 0))
+            fam = cwe.get('family', '')
+            if _is_not_applicable_cwe_entry(cwe):
+                not_applicable.add(fam)
+                continue
+            effort_map[fam] = _coerce_effort(cwe.get('effort', 0))
 
         for fam in applicable:
+            if fam in not_applicable:
+                continue
             effort = effort_map.get(fam, 0)
             if effort < threshold:
                 return True
@@ -284,8 +305,13 @@ def _print_vuln_class_summary(data: dict) -> None:
             continue
 
         effort_map: dict[str, float] = {}
+        not_applicable: set[str] = set()
         for cwe in cwe_coverage:
-            effort_map[cwe.get('family', '')] = _coerce_effort(cwe.get('effort', 0))
+            fam = cwe.get('family', '')
+            if _is_not_applicable_cwe_entry(cwe):
+                not_applicable.add(fam)
+                continue
+            effort_map[fam] = _coerce_effort(cwe.get('effort', 0))
 
         threshold = EFFORT_THRESHOLDS.get(classification, 0)
         has_zero = False
@@ -293,6 +319,8 @@ def _print_vuln_class_summary(data: dict) -> None:
 
         families_to_check = set(applicable) if applicable else set(effort_map.keys())
         for fam in families_to_check:
+            if fam in not_applicable:
+                continue
             effort = effort_map.get(fam, 0)
             if effort == 0:
                 has_zero = True
@@ -367,11 +395,17 @@ def _print_coverage(data: dict) -> None:
 
     triggers = data.get('trigger_summary', {})
     if triggers:
+        accepted = (
+            triggers.get('external_context_unavailable', 0)
+            + triggers.get('source_equivalent_analyzed', 0)
+            + triggers.get('not_applicable', 0)
+        )
         print(
             "\nCross-File Triggers: "
             f"{triggers.get('pending', 0)} pending, "
             f"{triggers.get('queued', 0)} queued, "
-            f"{triggers.get('resolved', 0)} resolved"
+            f"{triggers.get('resolved', 0)} resolved, "
+            f"{accepted} accepted gap"
         )
 
     # Coverage Gate

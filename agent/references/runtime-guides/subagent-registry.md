@@ -1,14 +1,14 @@
 # Subagent Dispatch Registry — Backend Tables
 
 Dispatch tracking, structured handoffs, and decision rows live in three backend
-tables. The operator and specialists interact with these tables via `aith assess dispatch ...`
+tables. The operator and specialists interact with these tables via `aith assess agent ...`
 CLI verbs.
 
 | Table | Owner | CLI verbs | Purpose |
 |---|---|---|---|
-| `assessment_dispatches` | operator | `dispatch register` / `update-status` / `list` / `get` | Audit trail of every specialist dispatch (role, task, contract, status, finding slugs). |
-| `assessment_dispatch_handoffs` | specialist | `dispatch record-handoff` / `render-handoff` | Structured per-dispatch handoff: summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, role-specific extras. Schema: [`handoff-schema.md`](handoff-schema.md). |
-| `assessment_dispatch_decisions` | operator + specialist | `dispatch record-decision` | Cross-cutting decision rows (vendor-SaaS scope, egress reputation, dispatch_blocked, scope_decision). |
+| `assessment_dispatches` | operator | `aith assess agent start` / `done` / `list` / `get` | Audit trail of every specialist dispatch (role, task, contract, status, finding slugs). |
+| `assessment_dispatch_handoffs` | specialist | `aith assess agent handoff` / `render-handoff` | Structured per-dispatch handoff: summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, role-specific extras. Schema: [`handoff-schema.md`](handoff-schema.md). |
+| `assessment_dispatch_decisions` | operator + specialist | `aith assess agent decision` | Cross-cutting decision rows (vendor-SaaS scope, egress reputation, dispatch_blocked, scope_decision). |
 
 ## Table 1 — `assessment_dispatches`
 
@@ -18,23 +18,27 @@ The operator's audit trail. One row per dispatched specialist agent.
 
 | Field | Type | Source |
 |---|---|---|
-| `agent_id` | string (PK) | Operator-assigned at `dispatch register` time. |
+| `agent_id` | string (PK) | Operator-assigned at `aith assess agent start` time. Must match the spawned specialist's runtime identity (`AGENT_NAME` / wrapper label). |
 | `agent_role` | string | `recon-specialist` / `vulnerability-analyst` / etc. |
 | `task` | string | One-paragraph dispatch objective. |
 | `scope_host` | string | The host the dispatch operated against (or `multi` for multi-host). |
-| `dispatched_at` | ISO datetime | Set on `register`. |
-| `completed_at` | ISO datetime | Set on `update-status` when status moves to a terminal value. |
+| `dispatched_at` | ISO datetime | Set on agent start (`POST /dispatches`). |
+| `completed_at` | ISO datetime | Set on `aith assess agent done` when status moves to a terminal value. |
 | `status` | enum | `in-progress` / `completed` / `failed` / `aborted` / `blocked`. |
-| `model` | string | The model id (`claude-opus-4-7`, `gpt-5.4`, ...). |
-| `reasoning` | string | `low` / `medium` / `high`. |
+| `model` | string | Canonical copy of requested model used for legacy readers (mirrors requested when only one side was supplied). |
+| `reasoning` | string | Same role as `model` for reasoning level (`low` / `medium` / `high`). |
+| `requested_model` | string | Operator-requested model id (`claude-opus-4-7`, …). |
+| `actual_model` | string | Model that actually executed when it differs from the request. |
+| `requested_reasoning` | string | Requested reasoning level. |
+| `actual_reasoning` | string | Observed reasoning level when it differs from the request. |
 | `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation`. |
-| `finding_slugs_json` | JSON array | Finding slugs the dispatch produced (set on `update-status`). |
+| `finding_slugs_json` | JSON array | Finding slugs the dispatch produced (`agent done` PATCH may append additively). |
 
 ### CLI
 
 ```bash
 # Register a dispatch (operator does this when they launch a specialist).
-aith assess dispatch register \
+aith assess agent start \
     --agent-id recon_a3f9 \
     --agent-role recon-specialist \
     --task "Phase 1 wildcard subdomain enum + recon on saas.acme.example" \
@@ -45,32 +49,37 @@ aith assess dispatch register \
     --skills subdomain-enumeration,web-recon
 
 # Update status when the dispatch returns.
-aith assess dispatch update-status recon_a3f9 \
+aith assess agent done recon_a3f9 \
     --status completed \
     --finding-slugs RECON-2026-01-15-001,RECON-2026-01-15-002
 
 # List dispatches (DEDUP input — replaces the old JSON-file scan).
-aith assess dispatch list --role recon-specialist --since 2026-01-15T00:00:00Z
-aith assess dispatch list --task-q "wildcard subdomain"
+aith assess agent list --filter-role recon-specialist --since 2026-01-15T00:00:00Z
+aith assess agent list --task-q "wildcard subdomain"
 
 # Inspect one dispatch's full row.
-aith assess dispatch get recon_a3f9
+aith assess agent get recon_a3f9
 ```
 
-The contract fields (`model`, `reasoning`, `dispatch_mode`) capture the dispatch
+The contract fields (`requested_model`/`actual_model`, `requested_reasoning`/`actual_reasoning`, `dispatch_mode`, `skills`) capture the dispatch
 shape alongside the audit fields. Report-writer and later operators read these
-to audit not only what was dispatched but also the dispatch configuration.
+to audit not only what was dispatched but also the dispatch configuration. Legacy
+JSON keys `model` / `reasoning` on `POST /dispatches` still populate the requested columns.
 
 ## Contract Schema
 
-The contract fields recorded on every `dispatch register` call:
+The contract fields recorded on every `aith assess agent start` / `POST /dispatches` call:
 
 | Field | Type | Values |
 |---|---|---|
 | `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Dispatch-Mode Declaration" in `agent/operator-core.md`) |
 | `skills` | string | Comma-separated skill names loaded by the specialist; required for non-operator roles. |
-| `model` | string (optional) | model id (`claude-opus-4-7`, `claude-sonnet-4-6`, `gpt-5.4`) |
-| `reasoning` | string (optional) | `low` / `medium` / `high` |
+| `requested_model` | string (optional) | Intended model id from the operator |
+| `actual_model` | string (optional) | Model that actually executed |
+| `requested_reasoning` | string (optional) | Intended reasoning level (`low` / `medium` / `high`) |
+| `actual_reasoning` | string (optional) | Actual reasoning tier when recorded |
+| `model` | string (optional) | Legacy alias for requested model on POST |
+| `reasoning` | string (optional) | Legacy alias for requested reasoning on POST |
 
 ## Table 2 — `assessment_dispatch_handoffs`
 
@@ -84,11 +93,11 @@ Schema, per-role examples, and field-by-field guidance:
 
 ```bash
 # Specialist writes the handoff at the end of its dispatch.
-aith assess dispatch record-handoff --from-json /tmp/handoff-recon-a3f9.json
+aith assess agent handoff --from-json /tmp/handoff-recon-a3f9.json
 
 # Operator renders the bounded markdown blob into the next dispatch's prompt.
-aith assess dispatch render-handoff recon_a3f9
-aith assess dispatch render-handoff recon_a3f9 --max-lines 60 --include-evidence
+aith assess agent render-handoff recon_a3f9
+aith assess agent render-handoff recon_a3f9 --max-lines 60 --include-evidence
 ```
 
 The renderer reads the handoff row, fetches each finding slug from the backend
@@ -123,7 +132,7 @@ operator/specialist decisions.
 
 ```bash
 # Vendor-SaaS scope decision (recon-specialist surfaces; operator updates).
-aith assess dispatch record-decision \
+aith assess agent decision \
     --kind scope_decision \
     --host saas.acme.example \
     --vendor "Vendor SaaS" \
@@ -132,14 +141,14 @@ aith assess dispatch record-decision \
     --surfaced-to-user
 
 # Egress reputation decision after the four-option checkpoint resolves.
-aith assess dispatch record-decision \
+aith assess agent decision \
     --kind egress_decision \
     --choice browser-based-tool \
     --payload-json '{"egress_block_pct": 67, "second_sample_pct": 64}' \
     --reason "Cloudflare bot-fight on direct egress; presenting browser fingerprint via runtime browser tool"
 
 # Dispatch-blocked record when a specialist cannot launch.
-aith assess dispatch record-decision \
+aith assess agent decision \
     --kind dispatch_blocked \
     --phase recon \
     --reason "subdomain-enumeration skill missing required massdns binary in runtime image" \
@@ -153,15 +162,15 @@ before advancing.
 
 ## Why these tables exist
 
-- **Audit trail.** `dispatch list` shows what was tried, by whom, against which
+- **Audit trail.** `aith assess agent list` shows what was tried, by whom, against which
   target and finding cluster. Read back during report-writing and
   log-investigation phases.
 - **DEDUP input.** The pre-dispatch checklist runs
-  `aith assess dispatch list --task-q "<keyword>"` to avoid re-dispatching the
+  `aith assess agent list --task-q "<keyword>"` to avoid re-dispatching the
   same role for the same objective. Cross-checks against the activity log
   (`aith assess fetch activity-entries`) for narrative dedup.
 - **Handoff source.** The handoff row is the input
-  `aith assess dispatch render-handoff <agent-id>` reads. Bounded, deterministic,
+  `aith assess agent render-handoff <agent-id>` reads. Bounded, deterministic,
   pulls finding metadata from the findings table and artifact state from disk.
 - **Decision audit.** Vendor-SaaS scope and egress-reputation decisions are
   cross-dispatch state — the dispatcher needs them when choosing the next
@@ -173,7 +182,7 @@ Every dispatch launches a fresh agent — continuity lives in what the operator
 hands the new agent. The canonical path is the renderer:
 
 ```bash
-aith assess dispatch render-handoff <prior-agent-id>
+aith assess agent render-handoff <prior-agent-id>
 ```
 
 Paste the rendered blob verbatim into the new dispatch's prompt. The blob is

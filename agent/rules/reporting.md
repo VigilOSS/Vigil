@@ -28,6 +28,53 @@ Do not let recon hints, CVEs, or intuition inflate severity beyond what the evid
 
 If you use CVSS, make it match the proved attack path, not the imagined best case for the attacker.
 
+### Precondition analysis
+
+Before assigning severity, answer: **what does the attacker need to already have?** Every precondition
+that is not freely available to an anonymous internet attacker reduces severity. Stack enough
+preconditions and even a technically impressive bug becomes low-impact.
+
+**Defense-in-depth:** If exploiting the finding requires already possessing the secret or credential it
+bypasses, the finding is defense-in-depth — it adds a layer but its failure alone does not grant access.
+An API-key bypass that requires knowing the API key is not critical; the key is the auth mechanism, and
+obtaining it is a separate vulnerability. Rate the bypass relative to how hard the precondition is to
+satisfy independently.
+
+**Preconditions that reduce severity:**
+- Requires a valid authenticated session (not anonymous)
+- Requires knowing a non-iterable identifier (UUID, GUID, random token) — the attacker cannot enumerate, they must already have it from somewhere
+- Requires a second vulnerability to supply the input (chain-dependent primitive)
+- Requires access to source code, CI config, or internal systems to extract a secret
+- Requires attacker-controlled infrastructure (subdomain, DNS, upstream service)
+- Requires specific file upload + specific serving conditions to trigger
+- Reproduces only in dev/staging, not production
+
+**Preconditions that do NOT reduce severity:**
+- Requires an iterable integer ID (1, 2, 3...) — the attacker can enumerate trivially
+- Requires only a free/low-privilege account on a self-registration platform
+- Requires sending a single crafted HTTP request with no prior knowledge
+
+**Identifier complexity matters for IDOR:** An IDOR on `/api/records/{uuid}` where the UUID is not leaked anywhere is materially less exploitable than `/api/records/{id}` where id is a sequential integer. The former requires the attacker to already know the target; the latter lets them sweep every record. Rate accordingly.
+
+**Code-only without runtime proof:** A vulnerability pattern confirmed in source code but never demonstrated against a running instance is less certain than one with a captured request/response. Code paths may be dead, gated by middleware not visible in the snippet, or patched at deploy time. Drop severity at least one tier from what a dynamically-proved equivalent would earn.
+
+**Missing headers, stack traces, error messages, schema exposure, and configuration observations** are informational unless they directly enable a higher-impact attack. Do not inflate these to medium or above on the theory that they "could help an attacker" — that is speculative chaining, not proved impact.
+
+**Timing side-channels** are real but low-impact in practice. Rate as low unless the timing oracle directly leaks a high-value secret (e.g., full API key byte-by-byte extraction proved in evidence).
+
+**DoS severity depends on access:** Unauthenticated DoS against a production endpoint with no rate limiting is higher than auth-required DoS that crashes a background worker.
+
+For resource-limit and protocol-wrapper issues, prove the limit is a security boundary before using
+High/Critical language. A named cap being bypassed is not enough when the cap only protects a local
+buffer, spool, or compatibility path. Compare equivalent default transports and protocol modes. If the
+same logical input can already be sent through another supported path and the downstream component does
+only bounded, linear work, report it as Medium/hardening or documentation rather than a High vulnerability.
+
+High/Critical requires a proved second-order outcome: service-level denial of service, unbounded
+retained memory/disk, superlinear CPU, output amplification, crash, memory corruption,
+privilege-boundary crossing, or another concrete impact that ordinary protocol access cannot already
+produce.
+
 ## 4. Verify the data is actually non-public
 
 Before calling something exposure or disclosure, confirm the same information is not already intentionally public.
@@ -199,4 +246,3 @@ The following are internal-only and must not appear in client-facing deliverable
 - **Coverage Summary** — operational metrics (targets, services, probe counts) are engagement-internal and have no meaning to the client
 - **Finding Cross-Reference** — maps report IDs to backend slugs; internal traceability only, exclude from external reports
 - **Tested by / tester attribution** — not required in client deliverables
-

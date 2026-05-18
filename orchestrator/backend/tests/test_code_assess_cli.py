@@ -45,6 +45,10 @@ def _load_code_dispatch_module():
     return _load_assess_module("code_dispatch.py", "test_code_dispatch_command")
 
 
+def _load_code_record_analysis_module():
+    return _load_assess_module("code_record_analysis.py", "test_code_record_analysis_command")
+
+
 def _load_code_index_module():
     return _load_assess_module("code_index.py", "test_code_index_command")
 
@@ -168,6 +172,28 @@ def test_code_coverage_cwe_matrix_coerces_non_numeric_effort_values():
     )
 
     assert has_gap is True
+
+
+def test_code_coverage_cwe_matrix_treats_not_applicable_as_satisfied():
+    module = _load_code_coverage_module()
+
+    has_gap = module._check_effort_gaps(
+        [
+            {
+                "classification": "critical",
+                "applicable_families": ["ai-ml-security"],
+                "cwe_coverage": [
+                    {
+                        "family": "ai-ml-security",
+                        "effort": 0,
+                        "disposition": "not_applicable",
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert has_gap is False
 
 
 def test_code_coverage_cwe_matrix_require_gate_pass_honors_backend_gate(monkeypatch):
@@ -382,6 +408,48 @@ def test_code_index_walk_repo_skips_named_pipes(tmp_path):
     files = module._walk_repo(str(repo_path))
 
     assert files == [{"file_path": "main.py", "language": "python"}]
+
+
+def test_code_index_default_output_uses_engagement_analysis_state(monkeypatch, tmp_path):
+    module = _load_code_index_module()
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setitem(sys.modules, "tree_sitter", SimpleNamespace())
+    monkeypatch.setattr(
+        module,
+        "_walk_repo",
+        lambda _repo_path: [{"file_path": "main.py", "language": "python"}],
+    )
+    monkeypatch.setattr(
+        module,
+        "index_file",
+        lambda _path, _lang: {
+            "total_functions": 1,
+            "entry_points": [],
+            "security_sinks": [],
+            "exports": [],
+        },
+    )
+
+    module.run(
+        SimpleNamespace(
+            repo_path=str(repo_path),
+            repo_id="demo",
+            output_dir=None,
+            file_list=None,
+            engagement_dir=str(engagement_dir),
+        )
+    )
+
+    manifest_path = engagement_dir / "tools" / "analysis-state" / "structural-index-manifest.json"
+    assert manifest_path.is_file()
+    assert not (repo_path / ".code-index").exists()
 
 
 def test_git_security_history_args_limits_large_repos():
@@ -1039,6 +1107,152 @@ def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypa
     assert excinfo.value.code == 1
 
 
+def test_code_dispatch_resolve_triggers_posts_terminal_resolution(monkeypatch, tmp_path):
+    module = _load_code_dispatch_module()
+
+    triggers_path = tmp_path / "triggers.json"
+    triggers_path.write_text(
+        json.dumps(
+            [
+                {
+                    "file_path": "bin/StorageService.dll",
+                    "vuln_class": "web-app-injection",
+                    "repo_id": 7,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    def fake_snapshot(engagement_dir: str, category: str, label: str, payload, source_path=None, metadata=None):
+        path = tmp_path / f"{category}-{label}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(module, "write_json_snapshot", fake_snapshot)
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def post(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return {"resolved": 1, "total": 1}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            action="resolve-triggers",
+            extra=[
+                str(triggers_path),
+                "external_context_unavailable",
+                "source",
+                "not",
+                "provided",
+            ],
+            engagement_dir=tmp_path,
+        )
+    )
+
+    assert captured["endpoint"] == "code/triggers/resolve"
+    assert captured["payload"] == {
+        "items": [
+            {
+                "file_path": "bin/StorageService.dll",
+                "repo_id": 7,
+                "vuln_class": "web-app-injection",
+            }
+        ],
+        "resolution_status": "external_context_unavailable",
+        "resolution_note": "source not provided",
+    }
+
+
+def test_code_record_analysis_rejects_bad_nested_payloads_before_post(tmp_path, capsys):
+    module = _load_code_record_analysis_module()
+
+    analysis_path = tmp_path / "analysis.json"
+    analysis_path.write_text(
+        json.dumps(
+            [
+                {
+                    "queue_item_id": 101,
+                    "file_id": 1,
+                    "disposition": "clean",
+                    "cwe_coverage": {"cwe_coverage": [{"family": "ssrf", "effort": 80}]},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(SimpleNamespace(analysis_json=str(analysis_path), engagement_dir=tmp_path))
+
+    assert excinfo.value.code == 1
+    assert "cwe_coverage must be a JSON array" in capsys.readouterr().err
+
+
+def test_code_record_analysis_validates_whole_batch_before_any_post(monkeypatch, tmp_path):
+    module = _load_code_record_analysis_module()
+
+    analysis_path = tmp_path / "analysis.json"
+    analysis_path.write_text(
+        json.dumps(
+            [
+                {"queue_item_id": 201, "file_id": 1, "disposition": "clean"},
+                {
+                    "queue_item_id": 202,
+                    "file_id": 2,
+                    "disposition": "clean",
+                    "cross_file_triggers": [{"file_path": "src/missing.py", "vuln_class": "ssrf"}],
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    posted: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def post(self, endpoint: str, payload: dict):
+            posted.append(payload)
+            return {"id": len(posted)}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(SimpleNamespace(analysis_json=str(analysis_path), engagement_dir=tmp_path))
+
+    assert excinfo.value.code == 1
+    assert posted == []
+
+
 def test_code_dispatch_reset_stale_rejects_zero_before_backend(monkeypatch, tmp_path, capsys):
     module = _load_code_dispatch_module()
 
@@ -1193,6 +1407,19 @@ def test_contract_prints_reset_finding_contract(capsys):
     assert "Command: reset-finding" in out
     assert "reopen" in out.lower()
     assert "aith assess reset-finding <slug>" in out
+
+
+def test_contract_prints_code_record_analysis_contract(capsys):
+    module = _load_contract_module()
+
+    module.run(SimpleNamespace(name="code-record-analysis"))
+
+    out = capsys.readouterr().out
+    assert "Command: code-record-analysis" in out
+    assert "Schema: code-analysis-result.schema.json" in out
+    assert "queue_item_id" in out
+    assert "file_id = derived by the backend from queue_item_id" in out
+    assert "file_id-only result -> include queue_item_id" in out
 
 
 def test_contract_prints_record_intel_variant_contract(capsys):

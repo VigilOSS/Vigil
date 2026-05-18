@@ -725,7 +725,7 @@ input {
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 12px 14px;
-  background: rgba(255, 255, 255, 0.62);
+  background: var(--panel-soft);
   display: grid;
   gap: 4px;
 }
@@ -2105,7 +2105,7 @@ input {
 .findings-redesign .standalone-group {
   border: 1px solid var(--border);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.62);
+  background: var(--panel-soft);
   overflow: hidden;
 }
 .findings-redesign .group-card-head {
@@ -2114,7 +2114,7 @@ input {
   justify-content: space-between;
   gap: 16px;
   padding: 14px 16px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-strong);
 }
 .findings-redesign .group-card-head h3 {
   margin: 2px 0 0;
@@ -2165,7 +2165,7 @@ input {
 }
 .findings-redesign .mini-finding-row:hover,
 .findings-redesign .mini-finding-row.is-selected {
-  background: rgba(23, 53, 76, 0.05);
+  background: var(--panel-hover);
 }
 .findings-redesign .mini-main {
   display: grid;

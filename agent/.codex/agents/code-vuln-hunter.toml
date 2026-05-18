@@ -36,6 +36,7 @@ already listed below.
 - `agent/shared-constraints-code.md` -- scope, filesystem access, anti-rationalization rules, finding format
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
+- `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-vulnerability-analysis/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 - The CWE-specific pattern reference matching the context's slot types (from `agent/references/code-vuln-patterns/`)
 
@@ -47,6 +48,8 @@ Before producing any output, confirm:
 - [ ] **CWE-specific pattern reference loaded** -- the correct `code-vuln-patterns/*.md` file
       matching the slot types is present. WITHOUT IT, PATTERN-LEVEL DEPTH IS LOST.
 - [ ] **File batch provided**: file paths, priorities, batch theme, slot types, classification tier
+- [ ] **Queue item IDs provided**: each final `code-record-analysis` row will use the fetched
+      `queue_item_id` as the file identity source
 - [ ] **Structural index loaded (if available at `tools/analysis-state/structural-index/`)** -- provides
       function map as completeness anchor, plus entry points, sinks, exports, and import targets as advisory navigation metadata
 - [ ] **Threat model summary available** -- trust boundaries, entry points, high-value targets
@@ -146,6 +149,12 @@ sink-bearing, stateful, and ambiguous functions deserve the deepest reasoning fi
 5. **Type transitions**: What signed/unsigned conversions occur? What narrow-to-wide
    or wide-to-narrow casts? What pointer type changes? What integer promotions does
    the compiler perform implicitly?
+6. **Guard dominance and fail-open**: For auth/policy/config functions, verify that
+   every success-path return actually depends on the computed guard. Patterns that
+   survive taint-trace methodology: guard computed but discarded on null/exception
+   return, partial validation followed by raw-value use downstream, loop that doesn't
+   break after match causing wrong binding. These are semantic bugs — the code looks
+   guarded but isn't.
 
 ### Phase C: 5 Whys on Each Suspicious Pattern
 
@@ -262,14 +271,24 @@ Each function gets exactly one disposition:
   symbol needed. Only use this after filesystem self-service failed to resolve.
 
 In addition to per-function dispositions, produce a **`cwe_coverage`** array -- one entry per
-applicable vulnerability class for this file. Each entry records:
+applicable vulnerability class for this file. The coverage file passed to
+`aith assess code-dispatch done` must contain this bare JSON array, not an object wrapper
+with a `cwe_coverage` key. Include every family listed in the queue item's
+`applicable_vuln_classes`; for any family that genuinely cannot apply to this file's
+language/runtime, emit a not-applicable entry. For families you could not analyze due to
+a blocker, emit a zero-effort gap entry with notes. Each entry records:
 
 - `family`: vulnerability class name (e.g., `sql-injection`, `path-traversal`, `buffer-overflow`)
 - `effort`: 0-100 score reflecting analysis thoroughness (see effort guidelines below)
+- `disposition`: `"analyzed"` (default) or `"not_applicable"` when the class cannot apply
 - `functions_analyzed`: count of functions examined for this class
 - `entry_chains_traced`: entry-point chains from the call graph traced end-to-end for this class
 - `total_entry_chains`: total chains relevant to this class (from Phase A.5 triage)
 - `notes`: what was and was not analyzed and why
+
+**Not-applicable entries** — use when a vulnerability class structurally cannot apply
+(e.g., `buffer-overflow` in pure Python, `sql-injection` in a file with no database
+access). Shape: `{"family": "buffer-overflow", "effort": 0, "disposition": "not_applicable", "notes": "Pure Python module — no native memory operations"}`.
 
 **Effort guidelines**: 0-20 = glanced at imports only. 20-40 = checked obvious sinks.
 40-60 = basic taint tracing from sources to sinks. 60-80 = full taint tracing plus error path
@@ -452,8 +471,11 @@ defaults when omitted.
     "sink": "dangerous operation receiving tainted data",
     "taint_path": "entry -> transform1 -> ... -> sink",
     "guards_evaluated": "What guards exist, why they fail",
+    "remediation": "Concrete fix or control recommendation",
     "slot_type": "NETWORK-INPUT|URL-COMPONENT|...",
     "steps_to_reproduce": ["Step 1", "Step 2", "..."],
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "cvss_score": 8.1,
     "references": ["https://cwe.mitre.org/data/definitions/XXX.html"],
     "poc_code": "optional PoC exploit script"
   }
@@ -535,11 +557,13 @@ When analysis is genuinely blocked on missing code (after self-service failed):
 ## State Recording
 
 ```bash
+aith assess contract record-finding
+aith assess contract code-record-analysis
 aith assess record-finding code-vuln-hunter <finding-json>
 aith assess code-record-analysis <analysis-json>
 ```
 
-Every `analysis-json` payload must include `audit_metadata`:
+Every `analysis-json` payload must include the fetched `queue_item_id` and `audit_metadata`:
 - `cross_ref_usage`: actual ctags/grep/Read lookups performed during analysis
 - `pattern_refs`: the `agent/references/code-vuln-patterns/*.md` files consulted for that verdict
 
@@ -548,14 +572,14 @@ Every `analysis-json` payload must include `audit_metadata`:
 Before your dispatch returns, run in this order:
 
 1. `aith assess record-finding code-vuln-hunter <finding-json>` per finding
-2. `aith assess code-record-analysis <analysis-json>` per file (carries dispositions, CWE coverage, cross-file triggers)
-3. `aith assess dispatch record-handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
-4. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+2. `aith assess code-record-analysis <analysis-json>` per queue item (carries dispositions, CWE coverage, cross-file triggers, and the fetched `queue_item_id`)
+3. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
+4. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-The `record-handoff` step is idempotent and called incrementally — checkpoint
+`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -580,6 +604,11 @@ all live in the analysis rows — so the response can stay focused on hunt
 narrative rather than restating canonical state.
 
 ## Finding Prefix: CH
+
+Do not put a `slug` field in new finding JSON. `aith assess record-finding
+code-vuln-hunter <finding-json>` allocates the next `CH-*` slug under a lock and
+prints the canonical slug; use that returned value in `finding_slug`, handoffs,
+and follow-up notes.
 
 ## Post-Batch Coverage Check
 

@@ -101,6 +101,8 @@ Every `description` field is an ADF document:
 | `em` | Italic | `"marks": [{"type": "em"}]` |
 | `link` | Hyperlink | `"marks": [{"type": "link", "attrs": {"href": "https://..."}}]` |
 
+**Gotcha — the `code` mark is exclusive.** It cannot be combined with `strong` or `em` on the same text node. A node with `"marks": [{"type": "code"}, {"type": "strong"}]` is rejected by the v3 API with a top-level `INVALID_INPUT` and an empty `errors` object (no per-field diagnostic). To get bold + inline-code visually, split the run into two adjacent text nodes — one with `code`, one with `strong`. Same applies to bold-italic-code combinations.
+
 ---
 
 ## Security Finding Issue Template
@@ -113,8 +115,17 @@ Standard structure for SEC project findings. All sections are H2 headings.
 2. **Steps to Reproduce** — Numbered list, each step with inline code for endpoints/params
 3. **Evidence** — Request/response pairs in `codeBlock` nodes (language: `http`)
 4. **Impact** — Concrete harm statement (no speculative language)
-5. **Remediation** — Specific fix with inline code for function/attribute names
-6. **Metadata** — Table with: Report ID, Backend Slug, OWASP, CWE, CVSS (score + vector), Severity
+5. **Remediation** — Specific fix with inline code for function/attribute names. When remediation involves multiple files or call sites, enumerate them as a bullet list with full path + line ranges + the specific pattern at each site — do **not** abbreviate as "see also CH-XXX, CH-YYY". The ticket must stand alone for a developer who has never seen the engagement backend.
+6. **Metadata** — Table with: Report ID, OWASP, CWE, CVSS (score + vector), Severity, Affected Host/Path. **Never** include internal finding slugs (CH-XXX, EX-XXX, CV-XXX, VA-XXX, RE-XXX) — see Rule 17 of `agent/rules/reporting.md`. Internal cross-reference belongs in the engagement backend (`aith assess agent done --finding-slugs ...`), not in the Jira ticket body.
+
+### Standalone-ticket rule (Rule 17 enforcement)
+
+Every Jira issue must be readable by a developer who has zero context on the engagement, zero access to the orchestrator backend, and zero familiarity with internal slugs. Concretely:
+
+- **Do not** reference internal slugs anywhere in `summary`, `description`, `remediation`, or `metadata`.
+- **Do** describe related findings by their attacker outcome or code path: `"the same unparameterized mysql_query pattern appears across the Service.*.php delivery classes — see file list in Remediation"`, not `"(CH-043, CH-044, CH-045, CH-049, CH-070)"`.
+- **Do** use Jira's native `Linked Issues` / `Epic` / `Blocks` relationships to express cross-ticket dependencies — that's what they are for. Reference sibling tickets by SEC-XXXX key, not by internal slug.
+- **Do** keep the orchestrator-to-Jira mapping in the engagement backend via `aith assess agent done --finding-slugs <slugs>` after the ticket is created. The mapping table is operator-internal and never leaves the engagement directory.
 
 ### Summary Format
 
@@ -188,10 +199,6 @@ XXX: <concise vulnerability title describing the defect and impact>
           {"type": "tableRow", "content": [
             {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Report ID"}]}]},
             {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "001"}]}]}
-          ]},
-          {"type": "tableRow", "content": [
-            {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Backend Slug"}]}]},
-            {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "VA-001"}]}]}
           ]},
           {"type": "tableRow", "content": [
             {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "OWASP"}]}]},

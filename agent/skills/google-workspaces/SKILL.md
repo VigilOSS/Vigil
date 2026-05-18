@@ -110,7 +110,9 @@ gam oauth create
 cp ~/Downloads/<project>-<keyid>.json ~/.gam/oauth2service.json
 
 # 5. Service account numeric client ID (needed for DWD)
-gam info service
+gam info currentprojectid   # prints GCP project ID
+gam info instance           # prints customer ID, primary domain — SA client_id is in oauth2service.json
+# SA numeric client_id is the client_id field in ~/.gam/oauth2service.json
 
 # 6. Authorize DWD — https://admin.google.com/ac/owl/domainwidedelegation
 #    Add new → paste the numeric client ID from step 5 → paste scopes comma-separated, no spaces:
@@ -182,8 +184,10 @@ curl -s -o /dev/null -w "Reports probe: HTTP %{http_code}\n" \
 - `oauth2.txt Not Found` → `gam oauth create` has not completed; the flow exits early if the trust step in Admin Console wasn't confirmed.
 - `oauth2service.json Not Found` → the service-account key JSON hasn't been placed at `~/.gam/oauth2service.json`.
 - `Alerts Service/App not enabled` → `admin_email` impersonates a user who does not have Alert Center access; set it to a Super Admin via `gam config admin_email <superadmin> save`.
-- `Gmail API Service/App not enabled` → the GCP project has the Gmail API disabled; `gcloud services enable gmail.googleapis.com --project=<project-id>` and wait 60 seconds.
-- `check serviceaccount` reports scope failures → the DWD entry is missing those scopes. Append them at `https://admin.google.com/ac/owl/domainwidedelegation` and wait for propagation.
+- `Gmail API Service/App not enabled` → two independent causes; verify both before acting:
+  1. Gmail API actually disabled on the GCP project — `gcloud services list --project=<gam-project-id> --filter="NAME:gmail"`. If absent, `gcloud services enable gmail.googleapis.com --project=<gam-project-id>` and wait 60 seconds.
+  2. Gmail API is enabled but GAM's DWD preflight still fails — GAM's `check serviceaccount` (without arguments) probes `gmail.modify` as its Gmail test scope, **not** `gmail.readonly`. A DWD entry that grants only `gmail.readonly` will cause GAM to report this error even though read access works fine. Do not add `gmail.modify` to DWD to silence it — instead bypass GAM's preflight entirely using the Python DWD fallback in §3, which tests `gmail.readonly` directly.
+- `check serviceaccount` reports scope failures → the DWD entry is missing those scopes. Append them at `https://admin.google.com/ac/owl/domainwidedelegation` and wait for propagation. **Note:** running `check serviceaccount` without arguments tests a fixed internal list that includes `gmail.modify` but not `gmail.readonly`. To check `gmail.readonly` specifically, use `gam user <target> check serviceaccount scopes "https://www.googleapis.com/auth/gmail.readonly"`, or use the Python DWD test in §3 as the authoritative check.
 - After rotating the OAuth client secret in GCP, delete `~/.gam/oauth2.txt` and re-run `gam oauth create` — the old token is bound to the previous secret.
 
 ## Investigation Start Protocol
@@ -264,7 +268,7 @@ for r in w:
 
 Three things have to line up before any message-content query works:
 
-1. The DWD entry in Admin Console includes `https://www.googleapis.com/auth/gmail.readonly`. Confirm with `gam user <target> check serviceaccount scopes "https://www.googleapis.com/auth/gmail.readonly"` — every line returns PASS.
+1. The DWD entry in Admin Console includes `https://www.googleapis.com/auth/gmail.readonly`. The most reliable confirmation is the Python DWD test at the end of this section — request the scope directly and verify a token is returned. `gam user <target> check serviceaccount` without arguments does **not** test `gmail.readonly` (it probes `gmail.modify`); use `gam user <target> check serviceaccount scopes "https://www.googleapis.com/auth/gmail.readonly"` for a targeted GAM check, but trust the Python test over it if they disagree.
 2. The Gmail API is enabled on the GAM GCP project. Workspace Admin SDK (Reports, Directory, Alert Center) is implicitly available on any Cloud Identity tenant; the Gmail API is not. Enable explicitly:
    ```bash
    gcloud services enable gmail.googleapis.com --project=<gam-project-id>
@@ -276,12 +280,19 @@ Gmail's native search operators live inside the `query "..."` string; GAM's own 
 
 ```bash
 # Hunt phishing-lure keywords in a time window via GAM
+# Result cap: max_to_print <N> — NOT maxresults (throws "Invalid argument")
 gam user <user@domain> print messages \
   query "(docusign OR dropbox OR sharepoint OR supoena OR \"document access\") after:2026/04/05 before:2026/04/09" \
-  headers "Subject,From,To,Date,Message-Id,Authentication-Results,Received"
+  headers "Subject,From,To,Date,Message-Id,Authentication-Results,Received" \
+  max_to_print 25
 
 # Specific message full content (raw RFC822)
-gam user <user@domain> show message <message-id> format raw > "$DIR/msg_<user>_<message-id>.eml"
+# IMPORTANT: GAM and the Gmail API require the Gmail INTERNAL message ID (16-char hex, e.g. 19e1c40646b0e836).
+# Alert Center's messages[].messageId field is the RFC 2822 Message-ID (e.g. message-id@sender.example) — these are NOT the same.
+# Resolve an RFC 2822 ID to a Gmail internal ID first:
+#   gam user <user@domain> print messages query "rfc822msgid:<rfc2822-id>" max_to_print 1
+# then use the id field from the result.
+gam user <user@domain> show message <gmail-internal-id> format raw > "$DIR/msg_<user>_<gmail-internal-id>.eml"
 ```
 
 Gmail search operators that matter for phishing hunts: `from:`, `to:`, `subject:`, `has:attachment`, `filename:.html`, `list:`, `in:anywhere` (includes Spam and Trash), `rfc822msgid:`. Dates in `after:` / `before:` use `YYYY/MM/DD`.
@@ -417,6 +428,29 @@ gam print users query "orgUnitPath:*" fields primaryEmail,creationTime,suspended
 ```bash
 gam info user <user> fields isEnrolledIn2Sv,isEnforcedIn2Sv,recoveryEmail,recoveryPhone,lastLoginTime
 ```
+
+### 9. Alert Center false positive handling and sender allowlisting
+
+**Submit feedback on a resolved alert** (signals Google's ML; does not suppress future alerts on its own):
+
+```bash
+# notuseful | somewhatuseful | veryuseful
+gam create alertfeedback <alertId> notuseful
+```
+
+**Alert Center has no per-sender suppression rules.** There is no API or Admin Console control that says "never alert on email from address X." The two controls that actually prevent recurrence:
+
+**Option A — Approved senders list (best for known-benign external addresses).** Approved senders bypass Gmail's MTA-layer phishing and spam classification, which is what generates the Alert Center signal in the first place.
+
+Admin Console → Apps → Google Workspace → Gmail → Spam, phishing and malware → Approved senders → Add address or domain.
+
+There is no direct GAM verb for managing the approved-senders list — use Admin Console for individual addresses.
+
+**Option B — Gmail routing / content compliance rule (more surgical).** Allowlists a specific sender+recipient pair without opening the address for the entire org.
+
+Admin Console → Apps → Google Workspace → Gmail → Routing → Content compliance → Add rule: match on sender address + envelope recipient, apply "Do not deliver to spam" and "Never mark as spam."
+
+**Precedence note.** The "Gmail potential employee spoofing" alert fires at the MTA layer before per-user Gmail filters run. Per-user inbox filters do not suppress it; the org-level approved-senders list does.
 
 ## Browser and Endpoint Forensics
 
@@ -867,6 +901,10 @@ Each entry below reflects a specific mistake observed on at least one engagement
 **A11. Running destructive containment without specific user approval.** Broad "you have authorization to investigate" is not authorization to signOut, revoke, suspend, or delete. Correct approach: propose the specific action against the specific target, wait for the user to approve, then run it.
 
 **A12. Reporting in AI slop.** Sentences that restate what a command does, preamble ("Here is an analysis of…"), or wrap-up ("In conclusion, the attacker…") add nothing. Correct approach: every sentence either adds a fact the reader did not have or is cut. The reader has the audit log; they do not need the narrative padding.
+
+**A13. Trusting `check serviceaccount` failure for `gmail.modify` as proof that `gmail.readonly` is unauthorized.** GAM's `check serviceaccount` without arguments tests a fixed internal list that includes `gmail.modify` but not `gmail.readonly`. A DWD entry that authorizes only `gmail.readonly` will show `gmail.modify FAIL`, causing the investigator to believe Gmail read access is broken and potentially adding `gmail.modify` to DWD unnecessarily. Correct approach: test `gmail.readonly` directly with the Python DWD fallback or `gam user <target> check serviceaccount scopes "https://www.googleapis.com/auth/gmail.readonly"`. Trust a successful token exchange over GAM's preflight.
+
+**A14. Passing the RFC 2822 Message-ID from Alert Center directly to `gam show message`.** Alert Center's `messages[].messageId` field is the RFC 2822 `Message-ID` header (e.g. `message-id@sender.example`), not the Gmail internal ID. `gam show message` and the Gmail API `GET /messages/{id}` require the Gmail internal 16-char hex ID. Correct approach: resolve first with `gam user <user> print messages query "rfc822msgid:<rfc2822-id>" max_to_print 1` and use the `id` field from the result. Also: `print messages` uses `max_to_print <N>` for the result cap — `maxresults` throws `Invalid argument`.
 
 ## Prompting Subordinate Agents Under This Skill
 

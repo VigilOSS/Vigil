@@ -586,6 +586,15 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     assert findings.status_code == 200
     assert findings.json()[0]["slug"] == "VA-001"
 
+    finding_detail = client.get("/engagements/2026-03-30-120000-example/assessment/findings/VA-001")
+    assert finding_detail.status_code == 200
+    assert finding_detail.json()["slug"] == "VA-001"
+    assert json.loads(finding_detail.json()["details_json"])["cwe_id"] == "CWE-639"
+
+    missing_finding = client.get("/engagements/2026-03-30-120000-example/assessment/findings/VA-404")
+    assert missing_finding.status_code == 404
+    assert missing_finding.json()["detail"] == "finding not found"
+
     summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
     assert summary.status_code == 200
     assert summary.json()["finding_count"] == 1

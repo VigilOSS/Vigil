@@ -3,7 +3,7 @@
 The operator-core "Specialist Dispatch Contract" is currently enforced only by
 prose; this helper turns the contract table into a runnable validator so the
 operator can pipe a JSON payload through before passing it to
-``aith assess dispatch register --from-json <path>``.
+``aith assess agent start --from-json <path>``.
 
 Usage::
 
@@ -41,6 +41,15 @@ def register(subparsers) -> None:
         default="-",
         help="Path to dispatch JSON, or '-' / omitted to read from stdin",
     )
+    p.add_argument(
+        "--engagement-dir",
+        default=None,
+        help=(
+            "Engagement directory used to enable the scope_host gate for "
+            "vulnerability-analyst / exploit-developer dispatches. Omit to "
+            "skip the scope check (default)."
+        ),
+    )
     p.set_defaults(func=run)
 
 
@@ -66,7 +75,10 @@ def run(args) -> None:
         )
         sys.exit(1)
 
-    errors, warnings = validate_specialist_dispatch_contract(payload)
+    errors, warnings = validate_specialist_dispatch_contract(
+        payload,
+        engagement_dir=getattr(args, "engagement_dir", None),
+    )
     for warning in warnings:
         print(f"WARN {warning}", file=sys.stderr)
     if errors:

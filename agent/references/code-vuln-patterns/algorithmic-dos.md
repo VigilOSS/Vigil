@@ -159,6 +159,26 @@ with zipfile.ZipFile(uploaded_file) as zf:
 `Content-Encoding: gzip` request bodies without checking the decompressed size are
 vulnerable.
 
+**Severity guardrail**: Do not stop at "compressed input bypasses a named request
+limit." First prove what the decompressed bytes do after inflation. If the downstream
+component streams the bytes through bounded buffers and performs only linear parsing
+that is equally reachable over another default transport, the issue is usually a
+resource-limit consistency or hardening bug, not a High-severity vulnerability.
+
+To justify High, demonstrate at least one second-order impact:
+
+- superlinear CPU or service-wide worker exhaustion under realistic concurrency
+- unbounded retained memory or disk growth after downstream parsing
+- duplicate state that is not deduplicated before expensive work
+- output amplification materially larger than the decompressed input
+- crash, memory corruption, or command execution in the downstream parser
+- bypass of an independent default deployment boundary, not just a local spool cap
+
+Always inspect feature gates and protocol equivalents: if the same logical stream is
+accepted over SSH, raw TCP, or another default mode without the named HTTP/request
+limit, grade the finding on the downstream behavior, not on the misleading option
+name.
+
 **Image variant**: A 100x100 PNG with a declared dimension of 100000x100000 pixels.
 Decoders that allocate based on the header dimensions without checking plausibility
 allocate terabytes.

@@ -17,12 +17,21 @@ transitions, finding writes, or report work:
 
 ```bash
 aith assess list-findings
+aith assess list-findings --verification-state unreviewed
+aith assess list-findings --workflow-status pending
 aith assess list-intel
 aith assess fetch activity-entries
-aith assess dispatch list --limit 10
-aith assess dispatch render-handoff <last-agent-id>
+aith assess agent list --limit 10
+aith assess agent render-handoff <last-agent-id>
 aith assess list-command-runs --q <scope-host-or-keyword>
 ```
+
+The `--verification-state unreviewed` and `--workflow-status pending` queues
+are the two most likely to be silently skipped across operator handoffs. A
+finding that lives in `unreviewed` is a draft, not a finding — it cannot be
+reported until Phase 4 verification clears it. A `pending` workflow row is
+work the prior operator did not close out. Surface both queues at resume so
+the new operator decides explicitly: verify, kill, or carry forward.
 
 Use the most recent relevant dispatch `agent_id` for `render-handoff`. If no dispatch has a
 recorded handoff, state that explicitly and continue with the other resume checks. Use the primary

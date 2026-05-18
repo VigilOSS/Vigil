@@ -183,15 +183,15 @@ closing sequence is:
 2. Run the 13-check self-review in `agent/skills/report-generation/SKILL.md`
 3. In review-and-fix QA mode, run the QA checklist and fix report-local issues
 4. In publish mode, emit `report.generated`, mark included findings `reported`, update scope.json phase to `complete`
-5. `aith assess dispatch record-handoff --from-json <path>` to capture summary, runtime issues, working artifacts (point at `report.md`), open questions, and role-specific extras (`qa_status`, `findings_in_report`)
-6. `aith assess dispatch render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+5. `aith assess agent handoff --from-json <path>` to capture summary, runtime issues, working artifacts (point at `report.md`), open questions, and role-specific extras (`qa_status`, `findings_in_report`)
+6. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`. The handoff
 `working_artifacts` MUST list `report.md` so the renderer surfaces present/missing
 state.
 
-The `record-handoff` step is idempotent and called incrementally — checkpoint
+`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 

@@ -10,6 +10,57 @@ from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
 
+def _validate_cwe_coverage(item_index: int, result: dict) -> None:
+    cwe_coverage = result.get("cwe_coverage", [])
+    if cwe_coverage in (None, []):
+        return
+    if not isinstance(cwe_coverage, list):
+        print(f"Item {item_index} cwe_coverage must be a JSON array", file=sys.stderr)
+        sys.exit(1)
+    seen_families: set[str] = set()
+    for idx, entry in enumerate(cwe_coverage):
+        if not isinstance(entry, dict):
+            print(f"Item {item_index} cwe_coverage entry {idx} must be a JSON object", file=sys.stderr)
+            sys.exit(1)
+        family = str(entry.get("family", "")).strip()
+        if not family:
+            print(f"Item {item_index} cwe_coverage entry {idx} is missing family", file=sys.stderr)
+            sys.exit(1)
+        if family in seen_families:
+            print(f"Item {item_index} cwe_coverage has duplicate family: {family}", file=sys.stderr)
+            sys.exit(1)
+        seen_families.add(family)
+        if "effort" in entry:
+            try:
+                float(entry.get("effort", 0))
+            except (TypeError, ValueError):
+                print(
+                    f"Item {item_index} cwe_coverage entry {idx} has a non-numeric effort",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+
+def _validate_cross_file_triggers(item_index: int, result: dict) -> None:
+    triggers = result.get("cross_file_triggers", [])
+    if triggers in (None, []):
+        return
+    if not isinstance(triggers, list):
+        print(f"Item {item_index} cross_file_triggers must be a JSON array", file=sys.stderr)
+        sys.exit(1)
+    for idx, trigger in enumerate(triggers):
+        if not isinstance(trigger, dict):
+            print(f"Item {item_index} cross_file_triggers entry {idx} must be a JSON object", file=sys.stderr)
+            sys.exit(1)
+        for field in ("file_path", "vuln_class", "reason"):
+            if not str(trigger.get(field, "")).strip():
+                print(
+                    f"Item {item_index} cross_file_triggers entry {idx} is missing {field}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "code-record-analysis",
@@ -44,7 +95,7 @@ def run(args) -> None:
         sys.exit(0)
 
     # Validate required fields
-    required = {"file_id", "disposition"}
+    required = {"queue_item_id", "disposition"}
     for i, result in enumerate(results):
         if not isinstance(result, dict):
             print(f"Item {i} is not a JSON object", file=sys.stderr)
@@ -56,6 +107,19 @@ def run(args) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
+        try:
+            int(result["queue_item_id"])
+        except (TypeError, ValueError):
+            print(f"Item {i} queue_item_id must be an integer", file=sys.stderr)
+            sys.exit(1)
+        if result.get("file_id") is not None:
+            try:
+                int(result["file_id"])
+            except (TypeError, ValueError):
+                print(f"Item {i} file_id must be an integer when supplied", file=sys.stderr)
+                sys.exit(1)
+        _validate_cwe_coverage(i, result)
+        _validate_cross_file_triggers(i, result)
 
     cfg = load_config(args.engagement_dir)
     submit_snapshot = write_json_snapshot(

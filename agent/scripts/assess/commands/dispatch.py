@@ -1,4 +1,4 @@
-"""aith assess dispatch — SQLite work-buffer consumption engine.
+"""Internal work-buffer and agent lifecycle implementation helpers.
 
 Replaces dispatcher.sh with parameterized SQL.
 """
@@ -20,8 +20,9 @@ from assess.lib.params import extract_url_path, extract_query_params, extract_pa
 # Actions that don't need a cases.db (work-buffer SQLite). When the first
 # positional arg matches one of these names, we treat it as the action and
 # leave db_path empty rather than forcing the operator to pass a useless path.
-# Round 9: register/update-status/list/get/record-decision/record-handoff and
-# render-handoff all read/write the orchestrator backend, not the work buffer.
+# Round 9: internal action names register/update-status/list/get/record-decision/
+# record-handoff (plus render-handoff) hit the orchestrator backend, not the work buffer.
+# Operator CLI maps these to ``aith assess agent start|done|list|get|handoff|decision|...``.
 _DBLESS_ACTIONS = (
     "render-handoff",
     "register",
@@ -89,12 +90,18 @@ def _load_json_arg(value: str | None) -> Any:
 
 
 def register(subparsers) -> None:
+    """LEGACY INTERNAL: attach the historical ``dispatch`` argparse subcommand.
+
+    The operator-facing surface is ``aith assess agent`` and ``aith assess work-buffer``.
+    Unit tests and older tooling may still call ``register`` to obtain the combined
+    parser; do not wire this into ``cli.py`` as a top-level subcommand.
+    """
     p = subparsers.add_parser(
         "dispatch",
-        help="Work-buffer dispatch engine plus backend dispatch registry helpers",
+        help="INTERNAL: legacy combined parser (use: aith assess agent / work-buffer)",
         usage=(
-            "aith assess dispatch <backend-action> [args...] OR "
-            "aith assess dispatch <cases.db> <work-buffer-action> [args...]"
+            "aith assess agent <backend-action> [args...] OR "
+            "aith assess work-buffer <cases.db> <work-buffer-action> [args...]"
         ),
     )
     p.add_argument(
@@ -115,8 +122,8 @@ def register(subparsers) -> None:
     p.add_argument(
         "--reason",
         default="",
-        help="Reason for defer-cluster / defer-items / abort-duplicate / record-decision "
-        "(required for defer-* and abort-duplicate; optional for record-decision). Free text; "
+        help="Reason for defer-cluster / defer-items / abort-duplicate / agent decision "
+        "(required for defer-* and abort-duplicate; optional for decision). Free text; "
         "stored in terminal_reason (defer-*) or the decision payload so operators can audit why "
         "a cluster, item, duplicate dispatch, or operator decision was skipped/aborted/recorded.",
     )
@@ -142,38 +149,39 @@ def register(subparsers) -> None:
         "default to keep the handoff blob bounded.",
     )
 
-    # Round 9: dispatch / handoff / decision shared flags. Some are reused
-    # across multiple verbs (e.g. --agent-id, --agent-role for register and
-    # record-handoff); keeping them on the parent dispatch parser avoids
-    # rebuilding subparser plumbing while every action's run handler picks
-    # only the flags it cares about.
+    # Backend lifecycle / handoff / decision flags. Internal action names
+    # (register/update-status/list/get/record-handoff/record-decision) map to
+    # ``aith assess agent start/done/list/get/handoff/decision``.
     p.add_argument("--agent-id", dest="agent_id", default=None,
-                   help="(register / update-status / get / record-handoff) Dispatch agent_id.")
+                   help="(start / done / get / internal handoff) Dispatch agent_id.")
     p.add_argument("--agent-role", dest="agent_role", default=None,
-                   help="(register / record-handoff) Specialist role.")
-    p.add_argument("--task", dest="task", default=None, help="(register) Task description.")
-    p.add_argument("--scope-host", dest="scope_host", default=None, help="(register) Scope host.")
-    p.add_argument("--model", dest="dispatch_model", default=None, help="(register) Model name.")
+                   help="(start / internal handoff) Specialist role.")
+    p.add_argument("--task", dest="task", default=None, help="(start) Task description.")
+    p.add_argument("--scope-host", dest="scope_host", default=None, help="(start) Scope host.")
+    p.add_argument("--model", dest="dispatch_model", default=None,
+                   help="(start) Requested model name (stored as requested_model / model).")
     p.add_argument("--reasoning", dest="reasoning", default=None,
-                   choices=("low", "medium", "high"), help="(register) Reasoning level.")
+                   choices=("low", "medium", "high", "xhigh", "max"),
+                   help="(start) Requested reasoning level. `max` is Claude-only; Codex caps at xhigh "
+                        "(operator records this in actual_reasoning when known).")
     p.add_argument("--dispatch-mode", dest="dispatch_mode_arg", default=None,
-                   choices=("hypothesis-driven", "item-iterating", "deep-manual", "variant-rotation"),
-                   help="(register) Dispatch loop shape.")
+                   choices=("hypothesis-driven", "item-iterating", "deep-manual", "variant-rotation", "swarm"),
+                   help="(start) Dispatch loop shape.")
     p.add_argument("--skills", dest="skills", default=None,
-                   help="(register) Comma-separated skill names the specialist must load "
+                   help="(start) Comma-separated skill names the specialist must load "
                         "(e.g. 'surface-collection,gau-triage'). Required for non-operator "
                         "roles to make skill scope explicit at dispatch time.")
     p.add_argument("--from-json", dest="from_json", default=None,
-                   help="(register / record-handoff) Path to JSON payload (overrides flag-based fields).")
+                   help="(start / internal handoff) Path to JSON payload (overrides flag-based fields).")
     p.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true",
-                   help="(register) Suppress advisory warnings for active overlapping dispatch rows.")
+                   help="(start) Suppress advisory warnings for active overlapping dispatch rows.")
     p.add_argument("--status", dest="dispatch_status", default=None,
                    choices=("in-progress", "completed", "failed", "aborted", "blocked"),
-                   help="(update-status / list) Dispatch lifecycle status.")
+                   help="(done / list) Dispatch lifecycle status.")
     p.add_argument("--completed-at", dest="completed_at", default=None,
-                   help="(update-status) ISO timestamp; defaults to now() when --status is terminal.")
+                   help="(done) ISO timestamp; defaults to now() when --status is terminal.")
     p.add_argument("--finding-slugs", dest="finding_slugs", default=None,
-                   help="(update-status / record-handoff) Comma-separated slugs.")
+                   help="(done / internal handoff) Comma-separated slugs.")
     p.add_argument("--replacement-agent-id", dest="replacement_agent_id", default=None,
                    help="(abort-duplicate) Agent ID replacing the accidental duplicate.")
     p.add_argument("--role", dest="filter_role", default=None,
@@ -184,42 +192,42 @@ def register(subparsers) -> None:
                    help="(list) Substring match against task field.")
     p.add_argument("--limit", dest="dispatch_limit", default=None, type=int,
                    help="(list) Result limit (default 100).")
-    # record-decision / record-handoff
+    # decision / handoff — internal actions map to ``aith assess agent decision|handoff``.
     p.add_argument("--kind", dest="decision_kind", default=None,
-                   help="(record-decision) Decision kind: scope_decision|egress_decision|dispatch_blocked|...")
+                   help="(decision) Decision kind: scope_decision|egress_decision|dispatch_blocked|...")
     p.add_argument("--payload-json", dest="payload_json", default=None,
-                   help="(record-decision) Decision payload (inline JSON or path).")
+                   help="(decision) Decision payload (inline JSON or path).")
     p.add_argument("--surfaced-to-user", dest="surfaced_to_user", action="store_true",
-                   help="(record-decision) Mark decision as user-facing.")
+                   help="(decision) Mark decision as user-facing.")
     p.add_argument("--host", dest="decision_host", default=None,
-                   help="(record-decision scope_decision shorthand) Host name.")
+                   help="(decision scope_decision shorthand) Host name.")
     p.add_argument("--vendor", dest="decision_vendor", default=None,
-                   help="(record-decision scope_decision shorthand) Vendor name.")
+                   help="(decision scope_decision shorthand) Vendor name.")
     p.add_argument("--choice", dest="decision_choice", default=None,
-                   help="(record-decision shorthand) User choice / decision label.")
+                   help="(decision shorthand) User choice / decision label.")
     p.add_argument("--note", dest="decision_note", default=None,
-                   help="(record-decision shorthand) Free-text note attached to payload.")
+                   help="(decision shorthand) Free-text note attached to payload.")
     p.add_argument("--phase", dest="decision_phase", default=None,
-                   help="(record-decision dispatch_blocked shorthand) Phase tag.")
-    # record-handoff flag-based payload
+                   help="(decision dispatch_blocked shorthand) Phase tag.")
+    # Handoff payload flags (internal action name remains record-handoff).
     p.add_argument("--summary", dest="hf_summary", default=None,
-                   help="(record-handoff) Required summary text (≤2000 chars).")
+                   help="(handoff) Required summary text (≤2000 chars).")
     p.add_argument("--confidence", dest="hf_confidence", default=None,
-                   choices=("low", "medium", "high"), help="(record-handoff) Confidence level.")
+                   choices=("low", "medium", "high"), help="(handoff) Confidence level.")
     p.add_argument("--next-step", dest="hf_next_steps", action="append", default=None,
-                   help="(record-handoff) Next-step action; repeat to add multiple.")
+                   help="(handoff) Next-step action; repeat to add multiple.")
     p.add_argument("--coverage-gap", dest="hf_coverage_gaps", action="append", default=None,
-                   help="(record-handoff) '<area>: <reason>' coverage-gap entry; repeatable.")
+                   help="(handoff) '<area>: <reason>' coverage-gap entry; repeatable.")
     p.add_argument("--runtime-issue", dest="hf_runtime_issues", action="append", default=None,
-                   help="(record-handoff) '<kind>: <detail>' runtime-issue entry; repeatable.")
+                   help="(handoff) '<kind>: <detail>' runtime-issue entry; repeatable.")
     p.add_argument("--working-artifact", dest="hf_working_artifacts", action="append", default=None,
-                   help="(record-handoff) Path to a working artifact; repeatable.")
+                   help="(handoff) Path to a working artifact; repeatable.")
     p.add_argument("--open-question", dest="hf_open_questions", action="append", default=None,
-                   help="(record-handoff) Open question; repeatable.")
+                   help="(handoff) Open question; repeatable.")
     p.add_argument("--recommended-next-agent", dest="hf_recommended_next_agent", default=None,
-                   help="(record-handoff) Suggested next role.")
+                   help="(handoff) Suggested next role.")
     p.add_argument("--extras-json", dest="hf_extras_json", default=None,
-                   help="(record-handoff) Extras dict (inline JSON or path).")
+                   help="(handoff) Extras dict (inline JSON or path).")
     p.set_defaults(func=run)
 
 
@@ -229,7 +237,7 @@ def run(args) -> None:
     extra = args.extra or []
 
     # render-handoff and other dbless actions don't take a cases.db; the
-    # operator types `aith assess dispatch render-handoff <agent-id>` and
+    # operator types `aith assess agent render-handoff <agent-id>` and
     # argparse parks the action name in the db_path slot. Shift it so the
     # rest of the dispatcher can route normally.
     if (db_path or "") in _DBLESS_ACTIONS:
@@ -241,18 +249,24 @@ def run(args) -> None:
         db_path = ""
 
     if action in _DBLESS_ACTIONS and db_path:
+        suggested_action = {
+            "record-handoff": "handoff",
+            "record-decision": "decision",
+            "register": "start",
+            "update-status": "done",
+        }.get(action, action)
         print(
-            f"ERROR: dispatch {action} is a backend registry action and must not take a cases.db path.\n"
-            f"Use: aith assess dispatch {action} {' '.join(extra)}".rstrip(),
+            f"ERROR: '{action}' is a backend agent lifecycle action and must not take a cases.db path.\n"
+            f"Use: aith assess agent {suggested_action} {' '.join(extra)}".rstrip(),
             file=sys.stderr,
         )
         sys.exit(1)
 
     if not action:
         print(
-            "Usage: aith assess dispatch <backend-action> [args...]\n"
-            "       aith assess dispatch <cases.db> <work-buffer-action> [...]\n"
-            "       aith assess dispatch render-handoff <agent-id> [--max-lines N] [--include-evidence]",
+            "Usage: aith assess agent <backend-action> [args...]\n"
+            "       aith assess work-buffer <cases.db> <work-buffer-action> [...]\n"
+            "       aith assess agent render-handoff <agent-id> [--max-lines N] [--include-evidence]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -284,7 +298,7 @@ def run(args) -> None:
 
     if not db_path:
         print(
-            f"Usage: aith assess dispatch <db> {action} [...]\n"
+            f"Usage: aith assess work-buffer <db> {action} [...]\n"
             f"  '{action}' requires a path to cases.db as the first positional.",
             file=sys.stderr,
         )
@@ -297,20 +311,20 @@ def run(args) -> None:
         _stats(db_path, by=by)
     elif action == "peek":
         if len(extra) < 1:
-            print("Usage: dispatch <db> peek <type> [limit]", file=sys.stderr)
+            print("Usage: work-buffer <db> peek <type> [limit]", file=sys.stderr)
             sys.exit(1)
         peek_type = extra[0]
         peek_limit = _safe_int_arg(extra[1], "limit") if len(extra) > 1 else 10
         _peek(db_path, peek_type, peek_limit)
     elif action == "fetch":
         if len(extra) < 3:
-            print("Usage: dispatch <db> fetch <type> <limit> <agent>", file=sys.stderr)
+            print("Usage: work-buffer <db> fetch <type> <limit> <agent>", file=sys.stderr)
             sys.exit(1)
         _fetch(db_path, extra[0], _safe_int_arg(extra[1], "limit"), extra[2])
     elif action == "fetch-by-priority":
         if len(extra) < 1:
             print(
-                "Usage: dispatch <db> fetch-by-priority <limit> [auto|agent]",
+                "Usage: work-buffer <db> fetch-by-priority <limit> [auto|agent]",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -322,7 +336,7 @@ def run(args) -> None:
     elif action == "defer-cluster":
         if not extra:
             print(
-                "Usage: dispatch <db> defer-cluster <cluster_key> --reason TEXT",
+                "Usage: work-buffer <db> defer-cluster <cluster_key> --reason TEXT",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -338,9 +352,9 @@ def run(args) -> None:
     elif action == "defer-items":
         if not extra:
             print(
-                "Usage: dispatch <db> defer-items <id> [<id> ...] --reason TEXT\n"
-                "       dispatch <db> defer-items <id1,id2,...> --reason TEXT",
-                file=sys.stderr,
+                "Usage: work-buffer <db> defer-items <id> [<id> ...] --reason TEXT\n"
+                "       work-buffer <db> defer-items <id1,id2,...> --reason TEXT",
+            file=sys.stderr,
             )
             sys.exit(1)
         reason = (getattr(args, "reason", "") or "").strip()
@@ -354,17 +368,17 @@ def run(args) -> None:
         _defer_items(db_path, extra, reason)
     elif action == "done":
         if not extra:
-            print("Usage: dispatch <db> done <id> [<id> ...]", file=sys.stderr)
+            print("Usage: work-buffer <db> done <id> [<id> ...]", file=sys.stderr)
             sys.exit(1)
         _done(db_path, extra)
     elif action == "error":
         if not extra:
-            print("Usage: dispatch <db> error <id> [<id> ...]", file=sys.stderr)
+            print("Usage: work-buffer <db> error <id> [<id> ...]", file=sys.stderr)
             sys.exit(1)
         _error(db_path, extra)
     elif action == "reset-stale":
         if not extra:
-            print("Usage: dispatch <db> reset-stale <minutes>", file=sys.stderr)
+            print("Usage: work-buffer <db> reset-stale <minutes>", file=sys.stderr)
             sys.exit(1)
         _reset_stale(db_path, _safe_int_arg(extra[0], "minutes"))
     elif action == "retry-errors":
@@ -378,7 +392,7 @@ def run(args) -> None:
         print(f"Unknown action: {action}", file=sys.stderr)
         print(
             f"Work-buffer actions: {', '.join(_DB_ACTIONS)}\n"
-            f"Dispatch actions (no cases.db): {', '.join(_DBLESS_ACTIONS)}",
+            f"Agent lifecycle actions (no cases.db): {', '.join(_DBLESS_ACTIONS)}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -979,7 +993,7 @@ def _render_handoff(args, extra: list[str]) -> None:
     """
     if not extra:
         print(
-            "Usage: aith assess dispatch render-handoff <agent-id> "
+            "Usage: aith assess agent render-handoff <agent-id> "
             "[--max-lines N] [--include-evidence]",
             file=sys.stderr,
         )
@@ -1004,7 +1018,7 @@ def _render_handoff(args, extra: list[str]) -> None:
             print(
                 f"render-handoff: agent-id '{agent_id}' has no recorded handoff in the backend "
                 f"(GET dispatch-handoffs/{agent_id} -> 404). Specialist dispatches should call "
-                f"`aith assess dispatch record-handoff` before exiting; a missing handoff means "
+                f"`aith assess agent handoff` before exiting; a missing handoff means "
                 f"the prior dispatch never wrote one (or the id was mistyped).",
                 file=sys.stderr,
             )
@@ -1445,8 +1459,8 @@ def _truncate_findings(
 
 
 # ---------------------------------------------------------------------------
-# Dispatch operator-glue verbs: register / update-status / list / get /
-# record-decision / record-handoff — backend-table writes via the orchestrator API.
+# Backend agent lifecycle verbs (internal action names register / update-status /
+# record-decision / record-handoff) — backend-table writes via the orchestrator API.
 # ---------------------------------------------------------------------------
 
 
@@ -1460,7 +1474,7 @@ def _build_register_payload(args) -> dict:
     if getattr(args, "from_json", None):
         loaded = _load_json_arg(args.from_json)
         if not isinstance(loaded, dict):
-            print("register --from-json: file must contain a JSON object", file=sys.stderr)
+            print("agent start --from-json: file must contain a JSON object", file=sys.stderr)
             sys.exit(1)
         payload.update(loaded)
     # CLI flags override / supplement the JSON payload.
@@ -1469,8 +1483,8 @@ def _build_register_payload(args) -> dict:
         "agent_role": getattr(args, "agent_role", None),
         "task": getattr(args, "task", None),
         "scope_host": getattr(args, "scope_host", None),
-        "model": getattr(args, "dispatch_model", None),
-        "reasoning": getattr(args, "reasoning", None),
+        "requested_model": getattr(args, "dispatch_model", None),
+        "requested_reasoning": getattr(args, "reasoning", None),
         "dispatch_mode": getattr(args, "dispatch_mode_arg", None),
         "skills": getattr(args, "skills", None),
     }
@@ -1481,17 +1495,27 @@ def _build_register_payload(args) -> dict:
     if finding_slugs:
         payload["finding_slugs"] = finding_slugs
     if not payload.get("agent_id"):
-        print("register: --agent-id is required (or include 'agent_id' in --from-json)", file=sys.stderr)
+        print("agent start: --agent-id is required (or include 'agent_id' in --from-json)", file=sys.stderr)
         sys.exit(1)
     if not payload.get("agent_role"):
-        print("register: --agent-role is required (or include 'agent_role' in --from-json)", file=sys.stderr)
+        print("agent start: --agent-role is required (or include 'agent_role' in --from-json)", file=sys.stderr)
         sys.exit(1)
-    errors, warnings = validate_specialist_dispatch_contract(payload)
+    # Engagement dir lets the validator check scope_host against scope.json
+    # for vulnerability-analyst / exploit-developer dispatches.
+    try:
+        _cfg_for_validation = load_config(getattr(args, "engagement_dir", None))
+        _eng_dir_for_validation = _cfg_for_validation.engagement_dir
+    except Exception:
+        _eng_dir_for_validation = None
+    errors, warnings = validate_specialist_dispatch_contract(
+        payload,
+        engagement_dir=_eng_dir_for_validation,
+    )
     for warning in warnings:
-        print(f"WARN register: {warning}", file=sys.stderr)
+        print(f"WARN agent start: {warning}", file=sys.stderr)
     if errors:
         for error in errors:
-            print(f"register: {error}", file=sys.stderr)
+            print(f"agent start: {error}", file=sys.stderr)
         sys.exit(1)
     skills_value = payload.get("skills")
     if isinstance(skills_value, list):
@@ -1528,7 +1552,7 @@ def _warn_on_overlapping_dispatch(client: AssessmentClient, payload: dict[str, A
     try:
         rows = client.list_dispatches(role=role, status="in-progress", limit=1000)
     except AssessError as exc:
-        print(f"WARN dispatch register: duplicate-overlap check skipped: {exc}", file=sys.stderr)
+        print(f"WARN agent start: duplicate-overlap check skipped: {exc}", file=sys.stderr)
         return
     current_agent_id = str(payload.get("agent_id") or "")
     overlaps: list[tuple[dict[str, Any], str]] = []
@@ -1541,7 +1565,7 @@ def _warn_on_overlapping_dispatch(client: AssessmentClient, payload: dict[str, A
     if not overlaps:
         return
     print(
-        "WARN dispatch register: active dispatch rows appear to overlap this dispatch. "
+        "WARN agent start: active dispatch rows appear to overlap this dispatch. "
         "Registration will continue; use --allow-duplicate to suppress this advisory "
         "when the overlap is intentional.",
         file=sys.stderr,
@@ -1591,7 +1615,7 @@ def _string_set(value: Any) -> set[str]:
 def _update_dispatch_status(args, extra: list[str]) -> None:
     agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
     if not agent_id:
-        print("Usage: aith assess dispatch update-status <agent-id> --status ...", file=sys.stderr)
+        print("Usage: aith assess agent done <agent-id> --status ...", file=sys.stderr)
         sys.exit(1)
     patch: dict[str, Any] = {}
     if getattr(args, "dispatch_status", None):
@@ -1605,7 +1629,7 @@ def _update_dispatch_status(args, extra: list[str]) -> None:
         patch["finding_slugs"] = finding_slugs
     if not patch:
         print(
-            "update-status: pass at least one of --status, --completed-at, --finding-slugs",
+            "agent done: pass at least one of --status, --completed-at, --finding-slugs",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1623,7 +1647,7 @@ def _abort_duplicate_dispatch(args, extra: list[str]) -> None:
     reason = (getattr(args, "reason", "") or "").strip()
     if not agent_id or not replacement or not reason:
         print(
-            "Usage: aith assess dispatch abort-duplicate <agent-id> "
+            "Usage: aith assess agent abort-duplicate <agent-id> "
             "--replacement-agent-id <agent-id> --reason TEXT",
             file=sys.stderr,
         )
@@ -1692,7 +1716,7 @@ def _list_dispatches(args) -> None:
 def _get_dispatch(args, extra: list[str]) -> None:
     agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
     if not agent_id:
-        print("Usage: aith assess dispatch get <agent-id>", file=sys.stderr)
+        print("Usage: aith assess agent get <agent-id>", file=sys.stderr)
         sys.exit(1)
     client, _ = _client_for(args)
     try:
@@ -1700,7 +1724,7 @@ def _get_dispatch(args, extra: list[str]) -> None:
     finally:
         client.close()
     if row is None:
-        print(f"get: agent_id '{agent_id}' not found", file=sys.stderr)
+        print(f"agent get: agent_id '{agent_id}' not found", file=sys.stderr)
         sys.exit(2)
     print(json.dumps(row, ensure_ascii=False))
 
@@ -1708,13 +1732,13 @@ def _get_dispatch(args, extra: list[str]) -> None:
 def _record_decision(args) -> None:
     kind = getattr(args, "decision_kind", None)
     if not kind:
-        print("record-decision: --kind is required", file=sys.stderr)
+        print("agent decision: --kind is required", file=sys.stderr)
         sys.exit(1)
     payload_json = getattr(args, "payload_json", None)
     if payload_json:
         loaded = _load_json_arg(payload_json)
         if not isinstance(loaded, dict):
-            print("record-decision --payload-json: must produce a JSON object", file=sys.stderr)
+            print("agent decision --payload-json: must produce a JSON object", file=sys.stderr)
             sys.exit(1)
         payload = dict(loaded)
     else:
@@ -1742,7 +1766,7 @@ def _record_decision(args) -> None:
             payload["phase"] = phase
         if not payload:
             print(
-                "record-decision: pass --payload-json or at least one of "
+                "agent decision: pass --payload-json or at least one of "
                 "--host/--vendor/--choice/--note/--reason/--phase",
                 file=sys.stderr,
             )
@@ -1764,7 +1788,7 @@ def _build_handoff_payload(args) -> dict:
     if getattr(args, "from_json", None):
         loaded = _load_json_arg(args.from_json)
         if not isinstance(loaded, dict):
-            print("record-handoff --from-json: file must contain a JSON object", file=sys.stderr)
+            print("agent handoff --from-json: file must contain a JSON object", file=sys.stderr)
             sys.exit(1)
         # When --from-json is given we honour it as the authoritative shape,
         # but explicit identity flags are integrity checks. A mismatch usually
@@ -1780,7 +1804,7 @@ def _build_handoff_payload(args) -> dict:
             existing = loaded.get(key)
             if existing and str(existing) != str(val):
                 print(
-                    f"record-handoff: --from-json {key}={existing!r} does not match "
+                    f"agent handoff: --from-json {key}={existing!r} does not match "
                     f"explicit --{key.replace('_', '-')} {val!r}",
                     file=sys.stderr,
                 )
@@ -1794,7 +1818,7 @@ def _build_handoff_payload(args) -> dict:
     summary = getattr(args, "hf_summary", None)
     if not agent_id or not agent_role or not summary:
         print(
-            "record-handoff: --agent-id, --agent-role, and --summary are required "
+            "agent handoff: --agent-id, --agent-role, and --summary are required "
             "(or pass --from-json with a payload that supplies them)",
             file=sys.stderr,
         )
@@ -1840,7 +1864,7 @@ def _build_handoff_payload(args) -> dict:
     if extras_json:
         loaded = _load_json_arg(extras_json)
         if not isinstance(loaded, dict):
-            print("record-handoff --extras-json: must produce a JSON object", file=sys.stderr)
+            print("agent handoff --extras-json: must produce a JSON object", file=sys.stderr)
             sys.exit(1)
         payload["extras"] = loaded
     return payload
@@ -1865,7 +1889,7 @@ def _record_handoff(args) -> None:
     )
     if getattr(args, "from_json", None) and has_flag_based:
         print(
-            "record-handoff: --from-json is set and flag-based content was also "
+            "agent handoff: --from-json is set and flag-based content was also "
             "supplied; flag-based fields are ignored except as fallback for "
             "agent_id / agent_role / summary.",
             file=sys.stderr,

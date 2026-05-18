@@ -141,7 +141,7 @@ coverage candidates automatically.
 After all sources are ingested, verify the work buffer is clean:
 
 ```bash
-aith assess dispatch "$DB" stats
+aith assess work-buffer "$DB" stats
 ```
 
 The ingestion pipeline handles param-structure deduplication automatically (same endpoint
@@ -158,7 +158,7 @@ There is no per-host URL cap. Volume control happens at ingest:
   `db_insert_work_item()` so they never enter the priority-mode dispatch.
 - **Classification runs inline at ingestion** so every URL gets a `cluster_key` and
   `priority_score` immediately. Run `aith assess list-clusters "$DB"` to review the
-  resulting cluster set and `aith assess dispatch "$DB" defer-cluster <key> --reason "…"`
+  resulting cluster set and `aith assess work-buffer "$DB" defer-cluster <key> --reason "…"`
   to drop low-signal clusters before Phase 3.
 - **Egress-blocked hosts still defer** (see "Egress-blocked hosts" below) — that is a
   network-failure class, not a volume cap.
@@ -183,7 +183,7 @@ AFTER initial ingestion MUST receive their own gau pass — surface-collector ca
 skip them on the assumption that initial collection was exhaustive. A new host
 ingests through the standard path; inline classification scores its rows
 immediately, and any low-signal cluster gets explicit operator control via
-`aith assess dispatch defer-cluster` rather than an automatic URL cap.
+`aith assess work-buffer defer-cluster` rather than an automatic URL cap.
 
 #### Admin / internal / config URL preservation under egress block
 
@@ -207,16 +207,16 @@ replacement.
 
 **Retrieve work items for analysis:**
 ```bash
-aith assess dispatch "$DB" fetch api 50 surface-collector
-aith assess dispatch "$DB" fetch page 50 surface-collector
-aith assess dispatch "$DB" fetch unknown 50 surface-collector
+aith assess work-buffer "$DB" fetch api 50 surface-collector
+aith assess work-buffer "$DB" fetch page 50 surface-collector
+aith assess work-buffer "$DB" fetch unknown 50 surface-collector
 ```
 
 Analyze the fetched URLs (without testing them — triage is classification, not probing)
 and produce the priority manifest. Then release them back:
 
 ```bash
-aith assess dispatch "$DB" reset-stale 0
+aith assess work-buffer "$DB" reset-stale 0
 ```
 
 **Triage categories** (see agent prompt for full pattern lists):
@@ -231,6 +231,29 @@ For each category, produce:
 - Count of matching URLs
 - Representative examples (3-5 per category)
 - Recommended Phase 3 priority and vuln-class skill
+
+### Step 6.5: URL-shape body-field harvest (SSRF candidates)
+
+URL / host fields inside admin / settings POST and PUT bodies are SSRF candidates regardless of where the URL appears in the request *path*. The triage in Step 6 keys on URL path patterns; this step keys on *body field names* so SSRF-shaped fields are not missed.
+
+Run this against every captured POST/PUT body in the work buffer:
+
+```bash
+aith assess work-buffer "$DB" --json \
+  | jq -r '.[] | select(.method=="POST" or .method=="PUT")
+           | "\(.url)\t\(.body_params // empty)"' \
+  | grep -iE '\b(url|uri|host|hostname|endpoint|callback|webhook|notify|postback|target|destination|return|redirect|next|continue|origin|fetch|import|source|metadata|discovery)\b\s*[:=]'
+```
+
+For each hit, record the candidate so Phase 3 dispatching does not lose it:
+
+```bash
+aith assess record-surface ssrf-candidate "<endpoint>" surface-collector-url-shape \
+  --rationale "POST/PUT body field <field> accepts a URL — server-side fetch on save / connection-test (SaaS connector pattern)" \
+  --status discovered
+```
+
+Then dispatch `vulnerability-analyst` with `--skills ssrf-testing` against the highest-yield candidates — typically admin/settings/enterprise pages, integration list endpoints, and any connection-test handler. See `agent/skills/ssrf-testing/SKILL.md` "SaaS Integration Connector Pattern" for the full testing recipe.
 
 ### Step 7: Surface and Finding Recording
 
@@ -253,7 +276,7 @@ aith assess record-finding surface-collector <finding-json-file>
 
 Produce the final stats:
 ```bash
-aith assess dispatch "$DB" stats
+aith assess work-buffer "$DB" stats
 ```
 
 Build the priority manifest in the output — a ranked list of attack surface clusters

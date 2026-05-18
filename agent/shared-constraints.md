@@ -192,17 +192,17 @@ emits the canonical schema and an example):
 - `record-finding` — `aith assess contract record-finding`
 - `record-intel <type>` — `aith assess contract record-intel <type>`
 - `record-surface` — `aith assess contract record-surface`
-- `dispatch <subverb>` for sub-verbs that mutate durable dispatch state or
+- `agent <subverb>` for sub-verbs that mutate durable dispatch state or
   emit the canonical handoff blob:
-  `register`, `update-status`, `record-handoff`, `record-decision`,
-  `abort-duplicate`, `render-handoff` — `aith assess contract dispatch <subverb>`
+  `start`, `done`, `handoff`, `decision`,
+  `abort-duplicate`, `render-handoff` — `aith assess contract agent <subverb>`
 - Lifecycle helpers (`verify-finding`, `kill-finding`, `update-finding`,
   `reset-finding`, `resolve-surface`) — `aith assess contract <verb>`
 
 Verbs **not** covered (skip the contract round-trip — they are read-only or
 have no payload to validate): `fetch`, `list-skills`, `list-clusters`,
 `list-command-runs`, `get-command-run`, `check-scope-coverage`,
-`filter-scope`, `dispatch <db> stats|peek|fetch|done`,
+`filter-scope`, `work-buffer <db> stats|peek|fetch|done`,
 `dispatch list`, `dispatch get`. Reading the contract for these adds
 latency without preventing any error class.
 
@@ -298,6 +298,24 @@ worse than running a fresh probe.
 
 Full coverage-vs-duplicate decision table and output-field interpretation:
 `agent/references/runtime-guides/command-history-auditing.md`.
+
+---
+
+## 2bb. Tool-First Rule
+
+Before writing a bash/curl loop for a probe pattern, check whether an existing tool already covers the pattern. Hand-built loops are the right answer for genuinely uncovered patterns (proprietary RPC envelopes, custom Aura descriptors, header-matrix fuzzing the tool cannot express). They are the **wrong** answer for any pattern a tool already runs faster, with better evidence capture, and with audit-row metadata that downstream specialists can read.
+
+| Pattern | Use this | Not bash + curl |
+|---|---|---|
+| Parameter enumeration | `aith assess kali` → `arjun` | `for p in id user uid ...; do curl ...; done` |
+| XSS scanning | `aith assess kali` → `dalfox` | hand-built payload loop |
+| SQL injection | `aith assess kali` → `sqlmap` | error-based / time-based curl loop |
+| Directory / path discovery | `aith assess kali ffuf` / `feroxbuster` with the right wordlist | hand-seeded 60–100 entry list |
+| Web fingerprinting | `aith assess kali httpx` / `whatweb` / `wafw00f` | header-by-header curl |
+| Subdomain enumeration | `subfinder` / `dnsx` / `puredns` (see Phase 1a) | brute-force loop |
+| Template-based CVE / misconfig | `aith assess kali nuclei` | per-CVE curl scripts |
+
+If the right tool is missing from the runtime, that is a runtime gap to file (skipped/missing binary), not a license to fall back to bash. When the tool exists but the pattern isn't covered (custom RPC, novel descriptor shape, vendor-specific envelope), the bash loop is fine — pass the audit-flag set so downstream specialists can still find it via `list-command-runs`.
 
 ---
 
@@ -458,6 +476,7 @@ These are the most commonly violated rules — internalize them before you start
 - **No theoretical findings.** "Can an attacker do this right now with real harm?" — if no, not a finding yet.
 - **Kill weak leads fast.** Theory without a real request, more than two fragile preconditions stacked, or "might be chainable" without a proved chain → kill it.
 - **Severity follows proved impact.** Do not let recon hints, CVEs, or intuition inflate severity beyond what the evidence shows.
+- **Named limit bypass is not automatically High.** For request caps, buffer limits, decompression limits, timeouts, and protocol negotiation limits, prove the limit is a security boundary and prove downstream second-order impact. If equivalent default transports already accept the same logical stream and downstream work is bounded and linear, downgrade to Medium/hardening or docs.
 - **No speculative language.** Write `An attacker can [exact action] by [exact method]`, never `could potentially`, `may allow`, or `might be possible`.
 - **No filler or padding.** Do not use `Furthermore`, `Additionally`, `It should be noted`, or similar filler transitions. Do not restate titles in descriptions. Do not define standard vulnerability classes to a security audience. Every sentence must contribute new information.
 - **Sibling rule.** When one route or method is vulnerable, inspect its siblings before moving on.
@@ -658,7 +677,7 @@ the findings table (`aith assess record-finding`), intel rows in `intel_*` table
 credentials and attack chains in their tables, and the cross-cutting handoff
 (summary / coverage gaps / next steps / runtime issues / working artifacts /
 open questions / specialty extras) in `assessment_dispatch_handoffs`
-(`aith assess dispatch record-handoff --from-json <path>`).
+(`aith assess agent handoff --from-json <path>`).
 
 The operator queries those tables directly — `render-handoff <agent-id>`, `fetch
 findings`, `list-intel`, `list-clusters` — to assemble the next dispatch's
@@ -670,18 +689,18 @@ the canonical record of it.
 1. `aith assess record-finding <agent-name> <finding-json>` per finding.
 2. `aith assess record-intel <type> <intel-json>` per intel row.
 3. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` per surface candidate.
-4. `aith assess dispatch record-handoff --from-json <path>` — use the exact
+4. `aith assess agent handoff --from-json <path>` — use the exact
    `agent_id`, `agent_role`, and `phase` values from the **Runtime Identity block**
    the operator placed at the top of your dispatch prompt. The handoff row is keyed
    on `agent_id`; using a different value creates an orphaned row the operator cannot render.
-5. `aith assess dispatch render-handoff <agent_id>` — run after step 4 as a self-check.
+5. `aith assess agent render-handoff <agent_id>` — run after step 4 as a self-check.
    Exit only after the render succeeds. A 404 means the `agent_id` in step 4 did not
    match the registered dispatch.
 
-`update-status` is operator-only — do not call it; the operator marks the dispatch
+`agent done` is operator-only — do not call it; the operator marks the dispatch
 complete after your return.
 
-`record-handoff` is idempotent — call it as a checkpoint after each major step, not
+`agent handoff` is idempotent — call it as a checkpoint after each major step, not
 only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md` "Checkpointing".
 
 ### Reasoning quality > response brevity
