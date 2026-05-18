@@ -1500,6 +1500,11 @@ input {
 .code-disposition-suspicious { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
 .code-disposition-clean { background: rgba(23, 53, 76, 0.08); color: var(--accent); }
 .code-disposition-needs_context { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
+/* C50: `skipped` is an intentional analyst opt-out (test fixture,
+ * generated code, minified, vendored dep, out-of-scope language). Muted
+ * gray distinguishes it visually from `clean` (which implies a real
+ * review happened and found nothing). */
+.code-disposition-skipped { background: rgba(23, 53, 76, 0.06); color: var(--muted); }
 
 .code-confidence-high { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
 .code-confidence-medium { background: rgba(161, 98, 7, 0.14); color: #a16207; }
