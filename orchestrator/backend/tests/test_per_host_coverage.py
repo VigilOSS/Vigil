@@ -304,3 +304,111 @@ def test_report_readiness_includes_per_host_coverage(client, isolate_settings):
     assert body["per_host_coverage"]["objectives"]
     rows = {row["host"]: row for row in body["per_host_coverage"]["hosts"]}
     assert "api.target.example" in rows
+
+
+# ---------------------------------------------------------------------------
+# FU2: coverage_deferral payload validation
+# ---------------------------------------------------------------------------
+
+
+def _post_decision_raw(client, *, kind: str, payload: dict, surfaced: bool = True):
+    return client.post(
+        f"{ASSESSMENT_BASE}/dispatch-decisions",
+        json={"kind": kind, "payload": payload, "surfaced_to_user": surfaced},
+    )
+
+
+def test_coverage_deferral_validator_accepts_canonical_payload(client, isolate_settings):
+    _seed(client, isolate_settings)
+    response = _post_decision_raw(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "host": "api.target.example",
+            "deferred_objectives": ["directory_fuzz"],
+            "reason": "Scope brief forbids brute-force",
+            "approved_by": "operator",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+
+def test_coverage_deferral_validator_rejects_missing_host_aliases(client, isolate_settings):
+    _seed(client, isolate_settings)
+    response = _post_decision_raw(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "deferred_objectives": ["osint"],
+            "reason": "Engagement-level skip",
+        },
+    )
+    assert response.status_code == 422
+    assert "host" in response.text.lower() or "hostname" in response.text.lower()
+
+
+def test_coverage_deferral_validator_rejects_unknown_objective(client, isolate_settings):
+    _seed(client, isolate_settings)
+    response = _post_decision_raw(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "host": "api.target.example",
+            "deferred_objectives": ["super_extensive_fuzz"],
+            "reason": "...",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_coverage_deferral_validator_rejects_empty_objectives(client, isolate_settings):
+    _seed(client, isolate_settings)
+    response = _post_decision_raw(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "host": "api.target.example",
+            "deferred_objectives": [],
+            "reason": "...",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_coverage_deferral_validator_rejects_missing_reason(client, isolate_settings):
+    _seed(client, isolate_settings)
+    response = _post_decision_raw(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "host": "api.target.example",
+            "deferred_objectives": ["directory_fuzz"],
+        },
+    )
+    assert response.status_code == 422
+    assert "reason" in response.text.lower()
+
+
+def test_coverage_deferral_validator_accepts_hosts_list_alias(client, isolate_settings):
+    _seed(client, isolate_settings)
+    response = _post_decision_raw(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "hosts": ["api.target.example", "edge.target.example"],
+            "deferred_objectives": ["nikto_trigger"],
+            "reason": "Vendor confirms WAF tier out-of-band",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+
+def test_coverage_deferral_validator_does_not_constrain_other_kinds(client, isolate_settings):
+    """Unknown kinds keep the free-form payload contract — only `coverage_deferral` is gated."""
+    _seed(client, isolate_settings)
+    response = _post_decision_raw(
+        client,
+        kind="scope_decision",
+        payload={"host": "foo", "anything_goes": True, "deferred_objectives": "not even a list"},
+    )
+    assert response.status_code == 201, response.text
