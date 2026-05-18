@@ -226,6 +226,7 @@ def _run(
     verbose: bool = False,
     strict_vendor_saas: bool = False,
     by_host: bool = False,
+    include_discovered: bool = False,
     per_host_payload=None,
 ) -> FakeClient | None:
     module = _load_module()
@@ -247,6 +248,7 @@ def _run(
             verbose=verbose,
             strict_vendor_saas=strict_vendor_saas,
             by_host=by_host,
+            include_discovered=include_discovered,
         )
     )
     return clients[0] if clients else None
@@ -1365,6 +1367,228 @@ def test_specialist_roster_names_in_hints_have_role_files_on_disk():
             f"{role_file} does not exist. Either fix the constant in "
             "check_scope_coverage.py or restore the role file."
         )
+
+
+# ---------------------------------------------------------------------------
+# FU1: discovered-host filtering / --include-discovered
+# ---------------------------------------------------------------------------
+
+
+def test_by_host_default_filters_wildcard_discovered_into_summary(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """Hosts NOT authored in scope.json are folded into discovered_summary."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    # Scope.json: one literal host + one wildcard. The wildcard's expansions
+    # should NOT show up in the matrix by default.
+    _write_scope(eng, hosts=["api.target.example", "*.target.example"])
+    _make_cases_db(eng)
+
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "api.target.example",  # explicit literal — kept
+                "outcomes": {
+                    "waf_tier": _outcome(met=True, evidence=["intel:1"]),
+                    "service_inventory": _outcome(met=True, evidence=["services:1"]),
+                    "directory_fuzz": _outcome(met=True, evidence=["surfaces:1"]),
+                    "nikto_trigger": _outcome(met=True),
+                    "osint": _outcome(met=True),
+                },
+            },
+            {
+                "host": "discovered-a.target.example",  # wildcard expansion — folded
+                "outcomes": {
+                    "waf_tier": _outcome(met=False),
+                    "service_inventory": _outcome(met=False),
+                    "directory_fuzz": _outcome(met=False),
+                    "nikto_trigger": _outcome(met=False),
+                    "osint": _outcome(met=False),
+                },
+            },
+            {
+                "host": "discovered-b.target.example",  # wildcard expansion — folded
+                "outcomes": {
+                    "waf_tier": _outcome(met=False),
+                    "service_inventory": _outcome(met=True),
+                    "directory_fuzz": _outcome(met=False),
+                    "nikto_trigger": _outcome(met=False),
+                    "osint": _outcome(met=True),
+                },
+            },
+        ],
+    )
+
+    _run(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "api.target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://api.target.example/v1"}],
+        require_stage="enum",
+        by_host=True,
+        per_host_payload=host_payload,
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    section = report["per_host_coverage"]
+    hosts = {row["host"]: row for row in section["hosts"]}
+
+    # Literal stays.
+    assert "api.target.example" in hosts
+    # Discovered hosts are filtered out of `hosts[]`.
+    assert "discovered-a.target.example" not in hosts
+    assert "discovered-b.target.example" not in hosts
+
+    # Summary present + correct.
+    summary = section["discovered_summary"]
+    assert summary["discovered_count"] == 2
+    # Both discovered hosts have at least one unmet objective.
+    assert summary["hosts_with_unmet_count"] == 2
+    assert summary["hosts_with_deferral_count"] == 0
+    # top_unmet_objectives: most-frequent unmet across discovered.
+    top_objectives = {entry["objective"] for entry in summary["top_unmet_objectives"]}
+    # waf_tier, directory_fuzz, nikto_trigger all unmet on both discovered hosts.
+    # service_inventory unmet on a but met on b → 1 instance.
+    # osint unmet on a but met on b → 1 instance.
+    assert "waf_tier" in top_objectives
+    assert "directory_fuzz" in top_objectives
+    assert "nikto_trigger" in top_objectives
+
+
+def test_by_host_include_discovered_keeps_full_matrix(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """--include-discovered restores wildcard-discovered hosts to the matrix."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["api.target.example", "*.target.example"])
+    _make_cases_db(eng)
+
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "api.target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=True),
+                    "service_inventory": _outcome(met=True),
+                    "directory_fuzz": _outcome(met=True),
+                    "nikto_trigger": _outcome(met=True),
+                    "osint": _outcome(met=True),
+                },
+            },
+            {
+                "host": "discovered.target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=False),
+                    "service_inventory": _outcome(met=False),
+                    "directory_fuzz": _outcome(met=False),
+                    "nikto_trigger": _outcome(met=False),
+                    "osint": _outcome(met=False),
+                },
+            },
+        ],
+    )
+
+    _run(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "api.target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://api.target.example/v1"}],
+        require_stage="enum",
+        by_host=True,
+        include_discovered=True,
+        per_host_payload=host_payload,
+    )
+
+    section = json.loads(capsys.readouterr().out)["per_host_coverage"]
+    hosts = {row["host"] for row in section["hosts"]}
+    assert hosts == {"api.target.example", "discovered.target.example"}
+    # No summary when full matrix is rendered.
+    assert "discovered_summary" not in section
+
+
+def test_by_host_wildcard_only_scope_skips_filtering(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """When scope.json has no explicit literals (only wildcards), filtering is a no-op.
+
+    Run without require_stage so the scope-entry gate doesn't sys.exit on
+    the wildcard having no enum evidence — this test is exclusively about
+    the FU1 filter behavior, not the enum-evidence audit.
+    """
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["*.target.example"])  # wildcard only — no literals
+    _make_cases_db(eng)
+
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "a.target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=False),
+                    "service_inventory": _outcome(met=False),
+                    "directory_fuzz": _outcome(met=False),
+                    "nikto_trigger": _outcome(met=False),
+                    "osint": _outcome(met=False),
+                },
+            },
+        ],
+    )
+
+    _run(
+        monkeypatch,
+        eng,
+        by_host=True,
+        per_host_payload=host_payload,
+    )
+
+    section = json.loads(capsys.readouterr().out)["per_host_coverage"]
+    hosts = {row["host"] for row in section["hosts"]}
+    # With no literal anchor, the filter cannot run — full matrix is preserved.
+    assert "a.target.example" in hosts
+    assert "discovered_summary" not in section
+
+
+def test_by_host_no_discovered_hosts_skips_summary(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """When every backend-signal host is a scope literal, no summary block."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["api.target.example", "edge.target.example"])
+    _make_cases_db(eng)
+
+    host_payload = _per_host_payload(
+        hosts=[
+            {
+                "host": "api.target.example",
+                "outcomes": {
+                    "waf_tier": _outcome(met=True),
+                    "service_inventory": _outcome(met=True),
+                    "directory_fuzz": _outcome(met=True),
+                    "nikto_trigger": _outcome(met=True),
+                    "osint": _outcome(met=True),
+                },
+            },
+        ],
+    )
+
+    _run(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "api.target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://api.target.example/v1"}],
+        require_stage="enum",
+        by_host=True,
+        per_host_payload=host_payload,
+    )
+
+    section = json.loads(capsys.readouterr().out)["per_host_coverage"]
+    # api.target.example is the only signal host AND it's a literal — summary
+    # is suppressed because there are no discovered hosts to summarize.
+    assert "discovered_summary" not in section
 
 
 def test_specialist_roster_substituted_into_hints():
