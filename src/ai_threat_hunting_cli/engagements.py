@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import docker
 from .client_rosters import ensure_claude_agents_link, ensure_claude_settings, ensure_codex_agents_link
 from .paths import (
     DEFAULT_ORCHESTRATOR_BASE_URL,
@@ -19,9 +20,7 @@ from .paths import (
     resolve_orchestrator_data_dir,
 )
 
-AUTH_MODES = {"none", "manual", "auth_json", "proxy_capture"}
 ENGAGEMENT_TYPES = {"web", "code", "both", "android"}
-EXPLOIT_POLICIES = {"pause", "full_send", "selected"}
 ANDROID_DYNAMIC_MODES = {"static_only", "device", "emulator"}
 
 
@@ -32,8 +31,6 @@ class CreateEngagementOptions:
     target: str | None = None
     name: str | None = None
     hosts: list[str] = field(default_factory=list)
-    auth_mode: str = "none"
-    exploit_policy: str = "pause"
     repos: list[str] = field(default_factory=list)
     artifacts: list[str] = field(default_factory=list)
     android_package: str | None = None
@@ -91,10 +88,6 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
 
     if options.engagement_type not in ENGAGEMENT_TYPES:
         raise SystemExit("--type must be one of: web, code, both, android")
-    if options.auth_mode not in AUTH_MODES:
-        raise SystemExit("--auth-mode must be one of: none, manual, auth_json, proxy_capture")
-    if options.exploit_policy not in EXPLOIT_POLICIES:
-        raise SystemExit("--exploit-policy must be one of: pause, full_send, selected")
     if options.dynamic_mode not in ANDROID_DYNAMIC_MODES:
         raise SystemExit("--dynamic-mode must be one of: static_only, device, emulator")
 
@@ -155,7 +148,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
             "name": name,
             "repos": repos,
             "hosts": [],
-            "exploit_policy": options.exploit_policy,
+            "exploit_policy": "pause",
             "exploit_review_state": "pending",
             "approved_targets": [],
             "source_repos": [],
@@ -174,7 +167,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
             "hosts": [],
             "backend_hosts": hosts,
             "dynamic_mode": options.dynamic_mode,
-            "exploit_policy": options.exploit_policy,
+            "exploit_policy": "pause",
             "exploit_review_state": "pending",
             "approved_targets": [],
             "source_repos": [],
@@ -196,7 +189,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
             "engagement_type": "web",
             "hostname": hostname,
             "hosts": hosts,
-            "exploit_policy": options.exploit_policy,
+            "exploit_policy": "pause",
             "exploit_review_state": "pending",
             "approved_targets": [],
             "status": "in_progress",
@@ -210,7 +203,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
             "hostname": hostname,
             "hosts": hosts,
             "repos": repos,
-            "exploit_policy": options.exploit_policy,
+            "exploit_policy": "pause",
             "exploit_review_state": "pending",
             "approved_targets": [],
             "source_repos": [],
@@ -230,7 +223,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     _write_json(eng_dir / "scope.json", scope)
     _write_json(eng_dir / "engagement.json", manifest)
     _write_report(eng_dir, options.engagement_type, name=name, target=target_normalized, repos=repos, date_label=date_label)
-    _write_auth_scaffold(eng_dir, "none" if options.engagement_type in {"code", "android"} else options.auth_mode, created_at)
+    _write_auth_scaffold(eng_dir, "none", created_at)
     _write_json(eng_dir / "sessions" / "index.json", [])
     # Dispatch tracking + handoff content live in the orchestrator backend
     # (assessment_dispatches / assessment_dispatch_handoffs /
@@ -273,7 +266,40 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
     _emit_bootstrap_scope_summary(scope)
     _verify_backend_install_root(install_root, eng_dir)
+    _emit_post_create_footer(key)
     return CreatedEngagement(key=key, path=eng_dir)
+
+
+def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_command) -> None:
+    """Print a status-aware next-steps footer after creating an engagement.
+
+    Reuses the existing helpers from ``docker`` and ``oob`` so we don't
+    re-implement liveness probes. stdout still carries just the path so
+    ``eng=$(aith engagement create ...)`` keeps working — this writes to
+    stderr only.
+    """
+    try:
+        mitm_running = docker.container_running("security-research-proxy", runner=runner)
+    except Exception:
+        mitm_running = False
+    try:
+        from .oob import oob_status
+
+        oob_state = str(oob_status(runner=runner).get("state", "unknown"))
+    except Exception:
+        oob_state = "unknown"
+
+    mitm_label = "running" if mitm_running else "stopped"
+    mitm_hint = "" if mitm_running else f"   (auth capture: aith mitmproxy start {key})"
+    oob_hint = "" if oob_state == "running" else "   (callbacks: aith oob start)"
+
+    print(f"[aith] engagement: {key}", file=sys.stderr)
+    print(f"[aith] mitmproxy: {mitm_label}{mitm_hint}", file=sys.stderr)
+    print(f"[aith] oob:       {oob_state}{oob_hint}", file=sys.stderr)
+    print(
+        f"[aith] start:     aith engagement start {key} --client codex   (or --client claude)",
+        file=sys.stderr,
+    )
 
 
 def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> None:
