@@ -557,7 +557,7 @@ When ANY agent discovers credentials, the operator coordinates these steps:
 4. **Dispatch exploit-developer** — to test authenticated surfaces discovered in step 3. The agent maps what authenticated access grants and tests for privilege escalation, IDOR, and auth-boundary issues across the newly discovered endpoints. This is the analysis work that requires a specialist.
 
 Auth handling rules:
-- `auth.json` is the live auth contract. It may contain cookies, headers, `auth_context`, `use_for_requests`, and optional `expires_at`.
+- `auth.json` is the live auth contract, per-engagement. It may contain cookies, headers, `auth_context`, `use_for_requests`, and optional `expires_at`. The shared mitmproxy (if running) routes captures into the matching engagement's `auth.json` by scope, so concurrent engagements do not contend.
 - If `auth.json` is present and usable, surface-collector passes auth headers to Katana and tags ingestion with the authenticated context automatically.
 - If `auth.json` is missing material or marked expired, warn and continue anonymously rather than halting the engagement.
 - The human may update `auth.json` directly or use mitmproxy-assisted login capture to refresh it.
@@ -576,7 +576,7 @@ Recovery branch:
    ```
 2. **Decide refresh path.**
    - **Bearer / API token** in `auth.json.headers.Authorization`: refresh via the documented refresh endpoint (if the program offers one) or re-run the login flow. Operator action; do NOT dispatch a specialist for a token refresh — the refresh request itself is one-shot mechanical work.
-   - **Session cookie** in `auth.json.cookies` / `host_cookies[]`: re-capture via mitmproxy-assisted login. Restart browser flow through the proxy; `proxy_addon.py` writes the refreshed cookie set into `auth.json` automatically.
+   - **Session cookie** in `auth.json.cookies` / `host_cookies[]`: re-capture via mitmproxy-assisted login. Restart browser flow through the proxy; `proxy_addon.py` writes the refreshed cookie set into the matching engagement's `auth.json` automatically (per-engagement routing by scope).
    - **OAuth/OIDC**: re-run the authorization code grant against the discovery endpoint; check `auth.json.tokens.refresh_token` first.
 3. **Validate the refresh.** Re-run the same login check from Credential Auto-Use step 1 via `aith assess kali exec --technique AUTH --intent "post-refresh validation" ...`. The audit row records both the failed pre-refresh probe and the successful post-refresh probe so the timeline is unambiguous.
 4. **Re-dispatch only on success.** Re-dispatch the affected specialist (typically `vulnerability-analyst` or `exploit-developer`) with a dispatch-context note: "Auth refreshed at <iso>; the previous handoff's runtime_issues about 401/403 are stale — re-run from the same task objective with fresh credentials in `auth.json`."

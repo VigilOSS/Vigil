@@ -1423,15 +1423,29 @@ class CoverageDeferralPayload(BaseModel):
     hostname: str | None = Field(default=None, min_length=1)
     hosts: list[str] | None = Field(default=None)
     approved_by: str | None = Field(default=None, min_length=1)
+    # Engagement-wide deferrals (e.g., "OSINT is out of scope for this whole
+    # engagement") satisfy the named objectives for EVERY host with signal,
+    # so operators don't have to duplicate the same deferral per host on
+    # wildcard/large engagements. Mutually exclusive with the host fields:
+    # an engagement-wide flag plus a host field is almost always an operator
+    # mistake (which one wins?), so reject the ambiguous shape outright.
+    engagement_wide: bool | None = Field(default=None)
 
     @model_validator(mode="after")
-    def _require_at_least_one_host_field(self) -> "CoverageDeferralPayload":
-        if not any(
+    def _require_host_or_engagement_wide(self) -> "CoverageDeferralPayload":
+        has_host = any(
             [self.host, self.target, self.hostname, self.hosts and any(self.hosts)]
-        ):
+        )
+        if not has_host and not self.engagement_wide:
             raise ValueError(
-                "coverage_deferral payload requires at least one of: "
-                "host, target, hostname, or hosts[] (non-empty)"
+                "coverage_deferral payload requires one of: "
+                "host, target, hostname, hosts[] (non-empty), or "
+                "engagement_wide=true"
+            )
+        if has_host and self.engagement_wide:
+            raise ValueError(
+                "coverage_deferral payload cannot mix host fields with "
+                "engagement_wide=true; pick one or the other"
             )
         if self.hosts is not None:
             for entry in self.hosts:

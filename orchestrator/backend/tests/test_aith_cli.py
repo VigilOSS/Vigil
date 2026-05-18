@@ -496,12 +496,13 @@ def test_runtime_start_retries_without_host_gateway_when_docker_rejects_flag(tmp
     assert "--add-host=host.docker.internal:host-gateway" not in run_commands[1]
 
 
-def test_mitmproxy_docker_start_builds_and_mounts_engagement(tmp_path: Path) -> None:
+def test_mitmproxy_docker_start_builds_and_mounts_engagements_root(tmp_path: Path) -> None:
     from ai_threat_hunting_cli.docker import DockerResult
     from ai_threat_hunting_cli.mitmproxy import MitmproxyOptions, start_proxy
 
     install_root = tmp_path / "install"
-    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagements_root = install_root / "agent" / "engagements"
+    engagement = engagements_root / "eng-1"
     engagement.mkdir(parents=True)
     (engagement / "scope.json").write_text("{}", encoding="utf-8")
     (engagement / ".orchestrator.env").write_text(
@@ -523,7 +524,12 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagement(tmp_path: Path) -> 
         return DockerResult(0, "", "")
 
     start_proxy(
-        MitmproxyOptions(install_root=install_root, engagement_dir=engagement, mode="docker", port=9090),
+        MitmproxyOptions(
+            install_root=install_root,
+            engagements_root=engagements_root,
+            mode="docker",
+            port=9090,
+        ),
         runner=runner,
         verify_port=False,
     )
@@ -533,9 +539,14 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagement(tmp_path: Path) -> 
     assert str(install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile") in build_command
     assert str(install_root / "agent") == build_command[-1]
     assert "--add-host=host.docker.internal:host-gateway" in run_command
-    assert f"127.0.0.1:9090:8080" in run_command
-    assert f"{engagement}:/engagement" in run_command
+    assert "127.0.0.1:9090:8080" in run_command
+    # New contract: bind-mount the whole engagements tree at /engagements.
+    assert f"{engagements_root}:/engagements" in run_command
+    # ENGAGEMENT_KEY is gone — the addon learns the key per flow.
+    assert not any(item.startswith("ENGAGEMENT_KEY=") for item in run_command)
     assert "ORCHESTRATOR_BASE_URL=http://host.docker.internal:18000" in run_command
+    # The --set switches the addon to multi-engagement mode.
+    assert "engagements_root=/engagements" in run_command
 
 
 def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -543,7 +554,8 @@ def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pyt
     from ai_threat_hunting_cli.docker import DockerResult
 
     install_root = tmp_path / "install"
-    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagements_root = install_root / "agent" / "engagements"
+    engagement = engagements_root / "eng-1"
     engagement.mkdir(parents=True)
     (engagement / "scope.json").write_text("{}", encoding="utf-8")
     (engagement / ".orchestrator.env").write_text(
@@ -570,14 +582,20 @@ def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setattr(mitmproxy_module, "_port_open", fake_port_open)
 
     mitmproxy_module.start_proxy(
-        mitmproxy_module.MitmproxyOptions(install_root=install_root, engagement_dir=engagement, port=9090),
+        mitmproxy_module.MitmproxyOptions(
+            install_root=install_root, engagements_root=engagements_root, port=9090
+        ),
         runner=runner,
     )
 
     assert attempts == [("127.0.0.1", 9090)] * 3
 
 
-def test_mitmproxy_start_without_arg_uses_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mitmproxy_start_uses_install_engagements_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`aith mitmproxy start` now mounts the whole engagements tree — no
+    per-engagement context required, the addon routes each captured flow to
+    the matching engagement.
+    """
     from ai_threat_hunting_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
@@ -588,14 +606,13 @@ def test_mitmproxy_start_without_arg_uses_current_engagement(tmp_path: Path, mon
     captured: dict[str, object] = {}
 
     def fake_start_proxy(options: object) -> None:
-        captured["engagement_dir"] = options.engagement_dir  # type: ignore[attr-defined]
+        captured["engagements_root"] = options.engagements_root  # type: ignore[attr-defined]
 
-    monkeypatch.chdir(engagement)
     monkeypatch.setattr(main_module, "start_proxy", fake_start_proxy)
 
     main_module.main(["--root", str(install_root), "mitmproxy", "start"])
 
-    assert captured["engagement_dir"] == engagement
+    assert captured["engagements_root"] == install_root / "agent" / "engagements"
 
 
 def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1420,18 +1437,79 @@ def test_auth_without_engagement_context_requires_key_or_select(tmp_path: Path, 
         main_module.main(["--root", str(install_root), "auth", "status"])
 
 
-def test_mitmproxy_without_engagement_context_requires_key_path_or_select(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mitmproxy_start_legacy_engagement_arg_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Legacy `aith mitmproxy start <engagement>` is a no-op selector — the
+    proxy serves every active engagement. The CLI should accept it silently
+    (printing one notice) rather than error out.
+    """
     from ai_threat_hunting_cli import main as main_module
 
+    _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
     engagement = install_root / "agent" / "engagements" / "eng-1"
     engagement.mkdir(parents=True)
     (engagement / "scope.json").write_text("{}", encoding="utf-8")
-    (engagement / "engagement.json").write_text(json.dumps({"key": "eng-1", "created_at": "2026-04-24T12:00:00Z"}), encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    captured: dict[str, object] = {}
 
-    with pytest.raises(SystemExit, match="Specify an engagement key/path or --select"):
-        main_module.main(["--root", str(install_root), "mitmproxy", "start"])
+    def fake_start_proxy(options: object) -> None:
+        captured["engagements_root"] = options.engagements_root  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(main_module, "start_proxy", fake_start_proxy)
+
+    main_module.main(["--root", str(install_root), "mitmproxy", "start", "eng-1"])
+    assert captured["engagements_root"] == install_root / "agent" / "engagements"
+    err = capsys.readouterr().err
+    assert "ignoring engagement selector" in err
+
+
+def test_mitmproxy_reload_touches_sentinel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`aith mitmproxy reload` writes the sentinel the addon polls for, so the
+    bind-mount surfaces it to the running container immediately.
+    """
+    from ai_threat_hunting_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    engagements_root = install_root / "agent" / "engagements"
+    engagements_root.mkdir(parents=True)
+    main_module.main(["--root", str(install_root), "mitmproxy", "reload"])
+    sentinel = engagements_root / ".mitmproxy-reload-requested"
+    assert sentinel.exists()
+
+
+def test_mitmproxy_routes_reads_addon_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`aith mitmproxy routes` parses the snapshot the addon wrote and prints
+    a readable summary; --json round-trips the raw cache.
+    """
+    from ai_threat_hunting_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    engagements_root = install_root / "agent" / "engagements"
+    engagements_root.mkdir(parents=True)
+    snapshot = {
+        "generated_at": "2026-05-18T12:00:00Z",
+        "engagements": [
+            {
+                "key": "eng-1",
+                "scope_patterns": ["app.example.com", "*.example.com"],
+                "scope_priority": 5,
+                "updated_at": "2026-05-18T11:59:00Z",
+            }
+        ],
+    }
+    (engagements_root / ".mitmproxy-routes.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    main_module.main(["--root", str(install_root), "mitmproxy", "routes"])
+    out = capsys.readouterr().out
+    assert "eng-1" in out
+    assert "app.example.com" in out
+    main_module.main(["--root", str(install_root), "mitmproxy", "routes", "--json"])
+    out_json = capsys.readouterr().out
+    assert json.loads(out_json) == snapshot
 
 
 def test_backup_create_and_list_uses_sqlite_backup(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1674,6 +1752,7 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: name == "security-research")
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
+    monkeypatch.setattr(up_module, "start_proxy", lambda *args, **kwargs: calls.append("mitmproxy"))
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
     monkeypatch.setattr(
         up_module,
@@ -1694,7 +1773,10 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
 
     up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=lambda *args, **kwargs: None)
 
-    assert calls[:3] == ["runtime", "orchestrator", "frp-prompt"]
+    # Mitmproxy now starts unconditionally (it serves every engagement at
+    # once), so the ordered call list includes it between orchestrator and the
+    # oob token prompt.
+    assert calls[:4] == ["runtime", "orchestrator", "mitmproxy", "frp-prompt"]
 
 
 def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
