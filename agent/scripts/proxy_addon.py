@@ -331,6 +331,16 @@ class CaseCollector:
             # lives at ``/engagements/<key>``, so resolve by basename to keep
             # the bind mount portable.
             root = self.engagements_root / key
+            if not root.is_dir():
+                # Stale backend row pointing at a directory that doesn't
+                # exist (install-root mismatch, deleted-but-not-tombstoned
+                # engagement, etc.). Skipping here keeps `_open_db_for` from
+                # attempting `db_path.touch()` against a missing parent and
+                # crashing the flow hook.
+                ctx.log.warn(
+                    f"proxy_addon: backend lists engagement {key!r} but {root} is not a directory; skipping"
+                )
+                continue
             scope_hosts = row.get("scope_hosts")
             if not isinstance(scope_hosts, list):
                 scope_hosts = []
@@ -377,6 +387,13 @@ class CaseCollector:
                 )
                 continue
             if not isinstance(scope_data, dict):
+                continue
+            # Mirror the backend filter (`/engagements?status=in_progress`):
+            # archived/completed engagements must not re-enter routing on a
+            # backend-fetch failure or they would steal captures from active
+            # engagements that share overlapping scope patterns.
+            status_value = str(scope_data.get("status") or "").strip().lower()
+            if status_value and status_value != "in_progress":
                 continue
             scope_patterns = self._scope_patterns_from_dict(scope_data)
             scope_priority_raw = scope_data.get("scope_priority", 0)
@@ -899,6 +916,15 @@ class CaseCollector:
                 return entry.db
             db_path = entry.root / "cases.db"
             try:
+                if not entry.root.is_dir():
+                    # Root vanished between registry load and the next flow
+                    # (deleted engagement, unmounted volume). Returning None
+                    # cleanly lets the flow hook continue without writing
+                    # rather than raising up through mitmproxy.
+                    ctx.log.warn(
+                        f"proxy_addon: engagement root {entry.root} is missing — skipping DB open for {entry.key}"
+                    )
+                    return None
                 if not db_path.exists():
                     db_path.touch()
                 db_init(str(db_path))
@@ -908,9 +934,13 @@ class CaseCollector:
                 entry.db = connection
                 ctx.log.info(f"proxy_addon: opened {db_path} for engagement {entry.key}")
                 return connection
-            except sqlite3.OperationalError as exc:
+            except (sqlite3.OperationalError, OSError) as exc:
+                # OSError covers FileNotFoundError (root deleted between
+                # registry load and open), PermissionError (read-only mount),
+                # and bind-mount surprises. Log and degrade — losing one
+                # capture is better than aborting the whole flow hook.
                 ctx.log.error(
-                    f"proxy_addon: cannot open DB for engagement {entry.key} — {exc}"
+                    f"proxy_addon: cannot open DB for engagement {entry.key} — {exc.__class__.__name__}: {exc}"
                 )
                 return None
 
