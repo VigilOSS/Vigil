@@ -1407,6 +1407,18 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_assessment_artifacts_present "
             "ON assessment_artifacts(engagement_id, present)"
         )
+        artifact_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(assessment_artifacts)").fetchall()
+        }
+        if "scratch" not in artifact_columns:
+            connection.execute(
+                "ALTER TABLE assessment_artifacts ADD COLUMN scratch INTEGER NOT NULL DEFAULT 0"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_artifacts_scratch "
+            "ON assessment_artifacts(engagement_id, scratch)"
+        )
         artifact_fts_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(assessment_artifacts_fts)").fetchall()

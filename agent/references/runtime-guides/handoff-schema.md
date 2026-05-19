@@ -37,8 +37,10 @@ prompt by `aith assess agent render-handoff <agent-id>`.
 | `working_artifacts` | object[] | optional | Each entry: `{path, description, kind}`. `path` is engagement-relative (e.g. `scans/sans_acme-saas.txt`); the renderer checks each on disk. |
 | `open_questions` | string[] | optional | Free-text questions the operator/human must answer (vendor-SaaS in/out, scope ambiguity, missing credential, etc.). |
 | `recommended_next_agent` | string | optional | The role you'd hand off to (`vulnerability-analyst`, `exploit-developer`, `report-writer`, ...). |
-| `handoff_status` | enum | optional | `checkpointed` / `ready` / `blocked` / `superseded`. Defaults to `checkpointed`; set `ready` or `blocked` in the final handoff so the operator can run `aith assess agent close <agent_id>`. |
-| `closed_dispatch_status` | enum | optional | Optional dispatch status for `agent close` to apply (`completed`, `blocked`, `failed`, `aborted`). |
+| `handoff_status` | enum | optional | `checkpointed` / `ready` / `blocked` / `superseded`. Defaults to `checkpointed`; set `ready` or `blocked` in the final handoff so the operator can run `aith assess agent close <agent_id>`. A `ready` or `blocked` handoff whose dispatch stays `in-progress` past the resume-brief threshold surfaces as a `stale_dispatch_ready_handoff` report-readiness blocker. |
+| `closed_dispatch_status` | enum | optional | Dispatch status for `agent close` to apply (`completed`, `blocked`, `failed`, `aborted`). |
+| `handoff_version` | integer | backend-managed | Incremented on every checkpoint write. Specialists do not set it; the orchestrator increments it on each PATCH so concurrent updates and audit trails stay ordered. |
+| `last_checkpoint_at` | ISO datetime | backend-managed | Timestamp of the most recent handoff write. Backfilled to `created_at` for pre-lifecycle rows; updated by every checkpoint PATCH. Used by `agent reconcile-stale` to find dispatches that have not checkpointed recently. |
 | `extras` | object | optional | Opaque JSON object for role-specific fields (osint CVE-match counts, fuzzer hit/miss ratio, recon live_host_count, etc.). |
 
 ## Field-by-field guidance

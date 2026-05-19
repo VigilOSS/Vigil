@@ -232,11 +232,15 @@ explicit human approval required before any exploit-developer dispatch.
 
 #### Refined — resume with prior context
 
-Use this when continuing across sessions. Paste the rendered handoff blob from the prior agent (run `aith assess agent render-handoff <agent-id>` before closing the previous session) in place of `<paste here>`.
+Use this when continuing across sessions. The operator's first action is `aith assess
+resume-brief` for a bounded backend snapshot; paste the rendered handoff blob from the prior
+agent (run `aith assess agent render-handoff <agent-id>` before closing the previous session)
+when the new session continues a specific dispatch.
 
 ```
 Read AGENTS.md and assume Operator role. Run agent/rules/resume.md hydration before
-planning anything — read current backend state before deciding what to do next.
+planning anything — start with `aith assess resume-brief` (narrow with --finding, --q,
+or --agent-id for targeted continuation).
 
 Authorized engagement: https://bugcrowd.com/engagements/<slug>
 Continue phases <X, Y, Z> to completion. Use specialist agents for all dispatched work;
@@ -247,9 +251,34 @@ Depth is the default. "Quick" is not desired — thorough and deep coverage is.
 Prefer claude-opus-4-7 / gpt-5.5 xhigh for substantial work; medium only for bounded sidecar tasks.
 Exploitation policy: <pause|selected|full_send> per scope.json.
 
-Previous agent context:
+Previous agent context (paste only when continuing a specific dispatch):
 <paste aith assess agent render-handoff <agent-id> output here>
 ```
+
+### Resume, artifacts, and dispatch closure (operator CLI surface)
+
+The orchestrator backend is the canonical store for engagement state. Use these CLI
+commands to read and close that state — they replace ad-hoc file scraping and
+transcript pasting:
+
+- `aith assess resume-brief [--finding <slug>] [--q <text>] [--agent-id <id>] [--max-age-hours N]`
+  — bounded JSON+markdown operating picture (finding queues, recent decisions, stale
+  dispatches, handoff gaps, top command-history matches, indexed artifacts, and
+  one-shot drill-down commands keyed by id).
+- `aith assess artifact sync|search|get|register|mark-scratch`
+  — engagement-local file index. `sync` scans the default roots (`notes/`,
+  `findings_payloads/`, `tools/exploit-state/`, `scans/reports/`, `downloads/`) and
+  marks missing files. `search` is FTS over previews + paths + linked finding slugs.
+  `mark-scratch <path-or-id>` dismisses a markdown note as scratch so
+  `check-report-readiness` no longer blocks on it (the escape valve for operator or
+  specialist working notes that are not durable engagement memory).
+- `aith assess agent close <agent-id>`
+  — close an in-progress dispatch when its handoff is `ready` or `blocked`. Records a
+  `dispatch_closed_from_handoff` decision row.
+- `aith assess agent reconcile-stale [--dry-run] [--max-age-hours N]`
+  — list in-progress dispatches older than the threshold; close ones whose handoff is
+  `ready`/`blocked` automatically. Always prints every candidate with `closed=true|false`
+  and a `skip_reason`.
 
 ### Starting a code analysis engagement
 

@@ -773,6 +773,62 @@ def get_indexed_artifact(engagement_key: str, artifact_id: int) -> dict[str, Any
     return artifact_index.get_artifact(engagement.id, artifact_id)
 
 
+class ArtifactScratchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str | None = Field(default=None, max_length=2048)
+    scratch: bool = True
+
+
+@router.post("/artifacts/{artifact_id}/scratch")
+async def mark_artifact_scratch(
+    engagement_key: str,
+    artifact_id: int,
+    request: ArtifactScratchRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    row = artifact_index.set_scratch_flag(
+        engagement.id,
+        artifact_id=artifact_id,
+        scratch=request.scratch,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="artifact mark-scratch" if request.scratch else "artifact unmark-scratch",
+        action=str(row.get("relative_path") or ""),
+        actor_name="operator",
+        result="scratch=1" if request.scratch else "scratch=0",
+        metadata={"artifact_id": row.get("id"), "relative_path": row.get("relative_path")},
+    )
+    await _broadcast(engagement.key, "artifact_scratch", row)
+    return row
+
+
+@router.post("/artifacts/scratch-by-path")
+async def mark_artifact_scratch_by_path(
+    engagement_key: str,
+    request: ArtifactScratchRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    if not (request.path or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
+    row = artifact_index.set_scratch_flag(
+        engagement.id,
+        path=request.path or "",
+        scratch=request.scratch,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="artifact mark-scratch" if request.scratch else "artifact unmark-scratch",
+        action=str(row.get("relative_path") or request.path or ""),
+        actor_name="operator",
+        result="scratch=1" if request.scratch else "scratch=0",
+        metadata={"artifact_id": row.get("id"), "relative_path": row.get("relative_path")},
+    )
+    await _broadcast(engagement.key, "artifact_scratch", row)
+    return row
+
+
 @router.get("/surfaces")
 def get_surfaces(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
