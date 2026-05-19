@@ -5869,8 +5869,11 @@ def list_command_runs(
     include_output: bool = False,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
-    base_params: list[Any] = [engagement.id]
-    base_where = ["r.engagement_id = ?"]
+
+    # Track WHERE filters as (clause, params) tuples so the distant-search
+    # helper can drop the MATCH filter cleanly. Positional zip() against a
+    # flat base_params list breaks when a filter takes >1 param.
+    filters: list[tuple[str, list[Any]]] = [("r.engagement_id = ?", [engagement.id])]
 
     # ``q`` is a global FTS match across all content columns. ``intent_q`` is
     # a scoped FTS match against the intent column only — SQLite FTS5 uses
@@ -5891,46 +5894,39 @@ def list_command_runs(
         scoped_tokens = [f"intent:{tok}" for tok in intent_term.split(" ") if tok]
         if scoped_tokens:
             match_terms.append(" ".join(scoped_tokens))
+    match_filter: tuple[str, list[Any]] | None = None
     if match_terms:
         join_sql = "JOIN assessment_command_runs_fts ON assessment_command_runs_fts.rowid = r.id"
-        base_where.append("assessment_command_runs_fts MATCH ?")
-        base_params.append(" ".join(match_terms))
+        match_filter = ("assessment_command_runs_fts MATCH ?", [" ".join(match_terms)])
+        filters.append(match_filter)
 
     if agent_name:
-        base_where.append("r.agent_name = ?")
-        base_params.append(agent_name)
+        filters.append(("r.agent_name = ?", [agent_name]))
     if phase:
-        base_where.append("r.phase = ?")
-        base_params.append(phase)
+        filters.append(("r.phase = ?", [phase]))
     if tool_name:
-        base_where.append("r.tool_name = ?")
-        base_params.append(tool_name)
+        filters.append(("r.tool_name = ?", [tool_name]))
     if tool_bin:
-        base_where.append("r.tool_bin = ?")
-        base_params.append(tool_bin)
+        filters.append(("r.tool_bin = ?", [tool_bin]))
     if target_host:
         # Case-insensitive exact match against the parsed target_host column.
         # NULL-tolerant (LOWER(NULL) = NULL, which will not match the literal).
-        base_where.append("LOWER(r.target_host) = ?")
-        base_params.append(target_host.strip().lower())
+        filters.append(("LOWER(r.target_host) = ?", [target_host.strip().lower()]))
     if audit_source:
-        base_where.append("r.audit_source = ?")
-        base_params.append(audit_source)
+        filters.append(("r.audit_source = ?", [audit_source]))
     if success is not None:
-        base_where.append("r.success = ?")
-        base_params.append(1 if success else 0)
+        filters.append(("r.success = ?", [1 if success else 0]))
     if timed_out is not None:
-        base_where.append("r.timed_out = ?")
-        base_params.append(1 if timed_out else 0)
+        filters.append(("r.timed_out = ?", [1 if timed_out else 0]))
     if technique:
-        base_where.append("r.technique = ?")
-        base_params.append(technique)
+        filters.append(("r.technique = ?", [technique]))
     if probe_kind:
-        base_where.append("r.probe_kind = ?")
-        base_params.append(probe_kind)
+        filters.append(("r.probe_kind = ?", [probe_kind]))
     if destructive is not None:
-        base_where.append("r.destructive = ?")
-        base_params.append(1 if destructive else 0)
+        filters.append(("r.destructive = ?", [1 if destructive else 0]))
+
+    base_where = [clause for clause, _ in filters]
+    base_params: list[Any] = [param for _, params in filters for param in params]
 
     sort_value = (sort or "").strip().lower()
     if not sort_value:
@@ -5942,8 +5938,8 @@ def list_command_runs(
         return _list_distant_command_runs(
             engagement.id,
             q=q,
-            base_where=base_where,
-            base_params=base_params,
+            filters=filters,
+            match_filter=match_filter,
             match_terms=match_terms,
             limit=limit,
             offset=offset,
@@ -5976,8 +5972,8 @@ def _list_distant_command_runs(
     engagement_id: int,
     *,
     q: str,
-    base_where: list[str],
-    base_params: list[Any],
+    filters: list[tuple[str, list[Any]]],
+    match_filter: tuple[str, list[Any]] | None,
     match_terms: list[str],
     limit: int,
     offset: int,
@@ -5991,21 +5987,17 @@ def _list_distant_command_runs(
     that scope.
     """
 
-    distant_where = [item for item in base_where if "assessment_command_runs_fts MATCH" not in item]
-    distant_params = [
-        param
-        for where_item, param in zip(base_where, base_params, strict=False)
-        if "assessment_command_runs_fts MATCH" not in where_item
-    ]
-    # The zip above only covers one param per WHERE clause, which holds for
-    # this function's scalar filters. Keep engagement_id explicit if no
-    # filters were zipped because future callers may pass an empty list.
-    if not distant_params:
-        distant_params = [engagement_id]
+    distant_filters = [(clause, list(params)) for clause, params in filters if (clause, params) != match_filter]
+    if not distant_filters:
+        distant_filters = [("r.engagement_id = ?", [engagement_id])]
+    distant_where = [clause for clause, _ in distant_filters]
+    distant_params: list[Any] = [p for _, ps in distant_filters for p in ps]
 
     direct_rows: list[Any] = []
     direct_ids: list[int] = []
     if match_terms:
+        base_where = [clause for clause, _ in filters]
+        base_params = [p for _, ps in filters for p in ps]
         direct_query = (
             "SELECT r.* FROM assessment_command_runs r "
             "JOIN assessment_command_runs_fts ON assessment_command_runs_fts.rowid = r.id "
@@ -6328,8 +6320,18 @@ def _register_handoff_artifacts(engagement_id: int, handoff: dict[str, Any]) -> 
     artifacts = handoff.get("working_artifacts") or []
     if not isinstance(artifacts, list):
         return
-    finding_slugs = handoff.get("finding_slugs") or []
-    related_finding_slug = str(finding_slugs[0]) if isinstance(finding_slugs, list) and finding_slugs else None
+    raw_slugs = handoff.get("finding_slugs") or []
+    finding_slugs: list[str] = (
+        [str(slug) for slug in raw_slugs if str(slug)] if isinstance(raw_slugs, list) else []
+    )
+    # The artifact row carries one related_finding_slug. The primary slug
+    # (first in the handoff list, by specialist convention) gets the column;
+    # multi-finding handoffs still find their artifact via indexed_text /
+    # path LIKE searches in search_artifacts, so the column is the
+    # canonical-link anchor rather than the only path back.
+    related_finding_slug = finding_slugs[0] if finding_slugs else None
+    producer_agent_id = str(handoff.get("agent_id") or "") or None
+    producer_agent_role = str(handoff.get("agent_role") or "") or None
     for item in artifacts:
         if not isinstance(item, dict) or not item.get("path"):
             continue
@@ -6337,8 +6339,8 @@ def _register_handoff_artifacts(engagement_id: int, handoff: dict[str, Any]) -> 
             engagement_id,
             str(item.get("path") or ""),
             kind=str(item.get("kind") or "handoff-artifact"),
-            producer_agent_id=str(handoff.get("agent_id") or "") or None,
-            producer_agent_role=str(handoff.get("agent_role") or "") or None,
+            producer_agent_id=producer_agent_id,
+            producer_agent_role=producer_agent_role,
             related_finding_slug=related_finding_slug,
         )
 

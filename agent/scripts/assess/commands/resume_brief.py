@@ -16,6 +16,13 @@ def register(subparsers) -> None:
     p.add_argument("--q", default="", help="Optional topic/query for command and artifact context.")
     p.add_argument("--finding", default="", help="Optional finding slug or alias, e.g. VA-047 or VA047.")
     p.add_argument("--agent-id", default="", help="Optional dispatch agent_id to include handoff/dispatch details.")
+    p.add_argument(
+        "--max-age-hours",
+        dest="max_age_hours",
+        type=float,
+        default=24.0,
+        help="Age threshold for in-progress dispatches flagged stale. Defaults to 24h (matches `agent reconcile-stale`).",
+    )
     p.add_argument("--json", dest="as_json", action="store_true")
     p.set_defaults(func=run)
 
@@ -29,6 +36,8 @@ def run(args) -> None:
         params.append(("finding", args.finding))
     if args.agent_id:
         params.append(("agent_id", args.agent_id))
+    if getattr(args, "max_age_hours", None) and float(args.max_age_hours) != 24.0:
+        params.append(("max_age_hours", str(float(args.max_age_hours))))
     endpoint = "resume-brief"
     if params:
         endpoint += "?" + urlencode(params, quote_via=quote)
@@ -81,6 +90,36 @@ def _render_markdown(brief: dict) -> str:
         lines.append(f"- gap: {row.get('agent_id')} role={row.get('agent_role')} reason={row.get('reason')}")
     if not (dispatches.get("stale_in_progress_dispatches") or dispatches.get("handoff_gaps")):
         lines.append("- no stale in-progress dispatches or handoff gaps in the brief window")
+    selected = dispatches.get("selected_dispatch")
+    if selected:
+        lines.extend(["", "## Selected Dispatch"])
+        lines.append(
+            f"- agent_id: {selected.get('agent_id')} role={selected.get('agent_role')} "
+            f"status={selected.get('status')} dispatched_at={selected.get('dispatched_at')}"
+        )
+        if selected.get("task"):
+            lines.append(f"- task: {_trim(str(selected.get('task') or ''), 200)}")
+        if selected.get("finding_slugs"):
+            lines.append(f"- finding_slugs: {', '.join(selected.get('finding_slugs') or [])}")
+    selected_handoff = dispatches.get("selected_handoff")
+    if selected_handoff:
+        lines.extend(["", "## Selected Handoff"])
+        lines.append(
+            f"- agent_id: {selected_handoff.get('agent_id')} "
+            f"status={selected_handoff.get('handoff_status')} "
+            f"version={selected_handoff.get('handoff_version')} "
+            f"last_checkpoint_at={selected_handoff.get('last_checkpoint_at')}"
+        )
+        if selected_handoff.get("summary"):
+            lines.append(f"- summary: {_trim(str(selected_handoff.get('summary') or ''), 400)}")
+        if selected_handoff.get("finding_slugs"):
+            lines.append(f"- finding_slugs: {', '.join(selected_handoff.get('finding_slugs') or [])}")
+        for step in (selected_handoff.get("next_steps") or [])[:3]:
+            if isinstance(step, dict):
+                lines.append(
+                    f"- next: {step.get('action') or '-'} → {step.get('target') or '-'} "
+                    f"({step.get('recommended_agent') or '-'})"
+                )
     lines.extend(["", "## Command Runs"])
     for row in brief.get("command_runs") or []:
         lines.append(f"- #{row.get('id')} {row.get('created_at')} {row.get('tool_bin') or row.get('tool_name')} {row.get('agent_name')} :: {_trim(row.get('intent') or row.get('command') or '', 120)}")
