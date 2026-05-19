@@ -9,7 +9,6 @@ from pathlib import Path
 
 from . import config as config_module
 from . import docker
-from .engagements import current_engagement_path, resolve_engagement_path
 from .install import InstallOptions, install_from_source
 from .mitmproxy import MitmproxyOptions, start_proxy
 from .oob import OobOptions, oob_status, start_oob
@@ -21,8 +20,6 @@ from .runtime import RuntimeOptions, build_runtime, start_runtime, stop_runtime
 @dataclass(frozen=True, slots=True)
 class UpOptions:
     install_root: Path
-    engagement: str | None = None
-    select: bool = False
     no_build: bool = False
     runtime_restart_timeout: int = 10
     yes_restart_runtime: bool = False
@@ -130,12 +127,14 @@ def _start_mitmproxy_if_needed(install_root: Path, options: UpOptions, *, runner
     if docker.container_running("security-research-proxy", runner=runner):
         print("mitmproxy\talready running")
         return
-    engagement = _resolve_optional_engagement(install_root, options)
-    if engagement is None:
-        print("mitmproxy\tskipped; run `aith mitmproxy start --select` or pass `aith up --engagement <key>`")
-        return
-    print(f"mitmproxy\tstarting for {engagement.name}")
-    start_proxy(MitmproxyOptions(install_root=install_root, engagement_dir=engagement), runner=runner)
+    engagements_root = install_root / "agent" / "engagements"
+    engagements_root.mkdir(parents=True, exist_ok=True)
+    print("mitmproxy\tstarting (serves all active engagements)")
+    start_proxy(
+        MitmproxyOptions(install_root=install_root, engagements_root=engagements_root),
+        runner=runner,
+    )
+    del options  # accepted for signature parity; the proxy no longer pins to an engagement
 
 
 def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
@@ -181,14 +180,6 @@ def _oob_options(install_root: Path) -> OobOptions:
     port = int(os.environ.get("AI_THREAT_HUNTING_FRP_PORT") or config_module.get_config_value("oob.frp_port", str(DEFAULT_FRP_PORT)) or DEFAULT_FRP_PORT)
     domain = os.environ.get("AI_THREAT_HUNTING_OOB_DOMAIN") or config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN) or DEFAULT_OOB_DOMAIN
     return OobOptions(install_root=install_root, frp_host=host, frp_port=port, frp_token=token, oob_domain=domain)
-
-
-def _resolve_optional_engagement(install_root: Path, options: UpOptions) -> Path | None:
-    if options.engagement:
-        return resolve_engagement_path(install_root, options.engagement)
-    if options.select:
-        return resolve_engagement_path(install_root, select=True)
-    return current_engagement_path()
 
 
 def _runtime_image_inputs(install_root: Path) -> list[Path]:

@@ -47,6 +47,7 @@ def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-exampl
         encoding="utf-8",
     )
     (engagement_dir / "log.md").write_text("# Engagement Log\n", encoding="utf-8")
+    (engagement_dir / "findings.md").write_text("# Findings\n", encoding="utf-8")
     (engagement_dir / "sessions" / "index.json").write_text(
         json.dumps(
             [
@@ -73,6 +74,87 @@ def test_list_engagements_discovers_filesystem_engagements(client, isolate_setti
     assert payload[0]["key"] == "2026-03-30-120000-example"
     assert payload[0]["current_phase"] == "exploit"
     assert payload[0]["session_count"] == 1
+
+
+def test_list_engagements_surfaces_scope_hosts_for_proxy_router(client, isolate_settings):
+    """The multi-engagement mitmproxy router fetches the active engagement set
+    from this endpoint; scope_hosts must be present so the addon can route
+    captured flows without a second round-trip to read scope.json.
+    """
+    engagements_dir = isolate_settings["engagements_dir"]
+    engagement_dir = engagements_dir / "2026-04-01-100000-multi"
+    (engagement_dir / "sessions").mkdir(parents=True)
+    (engagement_dir / "engagement.json").write_text(
+        json.dumps(
+            {
+                "key": "2026-04-01-100000-multi",
+                "target": "https://multi.example",
+                "created_at": "2026-04-01T10:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (engagement_dir / "scope.json").write_text(
+        json.dumps(
+            {
+                "hostname": "multi.example",
+                "hosts": ["multi.example", "*.multi.example"],
+                "scope": ["legacy.multi.example"],
+                "status": "in_progress",
+                "current_phase": "recon",
+                "scope_priority": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (engagement_dir / "sessions" / "index.json").write_text("[]", encoding="utf-8")
+
+    response = client.get("/engagements")
+    assert response.status_code == 200
+    row = next(item for item in response.json() if item["key"] == "2026-04-01-100000-multi")
+    assert row["scope_hosts"] == ["multi.example", "*.multi.example", "legacy.multi.example"]
+    assert row["scope_priority"] == 5
+
+
+def test_list_engagements_filters_by_status(client, isolate_settings):
+    """The proxy registry asks for ?status=in_progress so completed engagements
+    don't keep claiming traffic. The filter must apply to the same payload
+    shape as the unfiltered list.
+    """
+    engagements_dir = isolate_settings["engagements_dir"]
+    active_dir = engagements_dir / "2026-04-02-100000-active"
+    completed_dir = engagements_dir / "2026-04-02-100100-completed"
+    for path, status in ((active_dir, "in_progress"), (completed_dir, "completed")):
+        (path / "sessions").mkdir(parents=True)
+        (path / "engagement.json").write_text(
+            json.dumps(
+                {
+                    "key": path.name,
+                    "target": f"https://{path.name}.example",
+                    "created_at": "2026-04-02T10:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (path / "scope.json").write_text(
+            json.dumps(
+                {
+                    "hostname": f"{path.name}.example",
+                    "hosts": [f"{path.name}.example"],
+                    "status": status,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (path / "sessions" / "index.json").write_text("[]", encoding="utf-8")
+
+    all_keys = {row["key"] for row in client.get("/engagements").json()}
+    assert active_dir.name in all_keys
+    assert completed_dir.name in all_keys
+
+    active_only = {row["key"] for row in client.get("/engagements?status=in_progress").json()}
+    assert active_dir.name in active_only
+    assert completed_dir.name not in active_only
 
 
 def test_maybe_sync_engagements_skips_repeated_resync_without_filesystem_changes(isolate_settings, monkeypatch):
@@ -593,7 +675,7 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
 
     missing_finding = client.get("/engagements/2026-03-30-120000-example/assessment/findings/VA-404")
     assert missing_finding.status_code == 404
-    assert missing_finding.json()["detail"] == "finding not found"
+    assert missing_finding.json()["detail"].startswith("finding not found: VA-404")
 
     summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
     assert summary.status_code == 200
@@ -621,6 +703,145 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     )
     assert final_report.status_code == 200
     assert [row["slug"] for row in final_report.json()["standalone"]] == ["VA-001"]
+
+
+def test_finding_create_rejects_malformed_slug_and_lookup_accepts_alias(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    malformed = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "VA047",
+            "title": "Malformed slug",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "canonical_location": "https://example.com/malformed",
+            "summary": "Malformed slug should be rejected at write time.",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert malformed.status_code == 400
+    assert "did you mean VA-047" in malformed.json()["detail"]
+
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "VA-047",
+            "title": "Canonical slug",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "canonical_location": "https://example.com/canonical",
+            "summary": "Canonical slug should be stored.",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    alias_lookup = client.get("/engagements/2026-03-30-120000-example/assessment/findings/VA047")
+    assert alias_lookup.status_code == 200
+    assert alias_lookup.json()["slug"] == "VA-047"
+
+
+def test_finding_auto_slug_counts_canonical_ids_beyond_999(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    seeded = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "VA-1000",
+            "title": "Existing high-volume canonical slug",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "canonical_location": "https://example.com/high-volume/1000",
+            "summary": "Existing finding beyond the first 999 IDs.",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert seeded.status_code == 201, seeded.text
+
+    allocated = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "title": "Next high-volume canonical slug",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "canonical_location": "https://example.com/high-volume/1001",
+            "summary": "Auto-allocation should not collide with VA-1000.",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert allocated.status_code == 201, allocated.text
+    assert allocated.json()["finding"]["slug"] == "VA-1001"
+
+
+def test_finding_auto_slug_falls_back_for_unknown_source_name(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "title": "Unknown source finding",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "canonical_location": "https://example.com/unknown",
+            "summary": "Clients that omit source_name still get a backend slug.",
+            "evidence_ref": "findings.md",
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["finding"]["slug"] == "unknown-source-finding-https-example-com-unknown"
+
+
+def test_patch_finding_accepts_existing_database_legacy_slug(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+    assert client.get("/engagements/2026-03-30-120000-example").status_code == 200
+    db_path = db_module.database_path()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        engagement_id = connection.execute(
+            "SELECT id FROM engagements WHERE key = ?",
+            ("2026-03-30-120000-example",),
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO assessment_findings (
+                engagement_id, slug, title, severity, status,
+                verification_state, verification_disposition, canonical_location,
+                source_name, summary, evidence_ref
+            ) VALUES (?, 'legacy-title-slug', 'Legacy row', 'medium', 'active',
+                'unreviewed', 'none', 'https://example.com/legacy',
+                'vulnerability-analyst', 'Before update', 'findings.md')
+            """,
+            (engagement_id,),
+        )
+        connection.commit()
+
+    patched = client.patch(
+        "/engagements/2026-03-30-120000-example/assessment/findings/legacy-title-slug",
+        json={
+            "summary": "Updated without forcing a new slug spelling.",
+            "reason_code": "legacy_db_row",
+            "reason_text": "Existing database row retained its pre-canonical slug.",
+        },
+    )
+
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["finding"]["slug"] == "legacy-title-slug"
+    assert patched.json()["finding"]["summary"] == "Updated without forcing a new slug spelling."
 
 
 def test_events_synthesizes_legacy_log_artifact_timeline(client, isolate_settings):
@@ -1028,7 +1249,7 @@ def test_findings_patch_allows_explicit_workflow_rollback(client, isolate_settin
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "CH-010A",
+            "slug": "CH-011",
             "title": "Workflow rollback candidate",
             "severity": "medium",
             "workflow_status": "active",
@@ -1050,7 +1271,7 @@ def test_findings_patch_allows_explicit_workflow_rollback(client, isolate_settin
     assert created.status_code == 201
 
     patched = client.patch(
-        "/engagements/2026-03-30-120000-example/assessment/findings/CH-010A",
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-011",
         json={
             "workflow_status": "draft",
             "reason_code": "needs-retriage",
@@ -1067,7 +1288,7 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "CH-010B",
+            "slug": "CH-012",
             "title": "Patch/merge race candidate",
             "severity": "high",
             "workflow_status": "active",
@@ -1101,7 +1322,7 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
                 SET status = 'merged',
                     merged_into_finding_id = id,
                     updated_at = '2099-01-01 00:00:00'
-                WHERE slug = 'CH-010B'
+                WHERE slug = 'CH-012'
                 """
             )
             connection.commit()
@@ -1110,7 +1331,7 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
     monkeypatch.setattr(state_manager, "create_finding", race)
 
     patched = client.patch(
-        "/engagements/2026-03-30-120000-example/assessment/findings/CH-010B",
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-012",
         json={"notes": "Late patch should not overwrite a merged finding."},
     )
 

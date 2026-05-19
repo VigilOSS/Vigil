@@ -168,7 +168,7 @@ In non-interactive runs the safe default is the parsed target hostname as the so
 If the engagement needs authenticated coverage or out-of-band callbacks, set those up before launching the client:
 
 ```bash
-aith mitmproxy start <engagement-key>   # browse through 127.0.0.1:8080 to populate auth.json
+aith mitmproxy start                    # one proxy serves all active engagements; browse 127.0.0.1:8080
 aith oob start                          # shared frp/interactsh; see "Callback, Listener & Tunnel Handling"
 ```
 
@@ -232,11 +232,15 @@ explicit human approval required before any exploit-developer dispatch.
 
 #### Refined — resume with prior context
 
-Use this when continuing across sessions. Paste the rendered handoff blob from the prior agent (run `aith assess agent render-handoff <agent-id>` before closing the previous session) in place of `<paste here>`.
+Use this when continuing across sessions. The operator's first action is `aith assess
+resume-brief` for a bounded backend snapshot; paste the rendered handoff blob from the prior
+agent (run `aith assess agent render-handoff <agent-id>` before closing the previous session)
+when the new session continues a specific dispatch.
 
 ```
 Read AGENTS.md and assume Operator role. Run agent/rules/resume.md hydration before
-planning anything — read current backend state before deciding what to do next.
+planning anything — start with `aith assess resume-brief` (narrow with --finding, --q,
+or --agent-id for targeted continuation).
 
 Authorized engagement: https://bugcrowd.com/engagements/<slug>
 Continue phases <X, Y, Z> to completion. Use specialist agents for all dispatched work;
@@ -247,9 +251,34 @@ Depth is the default. "Quick" is not desired — thorough and deep coverage is.
 Prefer claude-opus-4-7 / gpt-5.5 xhigh for substantial work; medium only for bounded sidecar tasks.
 Exploitation policy: <pause|selected|full_send> per scope.json.
 
-Previous agent context:
+Previous agent context (paste only when continuing a specific dispatch):
 <paste aith assess agent render-handoff <agent-id> output here>
 ```
+
+### Resume, artifacts, and dispatch closure (operator CLI surface)
+
+The orchestrator backend is the canonical store for engagement state. Use these CLI
+commands to read and close that state — they replace ad-hoc file scraping and
+transcript pasting:
+
+- `aith assess resume-brief [--finding <slug>] [--q <text>] [--agent-id <id>] [--max-age-hours N]`
+  — bounded JSON+markdown operating picture (finding queues, recent decisions, stale
+  dispatches, handoff gaps, top command-history matches, indexed artifacts, and
+  one-shot drill-down commands keyed by id).
+- `aith assess artifact sync|search|get|register|mark-scratch`
+  — engagement-local file index. `sync` scans the default roots (`notes/`,
+  `findings_payloads/`, `tools/exploit-state/`, `scans/reports/`, `downloads/`) and
+  marks missing files. `search` is FTS over previews + paths + linked finding slugs.
+  `mark-scratch <path-or-id>` dismisses a markdown note as scratch so
+  `check-report-readiness` no longer blocks on it (the escape valve for operator or
+  specialist working notes that are not durable engagement memory).
+- `aith assess agent close <agent-id>`
+  — close an in-progress dispatch when its handoff is `ready` or `blocked`. Records a
+  `dispatch_closed_from_handoff` decision row.
+- `aith assess agent reconcile-stale [--dry-run] [--max-age-hours N]`
+  — list in-progress dispatches older than the threshold; close ones whose handoff is
+  `ready`/`blocked` automatically. Always prints every candidate with `closed=true|false`
+  and a `skip_reason`.
 
 ### Starting a code analysis engagement
 
@@ -344,7 +373,7 @@ A lightweight runtime also exists at `agent/docker/runtime-lightweight/Dockerfil
 
 `aith engagement create` seeds an anonymous `auth.json` (`mode: none`). Three ways to add an authenticated session later:
 
-- Run `aith mitmproxy start <key>` and browse through the proxy — `proxy_addon.py` rewrites `auth.json` with the captured cookies/headers.
+- Run `aith mitmproxy start` (one proxy serves every active engagement) and browse through `127.0.0.1:8080` — `proxy_addon.py` matches the captured host against each engagement's `scope.json` and writes the cookies/headers to THAT engagement's `auth.json`. No engagement context is required at proxy-start time; multiple engagements can be authenticated in parallel without restarting the proxy.
 - Run `aith auth import <key> --source cookies-and-headers.json`.
 - Edit `auth.json` directly.
 
@@ -376,8 +405,10 @@ These capabilities are intentionally present but not always started automaticall
 
 `aith engagement create` prints whether mitmproxy is running and the start command if it is not. This subsection is the deep reference.
 
-1. `aith mitmproxy start <engagement-key>` — the CLI builds the Docker image if needed, bind-mounts the engagement at `/engagement`, persists the mitmproxy CA in a Docker volume, and verifies the local proxy port.
-2. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow, then confirm that `auth.json` was refreshed. Continue the engagement with authenticated recollection and testing. Use `aith logs mitmproxy` for capture logs.
+1. `aith mitmproxy start` — the CLI builds the Docker image if needed, bind-mounts the install's `agent/engagements/` directory at `/engagements` (so the addon sees every engagement at once), persists the mitmproxy CA in a Docker volume, and verifies the local proxy port. No engagement context is required.
+2. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow against any scoped host, then confirm that the matching engagement's `auth.json` was refreshed. Continue with authenticated recollection and testing. Use `aith logs mitmproxy` for capture logs.
+
+The addon routes each captured response to the engagement whose `scope.json` best matches the hostname (precedence: literal host > narrower wildcard > engagement `scope_priority` > most-recently-updated). After creating or scope-editing an engagement, `aith mitmproxy reload` forces the addon to refresh its registry; `aith mitmproxy routes` prints the current mapping for verification.
 
 If you need HTTPS interception, install the mitmproxy CA certificate in the browser or device before logging in.
 

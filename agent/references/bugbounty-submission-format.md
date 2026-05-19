@@ -8,7 +8,7 @@ The output is designed to map cleanly onto the platform's submission form. The o
 
 - **`VRT:` line** → platform's VRT / Vulnerability Category field
 - **`Title:` line** → platform's Submission Title field
-- **`POC:` file** → upload as attachment on the submission
+- **`POC:` block** → identifies what to attach; omit entirely for inline-only reproductions
 - **Everything from `### Summary` down to the end of the file** → platform's Description / Body field
 
 The `---` separator exists so the operator can select the entire body block in one contiguous paste without stripping metadata lines. Do not put anything between the separator and `### Summary` that the operator should not paste into the platform.
@@ -22,16 +22,19 @@ The `---` separator exists so the operator can select the entire body block in o
 
 **Severity:** [P1-P4]
 
+[PoC block — see "PoC block" below. Omit entirely for inline-only reproductions.]
+
 ---
 
 ### Summary
 [2-4 sentences. First sentence = attacker outcome. Then the code fault. Then what the POC proves.]
 
 ### Steps to Reproduce
-[Numbered steps. One action per step. No narrative between steps. Include the POC command.]
+[Numbered steps. One action per step. No narrative between steps. Include the run command or
+inline requests — whichever form the PoC takes.]
 
 ### Evidence
-[Key POC output proving the finding. Annotated with <-- proof markers on critical lines.
+[Key PoC output proving the finding. Annotated with <-- proof markers on critical lines.
 Truncated to only the lines that matter. No full tool dumps.
 Real customer PII must be redacted — see "PII redaction" below.]
 
@@ -42,8 +45,52 @@ Real customer PII must be redacted — see "PII redaction" below.]
 [1-2 sentences. Proven impact only. Quantify by shape/count without exposing raw PII.]
 
 ### Remediation
-[1-2 sentences. Name the technology, the control, the fix.]
+[1-3 items. Primary fix first. One defense-in-depth item at most. No "validate the fix" step.]
 ```
+
+## PoC block
+
+Choose the form that fits the reproduction. Place the block between `**Severity:**` and the `---` separator. Omit entirely when all reproduction steps are inline requests or commands pasted directly into Steps to Reproduce.
+
+**Inline only — no attachment:**
+Omit the block. Steps to Reproduce contains everything the triager needs to run.
+
+**Single file:**
+```
+**POC:** `<filename>` — attach
+**Run:** `<runtime> <filename>`
+**Pass if:** <one-line observable success criterion>
+```
+
+**Multiple files:**
+```
+**POC:** `<main>`, `<file2>`, `<file3>` — attach all
+**Run:** `<runtime> <main>`
+**Pass if:** <one-line observable success criterion>
+```
+
+Rules for the PoC block:
+- `**Run:**` is the exact command the triager copies and pastes. Include environment setup (e.g., `source env.sh && python3 poc.py`) in the command, not in a separate step.
+- `**Pass if:**` is one observable line — what the triager sees in output that confirms the finding. Not a paragraph, not a list.
+- Use the actual file extension. Do not normalize everything to `.sh`.
+- If setup requires manual prerequisites (running a server, creating a test account), document them with `# SETUP:` comments inside the script, not in the PoC block.
+
+## Section budgets
+
+These are hard ceilings. A section that exceeds its budget needs to be cut, not wrapped.
+
+| Section | Budget |
+|---|---|
+| Title | 12 words, single clause |
+| Summary | 4 sentences |
+| Steps to Reproduce | One sentence per step, no narrative between steps |
+| Attack Scenario | 3 sentences |
+| Impact | 2 sentences |
+| Remediation | 3 items |
+| Related Findings (if present) | 1 sentence per cross-reference |
+| Deconfliction (if required by program) | 3 lines: researcher ID, source IP, UTC time window |
+
+Sections not in this table (Chain Potential, Defender-positive, Probe Coverage, Architectural Analysis, Fix Validation steps) do not exist in external submissions. If content belongs in one of those categories, it belongs in the internal `report.md`, not the submission.
 
 ## Rules
 
@@ -71,29 +118,42 @@ Bug bounty submissions are standalone deliverables — nothing inside them shoul
 - **No engagement keys, engagement directory paths, `$DIR/`, `$ENGAGEMENT_KEY/`, or backend URLs.**
 - **No cross-references to other findings in the same engagement** — each submission stands alone. If two findings share a root cause, file two submissions; if one finding genuinely depends on another, describe the dependency in plain English, not via a finding ID.
 - **No operator/tool metadata breadcrumbs** — tool run IDs, MCP command IDs, activity log references, `aith assess` invocations.
-- **No internal tooling breadcrumbs** — references to alternate reproducers, "bundled" all-in-one scripts, operator convenience wrappers, or `tools/` paths belong in the internal report. The submission points at one POC — the one the triager should run. "Also available at…" creates ambiguity and exposes research-time scaffolding the platform does not need.
+- **No internal tooling breadcrumbs** — references to alternate reproducers, operator convenience wrappers, or internal `tools/` paths belong in the internal report. "Also available at…" creates ambiguity and exposes research-time scaffolding the platform does not need.
 
 ### Format-specific
 
 - Each finding is one submission. Do not bundle.
-- One POC file per submission. If research produced granular and bundled scripts, attach the single file that proves the finding end-to-end — additional reproducers are operator scaffolding and stay in the internal report.
-- The POC must exercise the vendor's code, not reimplemented logic. Import and call their functions. Run their binary. Show their output.
-- If end-to-end testing requires infrastructure (LDAP server, SSH host, proxy), document what must be set up manually and what the script does. Use `# SETUP:` comments in scripts for manual prerequisite steps.
-- Evidence must come from running the POC, not from reading the source. Code analysis supports the description but does not replace proof.
+- **Choose the right PoC form.** Inline requests (curl, HTTP) pasted into Steps to Reproduce need no attachment. A script that must be run gets the PoC block with `**Run:**` and `**Pass if:**`. Multiple supporting files (payload file, env config, helper module) are listed in the PoC block and all attached — do not artificially collapse them into one file.
+- Attach only what the triager needs to reproduce the finding. Internal scaffolding, bundled all-in-one scripts, and alternate reproducers stay in the internal report.
+- The PoC must exercise the vendor's code, not reimplemented logic. Import and call their functions. Run their binary. Show their output.
+- Evidence must come from running the PoC, not from reading the source. Code analysis supports the description but does not replace proof.
 - Credentials and secrets go in environment variables, never in submission text or script source.
 
 ## Pre-submission checklist
 
 Verify every item before handing the submission file to the operator. Any failing item blocks the submission.
 
-- [ ] `Title:` is a single line, no markdown/backticks/finding-IDs, follows the title formula
+**Structure and content**
+- [ ] `Title:` is a single line, ≤12 words, no markdown/backticks/finding-IDs, follows the title formula — no sub-clauses, no parenthetical product aliases
 - [ ] `VRT:` is populated with a specific platform-taxonomy path (not blank, not "TBD", not "N/A")
-- [ ] `Severity:` matches proven impact, not imagined worst case
+- [ ] `Severity:` and CVSS score match proved impact — if write operations were rejected by application-layer validation, `I` is not `H`
 - [ ] `---` separator is present so the operator can paste the body in one block
 - [ ] Body starts with `### Summary` and the summary leads with attacker outcome in sentence 1
 - [ ] Evidence contains no raw customer PII (emails, phone numbers, case/account/SSN values, real names). Exposure is proved by shape and count, with partial masking where needed
 - [ ] No internal finding slugs, engagement paths, or tool run IDs anywhere in the body
-- [ ] Remediation names a specific technology and control, not generic advice
+- [ ] Remediation names a specific technology and control, not generic advice — ≤3 items, no "validate the fix" item
+- [ ] PoC form matches the reproduction: inline-only → no block; script → PoC block with correct extension, `**Run:**` command, and one-line `**Pass if:**`; multi-file → all files listed in the block
+
+**Human voice — AI tell elimination (Rule 20)**
+- [ ] No "Defender-positive", "Dead ends", "Negative findings", or "What was ruled out" section or sub-section exists anywhere in the submission
+- [ ] No probe counts, request volumes, or percentile latencies appear anywhere in the submission body
+- [ ] Deconfliction (if present) is ≤3 lines: researcher ID, source IP, UTC time window — no per-phase breakdowns, no marker string lists, no rate pledges
+- [ ] Attack scenario uses a realistic adversary class, not a cartoonish persona ("student in a dorm room", "script kiddie") — 3 sentences maximum
+- [ ] No sentence instructs the reviewer how to interpret, score, or act on the finding (`"please do not treat"`, `"recorded so triage does not re-investigate"`, `"triage can prioritize"`)
+- [ ] No section exists outside the defined structure (no Chain Potential, Architectural Analysis, Fix Validation, Related Findings as multi-paragraph blocks)
+- [ ] The word "submission" does not appear in the body prose — use "finding" or "report"
+- [ ] CWE, CVSS, or VRT that appear in header fields are not restated or justified inside body prose
+- [ ] Related findings (if present) are one sentence each at the end of the submission, not multi-paragraph cross-references
 
 ## Example
 

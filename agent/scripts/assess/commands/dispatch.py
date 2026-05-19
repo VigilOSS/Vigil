@@ -227,6 +227,12 @@ def register(subparsers) -> None:
                    help="(handoff) Open question; repeatable.")
     p.add_argument("--recommended-next-agent", dest="hf_recommended_next_agent", default=None,
                    help="(handoff) Suggested next role.")
+    p.add_argument("--handoff-status", dest="hf_handoff_status", default=None,
+                   choices=("checkpointed", "ready", "blocked", "superseded"),
+                   help="(handoff) Checkpoint lifecycle status.")
+    p.add_argument("--closed-dispatch-status", dest="hf_closed_dispatch_status", default=None,
+                   choices=("completed", "blocked", "failed", "aborted"),
+                   help="(handoff) Dispatch status to apply when `agent close` consumes a ready/blocked handoff.")
     p.add_argument("--extras-json", dest="hf_extras_json", default=None,
                    help="(handoff) Extras dict (inline JSON or path).")
     p.set_defaults(func=run)
@@ -1915,6 +1921,10 @@ def _build_handoff_payload(args) -> dict:
         payload["open_questions"] = list(open_qs)
     if getattr(args, "hf_recommended_next_agent", None):
         payload["recommended_next_agent"] = args.hf_recommended_next_agent
+    if getattr(args, "hf_handoff_status", None):
+        payload["handoff_status"] = args.hf_handoff_status
+    if getattr(args, "hf_closed_dispatch_status", None):
+        payload["closed_dispatch_status"] = args.hf_closed_dispatch_status
     extras_json = getattr(args, "hf_extras_json", None)
     if extras_json:
         loaded = _load_json_arg(extras_json)
@@ -1939,6 +1949,8 @@ def _record_handoff(args) -> None:
             "hf_working_artifacts",
             "hf_open_questions",
             "hf_recommended_next_agent",
+            "hf_handoff_status",
+            "hf_closed_dispatch_status",
             "hf_extras_json",
         )
     )

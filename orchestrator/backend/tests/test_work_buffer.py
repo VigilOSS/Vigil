@@ -75,7 +75,9 @@ def _load_proxy_addon_module():
             warn=lambda *_args, **_kwargs: None,
             error=lambda *_args, **_kwargs: None,
         ),
-        options=SimpleNamespace(engagement_dir="", engagement_key=""),
+        options=SimpleNamespace(
+            engagements_root="", engagement_dir="", registry_poll_seconds=30
+        ),
     )
     sys.modules.setdefault("mitmproxy", mitmproxy)
     sys.modules.setdefault("mitmproxy.http", http)
@@ -83,6 +85,25 @@ def _load_proxy_addon_module():
         "test_proxy_addon_module",
         "agent/scripts/proxy_addon.py",
     )
+
+
+def _make_collector_with_engagement(module, root: Path, *, key: str = "eng-1"):
+    """Helper for tests that need a CaseCollector preloaded with a single
+    engagement entry pointing at ``root/<key>``. Returns ``(collector, entry)``.
+    """
+    engagement_dir = root / key
+    engagement_dir.mkdir(parents=True, exist_ok=True)
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    entry = module.EngagementEntry(
+        key=key,
+        root=engagement_dir,
+        scope_patterns=[],
+        scope_priority=0,
+        updated_at="",
+    )
+    collector.registry = {key: entry}
+    return collector, entry
 
 
 def _make_fresh_db(tmp_path: Path, name: str = "cases.db") -> Path:
@@ -587,15 +608,14 @@ def test_db_insert_inline_classifies_unknown_trust_surface(tmp_path: Path) -> No
 
 def test_proxy_insert_uses_shared_inline_classification(tmp_path: Path) -> None:
     module = _load_proxy_addon_module()
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
-    collector = module.CaseCollector()
-    collector.engagement_dir = str(engagement_dir)
-    collector._init_db()
+    engagements_root = tmp_path / "engagements"
+    engagements_root.mkdir()
+    collector, entry = _make_collector_with_engagement(module, engagements_root)
 
     case_type = collector._classify_type("GET", "/oauth/callback", "", {})
     assert case_type == "unknown"
     collector._insert_case(
+        entry,
         queue_key="variant:1:unknown",
         request_variant_id=1,
         service_id=None,
@@ -621,7 +641,7 @@ def test_proxy_insert_uses_shared_inline_classification(tmp_path: Path) -> None:
         params_key_sig="",
     )
 
-    conn = sqlite3.connect(str(engagement_dir / "cases.db"))
+    conn = sqlite3.connect(str(entry.root / "cases.db"))
     try:
         row = conn.execute(
             "SELECT type, status, priority_score, cluster_key, priority_reason "
@@ -636,9 +656,13 @@ def test_proxy_insert_uses_shared_inline_classification(tmp_path: Path) -> None:
 
 def test_proxy_insert_reuses_open_db_connection(tmp_path: Path, monkeypatch) -> None:
     module = _load_proxy_addon_module()
-    collector = module.CaseCollector()
-    collector.engagement_dir = str(tmp_path)
-    collector.db = object()
+    engagements_root = tmp_path / "engagements"
+    engagements_root.mkdir()
+    collector, entry = _make_collector_with_engagement(module, engagements_root)
+    # Pre-populate the cached DB handle on the entry; _insert_case must reuse it
+    # rather than re-opening cases.db per call.
+    cached_connection = object()
+    entry.db = cached_connection
     seen: dict[str, object] = {}
 
     def fake_insert(_db_path: str, **kwargs) -> None:
@@ -646,6 +670,7 @@ def test_proxy_insert_reuses_open_db_connection(tmp_path: Path, monkeypatch) -> 
 
     monkeypatch.setattr(module, "db_insert_work_item", fake_insert)
     collector._insert_case(
+        entry,
         queue_key="variant:1:unknown",
         request_variant_id=1,
         service_id=None,
@@ -671,7 +696,7 @@ def test_proxy_insert_reuses_open_db_connection(tmp_path: Path, monkeypatch) -> 
         params_key_sig="",
     )
 
-    assert seen["connection"] is collector.db
+    assert seen["connection"] is cached_connection
 
 
 def test_fetch_by_priority_vuln_agent_routes_scored_unknown_only(
