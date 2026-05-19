@@ -229,6 +229,20 @@ The default output is `report.md` (internal engagement report). Two alternate mo
 - **Bug bounty submissions** — load `agent/references/bugbounty-submission-format.md` and the LDAP injection example.
 - **Email disclosures** — load `agent/references/disclosure-email-format.md` and the fast-import example.
 
+### Bug bounty: mandatory AI-tell check before delivery
+
+Before producing a bug bounty submission, run the full pre-submission checklist in `agent/references/bugbounty-submission-format.md`, including the **Human voice — AI tell elimination** block. Every item in that block must pass. The most common failures are:
+
+- Defender-positive or dead-end sections (probe results that found nothing)
+- Probe counts or per-phase timing in the deconfliction block
+- Titles longer than 12 words or with sub-clauses
+- CVSS `I:H` assigned when writes returned HTTP 200 but were rejected at the application layer
+- Remediation with more than 3 items or a "validate the fix" step
+- Attack scenario using a cartoonish persona
+- Sentences instructing the reviewer how to interpret the finding
+
+`reporting.md` Rule 20 governs all of these. Read it before drafting.
+
 ## Handoffs
 
 - Back to `operator`: when evidence is missing, severity is inconsistent, or a finding needs clarification before it can be reported cleanly

@@ -3309,7 +3309,11 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "kind": "finding_missing_evidence_ref",
                         "slug": slug,
                         "title": row.get("title", ""),
-                        "detail": "active/reportable finding has no evidence_ref",
+                        "detail": (
+                            f"active/reportable finding {slug} has no evidence_ref. "
+                            f"Fix with `aith assess update-finding {slug} --evidence-ref <relative-path>` "
+                            "after writing the evidence artifact to disk."
+                        ),
                     }
                 )
                 continue
@@ -3320,7 +3324,11 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "kind": "finding_evidence_unindexed",
                         "slug": slug,
                         "title": row.get("title", ""),
-                        "detail": f"evidence_ref={evidence_ref} is not indexed; run artifact sync/register",
+                        "detail": (
+                            f"finding {slug} evidence_ref={evidence_ref!r} is not in the artifact index. "
+                            f"Fix with `aith assess artifact register {evidence_ref} --finding {slug}` "
+                            "or `aith assess artifact sync` if the path is under a default sync root."
+                        ),
                     }
                 )
             elif not bool(artifact.get("present")):
@@ -3329,7 +3337,12 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "kind": "finding_evidence_missing_artifact",
                         "slug": slug,
                         "title": row.get("title", ""),
-                        "detail": f"indexed artifact is missing: {evidence_ref}",
+                        "detail": (
+                            f"finding {slug} evidence_ref={evidence_ref!r} is indexed but the file is "
+                            "missing on disk. Restore the file and run `aith assess artifact sync`, or "
+                            f"update the finding to point at a present artifact with "
+                            f"`aith assess update-finding {slug} --evidence-ref <relative-path>`."
+                        ),
                     }
                 )
 
@@ -3413,7 +3426,13 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 {
                     "kind": "stale_dispatch_ready_handoff",
                     "agent_id": row["agent_id"],
-                    "detail": f"{row['agent_role']} has {row['handoff_status']} handoff but dispatch is still in-progress",
+                    "detail": (
+                        f"{row['agent_role']} dispatch {row['agent_id']} has a "
+                        f"{row['handoff_status']!r} handoff but is still in-progress. "
+                        f"Close with `aith assess agent close {row['agent_id']}` "
+                        "or bulk-close ready/blocked stales with "
+                        "`aith assess agent reconcile-stale`."
+                    ),
                 }
             )
 

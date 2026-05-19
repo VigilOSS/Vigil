@@ -25,6 +25,8 @@ For targeted continuation, narrow the brief instead of manually reconstructing s
 aith assess resume-brief --finding <finding-slug-or-alias>
 aith assess resume-brief --q "<scope-host-or-keyword>"
 aith assess resume-brief --agent-id <agent-id>
+aith assess resume-brief --since <iso-datetime>   # what's new since the last brief
+aith assess resume-brief --max-age-hours <N>      # override the per-role stale threshold
 ```
 
 The brief includes finding queues, recent decisions, stale dispatches, handoff gaps,

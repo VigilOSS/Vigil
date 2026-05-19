@@ -42,8 +42,25 @@ Real customer PII must be redacted — see "PII redaction" below.]
 [1-2 sentences. Proven impact only. Quantify by shape/count without exposing raw PII.]
 
 ### Remediation
-[1-2 sentences. Name the technology, the control, the fix.]
+[1-3 items. Primary fix first. One defense-in-depth item at most. No "validate the fix" step.]
 ```
+
+## Section budgets
+
+These are hard ceilings. A section that exceeds its budget needs to be cut, not wrapped.
+
+| Section | Budget |
+|---|---|
+| Title | 12 words, single clause |
+| Summary | 4 sentences |
+| Steps to Reproduce | One sentence per step, no narrative between steps |
+| Attack Scenario | 3 sentences |
+| Impact | 2 sentences |
+| Remediation | 3 items |
+| Related Findings (if present) | 1 sentence per cross-reference |
+| Deconfliction (if required by program) | 3 lines: researcher ID, source IP, UTC time window |
+
+Sections not in this table (Chain Potential, Defender-positive, Probe Coverage, Architectural Analysis, Fix Validation steps) do not exist in external submissions. If content belongs in one of those categories, it belongs in the internal `report.md`, not the submission.
 
 ## Rules
 
@@ -86,14 +103,26 @@ Bug bounty submissions are standalone deliverables — nothing inside them shoul
 
 Verify every item before handing the submission file to the operator. Any failing item blocks the submission.
 
-- [ ] `Title:` is a single line, no markdown/backticks/finding-IDs, follows the title formula
+**Structure and content**
+- [ ] `Title:` is a single line, ≤12 words, no markdown/backticks/finding-IDs, follows the title formula — no sub-clauses, no parenthetical product aliases
 - [ ] `VRT:` is populated with a specific platform-taxonomy path (not blank, not "TBD", not "N/A")
-- [ ] `Severity:` matches proven impact, not imagined worst case
+- [ ] `Severity:` and CVSS score match proved impact — if write operations were rejected by application-layer validation, `I` is not `H`
 - [ ] `---` separator is present so the operator can paste the body in one block
 - [ ] Body starts with `### Summary` and the summary leads with attacker outcome in sentence 1
 - [ ] Evidence contains no raw customer PII (emails, phone numbers, case/account/SSN values, real names). Exposure is proved by shape and count, with partial masking where needed
 - [ ] No internal finding slugs, engagement paths, or tool run IDs anywhere in the body
-- [ ] Remediation names a specific technology and control, not generic advice
+- [ ] Remediation names a specific technology and control, not generic advice — ≤3 items, no "validate the fix" item
+
+**Human voice — AI tell elimination (Rule 20)**
+- [ ] No "Defender-positive", "Dead ends", "Negative findings", or "What was ruled out" section or sub-section exists anywhere in the submission
+- [ ] No probe counts, request volumes, or percentile latencies appear anywhere in the submission body
+- [ ] Deconfliction (if present) is ≤3 lines: researcher ID, source IP, UTC time window — no per-phase breakdowns, no marker string lists, no rate pledges
+- [ ] Attack scenario uses a realistic adversary class, not a cartoonish persona ("student in a dorm room", "script kiddie") — 3 sentences maximum
+- [ ] No sentence instructs the reviewer how to interpret, score, or act on the finding (`"please do not treat"`, `"recorded so triage does not re-investigate"`, `"triage can prioritize"`)
+- [ ] No section exists outside the defined structure (no Chain Potential, Architectural Analysis, Fix Validation, Related Findings as multi-paragraph blocks)
+- [ ] The word "submission" does not appear in the body prose — use "finding" or "report"
+- [ ] CWE, CVSS, or VRT that appear in header fields are not restated or justified inside body prose
+- [ ] Related findings (if present) are one sentence each at the end of the submission, not multi-paragraph cross-references
 
 ## Example
 
