@@ -217,6 +217,13 @@ def _parse_indexed_at(value: Any) -> float | None:
         return None
 
 
+def _normalize_related_finding_slug(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    return canonical_finding_alias(raw) or raw
+
+
 def register_artifact(
     engagement_id: int,
     *,
@@ -238,7 +245,7 @@ def register_artifact(
     media_type_value = _media_type(relative_path, media_type)
     file_data = _file_payload_if_changed(engagement_id, root, relative_path, media_type_value)
     now = _utcnow_iso()
-    canonical_finding = canonical_finding_alias(related_finding_slug) if related_finding_slug else None
+    linked_finding = _normalize_related_finding_slug(related_finding_slug)
     with get_connection() as connection:
         connection.execute(
             """
@@ -283,7 +290,7 @@ def register_artifact(
                 producer_agent_id,
                 producer_agent_role,
                 producer_command_run_id,
-                canonical_finding,
+                linked_finding,
                 related_chain_key,
                 related_surface_id,
                 related_request_variant_id,

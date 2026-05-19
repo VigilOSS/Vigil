@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from fastapi import HTTPException, status
 
 from ..db import get_connection
+from .artifact_index import _normalize_relative_path
 from .events import _engagement_or_404
 from .search import (
     canonical_finding_alias,
@@ -75,6 +76,7 @@ _FINDING_PREFIX_BY_SOURCE = {
     "operator": "OP",
     "operator-review": "OR",
 }
+_TERMINAL_DISPATCH_STATUSES = {"completed", "failed", "aborted", "blocked"}
 
 
 def _json_text(value: Any) -> str:
@@ -1551,10 +1553,16 @@ def _finding_slug(
         return slug
     prefix = _FINDING_PREFIX_BY_SOURCE.get(str(source_name or "").strip())
     if not prefix:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="slug is required when source_name has no canonical finding prefix",
-        )
+        base = _slugify(f"{title}-{canonical_location}")
+        candidate = base
+        suffix = 2
+        while connection.execute(
+            "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement_id, candidate),
+        ).fetchone():
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        return candidate
     rows = connection.execute(
         "SELECT slug FROM assessment_findings WHERE engagement_id = ? AND slug LIKE ?",
         (engagement_id, f"{prefix}-%"),
@@ -1574,7 +1582,7 @@ def _require_canonical_finding_slug(slug: str | None, *, field: str = "finding_s
         suggestion = f"; did you mean {alias}?" if alias and alias != value else ""
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"{field} must be canonical <PREFIX>-<3 digits> (example VA-047){suggestion}",
+            detail=f"{field} must be canonical <PREFIX>-<at least 3 digits> (example VA-047){suggestion}",
         )
     return value
 
@@ -1596,6 +1604,48 @@ def _finding_not_found(connection, engagement_id: int, slug: str) -> HTTPExcepti
     if close:
         detail += "; close matches: " + ", ".join(close)
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+
+
+def _resolve_existing_finding_slug(
+    connection,
+    engagement_id: int,
+    slug: str | None,
+    *,
+    field: str = "finding_slug",
+) -> str:
+    value = str(slug or "").strip()
+    lookup = canonical_finding_alias(value) or value
+    if lookup:
+        row = connection.execute(
+            "SELECT slug FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement_id, lookup),
+        ).fetchone()
+        if row is not None:
+            return str(row["slug"])
+    if canonical_finding_alias(value):
+        raise _finding_not_found(connection, engagement_id, lookup)
+    _require_canonical_finding_slug(value, field=field)
+    raise _finding_not_found(connection, engagement_id, value)
+
+
+def _normalize_report_evidence_ref(root: Path, evidence_ref: str) -> str:
+    try:
+        return _normalize_relative_path(root, evidence_ref)
+    except HTTPException:
+        return evidence_ref
+
+
+def _require_terminal_dispatch_status(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if normalized not in _TERMINAL_DISPATCH_STATUSES:
+        allowed = ", ".join(sorted(_TERMINAL_DISPATCH_STATUSES))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"closed_dispatch_status must be terminal ({allowed})",
+        )
+    return normalized
 
 
 def _ensure_finding_slugs_exist(connection, engagement_id: int, slugs: list[str] | None) -> None:
@@ -1684,12 +1734,12 @@ def _upsert_finding_link(
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if str(target_kind) == "finding" and target_ref:
-        target_ref = _require_canonical_finding_slug(target_ref, field="target_ref")
-        if not connection.execute(
-            "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
-            (engagement_id, target_ref),
-        ).fetchone():
-            raise _finding_not_found(connection, engagement_id, target_ref)
+        target_ref = _resolve_existing_finding_slug(
+            connection,
+            engagement_id,
+            target_ref,
+            field="target_ref",
+        )
     row = connection.execute(
         """
         SELECT *
@@ -1751,6 +1801,7 @@ def create_finding(
     explicit_verification_state_override: bool = False,
     explicit_verification_disposition_override: bool = False,
     explicit_severity_override: bool = False,
+    allow_existing_noncanonical_slug: bool = False,
     transition_action: str | None = None,
     transition_reason_code: str = "",
     transition_reason_text: str = "",
@@ -1760,7 +1811,9 @@ def create_finding(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if slug:
-        slug = _require_canonical_finding_slug(slug, field="slug")
+        slug = str(slug).strip()
+        if not allow_existing_noncanonical_slug:
+            slug = _require_canonical_finding_slug(slug, field="slug")
     incoming_workflow_status = _normalize_workflow_status(workflow_status)
     incoming_verification_state = _normalize_verification_state(verification_state)
     incoming_verification_disposition = _normalize_verification_disposition(verification_disposition)
@@ -1988,6 +2041,7 @@ def update_finding(
         explicit_verification_state_override=verification_state is not None,
         explicit_verification_disposition_override=verification_disposition is not None,
         explicit_severity_override=severity is not None,
+        allow_existing_noncanonical_slug=True,
     )
     return result["finding"]
 
@@ -2021,14 +2075,12 @@ def patch_finding(
     expected_updated_at: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    slug = _require_canonical_finding_slug(slug)
     with get_connection() as connection:
+        slug = _resolve_existing_finding_slug(connection, engagement.id, slug)
         existing = connection.execute(
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, slug),
         ).fetchone()
-        if existing is None:
-            raise _finding_not_found(connection, engagement.id, slug)
 
     existing_workflow = _row_workflow_status(existing)
     current_updated_at = str(existing["updated_at"])
@@ -2082,6 +2134,7 @@ def patch_finding(
         explicit_verification_state_override=verification_state is not None,
         explicit_verification_disposition_override=verification_disposition is not None,
         explicit_severity_override=severity is not None,
+        allow_existing_noncanonical_slug=True,
         transition_action=transition_action,
         transition_reason_code=transition_reason_code,
         transition_reason_text=transition_reason_text,
@@ -2107,7 +2160,6 @@ def verify_finding(
     new_severity: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    slug = _require_canonical_finding_slug(slug)
     if disposition == "disputed":
         normalized_disposition = "none"
     else:
@@ -2116,12 +2168,11 @@ def verify_finding(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="verification disposition cannot be none")
 
     with get_connection() as connection:
+        slug = _resolve_existing_finding_slug(connection, engagement.id, slug)
         existing = connection.execute(
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, slug),
         ).fetchone()
-        if existing is None:
-            raise _finding_not_found(connection, engagement.id, slug)
 
     expected_updated_at = str(existing["updated_at"])
     existing_workflow = _row_workflow_status(existing)
@@ -3098,6 +3149,8 @@ def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
 
 
 def report_readiness(engagement_id: int) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    engagement_root = Path(engagement.engagement_root).expanduser().resolve()
     coverage = coverage_readiness(engagement_id)
     blockers: list[dict[str, Any]] = []
     if not coverage["ready"]:
@@ -3317,7 +3370,8 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     }
                 )
                 continue
-            artifact = artifact_rows.get(evidence_ref)
+            indexed_evidence_ref = _normalize_report_evidence_ref(engagement_root, evidence_ref)
+            artifact = artifact_rows.get(indexed_evidence_ref)
             if artifact is None:
                 blockers.append(
                     {
@@ -3326,7 +3380,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "title": row.get("title", ""),
                         "detail": (
                             f"finding {slug} evidence_ref={evidence_ref!r} is not in the artifact index. "
-                            f"Fix with `aith assess artifact register {evidence_ref} --finding {slug}` "
+                            f"Fix with `aith assess artifact register {indexed_evidence_ref} --finding {slug}` "
                             "or `aith assess artifact sync` if the path is under a default sync root."
                         ),
                     }
@@ -3630,23 +3684,20 @@ def create_finding_link(
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    finding_slug = _require_canonical_finding_slug(finding_slug)
-    if str(target_kind) == "finding" and target_ref:
-        target_ref = _require_canonical_finding_slug(target_ref, field="target_ref")
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        finding_slug = _resolve_existing_finding_slug(connection, engagement.id, finding_slug)
+        if str(target_kind) == "finding" and target_ref:
+            target_ref = _resolve_existing_finding_slug(
+                connection,
+                engagement.id,
+                target_ref,
+                field="target_ref",
+            )
         finding = connection.execute(
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, finding_slug),
         ).fetchone()
-        if finding is None:
-            raise _finding_not_found(connection, engagement.id, finding_slug)
-        if str(target_kind) == "finding" and target_ref:
-            if not connection.execute(
-                "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
-                (engagement.id, target_ref),
-            ).fetchone():
-                raise _finding_not_found(connection, engagement.id, target_ref)
         return _upsert_finding_link(
             connection,
             engagement.id,
@@ -3672,13 +3723,18 @@ def set_root_cause_link(
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    finding_slug = _require_canonical_finding_slug(finding_slug)
-    root_cause_slug = _require_canonical_finding_slug(root_cause_slug, field="root_cause_slug")
     effect = (root_cause_effect or "eliminates_finding").strip()
     if effect not in ROOT_CAUSE_EFFECTS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid root_cause_effect: {root_cause_effect}")
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        finding_slug = _resolve_existing_finding_slug(connection, engagement.id, finding_slug)
+        root_cause_slug = _resolve_existing_finding_slug(
+            connection,
+            engagement.id,
+            root_cause_slug,
+            field="root_cause_slug",
+        )
         finding = connection.execute(
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, finding_slug),
@@ -3687,9 +3743,6 @@ def set_root_cause_link(
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, root_cause_slug),
         ).fetchone()
-        if finding is None or root is None:
-            missing = finding_slug if finding is None else root_cause_slug
-            raise _finding_not_found(connection, engagement.id, missing)
         if int(finding["id"]) == int(root["id"]):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="finding cannot be its own root cause")
         if _is_suppressed_workflow_status(_row_workflow_status(finding)):
@@ -3778,15 +3831,13 @@ def set_root_cause_link(
 
 def clear_root_cause_link(engagement_id: int, *, finding_slug: str) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    finding_slug = _require_canonical_finding_slug(finding_slug)
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        finding_slug = _resolve_existing_finding_slug(connection, engagement.id, finding_slug)
         finding = connection.execute(
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, finding_slug),
         ).fetchone()
-        if finding is None:
-            raise _finding_not_found(connection, engagement.id, finding_slug)
         cursor = connection.execute(
             """
             DELETE FROM assessment_finding_links
@@ -3923,12 +3974,12 @@ def _upsert_chain_link(
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if str(entity_kind) == "finding" and entity_ref:
-        entity_ref = _require_canonical_finding_slug(entity_ref, field="entity_ref")
-        if not connection.execute(
-            "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
-            (engagement_id, entity_ref),
-        ).fetchone():
-            raise _finding_not_found(connection, engagement_id, entity_ref)
+        entity_ref = _resolve_existing_finding_slug(
+            connection,
+            engagement_id,
+            entity_ref,
+            field="entity_ref",
+        )
     row = connection.execute(
         """
         SELECT *
@@ -6412,6 +6463,7 @@ def record_handoff(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"summary exceeds {_HANDOFF_SUMMARY_MAX} characters",
         )
+    closed_dispatch_status = _require_terminal_dispatch_status(closed_dispatch_status)
     finding_slugs = _require_canonical_finding_slugs(finding_slugs)
     created_at = _utcnow_iso_dispatch()
     with get_connection() as connection:
@@ -6503,6 +6555,7 @@ def update_handoff(
     extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    closed_dispatch_status = _require_terminal_dispatch_status(closed_dispatch_status)
     finding_slugs = _require_canonical_finding_slugs(finding_slugs)
     with get_connection() as connection:
         _ensure_finding_slugs_exist(connection, engagement.id, finding_slugs)

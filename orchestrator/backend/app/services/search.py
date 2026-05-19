@@ -33,9 +33,9 @@ def fts_escape(term: str) -> str:
     return " ".join(f'"{tok}"' for tok in tokens)
 
 
-CANONICAL_FINDING_SLUG_RE = re.compile(r"^[A-Z]{2}-\d{3}$")
-_FINDING_ALIAS_FULL_RE = re.compile(r"^(?:FINDING[-\s]*)?([A-Za-z]{2})[-\s]?(\d{3})$")
-_FINDING_ALIAS_SEARCH_RE = re.compile(r"\b(?:FINDING[-\s]*)?([A-Za-z]{2})[-\s]?(\d{3})\b")
+CANONICAL_FINDING_SLUG_RE = re.compile(r"^[A-Z]{2}-\d{3,}$")
+_FINDING_ALIAS_FULL_RE = re.compile(r"^(?:FINDING[-\s]*)?([A-Za-z]{2})[-\s]?(\d{3,})$")
+_FINDING_ALIAS_SEARCH_RE = re.compile(r"\b(?:FINDING[-\s]*)?([A-Za-z]{2})[-\s]?(\d{3,})\b")
 
 
 def is_canonical_finding_slug(value: str | None) -> bool:
