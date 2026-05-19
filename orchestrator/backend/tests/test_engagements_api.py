@@ -748,6 +748,102 @@ def test_finding_create_rejects_malformed_slug_and_lookup_accepts_alias(client, 
     assert alias_lookup.json()["slug"] == "VA-047"
 
 
+def test_finding_auto_slug_counts_canonical_ids_beyond_999(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    seeded = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "VA-1000",
+            "title": "Existing high-volume canonical slug",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "canonical_location": "https://example.com/high-volume/1000",
+            "summary": "Existing finding beyond the first 999 IDs.",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert seeded.status_code == 201, seeded.text
+
+    allocated = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "title": "Next high-volume canonical slug",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "canonical_location": "https://example.com/high-volume/1001",
+            "summary": "Auto-allocation should not collide with VA-1000.",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert allocated.status_code == 201, allocated.text
+    assert allocated.json()["finding"]["slug"] == "VA-1001"
+
+
+def test_finding_auto_slug_falls_back_for_unknown_source_name(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "title": "Unknown source finding",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "canonical_location": "https://example.com/unknown",
+            "summary": "Clients that omit source_name still get a backend slug.",
+            "evidence_ref": "findings.md",
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["finding"]["slug"] == "unknown-source-finding-https-example-com-unknown"
+
+
+def test_patch_finding_accepts_existing_database_legacy_slug(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+    assert client.get("/engagements/2026-03-30-120000-example").status_code == 200
+    db_path = db_module.database_path()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        engagement_id = connection.execute(
+            "SELECT id FROM engagements WHERE key = ?",
+            ("2026-03-30-120000-example",),
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO assessment_findings (
+                engagement_id, slug, title, severity, status,
+                verification_state, verification_disposition, canonical_location,
+                source_name, summary, evidence_ref
+            ) VALUES (?, 'legacy-title-slug', 'Legacy row', 'medium', 'active',
+                'unreviewed', 'none', 'https://example.com/legacy',
+                'vulnerability-analyst', 'Before update', 'findings.md')
+            """,
+            (engagement_id,),
+        )
+        connection.commit()
+
+    patched = client.patch(
+        "/engagements/2026-03-30-120000-example/assessment/findings/legacy-title-slug",
+        json={
+            "summary": "Updated without forcing a new slug spelling.",
+            "reason_code": "legacy_db_row",
+            "reason_text": "Existing database row retained its pre-canonical slug.",
+        },
+    )
+
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["finding"]["slug"] == "legacy-title-slug"
+    assert patched.json()["finding"]["summary"] == "Updated without forcing a new slug spelling."
+
+
 def test_events_synthesizes_legacy_log_artifact_timeline(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 

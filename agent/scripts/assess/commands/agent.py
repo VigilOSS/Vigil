@@ -80,7 +80,17 @@ def register(subparsers) -> None:
     p.add_argument("--extras-json", dest="hf_extras_json", default=None)
     p.add_argument("--reason", default="", help="Reason for abort-duplicate / decision shorthand.")
     p.add_argument("--dry-run", dest="dry_run", action="store_true", help="(reconcile-stale) Print candidates without closing dispatches.")
-    p.add_argument("--max-age-hours", dest="max_age_hours", type=float, default=24.0, help="(reconcile-stale) Age threshold for in-progress dispatches.")
+    p.add_argument(
+        "--max-age-hours",
+        dest="max_age_hours",
+        type=float,
+        default=None,
+        help=(
+            "(reconcile-stale) Override the per-role age threshold for in-progress dispatches. "
+            "Defaults: 24h for most roles, 48h for exploit-developer / report-writer / code-* "
+            "(except 72h for code-fuzz-engineer). Matches `resume-brief --max-age-hours` semantics."
+        ),
+    )
     # start-swarm flags. Reuse --role / --task / --skills / --model / --reasoning
     # from the existing start flag set; add three new flags below.
     p.add_argument(
@@ -268,8 +278,31 @@ def _parse_iso(value: str) -> datetime | None:
         return None
 
 
+# Mirrors orchestrator/backend/app/services/assessment_memory.py
+# `_STALE_THRESHOLD_BY_ROLE` so `reconcile-stale` and `resume-brief` agree on
+# which dispatches are stale. A drift between the two would surface stale
+# candidates that `resume-brief` never flagged, confusing the operator.
+_STALE_THRESHOLD_BY_ROLE: dict[str, float] = {
+    "exploit-developer": 48.0,
+    "report-writer": 48.0,
+    "code-architect": 48.0,
+    "code-vuln-hunter": 48.0,
+    "code-variant-hunter": 48.0,
+    "code-vuln-verifier": 48.0,
+    "code-fuzz-engineer": 72.0,
+}
+_DEFAULT_STALE_THRESHOLD_HOURS = 24.0
+
+
+def _stale_threshold_for(role: str | None, *, override: float | None) -> float:
+    if override is not None:
+        return float(override)
+    return _STALE_THRESHOLD_BY_ROLE.get(str(role or ""), _DEFAULT_STALE_THRESHOLD_HOURS)
+
+
 def _reconcile_stale(args) -> None:
-    cutoff_hours = float(getattr(args, "max_age_hours", 24.0) or 24.0)
+    override = getattr(args, "max_age_hours", None)
+    cutoff_override: float | None = float(override) if override is not None else None
     dry_run = bool(getattr(args, "dry_run", False))
     now = datetime.now(timezone.utc)
     client, _ = dispatch._client_for(args)  # noqa: SLF001
@@ -278,6 +311,8 @@ def _reconcile_stale(args) -> None:
         dispatches = client.list_dispatches(status="in-progress", limit=1000)
         handoffs = {row.get("agent_id"): row for row in client.list_handoffs(limit=1000)}
         for row in dispatches:
+            agent_role = row.get("agent_role")
+            cutoff_hours = _stale_threshold_for(agent_role, override=cutoff_override)
             started = _parse_iso(str(row.get("dispatched_at") or ""))
             age_hours = ((now - started).total_seconds() / 3600.0) if started else None
             if age_hours is not None and age_hours < cutoff_hours:
@@ -293,8 +328,9 @@ def _reconcile_stale(args) -> None:
                 category = "checkpointed_handoff"
             item: dict = {
                 "agent_id": row.get("agent_id"),
-                "agent_role": row.get("agent_role"),
+                "agent_role": agent_role,
                 "age_hours": round(age_hours, 2) if age_hours is not None else None,
+                "threshold_hours": cutoff_hours,
                 "category": category,
                 "handoff_status": handoff_status,
                 "closed": False,

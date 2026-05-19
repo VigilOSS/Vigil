@@ -1482,6 +1482,7 @@ async def create_blocked_technique(engagement_key: str, request: BlockedTechniqu
 
 
 _DISPATCH_STATUS = Literal["in-progress", "completed", "failed", "aborted", "blocked"]
+_DISPATCH_TERMINAL_STATUS = Literal["completed", "failed", "aborted", "blocked"]
 _DISPATCH_MODE = Literal[
     "hypothesis-driven",
     "item-iterating",
@@ -1567,7 +1568,7 @@ class HandoffCreate(BaseModel):
     open_questions: list[str] | None = None
     recommended_next_agent: str | None = Field(default=None, max_length=128)
     handoff_status: _HANDOFF_STATUS = "checkpointed"
-    closed_dispatch_status: _DISPATCH_STATUS | None = None
+    closed_dispatch_status: _DISPATCH_TERMINAL_STATUS | None = None
     extras: dict[str, Any] | None = None
 
 
@@ -1585,7 +1586,7 @@ class HandoffUpdate(BaseModel):
     open_questions: list[str] | None = None
     recommended_next_agent: str | None = Field(default=None, max_length=128)
     handoff_status: _HANDOFF_STATUS | None = None
-    closed_dispatch_status: _DISPATCH_STATUS | None = None
+    closed_dispatch_status: _DISPATCH_TERMINAL_STATUS | None = None
     extras: dict[str, Any] | None = None
 
 

@@ -98,7 +98,9 @@ Credit: <name> - <email>
 ## Rules
 
 All writing rules from `agent/rules/reporting.md` apply (banned language, active voice,
-no class definitions, evidence truncation, sentence efficiency).
+no class definitions, evidence truncation, sentence efficiency). Rule 20 applies in full:
+do not document ruled-out attack variants, do not include probe counts or telemetry,
+do not instruct the recipient on how to interpret the finding.
 
 Format-specific:
 

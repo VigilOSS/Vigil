@@ -215,3 +215,34 @@ def test_handoff_rejects_role_mismatch(client, isolate_settings) -> None:
 
     assert resp.status_code == 409, resp.text
     assert "agent_role mismatch" in resp.text
+
+
+def test_handoff_rejects_non_terminal_closed_dispatch_status(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+    _register_dispatch(client, agent_id="HF-CLOSE", agent_role="vulnerability-analyst")
+
+    rejected_create = client.post(
+        f"{BASE}/dispatch-handoffs",
+        json=_full_payload(
+            agent_id="HF-CLOSE",
+            handoff_status="ready",
+            closed_dispatch_status="in-progress",
+        ),
+    )
+    assert rejected_create.status_code == 422, rejected_create.text
+
+    created = client.post(
+        f"{BASE}/dispatch-handoffs",
+        json=_full_payload(
+            agent_id="HF-CLOSE",
+            handoff_status="ready",
+            closed_dispatch_status="completed",
+        ),
+    )
+    assert created.status_code == 201, created.text
+
+    rejected_patch = client.patch(
+        f"{BASE}/dispatch-handoffs/HF-CLOSE",
+        json={"closed_dispatch_status": "in-progress"},
+    )
+    assert rejected_patch.status_code == 422, rejected_patch.text

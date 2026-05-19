@@ -549,6 +549,51 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagements_root(tmp_path: Pat
     assert "engagements_root=/engagements" in run_command
 
 
+def test_mitmproxy_start_uses_install_orchestrator_url_not_engagement_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import paths as paths_module
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.mitmproxy import MitmproxyOptions, start_proxy
+
+    monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
+    monkeypatch.setattr(paths_module, "get_config_value", lambda key: None)
+    install_root = tmp_path / "install"
+    engagements_root = install_root / "agent" / "engagements"
+    (install_root / ".orchestrator.env").parent.mkdir(parents=True, exist_ok=True)
+    (install_root / ".orchestrator.env").write_text(
+        "ORCHESTRATOR_BASE_URL=http://127.0.0.1:19001\n",
+        encoding="utf-8",
+    )
+    for key, port in (("eng-a", 19002), ("eng-b", 19003)):
+        engagement = engagements_root / key
+        engagement.mkdir(parents=True)
+        (engagement / "scope.json").write_text("{}", encoding="utf-8")
+        (engagement / ".orchestrator.env").write_text(
+            f"ORCHESTRATOR_BASE_URL=http://127.0.0.1:{port}\n",
+            encoding="utf-8",
+        )
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "-q"]:
+            return DockerResult(0, "", "")
+        return DockerResult(0, "", "")
+
+    start_proxy(
+        MitmproxyOptions(install_root=install_root, engagements_root=engagements_root),
+        runner=runner,
+        verify_port=False,
+    )
+
+    run_command = next(command for command in commands if command[:3] == ["docker", "run", "-d"])
+    assert "ORCHESTRATOR_BASE_URL=http://host.docker.internal:19001" in run_command
+    assert not any("19002" in item or "19003" in item for item in run_command)
+
+
 def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ai_threat_hunting_cli import mitmproxy as mitmproxy_module
     from ai_threat_hunting_cli.docker import DockerResult

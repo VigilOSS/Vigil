@@ -46,13 +46,12 @@ def start_proxy(options: MitmproxyOptions, *, runner: docker.Runner = docker.run
         runner(["docker", "rm", options.container_name])
 
     runner(["docker", "volume", "create", options.volume_name])
-    # The proxy needs the orchestrator URL the host CLI advertises. We resolve it
-    # against a representative engagement directory when one is available so the
-    # per-engagement .orchestrator.env override applies; otherwise we fall back
-    # to the install-level default.
-    representative_engagement = _representative_engagement(engagements_root)
+    # The proxy is one process for all engagements, so its backend URL must come
+    # from process/install-level configuration. Per-engagement overrides are for
+    # engagement-scoped helpers and would make one arbitrary engagement steer all
+    # captured flow writes.
     base_url = container_host_url(
-        resolve_orchestrator_base_url(install_root, representative_engagement)
+        resolve_orchestrator_base_url(install_root)
     )
     argv = [
         "docker",
@@ -118,23 +117,6 @@ def read_proxy_routes(engagements_root: Path) -> dict | None:
         return json.loads(cache.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-
-
-def _representative_engagement(engagements_root: Path) -> Path:
-    """Pick an arbitrary engagement directory to resolve the orchestrator URL.
-
-    We only need the per-engagement ``.orchestrator.env`` override mechanism;
-    the actual engagement does not matter because every captured flow re-reads
-    the URL from the env var the addon receives at container start.
-    """
-    for path in sorted(engagements_root.iterdir()):
-        if not path.is_dir():
-            continue
-        if path.name.startswith("."):
-            continue
-        if (path / "scope.json").exists():
-            return path
-    return engagements_root
 
 
 def _port_open(host: str, port: int) -> bool:

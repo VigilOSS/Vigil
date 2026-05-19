@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
+from app import db as db_module
 from app.services.assessment_memory import _recommended_actions
 
 
@@ -107,6 +109,52 @@ def test_artifact_sync_search_get_and_missing_state(client, isolate_settings) ->
     assert missing.json()["present"] is False
 
 
+def test_artifact_register_preserves_existing_legacy_finding_slug(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    (eng / "notes").mkdir(parents=True, exist_ok=True)
+    (eng / "notes" / "legacy-note.md").write_text("legacy finding evidence", encoding="utf-8")
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        engagement_id = connection.execute(
+            "SELECT id FROM engagements WHERE key = ?",
+            (ENGAGEMENT_KEY,),
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO assessment_findings (
+                engagement_id, slug, title, severity, status,
+                verification_state, verification_disposition, canonical_location,
+                source_name, summary, evidence_ref
+            ) VALUES (?, 'legacy-title-slug', 'Legacy row', 'medium', 'active',
+                'verified', 'confirmed', 'https://example.com/legacy',
+                'legacy-import', 'Legacy row imported from an older database.',
+                'notes/legacy-note.md')
+            """,
+            (engagement_id,),
+        )
+        connection.commit()
+
+    registered = client.post(
+        f"{BASE}/artifacts",
+        json={
+            "path": "notes/legacy-note.md",
+            "kind": "note",
+            "related_finding_slug": "legacy-title-slug",
+        },
+    )
+    assert registered.status_code == 201, registered.text
+    assert registered.json()["related_finding_slug"] == "legacy-title-slug"
+
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    assert not any(
+        blocker.get("kind") == "unlinked_markdown_note"
+        and blocker.get("path") == "notes/legacy-note.md"
+        for blocker in readiness.json()["blockers"]
+    )
+
+
 def test_resume_brief_returns_bounded_operating_picture(client, isolate_settings) -> None:
     eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
@@ -188,6 +236,48 @@ def test_report_readiness_blocks_unlinked_markdown_notes(client, isolate_setting
     blockers = readiness.json()["blockers"]
     assert any(
         blocker["kind"] == "unlinked_markdown_note" and blocker["path"] == "notes/scratch.md"
+        for blocker in blockers
+    )
+
+
+def test_report_readiness_normalizes_absolute_evidence_ref(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    evidence = eng / "notes" / "absolute-evidence.md"
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_text("absolute evidence path should index as relative", encoding="utf-8")
+    created = client.post(
+        f"{BASE}/findings",
+        json={
+            "slug": "VA-048",
+            "title": "Absolute evidence ref",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "canonical_location": "https://example.com/absolute",
+            "summary": "A command-run emitted an absolute path to the evidence artifact.",
+            "evidence_ref": str(evidence),
+            "source_name": "vulnerability-analyst",
+            "details": {
+                "cvss_score": 5.4,
+                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N",
+                "steps_to_reproduce": ["capture output", "register artifact"],
+                "remediation": "Normalize artifact references before readiness checks",
+                "impact": "False readiness blocker",
+                "evidence": "Absolute command-run artifact path",
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    sync = client.post(f"{BASE}/artifacts/sync")
+    assert sync.status_code == 200, sync.text
+
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    blockers = readiness.json()["blockers"]
+    assert not any(
+        blocker["kind"] == "finding_evidence_unindexed" and blocker["slug"] == "VA-048"
         for blocker in blockers
     )
 
