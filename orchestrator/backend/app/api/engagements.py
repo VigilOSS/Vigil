@@ -33,6 +33,7 @@ class EngagementResponse(BaseModel):
     created_at: str
     updated_at: str
     session_count: int
+    engagement_type: str | None = None
 
 
 class SessionResponse(BaseModel):
@@ -63,6 +64,7 @@ def _engagement_response(engagement: EngagementView) -> EngagementResponse:
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
         session_count=engagement.session_count,
+        engagement_type=engagement.engagement_type,
     )
 
 
@@ -73,10 +75,20 @@ def get_engagements(
         alias="status",
         description="Filter by engagement status (e.g. in_progress).",
     ),
+    engagement_type: str | None = Query(
+        default=None,
+        description="Filter by engagement_type (case-sensitive, e.g. 'red' | 'blue' | 'web' | 'code').",
+    ),
 ) -> list[EngagementResponse]:
     engagements = list_engagements()
     if status_filter:
         engagements = [engagement for engagement in engagements if engagement.status == status_filter]
+    if engagement_type:
+        engagements = [
+            engagement
+            for engagement in engagements
+            if engagement.engagement_type == engagement_type
+        ]
     return [_engagement_response(engagement) for engagement in engagements]
 
 

@@ -297,12 +297,83 @@ Load these skills for authorized Android/iOS app, device-lab, and mobile fuzzing
 
 ## Incident Response Skills
 
-Load these skills for blue-team IR engagements (BEC, account compromise, token theft, audit log review).
-See `agent/rules/ir-evidence.md` (always-active during IR work) for attribution and evidence discipline rules.
+Load these skills for blue-team IR engagements (alert triage, BEC, account compromise, token theft, audit log review, verification, containment).
+See `agent/rules/ir-evidence.md` (always-active during IR work) for attribution and evidence discipline rules. The four P0 skills below cover the L1→L4 blue pipeline (triage → investigation → verification → containment); `google-workspaces` is the production-ready L2 platform skill the v1 minimum set leans on per plan §4.
+
+### P0 Blue Skills (L1–L4 pipeline)
+
+- `agent/skills/alert-triage/SKILL.md`
+  **Use when:** L1 first-contact with a pasted alert; classifying severity / platform / MITRE technique; deciding L2 dispatch vs auto-close against the tenant ref's known-benign register.
+  **Paired references:** `agent/rules/triage.md`, `agent/shared-constraints-blue.md`, `agent/rules/ir-evidence.md`, the tenant ref(s) named in `scope.json:tenant_reference_paths[]`.
+
+- `agent/skills/alert-fp-verification/SKILL.md`
+  **Use when:** L3 verifier dispatch on a finding with `verification_state=unreviewed`; pre-containment gate for every finding ≥ high before L4 may propose containment; reopening a previously dispositioned finding when new evidence contradicts the prior verdict.
+  **Paired references:** `agent/skills/code-finding-verification/SKILL.md` (origin of the five-check protocol; symmetric evidence bar is identical), `agent/rules/triage.md`, `agent/shared-constraints-blue.md`.
+
+- `agent/skills/ioc-enrichment/SKILL.md`
+  **Use when:** L2 investigator (or L3/L4) needs reputation on an IP, domain, URL, hash, email, or ASN that surfaced during an audit pull; cross-referencing threat intelligence against an artifact; pre-Check-1 reachability or pre-containment IOC confirmation.
+  **Paired references:** `agent/skills/osint-recon/SKILL.md` (red analog), `agent/rules/triage.md` (symmetric evidence bar applies to IOC citations), `agent/shared-constraints-blue.md` (host-exec audit pipeline required for every reputation query).
+
+- `agent/skills/incident-containment/SKILL.md`
+  **Use when:** L4 ir-lead dispatch on a `verified` finding with severity ≥ high; authoring containment / eradication / recovery proposals with target / action / rollback contract; blast-radius assessment; per-action operator approval gate before `aith blue contain` executes.
+  **Paired references:** the platform skill in containment mode (e.g., `agent/skills/google-workspaces/SKILL.md`), `agent/rules/triage.md` (containment-proposal shape, never-delete-evidence), `agent/rules/ir-evidence.md`.
+
+### Reused-from-red skills with blue applicability
+
+The following skills already documented in the red-team sections above also apply to blue IR work. See their full entries above for paired references; the blue use cases below are forward pointers, not duplicate definitions.
 
 - `agent/skills/google-workspaces/SKILL.md`
-  **Use when:** A Google Workspace tenant user is suspected compromised (BEC, AiTM, token theft, malicious OAuth grant, insider misuse); audit log pulls, Alert Center review, OAuth token investigation, session revocation, Gmail content search, or browser/endpoint forensics on Windows and macOS are needed.
+  **Use when (blue):** A Google Workspace tenant user is suspected compromised (BEC, AiTM, token theft, malicious OAuth grant, insider misuse); audit log pulls, Alert Center review, OAuth token investigation, session revocation, Gmail content search, or browser/endpoint forensics on Windows and macOS are needed. L2 default for Workspace alerts and the production-ready Workspace IR skill the v1 minimum set leans on.
   **Paired references:** _(environment-specific; gcloud / GAM / raw REST — consult operator for scope grants)_
+
+- `agent/skills/athena-log-investigation/SKILL.md`
+  **Use when (blue):** Pairs with AWS CloudTrail investigations — `aws-cloudtrail-investigation` references this for Athena-over-S3 query mechanics on partitioned `cloudtrail_logs`.
+
+- `agent/skills/cobalt-strike-analysis/SKILL.md`
+  **Use when (blue):** Detection portions usable by the L2 investigator when an EDR / IDS / memory artifact surfaces a suspected beacon; network signature generation feeds the verifier's Check 2 corroboration.
+
+- `agent/skills/dns-tunneling-detection/SKILL.md`
+  **Use when (blue):** Detection portions usable by the L2 investigator and the `network-threat-hunt` skill when DNS exfiltration is suspected (entropy / record-type ratios / volume analysis in Zeek or Splunk).
+
+- `agent/skills/container-escape-detection/SKILL.md`
+  **Use when (blue):** Pairs with EDR alerts on container hosts (Falco / runtime sensor alerts on Docker / Kubernetes); the detection-side enumeration informs L2 investigation and L3 verification.
+
+- `agent/skills/osint-recon/SKILL.md`
+  **Use when (blue):** IOC research baseline for the OSINT specialist in blue mode — public DNS / WHOIS / breach-history lookups that supplement `ioc-enrichment`'s reputation queries.
+
+### P1 / P2 platform skills (L2 investigator load-on-dispatch)
+
+The L2 `investigator` role loads exactly one of these per dispatch, chosen by the platform classification L1 emits in the triage handoff. Each ships its own platform-specific tool roster, methodology, MITRE mapping, and known-benign register schema additions. Pair every dispatch with the matching tenant ref under `agent/references/tenants/<customer>-<platform>.md`.
+
+- `agent/skills/phishing-triage/SKILL.md` (P1)
+  **Use when:** L2 dispatch for `phishing | bec | aitm | oauth-grant` categories. Email-header forensics, sender authentication state (SPF/DKIM/DMARC), URL + attachment detonation, BEC pattern detection. Primary platform M365; cross-references GWS.
+  **Paired references:** `agent/skills/m365-signin-investigation/SKILL.md` (post-credential-entry pivot), `agent/skills/google-workspaces/SKILL.md` (Gmail content), `agent/references/tenants/_template-m365.md`.
+
+- `agent/skills/m365-signin-investigation/SKILL.md` (P1)
+  **Use when:** L2 dispatch for anomalous-sign-in / impossible-travel / suspicious-oauth-grant / mailbox-rule-created / BEC on Microsoft 365. Entra Sign-In Logs (4-stream), UAL hunt, mailbox forensics, OAuth grant audit, conditional access state.
+  **Paired references:** `agent/references/tenants/_template-m365.md`.
+
+- `agent/skills/aws-cloudtrail-investigation/SKILL.md` (P1)
+  **Use when:** L2 dispatch for `iam-anomaly | credential-abuse | s3-exfil | guardduty-finding | root-use`. STS AssumeRole chain traversal, long-term key vs federated-chain decision tree, IMDSv1/v2 patterns, Athena-over-S3 queries, GuardDuty correlation.
+  **Paired references:** `agent/skills/athena-log-investigation/SKILL.md`, `agent/references/tenants/_template-aws.md`.
+
+- `agent/skills/okta-investigation/SKILL.md` (P2)
+  **Use when:** L2 dispatch for `push-fatigue | factor-reset | admin-role-change | api-token-anomaly | aitm-token-replay`. SystemLog pulls, factor enumeration, session/cookie replay, API token review, hybrid AD-Okta drift.
+  **Paired references:** `agent/references/tenants/_template-okta.md`.
+
+- `agent/skills/edr-alert-triage/SKILL.md` (P2)
+  **Use when:** L2 dispatch for `edr-mde | edr-cs | edr-s1` alert types. Process tree, network correlation, file/registry activity, persistence sweep, TI cross-ref. Vendor-specific FP gates for Defender / CrowdStrike / SentinelOne.
+  **Paired references:** `agent/skills/cobalt-strike-analysis/SKILL.md`, `agent/skills/container-escape-detection/SKILL.md`, `agent/references/tenants/_template-edr.md`.
+
+- `agent/skills/network-threat-hunt/SKILL.md` (P2)
+  **Use when:** L2 dispatch for `network-siem | network-fw | network-proxy` (beaconing, DNS-tunnel, exfil, JA3-anomaly). SPL/KQL queries, RITA beacon analysis, JA3/JA3S correlation, DNS entropy, lateral-movement east-west flow.
+  **Paired references:** `agent/skills/dns-tunneling-detection/SKILL.md`, `agent/references/tenants/_template-network.md`.
+
+### Blue incident report template
+
+- `agent/skills/report-generation/templates/blue.md`
+  **Use when:** `aith blue report` dispatches the report-writer for an `engagement_type=blue` engagement. Provides the 12-section blue-template structure (Executive Summary, Incident Overview, Scope & Authorization, Timeline, Technical Findings, Attack Reconstruction, Containment & Eradication Actions, Posture Observations, Recommendations, Coverage Gaps & Limitations, Evidence Index, Sensitive Annex).
+  **Paired references:** `agent/skills/report-generation/SKILL.md` §Blue Mode for the dispatch contract.
 
 ---
 

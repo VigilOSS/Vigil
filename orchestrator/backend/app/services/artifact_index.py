@@ -20,6 +20,9 @@ DEFAULT_ROOTS = (
     "tools/exploit-state",
     "scans/reports",
     "downloads",
+    "ir/alerts",
+    "ir/evidence",
+    "ir/reports",
 )
 # Engagement-root files (not directories) that sync should also pick up so the
 # deliverable lands in `artifact search` without an explicit register call.
@@ -93,6 +96,12 @@ def _guess_kind(relative_path: str, explicit: str = "") -> str:
         return "scan-report"
     if path.startswith("downloads/"):
         return "download"
+    if path.startswith("ir/alerts/"):
+        return "ir-alert"
+    if path.startswith("ir/evidence/"):
+        return "ir-evidence"
+    if path.startswith("ir/reports/"):
+        return "ir-report"
     if path.startswith("tmp/"):
         return "tmp-reference"
     if "command-runs" in path:
@@ -523,6 +532,7 @@ def search_artifacts(
     *,
     query: str = "",
     finding: str = "",
+    kind: str = "",
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -552,6 +562,12 @@ def search_artifacts(
             "OR a.relative_path LIKE ? ESCAPE '\\')"
         )
         params.extend([canonical_finding, f"%{escaped_slug}%", f"%{escaped_slug}%"])
+    # Optional ``kind`` filter (e.g. ``alert_paste``, ``ir_log``,
+    # ``containment_proof``). No new index — v1 query volumes are small enough
+    # that a WHERE on ``kind`` is fine even with a full scan per engagement.
+    if kind:
+        where.append("a.kind = ?")
+        params.append(kind)
     params.extend([int(limit), int(offset)])
     rank_select = ""
     if canonical_finding:

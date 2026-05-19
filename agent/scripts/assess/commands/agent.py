@@ -47,6 +47,13 @@ def register(subparsers) -> None:
         choices=("hypothesis-driven", "item-iterating", "deep-manual", "variant-rotation", "swarm"),
     )
     p.add_argument("--skills", dest="skills", default=None)
+    p.add_argument(
+        "--tier",
+        dest="tier",
+        default=None,
+        choices=("L1", "L2", "L3", "L4"),
+        help="(start) Blue specialist tier label recorded on the dispatch row.",
+    )
     p.add_argument("--from-json", dest="from_json", default=None)
     p.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true")
     p.add_argument("--status", dest="dispatch_status", default=None, choices=("in-progress", "completed", "failed", "aborted", "blocked"))

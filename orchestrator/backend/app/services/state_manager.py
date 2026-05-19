@@ -27,13 +27,32 @@ from .search import (
 )
 
 SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
-WORKFLOW_STATUSES = {"draft", "active", "blocked", "exploited", "false_positive", "merged", "reported"}
+WORKFLOW_STATUSES = {
+    "draft",
+    "active",
+    "blocked",
+    "exploited",
+    "contained",
+    "eradicated",
+    "recovered",
+    "false_positive",
+    "merged",
+    "reported",
+}
 WORKFLOW_STATUS_RANK = {
     "draft": 0,
     "active": 1,
     "blocked": 2,
     "exploited": 3,
-    "reported": 4,
+    # Blue IR response phases sit between exploited and reported. They are
+    # monotonically increasing (contained < eradicated < recovered) so the
+    # standard "incoming must not regress" guard at line 186 below blocks an
+    # accidental rollback (e.g., eradicated → contained) without an operator
+    # reset.
+    "contained": 4,
+    "eradicated": 5,
+    "recovered": 6,
+    "reported": 7,
     "false_positive": -2,
     "merged": -1,
 }
@@ -6232,6 +6251,7 @@ def record_dispatch(
     dispatch_mode: str | None = None,
     finding_slugs: list[str] | None = None,
     skills: str | None = None,
+    tier: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not (agent_id or "").strip():
@@ -6240,6 +6260,7 @@ def record_dispatch(
     finding_slugs = _require_canonical_finding_slugs(finding_slugs)
     findings_json = json.dumps(list(finding_slugs)) if finding_slugs is not None else None
     skills_value = (skills or "").strip() or None
+    tier_value = (tier or "").strip() or None
     requested_model_value = requested_model if requested_model is not None else model
     requested_reasoning_value = requested_reasoning if requested_reasoning is not None else reasoning
     with get_connection() as connection:
@@ -6259,8 +6280,8 @@ def record_dispatch(
                 engagement_id, agent_id, agent_role, task, scope_host,
                 dispatched_at, status, model, reasoning,
                 requested_model, actual_model, requested_reasoning, actual_reasoning,
-                dispatch_mode, finding_slugs_json, skills
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dispatch_mode, finding_slugs_json, skills, tier
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -6279,6 +6300,7 @@ def record_dispatch(
                 dispatch_mode,
                 findings_json,
                 skills_value,
+                tier_value,
             ),
         )
         row = connection.execute(

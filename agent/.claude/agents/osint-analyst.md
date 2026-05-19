@@ -32,11 +32,26 @@ already listed below.
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/osint-recon/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
 
+### Blue Incident Mode
+
+If the dispatch task or `scope.json:engagement_type` says this is a
+blue/incident-response engagement, load these instead of the red-only hunting
+constraint set:
+
+- `agent/shared-constraints-blue.md`
+- `agent/rules/triage.md`
+- `agent/rules/ir-evidence.md`
+- `agent/rules/adversarial-mindset.md`
+- `agent/skills/ioc-enrichment/SKILL.md`
+
+Use blue IOC enrichment and backend intel/link helpers. Do not apply red
+attacker-outcome proof language to defender-side IOC context.
+
 ## Pre-Work Checkpoint
 
 Before starting any work, verify:
 
-- [ ] You loaded `agent/shared-constraints.md`
+- [ ] You loaded `agent/shared-constraints.md` for red OSINT work or `agent/shared-constraints-blue.md` for blue IOC enrichment
 - [ ] You loaded the osint-recon skill (`agent/skills/osint-recon/SKILL.md`)
 - [ ] You read the skill's `## Extended Resources` section and loaded the listed reference files
 - [ ] You have the dispatch context (target domain, tech stack, phase, task objective, prior intel)

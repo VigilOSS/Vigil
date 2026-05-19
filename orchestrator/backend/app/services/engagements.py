@@ -32,6 +32,7 @@ class EngagementView:
     created_at: str
     updated_at: str
     session_count: int
+    engagement_type: str | None = None
 
 
 _sync_lock = Lock()
@@ -166,10 +167,16 @@ def _manifest_for(engagement_dir: Path) -> dict[str, Any]:
     key = engagement_dir.name
     target = str(manifest.get("target") or manifest.get("hostname") or scope.get("hostname") or key)
     status = str(scope.get("status") or "in_progress")
+    # ``engagement_type`` comes from scope.json (preferred) with a fallback to
+    # engagement.json. None means "leave whatever the DB had", which preserves
+    # the DEFAULT 'red' for fresh rows without overriding existing values.
+    raw_type = scope.get("engagement_type") or manifest.get("engagement_type")
+    engagement_type: str | None = str(raw_type) if raw_type else None
     return {
         "key": key,
         "target": target,
         "status": status,
+        "engagement_type": engagement_type,
         "scope": scope,
     }
 
@@ -260,6 +267,7 @@ def sync_engagements() -> None:
                     manifest["target"],
                     manifest["status"],
                     str(engagement_dir),
+                    engagement_type=manifest.get("engagement_type"),
                 )
             else:
                 db.update_engagement_identity(
@@ -267,6 +275,7 @@ def sync_engagements() -> None:
                     manifest["target"],
                     manifest["status"],
                     str(engagement_dir),
+                    engagement_type=manifest.get("engagement_type"),
                 )
                 engagement = db.get_engagement_by_id(engagement.id)
                 assert engagement is not None
@@ -411,6 +420,7 @@ def _view_for(engagement: Engagement) -> EngagementView:
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
         session_count=len(db.list_engagement_sessions_for_engagement(engagement.id)),
+        engagement_type=engagement.engagement_type,
     )
 
 
