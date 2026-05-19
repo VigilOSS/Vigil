@@ -227,6 +227,7 @@ def _parse_iso(value: str) -> datetime | None:
 
 def _reconcile_stale(args) -> None:
     cutoff_hours = float(getattr(args, "max_age_hours", 24.0) or 24.0)
+    dry_run = bool(getattr(args, "dry_run", False))
     now = datetime.now(timezone.utc)
     client, _ = dispatch._client_for(args)  # noqa: SLF001
     rows_out: list[dict] = []
@@ -247,21 +248,77 @@ def _reconcile_stale(args) -> None:
                 category = "blocked_handoff"
             elif handoff:
                 category = "checkpointed_handoff"
-            item = {
+            item: dict = {
                 "agent_id": row.get("agent_id"),
                 "agent_role": row.get("agent_role"),
                 "age_hours": round(age_hours, 2) if age_hours is not None else None,
                 "category": category,
                 "handoff_status": handoff_status,
+                "closed": False,
+                "closed_status": None,
+                "skip_reason": None,
             }
+            if dry_run:
+                item["skip_reason"] = "dry-run"
+            elif category in {"ready_handoff", "blocked_handoff"}:
+                try:
+                    closed = _close_via_client(client, str(row.get("agent_id") or ""), reason="reconcile-stale")
+                    item["closed"] = True
+                    item["closed_status"] = closed["dispatch"].get("status")
+                except _ReconcileSkipped as exc:
+                    item["skip_reason"] = str(exc)
+            else:
+                item["skip_reason"] = (
+                    "no handoff to close" if category == "no_handoff"
+                    else "handoff is checkpointed; specialist must mark ready|blocked before close"
+                )
             rows_out.append(item)
-            if not getattr(args, "dry_run", False) and category in {"ready_handoff", "blocked_handoff"}:
-                args.agent_id = str(row.get("agent_id") or "")
-                _close(args)
     finally:
         client.close()
-    if getattr(args, "dry_run", False):
-        print(json.dumps(rows_out, indent=2, ensure_ascii=False))
+    print(json.dumps(rows_out, indent=2, ensure_ascii=False))
+
+
+class _ReconcileSkipped(Exception):
+    """Raised when a reconcile candidate cannot be closed cleanly."""
+
+
+def _close_via_client(client, agent_id: str, *, reason: str) -> dict:
+    """Close one dispatch using an already-open client. Returns {'dispatch', 'decision'}."""
+    if not agent_id:
+        raise _ReconcileSkipped("missing agent_id")
+    handoff = client.get_handoff(agent_id)
+    if not handoff:
+        raise _ReconcileSkipped("no handoff for agent_id")
+    dispatch_row = client.get_dispatch(agent_id)
+    if not dispatch_row:
+        raise _ReconcileSkipped("no dispatch for agent_id")
+    handoff_status = str(handoff.get("handoff_status") or "checkpointed")
+    if handoff_status == "ready":
+        target_status = str(handoff.get("closed_dispatch_status") or "completed")
+    elif handoff_status == "blocked":
+        target_status = str(handoff.get("closed_dispatch_status") or "blocked")
+    else:
+        raise _ReconcileSkipped(f"handoff_status={handoff_status} is not closable")
+    if target_status not in {"completed", "blocked", "failed", "aborted"}:
+        raise _ReconcileSkipped(f"invalid closed status {target_status}")
+    patch: dict = {"status": target_status, "completed_at": _utcnow_iso()}
+    if handoff.get("finding_slugs"):
+        patch["finding_slugs"] = handoff.get("finding_slugs")
+    updated = client.update_dispatch(agent_id, patch)
+    decision = client.record_decision(
+        {
+            "kind": "dispatch_closed_from_handoff",
+            "payload": {
+                "agent_id": agent_id,
+                "handoff_status": handoff_status,
+                "closed_dispatch_status": target_status,
+                "handoff_version": handoff.get("handoff_version"),
+                "reason": reason,
+            },
+            "surfaced_to_user": False,
+        }
+    )
+    return {"dispatch": updated, "decision": decision}
 
 
 def _start(args) -> None:

@@ -686,6 +686,7 @@ def get_resume_brief(
     q: str = "",
     finding: str = "",
     agent_id: str = "",
+    max_age_hours: float = Query(default=24.0, gt=0, le=24 * 30),
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     return assessment_memory.build_resume_brief(
@@ -693,6 +694,7 @@ def get_resume_brief(
         q=q,
         finding=finding,
         agent_id=agent_id,
+        max_age_hours=max_age_hours,
     )
 
 

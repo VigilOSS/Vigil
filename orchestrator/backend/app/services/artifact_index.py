@@ -21,6 +21,19 @@ DEFAULT_ROOTS = (
     "scans/reports",
     "downloads",
 )
+EXCLUDED_DIR_NAMES = frozenset({
+    ".git",
+    ".hg",
+    ".svn",
+    ".jj",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+})
 PREVIEW_BYTES = 4096
 INDEXED_TEXT_BYTES = 16384
 GET_CONTENT_BYTES = 65536
@@ -138,6 +151,60 @@ def _serialize_artifact(row) -> dict[str, Any]:
     return data
 
 
+def _file_payload_if_changed(
+    engagement_id: int,
+    root: Path,
+    relative_path: str,
+    media_type: str,
+) -> dict[str, Any]:
+    """Skip the hash + preview read when the on-disk file is unchanged.
+
+    Compares the on-disk (size, mtime) against the stored row's
+    (size_bytes, last_indexed_at). When both match and the row already has a
+    sha256, return the cached payload — saves a full re-read for files that
+    haven't changed since the last sync.
+    """
+    path = root / relative_path
+    if not path.is_file():
+        return _file_payload(root, relative_path, media_type)
+    try:
+        stat = path.stat()
+    except OSError:
+        return _file_payload(root, relative_path, media_type)
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT size_bytes, sha256, preview_text, indexed_text, last_indexed_at "
+            "FROM assessment_artifacts WHERE engagement_id = ? AND relative_path = ?",
+            (engagement_id, relative_path),
+        ).fetchone()
+    if existing is None:
+        return _file_payload(root, relative_path, media_type)
+    stored_size = int(existing["size_bytes"] or 0)
+    stored_sha = str(existing["sha256"] or "")
+    stored_indexed_at = _parse_indexed_at(existing["last_indexed_at"])
+    if stored_size != stat.st_size or not stored_sha or stored_indexed_at is None:
+        return _file_payload(root, relative_path, media_type)
+    if stat.st_mtime > stored_indexed_at:
+        return _file_payload(root, relative_path, media_type)
+    return {
+        "present": True,
+        "size_bytes": stored_size,
+        "sha256": stored_sha,
+        "preview_text": str(existing["preview_text"] or ""),
+        "indexed_text": str(existing["indexed_text"] or ""),
+    }
+
+
+def _parse_indexed_at(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def register_artifact(
     engagement_id: int,
     *,
@@ -157,7 +224,7 @@ def register_artifact(
     relative_path = _normalize_relative_path(root, path)
     kind_value = _guess_kind(relative_path, kind)
     media_type_value = _media_type(relative_path, media_type)
-    file_data = _file_payload(root, relative_path, media_type_value)
+    file_data = _file_payload_if_changed(engagement_id, root, relative_path, media_type_value)
     now = _utcnow_iso()
     canonical_finding = canonical_finding_alias(related_finding_slug) if related_finding_slug else None
     with get_connection() as connection:
@@ -230,10 +297,33 @@ def _iter_default_files(root: Path) -> set[str]:
         if base.is_file():
             paths.add(base.relative_to(root).as_posix())
             continue
-        for path in base.rglob("*"):
-            if path.is_file():
-                paths.add(path.relative_to(root).as_posix())
+        for path in _walk_tracked(base):
+            paths.add(path.relative_to(root).as_posix())
     return paths
+
+
+def _walk_tracked(base: Path):
+    """Yield files under ``base`` while pruning version-control and build dirs.
+
+    `Path.rglob` cannot prune, so a large `.git` or `node_modules` would hash
+    thousands of irrelevant files on every sync.
+    """
+    stack = [base]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(current.iterdir())
+        except (OSError, PermissionError):
+            continue
+        for entry in entries:
+            if entry.is_symlink():
+                continue
+            if entry.is_dir():
+                if entry.name in EXCLUDED_DIR_NAMES:
+                    continue
+                stack.append(entry)
+            elif entry.is_file():
+                yield entry
 
 
 def _path_ref(value: Any) -> str | None:
@@ -349,19 +439,29 @@ def sync_artifacts(engagement_id: int) -> dict[str, Any]:
                 (engagement_id,),
             ).fetchall()
         }
-        connection.execute(
-            "UPDATE assessment_artifacts SET present = 0, updated_at = ? WHERE engagement_id = ?",
-            (_utcnow_iso(), engagement_id),
-        )
     discovered = _iter_default_files(root) | existing_paths
+    touched_paths: set[str] = set()
     registered = 0
     for relative_path in sorted(discovered):
-        register_artifact(engagement_id, path=relative_path)
+        row = register_artifact(engagement_id, path=relative_path)
+        touched_paths.add(str(row.get("relative_path") or relative_path))
         registered += 1
     for ref in _referenced_artifacts(engagement_id, root):
-        register_artifact(engagement_id, **ref)
+        row = register_artifact(engagement_id, **ref)
+        touched_paths.add(str(row.get("relative_path") or ref.get("path", "")))
         registered += 1
+    # Rows that existed before sync but were not touched (and their file is now
+    # gone) get marked missing in a single closing transaction so a mid-sync
+    # crash never leaves the whole table flagged present=0.
+    untouched = existing_paths - touched_paths
     with get_connection() as connection:
+        if untouched:
+            placeholders = ",".join("?" for _ in untouched)
+            connection.execute(
+                f"UPDATE assessment_artifacts SET present = 0, updated_at = ? "
+                f"WHERE engagement_id = ? AND relative_path IN ({placeholders})",
+                (_utcnow_iso(), engagement_id, *sorted(untouched)),
+            )
         present = connection.execute(
             "SELECT COUNT(*) FROM assessment_artifacts WHERE engagement_id = ? AND present = 1",
             (engagement_id,),

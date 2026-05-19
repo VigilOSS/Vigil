@@ -70,7 +70,7 @@ def _recent_decisions(engagement_id: int) -> list[dict[str, Any]]:
     return state_manager.list_decisions(engagement_id, limit=10)
 
 
-def _recent_dispatch_picture(engagement_id: int) -> dict[str, Any]:
+def _recent_dispatch_picture(engagement_id: int, *, max_age_hours: float) -> dict[str, Any]:
     dispatches = state_manager.list_dispatches(engagement_id, limit=25)
     handoffs = {row.get("agent_id"): row for row in state_manager.list_handoffs(engagement_id, limit=100)}
     now = dt.datetime.now(dt.timezone.utc)
@@ -85,7 +85,7 @@ def _recent_dispatch_picture(engagement_id: int) -> dict[str, Any]:
             gaps.append({"agent_id": agent_id, "agent_role": row.get("agent_role"), "reason": "no_handoff"})
         started = _parse_iso(row.get("dispatched_at"))
         age_hours = ((now - started).total_seconds() / 3600.0) if started else None
-        if age_hours is not None and age_hours >= 24:
+        if age_hours is not None and age_hours >= max_age_hours:
             stale.append(
                 {
                     "agent_id": agent_id,
@@ -99,6 +99,7 @@ def _recent_dispatch_picture(engagement_id: int) -> dict[str, Any]:
         "latest_handoffs": list(handoffs.values())[:10],
         "stale_in_progress_dispatches": stale,
         "handoff_gaps": gaps[:10],
+        "stale_threshold_hours": max_age_hours,
     }
 
 
@@ -141,12 +142,14 @@ def build_resume_brief(
     q: str = "",
     finding: str = "",
     agent_id: str = "",
+    max_age_hours: float = 24.0,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     root = Path(engagement.engagement_root)
     scope = _read_scope(root)
     canonical_finding = canonical_finding_alias(finding) if finding else ""
-    search_text = canonical_finding or q
+    search_terms = [term for term in (canonical_finding, q) if term]
+    search_text = " ".join(search_terms)
 
     with get_connection() as connection:
         target_finding = None
@@ -194,7 +197,7 @@ def build_resume_brief(
         finding=canonical_finding or finding,
         limit=10,
     )
-    dispatch_picture = _recent_dispatch_picture(engagement_id)
+    dispatch_picture = _recent_dispatch_picture(engagement_id, max_age_hours=max_age_hours)
     if agent_id:
         dispatch_picture["selected_dispatch"] = state_manager.get_dispatch(engagement_id, agent_id)
         try:
