@@ -31,3 +31,89 @@ def fts_escape(term: str) -> str:
     if not tokens:
         return ""
     return " ".join(f'"{tok}"' for tok in tokens)
+
+
+CANONICAL_FINDING_SLUG_RE = re.compile(r"^[A-Z]{2}-\d{3}$")
+_FINDING_ALIAS_FULL_RE = re.compile(r"^(?:FINDING[-\s]*)?([A-Za-z]{2})[-\s]?(\d{3})$")
+_FINDING_ALIAS_SEARCH_RE = re.compile(r"\b(?:FINDING[-\s]*)?([A-Za-z]{2})[-\s]?(\d{3})\b")
+
+
+def is_canonical_finding_slug(value: str | None) -> bool:
+    """Return True for the write-time canonical finding ID shape.
+
+    Lookup and search callers may accept aliases, but mutating paths use this
+    strict check so backend rows do not accumulate spelling variants.
+    """
+
+    return bool(value and CANONICAL_FINDING_SLUG_RE.fullmatch(str(value)))
+
+
+def canonical_finding_alias(value: str | None) -> str | None:
+    """Normalize a single finding alias for lookup/search.
+
+    Accepts ``VA-047``, ``VA047``, ``VA 047``, and ``FINDING-VA-047`` variants.
+    Returns ``None`` when the whole value is not a finding reference.
+    """
+
+    if value is None:
+        return None
+    match = _FINDING_ALIAS_FULL_RE.fullmatch(str(value).strip())
+    if not match:
+        return None
+    return f"{match.group(1).upper()}-{match.group(2)}"
+
+
+def finding_aliases(canonical_slug: str) -> list[str]:
+    """Return stable search aliases for a canonical finding slug."""
+
+    canonical = canonical_finding_alias(canonical_slug)
+    if canonical is None:
+        return []
+    prefix, number = canonical.split("-", 1)
+    return [
+        canonical,
+        f"{prefix}{number}",
+        f"{prefix} {number}",
+        f"FINDING-{canonical}",
+    ]
+
+
+def finding_aliases_in_text(value: str | None) -> dict[str, list[str]]:
+    """Return canonical finding refs detected in free text with their aliases."""
+
+    if value is None:
+        return {}
+    found: dict[str, list[str]] = {}
+    for match in _FINDING_ALIAS_SEARCH_RE.finditer(str(value)):
+        canonical = f"{match.group(1).upper()}-{match.group(2)}"
+        found.setdefault(canonical, finding_aliases(canonical))
+    return found
+
+
+def fts_or_expression(terms: list[str]) -> str:
+    """Return a safe FTS5 OR expression for user-controlled terms."""
+
+    expressions: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        expression = fts_escape(term)
+        if not expression or expression in seen:
+            continue
+        seen.add(expression)
+        expressions.append(expression)
+    if not expressions:
+        return ""
+    if len(expressions) == 1:
+        return expressions[0]
+    return " OR ".join(f"({expression})" for expression in expressions)
+
+
+def expanded_fts_query(value: str, *, exact: bool = False) -> str:
+    """Build a command/artifact search expression with finding alias expansion."""
+
+    if exact:
+        return fts_escape(value)
+    terms = [value]
+    for aliases in finding_aliases_in_text(value).values():
+        terms.extend(aliases)
+    return fts_or_expression(terms)

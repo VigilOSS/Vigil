@@ -16,27 +16,31 @@ Run the core resume hydration before target-facing commands, specialist dispatch
 transitions, finding writes, or report work:
 
 ```bash
-aith assess list-findings
-aith assess list-findings --verification-state unreviewed
-aith assess list-findings --workflow-status pending
-aith assess list-intel
-aith assess fetch activity-entries
-aith assess agent list --limit 10
-aith assess agent render-handoff <last-agent-id>
-aith assess list-command-runs --q <scope-host-or-keyword>
+aith assess resume-brief
 ```
 
-The `--verification-state unreviewed` and `--workflow-status pending` queues
-are the two most likely to be silently skipped across operator handoffs. A
-finding that lives in `unreviewed` is a draft, not a finding — it cannot be
-reported until Phase 4 verification clears it. A `pending` workflow row is
-work the prior operator did not close out. Surface both queues at resume so
-the new operator decides explicitly: verify, kill, or carry forward.
+For targeted continuation, narrow the brief instead of manually reconstructing state:
 
-Use the most recent relevant dispatch `agent_id` for `render-handoff`. If no dispatch has a
-recorded handoff, state that explicitly and continue with the other resume checks. Use the primary
-scope host for `list-command-runs --q`; if the target is code-only or hostless, use the repo/app
-keyword only when runtime, fuzz, or Kali command history exists.
+```bash
+aith assess resume-brief --finding <finding-slug-or-alias>
+aith assess resume-brief --q "<scope-host-or-keyword>"
+aith assess resume-brief --agent-id <agent-id>
+```
+
+The brief includes finding queues, recent decisions, stale dispatches, handoff gaps,
+relevant command-history matches, and indexed artifacts. Use the drill-down commands it
+prints for exact evidence:
+
+```bash
+aith assess get-command-run <id>
+aith assess artifact search <query>
+aith assess artifact get <id>
+aith assess agent render-handoff <agent-id>
+```
+
+Use command history as a coverage map, not as a reuse gate. If you cite a prior run
+instead of re-running, fetch it with `get-command-run <id>` first because a successful
+return code does not prove the preview answers the current question.
 
 After hydration, summarize the resume state in one compact operator note:
 - confirmed, suspicious, killed, and open findings
@@ -44,5 +48,6 @@ After hydration, summarize the resume state in one compact operator note:
 - recent operator decisions and null results
 - last dispatch owner, skills, result, and handoff gaps
 - command-run coverage already performed against the host or keyword
+- indexed artifacts that matter to the next action
 
 Only then decide the next action.

@@ -47,6 +47,7 @@ def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-exampl
         encoding="utf-8",
     )
     (engagement_dir / "log.md").write_text("# Engagement Log\n", encoding="utf-8")
+    (engagement_dir / "findings.md").write_text("# Findings\n", encoding="utf-8")
     (engagement_dir / "sessions" / "index.json").write_text(
         json.dumps(
             [
@@ -674,7 +675,7 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
 
     missing_finding = client.get("/engagements/2026-03-30-120000-example/assessment/findings/VA-404")
     assert missing_finding.status_code == 404
-    assert missing_finding.json()["detail"] == "finding not found"
+    assert missing_finding.json()["detail"].startswith("finding not found: VA-404")
 
     summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
     assert summary.status_code == 200
@@ -702,6 +703,49 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     )
     assert final_report.status_code == 200
     assert [row["slug"] for row in final_report.json()["standalone"]] == ["VA-001"]
+
+
+def test_finding_create_rejects_malformed_slug_and_lookup_accepts_alias(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    malformed = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "VA047",
+            "title": "Malformed slug",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "canonical_location": "https://example.com/malformed",
+            "summary": "Malformed slug should be rejected at write time.",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert malformed.status_code == 400
+    assert "did you mean VA-047" in malformed.json()["detail"]
+
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "VA-047",
+            "title": "Canonical slug",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "canonical_location": "https://example.com/canonical",
+            "summary": "Canonical slug should be stored.",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    alias_lookup = client.get("/engagements/2026-03-30-120000-example/assessment/findings/VA047")
+    assert alias_lookup.status_code == 200
+    assert alias_lookup.json()["slug"] == "VA-047"
 
 
 def test_events_synthesizes_legacy_log_artifact_timeline(client, isolate_settings):
@@ -1109,7 +1153,7 @@ def test_findings_patch_allows_explicit_workflow_rollback(client, isolate_settin
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "CH-010A",
+            "slug": "CH-011",
             "title": "Workflow rollback candidate",
             "severity": "medium",
             "workflow_status": "active",
@@ -1131,7 +1175,7 @@ def test_findings_patch_allows_explicit_workflow_rollback(client, isolate_settin
     assert created.status_code == 201
 
     patched = client.patch(
-        "/engagements/2026-03-30-120000-example/assessment/findings/CH-010A",
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-011",
         json={
             "workflow_status": "draft",
             "reason_code": "needs-retriage",
@@ -1148,7 +1192,7 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json={
-            "slug": "CH-010B",
+            "slug": "CH-012",
             "title": "Patch/merge race candidate",
             "severity": "high",
             "workflow_status": "active",
@@ -1182,7 +1226,7 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
                 SET status = 'merged',
                     merged_into_finding_id = id,
                     updated_at = '2099-01-01 00:00:00'
-                WHERE slug = 'CH-010B'
+                WHERE slug = 'CH-012'
                 """
             )
             connection.commit()
@@ -1191,7 +1235,7 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
     monkeypatch.setattr(state_manager, "create_finding", race)
 
     patched = client.patch(
-        "/engagements/2026-03-30-120000-example/assessment/findings/CH-010B",
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-012",
         json={"notes": "Late patch should not overwrite a merged finding."},
     )
 

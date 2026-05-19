@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from assess.commands import dispatch
@@ -24,6 +25,8 @@ def register(subparsers) -> None:
             "get",
             "handoff",
             "render-handoff",
+            "close",
+            "reconcile-stale",
             "decision",
             "abort-duplicate",
         ),
@@ -72,8 +75,12 @@ def register(subparsers) -> None:
     p.add_argument("--working-artifact", dest="hf_working_artifacts", action="append", default=None)
     p.add_argument("--open-question", dest="hf_open_questions", action="append", default=None)
     p.add_argument("--recommended-next-agent", dest="hf_recommended_next_agent", default=None)
+    p.add_argument("--handoff-status", dest="hf_handoff_status", default=None, choices=("checkpointed", "ready", "blocked", "superseded"))
+    p.add_argument("--closed-dispatch-status", dest="hf_closed_dispatch_status", default=None, choices=("completed", "blocked", "failed", "aborted"))
     p.add_argument("--extras-json", dest="hf_extras_json", default=None)
     p.add_argument("--reason", default="", help="Reason for abort-duplicate / decision shorthand.")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true", help="(reconcile-stale) Print candidates without closing dispatches.")
+    p.add_argument("--max-age-hours", dest="max_age_hours", type=float, default=24.0, help="(reconcile-stale) Age threshold for in-progress dispatches.")
     # start-swarm flags. Reuse --role / --task / --skills / --model / --reasoning
     # from the existing start flag set; add three new flags below.
     p.add_argument(
@@ -113,6 +120,10 @@ def run(args) -> None:
         dispatch._record_handoff(args)  # noqa: SLF001 - new command surface over existing backend helper.
     elif action == "render-handoff":
         dispatch._render_handoff(args, _agent_id_extra(args))  # noqa: SLF001
+    elif action == "close":
+        _close(args)
+    elif action == "reconcile-stale":
+        _reconcile_stale(args)
     elif action == "decision":
         dispatch._record_decision(args)  # noqa: SLF001
     elif action == "list":
@@ -143,6 +154,114 @@ def _done(args) -> None:
     if not getattr(args, "dispatch_status", None):
         args.dispatch_status = "completed"
     dispatch._update_dispatch_status(args, [])  # noqa: SLF001
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _close(args) -> None:
+    agent_id = getattr(args, "agent_id", None) or (args.extra[0] if args.extra else "")
+    if not agent_id:
+        print("agent close: agent id required as positional arg or --agent-id", file=sys.stderr)
+        sys.exit(1)
+    client, _ = dispatch._client_for(args)  # noqa: SLF001
+    try:
+        handoff = client.get_handoff(agent_id)
+        if not handoff:
+            print(f"agent close: no handoff found for agent_id={agent_id}", file=sys.stderr)
+            sys.exit(2)
+        dispatch_row = client.get_dispatch(agent_id)
+        if not dispatch_row:
+            print(f"agent close: no dispatch found for agent_id={agent_id}", file=sys.stderr)
+            sys.exit(2)
+        handoff_status = str(handoff.get("handoff_status") or "checkpointed")
+        if handoff_status == "ready":
+            target_status = str(handoff.get("closed_dispatch_status") or "completed")
+        elif handoff_status == "blocked":
+            target_status = str(handoff.get("closed_dispatch_status") or "blocked")
+        else:
+            print(
+                f"agent close: handoff_status={handoff_status!r} is not closable; "
+                "use agent handoff --handoff-status ready|blocked first",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if target_status not in {"completed", "blocked", "failed", "aborted"}:
+            print(f"agent close: closed status {target_status!r} is not valid", file=sys.stderr)
+            sys.exit(2)
+        patch = {
+            "status": target_status,
+            "completed_at": getattr(args, "completed_at", None) or _utcnow_iso(),
+        }
+        if handoff.get("finding_slugs"):
+            patch["finding_slugs"] = handoff.get("finding_slugs")
+        updated = client.update_dispatch(agent_id, patch)
+        decision = client.record_decision(
+            {
+                "kind": "dispatch_closed_from_handoff",
+                "payload": {
+                    "agent_id": agent_id,
+                    "handoff_status": handoff_status,
+                    "closed_dispatch_status": target_status,
+                    "handoff_version": handoff.get("handoff_version"),
+                    "reason": getattr(args, "reason", "") or "agent close",
+                },
+                "surfaced_to_user": False,
+            }
+        )
+    finally:
+        client.close()
+    print(json.dumps({"dispatch": updated, "decision": decision}, ensure_ascii=False))
+
+
+def _parse_iso(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _reconcile_stale(args) -> None:
+    cutoff_hours = float(getattr(args, "max_age_hours", 24.0) or 24.0)
+    now = datetime.now(timezone.utc)
+    client, _ = dispatch._client_for(args)  # noqa: SLF001
+    rows_out: list[dict] = []
+    try:
+        dispatches = client.list_dispatches(status="in-progress", limit=1000)
+        handoffs = {row.get("agent_id"): row for row in client.list_handoffs(limit=1000)}
+        for row in dispatches:
+            started = _parse_iso(str(row.get("dispatched_at") or ""))
+            age_hours = ((now - started).total_seconds() / 3600.0) if started else None
+            if age_hours is not None and age_hours < cutoff_hours:
+                continue
+            handoff = handoffs.get(row.get("agent_id"))
+            handoff_status = str((handoff or {}).get("handoff_status") or "none")
+            category = "no_handoff"
+            if handoff_status == "ready":
+                category = "ready_handoff"
+            elif handoff_status == "blocked":
+                category = "blocked_handoff"
+            elif handoff:
+                category = "checkpointed_handoff"
+            item = {
+                "agent_id": row.get("agent_id"),
+                "agent_role": row.get("agent_role"),
+                "age_hours": round(age_hours, 2) if age_hours is not None else None,
+                "category": category,
+                "handoff_status": handoff_status,
+            }
+            rows_out.append(item)
+            if not getattr(args, "dry_run", False) and category in {"ready_handoff", "blocked_handoff"}:
+                args.agent_id = str(row.get("agent_id") or "")
+                _close(args)
+    finally:
+        client.close()
+    if getattr(args, "dry_run", False):
+        print(json.dumps(rows_out, indent=2, ensure_ascii=False))
 
 
 def _start(args) -> None:

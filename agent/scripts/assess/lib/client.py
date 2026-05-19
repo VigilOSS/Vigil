@@ -287,6 +287,8 @@ class AssessmentClient:
         "working_artifacts",
         "open_questions",
         "recommended_next_agent",
+        "handoff_status",
+        "closed_dispatch_status",
         "extras",
     )
 

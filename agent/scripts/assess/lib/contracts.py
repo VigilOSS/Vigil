@@ -503,6 +503,52 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`--json` is the report-writer/LLM ingestion form. The default text form is for quick human inspection before dispatch.",
         ),
     ),
+    "resume-brief": CommandContract(
+        name="resume-brief",
+        summary="Render a bounded resume brief from backend state, command history, handoffs, and indexed artifacts.",
+        schema_name="GET /assessment/resume-brief",
+        preferred_invocations=(
+            "aith assess resume-brief",
+            "aith assess resume-brief --finding VA-047",
+            "aith assess resume-brief --q \"OIDC static state\" --json",
+        ),
+        author_supplied_fields=(
+            "--q",
+            "--finding",
+            "--agent-id",
+        ),
+        notes=(
+            "Use this as the first resume primitive instead of manually chaining findings, handoffs, command-runs, and local notes.",
+            "Output is intentionally bounded; use get-command-run and artifact get for drill-down.",
+        ),
+        common_mistakes=(
+            ("loading local notes first", "run resume-brief, then use artifact search/get for linked files"),
+        ),
+    ),
+    "artifact": CommandContract(
+        name="artifact",
+        summary="Sync, register, search, and fetch indexed engagement-local artifact metadata.",
+        schema_name="assessment_artifacts table + /assessment/artifacts endpoints",
+        preferred_invocations=(
+            "aith assess artifact sync",
+            "aith assess artifact search VA-047",
+            "aith assess artifact search --finding VA-047",
+            "aith assess artifact get <id>",
+            "aith assess artifact register notes/foo.md --kind note --finding VA-047",
+        ),
+        author_supplied_fields=(
+            "<action> sync|search|get|register",
+            "register path",
+            "--finding / --kind / --agent-id / --command-run-id",
+        ),
+        notes=(
+            "Large/raw files stay on disk. The backend stores hashes, capped previews, presence, and entity links.",
+            "Register paths relative to the engagement root; absolute paths are accepted only when they resolve inside the engagement directory.",
+        ),
+        common_mistakes=(
+            ("pasting full artifact content into prompts", "search first, then get a specific id; large content remains capped"),
+        ),
+    ),
     "verify-finding": CommandContract(
         name="verify-finding",
         summary="Apply a verification transition to an existing finding through the audit ledger.",
@@ -1504,6 +1550,8 @@ AGENT_VERBS: tuple[str, ...] = (
     "render-handoff",
     "start",
     "done",
+    "close",
+    "reconcile-stale",
     "abort-duplicate",
     "decision",
     "handoff",
@@ -1523,7 +1571,9 @@ def _dispatch_root_contract() -> CommandContract:
         preferred_invocations=(
             "aith assess agent start --role <role> --task \"...\" --dispatch-mode <mode> --skills <skills>",
             "aith assess agent done <agent-id> --finding-slugs <slug1,slug2>",
-            "aith assess agent handoff --agent-id <id> --role <role> --summary '...'",
+            "aith assess agent handoff --agent-id <id> --role <role> --summary '...' --handoff-status ready",
+            "aith assess agent close <agent-id>",
+            "aith assess agent reconcile-stale --dry-run",
             "aith assess agent list [--filter-role <role>] [--status <status>]",
             "aith assess agent render-handoff <agent-id>",
             "aith assess work-buffer <db_path> stats|fetch|done|...",
@@ -1536,9 +1586,7 @@ def _dispatch_root_contract() -> CommandContract:
             "Work-buffer actions live under `aith assess work-buffer <db_path> ...`; "
             "agent lifecycle actions never take a cases.db path.",
             "Dispatch state lives in the orchestrator backend. Use `agent start` to log a dispatch, `agent done` "
-            "to mark it complete, `agent handoff` to durably record the agent's exit "
-            "payload, and `agent render-handoff` to assemble the blob the next dispatch prompt "
-            "pastes verbatim.",
+            "for direct lifecycle patches, `agent handoff` for repeatable checkpoints, `agent close` to consume a ready/blocked handoff into dispatch closure, and `agent render-handoff` to assemble the blob the next dispatch prompt pastes verbatim.",
             f"Verbs with their own contract entries: {', '.join(AGENT_VERBS)}.",
         ),
         common_mistakes=(
@@ -1744,8 +1792,44 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             examples=(
                 {
-                    "command": "aith assess agent done va-7f3 --status completed --finding-slugs va-001,va-002",
+                    "command": "aith assess agent done va-7f3 --status completed --finding-slugs VA-001,VA-002",
                 },
+            ),
+        )
+    if verb == "close":
+        return CommandContract(
+            name="agent close",
+            summary="Consume the latest ready/blocked handoff and close the matching dispatch row.",
+            schema_name="GET dispatch-handoffs/{agent_id} + PATCH dispatches/{agent_id} + decision-record",
+            preferred_invocations=(
+                "aith assess agent close <agent-id>",
+                "aith assess agent close <agent-id> --reason \"ready handoff reviewed\"",
+            ),
+            author_supplied_fields=(
+                "<agent-id>",
+                "--reason",
+            ),
+            notes=(
+                "Use this after a specialist checkpoint marks handoff_status=ready or blocked. Checkpointed handoffs remain open.",
+                "The helper records a dispatch_closed_from_handoff decision row so automated/stale closure remains auditable.",
+            ),
+        )
+    if verb == "reconcile-stale":
+        return CommandContract(
+            name="agent reconcile-stale",
+            summary="List stale in-progress dispatches and optionally close those with ready/blocked handoffs.",
+            schema_name="GET dispatches + GET dispatch-handoffs",
+            preferred_invocations=(
+                "aith assess agent reconcile-stale --dry-run",
+                "aith assess agent reconcile-stale --max-age-hours 12 --dry-run",
+            ),
+            author_supplied_fields=(
+                "--max-age-hours",
+                "--dry-run",
+            ),
+            notes=(
+                "Dry-run is the review surface: it groups stale rows by handoff availability/status.",
+                "Without --dry-run, only ready/blocked handoffs are closable; checkpointed or missing handoffs remain in-progress.",
             ),
         )
     if verb in {"record-handoff", "handoff"}:
@@ -1760,7 +1844,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             preferred_invocations=(
                 "aith assess agent handoff --from-json <handoff.json>",
                 "aith assess agent handoff --agent-id <id> --role <role> "
-                "--summary \"...\" --next-step \"...\" --coverage-gap \"<area>: <reason>\"",
+                "--summary \"...\" --handoff-status ready --next-step \"...\" --coverage-gap \"<area>: <reason>\"",
             ),
             author_supplied_fields=(
                 "--agent-id",
@@ -1770,6 +1854,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             helper_defaults=(
                 ("upsert", "POST then PATCH on 409 — the operation is idempotent so checkpointing is safe"),
+                ("handoff_status", "checkpointed unless --handoff-status is supplied"),
                 ("confidence", "omitted when not specified"),
             ),
             notes=(
