@@ -192,6 +192,41 @@ def test_report_readiness_blocks_unlinked_markdown_notes(client, isolate_setting
     )
 
 
+def test_mark_scratch_clears_unlinked_markdown_blocker(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    (eng / "notes" / "scratch.md").write_text("operator scratch", encoding="utf-8")
+    sync = client.post(f"{BASE}/artifacts/sync")
+    assert sync.status_code == 200, sync.text
+
+    readiness_before = client.get(f"{BASE}/report-readiness")
+    blockers_before = readiness_before.json()["blockers"]
+    note_blocker = next(
+        b for b in blockers_before
+        if b["kind"] == "unlinked_markdown_note" and b["path"] == "notes/scratch.md"
+    )
+    # Blocker message must name the operator escape commands so a human or
+    # LLM can fix without searching docs.
+    assert "artifact register" in note_blocker["detail"]
+    assert "mark-scratch" in note_blocker["detail"]
+
+    flagged = client.post(
+        f"{BASE}/artifacts/scratch-by-path",
+        json={"path": "notes/scratch.md", "scratch": True},
+    )
+    assert flagged.status_code == 200, flagged.text
+    assert flagged.json()["scratch"] is True
+
+    readiness_after = client.get(f"{BASE}/report-readiness")
+    assert readiness_after.status_code == 200, readiness_after.text
+    blockers_after = readiness_after.json()["blockers"]
+    assert not any(
+        b["kind"] == "unlinked_markdown_note" and b["path"] == "notes/scratch.md"
+        for b in blockers_after
+    )
+
+
 def test_recommended_actions_keep_lifecycle_items_before_inspect_cap() -> None:
     actions = _recommended_actions(
         finding="VA-047",

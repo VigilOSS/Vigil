@@ -3270,6 +3270,10 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 continue
             if not bool(artifact.get("present")):
                 continue
+            if bool(artifact.get("scratch")):
+                # Operator explicitly marked this as scratch — outside the
+                # report-readiness contract by design.
+                continue
             linked = any(
                 artifact.get(field)
                 for field in (
@@ -3287,7 +3291,13 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "kind": "unlinked_markdown_note",
                         "artifact_id": artifact.get("id"),
                         "path": artifact_path,
-                        "detail": "markdown notes under notes/ must be registered and linked to durable backend state",
+                        "detail": (
+                            f"markdown note '{artifact_path}' is indexed but not linked to a finding, chain, "
+                            "surface, request_variant, command_run, or producing agent. Fix with one of: "
+                            f"`aith assess artifact register {artifact_path} --finding <slug>` to link, "
+                            f"`aith assess artifact mark-scratch {artifact_path}` to dismiss as scratch, "
+                            f"or delete the file and re-run `aith assess artifact sync`."
+                        ),
                     }
                 )
         for row in candidates:
@@ -5945,6 +5955,7 @@ def list_command_runs(
             offset=offset,
             include_output=include_output,
             show_matches=show_matches,
+            exact=exact,
         )
 
     params = list(base_params)
@@ -5963,7 +5974,7 @@ def list_command_runs(
     with get_connection() as connection:
         rows = connection.execute(query, tuple(params)).fetchall()
     return [
-        _serialize_command_run_with_matches(row, include_output=include_output, q=q, show_matches=show_matches)
+        _serialize_command_run_with_matches(row, include_output=include_output, q=q, show_matches=show_matches, exact=exact)
         for row in rows
     ]
 
@@ -5979,6 +5990,7 @@ def _list_distant_command_runs(
     offset: int,
     include_output: bool,
     show_matches: bool,
+    exact: bool = False,
 ) -> list[dict[str, Any]]:
     """Return nonmatching rows in the same inferred command scope.
 
@@ -6035,7 +6047,7 @@ def _list_distant_command_runs(
     with get_connection() as connection:
         rows = connection.execute(query, tuple(distant_params)).fetchall()
     return [
-        _serialize_command_run_with_matches(row, include_output=include_output, q=q, show_matches=show_matches)
+        _serialize_command_run_with_matches(row, include_output=include_output, q=q, show_matches=show_matches, exact=exact)
         for row in rows
     ]
 
@@ -6046,36 +6058,42 @@ def _serialize_command_run_with_matches(
     include_output: bool,
     q: str,
     show_matches: bool,
+    exact: bool = False,
 ) -> dict[str, Any]:
     data = _serialize_command_run(row, include_output=include_output)
     if show_matches:
-        data["matches"] = _command_run_match_reasons(data, q)
+        data["matches"] = _command_run_match_reasons(data, q, exact=exact)
     return data
 
 
-def _command_run_match_reasons(row: dict[str, Any], q: str) -> list[str]:
+def _command_run_match_reasons(row: dict[str, Any], q: str, *, exact: bool = False) -> list[str]:
     reasons: list[str] = []
-    aliases = finding_aliases_in_text(q)
-    if aliases:
-        for canonical, values in aliases.items():
-            needle_values = {value.lower() for value in values}
-            for field in (
-                "command",
-                "tool_name",
-                "tool_bin",
-                "agent_name",
-                "phase",
-                "notes",
-                "intent",
-                "technique",
-                "stdout_suppression_reason",
-                "stderr_suppression_reason",
-                "stdout_artifact_ref",
-                "stderr_artifact_ref",
-            ):
-                value = str(row.get(field) or "").lower()
-                if value and any(needle in value for needle in needle_values):
-                    reasons.append(f"finding_alias:{canonical}:{field}")
+    # In exact mode the FTS query is the user's raw phrase only — alias
+    # expansion never ran, so attributing the match to an alias would be
+    # misleading. Plain-token reasons still apply because the input phrase
+    # itself was searched.
+    if not exact:
+        aliases = finding_aliases_in_text(q)
+        if aliases:
+            for canonical, values in aliases.items():
+                needle_values = {value.lower() for value in values}
+                for field in (
+                    "command",
+                    "tool_name",
+                    "tool_bin",
+                    "agent_name",
+                    "phase",
+                    "notes",
+                    "intent",
+                    "technique",
+                    "stdout_suppression_reason",
+                    "stderr_suppression_reason",
+                    "stdout_artifact_ref",
+                    "stderr_artifact_ref",
+                ):
+                    value = str(row.get(field) or "").lower()
+                    if value and any(needle in value for needle in needle_values):
+                        reasons.append(f"finding_alias:{canonical}:{field}")
     plain_terms = [term.lower() for term in str(q or "").split() if len(term) >= 3]
     for field in ("command", "tool_name", "tool_bin", "agent_name", "phase", "notes", "intent", "technique"):
         value = str(row.get(field) or "").lower()

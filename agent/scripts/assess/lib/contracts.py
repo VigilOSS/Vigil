@@ -527,7 +527,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "artifact": CommandContract(
         name="artifact",
-        summary="Sync, register, search, and fetch indexed engagement-local artifact metadata.",
+        summary="Sync, register, search, fetch, or scratch-mark indexed engagement-local artifact metadata.",
         schema_name="assessment_artifacts table + /assessment/artifacts endpoints",
         preferred_invocations=(
             "aith assess artifact sync",
@@ -535,18 +535,22 @@ _CONTRACTS: dict[str, CommandContract] = {
             "aith assess artifact search --finding VA-047",
             "aith assess artifact get <id>",
             "aith assess artifact register notes/foo.md --kind note --finding VA-047",
+            "aith assess artifact mark-scratch notes/triage.md",
+            "aith assess artifact unmark-scratch notes/triage.md",
         ),
         author_supplied_fields=(
-            "<action> sync|search|get|register",
+            "<action> sync|search|get|register|mark-scratch|unmark-scratch",
             "register path",
             "--finding / --kind / --agent-id / --command-run-id",
         ),
         notes=(
             "Large/raw files stay on disk. The backend stores hashes, capped previews, presence, and entity links.",
             "Register paths relative to the engagement root; absolute paths are accepted only when they resolve inside the engagement directory.",
+            "`mark-scratch` dismisses a note as non-durable so `check-report-readiness` no longer blocks on it. The row stays searchable.",
         ),
         common_mistakes=(
             ("pasting full artifact content into prompts", "search first, then get a specific id; large content remains capped"),
+            ("deleting unlinked notes to clear blockers", "prefer `mark-scratch` so the audit trail keeps the artifact row; delete only when the file should not exist"),
         ),
     ),
     "verify-finding": CommandContract(

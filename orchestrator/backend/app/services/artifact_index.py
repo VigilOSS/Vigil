@@ -146,7 +146,7 @@ def _file_payload(root: Path, relative_path: str, media_type: str) -> dict[str, 
 
 def _serialize_artifact(row) -> dict[str, Any]:
     data = dict(row)
-    for key in ("sensitive", "present"):
+    for key in ("sensitive", "present", "scratch"):
         data[key] = bool(data.get(key))
     return data
 
@@ -557,3 +557,45 @@ def register_reference_if_local(
         if exc.status_code == status.HTTP_400_BAD_REQUEST:
             return None
         raise
+
+
+def set_scratch_flag(
+    engagement_id: int,
+    *,
+    path: str = "",
+    artifact_id: int | None = None,
+    scratch: bool = True,
+) -> dict[str, Any]:
+    """Mark an artifact row as scratch (excluded from report-readiness checks).
+
+    A scratch artifact stays in the FTS index — search and resume-brief still
+    surface it — but report-readiness ignores it. The escape valve for
+    engagements where specialists or operators write working notes that are
+    legitimately not part of the durable engagement memory.
+    """
+    _engagement, root = _engagement_root(engagement_id)
+    with get_connection() as connection:
+        row = None
+        if artifact_id is not None:
+            row = connection.execute(
+                "SELECT * FROM assessment_artifacts WHERE engagement_id = ? AND id = ?",
+                (engagement_id, int(artifact_id)),
+            ).fetchone()
+        elif path:
+            relative_path = _normalize_relative_path(root, path)
+            row = connection.execute(
+                "SELECT * FROM assessment_artifacts WHERE engagement_id = ? AND relative_path = ?",
+                (engagement_id, relative_path),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found")
+        connection.execute(
+            "UPDATE assessment_artifacts SET scratch = ?, updated_at = ? WHERE id = ?",
+            (1 if scratch else 0, _utcnow_iso(), int(row["id"])),
+        )
+        updated = connection.execute(
+            "SELECT * FROM assessment_artifacts WHERE id = ?",
+            (int(row["id"]),),
+        ).fetchone()
+    assert updated is not None
+    return _serialize_artifact(updated)

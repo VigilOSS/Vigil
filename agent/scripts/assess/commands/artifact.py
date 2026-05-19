@@ -14,7 +14,7 @@ def register(subparsers) -> None:
         "artifact",
         help="Sync, search, get, and register indexed engagement artifacts.",
     )
-    p.add_argument("action", choices=("sync", "search", "get", "register"))
+    p.add_argument("action", choices=("sync", "search", "get", "register", "mark-scratch", "unmark-scratch"))
     p.add_argument("extra", nargs="*", help="search query, artifact id, or path depending on action")
     p.add_argument("--kind", default="")
     p.add_argument("--media-type", default="")
@@ -37,7 +37,7 @@ def _client(args) -> AssessmentClient:
 def _render_rows(rows: list[dict]) -> str:
     if not rows:
         return "(no artifacts matched)"
-    header = ["id", "present", "kind", "finding", "bytes", "path", "preview"]
+    header = ["id", "present", "scratch", "kind", "finding", "bytes", "path", "preview"]
     lines = ["\t".join(header)]
     for row in rows:
         preview = str(row.get("preview_text") or "").replace("\t", " ").replace("\n", " ")
@@ -48,6 +48,7 @@ def _render_rows(rows: list[dict]) -> str:
                 [
                     str(row.get("id", "")),
                     "yes" if row.get("present") else "no",
+                    "yes" if row.get("scratch") else "no",
                     str(row.get("kind") or "-"),
                     str(row.get("related_finding_slug") or "-"),
                     str(row.get("size_bytes") or 0),
@@ -103,6 +104,24 @@ def run(args) -> None:
                 "related_finding_slug": args.finding or None,
             }
             row = client.post("artifacts", payload)
+            print(json.dumps(row, indent=2, ensure_ascii=False) if args.as_json else _render_rows([row]))
+            return
+        if args.action in {"mark-scratch", "unmark-scratch"}:
+            if not args.extra:
+                print(f"artifact {args.action}: artifact id or path is required", file=sys.stderr)
+                sys.exit(1)
+            scratch = args.action == "mark-scratch"
+            target = args.extra[0]
+            if target.isdigit():
+                row = client.post(
+                    f"artifacts/{int(target)}/scratch",
+                    {"scratch": scratch},
+                )
+            else:
+                row = client.post(
+                    "artifacts/scratch-by-path",
+                    {"path": target, "scratch": scratch},
+                )
             print(json.dumps(row, indent=2, ensure_ascii=False) if args.as_json else _render_rows([row]))
             return
     finally:

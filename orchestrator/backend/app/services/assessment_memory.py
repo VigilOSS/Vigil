@@ -228,6 +228,7 @@ def build_resume_brief(
             artifacts=artifacts,
             command_matches=command_matches,
             stale_dispatches=dispatch_picture.get("stale_in_progress_dispatches") or [],
+            stale_threshold_hours=max_age_hours,
         ),
     }
 
@@ -239,6 +240,7 @@ def _recommended_actions(
     artifacts: list[dict[str, Any]],
     command_matches: list[dict[str, Any]],
     stale_dispatches: list[dict[str, Any]],
+    stale_threshold_hours: float = 24.0,
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     max_actions = 8
@@ -268,7 +270,14 @@ def _recommended_actions(
     if agent_id:
         add("handoff continuation", f"aith assess agent render-handoff {agent_id}", entity_kind="agent", entity_id=agent_id)
     if stale_dispatches:
-        add("stale dispatch lifecycle", "aith assess agent reconcile-stale --dry-run")
+        threshold_arg = (
+            "" if abs(stale_threshold_hours - 24.0) < 1e-9
+            else f" --max-age-hours {stale_threshold_hours:g}"
+        )
+        add(
+            "stale dispatch lifecycle",
+            f"aith assess agent reconcile-stale --dry-run{threshold_arg}",
+        )
     if not artifacts:
         add("refresh artifact index", "aith assess artifact sync")
     for row in command_matches[:3]:
