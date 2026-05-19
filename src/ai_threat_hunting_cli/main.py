@@ -50,7 +50,14 @@ from .oob import (
     stop_oob_client,
     test_oob,
 )
-from .orchestrator import OrchestratorOptions, build_frontend, orchestrator_status, start_orchestrator, stop_orchestrator
+from .orchestrator import (
+    OrchestratorOptions,
+    build_frontend,
+    orchestrator_status,
+    orchestrator_status_payload,
+    start_orchestrator,
+    stop_orchestrator,
+)
 from .paths import resolve_install_root, resolve_source_root
 from .runtime import RuntimeOptions, aith_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime
 from .status import collect_doctor_checks, collect_status, print_doctor, print_status
@@ -198,7 +205,8 @@ def main(argv: list[str] | None = None) -> None:
     orch_start.add_argument("--foreground", action="store_true")
     orch_sub.add_parser("stop")
     orch_sub.add_parser("restart")
-    orch_sub.add_parser("status")
+    orch_status_p = orch_sub.add_parser("status")
+    orch_status_p.add_argument("--json", action="store_true")
     orch_sub.add_parser("open")
     orch_build = orch_sub.add_parser(
         "build",
@@ -589,7 +597,10 @@ def _orchestrator(args: argparse.Namespace, install_root: Path) -> None:
         stop_orchestrator(install_root)
         start_orchestrator(OrchestratorOptions(install_root=install_root))
     elif args.orchestrator_command == "status":
-        print(orchestrator_status(install_root))
+        if args.json:
+            print(json.dumps(orchestrator_status_payload(install_root), indent=2))
+        else:
+            print(orchestrator_status(install_root))
     elif args.orchestrator_command == "open":
         webbrowser.open("http://127.0.0.1:18000")
     elif args.orchestrator_command == "build":
