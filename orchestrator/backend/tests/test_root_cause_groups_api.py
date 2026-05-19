@@ -12,6 +12,7 @@ def _write_engagement(engagements_dir: Path) -> None:
         json.dumps({"engagement_name": "Root Cause Test", "targets": ["https://app.example"]}),
         encoding="utf-8",
     )
+    (engagement_dir / "findings.md").write_text("# Findings\n", encoding="utf-8")
 
 
 def _seed(client, isolate_settings) -> None:
@@ -38,6 +39,7 @@ def _finding(slug: str, title: str, *, root_key: str, severity: str = "high") ->
         "root_cause_key": root_key,
         "canonical_location": f"https://app.example/{slug.lower()}",
         "summary": title,
+        "evidence_ref": "findings.md",
         "source_name": "test",
         "details": {
             "cvss_score": cvss_score,

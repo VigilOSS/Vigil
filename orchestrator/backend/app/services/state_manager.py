@@ -7,6 +7,7 @@ import re
 import shlex
 import sqlite3
 import uuid
+from difflib import get_close_matches
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,13 @@ from fastapi import HTTPException, status
 
 from ..db import get_connection
 from .events import _engagement_or_404
-from .search import fts_escape as _fts_escape_shared
+from .search import (
+    canonical_finding_alias,
+    expanded_fts_query,
+    finding_aliases_in_text,
+    fts_escape as _fts_escape_shared,
+    is_canonical_finding_slug,
+)
 
 SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 WORKFLOW_STATUSES = {"draft", "active", "blocked", "exploited", "false_positive", "merged", "reported"}
@@ -52,6 +59,22 @@ _COVERAGE_STATUS_SYNONYMS = {
 }
 COVERAGE_STATUSES = {"pending", "queued", "deferred", "covered", "not_applicable", "blocked"}
 SLUG_RE = re.compile(r"[^a-z0-9]+")
+_FINDING_PREFIX_BY_SOURCE = {
+    "exploit-developer": "EX",
+    "vulnerability-analyst": "VA",
+    "source-analyzer": "SA",
+    "recon-specialist": "RE",
+    "fuzzer": "FZ",
+    "osint-analyst": "OS",
+    "code-architect": "CA",
+    "code-vuln-hunter": "CH",
+    "code-variant-hunter": "CV",
+    "code-vuln-verifier": "VF",
+    "surface-collector": "SC",
+    "code-fuzz-engineer": "CF",
+    "operator": "OP",
+    "operator-review": "OR",
+}
 
 
 def _json_text(value: Any) -> str:
@@ -958,6 +981,8 @@ def record_target(
     discovered_by: str,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    source_slug = _require_canonical_finding_slug(source_slug, field="source_slug")
+    target_slug = _require_canonical_finding_slug(target_slug, field="target_slug")
     with get_connection() as connection:
         return _upsert_target(
             connection,
@@ -1513,19 +1538,75 @@ def update_surface(
         return dict(row)
 
 
-def _finding_slug(connection, engagement_id: int, slug: str | None, title: str, canonical_location: str) -> str:
+def _finding_slug(
+    connection,
+    engagement_id: int,
+    slug: str | None,
+    title: str,
+    canonical_location: str,
+    source_name: str,
+) -> str:
     if slug:
+        _require_canonical_finding_slug(slug, field="slug")
         return slug
-    base = _slugify(f"{title}-{canonical_location}")
-    candidate = base
-    suffix = 2
-    while connection.execute(
-        "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
-        (engagement_id, candidate),
-    ).fetchone():
-        candidate = f"{base}-{suffix}"
-        suffix += 1
-    return candidate
+    prefix = _FINDING_PREFIX_BY_SOURCE.get(str(source_name or "").strip())
+    if not prefix:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="slug is required when source_name has no canonical finding prefix",
+        )
+    rows = connection.execute(
+        "SELECT slug FROM assessment_findings WHERE engagement_id = ? AND slug LIKE ?",
+        (engagement_id, f"{prefix}-%"),
+    ).fetchall()
+    max_id = 0
+    for row in rows:
+        row_slug = str(row["slug"] or "")
+        if is_canonical_finding_slug(row_slug) and row_slug.startswith(f"{prefix}-"):
+            max_id = max(max_id, int(row_slug.rsplit("-", 1)[1]))
+    return f"{prefix}-{max_id + 1:03d}"
+
+
+def _require_canonical_finding_slug(slug: str | None, *, field: str = "finding_slug") -> str:
+    value = str(slug or "").strip()
+    if not is_canonical_finding_slug(value):
+        alias = canonical_finding_alias(value)
+        suggestion = f"; did you mean {alias}?" if alias and alias != value else ""
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field} must be canonical <PREFIX>-<3 digits> (example VA-047){suggestion}",
+        )
+    return value
+
+
+def _require_canonical_finding_slugs(slugs: list[str] | None, *, field: str = "finding_slugs") -> list[str] | None:
+    if slugs is None:
+        return None
+    return [_require_canonical_finding_slug(str(slug), field=field) for slug in slugs]
+
+
+def _finding_not_found(connection, engagement_id: int, slug: str) -> HTTPException:
+    rows = connection.execute(
+        "SELECT slug FROM assessment_findings WHERE engagement_id = ?",
+        (engagement_id,),
+    ).fetchall()
+    candidates = [str(row["slug"]) for row in rows]
+    close = get_close_matches(slug, candidates, n=3, cutoff=0.55)
+    detail = f"finding not found: {slug}"
+    if close:
+        detail += "; close matches: " + ", ".join(close)
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+
+
+def _ensure_finding_slugs_exist(connection, engagement_id: int, slugs: list[str] | None) -> None:
+    if not slugs:
+        return
+    for slug in slugs:
+        if not connection.execute(
+            "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement_id, slug),
+        ).fetchone():
+            raise _finding_not_found(connection, engagement_id, slug)
 
 
 def _semantic_finding_match(
@@ -1602,6 +1683,13 @@ def _upsert_finding_link(
     notes: str,
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    if str(target_kind) == "finding" and target_ref:
+        target_ref = _require_canonical_finding_slug(target_ref, field="target_ref")
+        if not connection.execute(
+            "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement_id, target_ref),
+        ).fetchone():
+            raise _finding_not_found(connection, engagement_id, target_ref)
     row = connection.execute(
         """
         SELECT *
@@ -1671,6 +1759,8 @@ def create_finding(
     expected_updated_at: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    if slug:
+        slug = _require_canonical_finding_slug(slug, field="slug")
     incoming_workflow_status = _normalize_workflow_status(workflow_status)
     incoming_verification_state = _normalize_verification_state(verification_state)
     incoming_verification_disposition = _normalize_verification_disposition(verification_disposition)
@@ -1689,7 +1779,7 @@ def create_finding(
         )
         before_state = _finding_state_snapshot(existing) if existing is not None else None
         if existing is None:
-            resolved_slug = _finding_slug(connection, engagement.id, slug, title, canonical_location)
+            resolved_slug = _finding_slug(connection, engagement.id, slug, title, canonical_location, source_name)
             cursor = connection.execute(
                 """
                 INSERT INTO assessment_findings (
@@ -1826,6 +1916,23 @@ def create_finding(
                 artifact_ref=transition_artifact_ref or evidence_ref,
                 metadata=transition_metadata,
             )
+    if evidence_ref:
+        _register_artifact_reference(
+            engagement.id,
+            evidence_ref,
+            kind="evidence",
+            producer_agent_role=source_name or None,
+            related_finding_slug=str(finding["slug"]),
+        )
+    for link in finding_links:
+        if str(link.get("target_kind") or "") in {"evidence_artifact", "artifact"} and link.get("target_ref"):
+            _register_artifact_reference(
+                engagement.id,
+                str(link.get("target_ref") or ""),
+                kind="evidence",
+                producer_agent_role=source_name or None,
+                related_finding_slug=str(finding["slug"]),
+            )
     return {
         "finding": _serialize_finding_record(finding),
         "links": finding_links,
@@ -1914,13 +2021,14 @@ def patch_finding(
     expected_updated_at: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    slug = _require_canonical_finding_slug(slug)
     with get_connection() as connection:
         existing = connection.execute(
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, slug),
         ).fetchone()
-    if existing is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
+        if existing is None:
+            raise _finding_not_found(connection, engagement.id, slug)
 
     existing_workflow = _row_workflow_status(existing)
     current_updated_at = str(existing["updated_at"])
@@ -1999,6 +2107,7 @@ def verify_finding(
     new_severity: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    slug = _require_canonical_finding_slug(slug)
     if disposition == "disputed":
         normalized_disposition = "none"
     else:
@@ -2011,8 +2120,8 @@ def verify_finding(
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, slug),
         ).fetchone()
-    if existing is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
+        if existing is None:
+            raise _finding_not_found(connection, engagement.id, slug)
 
     expected_updated_at = str(existing["updated_at"])
     existing_workflow = _row_workflow_status(existing)
@@ -2049,7 +2158,7 @@ def verify_finding(
         normalized_disposition = "none"
         transition_action = "verification_disputed"
 
-    return patch_finding(
+    result = patch_finding(
         engagement.id,
         slug=slug,
         severity=target_severity,
@@ -2069,6 +2178,15 @@ def verify_finding(
         allow_verification_mutation=True,
         expected_updated_at=expected_updated_at,
     )
+    if artifact_ref:
+        _register_artifact_reference(
+            engagement.id,
+            artifact_ref,
+            kind="verification-artifact",
+            producer_agent_role=source_name or None,
+            related_finding_slug=slug,
+        )
+    return result
 
 
 def merge_findings(
@@ -2090,7 +2208,8 @@ def merge_findings(
             (engagement.id, target_slug),
         ).fetchone()
         if source is None or target is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
+            missing = source_slug if source is None else target_slug
+            raise _finding_not_found(connection, engagement.id, missing)
         if source["id"] == target["id"]:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="cannot merge a finding into itself")
         if _row_workflow_status(target) == "false_positive" and _row_workflow_status(source) != "false_positive":
@@ -2356,6 +2475,7 @@ def list_findings(engagement_id: int) -> list[dict[str, Any]]:
 
 def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    slug = canonical_finding_alias(slug) or slug
     with get_connection() as connection:
         row = connection.execute(
             """
@@ -2366,8 +2486,8 @@ def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
             """,
             (engagement.id, slug),
         ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
+        if row is None:
+            raise _finding_not_found(connection, engagement.id, slug)
     return _serialize_finding_record(row)
 
 
@@ -3136,6 +3256,131 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 }
             )
 
+    with get_connection() as connection:
+        artifact_rows = {
+            str(row["relative_path"]): dict(row)
+            for row in connection.execute(
+                "SELECT * FROM assessment_artifacts WHERE engagement_id = ?",
+                (engagement_id,),
+            ).fetchall()
+        }
+        for row in candidates:
+            slug = str(row.get("slug", ""))
+            evidence_ref = str(row.get("evidence_ref", "") or "").strip()
+            if not evidence_ref:
+                blockers.append(
+                    {
+                        "kind": "finding_missing_evidence_ref",
+                        "slug": slug,
+                        "title": row.get("title", ""),
+                        "detail": "active/reportable finding has no evidence_ref",
+                    }
+                )
+                continue
+            artifact = artifact_rows.get(evidence_ref)
+            if artifact is None:
+                blockers.append(
+                    {
+                        "kind": "finding_evidence_unindexed",
+                        "slug": slug,
+                        "title": row.get("title", ""),
+                        "detail": f"evidence_ref={evidence_ref} is not indexed; run artifact sync/register",
+                    }
+                )
+            elif not bool(artifact.get("present")):
+                blockers.append(
+                    {
+                        "kind": "finding_evidence_missing_artifact",
+                        "slug": slug,
+                        "title": row.get("title", ""),
+                        "detail": f"indexed artifact is missing: {evidence_ref}",
+                    }
+                )
+
+        chain_links = connection.execute(
+            """
+            SELECT chains.chain_key, links.entity_kind, links.entity_ref
+            FROM assessment_attack_chain_links AS links
+            JOIN assessment_attack_chains AS chains ON chains.id = links.chain_id
+            WHERE links.engagement_id = ?
+            """,
+            (engagement_id,),
+        ).fetchall()
+        for link in chain_links:
+            if str(link["entity_kind"]) != "finding":
+                blockers.append(
+                    {
+                        "kind": "chain_step_not_finding_linked",
+                        "chain_key": link["chain_key"],
+                        "detail": f"chain step entity_kind={link['entity_kind']} must link to a finding slug",
+                    }
+                )
+                continue
+            entity_ref = str(link["entity_ref"] or "")
+            if not entity_ref or entity_ref not in candidate_slugs:
+                blockers.append(
+                    {
+                        "kind": "chain_step_missing_finding",
+                        "chain_key": link["chain_key"],
+                        "detail": f"finding step {entity_ref or '<empty>'} is not reportable",
+                    }
+                )
+
+        handoff_rows = connection.execute(
+            """
+            SELECT agent_id, finding_slugs_json
+            FROM assessment_dispatch_handoffs
+            WHERE engagement_id = ? AND finding_slugs_json IS NOT NULL
+            """,
+            (engagement_id,),
+        ).fetchall()
+        known_slugs = {
+            str(row["slug"])
+            for row in connection.execute(
+                "SELECT slug FROM assessment_findings WHERE engagement_id = ?",
+                (engagement_id,),
+            ).fetchall()
+        }
+        for handoff in handoff_rows:
+            try:
+                handoff_slugs = json.loads(handoff["finding_slugs_json"] or "[]")
+            except json.JSONDecodeError:
+                handoff_slugs = []
+            if not isinstance(handoff_slugs, list):
+                continue
+            missing = [str(slug) for slug in handoff_slugs if str(slug) not in known_slugs]
+            if missing:
+                blockers.append(
+                    {
+                        "kind": "handoff_unknown_finding",
+                        "agent_id": handoff["agent_id"],
+                        "slugs": missing,
+                        "detail": "handoff references finding slugs not present in backend",
+                    }
+                )
+
+        stale_ready = connection.execute(
+            """
+            SELECT dispatches.agent_id, dispatches.agent_role, handoffs.handoff_status
+            FROM assessment_dispatches AS dispatches
+            JOIN assessment_dispatch_handoffs AS handoffs
+              ON handoffs.engagement_id = dispatches.engagement_id
+             AND handoffs.agent_id = dispatches.agent_id
+            WHERE dispatches.engagement_id = ?
+              AND dispatches.status = 'in-progress'
+              AND handoffs.handoff_status IN ('ready', 'blocked')
+            """,
+            (engagement_id,),
+        ).fetchall()
+        for row in stale_ready:
+            blockers.append(
+                {
+                    "kind": "stale_dispatch_ready_handoff",
+                    "agent_id": row["agent_id"],
+                    "detail": f"{row['agent_role']} has {row['handoff_status']} handoff but dispatch is still in-progress",
+                }
+            )
+
     return {
         "ready": len(blockers) == 0,
         "blocker_count": len(blockers),
@@ -3298,13 +3543,14 @@ def list_report_finding_groups(engagement_id: int, *, mode: str = "draft") -> di
 
 def list_finding_transitions(engagement_id: int, *, slug: str) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
+    slug = canonical_finding_alias(slug) or slug
     with get_connection() as connection:
         finding = connection.execute(
             "SELECT id FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, slug),
         ).fetchone()
         if finding is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
+            raise _finding_not_found(connection, engagement.id, slug)
         rows = connection.execute(
             """
             SELECT *
@@ -3329,6 +3575,9 @@ def create_finding_link(
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    finding_slug = _require_canonical_finding_slug(finding_slug)
+    if str(target_kind) == "finding" and target_ref:
+        target_ref = _require_canonical_finding_slug(target_ref, field="target_ref")
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         finding = connection.execute(
@@ -3336,7 +3585,13 @@ def create_finding_link(
             (engagement.id, finding_slug),
         ).fetchone()
         if finding is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
+            raise _finding_not_found(connection, engagement.id, finding_slug)
+        if str(target_kind) == "finding" and target_ref:
+            if not connection.execute(
+                "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+                (engagement.id, target_ref),
+            ).fetchone():
+                raise _finding_not_found(connection, engagement.id, target_ref)
         return _upsert_finding_link(
             connection,
             engagement.id,
@@ -3362,6 +3617,8 @@ def set_root_cause_link(
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    finding_slug = _require_canonical_finding_slug(finding_slug)
+    root_cause_slug = _require_canonical_finding_slug(root_cause_slug, field="root_cause_slug")
     effect = (root_cause_effect or "eliminates_finding").strip()
     if effect not in ROOT_CAUSE_EFFECTS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid root_cause_effect: {root_cause_effect}")
@@ -3376,7 +3633,8 @@ def set_root_cause_link(
             (engagement.id, root_cause_slug),
         ).fetchone()
         if finding is None or root is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
+            missing = finding_slug if finding is None else root_cause_slug
+            raise _finding_not_found(connection, engagement.id, missing)
         if int(finding["id"]) == int(root["id"]):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="finding cannot be its own root cause")
         if _is_suppressed_workflow_status(_row_workflow_status(finding)):
@@ -3465,6 +3723,7 @@ def set_root_cause_link(
 
 def clear_root_cause_link(engagement_id: int, *, finding_slug: str) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    finding_slug = _require_canonical_finding_slug(finding_slug)
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         finding = connection.execute(
@@ -3472,7 +3731,7 @@ def clear_root_cause_link(engagement_id: int, *, finding_slug: str) -> dict[str,
             (engagement.id, finding_slug),
         ).fetchone()
         if finding is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="finding not found")
+            raise _finding_not_found(connection, engagement.id, finding_slug)
         cursor = connection.execute(
             """
             DELETE FROM assessment_finding_links
@@ -3608,6 +3867,13 @@ def _upsert_chain_link(
     notes: str,
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    if str(entity_kind) == "finding" and entity_ref:
+        entity_ref = _require_canonical_finding_slug(entity_ref, field="entity_ref")
+        if not connection.execute(
+            "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement_id, entity_ref),
+        ).fetchone():
+            raise _finding_not_found(connection, engagement_id, entity_ref)
     row = connection.execute(
         """
         SELECT *
@@ -3694,6 +3960,13 @@ def create_attack_chain(
             )
             for item in (links or [])
         ]
+    if evidence_ref:
+        _register_artifact_reference(
+            engagement.id,
+            evidence_ref,
+            kind="chain-evidence",
+            related_chain_key=str(chain["chain_key"]),
+        )
     return {"chain": chain, "links": chain_links}
 
 
@@ -4564,6 +4837,14 @@ def _raise_duplicate_command_run_uuid() -> None:
     )
 
 
+def _register_artifact_reference(engagement_id: int, path: str, **metadata: Any) -> None:
+    if not path:
+        return
+    from .artifact_index import register_reference_if_local
+
+    register_reference_if_local(engagement_id, path=path, **metadata)
+
+
 def _remove_written_command_run_artifacts(*artifact_refs: str) -> None:
     for artifact_ref in artifact_refs:
         if not artifact_ref:
@@ -5068,7 +5349,20 @@ def record_command_run(
         # predecessor row to check its status.
         if superseded_by_id is not None:
             serialized["dedup_predecessor_id"] = superseded_by_id
-        return serialized
+    for artifact_ref in (
+        serialized.get("stdout_artifact_ref"),
+        serialized.get("stderr_artifact_ref"),
+        serialized.get("stdout_path"),
+        serialized.get("stderr_path"),
+    ):
+        _register_artifact_reference(
+            engagement.id,
+            str(artifact_ref or ""),
+            kind="command-run-output",
+            producer_command_run_id=int(serialized["id"]),
+            producer_agent_role=agent_name,
+        )
+    return serialized
 
 
 def _infer_command_run_status(
@@ -5541,13 +5835,16 @@ def list_command_runs(
     probe_kind: str = "",
     destructive: bool | None = None,
     intent_q: str = "",
+    sort: str = "",
+    exact: bool = False,
+    show_matches: bool = False,
     limit: int = 100,
     offset: int = 0,
     include_output: bool = False,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
-    params: list[Any] = [engagement.id]
-    where = ["r.engagement_id = ?"]
+    base_params: list[Any] = [engagement.id]
+    base_where = ["r.engagement_id = ?"]
 
     # ``q`` is a global FTS match across all content columns. ``intent_q`` is
     # a scoped FTS match against the intent column only — SQLite FTS5 uses
@@ -5557,7 +5854,7 @@ def list_command_runs(
     # here is to merge them into a single MATCH term joined with AND).
     join_sql = ""
     match_terms: list[str] = []
-    fts_term = _fts_escape(q) if q else ""
+    fts_term = expanded_fts_query(q, exact=exact) if q else ""
     if fts_term:
         match_terms.append(fts_term)
     intent_term = _fts_escape(intent_q) if intent_q else ""
@@ -5569,56 +5866,206 @@ def list_command_runs(
         if scoped_tokens:
             match_terms.append(" ".join(scoped_tokens))
     if match_terms:
-        join_sql = "JOIN assessment_command_runs_fts f ON f.rowid = r.id"
-        where.append("f.assessment_command_runs_fts MATCH ?")
-        params.append(" ".join(match_terms))
+        join_sql = "JOIN assessment_command_runs_fts ON assessment_command_runs_fts.rowid = r.id"
+        base_where.append("assessment_command_runs_fts MATCH ?")
+        base_params.append(" ".join(match_terms))
 
     if agent_name:
-        where.append("r.agent_name = ?")
-        params.append(agent_name)
+        base_where.append("r.agent_name = ?")
+        base_params.append(agent_name)
     if phase:
-        where.append("r.phase = ?")
-        params.append(phase)
+        base_where.append("r.phase = ?")
+        base_params.append(phase)
     if tool_name:
-        where.append("r.tool_name = ?")
-        params.append(tool_name)
+        base_where.append("r.tool_name = ?")
+        base_params.append(tool_name)
     if tool_bin:
-        where.append("r.tool_bin = ?")
-        params.append(tool_bin)
+        base_where.append("r.tool_bin = ?")
+        base_params.append(tool_bin)
     if target_host:
         # Case-insensitive exact match against the parsed target_host column.
         # NULL-tolerant (LOWER(NULL) = NULL, which will not match the literal).
-        where.append("LOWER(r.target_host) = ?")
-        params.append(target_host.strip().lower())
+        base_where.append("LOWER(r.target_host) = ?")
+        base_params.append(target_host.strip().lower())
     if audit_source:
-        where.append("r.audit_source = ?")
-        params.append(audit_source)
+        base_where.append("r.audit_source = ?")
+        base_params.append(audit_source)
     if success is not None:
-        where.append("r.success = ?")
-        params.append(1 if success else 0)
+        base_where.append("r.success = ?")
+        base_params.append(1 if success else 0)
     if timed_out is not None:
-        where.append("r.timed_out = ?")
-        params.append(1 if timed_out else 0)
+        base_where.append("r.timed_out = ?")
+        base_params.append(1 if timed_out else 0)
     if technique:
-        where.append("r.technique = ?")
-        params.append(technique)
+        base_where.append("r.technique = ?")
+        base_params.append(technique)
     if probe_kind:
-        where.append("r.probe_kind = ?")
-        params.append(probe_kind)
+        base_where.append("r.probe_kind = ?")
+        base_params.append(probe_kind)
     if destructive is not None:
-        where.append("r.destructive = ?")
-        params.append(1 if destructive else 0)
+        base_where.append("r.destructive = ?")
+        base_params.append(1 if destructive else 0)
 
+    sort_value = (sort or "").strip().lower()
+    if not sort_value:
+        sort_value = "relevance" if match_terms else "recent"
+    if sort_value not in {"relevance", "recent", "distant"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid command-run sort: {sort}")
+
+    if sort_value == "distant":
+        return _list_distant_command_runs(
+            engagement.id,
+            q=q,
+            base_where=base_where,
+            base_params=base_params,
+            match_terms=match_terms,
+            limit=limit,
+            offset=offset,
+            include_output=include_output,
+            show_matches=show_matches,
+        )
+
+    params = list(base_params)
     params.extend([int(limit), int(offset)])
+    rank_select = ", bm25(assessment_command_runs_fts) AS search_rank" if match_terms else ""
+    if sort_value == "relevance" and match_terms:
+        order_sql = "ORDER BY search_rank ASC, r.created_at DESC, r.id DESC"
+    else:
+        order_sql = "ORDER BY r.created_at DESC, r.id DESC"
     query = (
-        f"SELECT r.* FROM assessment_command_runs r {join_sql} "
-        f"WHERE {' AND '.join(where)} "
-        "ORDER BY r.created_at DESC, r.id DESC LIMIT ? OFFSET ?"
+        f"SELECT r.*{rank_select} FROM assessment_command_runs r {join_sql} "
+        f"WHERE {' AND '.join(base_where)} "
+        f"{order_sql} LIMIT ? OFFSET ?"
     )
 
     with get_connection() as connection:
         rows = connection.execute(query, tuple(params)).fetchall()
-    return [_serialize_command_run(row, include_output=include_output) for row in rows]
+    return [
+        _serialize_command_run_with_matches(row, include_output=include_output, q=q, show_matches=show_matches)
+        for row in rows
+    ]
+
+
+def _list_distant_command_runs(
+    engagement_id: int,
+    *,
+    q: str,
+    base_where: list[str],
+    base_params: list[Any],
+    match_terms: list[str],
+    limit: int,
+    offset: int,
+    include_output: bool,
+    show_matches: bool,
+) -> list[dict[str, Any]]:
+    """Return nonmatching rows in the same inferred command scope.
+
+    This is a coverage-gap view: first find direct matches, infer scope from
+    their structured fields, then list older/nonmatching command families in
+    that scope.
+    """
+
+    distant_where = [item for item in base_where if "assessment_command_runs_fts MATCH" not in item]
+    distant_params = [
+        param
+        for where_item, param in zip(base_where, base_params, strict=False)
+        if "assessment_command_runs_fts MATCH" not in where_item
+    ]
+    # The zip above only covers one param per WHERE clause, which holds for
+    # this function's scalar filters. Keep engagement_id explicit if no
+    # filters were zipped because future callers may pass an empty list.
+    if not distant_params:
+        distant_params = [engagement_id]
+
+    direct_rows: list[Any] = []
+    direct_ids: list[int] = []
+    if match_terms:
+        direct_query = (
+            "SELECT r.* FROM assessment_command_runs r "
+            "JOIN assessment_command_runs_fts ON assessment_command_runs_fts.rowid = r.id "
+            f"WHERE {' AND '.join(base_where)} "
+            "ORDER BY r.created_at DESC, r.id DESC LIMIT 200"
+        )
+        with get_connection() as connection:
+            direct_rows = connection.execute(direct_query, tuple(base_params)).fetchall()
+        direct_ids = [int(row["id"]) for row in direct_rows]
+
+    if direct_ids:
+        placeholders = ", ".join("?" for _ in direct_ids)
+        distant_where.append(f"r.id NOT IN ({placeholders})")
+        distant_params.extend(direct_ids)
+        scope_clauses: list[str] = []
+        for column in ("target_host", "tool_bin", "technique", "probe_kind", "phase"):
+            values = sorted({str(row[column] or "") for row in direct_rows if str(row[column] or "").strip()})
+            if values:
+                scope_placeholders = ", ".join("?" for _ in values)
+                scope_clauses.append(f"r.{column} IN ({scope_placeholders})")
+                distant_params.extend(values)
+        if scope_clauses:
+            distant_where.append("(" + " OR ".join(scope_clauses) + ")")
+    elif match_terms:
+        # No direct match means there is no safe inferred scope. Return no
+        # distant rows rather than flooding resume output with unrelated runs.
+        return []
+
+    distant_params.extend([int(limit), int(offset)])
+    query = (
+        "SELECT r.* FROM assessment_command_runs r "
+        f"WHERE {' AND '.join(distant_where)} "
+        "ORDER BY r.created_at ASC, r.id ASC LIMIT ? OFFSET ?"
+    )
+    with get_connection() as connection:
+        rows = connection.execute(query, tuple(distant_params)).fetchall()
+    return [
+        _serialize_command_run_with_matches(row, include_output=include_output, q=q, show_matches=show_matches)
+        for row in rows
+    ]
+
+
+def _serialize_command_run_with_matches(
+    row,
+    *,
+    include_output: bool,
+    q: str,
+    show_matches: bool,
+) -> dict[str, Any]:
+    data = _serialize_command_run(row, include_output=include_output)
+    if show_matches:
+        data["matches"] = _command_run_match_reasons(data, q)
+    return data
+
+
+def _command_run_match_reasons(row: dict[str, Any], q: str) -> list[str]:
+    reasons: list[str] = []
+    aliases = finding_aliases_in_text(q)
+    if aliases:
+        for canonical, values in aliases.items():
+            needle_values = {value.lower() for value in values}
+            for field in (
+                "command",
+                "tool_name",
+                "tool_bin",
+                "agent_name",
+                "phase",
+                "notes",
+                "intent",
+                "technique",
+                "stdout_suppression_reason",
+                "stderr_suppression_reason",
+                "stdout_artifact_ref",
+                "stderr_artifact_ref",
+            ):
+                value = str(row.get(field) or "").lower()
+                if value and any(needle in value for needle in needle_values):
+                    reasons.append(f"finding_alias:{canonical}:{field}")
+    plain_terms = [term.lower() for term in str(q or "").split() if len(term) >= 3]
+    for field in ("command", "tool_name", "tool_bin", "agent_name", "phase", "notes", "intent", "technique"):
+        value = str(row.get(field) or "").lower()
+        for term in plain_terms:
+            if term in value:
+                reasons.append(f"token:{term}:{field}")
+                break
+    return sorted(set(reasons))
 
 
 def get_command_run(engagement_id: int, command_run_id: int) -> dict[str, Any]:
@@ -5683,11 +6130,13 @@ def record_dispatch(
     if not (agent_id or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="agent_id is required")
     dispatched_value = dispatched_at or _utcnow_iso_dispatch()
+    finding_slugs = _require_canonical_finding_slugs(finding_slugs)
     findings_json = json.dumps(list(finding_slugs)) if finding_slugs is not None else None
     skills_value = (skills or "").strip() or None
     requested_model_value = requested_model if requested_model is not None else model
     requested_reasoning_value = requested_reasoning if requested_reasoning is not None else reasoning
     with get_connection() as connection:
+        _ensure_finding_slugs_exist(connection, engagement.id, finding_slugs)
         existing = connection.execute(
             "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
             (engagement.id, agent_id),
@@ -5742,7 +6191,9 @@ def update_dispatch(
     finding_slugs: list[str] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    finding_slugs = _require_canonical_finding_slugs(finding_slugs)
     with get_connection() as connection:
+        _ensure_finding_slugs_exist(connection, engagement.id, finding_slugs)
         existing = connection.execute(
             "SELECT * FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
             (engagement.id, agent_id),
@@ -5847,6 +6298,25 @@ def _serialize_handoff(row) -> dict[str, Any]:
 _HANDOFF_SUMMARY_MAX = 2000
 
 
+def _register_handoff_artifacts(engagement_id: int, handoff: dict[str, Any]) -> None:
+    artifacts = handoff.get("working_artifacts") or []
+    if not isinstance(artifacts, list):
+        return
+    finding_slugs = handoff.get("finding_slugs") or []
+    related_finding_slug = str(finding_slugs[0]) if isinstance(finding_slugs, list) and finding_slugs else None
+    for item in artifacts:
+        if not isinstance(item, dict) or not item.get("path"):
+            continue
+        _register_artifact_reference(
+            engagement_id,
+            str(item.get("path") or ""),
+            kind=str(item.get("kind") or "handoff-artifact"),
+            producer_agent_id=str(handoff.get("agent_id") or "") or None,
+            producer_agent_role=str(handoff.get("agent_role") or "") or None,
+            related_finding_slug=related_finding_slug,
+        )
+
+
 def record_handoff(
     engagement_id: int,
     *,
@@ -5862,6 +6332,8 @@ def record_handoff(
     working_artifacts: list[dict[str, Any]] | None = None,
     open_questions: list[str] | None = None,
     recommended_next_agent: str | None = None,
+    handoff_status: str = "checkpointed",
+    closed_dispatch_status: str | None = None,
     extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
@@ -5874,8 +6346,10 @@ def record_handoff(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"summary exceeds {_HANDOFF_SUMMARY_MAX} characters",
         )
+    finding_slugs = _require_canonical_finding_slugs(finding_slugs)
     created_at = _utcnow_iso_dispatch()
     with get_connection() as connection:
+        _ensure_finding_slugs_exist(connection, engagement.id, finding_slugs)
         dispatch_row = connection.execute(
             "SELECT agent_role FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
             (engagement.id, agent_id),
@@ -5908,8 +6382,9 @@ def record_handoff(
                 engagement_id, agent_id, agent_role, phase, summary, confidence,
                 finding_slugs_json, coverage_gaps_json, next_steps_json,
                 runtime_issues_json, working_artifacts_json, open_questions_json,
-                recommended_next_agent, extras_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                recommended_next_agent, handoff_status, handoff_version, last_checkpoint_at,
+                closed_dispatch_status, extras_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -5925,6 +6400,10 @@ def record_handoff(
                 json.dumps(list(working_artifacts)) if working_artifacts is not None else None,
                 json.dumps(list(open_questions)) if open_questions is not None else None,
                 recommended_next_agent,
+                handoff_status,
+                1,
+                created_at,
+                closed_dispatch_status,
                 json.dumps(extras) if extras is not None else None,
                 created_at,
             ),
@@ -5934,7 +6413,9 @@ def record_handoff(
             (cursor.lastrowid,),
         ).fetchone()
     assert row is not None
-    return _serialize_handoff(row)
+    serialized = _serialize_handoff(row)
+    _register_handoff_artifacts(engagement.id, serialized)
+    return serialized
 
 
 def update_handoff(
@@ -5951,10 +6432,14 @@ def update_handoff(
     working_artifacts: list[dict[str, Any]] | None = None,
     open_questions: list[str] | None = None,
     recommended_next_agent: str | None = None,
+    handoff_status: str | None = None,
+    closed_dispatch_status: str | None = None,
     extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    finding_slugs = _require_canonical_finding_slugs(finding_slugs)
     with get_connection() as connection:
+        _ensure_finding_slugs_exist(connection, engagement.id, finding_slugs)
         dispatch_row = connection.execute(
             "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
             (engagement.id, agent_id),
@@ -6009,11 +6494,20 @@ def update_handoff(
         if recommended_next_agent is not None:
             sets.append("recommended_next_agent = ?")
             values.append(recommended_next_agent)
+        if handoff_status is not None:
+            sets.append("handoff_status = ?")
+            values.append(handoff_status)
+        if closed_dispatch_status is not None:
+            sets.append("closed_dispatch_status = ?")
+            values.append(closed_dispatch_status)
         if extras is not None:
             sets.append("extras_json = ?")
             values.append(json.dumps(extras))
         if not sets:
             return _serialize_handoff(existing)
+        sets.append("handoff_version = COALESCE(handoff_version, 1) + 1")
+        sets.append("last_checkpoint_at = ?")
+        values.append(_utcnow_iso_dispatch())
         values.extend([engagement.id, agent_id])
         connection.execute(
             f"UPDATE assessment_dispatch_handoffs SET {', '.join(sets)} WHERE engagement_id = ? AND agent_id = ?",
@@ -6024,7 +6518,9 @@ def update_handoff(
             (engagement.id, agent_id),
         ).fetchone()
     assert row is not None
-    return _serialize_handoff(row)
+    serialized = _serialize_handoff(row)
+    _register_handoff_artifacts(engagement.id, serialized)
+    return serialized
 
 
 def get_handoff(engagement_id: int, agent_id: str) -> dict[str, Any]:

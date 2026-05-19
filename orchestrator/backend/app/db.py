@@ -402,6 +402,7 @@ _ENGAGEMENT_SCOPED_TABLES = {
     "assessment_tunnels",
     "assessment_blocked_techniques",
     "assessment_command_runs",
+    "assessment_artifacts",
     "assessment_jobs",
     "code_repos",
     "code_modules",
@@ -1362,6 +1363,144 @@ def init_db() -> None:
             connection.execute(
                 "INSERT INTO assessment_command_runs_fts(assessment_command_runs_fts) VALUES ('rebuild')"
             )
+        # assessment_artifacts indexes engagement-local files while keeping
+        # large/raw bytes on disk. Rows carry previews, hashes, producer
+        # metadata, and optional entity links so resume/report flows can
+        # discover artifacts without scraping arbitrary paths into prompts.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                relative_path TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT '',
+                media_type TEXT NOT NULL DEFAULT '',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                sha256 TEXT NOT NULL DEFAULT '',
+                preview_text TEXT NOT NULL DEFAULT '',
+                indexed_text TEXT NOT NULL DEFAULT '',
+                sensitive INTEGER NOT NULL DEFAULT 0,
+                present INTEGER NOT NULL DEFAULT 1,
+                producer_agent_id TEXT,
+                producer_agent_role TEXT,
+                producer_command_run_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
+                related_finding_slug TEXT,
+                related_chain_key TEXT,
+                related_surface_id INTEGER,
+                related_request_variant_id INTEGER,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_indexed_at TEXT,
+                UNIQUE(engagement_id, relative_path)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_artifacts_engagement_path "
+            "ON assessment_artifacts(engagement_id, relative_path)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_artifacts_finding "
+            "ON assessment_artifacts(engagement_id, related_finding_slug)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_artifacts_present "
+            "ON assessment_artifacts(engagement_id, present)"
+        )
+        artifact_fts_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(assessment_artifacts_fts)").fetchall()
+        }
+        existing_artifact_count = connection.execute("SELECT COUNT(*) FROM assessment_artifacts").fetchone()[0]
+        rebuild_artifacts_fts = not artifact_fts_columns and existing_artifact_count > 0
+        expected_artifact_fts_columns = {
+            "relative_path",
+            "kind",
+            "media_type",
+            "preview_text",
+            "indexed_text",
+            "related_finding_slug",
+            "related_chain_key",
+        }
+        if artifact_fts_columns and not expected_artifact_fts_columns.issubset(artifact_fts_columns):
+            connection.execute("DROP TABLE IF EXISTS assessment_artifacts_fts")
+            for trigger in ("assessment_artifacts_ai", "assessment_artifacts_ad", "assessment_artifacts_au"):
+                connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            rebuild_artifacts_fts = existing_artifact_count > 0
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS assessment_artifacts_fts
+            USING fts5(
+                relative_path,
+                kind,
+                media_type,
+                preview_text,
+                indexed_text,
+                related_finding_slug,
+                related_chain_key,
+                content='assessment_artifacts',
+                content_rowid='id',
+                tokenize='unicode61'
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS assessment_artifacts_ai
+            AFTER INSERT ON assessment_artifacts BEGIN
+                INSERT INTO assessment_artifacts_fts(
+                    rowid, relative_path, kind, media_type, preview_text,
+                    indexed_text, related_finding_slug, related_chain_key
+                )
+                VALUES (
+                    new.id, new.relative_path, new.kind, new.media_type, new.preview_text,
+                    new.indexed_text, new.related_finding_slug, new.related_chain_key
+                );
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS assessment_artifacts_ad
+            AFTER DELETE ON assessment_artifacts BEGIN
+                INSERT INTO assessment_artifacts_fts(
+                    assessment_artifacts_fts, rowid, relative_path, kind, media_type, preview_text,
+                    indexed_text, related_finding_slug, related_chain_key
+                )
+                VALUES (
+                    'delete', old.id, old.relative_path, old.kind, old.media_type, old.preview_text,
+                    old.indexed_text, old.related_finding_slug, old.related_chain_key
+                );
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS assessment_artifacts_au
+            AFTER UPDATE ON assessment_artifacts BEGIN
+                INSERT INTO assessment_artifacts_fts(
+                    assessment_artifacts_fts, rowid, relative_path, kind, media_type, preview_text,
+                    indexed_text, related_finding_slug, related_chain_key
+                )
+                VALUES (
+                    'delete', old.id, old.relative_path, old.kind, old.media_type, old.preview_text,
+                    old.indexed_text, old.related_finding_slug, old.related_chain_key
+                );
+                INSERT INTO assessment_artifacts_fts(
+                    rowid, relative_path, kind, media_type, preview_text,
+                    indexed_text, related_finding_slug, related_chain_key
+                )
+                VALUES (
+                    new.id, new.relative_path, new.kind, new.media_type, new.preview_text,
+                    new.indexed_text, new.related_finding_slug, new.related_chain_key
+                );
+            END
+            """
+        )
+        if rebuild_artifacts_fts:
+            connection.execute(
+                "INSERT INTO assessment_artifacts_fts(assessment_artifacts_fts) VALUES ('rebuild')"
+            )
         # assessment_jobs tracks long-running dtach-supervised workers spawned
         # by `aith assess kali job start`. parent_command_run_id links the
         # synchronous audit row that initiated the job; SET NULL on cascade
@@ -2052,15 +2191,39 @@ def init_db() -> None:
                 working_artifacts_json TEXT,
                 open_questions_json TEXT,
                 recommended_next_agent TEXT,
+                handoff_status TEXT NOT NULL DEFAULT 'checkpointed',
+                handoff_version INTEGER NOT NULL DEFAULT 1,
+                last_checkpoint_at TEXT,
+                closed_dispatch_status TEXT,
                 extras_json TEXT,
                 created_at TEXT NOT NULL,
                 UNIQUE(engagement_id, agent_id)
             )
             """
         )
+        handoff_columns = _table_columns(connection, "assessment_dispatch_handoffs")
+        if handoff_columns and "handoff_status" not in handoff_columns:
+            connection.execute(
+                "ALTER TABLE assessment_dispatch_handoffs ADD COLUMN handoff_status TEXT NOT NULL DEFAULT 'checkpointed'"
+            )
+        if handoff_columns and "handoff_version" not in handoff_columns:
+            connection.execute(
+                "ALTER TABLE assessment_dispatch_handoffs ADD COLUMN handoff_version INTEGER NOT NULL DEFAULT 1"
+            )
+        if handoff_columns and "last_checkpoint_at" not in handoff_columns:
+            connection.execute("ALTER TABLE assessment_dispatch_handoffs ADD COLUMN last_checkpoint_at TEXT")
+            connection.execute(
+                "UPDATE assessment_dispatch_handoffs SET last_checkpoint_at = created_at WHERE last_checkpoint_at IS NULL"
+            )
+        if handoff_columns and "closed_dispatch_status" not in handoff_columns:
+            connection.execute("ALTER TABLE assessment_dispatch_handoffs ADD COLUMN closed_dispatch_status TEXT")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_handoffs_engagement_at "
             "ON assessment_dispatch_handoffs(engagement_id, created_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_handoffs_engagement_status "
+            "ON assessment_dispatch_handoffs(engagement_id, handoff_status)"
         )
 
         connection.execute(

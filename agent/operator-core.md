@@ -25,7 +25,7 @@ dispatch handoffs, and command coverage.
 
 After engagement initialization completes, repeat until all attack paths exhausted or user signals stop:
 
-1. **ASSESS STATE** — Read scope.json. For resumed engagements, run the resume hydration in `agent/rules/resume.md` before planning. Query backend state via `aith assess list-findings` (findings), `aith assess list-intel` (intel summary), and `aith assess fetch activity-entries` (activity log). Findings are stored in the backend — use `aith assess export-findings` to generate a local export on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
+1. **ASSESS STATE** — Read scope.json. For resumed engagements, run `aith assess resume-brief` from `agent/rules/resume.md` before planning; use `--finding`, `--q`, or `--agent-id` for targeted continuation. Query narrow backend tables only when the brief points to a drill-down command such as `get-command-run`, `artifact search/get`, `agent render-handoff`, `list-findings`, or `list-intel`. Findings are stored in the backend — use `aith assess export-findings` to generate a local export on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
 2. **DECIDE NEXT ACTION** — Prioritize by current phase first. In Phase 1-2, prioritize breadth of surface coverage. In Phase 3, prioritize risk class: object references, auth boundaries, and privileged writes before low-risk surfaces. Keep exploitation behind Verify: only findings that survived review as `confirmed` or `downgraded`, or findings explicitly marked `details.chain_required=true`, enter exploit review. Skip ahead only when an obviously actionable path is already in hand.
 3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.5` with `xhigh` reasoning for high-stakes specialist dispatches (exploit chains, deep code review, novel vulnerability hypotheses) and `high` for standard work. Claude operator and substantial Claude workers should use `Opus 4.7` with `max` reasoning for the same high-stakes class and `high` for standard work — `max` is Claude-only; Codex caps at `xhigh`. Only drop to `gpt-5.5` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
@@ -146,7 +146,7 @@ The runtime dispatch contract is the same shape as the code-analysis contract �
 - **Rate-limit budget**: the per-call rate flag value the specialist should pass to `aith assess kali ...` (e.g. `nuclei -rate-limit 4 -c 2` for a 5 req/s program). Operator-owned; do not delegate aggregate-rate decisions to the specialist.
 - **OOB / listener availability**: `aith oob status --json` snapshot if the dispatch may need a callback URL (SSRF blind, command injection blind, deserialization callback). The specialist requests the URL via `aith oob client start <name>` — but only when the operator has named OOB as available.
 - **Auth context**: the `auth_context` field of any state the dispatch will operate under (anonymous / authenticated / authenticated-admin / a specific role). For credential-bearing dispatches, also pass the `credential_id` of the captured material so the specialist can reference it without re-extracting.
-- **Cross-agent prior work**: the rendered handoff blob from `aith assess agent render-handoff <prior-agent-id>` when a prior dispatch touched the same surface or finding (see Cross-Dispatch Continuity).
+- **Cross-agent prior work**: the relevant `resume-brief` slice plus the rendered handoff blob from `aith assess agent render-handoff <prior-agent-id>` when a prior dispatch touched the same surface or finding (see Cross-Dispatch Continuity).
 - **Coverage gap statement**: name the specific variant / sibling / payload family / surface that has NOT been tried. Do not leave the gap inference to the specialist — the operator has the cross-dispatch view that the specialist cannot reconstruct.
 - **Cleanup constraints**: when the dispatch may leave server-side state (uploaded files, created accounts, persistent payloads), name the cleanup expectation up front so the specialist records cleanup obligations as the work happens, not retroactively.
 
@@ -176,6 +176,8 @@ The operator obtains `agent_id` by:
 - **Codex**: use the id returned by `spawn_agent`.
 
 Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting. A 404 from render-handoff means the `agent_id` in the handoff does not match the registered dispatch.
+
+If this is a continuation or resumed engagement, include the relevant `aith assess resume-brief` output immediately after the Runtime Identity block. Specialists treat it as the compact operating picture and use the listed command/artifact IDs for drill-down instead of reconstructing state from local notes.
 
 ### Specialist Dispatch Contract
 
@@ -300,7 +302,7 @@ Before every dispatch, verify:
 - [ ] Matching skill's paired references identified from `agent/references/INDEX.md`
 - [ ] Prior relevant findings or existing finding slugs included (so the agent can reference them instead of creating duplicates)
 - [ ] Activity log checked for duplicate dispatch — `aith assess fetch activity-entries` (DEDUP rule)
-- [ ] Command history checked — `aith assess list-command-runs --q <keyword>` reviewed for prior runs that already cover the objective. Default to an unscoped search so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, open its preview with `aith assess get-command-run <id>` — `success=true` only means return_code=0, not that the output answers the current question
+- [ ] Command history checked — `aith assess list-command-runs --q <keyword> --show-matches` reviewed for prior runs that map coverage. Default to an unscoped fuzzy search so finding aliases and adjacent command metadata are included; narrow with exact filters only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, open its preview with `aith assess get-command-run <id>` — `success=true` only means return_code=0, not that the output answers the current question
 - [ ] Parallelism decision made (independent → parallel, dependent → sequential)
 - [ ] For `vulnerability-analyst` and `exploit-developer` dispatches: `--scope-host` confirmed against `scope.json` `hosts` (with wildcard semantics). Adjacent-but-out-of-scope hosts surfaced during OSINT/recon are NOT in scope for active probing — reframe as recon or add the host to scope first. The CLI validator enforces this, but stating it in the dispatch context catches operator mistakes earlier.
 
@@ -343,7 +345,7 @@ Report-review is intentionally NOT in this list — the `report-generation/SKILL
 
 Every dispatch launches a fresh agent — treat each dispatch as a clean-room environment that inherits only what the operator explicitly hands it. Session tokens, discovered endpoints, partial PoC steps, and next-step plans travel through the dispatch prompt and durable state (backend records, engagement files), because the harness rebuilds subagent context from those sources on each launch.
 
-**Specialist closing sequence** — every specialist writes a structured handoff before its dispatch returns: (1) `aith assess agent handoff --from-json <path>` using the `agent_id` from the Runtime Identity block, then (2) `aith assess agent render-handoff <agent_id>` as a self-check — exit only after the render succeeds (404 → `agent_id` mismatch). The handoff captures summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras. This row is canonical for "what was done, what's missing, what's next" — schema in `agent/references/runtime-guides/handoff-schema.md`.
+**Specialist closing sequence** — every specialist writes a structured handoff before its dispatch returns: (1) `aith assess agent handoff --from-json <path>` using the `agent_id` from the Runtime Identity block, with `handoff_status` set to `ready` when the dispatch can be closed or `blocked` when it cannot complete, then (2) `aith assess agent render-handoff <agent_id>` as a self-check — exit only after the render succeeds (404 → `agent_id` mismatch). The handoff captures summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras. This row is canonical for "what was done, what's missing, what's next" — schema in `agent/references/runtime-guides/handoff-schema.md`.
 
 **Operator dispatch tracking** — when the operator launches a specialist, register the dispatch:
 
@@ -368,6 +370,8 @@ aith assess agent render-handoff <agent-id>
 ```
 
 The renderer reads the handoff table, fetches each finding slug (404 → "slug missing in backend"), checks every working_artifact path on disk (missing → "(state: missing)"), and emits a markdown blob hard-capped at `--max-lines` (default 40). The findings list collapses to "... and N more" before runtime_issues / working_artifacts. Summary, coverage gaps, and next steps are never trimmed.
+
+When a handoff is `ready` or `blocked`, close the dispatch explicitly with `aith assess agent close <agent-id>` so checkpointing remains separate from lifecycle closure. Use `aith assess agent reconcile-stale --dry-run` during resume or phase transitions to find in-progress dispatches that have closable handoffs or missing handoffs.
 
 The blob already carries:
 - Finding slugs (with title + severity from the backend) the new agent can `fetch` for full context
@@ -601,7 +605,7 @@ variant that hasn't been tried — not to duplicate what the agents already
 have in hand.
 
 ```bash
-aith assess list-command-runs --q <keyword>
+aith assess list-command-runs --q <keyword> --show-matches
 ```
 
 When planning the next dispatch:
