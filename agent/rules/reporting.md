@@ -249,101 +249,24 @@ The following are internal-only and must not appear in client-facing deliverable
 
 ## 20. Do not write like an AI in external submissions
 
-Bug bounty submissions and vendor disclosure emails are read by humans who triage hundreds of reports. The patterns below signal AI authorship and undermine credibility. Avoid all of them.
+External submissions (bug bounty, disclosure email) are read by humans. The patterns below signal automated authorship and undermine credibility. The full gate checklist lives in `agent/references/bugbounty-submission-format.md`.
 
-### Do not document what you ruled out
+**Do not document what you ruled out.** Sections titled "Defender-positive", "Dead ends", "Negative findings", or any section cataloguing failed attack variants do not belong in a submission. If a negative result is genuinely material, state it in one sentence without a probe count.
 
-Bug bounty submissions are about the finding, not the research methodology. Do not include sections (or sub-sections) cataloguing failed attack variants: XXE attempts, SSRF probes, injection sweeps, oracle enumeration runs, or any other dead-end investigation. The triage reviewer does not need a log of what did not work.
+**No probe counts or telemetry.** Request volumes, per-phase timing, percentile latencies, and per-node distribution are internal state. One UTC date range covers the time window if the reviewer needs it.
 
-Banned constructs:
-- Any section titled or labelled "Defender-positive", "Dead ends", "Negative findings", "Ruled out", "What was probed"
-- Inline sentences of the form: "XXE is dead. 144 probes across 6 URI schemes returned…"
-- Parenthetical probe-count annotations anywhere in the submission body: `(20-probe sweep, 2026-05-19)`, `(111 candidates across 7 families)`
+**Deconfliction: three lines only.** Researcher ID, source IP, UTC time window (single range, not per-phase). Omit if the program does not require it. No marker string lists, no rate assertions, no cleanup claims.
 
-If a negative result is genuinely material — e.g., confirming that JPQL injection is closed on the same surface you are reporting — state it in one sentence, plain English, without a probe count. One sentence. Then move on.
+**Attack scenarios: realistic adversary, not a character.** Name the adversary class, starting access, action, and outcome in 2-3 sentences. Banned: cartoonish personas ("a first-year student in a dorm room"), romantic framing ("from a public Wi-Fi network with a copy of curl").
 
-### Probe counts and precise telemetry are internal state
+**Do not instruct the reviewer.** Phrases like `please do not treat it as one in triage` or `recorded so triage does not re-investigate` are condescending. State what you found. Stop.
 
-Request volumes, per-phase timing ranges, percentile latencies, and per-node load-balancer distribution are internal operational data. They do not belong in submissions.
+**CVSS must match proved impact.** If writes returned HTTP 200 but were rejected at the application layer with zero state mutated, `I` is not `H`. Do not assign an optimistic score and hedge it in body prose — that is Rule 3 applied to external submissions.
 
-Banned patterns:
-- `~270 SOAP POST requests distributed across gmwp-app1 and gmwp-app2`
-- `p50=257 ms, p95=564 ms`
-- `Rate held below 6 SOAP/min during the oracle sweep`
-- `144 probes across 6 URI schemes`
+**Titles: ≤12 words, one clause.** No parenthetical product aliases, no architectural sub-clauses. Bad: `Unauthenticated SOAP execution on production CA Identity Governance (Eurekify) bypasses the portal.cms.gov SSN/Experian RIDP gate on the federal role-request workflow plane`. Good: `Unauthenticated SOAP access to CA IGA workflow engine bypasses EUA RIDP gate`.
 
-If the reviewer needs a time window for incident response, one UTC date range suffices: `Testing occurred 2026-05-18 20:49 – 2026-05-19 11:03 UTC`.
+**Remediation: ≤3 items.** Primary fix, optional defense-in-depth, optional audit step. No "validate the fix" item.
 
-### Deconfliction is three lines, not a section
+**Do not restate header metadata in prose.** CWE, CVSS, and VRT declared in header fields need no in-body explanation. One field, one place.
 
-When a program or policy requires deconfliction data, provide exactly:
-1. Researcher identifier (handle or email the program knows you by)
-2. Source IP address
-3. UTC time window for all testing (single range, not per-phase)
-
-Nothing else. Do not enumerate marker strings, do not break the time window into per-phase sub-ranges, do not state request volumes, do not describe rate limiting, do not make cleanup assertions. These additions signal automated tooling, not a human researcher.
-
-If the program does not require deconfliction data, omit the section entirely.
-
-### Attack scenarios must sound like real threat models
-
-The attack scenario should describe a plausible adversary with a realistic motivation. It is 2-3 sentences.
-
-Banned patterns:
-- Cartoonish personas: "a first-year computer science student in a dorm room", "a script kiddie on public Wi-Fi", "any curious teenager with a browser"
-- Romantic framing: "from a public Wi-Fi network", "with a copy of curl"
-- The phrase "with a one-minute proof-of-concept" — banned by Rule 11 and doubly banned here
-
-Preferred pattern: name the adversary class (external unauthenticated attacker, low-privilege authenticated user, malicious insider), the access they start with, the action they take, and the impact they achieve. A real triager reading this should think "yes, this is who would do this" — not roll their eyes.
-
-### Do not instruct the triage reviewer
-
-Do not tell the reviewer how to interpret, score, weight, or act on your finding. They are experienced security professionals. Phrases like the following are condescending and read as AI-generated:
-
-Banned patterns:
-- `please do not treat it as one in triage`
-- `this is the finding; the escalation paths describe where it goes`
-- `do not conflate this with the other finding above`
-- `recorded so triage does not re-investigate`
-- `triage can prioritize remediation correctly`
-
-State what you found and what it means. Stop there. Let the reviewer decide.
-
-### CVSS scores must match proved impact, not structural potential
-
-If write operations returned HTTP 200 but the payload was rejected by application-layer validation and zero state was mutated, the integrity impact is not `I:H`. Score the impact that was demonstrated, not the impact that would occur if a secondary condition (valid template name, valid actor ID) were satisfied.
-
-If you believe the structural gap warrants a higher score than the demonstrated impact justifies, explain in one sentence why, then score the demonstrated impact. Do not assign `I:H` and then hedge it in the body prose.
-
-### Titles are one clause, not a paragraph
-
-A submission title is the shortest possible description that distinguishes this finding from all others. It maps to a single platform field that displays in list views.
-
-Maximum 12 words. No parenthetical product aliases. No sub-clauses beginning with "bypasses", "on the federal", "on the production". No architectural context that belongs in the summary.
-
-Bad: `Unauthenticated SOAP execution on production CA Identity Governance (Eurekify) bypasses the portal.cms.gov SSN/Experian RIDP gate on the federal role-request workflow plane`
-Good: `Unauthenticated SOAP access to CA IGA workflow engine bypasses EUA RIDP gate`
-
-### Remediation is a fix, not a project plan
-
-Remediation is 1-3 items. Item 1 is the primary fix (the control that must be bound or enforced). Item 2, if present, is defense-in-depth (an additional layer worth adding). Item 3, if present, is an audit/cleanup step.
-
-Do not include:
-- A "validate the fix" step telling the team to re-run your PoC curls — that is implied by any competent engineering process
-- More than one defense-in-depth item
-- Documentation or change-management recommendations
-- Security-review gate recommendations for future changes
-
-### Do not re-explain your metadata in the body
-
-If CWE, CVSS, VRT, or OWASP mapping fields appear at the top of the submission, do not restate or justify them inside the prose. `"The CWE here is CWE-306"` in the Impact section, after CWE-306 is already declared in the header, wastes a sentence and reads as AI filling space.
-
-### "This submission" is banned
-
-Say "this finding" or "this report". The word "submission" is platform jargon that makes prose sound like a form being completed, not a human describing a bug.
-
-### Related findings: one sentence each
-
-Cross-references to other findings in the same program belong at the end of the submission. Each cross-reference is one sentence: what the other finding is, and why it is related. No multi-paragraph descriptions of sibling findings. The reviewer can read that submission separately.
-
-If the finding genuinely depends on another (chain), describe the dependency in plain English in the Summary, not in a dedicated Related Findings section.
+**Banned phrase:** `this submission` → say `this finding`.
