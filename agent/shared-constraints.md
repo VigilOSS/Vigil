@@ -272,6 +272,17 @@ agent, and every phase are included; narrow with exact filters only if the broad
 result is overwhelming. Cross-agent and cross-phase context is usually the most
 valuable coverage signal.
 
+Mode-of-search guidance:
+
+- Default (`--q "VA-047 OIDC"`) OR-unions the raw input with every finding
+  alias. Loose; surfaces anything related to the finding even when the topic
+  token is missing. Best for coverage-mapping.
+- `--all` keeps alias expansion but intersects every non-alias token — use when
+  you want "rows that mention VA-047 (in any alias form) AND mention OIDC".
+- `--exact` skips alias expansion entirely; the FTS phrase is searched
+  verbatim. Strictest; use when a recall miss would be worse than a precision
+  miss.
+
 Read the results as a coverage map, not a reuse gate. Red-team depth comes
 from variants — different SQLi techniques, different SSRF payload encodings,
 different XXE entity styles, different wordlists, different auth contexts.
@@ -676,9 +687,12 @@ Write durable state to backend tables and linked artifacts immediately — hidde
 markdown notes break resume, report readiness, and cross-agent handoff because
 future agents cannot query or verify them. Any `.md` file under `notes/` that
 matters after the current command must be registered with `aith assess artifact
-register <path>` and linked through a finding, chain, dispatch/agent, surface,
-request variant, or command run before the dispatch closes. Unlinked markdown
-notes are scratch only and are not valid resume or report input.
+register <path> --finding <slug>` (or another entity link) before the dispatch
+closes. Unlinked markdown notes are scratch only and are not valid resume or
+report input — the operator can confirm a note is scratch with `aith assess
+artifact mark-scratch <path>` (single) or `--under <prefix>` (bulk). A
+`check-report-readiness` `unlinked_markdown_note` blocker names the exact fix
+per row.
 
 ### Mandatory closing sequence (every specialist runs this before returning)
 

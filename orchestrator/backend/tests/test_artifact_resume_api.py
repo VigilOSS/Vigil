@@ -271,6 +271,50 @@ def test_mark_scratch_inline_registers_when_path_unindexed(client, isolate_setti
     assert body["relative_path"] == "notes/fresh.md"
 
 
+def test_resume_brief_rejects_malformed_since(client, isolate_settings) -> None:
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    brief = client.get(f"{BASE}/resume-brief", params={"since": "today"})
+    assert brief.status_code == 400, brief.text
+    assert "not a valid ISO datetime" in brief.json()["detail"]
+
+
+def test_mark_scratch_refuses_ghost_path(client, isolate_settings) -> None:
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    flagged = client.post(
+        f"{BASE}/artifacts/scratch-by-path",
+        json={"path": "notes/never-existed.md", "scratch": True},
+    )
+    assert flagged.status_code == 404, flagged.text
+    assert "does not exist on disk" in flagged.json()["detail"]
+
+
+def test_mark_scratch_under_escapes_like_metacharacters(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    # Two directory siblings that would alias under unescaped LIKE: `_keep`
+    # and `Xkeep` (the `_` is a SQL LIKE wildcard for any single char).
+    keep = eng / "notes" / "_keep"
+    other = eng / "notes" / "Xkeep"
+    keep.mkdir(parents=True, exist_ok=True)
+    other.mkdir(parents=True, exist_ok=True)
+    (keep / "a.md").write_text("under _keep", encoding="utf-8")
+    (other / "b.md").write_text("under Xkeep", encoding="utf-8")
+    sync = client.post(f"{BASE}/artifacts/sync")
+    assert sync.status_code == 200, sync.text
+    # Mark only the `_keep` prefix — must NOT match `Xkeep` even though `_` is a LIKE wildcard.
+    bulk = client.post(
+        f"{BASE}/artifacts/scratch-under",
+        json={"prefix": "notes/_keep/", "scratch": True},
+    )
+    assert bulk.status_code == 200, bulk.text
+    body = bulk.json()
+    assert body["matched"] == 1
+    assert body["updated"] == ["notes/_keep/a.md"]
+
+
 def test_resume_brief_since_filters_old_findings(client, isolate_settings) -> None:
     eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200

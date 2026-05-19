@@ -217,8 +217,16 @@ def _close(args) -> None:
             target_status = str(handoff.get("closed_dispatch_status") or "blocked")
         else:
             print(
-                f"agent close: handoff_status={handoff_status!r} is not closable; "
-                "use agent handoff --handoff-status ready|blocked first",
+                f"agent close: handoff_status={handoff_status!r} is not closable. Options:\n"
+                f"  1. Re-dispatch the specialist to write a final handoff with "
+                f"--handoff-status ready (or blocked) — preferred.\n"
+                f"  2. Force-complete without an audit row: "
+                f"`aith assess agent done {agent_id} --status completed` "
+                f"(or --status failed / blocked / aborted).\n"
+                f"  3. Operator override: write the closing handoff manually with "
+                f"`aith assess agent handoff --agent-id {agent_id} --role <role> "
+                f"--summary \"...\" --handoff-status blocked` then re-run "
+                f"`agent close`.",
                 file=sys.stderr,
             )
             sys.exit(2)
