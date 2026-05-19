@@ -34,7 +34,7 @@ def _load_proxy_addon_module():
     mitmproxy_module = ModuleType("mitmproxy")
     mitmproxy_module.http = SimpleNamespace(HTTPFlow=object)
     mitmproxy_module.ctx = SimpleNamespace(
-        options=SimpleNamespace(engagement_dir=""),
+        options=SimpleNamespace(engagements_root="", engagement_dir="", registry_poll_seconds=30),
         log=SimpleNamespace(info=lambda *a, **k: None, warn=lambda *a, **k: None, error=lambda *a, **k: None),
     )
     sys.modules["mitmproxy"] = mitmproxy_module
@@ -185,9 +185,12 @@ def test_record_proposal_accepts_valid_credential_payload(tmp_path: Path, capsys
 
 
 def test_proxy_addon_loads_legacy_scope_keys(tmp_path: Path) -> None:
+    """The filesystem fallback supports the same legacy scope-key aliases as
+    before (``hosts`` / ``scope_hosts`` / ``scope`` plus ``hostname``)."""
     module = _load_proxy_addon_module()
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
+    engagements_root = tmp_path / "engagements"
+    engagement_dir = engagements_root / "eng-1"
+    engagement_dir.mkdir(parents=True)
     (engagement_dir / "scope.json").write_text(
         json.dumps(
             {
@@ -200,13 +203,13 @@ def test_proxy_addon_loads_legacy_scope_keys(tmp_path: Path) -> None:
     )
 
     collector = module.CaseCollector()
-    collector.engagement_dir = str(engagement_dir)
-    collector._load_scope()
+    collector.engagements_root = engagements_root
+    collector._reload_registry(force=True)
 
-    assert collector._is_in_scope("example.com") is True
-    assert collector._is_in_scope("api.example.com") is True
-    assert collector._is_in_scope("legacy.example.net") is True
-    assert collector._is_in_scope("out-of-scope.test") is False
+    assert collector._match_engagement("example.com") is not None
+    assert collector._match_engagement("api.example.com") is not None
+    assert collector._match_engagement("legacy.example.net") is not None
+    assert collector._match_engagement("out-of-scope.test") is None
 
 
 def test_filter_scope_keeps_in_scope_hosts(monkeypatch, tmp_path: Path, capsys) -> None:

@@ -35,9 +35,27 @@ def _write_engagement(engagements_dir: Path, key: str = ENGAGEMENT_KEY) -> Path:
 
 
 def _seed(client, isolate_settings) -> None:
-    _write_engagement(isolate_settings["engagements_dir"])
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    (eng / "findings.md").write_text("# Findings\n", encoding="utf-8")
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
+    for slug in ("VA-001", "VA-002"):
+        finding = client.post(
+            f"{BASE}/findings",
+            json={
+                "slug": slug,
+                "title": f"Seed finding {slug}",
+                "severity": "medium",
+                "workflow_status": "active",
+                "verification_state": "unreviewed",
+                "verification_disposition": "none",
+                "canonical_location": f"https://example.com/seed/{slug}",
+                "summary": "Seed finding for handoff references",
+                "evidence_ref": "findings.md",
+                "source_name": "vulnerability-analyst",
+            },
+        )
+        assert finding.status_code == 201, finding.text
 
 
 def _register_dispatch(client, *, agent_id: str, agent_role: str) -> None:
@@ -197,3 +215,34 @@ def test_handoff_rejects_role_mismatch(client, isolate_settings) -> None:
 
     assert resp.status_code == 409, resp.text
     assert "agent_role mismatch" in resp.text
+
+
+def test_handoff_rejects_non_terminal_closed_dispatch_status(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+    _register_dispatch(client, agent_id="HF-CLOSE", agent_role="vulnerability-analyst")
+
+    rejected_create = client.post(
+        f"{BASE}/dispatch-handoffs",
+        json=_full_payload(
+            agent_id="HF-CLOSE",
+            handoff_status="ready",
+            closed_dispatch_status="in-progress",
+        ),
+    )
+    assert rejected_create.status_code == 422, rejected_create.text
+
+    created = client.post(
+        f"{BASE}/dispatch-handoffs",
+        json=_full_payload(
+            agent_id="HF-CLOSE",
+            handoff_status="ready",
+            closed_dispatch_status="completed",
+        ),
+    )
+    assert created.status_code == 201, created.text
+
+    rejected_patch = client.patch(
+        f"{BASE}/dispatch-handoffs/HF-CLOSE",
+        json={"closed_dispatch_status": "in-progress"},
+    )
+    assert rejected_patch.status_code == 422, rejected_patch.text

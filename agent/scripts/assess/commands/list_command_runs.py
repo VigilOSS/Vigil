@@ -20,7 +20,25 @@ def register(subparsers) -> None:
         "list-command-runs",
         help="List `aith assess kali` command-run audit records for this engagement",
     )
-    p.add_argument("--q", default="", help="Keyword search (FTS5) over command, tool, previews, suppression reasons")
+    p.add_argument("--q", default="", help="Fuzzy keyword search over command, tool, previews, metadata, and finding aliases")
+    p.add_argument(
+        "--sort",
+        default="",
+        choices=("", "relevance", "recent", "distant"),
+        help="Sort mode. Defaults to relevance with --q and recent without --q; distant returns coverage-gap candidates.",
+    )
+    p.add_argument("--show-matches", action="store_true", help="Show why each row matched the query")
+    p.add_argument("--exact", action="store_true", help="Disable fuzzy finding-alias expansion for --q")
+    p.add_argument(
+        "--all",
+        dest="require_all",
+        action="store_true",
+        help=(
+            "Require every term in --q to match (AND), while still expanding finding aliases. "
+            "Combine `VA-047 OIDC` so rows must mention both the finding (in any alias form) "
+            "and the topic. Mutually exclusive with --exact."
+        ),
+    )
     p.add_argument("--agent-name", dest="agent_name", default="", help="Filter to a single dispatching agent")
     p.add_argument("--phase", default="", help="Filter to a specific engagement phase")
     p.add_argument("--tool-name", dest="tool_name", default="", help="Filter to the route-derived tool label (e.g. nmap, command)")
@@ -107,6 +125,14 @@ def _build_query(args) -> str:
         params.append(("probe_kind", args.probe_kind))
     if getattr(args, "intent_q", ""):
         params.append(("intent_q", args.intent_q))
+    if getattr(args, "sort", ""):
+        params.append(("sort", args.sort))
+    if getattr(args, "show_matches", False):
+        params.append(("show_matches", "true"))
+    if getattr(args, "exact", False):
+        params.append(("exact", "true"))
+    if getattr(args, "require_all", False):
+        params.append(("require_all", "true"))
     if args.success:
         params.append(("success", "true"))
     if args.failed:
@@ -143,6 +169,8 @@ def _render_table(rows: list[dict]) -> str:
         "intent",
         "command",
     ]
+    if any(row.get("matches") for row in rows):
+        header.append("matches")
     lines = ["\t".join(header)]
     for row in rows:
         rc = row.get("return_code")
@@ -162,24 +190,24 @@ def _render_table(rows: list[dict]) -> str:
             dest_str = "-"
         else:
             dest_str = "yes" if destructive else "no"
-        lines.append(
-            "\t".join(
-                [
-                    str(row.get("id", "")),
-                    str(row.get("created_at", "")),
-                    str(row.get("phase", "")),
-                    str(row.get("agent_name", "")),
-                    tool_display,
-                    str(row.get("technique") or "-"),
-                    str(row.get("probe_kind") or "-"),
-                    dest_str,
-                    rc_str,
-                    "yes" if row.get("timed_out") else "no",
-                    intent or "-",
-                    command,
-                ]
-            )
-        )
+        values = [
+            str(row.get("id", "")),
+            str(row.get("created_at", "")),
+            str(row.get("phase", "")),
+            str(row.get("agent_name", "")),
+            tool_display,
+            str(row.get("technique") or "-"),
+            str(row.get("probe_kind") or "-"),
+            dest_str,
+            rc_str,
+            "yes" if row.get("timed_out") else "no",
+            intent or "-",
+            command,
+        ]
+        if "matches" in header:
+            matches = row.get("matches") or []
+            values.append(",".join(str(item) for item in matches) or "-")
+        lines.append("\t".join(values))
     return "\n".join(lines)
 
 

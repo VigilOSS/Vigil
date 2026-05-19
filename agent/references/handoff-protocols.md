@@ -20,6 +20,16 @@ was done, what's missing, what's next" — schema in
 markdown blob via `aith assess agent render-handoff <agent-id>` and pastes it into
 the next dispatch's prompt.
 
+**Set `handoff_status` on the FINAL handoff.** Specialists MUST set
+`handoff_status=ready` when the dispatch's objective is complete and the
+operator can close it, or `handoff_status=blocked` when the work cannot
+finish (auth expired, scope ambiguity, tool missing, etc.). Intermediate
+checkpoints stay at the default `checkpointed`. Without `ready`/`blocked`
+on the final handoff, `aith assess agent close <agent-id>` will refuse to
+close the dispatch and the row stays `in-progress` — which then surfaces as
+a `stale_dispatch_ready_handoff` or `handoff_gap` blocker in report
+readiness.
+
 ## Skill Passing Protocol
 
 Every handoff specifies **which skill the next agent should load**. The operator includes

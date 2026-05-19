@@ -245,6 +245,81 @@ def test_list_command_runs_fts_search_finds_keyword(client, isolate_settings):
     assert httpx_hits[0]["tool_name"] == "execute_command"
 
 
+def test_list_command_runs_finding_aliases_rank_and_explain_matches(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    direct = _post(
+        client,
+        _base_payload(
+            command="curl https://example.com/users/47 # VA-047",
+            argv=["curl", "https://example.com/users/47"],
+            tool_name="execute_command",
+            intent="validate VA-047 IDOR",
+            target_host="example.com",
+        ),
+    )
+    assert direct.status_code == 201, direct.text
+    compact = _post(
+        client,
+        _base_payload(
+            command="curl https://example.com/admin",
+            argv=["curl", "https://example.com/admin"],
+            tool_name="execute_command",
+            intent="follow-up for VA047",
+            target_host="example.com",
+        ),
+    )
+    assert compact.status_code == 201, compact.text
+
+    result_sets = []
+    for query in ("VA-047", "VA047", "VA 047", "FINDING-VA-047"):
+        response = client.get(
+            f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs",
+            params={"q": query, "show_matches": "true"},
+        )
+        assert response.status_code == 200, response.text
+        rows = response.json()
+        result_sets.append({row["id"] for row in rows})
+        assert any(row.get("matches") for row in rows)
+
+    assert len({frozenset(ids) for ids in result_sets}) == 1
+    assert {direct.json()["id"], compact.json()["id"]} <= result_sets[0]
+
+
+def test_list_command_runs_distant_returns_nonmatching_scope_candidates(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    matched = _post(
+        client,
+        _base_payload(
+            command="curl https://example.com/users/47 # VA-047",
+            argv=["curl", "https://example.com/users/47"],
+            tool_name="execute_command",
+            intent="validate VA-047 IDOR",
+            target_host="example.com",
+        ),
+    )
+    assert matched.status_code == 201, matched.text
+    gap = _post(
+        client,
+        _base_payload(
+            command="curl https://example.com/users/48",
+            argv=["curl", "https://example.com/users/48"],
+            tool_name="execute_command",
+            intent="adjacent user id probe",
+            target_host="example.com",
+        ),
+    )
+    assert gap.status_code == 201, gap.text
+
+    response = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs",
+        params={"q": "VA047", "sort": "distant"},
+    )
+    assert response.status_code == 200, response.text
+    ids = {row["id"] for row in response.json()}
+    assert gap.json()["id"] in ids
+    assert matched.json()["id"] not in ids
+
+
 def test_large_stdout_spills_to_artifact_file(client, isolate_settings):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     big = ("A" * 1024 + "\n") * 200  # ~200 KiB — well above 64 KiB cap

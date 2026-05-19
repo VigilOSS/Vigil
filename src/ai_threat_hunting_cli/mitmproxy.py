@@ -11,15 +11,19 @@ from .paths import container_host_url, resolve_orchestrator_base_url
 _PORT_WAIT_ATTEMPTS = 30
 _PORT_WAIT_DELAY_SECONDS = 0.2
 
+_CONTAINER_NAME = "security-research-proxy"
+_RELOAD_SENTINEL = ".mitmproxy-reload-requested"
+_ROUTES_CACHE = ".mitmproxy-routes.json"
+
 
 @dataclass(frozen=True, slots=True)
 class MitmproxyOptions:
     install_root: Path
-    engagement_dir: Path
+    engagements_root: Path
     mode: str = "docker"
     port: int = 8080
     image: str = "security-research-proxy:latest"
-    container_name: str = "security-research-proxy"
+    container_name: str = _CONTAINER_NAME
     volume_name: str = "mitmproxy-ca"
 
 
@@ -27,9 +31,9 @@ def start_proxy(options: MitmproxyOptions, *, runner: docker.Runner = docker.run
     if options.mode != "docker":
         raise SystemExit("Only Docker mitmproxy mode is managed by the CLI. Use host mitmproxy directly for --host workflows.")
     install_root = options.install_root.expanduser().resolve()
-    engagement_dir = options.engagement_dir.expanduser().resolve()
-    if not (engagement_dir / "scope.json").exists():
-        raise SystemExit(f"Not an engagement directory: {engagement_dir}")
+    engagements_root = options.engagements_root.expanduser().resolve()
+    if not engagements_root.is_dir():
+        raise SystemExit(f"Engagements root does not exist: {engagements_root}")
 
     if not docker.image_exists(options.image, runner=runner):
         dockerfile = install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile"
@@ -42,7 +46,13 @@ def start_proxy(options: MitmproxyOptions, *, runner: docker.Runner = docker.run
         runner(["docker", "rm", options.container_name])
 
     runner(["docker", "volume", "create", options.volume_name])
-    base_url = container_host_url(resolve_orchestrator_base_url(install_root, engagement_dir))
+    # The proxy is one process for all engagements, so its backend URL must come
+    # from process/install-level configuration. Per-engagement overrides are for
+    # engagement-scoped helpers and would make one arbitrary engagement steer all
+    # captured flow writes.
+    base_url = container_host_url(
+        resolve_orchestrator_base_url(install_root)
+    )
     argv = [
         "docker",
         "run",
@@ -53,16 +63,14 @@ def start_proxy(options: MitmproxyOptions, *, runner: docker.Runner = docker.run
         "-p",
         f"127.0.0.1:{options.port}:8080",
         "-v",
-        f"{engagement_dir}:/engagement",
+        f"{engagements_root}:/engagements",
         "-v",
         f"{options.volume_name}:/root/.mitmproxy",
         "-e",
         f"ORCHESTRATOR_BASE_URL={base_url}",
-        "-e",
-        f"ENGAGEMENT_KEY={engagement_dir.name}",
         options.image,
         "--set",
-        "engagement_dir=/engagement",
+        "engagements_root=/engagements",
         "--set",
         "block_global=false",
         # Akamai-fronted sites (LastPass, Salesforce Experience Cloud, and
@@ -80,9 +88,35 @@ def start_proxy(options: MitmproxyOptions, *, runner: docker.Runner = docker.run
         raise SystemExit(f"mitmproxy container started but port {options.port} is not reachable on 127.0.0.1")
 
 
-def stop_proxy(container_name: str = "security-research-proxy", *, runner: docker.Runner = docker.run_command) -> None:
+def stop_proxy(container_name: str = _CONTAINER_NAME, *, runner: docker.Runner = docker.run_command) -> None:
     if docker.container_exists(container_name, runner=runner):
         runner(["docker", "rm", "-f", container_name])
+
+
+def request_proxy_reload(engagements_root: Path) -> None:
+    """Touch the sentinel file the addon watches to force a registry refresh.
+
+    The container bind-mounts ``engagements_root`` at ``/engagements``, so a
+    write on the host side is immediately visible to the addon's polling
+    thread.
+    """
+    engagements_root = engagements_root.expanduser().resolve()
+    engagements_root.mkdir(parents=True, exist_ok=True)
+    sentinel = engagements_root / _RELOAD_SENTINEL
+    sentinel.touch()
+
+
+def read_proxy_routes(engagements_root: Path) -> dict | None:
+    """Return the addon's last-written routing snapshot, or None if absent."""
+    import json
+
+    cache = engagements_root.expanduser().resolve() / _ROUTES_CACHE
+    if not cache.is_file():
+        return None
+    try:
+        return json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def _port_open(host: str, port: int) -> bool:

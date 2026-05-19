@@ -19,7 +19,7 @@ something that hasn't.
    usually the most valuable coverage signal:
 
    ```bash
-   aith assess list-command-runs --q <keyword>
+   aith assess list-command-runs --q <keyword> --show-matches
    ```
 
    Narrow with `--agent-name` or `--phase` only if the broad result is
@@ -39,7 +39,7 @@ something that hasn't.
 
 4. **When a prior run is genuinely on-point for your current question,
    cite its id** in your output (e.g. "reused command-run #142"). Before
-   citing, open the preview with `get-command-run <id>` — `success=true`
+   citing, open the preview with `aith assess get-command-run <id>` — `success=true`
    only means `return_code=0`, not that the output answers your question.
    Soft-failure pages, WAF intercepts, and rate-limited stubs all exit
    cleanly.
@@ -48,7 +48,7 @@ something that hasn't.
 
 ```bash
 # Broad search for prior work on an objective
-aith assess list-command-runs --q "nmap 10.0.0.1"
+aith assess list-command-runs --q "nmap 10.0.0.1" --show-matches
 
 # Scoped to a specific agent and phase
 aith assess list-command-runs \
@@ -61,7 +61,7 @@ aith assess list-command-runs --tool-name nmap_scan --success
 # execute_command wrapper. The backend derives tool_bin from the command
 # string (peeling off timeout/sudo/env/sh -c wrappers), so --tool-bin catches
 # generic-wrapper rows that --tool-name would miss.
-aith assess list-command-runs --q nuclei --tool-bin nuclei
+aith assess list-command-runs --q nuclei --tool-bin nuclei --show-matches
 aith assess list-command-runs --tool-bin sqlmap
 aith assess list-command-runs --tool-bin httpx --success
 

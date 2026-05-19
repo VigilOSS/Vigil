@@ -246,3 +246,27 @@ The following are internal-only and must not appear in client-facing deliverable
 - **Coverage Summary** — operational metrics (targets, services, probe counts) are engagement-internal and have no meaning to the client
 - **Finding Cross-Reference** — maps report IDs to backend slugs; internal traceability only, exclude from external reports
 - **Tested by / tester attribution** — not required in client deliverables
+
+## 20. Do not write like an AI in external submissions
+
+External submissions (bug bounty, disclosure email) are read by humans. The patterns below signal automated authorship and undermine credibility. The full gate checklist lives in `agent/references/bugbounty-submission-format.md`.
+
+**Do not document what you ruled out.** Sections titled "Defender-positive", "Dead ends", "Negative findings", or any section cataloguing failed attack variants do not belong in a submission. If a negative result is genuinely material, state it in one sentence without a probe count.
+
+**No probe counts or telemetry.** Request volumes, per-phase timing, percentile latencies, and per-node distribution are internal state. One UTC date range covers the time window if the reviewer needs it.
+
+**Deconfliction: three lines only.** Researcher ID, source IP, UTC time window (single range, not per-phase). Omit if the program does not require it. No marker string lists, no rate assertions, no cleanup claims.
+
+**Attack scenarios: realistic adversary, not a character.** Name the adversary class, starting access, action, and outcome in 2-3 sentences. Banned: cartoonish personas ("a first-year student in a dorm room"), romantic framing ("from a public Wi-Fi network with a copy of curl").
+
+**Do not instruct the reviewer.** Phrases like `please do not treat it as one in triage` or `recorded so triage does not re-investigate` are condescending. State what you found. Stop.
+
+**CVSS must match proved impact.** If writes returned HTTP 200 but were rejected at the application layer with zero state mutated, `I` is not `H`. Do not assign an optimistic score and hedge it in body prose — that is Rule 3 applied to external submissions.
+
+**Titles: ≤12 words, one clause.** No parenthetical product aliases, no architectural sub-clauses. Bad: `Unauthenticated SOAP execution on production CA Identity Governance (Eurekify) bypasses the portal.cms.gov SSN/Experian RIDP gate on the federal role-request workflow plane`. Good: `Unauthenticated SOAP access to CA IGA workflow engine bypasses EUA RIDP gate`.
+
+**Remediation: ≤3 items.** Primary fix, optional defense-in-depth, optional audit step. No "validate the fix" item.
+
+**Do not restate header metadata in prose.** CWE, CVSS, and VRT declared in header fields need no in-body explanation. One field, one place.
+
+**Banned phrase:** `this submission` → say `this finding`.

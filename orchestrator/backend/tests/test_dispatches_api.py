@@ -36,9 +36,27 @@ def _write_engagement(engagements_dir: Path, key: str = ENGAGEMENT_KEY) -> Path:
 
 
 def _seed(client, isolate_settings) -> None:
-    _write_engagement(isolate_settings["engagements_dir"])
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    (eng / "findings.md").write_text("# Findings\n", encoding="utf-8")
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
+    for slug in ("VA-001", "VA-002"):
+        finding = client.post(
+            f"{BASE}/findings",
+            json={
+                "slug": slug,
+                "title": f"Seed finding {slug}",
+                "severity": "medium",
+                "workflow_status": "active",
+                "verification_state": "unreviewed",
+                "verification_disposition": "none",
+                "canonical_location": f"https://example.com/seed/{slug}",
+                "summary": "Seed finding for dispatch references",
+                "evidence_ref": "findings.md",
+                "source_name": "vulnerability-analyst",
+            },
+        )
+        assert finding.status_code == 201, finding.text
 
 
 def test_dispatch_post_get_list_patch(client, isolate_settings) -> None:
