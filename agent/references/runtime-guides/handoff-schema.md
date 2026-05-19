@@ -37,6 +37,10 @@ prompt by `aith assess agent render-handoff <agent-id>`.
 | `working_artifacts` | object[] | optional | Each entry: `{path, description, kind}`. `path` is engagement-relative (e.g. `scans/sans_acme-saas.txt`); the renderer checks each on disk. |
 | `open_questions` | string[] | optional | Free-text questions the operator/human must answer (vendor-SaaS in/out, scope ambiguity, missing credential, etc.). |
 | `recommended_next_agent` | string | optional | The role you'd hand off to (`vulnerability-analyst`, `exploit-developer`, `report-writer`, ...). |
+| `handoff_status` | enum | optional | `checkpointed` / `ready` / `blocked` / `superseded`. Defaults to `checkpointed`; set `ready` or `blocked` in the final handoff so the operator can run `aith assess agent close <agent_id>`. A `ready` or `blocked` handoff whose dispatch stays `in-progress` past the resume-brief threshold surfaces as a `stale_dispatch_ready_handoff` report-readiness blocker. |
+| `closed_dispatch_status` | enum | optional | Dispatch status for `agent close` to apply (`completed`, `blocked`, `failed`, `aborted`). |
+| `handoff_version` | integer | backend-managed | Incremented on every checkpoint write. Specialists do not set it; the orchestrator increments it on each PATCH so concurrent updates and audit trails stay ordered. |
+| `last_checkpoint_at` | ISO datetime | backend-managed | Timestamp of the most recent handoff write. Backfilled to `created_at` for pre-lifecycle rows; updated by every checkpoint PATCH. Used by `agent reconcile-stale` to find dispatches that have not checkpointed recently. |
 | `extras` | object | optional | Opaque JSON object for role-specific fields (osint CVE-match counts, fuzzer hit/miss ratio, recon live_host_count, etc.). |
 
 ## Field-by-field guidance
@@ -63,7 +67,7 @@ operator's decision on whether to trust the summary or re-dispatch.
 
 ### `finding_slugs`
 
-A list of slug strings (`["RECON-2026-01-15-001", "RECON-2026-01-15-002"]`).
+A list of canonical slug strings (`["RE-001", "VA-004"]`).
 The renderer fetches the title + severity from the findings table per slug, so
 you don't repeat them here. If a finding wasn't recorded via `record-finding`, do
 not list it here — the renderer would emit "slug missing in backend" and the
@@ -126,6 +130,15 @@ Optional pointer to the role you'd hand off to next (`vulnerability-analyst`,
 input to the dispatch decision — they may override it based on phase and
 parallelism considerations.
 
+### `handoff_status`
+
+Use `checkpointed` while the dispatch is still in progress and the handoff is a
+durable progress save. Use `ready` for the final handoff when the operator can
+close the dispatch as completed. Use `blocked` when the dispatch cannot complete
+without new credentials, scope clarification, runtime repair, or another
+operator action. The operator runs `aith assess agent close <agent_id>` after
+reviewing a ready/blocked handoff; agents do not close their own dispatch rows.
+
 ### `extras`
 
 Opaque JSON object for role-specific fields. Examples:
@@ -149,7 +162,7 @@ without reading the audit pipeline.
   "phase": "recon",
   "summary": "Phase 1 recon completed against 14 live hosts under saas.acme.example; five priority surfaces recorded; nuclei flagged two medium CVE matches pending validation.",
   "confidence": "medium",
-  "finding_slugs": ["RECON-2026-01-15-001"],
+  "finding_slugs": ["RE-001"],
   "coverage_gaps": [
     {"area": "non-web triage on saas.acme.example:9001", "reason": "service banner unidentifiable; nmap version probe inconclusive", "recommended_followup": "manual netcat banner grab + protocol fingerprint"}
   ],
@@ -164,6 +177,7 @@ without reading the audit pipeline.
   ],
   "open_questions": ["Is saas.acme.example in scope? CNAME points at vendor SaaS."],
   "recommended_next_agent": "vulnerability-analyst",
+  "handoff_status": "ready",
   "extras": {"live_host_count": 14, "wildcard_subs_resolved": 86, "egress_block_pct": 12}
 }
 ```
@@ -177,7 +191,7 @@ without reading the audit pipeline.
   "phase": "recon",
   "summary": "Extracted 142 routes and 4 secrets from saas.acme.example bundles; APP_VERSION=2.18.4 captured for osint-analyst version triangulation.",
   "confidence": "high",
-  "finding_slugs": ["SA-2026-01-15-001", "SA-2026-01-15-002"],
+  "finding_slugs": ["SA-001", "SA-002"],
   "coverage_gaps": [],
   "next_steps": [
     {"action": "ingest 142 new routes into work buffer", "target": "saas.acme.example", "recommended_agent": "surface-collector", "rationale": "extracted routes are the Phase 2 input"}
@@ -223,10 +237,10 @@ without reading the audit pipeline.
   "phase": "consume-test",
   "summary": "Tested 28 candidate surfaces; recorded 4 findings (1 high IDOR, 2 medium info-disclosure, 1 low); one parameter requires fuzzer follow-up.",
   "confidence": "high",
-  "finding_slugs": ["VA-2026-01-15-001", "VA-2026-01-15-002", "VA-2026-01-15-003", "VA-2026-01-15-004"],
+  "finding_slugs": ["VA-001", "VA-002", "VA-003", "VA-004"],
   "coverage_gaps": [],
   "next_steps": [
-    {"action": "verify VA-2026-01-15-001 IDOR severity", "target": "saas.acme.example/api/users/{id}", "recommended_agent": "vulnerability-analyst", "rationale": "Phase 4 review mode"}
+    {"action": "verify VA-001 IDOR severity", "target": "saas.acme.example/api/users/{id}", "recommended_agent": "vulnerability-analyst", "rationale": "Phase 4 review mode"}
   ],
   "runtime_issues": [
     {"kind": "fuzzer_needed", "tool_or_target": "saas.acme.example/search?q=", "detail": "reflected-XSS hint without payload diversity — needs 100+ payload sweep", "severity": "info"}
@@ -247,7 +261,7 @@ without reading the audit pipeline.
   "phase": "exploit",
   "summary": "Chained EX-001 (auth-bypass) → EX-002 (RCE) into authenticated webshell on saas.acme.example; full chain recorded; one credential captured.",
   "confidence": "high",
-  "finding_slugs": ["EX-2026-01-15-001", "EX-2026-01-15-002"],
+  "finding_slugs": ["EX-001", "EX-002"],
   "coverage_gaps": [],
   "next_steps": [
     {"action": "draft final report including chain narrative", "target": "engagement", "recommended_agent": "report-writer", "rationale": "exploitation phase complete"}
@@ -272,7 +286,7 @@ without reading the audit pipeline.
   "phase": "consume-test",
   "summary": "1200 payloads against /search?q=; 7 anomalous responses; 1 confirmed reflected-XSS recorded; results dumped for vulnerability-analyst follow-up.",
   "confidence": "high",
-  "finding_slugs": ["FZ-2026-01-15-001"],
+  "finding_slugs": ["FZ-001"],
   "coverage_gaps": [],
   "next_steps": [
     {"action": "validate the 6 anomalous non-XSS responses", "target": "saas.acme.example/search?q=", "recommended_agent": "vulnerability-analyst", "rationale": "anomalies need analysis before promotion"}
@@ -364,7 +378,7 @@ without reading the audit pipeline.
   "phase": "code-hunt",
   "summary": "Hunted 14 critical+high modules; recorded 6 findings (2 critical, 3 high, 1 medium) across deserialization, path-traversal, auth-bypass classes.",
   "confidence": "high",
-  "finding_slugs": ["CVH-2026-01-15-001", "CVH-2026-01-15-002", "CVH-2026-01-15-003", "CVH-2026-01-15-004", "CVH-2026-01-15-005", "CVH-2026-01-15-006"],
+  "finding_slugs": ["CH-001", "CH-002", "CH-003", "CH-004", "CH-005", "CH-006"],
   "coverage_gaps": [],
   "next_steps": [
     {"action": "verify each new finding via five-check protocol", "target": "6 finding slugs", "recommended_agent": "code-vuln-verifier", "rationale": "Phase 3 entry"}
@@ -384,9 +398,9 @@ without reading the audit pipeline.
   "agent_id": "cvh_u9w2",
   "agent_role": "code-variant-hunter",
   "phase": "code-verify",
-  "summary": "Found 4 variant instances of CVH-2026-01-15-002 (path-traversal pattern) across 3 sibling modules; all recorded as new findings linked to the parent.",
+  "summary": "Found 4 variant instances of CH-002 (path-traversal pattern) across 3 sibling modules; all recorded as new findings linked to the parent.",
   "confidence": "high",
-  "finding_slugs": ["CVH-2026-01-15-007", "CVH-2026-01-15-008", "CVH-2026-01-15-009", "CVH-2026-01-15-010"],
+  "finding_slugs": ["CV-001", "CV-002", "CV-003", "CV-004"],
   "coverage_gaps": [],
   "next_steps": [
     {"action": "verify variants via five-check protocol", "target": "4 new finding slugs", "recommended_agent": "code-vuln-verifier", "rationale": "variants follow the same gating as primaries"}
@@ -395,7 +409,7 @@ without reading the audit pipeline.
   "working_artifacts": [],
   "open_questions": [],
   "recommended_next_agent": "code-vuln-verifier",
-  "extras": {"parent_finding": "CVH-2026-01-15-002", "variants_found": 4}
+  "extras": {"parent_finding": "CH-002", "variants_found": 4}
 }
 ```
 
@@ -433,7 +447,7 @@ cat > /tmp/handoff-recon-a3f9.json <<'JSON'
   "phase": "recon",
   "summary": "Phase 1 recon ...",
   "confidence": "medium",
-  "finding_slugs": ["RECON-2026-01-15-001"],
+  "finding_slugs": ["RE-001"],
   "coverage_gaps": [...],
   "next_steps": [...],
   "runtime_issues": [...],

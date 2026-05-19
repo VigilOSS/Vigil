@@ -4,9 +4,9 @@
 
 **Severity:** P2 (High)
 
-**POC:** `tools/poc-ldap-injection.py`
-**Run:** `python3 tools/poc-ldap-injection.py`
-**Pass if:** All captured filters match expected injected filters; every `[INJECTION CONFIRMED]` line prints
+**POC:** `poc-ldap-injection.py` — attach
+**Run:** `python3 poc-ldap-injection.py`
+**Pass if:** every `[INJECTION CONFIRMED]` line prints
 
 ---
 
@@ -18,7 +18,7 @@ An attacker with edit access to a shared credential record changes the `login` f
 
 1. Run the POC against the installed package:
 ```
-python3 tools/poc-ldap-injection.py
+python3 poc-ldap-injection.py
 ```
 2. Observe test cases calling the installed `rotate()` function.
 3. Each captured filter shows unescaped LDAP metacharacters (`*`, `(`, `)`, `|`, `!`) passing through.

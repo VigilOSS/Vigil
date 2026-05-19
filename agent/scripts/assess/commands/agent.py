@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from assess.commands import dispatch
@@ -24,6 +25,8 @@ def register(subparsers) -> None:
             "get",
             "handoff",
             "render-handoff",
+            "close",
+            "reconcile-stale",
             "decision",
             "abort-duplicate",
         ),
@@ -72,8 +75,22 @@ def register(subparsers) -> None:
     p.add_argument("--working-artifact", dest="hf_working_artifacts", action="append", default=None)
     p.add_argument("--open-question", dest="hf_open_questions", action="append", default=None)
     p.add_argument("--recommended-next-agent", dest="hf_recommended_next_agent", default=None)
+    p.add_argument("--handoff-status", dest="hf_handoff_status", default=None, choices=("checkpointed", "ready", "blocked", "superseded"))
+    p.add_argument("--closed-dispatch-status", dest="hf_closed_dispatch_status", default=None, choices=("completed", "blocked", "failed", "aborted"))
     p.add_argument("--extras-json", dest="hf_extras_json", default=None)
     p.add_argument("--reason", default="", help="Reason for abort-duplicate / decision shorthand.")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true", help="(reconcile-stale) Print candidates without closing dispatches.")
+    p.add_argument(
+        "--max-age-hours",
+        dest="max_age_hours",
+        type=float,
+        default=None,
+        help=(
+            "(reconcile-stale) Override the per-role age threshold for in-progress dispatches. "
+            "Defaults: 24h for most roles, 48h for exploit-developer / report-writer / code-* "
+            "(except 72h for code-fuzz-engineer). Matches `resume-brief --max-age-hours` semantics."
+        ),
+    )
     # start-swarm flags. Reuse --role / --task / --skills / --model / --reasoning
     # from the existing start flag set; add three new flags below.
     p.add_argument(
@@ -113,6 +130,10 @@ def run(args) -> None:
         dispatch._record_handoff(args)  # noqa: SLF001 - new command surface over existing backend helper.
     elif action == "render-handoff":
         dispatch._render_handoff(args, _agent_id_extra(args))  # noqa: SLF001
+    elif action == "close":
+        _close(args)
+    elif action == "reconcile-stale":
+        _reconcile_stale(args)
     elif action == "decision":
         dispatch._record_decision(args)  # noqa: SLF001
     elif action == "list":
@@ -142,7 +163,241 @@ def _done(args) -> None:
             sys.exit(1)
     if not getattr(args, "dispatch_status", None):
         args.dispatch_status = "completed"
+    _warn_if_handoff_is_closable(args)
     dispatch._update_dispatch_status(args, [])  # noqa: SLF001
+
+
+def _warn_if_handoff_is_closable(args) -> None:
+    """Stderr-warn when `agent done` is used on a dispatch with a closable handoff.
+
+    `agent close` consumes a ready/blocked handoff and writes an audit decision
+    row; `agent done` is a raw status PATCH. Both work, but operators usually
+    want `close` once the specialist has produced a ready handoff so the
+    closure is traceable in the decision ledger. Warn but do not block.
+    """
+    try:
+        client, _ = dispatch._client_for(args)  # noqa: SLF001
+    except Exception:  # noqa: BLE001 - non-fatal precheck
+        return
+    try:
+        handoff = client.get_handoff(args.agent_id)
+    except Exception:  # noqa: BLE001 - non-fatal precheck
+        return
+    finally:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
+    if not handoff:
+        return
+    status_value = str(handoff.get("handoff_status") or "")
+    if status_value in {"ready", "blocked"}:
+        print(
+            f"WARN agent done: handoff for {args.agent_id} is handoff_status={status_value!r}; "
+            f"`aith assess agent close {args.agent_id}` would write a dispatch_closed_from_handoff "
+            "decision row for the audit ledger. Proceeding with raw done — pass --status explicitly "
+            "and ignore this warning if that is intended.",
+            file=sys.stderr,
+        )
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _close(args) -> None:
+    agent_id = getattr(args, "agent_id", None) or (args.extra[0] if args.extra else "")
+    if not agent_id:
+        print("agent close: agent id required as positional arg or --agent-id", file=sys.stderr)
+        sys.exit(1)
+    client, _ = dispatch._client_for(args)  # noqa: SLF001
+    try:
+        handoff = client.get_handoff(agent_id)
+        if not handoff:
+            print(f"agent close: no handoff found for agent_id={agent_id}", file=sys.stderr)
+            sys.exit(2)
+        dispatch_row = client.get_dispatch(agent_id)
+        if not dispatch_row:
+            print(f"agent close: no dispatch found for agent_id={agent_id}", file=sys.stderr)
+            sys.exit(2)
+        handoff_status = str(handoff.get("handoff_status") or "checkpointed")
+        if handoff_status == "ready":
+            target_status = str(handoff.get("closed_dispatch_status") or "completed")
+        elif handoff_status == "blocked":
+            target_status = str(handoff.get("closed_dispatch_status") or "blocked")
+        else:
+            print(
+                f"agent close: handoff_status={handoff_status!r} is not closable. Options:\n"
+                f"  1. Re-dispatch the specialist to write a final handoff with "
+                f"--handoff-status ready (or blocked) — preferred.\n"
+                f"  2. Force-complete without an audit row: "
+                f"`aith assess agent done {agent_id} --status completed` "
+                f"(or --status failed / blocked / aborted).\n"
+                f"  3. Operator override: write the closing handoff manually with "
+                f"`aith assess agent handoff --agent-id {agent_id} --role <role> "
+                f"--summary \"...\" --handoff-status blocked` then re-run "
+                f"`agent close`.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if target_status not in {"completed", "blocked", "failed", "aborted"}:
+            print(f"agent close: closed status {target_status!r} is not valid", file=sys.stderr)
+            sys.exit(2)
+        patch = {
+            "status": target_status,
+            "completed_at": getattr(args, "completed_at", None) or _utcnow_iso(),
+        }
+        if handoff.get("finding_slugs"):
+            patch["finding_slugs"] = handoff.get("finding_slugs")
+        updated = client.update_dispatch(agent_id, patch)
+        decision = client.record_decision(
+            {
+                "kind": "dispatch_closed_from_handoff",
+                "payload": {
+                    "agent_id": agent_id,
+                    "handoff_status": handoff_status,
+                    "closed_dispatch_status": target_status,
+                    "handoff_version": handoff.get("handoff_version"),
+                    "reason": getattr(args, "reason", "") or "agent close",
+                },
+                "surfaced_to_user": False,
+            }
+        )
+    finally:
+        client.close()
+    print(json.dumps({"dispatch": updated, "decision": decision}, ensure_ascii=False))
+
+
+def _parse_iso(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+# Mirrors orchestrator/backend/app/services/assessment_memory.py
+# `_STALE_THRESHOLD_BY_ROLE` so `reconcile-stale` and `resume-brief` agree on
+# which dispatches are stale. A drift between the two would surface stale
+# candidates that `resume-brief` never flagged, confusing the operator.
+_STALE_THRESHOLD_BY_ROLE: dict[str, float] = {
+    "exploit-developer": 48.0,
+    "report-writer": 48.0,
+    "code-architect": 48.0,
+    "code-vuln-hunter": 48.0,
+    "code-variant-hunter": 48.0,
+    "code-vuln-verifier": 48.0,
+    "code-fuzz-engineer": 72.0,
+}
+_DEFAULT_STALE_THRESHOLD_HOURS = 24.0
+
+
+def _stale_threshold_for(role: str | None, *, override: float | None) -> float:
+    if override is not None:
+        return float(override)
+    return _STALE_THRESHOLD_BY_ROLE.get(str(role or ""), _DEFAULT_STALE_THRESHOLD_HOURS)
+
+
+def _reconcile_stale(args) -> None:
+    override = getattr(args, "max_age_hours", None)
+    cutoff_override: float | None = float(override) if override is not None else None
+    dry_run = bool(getattr(args, "dry_run", False))
+    now = datetime.now(timezone.utc)
+    client, _ = dispatch._client_for(args)  # noqa: SLF001
+    rows_out: list[dict] = []
+    try:
+        dispatches = client.list_dispatches(status="in-progress", limit=1000)
+        handoffs = {row.get("agent_id"): row for row in client.list_handoffs(limit=1000)}
+        for row in dispatches:
+            agent_role = row.get("agent_role")
+            cutoff_hours = _stale_threshold_for(agent_role, override=cutoff_override)
+            started = _parse_iso(str(row.get("dispatched_at") or ""))
+            age_hours = ((now - started).total_seconds() / 3600.0) if started else None
+            if age_hours is not None and age_hours < cutoff_hours:
+                continue
+            handoff = handoffs.get(row.get("agent_id"))
+            handoff_status = str((handoff or {}).get("handoff_status") or "none")
+            category = "no_handoff"
+            if handoff_status == "ready":
+                category = "ready_handoff"
+            elif handoff_status == "blocked":
+                category = "blocked_handoff"
+            elif handoff:
+                category = "checkpointed_handoff"
+            item: dict = {
+                "agent_id": row.get("agent_id"),
+                "agent_role": agent_role,
+                "age_hours": round(age_hours, 2) if age_hours is not None else None,
+                "threshold_hours": cutoff_hours,
+                "category": category,
+                "handoff_status": handoff_status,
+                "closed": False,
+                "closed_status": None,
+                "skip_reason": None,
+            }
+            if dry_run:
+                item["skip_reason"] = "dry-run"
+            elif category in {"ready_handoff", "blocked_handoff"}:
+                try:
+                    closed = _close_via_client(client, str(row.get("agent_id") or ""), reason="reconcile-stale")
+                    item["closed"] = True
+                    item["closed_status"] = closed["dispatch"].get("status")
+                except _ReconcileSkipped as exc:
+                    item["skip_reason"] = str(exc)
+            else:
+                item["skip_reason"] = (
+                    "no handoff to close" if category == "no_handoff"
+                    else "handoff is checkpointed; specialist must mark ready|blocked before close"
+                )
+            rows_out.append(item)
+    finally:
+        client.close()
+    print(json.dumps(rows_out, indent=2, ensure_ascii=False))
+
+
+class _ReconcileSkipped(Exception):
+    """Raised when a reconcile candidate cannot be closed cleanly."""
+
+
+def _close_via_client(client, agent_id: str, *, reason: str) -> dict:
+    """Close one dispatch using an already-open client. Returns {'dispatch', 'decision'}."""
+    if not agent_id:
+        raise _ReconcileSkipped("missing agent_id")
+    handoff = client.get_handoff(agent_id)
+    if not handoff:
+        raise _ReconcileSkipped("no handoff for agent_id")
+    dispatch_row = client.get_dispatch(agent_id)
+    if not dispatch_row:
+        raise _ReconcileSkipped("no dispatch for agent_id")
+    handoff_status = str(handoff.get("handoff_status") or "checkpointed")
+    if handoff_status == "ready":
+        target_status = str(handoff.get("closed_dispatch_status") or "completed")
+    elif handoff_status == "blocked":
+        target_status = str(handoff.get("closed_dispatch_status") or "blocked")
+    else:
+        raise _ReconcileSkipped(f"handoff_status={handoff_status} is not closable")
+    if target_status not in {"completed", "blocked", "failed", "aborted"}:
+        raise _ReconcileSkipped(f"invalid closed status {target_status}")
+    patch: dict = {"status": target_status, "completed_at": _utcnow_iso()}
+    if handoff.get("finding_slugs"):
+        patch["finding_slugs"] = handoff.get("finding_slugs")
+    updated = client.update_dispatch(agent_id, patch)
+    decision = client.record_decision(
+        {
+            "kind": "dispatch_closed_from_handoff",
+            "payload": {
+                "agent_id": agent_id,
+                "handoff_status": handoff_status,
+                "closed_dispatch_status": target_status,
+                "handoff_version": handoff.get("handoff_version"),
+                "reason": reason,
+            },
+            "surfaced_to_user": False,
+        }
+    )
+    return {"dispatch": updated, "decision": decision}
 
 
 def _start(args) -> None:

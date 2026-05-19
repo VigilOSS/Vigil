@@ -69,6 +69,32 @@ def _create_repo(client, engagement_key: str, repo_key: str = "demo-repo") -> di
     return response.json()
 
 
+def _create_root_finding(client, engagement_key: str, slug: str, *, source_name: str = "code-vuln-hunter") -> None:
+    response = client.post(
+        f"/engagements/{engagement_key}/assessment/findings",
+        json={
+            "slug": slug,
+            "title": f"Root finding {slug}",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "root-cause",
+            "root_cause_key": slug.lower(),
+            "auth_context": "anonymous",
+            "canonical_location": f"https://example.com/root/{slug}",
+            "summary": "Root finding for canonical variant link tests.",
+            "evidence_ref": "findings.md",
+            "notes": "",
+            "source_name": source_name,
+            "details": {"evidence": "root"},
+            "provenance": {"agent_name": source_name},
+            "links": [],
+        },
+    )
+    assert response.status_code == 201, response.text
+
+
 def _create_files(client, engagement_key: str, repo_id: int) -> list[dict[str, object]]:
     response = client.post(
         f"/engagements/{engagement_key}/assessment/code/files",
@@ -1420,10 +1446,12 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
     )
     assert unique_files.status_code == 201
 
+    _create_root_finding(client, engagement_key, "CH-090")
+    _create_root_finding(client, engagement_key, "CH-091")
     finding_a = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "CODE-A-001",
+            "slug": "CH-001",
             "title": "Parser trust boundary bypass",
             "severity": "high",
             "workflow_status": "active",
@@ -1443,7 +1471,7 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
                 {
                     "link_kind": "variant_of",
                     "target_kind": "finding",
-                    "target_ref": "ROOT-A",
+                    "target_ref": "CH-090",
                 }
             ],
         },
@@ -1453,7 +1481,7 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
     finding_b = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "CODE-B-001",
+            "slug": "CH-002",
             "title": "Helper sink exposure",
             "severity": "critical",
             "workflow_status": "active",
@@ -1473,7 +1501,7 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
                 {
                     "link_kind": "variant_of",
                     "target_kind": "finding",
-                    "target_ref": "ROOT-B",
+                    "target_ref": "CH-091",
                 }
             ],
         },
@@ -1552,10 +1580,11 @@ def test_coverage_summary_excludes_false_positive_variants(client, isolate_setti
     repo = _create_repo(client, engagement_key, repo_key="variant-filter-repo")
     _create_files(client, engagement_key, int(repo["id"]))
 
+    _create_root_finding(client, engagement_key, "CH-090")
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "CODE-VARIANT-001",
+            "slug": "CH-001",
             "title": "Parser variant",
             "severity": "high",
             "workflow_status": "active",
@@ -1575,7 +1604,7 @@ def test_coverage_summary_excludes_false_positive_variants(client, isolate_setti
                 {
                     "link_kind": "variant_of",
                     "target_kind": "finding",
-                    "target_ref": "ROOT-PARSER",
+                    "target_ref": "CH-090",
                 }
             ],
         },
@@ -1587,12 +1616,12 @@ def test_coverage_summary_excludes_false_positive_variants(client, isolate_setti
     assert baseline.json()["findings_summary"]["variant_count"] == 1
 
     verify = client.post(
-        f"/engagements/{engagement_key}/assessment/findings/CODE-VARIANT-001/verify",
+        f"/engagements/{engagement_key}/assessment/findings/CH-001/verify",
         json={
             "disposition": "false_positive",
             "reason_code": "guarded-path",
             "reason_text": "Guard closes the variant in production.",
-            "artifact_ref": "tools/analysis-state/code-verification/CODE-VARIANT-001.json",
+            "artifact_ref": "tools/analysis-state/code-verification/CH-001.json",
             "source_name": "code-vuln-verifier",
             "details": {
                 "kill_check": 4,
@@ -1618,10 +1647,11 @@ def test_coverage_summary_excludes_non_code_variants(client, isolate_settings):
     repo = _create_repo(client, engagement_key, repo_key="noncode-variant-repo")
     _create_files(client, engagement_key, int(repo["id"]))
 
+    _create_root_finding(client, engagement_key, "VA-090", source_name="vulnerability-analyst")
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "WEB-VARIANT-001",
+            "slug": "VA-001",
             "title": "HTTP variant",
             "severity": "high",
             "workflow_status": "active",
@@ -1641,7 +1671,7 @@ def test_coverage_summary_excludes_non_code_variants(client, isolate_settings):
                 {
                     "link_kind": "variant_of",
                     "target_kind": "finding",
-                    "target_ref": "ROOT-HTTP",
+                    "target_ref": "VA-090",
                 }
             ],
         },
@@ -1696,10 +1726,11 @@ def test_repo_scoped_coverage_excludes_ambiguous_shared_file_paths(client, isola
     )
     assert shared_files_b.status_code == 201
 
+    _create_root_finding(client, engagement_key, "CH-090")
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
-            "slug": "SHARED-PATH-001",
+            "slug": "CH-001",
             "title": "Shared path finding",
             "severity": "high",
             "workflow_status": "active",
@@ -1719,7 +1750,7 @@ def test_repo_scoped_coverage_excludes_ambiguous_shared_file_paths(client, isola
                 {
                     "link_kind": "variant_of",
                     "target_kind": "finding",
-                    "target_ref": "ROOT-SHARED",
+                    "target_ref": "CH-090",
                 }
             ],
         },

@@ -68,10 +68,27 @@ dispatch handoffs, and command coverage.
 
 After engagement initialization completes, repeat until all attack paths exhausted or user signals stop:
 
-1. **ASSESS STATE** — Read scope.json. For resumed engagements, run the resume hydration in `agent/rules/resume.md` before planning. Query backend state via `aith assess list-findings` (findings), `aith assess list-intel` (intel summary), and `aith assess fetch activity-entries` (activity log). Findings are stored in the backend — use `aith assess export-findings` to generate a local export on demand for archival. report.md is written by report-writer and is not backend-synchronized — treat it as a generated deliverable.
-2. **DECIDE NEXT ACTION** — Prioritize by current phase first. In Phase 1-2, prioritize breadth of surface coverage. In Phase 3, prioritize risk class: object references, auth boundaries, and privileged writes before low-risk surfaces. Keep exploitation behind Verify: only findings that survived review as `confirmed` or `downgraded`, or findings explicitly marked `details.chain_required=true`, enter exploit review. Skip ahead only when an obviously actionable path is already in hand.
-3. **FORMULATE PLAN** — Actions, tools, targets, rationale, best subagent, and the relevant skill that should drive the work. In recon, explicitly name which skill each dispatched subagent should load before it begins. Default model policy: Codex operator and substantial Codex workers should use `gpt-5.5` with `xhigh` reasoning for high-stakes specialist dispatches (exploit chains, deep code review, novel vulnerability hypotheses) and `high` for standard work. Claude operator and substantial Claude workers should use `Opus 4.7` with `max` reasoning for the same high-stakes class and `high` for standard work — `max` is Claude-only; Codex caps at `xhigh`. Only drop to `gpt-5.5` medium or `Sonnet 4.6` for clearly bounded sidecar work where latency or cost matters more than depth.
-4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Only continue autonomously when the human explicitly asks for it in the current session.
+1. **ASSESS STATE**
+   - Read `scope.json`.
+   - For resumed engagements, run `aith assess resume-brief` (see `agent/rules/resume.md`) before planning.
+   - Narrow the brief with `--finding`, `--q`, `--agent-id`, `--since <iso>` (what's new since the last brief), or `--max-age-hours <N>` (override the per-role stale threshold; default 24h, 48h for exploit-developer/report-writer/code-*, 72h for code-fuzz-engineer).
+   - Drill down only with the commands the brief points to: `get-command-run`, `artifact search/get`, `agent render-handoff`, `list-findings`, `list-intel`.
+   - Findings live in the backend; `aith assess export-findings` writes a local export on demand for archival.
+   - `report.md` is a report-writer deliverable, not a backend-synchronized state file.
+2. **DECIDE NEXT ACTION**
+   - Prioritize by current phase first.
+   - Phase 1–2: breadth of surface coverage.
+   - Phase 3: risk class — object references, auth boundaries, privileged writes before low-risk surfaces.
+   - Keep exploitation behind Verify: only `confirmed`/`downgraded` findings, or findings explicitly tagged `details.chain_required=true`, enter exploit review.
+   - Skip ahead only when an obviously actionable path is already in hand.
+3. **FORMULATE PLAN**
+   - Name the action, tool, target, rationale, subagent, and skill that drives the work.
+   - In recon, explicitly name which skill each dispatched subagent loads before it begins.
+   - Pick `--model` and `--reasoning` for `aith assess agent start`:
+     - High-stakes specialist dispatches (exploit chains, deep code review, novel vulnerability hypotheses) — Claude operator/workers: `claude-opus-4-7` at `max` reasoning. Codex operator/workers: `gpt-5.5` at `xhigh` reasoning. (`max` is Claude-only.)
+     - Standard specialist work — same model, `high` reasoning.
+     - Bounded sidecar work where latency or cost matters more than depth — drop to `gpt-5.5 medium` or `claude-sonnet-4-6`.
+4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Continue autonomously only when the human explicitly asks for it in the current session.
 5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide the payload libraries and checklists that make skills actionable.
 
    The operator does NOT read full skill files — skills routinely run 200-500 lines and pulling them into operator context burns tokens that the operator needs for orchestration, while the specialist who actually executes the skill is the right place for that depth. Instead:
@@ -89,7 +106,14 @@ After engagement initialization completes, repeat until all attack paths exhaust
    - **Phase 5 (Exploit):** `exploit-developer` → pick the skill matching the confirmed finding class via `aith assess list-skills` ("Use when:" criteria); `osint-analyst` → `agent/skills/osint-recon/SKILL.md`
    - **Phase 7 (Report):** `report-writer` → `agent/skills/report-generation/SKILL.md`
    If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, agents, rules, skill index, skills, references, and scripts before claiming no suitable skill exists.
-6. **USE `aith assess kali` FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation must go through `aith assess kali ...` subcommands. The CLI runs on the host, execs into the runtime container, and writes the audit row directly to the orchestrator backend, so the audit pipeline stays truthful and downstream specialists can read coverage from `aith assess list-command-runs`. Discovery is layered: load `agent/skills/kali-exec/SKILL.md` for the verb menu and audit-flag mapping; run `aith assess kali --help` and `aith assess kali <verb> --help` for the live flag set; run `aith assess contract kali <verb>` for the canonical schema, helper defaults, common mistakes, and example payload. Host Bash, `docker run`, `docker exec`, and ad-hoc curl/nmap from the host bypass the audit pipeline and the runtime's network isolation. If `aith assess kali --help` errors or a verb fails unexpectedly, pause target-facing work and debug the runtime from the host using `agent/references/runtime-guides/kali-cli.md` — host-side probes against scoped targets break the isolation boundary.
+6. **USE `aith assess kali` FOR TARGET WORK**
+   - All target-facing testing, probing, crawling, fuzzing, exploitation, and validation runs through `aith assess kali ...`. The CLI execs into the runtime container and writes the audit row to the backend, so downstream specialists can read coverage from `aith assess list-command-runs`.
+   - Discovery is layered:
+     - `agent/skills/kali-exec/SKILL.md` — verb menu and audit-flag mapping.
+     - `aith assess kali --help` / `aith assess kali <verb> --help` — live flag set.
+     - `aith assess contract kali <verb>` — canonical schema, helper defaults, common mistakes, example payload.
+   - Host Bash, `docker run`, `docker exec`, and ad-hoc curl/nmap from the host are forbidden against scoped targets — they bypass the audit pipeline and break runtime network isolation.
+   - If `aith assess kali --help` errors or a verb fails, pause target-facing work and debug the runtime from the host using `agent/references/runtime-guides/kali-cli.md`.
 7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis, testing, validation, and exploitation work. The operator's job is orchestration: phase control, specialist selection, state review, and backend state management — analysis and testing belong to specialist agents because they carry the skill context and methodology depth that the operator prompt lacks.
 
    **You are the orchestrator brain. You do not run probes. You do not write analysis.** Think ahead, spot the gaps specialists miss, form hypotheses that are not obvious from the data, and dispatch the right specialist with the right skill and context. An operator who starts running `curl`/`nmap`/`sqlmap` directly has failed the division of labor — every probe the operator runs is a probe a specialist with the correct skill context did not run, and the resulting analysis is shallower than what the specialist would have produced. The Operator-executed exceptions below are the small set of mechanical pipeline steps that intentionally bypass dispatch; everything else is specialist work.
@@ -189,13 +213,13 @@ The runtime dispatch contract is the same shape as the code-analysis contract �
 - **Rate-limit budget**: the per-call rate flag value the specialist should pass to `aith assess kali ...` (e.g. `nuclei -rate-limit 4 -c 2` for a 5 req/s program). Operator-owned; do not delegate aggregate-rate decisions to the specialist.
 - **OOB / listener availability**: `aith oob status --json` snapshot if the dispatch may need a callback URL (SSRF blind, command injection blind, deserialization callback). The specialist requests the URL via `aith oob client start <name>` — but only when the operator has named OOB as available.
 - **Auth context**: the `auth_context` field of any state the dispatch will operate under (anonymous / authenticated / authenticated-admin / a specific role). For credential-bearing dispatches, also pass the `credential_id` of the captured material so the specialist can reference it without re-extracting.
-- **Cross-agent prior work**: the rendered handoff blob from `aith assess agent render-handoff <prior-agent-id>` when a prior dispatch touched the same surface or finding (see Cross-Dispatch Continuity).
+- **Cross-agent prior work**: the relevant `resume-brief` slice plus the rendered handoff blob from `aith assess agent render-handoff <prior-agent-id>` when a prior dispatch touched the same surface or finding (see Cross-Dispatch Continuity).
 - **Coverage gap statement**: name the specific variant / sibling / payload family / surface that has NOT been tried. Do not leave the gap inference to the specialist — the operator has the cross-dispatch view that the specialist cannot reconstruct.
 - **Cleanup constraints**: when the dispatch may leave server-side state (uploaded files, created accounts, persistent payloads), name the cleanup expectation up front so the specialist records cleanup obligations as the work happens, not retroactively.
 
 **Role-specific additions:**
 
-- For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, the specific hypothesis to test, and prior probe-run ids if relevant (`aith assess list-command-runs --q <target-keyword>`).
+- For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, the specific hypothesis to test, and prior probe-run ids if relevant (`aith assess list-command-runs --q <target-keyword> --show-matches`).
 - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `aith assess fetch` — pass all B candidates (chain-target endpoints) through, since pre-filtering hides chain opportunities. Also pass any captured `credential_id` values from prior `vulnerability-analyst` runs so chain construction starts with the live material rather than re-extracting.
 - For `report-writer`: no finding context needed — the agent runs `aith assess list-report-findings --mode final --json` for final reports or `--mode draft --json` for interim. Operator names the QA mode (`generate` / `review-and-fix`) and any explicit blockers from `check-report-readiness`.
 - For `osint-analyst`: any tech-component intel already recorded, named so the agent does not re-enumerate. The agent reads `aith assess list-intel tech-component --json` itself; the operator names the *new* enumeration targets (recently identified component, new domain to triangulate).
@@ -219,6 +243,10 @@ The operator obtains `agent_id` by:
 - **Codex**: use the id returned by `spawn_agent`.
 
 Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting. A 404 from render-handoff means the `agent_id` in the handoff does not match the registered dispatch.
+
+If this is a continuation or resumed engagement, include the relevant `aith assess resume-brief` output immediately after the Runtime Identity block. Specialists treat it as the compact operating picture and use the listed command/artifact IDs for drill-down instead of reconstructing state from local notes.
+
+Require immediate backend/artifact linkage for durable notes: if a specialist creates a `.md` file under `notes/` that should matter after the current command, they must register it with `aith assess artifact register <path>` and link it to a finding, chain, dispatch/agent, surface, request variant, or command run before closing. Unlinked markdown notes are scratch and cannot be used as resume or report input.
 
 ### Specialist Dispatch Contract
 
@@ -343,7 +371,7 @@ Before every dispatch, verify:
 - [ ] Matching skill's paired references identified from `agent/references/INDEX.md`
 - [ ] Prior relevant findings or existing finding slugs included (so the agent can reference them instead of creating duplicates)
 - [ ] Activity log checked for duplicate dispatch — `aith assess fetch activity-entries` (DEDUP rule)
-- [ ] Command history checked — `aith assess list-command-runs --q <keyword>` reviewed for prior runs that already cover the objective. Default to an unscoped search so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, open its preview with `aith assess get-command-run <id>` — `success=true` only means return_code=0, not that the output answers the current question
+- [ ] Command history checked — `aith assess list-command-runs --q <keyword> --show-matches` reviewed for prior runs that map coverage. Default to an unscoped fuzzy search so finding aliases and adjacent command metadata are included; narrow with exact filters only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, open its preview with `aith assess get-command-run <id>` — `success=true` only means return_code=0, not that the output answers the current question
 - [ ] Parallelism decision made (independent → parallel, dependent → sequential)
 - [ ] For `vulnerability-analyst` and `exploit-developer` dispatches: `--scope-host` confirmed against `scope.json` `hosts` (with wildcard semantics). Adjacent-but-out-of-scope hosts surfaced during OSINT/recon are NOT in scope for active probing — reframe as recon or add the host to scope first. The CLI validator enforces this, but stating it in the dispatch context catches operator mistakes earlier.
 
@@ -368,7 +396,7 @@ Two coverage passes are not optional. They are gates the operator clears before 
 - **Verify → Exploit: variant/sibling pass per confirmed finding.** For each confirmed high/critical finding, dispatch a `vulnerability-analyst` run that explicitly hunts sibling routes / sibling controllers / sibling providers / sibling content-types / sibling auth contexts sharing the same code path. The dispatch `task` must contain `variant`, `sibling`, or `rotat` so `transition-phase --check` recognizes it. Skipping the variant pass is the single most common way real findings are missed in this codebase — `transition-phase verify` will block with `kind=missing_variant_pass` until satisfied (or `--force` with a stated reason).
 - **Exploit → Report: chain-construction pass across the confirmed set.** Before report-writer dispatch, run at least one `exploit-developer` pass that enumerates A→B candidates across confirmed findings. Information disclosure + open-redirect, SSRF + token leak, IDOR + impersonation are the standard chains worth checking even when they look unlikely; the chain pass is what turns a list of mediums into a high.
 
-### Phase-Exit Review Dispatches (C45)
+### Phase-Exit Review Dispatches
 
 Three review-mode dispatches gate phase transitions. Each is a separate read-only dispatch (no new probing) that emits a structured gap report so the operator can dispatch missing work before transitioning. They complement, not replace, the mandatory-pass gates above.
 
@@ -386,7 +414,7 @@ Report-review is intentionally NOT in this list — the `report-generation/SKILL
 
 Every dispatch launches a fresh agent — treat each dispatch as a clean-room environment that inherits only what the operator explicitly hands it. Session tokens, discovered endpoints, partial PoC steps, and next-step plans travel through the dispatch prompt and durable state (backend records, engagement files), because the harness rebuilds subagent context from those sources on each launch.
 
-**Specialist closing sequence** — every specialist writes a structured handoff before its dispatch returns: (1) `aith assess agent handoff --from-json <path>` using the `agent_id` from the Runtime Identity block, then (2) `aith assess agent render-handoff <agent_id>` as a self-check — exit only after the render succeeds (404 → `agent_id` mismatch). The handoff captures summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras. This row is canonical for "what was done, what's missing, what's next" — schema in `agent/references/runtime-guides/handoff-schema.md`.
+**Specialist closing sequence** — every specialist writes a structured handoff before its dispatch returns: (1) `aith assess agent handoff --from-json <path>` using the `agent_id` from the Runtime Identity block, with `handoff_status` set to `ready` when the dispatch can be closed or `blocked` when it cannot complete, then (2) `aith assess agent render-handoff <agent_id>` as a self-check — exit only after the render succeeds (404 → `agent_id` mismatch). The handoff captures summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras. This row is canonical for "what was done, what's missing, what's next" — schema in `agent/references/runtime-guides/handoff-schema.md`.
 
 **Operator dispatch tracking** — when the operator launches a specialist, register the dispatch:
 
@@ -411,6 +439,8 @@ aith assess agent render-handoff <agent-id>
 ```
 
 The renderer reads the handoff table, fetches each finding slug (404 → "slug missing in backend"), checks every working_artifact path on disk (missing → "(state: missing)"), and emits a markdown blob hard-capped at `--max-lines` (default 40). The findings list collapses to "... and N more" before runtime_issues / working_artifacts. Summary, coverage gaps, and next steps are never trimmed.
+
+When a handoff is `ready` or `blocked`, close the dispatch explicitly with `aith assess agent close <agent-id>` so checkpointing remains separate from lifecycle closure. Use `aith assess agent reconcile-stale --dry-run` during resume or phase transitions to find in-progress dispatches that have closable handoffs or missing handoffs.
 
 The blob already carries:
 - Finding slugs (with title + severity from the backend) the new agent can `fetch` for full context
@@ -459,7 +489,7 @@ DB="$DIR/cases.db"
 
    **Phase 1 exit gate.** Before leaving Phase 1, run `aith assess check-scope-coverage --require-stage enum`. The gate checks whether each scope entry has downstream evidence — live services, recorded surfaces, or work-buffer rows under the entry's host. Bare hosts and URL entries pass trivially; wildcards fail when enumeration produced nothing real. If a wildcard fails, dispatch the missing enum work or mark the entry deferred in `scope.json` before advancing, because entering Phase 2 with empty scope branches leaves whole subtrees of the attack surface untested.
 
-   **Per-host outcome audit (C40, WARN-only).** Pair the scope-entry gate with `aith assess check-scope-coverage --require-stage enum --by-host` to surface a per-host outcome table: WAF tier, service inventory, directory-fuzz coverage, nikto trigger, OSINT. The audit reads outcome tables (`intel_tech_components`, `assessment_services`, `assessment_surfaces`, `assessment_dispatch_decisions`) — never `assessment_command_runs` — so any tool that wrote the durable row satisfies the corresponding objective. Unmet objectives WARN with an actionable dispatch hint but do not block phase advance. When an objective is intentionally skipped (scope brief forbids brute-force, vendor confirms WAF tier out-of-band, OSINT carve-out), record an explicit deferral: `aith assess agent decision --kind coverage_deferral --payload-json '{"host": "api.example.com", "deferred_objectives": ["directory_fuzz"], "reason": "scope brief forbids brute-force"}' --surfaced-to-user`. The deferral row is queryable post-engagement via `aith assess agent list --kind coverage_deferral`, so gaming the gate is audited rather than invisible.
+   **Per-host outcome audit (WARN-only).** Pair the scope-entry gate with `aith assess check-scope-coverage --require-stage enum --by-host` to surface a per-host outcome table: WAF tier, service inventory, directory-fuzz coverage, nikto trigger, OSINT. The audit reads outcome tables (`intel_tech_components`, `assessment_services`, `assessment_surfaces`, `assessment_dispatch_decisions`) — never `assessment_command_runs` — so any tool that wrote the durable row satisfies the corresponding objective. Unmet objectives WARN with an actionable dispatch hint but do not block phase advance. When an objective is intentionally skipped (scope brief forbids brute-force, vendor confirms WAF tier out-of-band, OSINT carve-out), record an explicit deferral: `aith assess agent decision --kind coverage_deferral --payload-json '{"host": "api.example.com", "deferred_objectives": ["directory_fuzz"], "reason": "scope brief forbids brute-force"}' --surfaced-to-user`. The deferral row is queryable post-engagement via `aith assess agent list --kind coverage_deferral`, so gaming the gate is audited rather than invisible.
 2. **COLLECT** → dispatch surface-collector with `agent/skills/surface-collection/SKILL.md`.
    Provide: targets from scope.json, Phase 1 endpoint artifacts (paths to `endpoints.txt` and any source-analyzer output in `scans/`), auth.json state, and `$DIR/cases.db` path.
    On return:
@@ -468,12 +498,12 @@ DB="$DIR/cases.db"
    - Inspect work-buffer stats: `aith assess work-buffer "$DIR/cases.db" stats`
    - Inspect coverage gaps: `aith assess fetch summary`
    - Fire a reactive nuclei sweep against the Katana/gau URLs just ingested (see "Reactive Nuclei on URL Discovery" above and `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Surface-collector-ingested URLs are the largest URL injection of the engagement, so running the reactive sweep here maximizes the CVE/misconfig/exposure signal before Phase 3 dispatch.
-   - **Classification is automatic at ingestion** — `db_insert_work_item()` calls `assess.lib.classify_buckets.classify_row()` inline so `priority_score`, `priority_reason`, and `cluster_key` are populated immediately. `aith assess classify-work` is now used only to *re-apply* a bucket-table change against an already-ingested buffer; do not run it as part of the normal phase flow.
+   - **Classification is automatic at ingestion** — `db_insert_work_item()` calls `assess.lib.classify_buckets.classify_row()` inline so `priority_score`, `priority_reason`, and `cluster_key` are populated on every row write. Use `aith assess classify-work` only to re-apply a bucket-table change against an already-ingested buffer; do not run it as part of the normal phase flow.
    - **Review clusters, defer low-signal ones** — `aith assess list-clusters "$DIR/cases.db"` prints cluster counts, max/avg priority, and representative URLs. Any cluster that is clearly not worth specialist attention (e.g., 10k static-asset URLs, out-of-scope-adjacent paths, already-covered admin endpoints) gets deferred with `aith assess work-buffer "$DIR/cases.db" defer-cluster <cluster_key> --reason "…"` before Phase 3 begins — leaving low-signal clusters pending pollutes the priority queue and forces specialists to re-triage what the operator already judged.
    Surface-collector records surfaces via `aith assess record-surface` and findings via `aith assess record-finding` before returning.
    **Phase 2 exit gate.** Run `aith assess check-scope-coverage --require-stage collection`. Every scoped entry must have collection evidence — a recorded surface or a work-buffer row under its host. If an entry has neither, redispatch surface-collector against it or mark the entry deferred in `scope.json` before advancing. Skipping this gate lets scope-entries drift into Phase 3 with zero work in the buffer.
 
-   **Per-host outcome audit (C40, WARN-only).** Run the per-host audit alongside the scope-entry gate: `aith assess check-scope-coverage --require-stage collection --by-host`. The per-host view catches hosts that have squeaked through the scope-entry gate without one of the five Phase-1/2 outcomes (WAF tier, service inventory, directory-fuzz coverage, nikto trigger, OSINT). Same WARN-only contract as Phase 1 exit; record a `coverage_deferral` decision when an objective is intentionally skipped.
+   **Per-host outcome audit (WARN-only).** Run the per-host audit alongside the scope-entry gate: `aith assess check-scope-coverage --require-stage collection --by-host`. The per-host view catches hosts that have squeaked through the scope-entry gate without one of the five Phase-1/2 outcomes (WAF tier, service inventory, directory-fuzz coverage, nikto trigger, OSINT). Same WARN-only contract as Phase 1 exit; record a `coverage_deferral` decision when an objective is intentionally skipped.
    Transition phase: `aith assess transition-phase consume-test` (checks work-buffer, scope coverage).
 3. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`. Steps:
    a. **Nuclei coverage audit** (once, before the work-buffer loop) — audit what Phase 1/2 reactive sweeps already covered and run nuclei only against gaps. Do not blindly re-sweep: if every in-scope live host already received the reactive template set, this step prints a coverage summary and advances.
@@ -600,7 +630,7 @@ When ANY agent discovers credentials, the operator coordinates these steps:
 4. **Dispatch exploit-developer** — to test authenticated surfaces discovered in step 3. The agent maps what authenticated access grants and tests for privilege escalation, IDOR, and auth-boundary issues across the newly discovered endpoints. This is the analysis work that requires a specialist.
 
 Auth handling rules:
-- `auth.json` is the live auth contract. It may contain cookies, headers, `auth_context`, `use_for_requests`, and optional `expires_at`.
+- `auth.json` is the live auth contract, per-engagement. It may contain cookies, headers, `auth_context`, `use_for_requests`, and optional `expires_at`. The shared mitmproxy (if running) routes captures into the matching engagement's `auth.json` by scope, so concurrent engagements do not contend.
 - If `auth.json` is present and usable, surface-collector passes auth headers to Katana and tags ingestion with the authenticated context automatically.
 - If `auth.json` is missing material or marked expired, warn and continue anonymously rather than halting the engagement.
 - The human may update `auth.json` directly or use mitmproxy-assisted login capture to refresh it.
@@ -615,11 +645,11 @@ Recovery branch:
    ```bash
    aith assess agent list --limit 5 --json \
      | jq -r '.[] | select(.handoff.runtime_issues // [] | tostring | test("401|403|expired|invalid_token|redirect.*login"; "i")) | .agent_id'
-   aith assess list-command-runs --q "401\|403\|session\|expired" --limit 10
+   aith assess list-command-runs --q "401\|403\|session\|expired" --show-matches --limit 10
    ```
 2. **Decide refresh path.**
    - **Bearer / API token** in `auth.json.headers.Authorization`: refresh via the documented refresh endpoint (if the program offers one) or re-run the login flow. Operator action; do NOT dispatch a specialist for a token refresh — the refresh request itself is one-shot mechanical work.
-   - **Session cookie** in `auth.json.cookies` / `host_cookies[]`: re-capture via mitmproxy-assisted login. Restart browser flow through the proxy; `proxy_addon.py` writes the refreshed cookie set into `auth.json` automatically.
+   - **Session cookie** in `auth.json.cookies` / `host_cookies[]`: re-capture via mitmproxy-assisted login. Restart browser flow through the proxy; `proxy_addon.py` writes the refreshed cookie set into the matching engagement's `auth.json` automatically (per-engagement routing by scope).
    - **OAuth/OIDC**: re-run the authorization code grant against the discovery endpoint; check `auth.json.tokens.refresh_token` first.
 3. **Validate the refresh.** Re-run the same login check from Credential Auto-Use step 1 via `aith assess kali exec --technique AUTH --intent "post-refresh validation" ...`. The audit row records both the failed pre-refresh probe and the successful post-refresh probe so the timeline is unambiguous.
 4. **Re-dispatch only on success.** Re-dispatch the affected specialist (typically `vulnerability-analyst` or `exploit-developer`) with a dispatch-context note: "Auth refreshed at <iso>; the previous handoff's runtime_issues about 401/403 are stale — re-run from the same task objective with fresh credentials in `auth.json`."
@@ -644,7 +674,7 @@ variant that hasn't been tried — not to duplicate what the agents already
 have in hand.
 
 ```bash
-aith assess list-command-runs --q <keyword>
+aith assess list-command-runs --q <keyword> --show-matches
 ```
 
 When planning the next dispatch:
@@ -722,7 +752,7 @@ Do not declare the engagement complete or dispatch the final report-writer pass 
 - [ ] **Stale-text scrub clean.** Per `agent/rules/hunting.md` §21, no active finding's `summary` or `details` text references a state that no longer applies ("adjusted from X to Y" when severity is no longer Y, "originally rated as Z" after the rating shifted, etc.). The recipe lives in `agent/skills/report-generation/SKILL.md` Review-and-Fix QA Mode.
 - [ ] **`aith assess check-report-readiness` returns clean.** No blockers in the readiness response — coverage, unreviewed findings, root-cause groupings, chain-review state.
 - [ ] **Backend reflects submissions.** Findings actually submitted to the program (or marked accepted/duplicate) have a workflow status that matches reality; nothing remains "draft" if it was sent out.
-- [ ] **No `evidence_type='theoretical'` findings without `chain_required=true`.** Per C44, findings tagged `theoretical` must carry `details.chain_required=true` so the dispatcher knows a follow-up exploit-developer pass owes the runtime proof. Findings with NULL `evidence_type` are unaffected (legacy / pre-migration). Query: `aith assess list-findings --json | jq '.[] | select(.evidence_type=="theoretical" and (.details.chain_required != true))'`.
+- [ ] **No `evidence_type='theoretical'` findings without `chain_required=true`.** Findings tagged `theoretical` must carry `details.chain_required=true` so the dispatcher knows a follow-up exploit-developer pass owes the runtime proof. Findings with NULL `evidence_type` need not carry the flag. Query: `aith assess list-findings --json | jq '.[] | select(.evidence_type=="theoretical" and (.details.chain_required != true))'`.
 
 When all nine gates pass, dispatch `report-writer` for the final pass and then close the engagement.
 

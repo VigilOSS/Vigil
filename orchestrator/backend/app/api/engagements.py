@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
 
 from .. import db
@@ -28,6 +28,8 @@ class EngagementResponse(BaseModel):
     exploit_policy: str
     exploit_review_state: str
     approved_targets: list[str]
+    scope_hosts: list[str]
+    scope_priority: int
     created_at: str
     updated_at: str
     session_count: int
@@ -56,6 +58,8 @@ def _engagement_response(engagement: EngagementView) -> EngagementResponse:
         exploit_policy=engagement.exploit_policy,
         exploit_review_state=engagement.exploit_review_state,
         approved_targets=engagement.approved_targets,
+        scope_hosts=engagement.scope_hosts,
+        scope_priority=engagement.scope_priority,
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
         session_count=engagement.session_count,
@@ -63,8 +67,17 @@ def _engagement_response(engagement: EngagementView) -> EngagementResponse:
 
 
 @router.get("", response_model=list[EngagementResponse])
-def get_engagements() -> list[EngagementResponse]:
-    return [_engagement_response(engagement) for engagement in list_engagements()]
+def get_engagements(
+    status_filter: str | None = Query(
+        default=None,
+        alias="status",
+        description="Filter by engagement status (e.g. in_progress).",
+    ),
+) -> list[EngagementResponse]:
+    engagements = list_engagements()
+    if status_filter:
+        engagements = [engagement for engagement in engagements if engagement.status == status_filter]
+    return [_engagement_response(engagement) for engagement in engagements]
 
 
 @router.get("/{engagement_key}", response_model=EngagementResponse)

@@ -6,9 +6,9 @@ CLI verbs.
 
 | Table | Owner | CLI verbs | Purpose |
 |---|---|---|---|
-| `assessment_dispatches` | operator | `aith assess agent start` / `done` / `list` / `get` | Audit trail of every specialist dispatch (role, task, contract, status, finding slugs). |
-| `assessment_dispatch_handoffs` | specialist | `aith assess agent handoff` / `render-handoff` | Structured per-dispatch handoff: summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, role-specific extras. Schema: [`handoff-schema.md`](handoff-schema.md). |
-| `assessment_dispatch_decisions` | operator + specialist | `aith assess agent decision` | Cross-cutting decision rows (vendor-SaaS scope, egress reputation, dispatch_blocked, scope_decision). |
+| `assessment_dispatches` | operator | `aith assess agent start` / `done` / `list` / `get` / `close` / `reconcile-stale` | Audit trail of every specialist dispatch (role, task, contract, status, finding slugs). Closure: `agent close <id>` reads the handoff and applies `closed_dispatch_status` when handoff status is `ready` or `blocked`; `agent reconcile-stale [--dry-run]` lists in-progress dispatches past the age threshold and closes the ones whose handoff is closable. Both paths write a `dispatch_closed_from_handoff` decision row so closure is auditable. |
+| `assessment_dispatch_handoffs` | specialist | `aith assess agent handoff` / `render-handoff` | Structured per-dispatch handoff: summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, role-specific extras. Lifecycle columns (`handoff_status`, `handoff_version`, `last_checkpoint_at`, `closed_dispatch_status`) separate checkpointing from closure. Schema: [`handoff-schema.md`](handoff-schema.md). |
+| `assessment_dispatch_decisions` | operator + specialist | `aith assess agent decision` | Cross-cutting decision rows. Kinds: `scope_decision`, `egress_decision`, `dispatch_blocked`, `coverage_deferral`, `dispatch_closed_from_handoff`. |
 
 ## Table 1 — `assessment_dispatches`
 
