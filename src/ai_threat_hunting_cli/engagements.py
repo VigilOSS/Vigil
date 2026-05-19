@@ -20,7 +20,7 @@ from .paths import (
     resolve_orchestrator_data_dir,
 )
 
-ENGAGEMENT_TYPES = {"web", "code", "both", "android"}
+ENGAGEMENT_TYPES = {"web", "code", "both", "android", "blue"}
 ANDROID_DYNAMIC_MODES = {"static_only", "device", "emulator"}
 
 
@@ -36,6 +36,12 @@ class CreateEngagementOptions:
     android_package: str | None = None
     dynamic_mode: str = "static_only"
     skip_permissions: bool = False
+    # Blue-only fields (ignored unless engagement_type == "blue"):
+    customer: str | None = None
+    platforms: list[str] = field(default_factory=list)
+    tenant_reference_paths: list[str] = field(default_factory=list)
+    alert_source: str | None = None
+    severity_hint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,9 +93,14 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     root.mkdir(parents=True, exist_ok=True)
 
     if options.engagement_type not in ENGAGEMENT_TYPES:
-        raise SystemExit("--type must be one of: web, code, both, android")
+        raise SystemExit("--type must be one of: web, code, both, android, blue")
     if options.dynamic_mode not in ANDROID_DYNAMIC_MODES:
         raise SystemExit("--dynamic-mode must be one of: static_only, device, emulator")
+    if options.engagement_type == "blue":
+        if not options.customer:
+            raise SystemExit("blue engagements require --customer")
+        if not options.platforms:
+            raise SystemExit("blue engagements require at least one --platform")
 
     _snapshot_orchestrator_database(install_root)
 
@@ -123,6 +134,12 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
 
     if options.engagement_type == "web":
         label = slug(hostname)
+    elif options.engagement_type == "blue":
+        # Blue engagements aren't host- or repo-shaped; the natural label is
+        # `<customer>-<first-platform>` so engagement dirs sort meaningfully
+        # under engagements/.
+        first_platform = options.platforms[0] if options.platforms else "alert"
+        label = slug(f"{options.customer}-{first_platform}")
     else:
         label = slug(name or "engagement")
     eng_dir = root / f"{date_label}-{time_label}-{label}"
@@ -196,6 +213,40 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
             "current_phase": "recon",
         }
         manifest = {"key": key, "target": target_normalized, "hostname": hostname, "created_at": created_at}
+    elif options.engagement_type == "blue":
+        # Per Blue Team Engagement.plan.md §8.4. hosts stays empty so existing
+        # scope-readers don't crash; exploit_policy is explicitly null because
+        # blue has no exploit phase; response_policy is the blue-mode analog
+        # (operator-approved containment).
+        blue_customer = str(options.customer or "")
+        blue_target = f"{blue_customer}:{','.join(options.platforms)}"
+        scope = {
+            "engagement_type": "blue",
+            "customer": blue_customer,
+            "platforms": list(options.platforms),
+            "tenant_reference_paths": list(options.tenant_reference_paths),
+            "alert_metadata": {
+                "source": options.alert_source or "paste",
+                "external_id": None,
+                "received_at": None,
+                "severity_hint": options.severity_hint,
+                "raw_body": None,
+                "parsed": None,
+            },
+            "response_policy": "contain-with-approval",
+            "exploit_policy": None,
+            "status": "in_progress",
+            "current_phase": "intake",
+            "hosts": [],
+        }
+        manifest = {
+            "key": key,
+            "name": blue_customer,
+            "target": blue_target,
+            "customer": blue_customer,
+            "platforms": list(options.platforms),
+            "created_at": created_at,
+        }
     else:
         scope = {
             "engagement_type": "both",
@@ -222,7 +273,12 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
 
     _write_json(eng_dir / "scope.json", scope)
     _write_json(eng_dir / "engagement.json", manifest)
-    _write_report(eng_dir, options.engagement_type, name=name, target=target_normalized, repos=repos, date_label=date_label)
+    report_name = name
+    report_target = target_normalized
+    if options.engagement_type == "blue":
+        report_name = str(manifest.get("customer") or options.customer or "")
+        report_target = str(manifest.get("target") or "")
+    _write_report(eng_dir, options.engagement_type, name=report_name, target=report_target, repos=repos, date_label=date_label)
     _write_auth_scaffold(eng_dir, "none", created_at)
     _write_json(eng_dir / "sessions" / "index.json", [])
     # Dispatch tracking + handoff content live in the orchestrator backend
@@ -258,7 +314,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     _init_cases_db(agent_root, eng_dir)
 
     client_kind = _install_client_kind(agent_root)
-    _write_prompt_wrappers(agent_root, eng_dir, client_kind)
+    _write_prompt_wrappers(agent_root, eng_dir, client_kind, engagement_type=options.engagement_type)
     if client_kind in {"codex", "both"}:
         _write_codex_config(agent_root, eng_dir)
     if client_kind in {"claude", "both"}:
@@ -625,6 +681,13 @@ def _write_report(eng_dir: Path, engagement_type: str, *, name: str | None, targ
         lines.append("- **Scope Mode**: Android artifact-only")
     elif engagement_type == "web":
         lines.append(f"- **Target**: {target}")
+    elif engagement_type == "blue":
+        # Blue report variant lives behind plan unit 16. Until then we seed a
+        # minimal scaffold mirroring the other branches so report-writer
+        # dispatch always has a report.md to render into.
+        lines.append(f"- **Customer**: {name or '-'}")
+        lines.append(f"- **Scope**: {target}")
+        lines.append("- **Report Kind**: Incident (blue)")
     else:
         lines.append(f"- **Name**: {name}")
         lines.append(f"- **Target**: {target}")
@@ -688,8 +751,16 @@ def _install_client_kind(agent_root: Path) -> str:
     return "both"
 
 
-def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str) -> None:
+def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *, engagement_type: str) -> None:
     install_root = agent_root.parent
+    if engagement_type == "blue":
+        render_script = agent_root / "scripts" / "render-operator-prompts.sh"
+        try:
+            subprocess.run([str(render_script), "repo", str(eng_dir), "--type", "blue"], check=True)
+        except FileNotFoundError as exc:
+            raise SystemExit(f"prompt render script not found at {render_script}: {exc}") from exc
+        return
+
     # Specialist context isolation invariant:
     # The per-engagement AGENTS.md/CLAUDE.md written here are operator-only bootstrap pointers.
     # Specialists never land at this cwd directly — they are dispatched FROM the operator via

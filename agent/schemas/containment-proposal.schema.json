@@ -1,0 +1,16 @@
+{
+  "$id": "https://example.com/schemas/containment-proposal.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["action", "target", "platform", "rollback", "blast_radius"],
+  "additionalProperties": false,
+  "properties": {
+    "action": {"type": "string", "minLength": 1},
+    "target": {"type": "string", "minLength": 1},
+    "platform": {"type": "string", "enum": ["gws", "m365", "aws", "okta", "edr", "network", "generic"]},
+    "rollback": {"type": "string", "minLength": 1},
+    "blast_radius": {"type": "string", "enum": ["single-user", "multi-user", "multi-tenant", "cross-platform"]},
+    "note": {"type": "string"},
+    "finding_slug": {"type": "string"}
+  }
+}

@@ -14,6 +14,7 @@ _PROPOSAL_SCHEMAS = {
     "attack_chain": "attack-chain.schema.json",
     "credential": "credential.schema.json",
     "access_record": "access-record.schema.json",
+    "containment_proposal": "containment-proposal.schema.json",
 }
 
 

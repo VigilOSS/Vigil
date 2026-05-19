@@ -305,9 +305,64 @@ Load before writing:
 - `agent/references/bugbounty-submission-format.md` — authoritative spec (structure, rules)
 - `agent/references/examples/bugbounty-submission-ldap-injection.md` — working example with POC
 
+## Blue Mode
+
+When the active engagement is `engagement_type=blue`, the report-writer loads the
+template at `agent/skills/report-generation/templates/blue.md` instead of the default
+red template above. Red template behavior is unchanged — the blue template is a
+parallel file the dispatch points at by name, not a fork of this skill.
+
+Differences from red mode:
+
+- **Disposition vocabulary** — blue uses `verified | false_positive | downgraded | escalated`
+  (the canonical four-value vocab written verbatim to `details_json.disposition`). Findings
+  with `false_positive` are excluded from the report body but appear in Appendix B's audit
+  trail; their artifacts remain in the index marked scratch.
+- **Citation vocabulary** — MITRE ATT&CK technique IDs (e.g., `T1078.004`, `T1098.002`)
+  replace CWE / OWASP / CVSS. Severity is set from MITRE impact + proved blast radius
+  per `agent/rules/triage.md` §2, not from CVSS vectors.
+- **Scope unit** — tenant, not host. Pull `scope.json:tenant_reference_paths[]` for the
+  tenant-ref citations the report cross-references; never cite cross-tenant artifacts.
+- **PII handling** — sections 1–10 carry no PII. PII references (UPN-to-human mappings,
+  message bodies, credential fragments, IP/UPN combinations) live in Appendix B, which
+  is delivered separately on an encrypted channel.
+- **Forbidden vocabulary** — no "PoC", "exploit chain", "weaponized", "Steps to
+  Reproduce" (red framing). Blue uses "evidence reproduction" (artifact-id-cited
+  command), "kill-chain stage", "adversary capability".
+- **Closing sequence** — after the rendered report passes the same post-generation
+  self-review checks listed above, register the rendered file as an artifact:
+  ```bash
+  aith assess artifact register report.md \
+    --kind ir_evidence \
+    --finding <slug-list-or-engagement-ref> \
+    --agent-id <report-writer-agent-id>
+  ```
+  Then run the existing `Publish After QA Pass` steps (`emit-event report.generated`,
+  mark included findings `reported`, transition phase to `complete`).
+
+Dispatch invocation (worked example):
+
+```bash
+aith blue report --engagement-key <key>
+# internally dispatches:
+# aith assess agent start \
+#   --role report-writer \
+#   --skills report-generation \
+#   --task "Render blue incident report from durable backend state. Load
+#           template at agent/skills/report-generation/templates/blue.md.
+#           Pull findings, timeline, artifacts, containment actions per the
+#           template's macros."
+```
+
+The macros section at the bottom of `templates/blue.md` lists the exact backend queries
+(`list-report-findings`, `fetch activity-entries`, `artifact search`,
+`list-command-runs --phase respond`, `agent list`, `agent render-handoff`,
+`check-report-readiness`) the writer runs to populate each template section.
+
 ## Extended Resources
 
 - `agent/references/runtime-guides/engagement-methodology.md` — methodology narrative source
 - `agent/references/disclosure-email-format.md` — email disclosure format and rules
 - `agent/references/bugbounty-submission-format.md` — bug bounty submission format
 - `agent/references/examples/` — working examples for both output modes
+- `agent/skills/report-generation/templates/blue.md` — blue incident report template

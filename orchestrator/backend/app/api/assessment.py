@@ -116,7 +116,7 @@ class CommandRunRecordRequest(BaseModel):
     notes: str = Field(default="", max_length=4096)
     engagement_artifact_dir: str | None = Field(default=None, max_length=1024)
     run_uuid: str | None = Field(default=None, max_length=64)
-    audit_source: Literal["header", "env_fallback", "mixed"] = "header"
+    audit_source: Literal["header", "env_fallback", "mixed", "stdin", "argv"] = "header"
     # Command-metadata fields. Soft validation — matches the audit_source
     # precedent of plain TEXT storage. Technique/probe_kind are intentionally
     # not Literal-typed so new enum members don't require a backend redeploy;
@@ -763,6 +763,7 @@ def search_artifacts(
     engagement_key: str,
     q: str = "",
     finding: str = "",
+    kind: str = "",
     limit: int = Query(default=50, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
@@ -771,6 +772,7 @@ def search_artifacts(
         engagement.id,
         query=q,
         finding=finding,
+        kind=kind,
         limit=limit,
         offset=offset,
     )
@@ -1006,6 +1008,42 @@ async def create_command_run(
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     payload = request.model_dump()
+    if not payload.get("command_hash"):
+        payload["command_hash"] = hashlib.sha256(
+            payload["command"].encode("utf-8", errors="replace")
+        ).hexdigest()
+    record = state_manager.record_command_run(engagement.id, **payload)
+    await _broadcast(engagement.key, "command_run", record)
+    return record
+
+
+class HostExecRecord(CommandRunRecordRequest):
+    """Audit payload for ``aith assess host-exec``.
+
+    Reuses ``CommandRunRecordRequest`` for full field parity with the kali
+    route — the host-exec wrapper is just a different execution surface, not
+    a different audit shape. The dedicated route exists so the server can
+    force ``route='host_exec'`` regardless of client input, giving downstream
+    queries a single discriminator between kali-container rows and
+    host-machine rows.
+    """
+
+
+@router.post("/command-runs/host-exec", status_code=status.HTTP_201_CREATED)
+async def record_host_exec(
+    engagement_key: str,
+    request: HostExecRecord,
+) -> dict[str, Any]:
+    """Audited host-machine command execution (gam, gcloud, az, splunk, jq, ...).
+
+    Forces ``route='host_exec'`` server-side so the audit marker is reliable
+    regardless of what the CLI sent. Otherwise identical to ``POST
+    /command-runs``: the same retention, dedup, and artifact-spill logic in
+    ``state_manager.record_command_run()`` applies.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    payload = request.model_dump()
+    payload["route"] = "host_exec"  # canonical marker, never trust client input
     if not payload.get("command_hash"):
         payload["command_hash"] = hashlib.sha256(
             payload["command"].encode("utf-8", errors="replace")
@@ -1522,6 +1560,7 @@ class DispatchCreate(BaseModel):
     dispatch_mode: _DISPATCH_MODE | None = None
     finding_slugs: list[str] | None = None
     skills: str | None = Field(default=None, max_length=4096)
+    tier: Literal["L1", "L2", "L3", "L4"] | None = None
 
     @model_validator(mode="after")
     def _enforce_skills_for_specialists(self) -> "DispatchCreate":
@@ -1694,6 +1733,32 @@ class CoverageDeferralPayload(BaseModel):
         return self
 
 
+class ContainmentProposalPayload(BaseModel):
+    """Strict shape for ``kind='containment_proposal'`` decision rows.
+
+    Mirrors ``agent/schemas/containment-proposal.schema.json`` so the JSONL
+    writer (``aith assess record-proposal``) and the backend dispatch-decisions
+    row written by ``aith blue propose-contain`` enforce the same contract.
+    Without this, a malformed proposal still records a row but is unsafe to
+    approve+execute later (e.g. ``aith assess approve-proposal`` flips
+    ``resolved=true``, then ``aith blue contain`` reads garbage from the
+    payload). Catching shape errors at POST time keeps the approval ledger
+    trustworthy.
+
+    Extra fields are rejected so typos like ``actoin`` surface immediately.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: str = Field(min_length=1)
+    target: str = Field(min_length=1)
+    platform: Literal["gws", "m365", "aws", "okta", "edr", "network", "generic"]
+    rollback: str = Field(min_length=1)
+    blast_radius: Literal["single-user", "multi-user", "multi-tenant", "cross-platform"]
+    note: str | None = Field(default=None)
+    finding_slug: str | None = Field(default=None)
+
+
 class DecisionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1703,9 +1768,11 @@ class DecisionCreate(BaseModel):
     # validates the well-known shapes; the table just stores the bytes.
     #
     # The exception is kinds whose payload is consumed by a backend gate
-    # (currently: ``coverage_deferral`` → ``per_host_coverage()``). For those,
-    # validate the payload shape at POST time so malformed payloads can't
-    # silently neuter the gate that depends on them.
+    # (currently: ``coverage_deferral`` → ``per_host_coverage()``) OR by a
+    # downstream approve+execute flow (``containment_proposal`` →
+    # ``aith blue contain``). For those, validate the payload shape at POST
+    # time so malformed payloads can't silently neuter the gate that depends
+    # on them, or get blindly approved and executed later.
     kind: str = Field(min_length=1, max_length=128)
     payload: dict[str, Any]
     surfaced_to_user: bool = False
@@ -1714,6 +1781,17 @@ class DecisionCreate(BaseModel):
     def _validate_known_kind_payload(self) -> "DecisionCreate":
         if self.kind == "coverage_deferral":
             CoverageDeferralPayload.model_validate(self.payload)
+        elif self.kind == "containment_proposal":
+            try:
+                ContainmentProposalPayload.model_validate(self.payload)
+            except Exception as exc:
+                # Surface as 422 with the underlying detail so operators see
+                # which field is invalid (matches the JSONL-side error from
+                # ``aith assess record-proposal``).
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"containment_proposal payload invalid: {exc}",
+                ) from exc
         return self
 
 
@@ -1745,6 +1823,7 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
         dispatch_mode=request.dispatch_mode,
         finding_slugs=request.finding_slugs,
         skills=request.skills,
+        tier=request.tier,
     )
     _audit_assessment_mutation(
         engagement.id,
