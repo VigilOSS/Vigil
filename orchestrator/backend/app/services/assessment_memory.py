@@ -50,27 +50,94 @@ def _finding_summary(row: Any) -> dict[str, Any]:
     }
 
 
-def _limited_findings(connection, engagement_id: int, where_sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+def _limited_findings(
+    connection,
+    engagement_id: int,
+    where_sql: str,
+    params: tuple[Any, ...] = (),
+    *,
+    since: str = "",
+) -> list[dict[str, Any]]:
+    extra_where = ""
+    extra_params: tuple[Any, ...] = ()
+    if since:
+        extra_where = " AND updated_at >= ?"
+        extra_params = (since,)
     rows = connection.execute(
         f"""
         SELECT slug, title, severity, status, verification_state,
                verification_disposition, source_name, evidence_ref,
                details_json, updated_at
         FROM assessment_findings
-        WHERE engagement_id = ? AND {where_sql}
+        WHERE engagement_id = ? AND {where_sql}{extra_where}
         ORDER BY updated_at DESC, id DESC
         LIMIT 12
         """,
-        (engagement_id, *params),
+        (engagement_id, *params, *extra_params),
     ).fetchall()
     return [_finding_summary(row) for row in rows]
 
 
-def _recent_decisions(engagement_id: int) -> list[dict[str, Any]]:
-    return state_manager.list_decisions(engagement_id, limit=10)
+def _recent_decisions(engagement_id: int, *, since: str = "") -> list[dict[str, Any]]:
+    rows = state_manager.list_decisions(engagement_id, limit=10 if not since else 30)
+    return _since_filter(rows, since=since, field="created_at")[:10]
 
 
-def _recent_dispatch_picture(engagement_id: int, *, max_age_hours: float) -> dict[str, Any]:
+def _since_filter(
+    rows: list[dict[str, Any]],
+    *,
+    since: str,
+    field: str,
+) -> list[dict[str, Any]]:
+    """Keep only rows whose ``field`` timestamp is at or after ``since``.
+
+    Rows missing the field stay in the result so a malformed row never
+    silently disappears; the caller can investigate. ``since=""`` is a
+    no-op pass-through.
+    """
+    if not since:
+        return rows
+    cutoff = _parse_iso(since)
+    if cutoff is None:
+        return rows
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        ts_raw = row.get(field)
+        if not ts_raw:
+            kept.append(row)
+            continue
+        parsed = _parse_iso(ts_raw)
+        if parsed is None or parsed >= cutoff:
+            kept.append(row)
+    return kept
+
+
+# Roles whose dispatches legitimately run longer than a normal recon/test
+# pass. The default per-role threshold is consulted only when the caller
+# does not pin --max-age-hours; an explicit override always wins.
+_STALE_THRESHOLD_BY_ROLE: dict[str, float] = {
+    "exploit-developer": 48.0,
+    "report-writer": 48.0,
+    "code-architect": 48.0,
+    "code-vuln-hunter": 48.0,
+    "code-variant-hunter": 48.0,
+    "code-vuln-verifier": 48.0,
+    "code-fuzz-engineer": 72.0,
+}
+_DEFAULT_STALE_THRESHOLD_HOURS = 24.0
+
+
+def _stale_threshold_for(role: str | None, *, override: float | None) -> float:
+    if override is not None:
+        return float(override)
+    return _STALE_THRESHOLD_BY_ROLE.get(str(role or ""), _DEFAULT_STALE_THRESHOLD_HOURS)
+
+
+def _recent_dispatch_picture(
+    engagement_id: int,
+    *,
+    max_age_hours: float | None,
+) -> dict[str, Any]:
     dispatches = state_manager.list_dispatches(engagement_id, limit=25)
     handoffs = {row.get("agent_id"): row for row in state_manager.list_handoffs(engagement_id, limit=100)}
     now = dt.datetime.now(dt.timezone.utc)
@@ -80,26 +147,36 @@ def _recent_dispatch_picture(engagement_id: int, *, max_age_hours: float) -> dic
         if row.get("status") != "in-progress":
             continue
         agent_id = row.get("agent_id")
+        agent_role = row.get("agent_role")
         handoff = handoffs.get(agent_id)
         if not handoff:
-            gaps.append({"agent_id": agent_id, "agent_role": row.get("agent_role"), "reason": "no_handoff"})
+            gaps.append({"agent_id": agent_id, "agent_role": agent_role, "reason": "no_handoff"})
         started = _parse_iso(row.get("dispatched_at"))
         age_hours = ((now - started).total_seconds() / 3600.0) if started else None
-        if age_hours is not None and age_hours >= max_age_hours:
+        threshold = _stale_threshold_for(agent_role, override=max_age_hours)
+        if age_hours is not None and age_hours >= threshold:
             stale.append(
                 {
                     "agent_id": agent_id,
-                    "agent_role": row.get("agent_role"),
+                    "agent_role": agent_role,
                     "age_hours": round(age_hours, 2),
                     "handoff_status": (handoff or {}).get("handoff_status") or "none",
+                    "threshold_hours": threshold,
                 }
             )
+    # The reported `stale_threshold_hours` is the override if set, else the
+    # default — per-role thresholds applied per dispatch are also visible on
+    # each stale entry's `threshold_hours`.
+    reported_threshold = (
+        float(max_age_hours) if max_age_hours is not None else _DEFAULT_STALE_THRESHOLD_HOURS
+    )
     return {
         "recent_dispatches": dispatches[:10],
         "latest_handoffs": list(handoffs.values())[:10],
         "stale_in_progress_dispatches": stale,
         "handoff_gaps": gaps[:10],
-        "stale_threshold_hours": max_age_hours,
+        "stale_threshold_hours": reported_threshold,
+        "stale_threshold_role_overrides": dict(_STALE_THRESHOLD_BY_ROLE) if max_age_hours is None else {},
     }
 
 
@@ -142,7 +219,8 @@ def build_resume_brief(
     q: str = "",
     finding: str = "",
     agent_id: str = "",
-    max_age_hours: float = 24.0,
+    max_age_hours: float | None = None,
+    since: str = "",
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     root = Path(engagement.engagement_root)
@@ -166,37 +244,45 @@ def build_resume_brief(
             ).fetchone()
             target_finding = _finding_summary(row) if row else None
         findings = {
-            "active": _limited_findings(connection, engagement_id, "status IN ('active', 'exploited', 'reported')"),
-            "unreviewed": _limited_findings(connection, engagement_id, "verification_state = 'unreviewed'"),
-            "verified": _limited_findings(connection, engagement_id, "verification_state = 'verified'"),
-            "killed": _limited_findings(connection, engagement_id, "status = 'false_positive'"),
-            "merged": _limited_findings(connection, engagement_id, "status = 'merged'"),
+            "active": _limited_findings(connection, engagement_id, "status IN ('active', 'exploited', 'reported')", since=since),
+            "unreviewed": _limited_findings(connection, engagement_id, "verification_state = 'unreviewed'", since=since),
+            "verified": _limited_findings(connection, engagement_id, "verification_state = 'verified'", since=since),
+            "killed": _limited_findings(connection, engagement_id, "status = 'false_positive'", since=since),
+            "merged": _limited_findings(connection, engagement_id, "status = 'merged'", since=since),
             "chain_required": _limited_findings(
                 connection,
                 engagement_id,
                 "details_json LIKE '%chain_required%'",
+                since=since,
             ),
         }
         counts = _counts(connection, engagement_id)
 
-    command_matches = (
+    command_matches_all = (
         state_manager.list_command_runs(
             engagement_id,
             q=search_text,
             sort="relevance",
             show_matches=True,
-            limit=10,
+            limit=10 if not since else 30,
             include_output=False,
         )
         if search_text
-        else state_manager.list_command_runs(engagement_id, sort="recent", limit=10, include_output=False)
+        else state_manager.list_command_runs(
+            engagement_id,
+            sort="recent",
+            limit=10 if not since else 30,
+            include_output=False,
+        )
     )
-    artifacts = artifact_index.search_artifacts(
+    command_matches = _since_filter(command_matches_all, since=since, field="created_at")[:10]
+    artifacts_all = artifact_index.search_artifacts(
         engagement_id,
         query=q,
         finding=canonical_finding or finding,
-        limit=10,
+        limit=10 if not since else 30,
     )
+    artifacts = _since_filter(artifacts_all, since=since, field="updated_at")[:10]
     dispatch_picture = _recent_dispatch_picture(engagement_id, max_age_hours=max_age_hours)
     if agent_id:
         dispatch_picture["selected_dispatch"] = state_manager.get_dispatch(engagement_id, agent_id)
@@ -214,11 +300,11 @@ def build_resume_brief(
             "scope_status": scope.get("status") or engagement.status,
             "host_count": len(scope.get("hosts") or []) if isinstance(scope.get("hosts"), list) else 0,
         },
-        "query": {"q": q, "finding": canonical_finding or finding, "agent_id": agent_id},
+        "query": {"q": q, "finding": canonical_finding or finding, "agent_id": agent_id, "since": since},
         "finding_counts": counts,
         "target_finding": target_finding,
         "findings": findings,
-        "recent_decisions": _recent_decisions(engagement_id),
+        "recent_decisions": _recent_decisions(engagement_id, since=since),
         "dispatches": dispatch_picture,
         "command_runs": command_matches,
         "artifacts": artifacts,
@@ -228,7 +314,7 @@ def build_resume_brief(
             artifacts=artifacts,
             command_matches=command_matches,
             stale_dispatches=dispatch_picture.get("stale_in_progress_dispatches") or [],
-            stale_threshold_hours=max_age_hours,
+            stale_threshold_hours=max_age_hours if max_age_hours is not None else _DEFAULT_STALE_THRESHOLD_HOURS,
         ),
     }
 

@@ -651,11 +651,17 @@ def get_command_runs(
     sort: Literal["", "relevance", "recent", "distant"] = "",
     show_matches: bool = False,
     exact: bool = False,
+    require_all: bool = False,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     include_output: bool = False,
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
+    if exact and require_all:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="exact and require_all are mutually exclusive",
+        )
     return state_manager.list_command_runs(
         engagement.id,
         q=q,
@@ -673,6 +679,7 @@ def get_command_runs(
         intent_q=intent_q or "",
         sort=sort,
         exact=exact,
+        require_all=require_all,
         show_matches=show_matches,
         limit=limit,
         offset=offset,
@@ -686,7 +693,8 @@ def get_resume_brief(
     q: str = "",
     finding: str = "",
     agent_id: str = "",
-    max_age_hours: float = Query(default=24.0, gt=0, le=24 * 30),
+    max_age_hours: float | None = Query(default=None, gt=0, le=24 * 30),
+    since: str = "",
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     return assessment_memory.build_resume_brief(
@@ -695,6 +703,7 @@ def get_resume_brief(
         finding=finding,
         agent_id=agent_id,
         max_age_hours=max_age_hours,
+        since=since,
     )
 
 
@@ -827,6 +836,36 @@ async def mark_artifact_scratch_by_path(
     )
     await _broadcast(engagement.key, "artifact_scratch", row)
     return row
+
+
+class ArtifactScratchBulkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prefix: str = Field(min_length=1, max_length=2048)
+    scratch: bool = True
+
+
+@router.post("/artifacts/scratch-under")
+async def mark_artifacts_scratch_under(
+    engagement_key: str,
+    request: ArtifactScratchBulkRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    result = artifact_index.set_scratch_under_prefix(
+        engagement.id,
+        prefix=request.prefix,
+        scratch=request.scratch,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="artifact mark-scratch (bulk)" if request.scratch else "artifact unmark-scratch (bulk)",
+        action=f"prefix={request.prefix}",
+        actor_name="operator",
+        result=f"matched={result.get('matched', 0)} scratch={'1' if request.scratch else '0'}",
+        metadata={"prefix": result.get("prefix"), "matched": result.get("matched", 0)},
+    )
+    await _broadcast(engagement.key, "artifact_scratch_bulk", result)
+    return result
 
 
 @router.get("/surfaces")

@@ -25,6 +25,11 @@ def register(subparsers) -> None:
     p.add_argument("--sensitive", action="store_true")
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--offset", type=int, default=0)
+    p.add_argument(
+        "--under",
+        default="",
+        help="(mark-scratch / unmark-scratch) Path prefix to scratch/unscratch in bulk (e.g. notes/scratch/).",
+    )
     p.add_argument("--json", dest="as_json", action="store_true")
     p.set_defaults(func=run)
 
@@ -107,10 +112,26 @@ def run(args) -> None:
             print(json.dumps(row, indent=2, ensure_ascii=False) if args.as_json else _render_rows([row]))
             return
         if args.action in {"mark-scratch", "unmark-scratch"}:
-            if not args.extra:
-                print(f"artifact {args.action}: artifact id or path is required", file=sys.stderr)
-                sys.exit(1)
             scratch = args.action == "mark-scratch"
+            under = (args.under or "").strip()
+            if under:
+                result = client.post(
+                    "artifacts/scratch-under",
+                    {"prefix": under, "scratch": scratch},
+                )
+                if args.as_json:
+                    print(json.dumps(result, indent=2, ensure_ascii=False))
+                else:
+                    matched = result.get("matched", 0)
+                    print(f"matched={matched} prefix={result.get('prefix') or '(all)'}")
+                    for path in (result.get("updated") or [])[:20]:
+                        print(f"  - {path}")
+                    if matched > 20:
+                        print(f"  - … and {matched - 20} more")
+                return
+            if not args.extra:
+                print(f"artifact {args.action}: artifact id or path is required (or pass --under <prefix>)", file=sys.stderr)
+                sys.exit(1)
             target = args.extra[0]
             if target.isdigit():
                 row = client.post(
@@ -130,11 +151,19 @@ def run(args) -> None:
 
 
 def _sync_text(result: dict) -> str:
-    return (
+    base = (
         f"registered={result.get('registered', 0)} "
         f"present={result.get('present', 0)} "
         f"missing={result.get('missing', 0)}"
     )
+    walk_errors = result.get("walk_errors") or []
+    if walk_errors:
+        base += f"\nwalk_errors ({len(walk_errors)}):"
+        for err in walk_errors[:10]:
+            base += f"\n  - {err}"
+        if len(walk_errors) > 10:
+            base += f"\n  - … and {len(walk_errors) - 10} more"
+    return base
 
 
 def _artifact_text(row: dict) -> str:
