@@ -165,7 +165,7 @@ When you see `Templates loaded for current scan: NNNN` in stderr but zero result
 
 ### Dedup across runs (Option A — no schema change)
 
-Use `aith assess list-command-runs --q nuclei` to compute the "already-scanned" set from prior
+Use `aith assess list-command-runs --q nuclei --tool-bin nuclei --json` to compute the "already-scanned" set from prior
 reactive runs, then subtract it from the current delta before invoking nuclei. The artifact
 filenames and JSONL outputs are durable engagement state — no new column on
 `assessment_command_runs` is needed because the inputs (delta file) and outputs (JSONL) live

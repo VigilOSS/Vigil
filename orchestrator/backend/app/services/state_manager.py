@@ -3264,6 +3264,32 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 (engagement_id,),
             ).fetchall()
         }
+        for artifact_path, artifact in artifact_rows.items():
+            lower_path = artifact_path.lower()
+            if not (lower_path.startswith("notes/") and lower_path.endswith((".md", ".markdown"))):
+                continue
+            if not bool(artifact.get("present")):
+                continue
+            linked = any(
+                artifact.get(field)
+                for field in (
+                    "related_finding_slug",
+                    "related_chain_key",
+                    "related_surface_id",
+                    "related_request_variant_id",
+                    "producer_agent_id",
+                    "producer_command_run_id",
+                )
+            )
+            if not linked:
+                blockers.append(
+                    {
+                        "kind": "unlinked_markdown_note",
+                        "artifact_id": artifact.get("id"),
+                        "path": artifact_path,
+                        "detail": "markdown notes under notes/ must be registered and linked to durable backend state",
+                    }
+                )
         for row in candidates:
             slug = str(row.get("slug", ""))
             evidence_ref = str(row.get("evidence_ref", "") or "").strip()

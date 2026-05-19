@@ -93,7 +93,10 @@ def _render_markdown(brief: dict) -> str:
         lines.append("- none")
     lines.extend(["", "## Next Actions"])
     for row in brief.get("recommended_next_actions") or []:
-        lines.append(f"- {row.get('reason')}: `{row.get('command')}`")
+        entity = ""
+        if row.get("entity_kind") and row.get("entity_id") is not None:
+            entity = f" [{row.get('entity_kind')} {row.get('entity_id')}]"
+        lines.append(f"- {row.get('reason')}{entity}: `{row.get('command')}`")
     return "\n".join(lines)
 
 

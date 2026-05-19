@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from app.services.assessment_memory import _recommended_actions
+
 
 ENGAGEMENT_KEY = "2026-05-19-120000-memory"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
@@ -87,6 +89,16 @@ def test_artifact_sync_search_get_and_missing_state(client, isolate_settings) ->
     assert detail.status_code == 200, detail.text
     assert "OIDC static state" in detail.json()["content"]
 
+    (eng / "notes" / "incidental-VA-047.md").write_text(
+        "Incidental VA-047 mention that should not outrank the linked evidence artifact.",
+        encoding="utf-8",
+    )
+    sync = client.post(f"{BASE}/artifacts/sync")
+    assert sync.status_code == 200, sync.text
+    by_finding = client.get(f"{BASE}/artifacts/search", params={"finding": "VA047"})
+    assert by_finding.status_code == 200, by_finding.text
+    assert by_finding.json()[0]["relative_path"] == "notes/VA-047-note.md"
+
     (eng / "notes" / "VA-047-note.md").unlink()
     sync = client.post(f"{BASE}/artifacts/sync")
     assert sync.status_code == 200, sync.text
@@ -151,3 +163,45 @@ def test_resume_brief_returns_bounded_operating_picture(client, isolate_settings
     assert body["command_runs"][0]["stdout_preview"] == ""
     assert any(row["relative_path"] == "notes/VA-047-note.md" for row in body["artifacts"])
     assert any("list-command-runs" in row["command"] for row in body["recommended_next_actions"])
+    assert any(
+        row["entity_kind"] == "command_run" and row["command"] == f"aith assess get-command-run {command.json()['id']}"
+        for row in body["recommended_next_actions"]
+    )
+    artifact_id = next(row["id"] for row in body["artifacts"] if row["relative_path"] == "notes/VA-047-note.md")
+    assert any(
+        row["entity_kind"] == "artifact" and row["command"] == f"aith assess artifact get {artifact_id}"
+        for row in body["recommended_next_actions"]
+    )
+
+
+def test_report_readiness_blocks_unlinked_markdown_notes(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    (eng / "notes" / "scratch.md").write_text("Durable state that is not linked anywhere", encoding="utf-8")
+
+    sync = client.post(f"{BASE}/artifacts/sync")
+    assert sync.status_code == 200, sync.text
+
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    blockers = readiness.json()["blockers"]
+    assert any(
+        blocker["kind"] == "unlinked_markdown_note" and blocker["path"] == "notes/scratch.md"
+        for blocker in blockers
+    )
+
+
+def test_recommended_actions_keep_lifecycle_items_before_inspect_cap() -> None:
+    actions = _recommended_actions(
+        finding="VA-047",
+        agent_id="va-memory",
+        artifacts=[{"id": 11}, {"id": 12}, {"id": 13}],
+        command_matches=[{"id": 1}, {"id": 2}, {"id": 3}],
+        stale_dispatches=[{"agent_id": "stale-va"}],
+    )
+
+    commands = [row["command"] for row in actions]
+    assert len(actions) == 8
+    assert "aith assess agent render-handoff va-memory" in commands
+    assert "aith assess agent reconcile-stale --dry-run" in commands

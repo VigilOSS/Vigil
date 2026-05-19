@@ -39,8 +39,12 @@ aith assess agent render-handoff <agent-id>
 ```
 
 Use command history as a coverage map, not as a reuse gate. If you cite a prior run
-instead of re-running, fetch it with `get-command-run <id>` first because a successful
-return code does not prove the preview answers the current question.
+instead of re-running, fetch it with `aith assess get-command-run <id>` first because
+a successful return code does not prove the preview answers the current question.
+
+Treat unlinked markdown notes as scratch, not engagement memory. State that must
+survive resume goes into backend rows or into an indexed artifact linked to a
+finding, chain, dispatch/agent, surface, request variant, or command run.
 
 After hydration, summarize the resume state in one compact operator note:
 - confirmed, suspicious, killed, and open findings

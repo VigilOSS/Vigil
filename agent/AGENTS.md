@@ -195,7 +195,7 @@ The runtime dispatch contract is the same shape as the code-analysis contract �
 
 **Role-specific additions:**
 
-- For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, the specific hypothesis to test, and prior probe-run ids if relevant (`aith assess list-command-runs --q <target-keyword>`).
+- For `vulnerability-analyst`: the candidate surface URL, surface type, any recon observations, the specific hypothesis to test, and prior probe-run ids if relevant (`aith assess list-command-runs --q <target-keyword> --show-matches`).
 - For `exploit-developer`: the finding slug(s) and title(s) being exploited. The agent self-serves the full endpoint map, surfaces, and coverage gaps from the backend via `aith assess fetch` — pass all B candidates (chain-target endpoints) through, since pre-filtering hides chain opportunities. Also pass any captured `credential_id` values from prior `vulnerability-analyst` runs so chain construction starts with the live material rather than re-extracting.
 - For `report-writer`: no finding context needed — the agent runs `aith assess list-report-findings --mode final --json` for final reports or `--mode draft --json` for interim. Operator names the QA mode (`generate` / `review-and-fix`) and any explicit blockers from `check-report-readiness`.
 - For `osint-analyst`: any tech-component intel already recorded, named so the agent does not re-enumerate. The agent reads `aith assess list-intel tech-component --json` itself; the operator names the *new* enumeration targets (recently identified component, new domain to triangulate).
@@ -221,6 +221,8 @@ The operator obtains `agent_id` by:
 Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting. A 404 from render-handoff means the `agent_id` in the handoff does not match the registered dispatch.
 
 If this is a continuation or resumed engagement, include the relevant `aith assess resume-brief` output immediately after the Runtime Identity block. Specialists treat it as the compact operating picture and use the listed command/artifact IDs for drill-down instead of reconstructing state from local notes.
+
+Require immediate backend/artifact linkage for durable notes: if a specialist creates a `.md` file under `notes/` that should matter after the current command, they must register it with `aith assess artifact register <path>` and link it to a finding, chain, dispatch/agent, surface, request variant, or command run before closing. Unlinked markdown notes are scratch and cannot be used as resume or report input.
 
 ### Specialist Dispatch Contract
 
@@ -619,7 +621,7 @@ Recovery branch:
    ```bash
    aith assess agent list --limit 5 --json \
      | jq -r '.[] | select(.handoff.runtime_issues // [] | tostring | test("401|403|expired|invalid_token|redirect.*login"; "i")) | .agent_id'
-   aith assess list-command-runs --q "401\|403\|session\|expired" --limit 10
+   aith assess list-command-runs --q "401\|403\|session\|expired" --show-matches --limit 10
    ```
 2. **Decide refresh path.**
    - **Bearer / API token** in `auth.json.headers.Authorization`: refresh via the documented refresh endpoint (if the program offers one) or re-run the login flow. Operator action; do NOT dispatch a specialist for a token refresh — the refresh request itself is one-shot mechanical work.

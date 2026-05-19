@@ -384,6 +384,7 @@ def search_artifacts(
     _engagement, _root = _engagement_root(engagement_id)
     where = ["a.engagement_id = ?"]
     params: list[Any] = [engagement_id]
+    select_params: list[Any] = []
     join_sql = ""
     canonical_finding = canonical_finding_alias(finding) if finding else None
     fts_terms: list[str] = []
@@ -400,14 +401,25 @@ def search_artifacts(
         where.append("(a.related_finding_slug = ? OR a.indexed_text LIKE ? OR a.relative_path LIKE ?)")
         params.extend([canonical_finding, f"%{canonical_finding}%", f"%{canonical_finding}%"])
     params.extend([int(limit), int(offset)])
-    rank_select = ", bm25(assessment_artifacts_fts) AS search_rank" if fts_expr else ""
-    order_sql = "ORDER BY search_rank ASC, a.updated_at DESC, a.id DESC" if fts_expr else "ORDER BY a.updated_at DESC, a.id DESC"
+    rank_select = ""
+    if canonical_finding:
+        rank_select += ", CASE WHEN a.related_finding_slug = ? THEN 0 ELSE 1 END AS finding_link_rank"
+        select_params.append(canonical_finding)
+    if fts_expr:
+        rank_select += ", bm25(assessment_artifacts_fts) AS search_rank"
+    order_terms: list[str] = []
+    if canonical_finding:
+        order_terms.append("finding_link_rank ASC")
+    if fts_expr:
+        order_terms.append("search_rank ASC")
+    order_terms.extend(["a.updated_at DESC", "a.id DESC"])
+    order_sql = "ORDER BY " + ", ".join(order_terms)
     sql = (
         f"SELECT a.*{rank_select} FROM assessment_artifacts a {join_sql} "
         f"WHERE {' AND '.join(where)} {order_sql} LIMIT ? OFFSET ?"
     )
     with get_connection() as connection:
-        rows = connection.execute(sql, tuple(params)).fetchall()
+        rows = connection.execute(sql, tuple(select_params + params)).fetchall()
     return [_serialize_artifact(row) for row in rows]
 
 

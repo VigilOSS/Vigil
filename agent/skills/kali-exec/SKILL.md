@@ -78,7 +78,7 @@ The CLI fails closed when these are missing. Pass them explicitly — there is n
 | Flag | Purpose | Notes |
 |------|---------|-------|
 | `--technique <enum>` | Vulnerability class this command tests, OR the operator-side category for non-attack runs. | Allowed values: `SSRF`, `XSS`, `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`, `RFI`, `OPEN-REDIRECT`, `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`, `RATE-LIMIT`, `INFO-DISCLOSURE`, `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `META`, `HEALTH`, `LOG-READ`, `OTHER`. Pick the enum the skill maps to (`sqli-testing` → `SQLI`); use `META` for operator-side dispatch metadata, registry writes, and scope decisions; `HEALTH` for runtime health checks and tool inventory (`which jadx apktool`, version probes, container-status); `LOG-READ` for reading existing artifacts/log files (no new probes); `OTHER` only when no specific class fits. Unknown tags are rejected before an audit row is written. |
-| `--intent "<text>"` | ≤200-char one-liner of purpose. | Replaces the old `echo "=== label ==="` pattern. The intent is what makes `list-command-runs --q <keyword>` searchable across an engagement. |
+| `--intent "<text>"` | ≤200-char one-liner of purpose. | Replaces the old `echo "=== label ==="` pattern. The intent is what makes `list-command-runs --q <keyword> --show-matches` searchable across an engagement. |
 | `--probe-kind <kind>` | What the command represents. | One of `fingerprint` (learning the target, no payload) / `baseline` (vanilla control request, for diff) / `payload` (crafted attack payload testing a hypothesis) / `exploit` (attacker-outcome proof) / `replay` (captured primitive on a new surface) / `cleanup` (undoing target-side changes). |
 | `--phase <enum>` | The phase the dispatch was authorized for. | REQUIRED. See "Phase tags" below — pass the dispatch phase, not `scope.json.current_phase`. |
 | `--timeout <seconds>` | Wall-clock budget. | Required. Default suggestion: 1800 for synchronous probes; longer budgets must use `kali job start`. |
@@ -438,7 +438,7 @@ when the agent that started the job has long since exited.
 
 ## Coverage check before probing
 
-Every typed verb and `kali exec` writes an audit row with `command`, `argv`, `tool`, `agent`, `phase`, `technique`, `intent`, `probe_kind`, `destructive`, exit code, timings, and an output preview. Treat that history as a coverage map — search for prior work on this surface before dispatching, with `aith assess list-command-runs --q <keyword>`. The full coverage-vs-duplicate decision table lives in `agent/references/runtime-guides/command-history-auditing.md`. The shared `agent/shared-constraints.md §2b` has the agent-side rule.
+Every typed verb and `kali exec` writes an audit row with `command`, `argv`, `tool`, `agent`, `phase`, `technique`, `intent`, `probe_kind`, `destructive`, exit code, timings, and an output preview. Treat that history as a coverage map — search for prior work on this surface before dispatching, with `aith assess list-command-runs --q <keyword> --show-matches`. The full coverage-vs-duplicate decision table lives in `agent/references/runtime-guides/command-history-auditing.md`. The shared `agent/shared-constraints.md §2b` has the agent-side rule.
 
 ## Process cleanup discipline
 
