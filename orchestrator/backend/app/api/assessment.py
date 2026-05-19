@@ -1642,6 +1642,18 @@ class CoverageDeferralPayload(BaseModel):
     # mistake (which one wins?), so reject the ambiguous shape outright.
     engagement_wide: bool | None = Field(default=None)
 
+    # Objectives that legitimately apply to an entire engagement (a
+    # program-wide scope rule, vendor-confirmed CDN/WAF, OSINT carve-out).
+    # `service_inventory` and `nikto_trigger` are intentionally per-host —
+    # an engagement-wide deferral on those would silence every host's
+    # gate signal without a per-host justification, which is the failure
+    # mode the audit ledger is designed to prevent.
+    _ENGAGEMENT_WIDE_ALLOWED_OBJECTIVES: tuple[str, ...] = (
+        "osint",
+        "waf_tier",
+        "directory_fuzz",
+    )
+
     @model_validator(mode="after")
     def _require_host_or_engagement_wide(self) -> "CoverageDeferralPayload":
         has_host = any(
@@ -1664,6 +1676,20 @@ class CoverageDeferralPayload(BaseModel):
                     raise ValueError(
                         "coverage_deferral payload `hosts` entries must be non-empty strings"
                     )
+        if self.engagement_wide:
+            disallowed = [
+                obj
+                for obj in self.deferred_objectives
+                if obj not in self._ENGAGEMENT_WIDE_ALLOWED_OBJECTIVES
+            ]
+            if disallowed:
+                raise ValueError(
+                    "engagement_wide=true is only allowed for objectives "
+                    f"{list(self._ENGAGEMENT_WIDE_ALLOWED_OBJECTIVES)}; "
+                    f"{disallowed} are per-host signals and require an explicit "
+                    "host / hosts[] field. If a program-wide rule really blocks "
+                    "one of those, file a per-host deferral with the rationale."
+                )
         return self
 
 

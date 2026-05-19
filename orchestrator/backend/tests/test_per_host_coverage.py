@@ -570,6 +570,48 @@ def test_per_host_coverage_engagement_wide_deferral_satisfies_every_host(client,
         assert any(p.get("engagement_wide") is True for p in deferral_payloads)
 
 
+def test_coverage_deferral_engagement_wide_rejects_per_host_objectives(client, isolate_settings):
+    """engagement_wide=true is restricted to objectives that legitimately apply
+    program-wide (osint, waf_tier, directory_fuzz). Per-host signals like
+    service_inventory and nikto_trigger require an explicit host / hosts[] list
+    so the audit row carries the per-host rationale."""
+    _seed(client, isolate_settings)
+    for forbidden in ("service_inventory", "nikto_trigger"):
+        response = _post_decision_raw(
+            client,
+            kind="coverage_deferral",
+            payload={
+                "engagement_wide": True,
+                "deferred_objectives": [forbidden],
+                "reason": "program-wide skip",
+                "approved_by": "operator",
+            },
+        )
+        assert response.status_code == 422, response.text
+        body = response.text.lower()
+        assert "engagement_wide" in body
+        assert forbidden in body
+
+
+def test_coverage_deferral_engagement_wide_rejects_mixed_objective_list(client, isolate_settings):
+    """If any objective in a mixed list is per-host, the whole engagement_wide
+    deferral is rejected — partial acceptance would silently drop the per-host
+    objective from the audit ledger."""
+    _seed(client, isolate_settings)
+    response = _post_decision_raw(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "engagement_wide": True,
+            "deferred_objectives": ["osint", "service_inventory"],
+            "reason": "...",
+            "approved_by": "operator",
+        },
+    )
+    assert response.status_code == 422
+    assert "service_inventory" in response.text.lower()
+
+
 def test_coverage_deferral_validator_does_not_constrain_other_kinds(client, isolate_settings):
     """Unknown kinds keep the free-form payload contract — only `coverage_deferral` is gated."""
     _seed(client, isolate_settings)

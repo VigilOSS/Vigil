@@ -427,3 +427,86 @@ def test_backend_unreachable_falls_back_to_filesystem_scan(tmp_path: Path, monke
     monkeypatch.setattr(module, "urlopen", fake_urlopen)
     collector._reload_registry(force=True)
     assert "eng-fs" in collector.registry
+
+
+def test_filesystem_fallback_skips_non_in_progress_engagements(tmp_path: Path) -> None:
+    """When the backend is unreachable, the filesystem scan must mirror the
+    backend's `?status=in_progress` filter — archived/completed engagements
+    re-entering routing would steal captures from active engagements with
+    overlapping scope.
+    """
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    active = _seed_engagement(root, "eng-active", hosts=["target.example"])
+    archived = _seed_engagement(root, "eng-archived", hosts=["target.example"])
+    # Tag scope.json status explicitly. Active stays default (treated as
+    # in_progress); archived flips to "archived".
+    active_scope = json.loads((active / "scope.json").read_text())
+    active_scope["status"] = "in_progress"
+    (active / "scope.json").write_text(json.dumps(active_scope), encoding="utf-8")
+    archived_scope = json.loads((archived / "scope.json").read_text())
+    archived_scope["status"] = "archived"
+    (archived / "scope.json").write_text(json.dumps(archived_scope), encoding="utf-8")
+
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    # Active routes; archived is filtered out.
+    assert "eng-active" in collector.registry
+    assert "eng-archived" not in collector.registry
+
+
+def test_backend_registry_skips_rows_whose_root_is_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A stale backend row pointing at a directory that no longer exists must
+    be skipped at registry-build time so `_open_db_for` never hits
+    `FileNotFoundError` on `db_path.touch()` and crashes the flow hook.
+    """
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    # Only one of the two engagements has an on-disk directory.
+    _seed_engagement(root, "eng-present", hosts=["present.example"])
+
+    class FakeResponse:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self) -> bytes:
+            return self._body
+
+    def fake_urlopen(*_args, **_kwargs):
+        payload = [
+            {
+                "key": "eng-present",
+                "scope_hosts": ["present.example"],
+                "scope_priority": 0,
+                "updated_at": "2026-05-19T12:00:00Z",
+            },
+            {
+                "key": "eng-ghost",  # directory does not exist on disk
+                "scope_hosts": ["ghost.example"],
+                "scope_priority": 0,
+                "updated_at": "2026-05-19T12:00:00Z",
+            },
+        ]
+        return FakeResponse(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector.orchestrator_base_url = "http://orchestrator.test"
+    collector._reload_registry(force=True)
+
+    assert "eng-present" in collector.registry
+    assert "eng-ghost" not in collector.registry
