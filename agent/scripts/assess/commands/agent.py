@@ -153,7 +153,42 @@ def _done(args) -> None:
             sys.exit(1)
     if not getattr(args, "dispatch_status", None):
         args.dispatch_status = "completed"
+    _warn_if_handoff_is_closable(args)
     dispatch._update_dispatch_status(args, [])  # noqa: SLF001
+
+
+def _warn_if_handoff_is_closable(args) -> None:
+    """Stderr-warn when `agent done` is used on a dispatch with a closable handoff.
+
+    `agent close` consumes a ready/blocked handoff and writes an audit decision
+    row; `agent done` is a raw status PATCH. Both work, but operators usually
+    want `close` once the specialist has produced a ready handoff so the
+    closure is traceable in the decision ledger. Warn but do not block.
+    """
+    try:
+        client, _ = dispatch._client_for(args)  # noqa: SLF001
+    except Exception:  # noqa: BLE001 - non-fatal precheck
+        return
+    try:
+        handoff = client.get_handoff(args.agent_id)
+    except Exception:  # noqa: BLE001 - non-fatal precheck
+        return
+    finally:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
+    if not handoff:
+        return
+    status_value = str(handoff.get("handoff_status") or "")
+    if status_value in {"ready", "blocked"}:
+        print(
+            f"WARN agent done: handoff for {args.agent_id} is handoff_status={status_value!r}; "
+            f"`aith assess agent close {args.agent_id}` would write a dispatch_closed_from_handoff "
+            "decision row for the audit ledger. Proceeding with raw done — pass --status explicitly "
+            "and ignore this warning if that is intended.",
+            file=sys.stderr,
+        )
 
 
 def _utcnow_iso() -> str:
