@@ -227,6 +227,92 @@ def test_mark_scratch_clears_unlinked_markdown_blocker(client, isolate_settings)
     )
 
 
+def test_mark_scratch_under_prefix_clears_many_blockers(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    scratch_dir = eng / "notes" / "scratch"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("a.md", "b.md", "c.md"):
+        (scratch_dir / name).write_text("scratch", encoding="utf-8")
+    sync = client.post(f"{BASE}/artifacts/sync")
+    assert sync.status_code == 200, sync.text
+
+    bulk = client.post(
+        f"{BASE}/artifacts/scratch-under",
+        json={"prefix": "notes/scratch/", "scratch": True},
+    )
+    assert bulk.status_code == 200, bulk.text
+    body = bulk.json()
+    assert body["matched"] == 3
+    assert set(body["updated"]) == {"notes/scratch/a.md", "notes/scratch/b.md", "notes/scratch/c.md"}
+
+    readiness = client.get(f"{BASE}/report-readiness")
+    blockers = readiness.json()["blockers"]
+    assert not any(
+        b["kind"] == "unlinked_markdown_note" and b["path"].startswith("notes/scratch/")
+        for b in blockers
+    )
+
+
+def test_mark_scratch_inline_registers_when_path_unindexed(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    (eng / "notes" / "fresh.md").write_text("freshly-written note", encoding="utf-8")
+    # No sync — exercise the inline register fallback.
+    flagged = client.post(
+        f"{BASE}/artifacts/scratch-by-path",
+        json={"path": "notes/fresh.md", "scratch": True},
+    )
+    assert flagged.status_code == 200, flagged.text
+    body = flagged.json()
+    assert body["scratch"] is True
+    assert body["relative_path"] == "notes/fresh.md"
+
+
+def test_resume_brief_since_filters_old_findings(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    # since after the seeded finding's updated_at should drop it
+    brief = client.get(
+        f"{BASE}/resume-brief",
+        params={"since": "2099-01-01T00:00:00Z"},
+    )
+    assert brief.status_code == 200, brief.text
+    body = brief.json()
+    assert body["query"]["since"] == "2099-01-01T00:00:00Z"
+    for bucket in ("active", "unreviewed", "verified", "killed", "merged", "chain_required"):
+        assert body["findings"][bucket] == []
+
+
+def test_resume_brief_stale_threshold_per_role(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    # Dispatch an exploit-developer 36h ago — under role default 48h, not stale.
+    old_iso = "2026-05-18T00:00:00Z"  # ~36h before frozen test clock? actually deterministic check below
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "exp-old",
+            "agent_role": "exploit-developer",
+            "task": "deep chain",
+            "skills": "exploit-playbook-authoring",
+            "dispatched_at": old_iso,
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    # Force --max-age-hours=12 — should now flag it stale regardless of role default.
+    brief = client.get(
+        f"{BASE}/resume-brief",
+        params={"max_age_hours": "12"},
+    )
+    assert brief.status_code == 200, brief.text
+    stale_ids = [s["agent_id"] for s in brief.json()["dispatches"].get("stale_in_progress_dispatches") or []]
+    assert "exp-old" in stale_ids
+
+
 def test_recommended_actions_keep_lifecycle_items_before_inspect_cap() -> None:
     actions = _recommended_actions(
         finding="VA-047",

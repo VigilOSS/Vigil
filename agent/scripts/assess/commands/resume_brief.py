@@ -17,11 +17,24 @@ def register(subparsers) -> None:
     p.add_argument("--finding", default="", help="Optional finding slug or alias, e.g. VA-047 or VA047.")
     p.add_argument("--agent-id", default="", help="Optional dispatch agent_id to include handoff/dispatch details.")
     p.add_argument(
+        "--since",
+        default="",
+        help=(
+            "ISO datetime cutoff. When set, findings / decisions / command runs / artifacts "
+            "are filtered to entries updated at or after this point — useful for 'what's new "
+            "since I last looked' between sessions."
+        ),
+    )
+    p.add_argument(
         "--max-age-hours",
         dest="max_age_hours",
         type=float,
-        default=24.0,
-        help="Age threshold for in-progress dispatches flagged stale. Defaults to 24h (matches `agent reconcile-stale`).",
+        default=None,
+        help=(
+            "Override the per-role stale threshold for in-progress dispatches. "
+            "Default: 24h for most roles, 48h for exploit-developer / report-writer / code-*, "
+            "72h for code-fuzz-engineer."
+        ),
     )
     p.add_argument("--json", dest="as_json", action="store_true")
     p.set_defaults(func=run)
@@ -36,8 +49,12 @@ def run(args) -> None:
         params.append(("finding", args.finding))
     if args.agent_id:
         params.append(("agent_id", args.agent_id))
-    if getattr(args, "max_age_hours", None) and float(args.max_age_hours) != 24.0:
-        params.append(("max_age_hours", str(float(args.max_age_hours))))
+    max_age = getattr(args, "max_age_hours", None)
+    if max_age is not None:
+        params.append(("max_age_hours", str(float(max_age))))
+    since = getattr(args, "since", "")
+    if since:
+        params.append(("since", since))
     endpoint = "resume-brief"
     if params:
         endpoint += "?" + urlencode(params, quote_via=quote)
@@ -62,8 +79,11 @@ def _render_markdown(brief: dict) -> str:
         f"- scope_status: {engagement.get('scope_status', 'unknown')}",
         f"- hosts: {engagement.get('host_count', 0)}",
     ]
-    if query.get("q") or query.get("finding") or query.get("agent_id"):
-        lines.append(f"- query: q={query.get('q') or '-'} finding={query.get('finding') or '-'} agent_id={query.get('agent_id') or '-'}")
+    if query.get("q") or query.get("finding") or query.get("agent_id") or query.get("since"):
+        lines.append(
+            f"- query: q={query.get('q') or '-'} finding={query.get('finding') or '-'} "
+            f"agent_id={query.get('agent_id') or '-'} since={query.get('since') or '-'}"
+        )
     lines.extend(["", "## Finding Counts"])
     counts = brief.get("finding_counts") or {}
     for key in ("workflow", "verification_state", "verification_disposition", "severity", "source"):

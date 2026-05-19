@@ -5873,6 +5873,7 @@ def list_command_runs(
     intent_q: str = "",
     sort: str = "",
     exact: bool = False,
+    require_all: bool = False,
     show_matches: bool = False,
     limit: int = 100,
     offset: int = 0,
@@ -5893,7 +5894,7 @@ def list_command_runs(
     # here is to merge them into a single MATCH term joined with AND).
     join_sql = ""
     match_terms: list[str] = []
-    fts_term = expanded_fts_query(q, exact=exact) if q else ""
+    fts_term = expanded_fts_query(q, exact=exact, require_all=require_all) if q else ""
     if fts_term:
         match_terms.append(fts_term)
     intent_term = _fts_escape(intent_q) if intent_q else ""

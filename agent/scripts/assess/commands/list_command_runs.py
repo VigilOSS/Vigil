@@ -29,6 +29,16 @@ def register(subparsers) -> None:
     )
     p.add_argument("--show-matches", action="store_true", help="Show why each row matched the query")
     p.add_argument("--exact", action="store_true", help="Disable fuzzy finding-alias expansion for --q")
+    p.add_argument(
+        "--all",
+        dest="require_all",
+        action="store_true",
+        help=(
+            "Require every term in --q to match (AND), while still expanding finding aliases. "
+            "Combine `VA-047 OIDC` so rows must mention both the finding (in any alias form) "
+            "and the topic. Mutually exclusive with --exact."
+        ),
+    )
     p.add_argument("--agent-name", dest="agent_name", default="", help="Filter to a single dispatching agent")
     p.add_argument("--phase", default="", help="Filter to a specific engagement phase")
     p.add_argument("--tool-name", dest="tool_name", default="", help="Filter to the route-derived tool label (e.g. nmap, command)")
@@ -121,6 +131,8 @@ def _build_query(args) -> str:
         params.append(("show_matches", "true"))
     if getattr(args, "exact", False):
         params.append(("exact", "true"))
+    if getattr(args, "require_all", False):
+        params.append(("require_all", "true"))
     if args.success:
         params.append(("success", "true"))
     if args.failed:

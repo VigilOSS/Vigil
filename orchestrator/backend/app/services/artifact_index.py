@@ -21,6 +21,9 @@ DEFAULT_ROOTS = (
     "scans/reports",
     "downloads",
 )
+# Engagement-root files (not directories) that sync should also pick up so the
+# deliverable lands in `artifact search` without an explicit register call.
+DEFAULT_ROOT_FILES = ("report.md",)
 EXCLUDED_DIR_NAMES = frozenset({
     ".git",
     ".hg",
@@ -288,7 +291,7 @@ def register_artifact(
     return _serialize_artifact(row)
 
 
-def _iter_default_files(root: Path) -> set[str]:
+def _iter_default_files(root: Path, walk_errors: list[str] | None = None) -> set[str]:
     paths: set[str] = set()
     for root_name in DEFAULT_ROOTS:
         base = root / root_name
@@ -297,23 +300,36 @@ def _iter_default_files(root: Path) -> set[str]:
         if base.is_file():
             paths.add(base.relative_to(root).as_posix())
             continue
-        for path in _walk_tracked(base):
+        for path in _walk_tracked(base, root=root, walk_errors=walk_errors):
             paths.add(path.relative_to(root).as_posix())
+    for name in DEFAULT_ROOT_FILES:
+        candidate = root / name
+        if candidate.is_file():
+            paths.add(candidate.relative_to(root).as_posix())
     return paths
 
 
-def _walk_tracked(base: Path):
+def _walk_tracked(base: Path, *, root: Path | None = None, walk_errors: list[str] | None = None):
     """Yield files under ``base`` while pruning version-control and build dirs.
 
     `Path.rglob` cannot prune, so a large `.git` or `node_modules` would hash
-    thousands of irrelevant files on every sync.
+    thousands of irrelevant files on every sync. OSError/PermissionError on a
+    subdirectory becomes a structured entry on ``walk_errors`` so the sync
+    caller can surface "permission denied at notes/private/" instead of
+    quietly missing files.
     """
     stack = [base]
     while stack:
         current = stack.pop()
         try:
             entries = list(current.iterdir())
-        except (OSError, PermissionError):
+        except (OSError, PermissionError) as exc:
+            if walk_errors is not None:
+                try:
+                    rel = current.relative_to(root) if root else current
+                except ValueError:
+                    rel = current
+                walk_errors.append(f"{rel}: {exc.__class__.__name__}: {exc}")
             continue
         for entry in entries:
             if entry.is_symlink():
@@ -439,7 +455,8 @@ def sync_artifacts(engagement_id: int) -> dict[str, Any]:
                 (engagement_id,),
             ).fetchall()
         }
-    discovered = _iter_default_files(root) | existing_paths
+    walk_errors: list[str] = []
+    discovered = _iter_default_files(root, walk_errors=walk_errors) | existing_paths
     touched_paths: set[str] = set()
     registered = 0
     for relative_path in sorted(discovered):
@@ -470,7 +487,12 @@ def sync_artifacts(engagement_id: int) -> dict[str, Any]:
             "SELECT COUNT(*) FROM assessment_artifacts WHERE engagement_id = ? AND present = 0",
             (engagement_id,),
         ).fetchone()[0]
-    return {"registered": registered, "present": int(present), "missing": int(missing)}
+    return {
+        "registered": registered,
+        "present": int(present),
+        "missing": int(missing),
+        "walk_errors": walk_errors,
+    }
 
 
 def search_artifacts(
@@ -543,6 +565,59 @@ def get_artifact(engagement_id: int, artifact_id: int) -> dict[str, Any]:
     return data
 
 
+def set_scratch_under_prefix(
+    engagement_id: int,
+    *,
+    prefix: str,
+    scratch: bool = True,
+) -> dict[str, Any]:
+    """Bulk-mark every indexed artifact whose relative_path starts with ``prefix``.
+
+    For the report-time landslide case: an engagement with 30 unlinked
+    `notes/*.md` scratch files can be cleared with one call
+    (``--under notes/scratch/``) instead of 30 single-target mark-scratch
+    invocations. Returns the affected paths so the caller has an audit
+    trail of what changed.
+    """
+    _engagement, root = _engagement_root(engagement_id)
+    # Reuse the normalizer so callers can pass either a relative ("notes/")
+    # or an absolute prefix inside the engagement directory. Empty / "."
+    # prefixes are rejected because they would silently flag every indexed
+    # artifact — `notes/` is the conservative default if the caller wanted
+    # "all my markdown notes".
+    if prefix in (".", "./", ""):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="prefix is required; pass e.g. 'notes/' to mark every indexed note",
+        )
+    normalized = _normalize_relative_path(root, prefix)
+    # Anchor at a path-segment boundary so "notes/foo" never accidentally
+    # matches "notes/foobar".
+    if not normalized.endswith("/"):
+        normalized = normalized + "/"
+    with get_connection() as connection:
+        like_pattern = f"{normalized}%"
+        rows = connection.execute(
+            "SELECT id, relative_path FROM assessment_artifacts "
+            "WHERE engagement_id = ? AND relative_path LIKE ?",
+            (engagement_id, like_pattern),
+        ).fetchall()
+        if not rows:
+            return {"matched": 0, "updated": [], "prefix": normalized}
+        ids = [int(r["id"]) for r in rows]
+        placeholders = ",".join("?" for _ in ids)
+        connection.execute(
+            f"UPDATE assessment_artifacts SET scratch = ?, updated_at = ? "
+            f"WHERE id IN ({placeholders})",
+            (1 if scratch else 0, _utcnow_iso(), *ids),
+        )
+    return {
+        "matched": len(rows),
+        "updated": [str(r["relative_path"]) for r in rows],
+        "prefix": normalized,
+    }
+
+
 def register_reference_if_local(
     engagement_id: int,
     *,
@@ -569,9 +644,11 @@ def set_scratch_flag(
     """Mark an artifact row as scratch (excluded from report-readiness checks).
 
     A scratch artifact stays in the FTS index — search and resume-brief still
-    surface it — but report-readiness ignores it. The escape valve for
-    engagements where specialists or operators write working notes that are
-    legitimately not part of the durable engagement memory.
+    surface it — but report-readiness ignores it. When called by path against
+    an engagement-local file that has not yet been indexed (e.g., a freshly
+    written `notes/triage.md` before the next `artifact sync`), this registers
+    the row inline so the operator does not need to run sync first. Called by
+    id requires the row to exist.
     """
     _engagement, root = _engagement_root(engagement_id)
     with get_connection() as connection:
@@ -581,21 +658,35 @@ def set_scratch_flag(
                 "SELECT * FROM assessment_artifacts WHERE engagement_id = ? AND id = ?",
                 (engagement_id, int(artifact_id)),
             ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found")
         elif path:
             relative_path = _normalize_relative_path(root, path)
             row = connection.execute(
                 "SELECT * FROM assessment_artifacts WHERE engagement_id = ? AND relative_path = ?",
                 (engagement_id, relative_path),
             ).fetchone()
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found")
+        else:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path or artifact_id is required")
+    if row is None:
+        # Path-based mark on a file that exists on disk but has not been
+        # indexed yet — register inline so the operator does not have to
+        # chase a sync before scratching a brand-new note.
+        try:
+            row_dict = register_artifact(engagement_id, path=path)
+        except HTTPException:
+            raise
+        artifact_id_value = int(row_dict["id"])
+    else:
+        artifact_id_value = int(row["id"])
+    with get_connection() as connection:
         connection.execute(
             "UPDATE assessment_artifacts SET scratch = ?, updated_at = ? WHERE id = ?",
-            (1 if scratch else 0, _utcnow_iso(), int(row["id"])),
+            (1 if scratch else 0, _utcnow_iso(), artifact_id_value),
         )
         updated = connection.execute(
             "SELECT * FROM assessment_artifacts WHERE id = ?",
-            (int(row["id"]),),
+            (artifact_id_value,),
         ).fetchone()
     assert updated is not None
     return _serialize_artifact(updated)
