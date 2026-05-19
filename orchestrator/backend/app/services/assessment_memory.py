@@ -222,8 +222,8 @@ def build_resume_brief(
         "recommended_next_actions": _recommended_actions(
             finding=canonical_finding or finding,
             agent_id=agent_id,
-            has_artifacts=bool(artifacts),
-            has_command_matches=bool(command_matches),
+            artifacts=artifacts,
+            command_matches=command_matches,
             stale_dispatches=dispatch_picture.get("stale_in_progress_dispatches") or [],
         ),
     }
@@ -233,21 +233,57 @@ def _recommended_actions(
     *,
     finding: str,
     agent_id: str,
-    has_artifacts: bool,
-    has_command_matches: bool,
+    artifacts: list[dict[str, Any]],
+    command_matches: list[dict[str, Any]],
     stale_dispatches: list[dict[str, Any]],
-) -> list[dict[str, str]]:
-    actions: list[dict[str, str]] = []
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    max_actions = 8
+
+    def add(
+        reason: str,
+        command: str,
+        *,
+        entity_kind: str = "",
+        entity_id: str | int | None = None,
+    ) -> None:
+        if len(actions) >= max_actions:
+            return
+        action: dict[str, Any] = {"reason": reason, "command": command}
+        if entity_kind:
+            action["entity_kind"] = entity_kind
+        if entity_id is not None and entity_id != "":
+            action["entity_id"] = entity_id
+        actions.append(action)
+
     if finding:
-        actions.append({"reason": "inspect finding", "command": f"aith assess fetch findings/{finding}"})
-        actions.append({"reason": "command coverage", "command": f"aith assess list-command-runs --q {finding} --show-matches"})
-        actions.append({"reason": "artifact context", "command": f"aith assess artifact search --finding {finding}"})
-    elif not has_command_matches:
-        actions.append({"reason": "recent command coverage", "command": "aith assess list-command-runs --limit 20"})
-    if not has_artifacts:
-        actions.append({"reason": "refresh artifact index", "command": "aith assess artifact sync"})
+        add("inspect finding", f"aith assess fetch findings/{finding}", entity_kind="finding", entity_id=finding)
+        add("command coverage", f"aith assess list-command-runs --q {finding} --show-matches", entity_kind="finding", entity_id=finding)
+        add("artifact context", f"aith assess artifact search --finding {finding}", entity_kind="finding", entity_id=finding)
+    elif not command_matches:
+        add("recent command coverage", "aith assess list-command-runs --limit 20")
     if agent_id:
-        actions.append({"reason": "handoff continuation", "command": f"aith assess agent render-handoff {agent_id}"})
+        add("handoff continuation", f"aith assess agent render-handoff {agent_id}", entity_kind="agent", entity_id=agent_id)
     if stale_dispatches:
-        actions.append({"reason": "stale dispatch lifecycle", "command": "aith assess agent reconcile-stale --dry-run"})
-    return actions[:8]
+        add("stale dispatch lifecycle", "aith assess agent reconcile-stale --dry-run")
+    if not artifacts:
+        add("refresh artifact index", "aith assess artifact sync")
+    for row in command_matches[:3]:
+        run_id = row.get("id")
+        if run_id is not None:
+            add(
+                "inspect matching command run",
+                f"aith assess get-command-run {run_id}",
+                entity_kind="command_run",
+                entity_id=run_id,
+            )
+    for row in artifacts[:3]:
+        artifact_id = row.get("id")
+        if artifact_id is not None:
+            add(
+                "inspect indexed artifact",
+                f"aith assess artifact get {artifact_id}",
+                entity_kind="artifact",
+                entity_id=artifact_id,
+            )
+    return actions

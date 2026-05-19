@@ -672,6 +672,14 @@ treat it as the compact operating picture. Use its finding, command-run, handoff
 and artifact IDs for drill-down; do not reconstruct state by reading unindexed
 local notes first.
 
+Write durable state to backend tables and linked artifacts immediately — hidden
+markdown notes break resume, report readiness, and cross-agent handoff because
+future agents cannot query or verify them. Any `.md` file under `notes/` that
+matters after the current command must be registered with `aith assess artifact
+register <path>` and linked through a finding, chain, dispatch/agent, surface,
+request variant, or command run before the dispatch closes. Unlinked markdown
+notes are scratch only and are not valid resume or report input.
+
 ### Mandatory closing sequence (every specialist runs this before returning)
 
 1. `aith assess record-finding <agent-name> <finding-json>` per finding.
