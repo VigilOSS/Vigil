@@ -496,12 +496,13 @@ def test_runtime_start_retries_without_host_gateway_when_docker_rejects_flag(tmp
     assert "--add-host=host.docker.internal:host-gateway" not in run_commands[1]
 
 
-def test_mitmproxy_docker_start_builds_and_mounts_engagement(tmp_path: Path) -> None:
+def test_mitmproxy_docker_start_builds_and_mounts_engagements_root(tmp_path: Path) -> None:
     from ai_threat_hunting_cli.docker import DockerResult
     from ai_threat_hunting_cli.mitmproxy import MitmproxyOptions, start_proxy
 
     install_root = tmp_path / "install"
-    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagements_root = install_root / "agent" / "engagements"
+    engagement = engagements_root / "eng-1"
     engagement.mkdir(parents=True)
     (engagement / "scope.json").write_text("{}", encoding="utf-8")
     (engagement / ".orchestrator.env").write_text(
@@ -523,7 +524,12 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagement(tmp_path: Path) -> 
         return DockerResult(0, "", "")
 
     start_proxy(
-        MitmproxyOptions(install_root=install_root, engagement_dir=engagement, mode="docker", port=9090),
+        MitmproxyOptions(
+            install_root=install_root,
+            engagements_root=engagements_root,
+            mode="docker",
+            port=9090,
+        ),
         runner=runner,
         verify_port=False,
     )
@@ -533,9 +539,14 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagement(tmp_path: Path) -> 
     assert str(install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile") in build_command
     assert str(install_root / "agent") == build_command[-1]
     assert "--add-host=host.docker.internal:host-gateway" in run_command
-    assert f"127.0.0.1:9090:8080" in run_command
-    assert f"{engagement}:/engagement" in run_command
+    assert "127.0.0.1:9090:8080" in run_command
+    # New contract: bind-mount the whole engagements tree at /engagements.
+    assert f"{engagements_root}:/engagements" in run_command
+    # ENGAGEMENT_KEY is gone — the addon learns the key per flow.
+    assert not any(item.startswith("ENGAGEMENT_KEY=") for item in run_command)
     assert "ORCHESTRATOR_BASE_URL=http://host.docker.internal:18000" in run_command
+    # The --set switches the addon to multi-engagement mode.
+    assert "engagements_root=/engagements" in run_command
 
 
 def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -543,7 +554,8 @@ def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pyt
     from ai_threat_hunting_cli.docker import DockerResult
 
     install_root = tmp_path / "install"
-    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagements_root = install_root / "agent" / "engagements"
+    engagement = engagements_root / "eng-1"
     engagement.mkdir(parents=True)
     (engagement / "scope.json").write_text("{}", encoding="utf-8")
     (engagement / ".orchestrator.env").write_text(
@@ -570,14 +582,20 @@ def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setattr(mitmproxy_module, "_port_open", fake_port_open)
 
     mitmproxy_module.start_proxy(
-        mitmproxy_module.MitmproxyOptions(install_root=install_root, engagement_dir=engagement, port=9090),
+        mitmproxy_module.MitmproxyOptions(
+            install_root=install_root, engagements_root=engagements_root, port=9090
+        ),
         runner=runner,
     )
 
     assert attempts == [("127.0.0.1", 9090)] * 3
 
 
-def test_mitmproxy_start_without_arg_uses_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mitmproxy_start_uses_install_engagements_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`aith mitmproxy start` now mounts the whole engagements tree — no
+    per-engagement context required, the addon routes each captured flow to
+    the matching engagement.
+    """
     from ai_threat_hunting_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
@@ -588,14 +606,13 @@ def test_mitmproxy_start_without_arg_uses_current_engagement(tmp_path: Path, mon
     captured: dict[str, object] = {}
 
     def fake_start_proxy(options: object) -> None:
-        captured["engagement_dir"] = options.engagement_dir  # type: ignore[attr-defined]
+        captured["engagements_root"] = options.engagements_root  # type: ignore[attr-defined]
 
-    monkeypatch.chdir(engagement)
     monkeypatch.setattr(main_module, "start_proxy", fake_start_proxy)
 
     main_module.main(["--root", str(install_root), "mitmproxy", "start"])
 
-    assert captured["engagement_dir"] == engagement
+    assert captured["engagements_root"] == install_root / "agent" / "engagements"
 
 
 def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1420,18 +1437,79 @@ def test_auth_without_engagement_context_requires_key_or_select(tmp_path: Path, 
         main_module.main(["--root", str(install_root), "auth", "status"])
 
 
-def test_mitmproxy_without_engagement_context_requires_key_path_or_select(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mitmproxy_start_legacy_engagement_arg_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Legacy `aith mitmproxy start <engagement>` is a no-op selector — the
+    proxy serves every active engagement. The CLI should accept it silently
+    (printing one notice) rather than error out.
+    """
     from ai_threat_hunting_cli import main as main_module
 
+    _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
     engagement = install_root / "agent" / "engagements" / "eng-1"
     engagement.mkdir(parents=True)
     (engagement / "scope.json").write_text("{}", encoding="utf-8")
-    (engagement / "engagement.json").write_text(json.dumps({"key": "eng-1", "created_at": "2026-04-24T12:00:00Z"}), encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    captured: dict[str, object] = {}
 
-    with pytest.raises(SystemExit, match="Specify an engagement key/path or --select"):
-        main_module.main(["--root", str(install_root), "mitmproxy", "start"])
+    def fake_start_proxy(options: object) -> None:
+        captured["engagements_root"] = options.engagements_root  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(main_module, "start_proxy", fake_start_proxy)
+
+    main_module.main(["--root", str(install_root), "mitmproxy", "start", "eng-1"])
+    assert captured["engagements_root"] == install_root / "agent" / "engagements"
+    err = capsys.readouterr().err
+    assert "ignoring engagement selector" in err
+
+
+def test_mitmproxy_reload_touches_sentinel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`aith mitmproxy reload` writes the sentinel the addon polls for, so the
+    bind-mount surfaces it to the running container immediately.
+    """
+    from ai_threat_hunting_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    engagements_root = install_root / "agent" / "engagements"
+    engagements_root.mkdir(parents=True)
+    main_module.main(["--root", str(install_root), "mitmproxy", "reload"])
+    sentinel = engagements_root / ".mitmproxy-reload-requested"
+    assert sentinel.exists()
+
+
+def test_mitmproxy_routes_reads_addon_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`aith mitmproxy routes` parses the snapshot the addon wrote and prints
+    a readable summary; --json round-trips the raw cache.
+    """
+    from ai_threat_hunting_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    engagements_root = install_root / "agent" / "engagements"
+    engagements_root.mkdir(parents=True)
+    snapshot = {
+        "generated_at": "2026-05-18T12:00:00Z",
+        "engagements": [
+            {
+                "key": "eng-1",
+                "scope_patterns": ["app.example.com", "*.example.com"],
+                "scope_priority": 5,
+                "updated_at": "2026-05-18T11:59:00Z",
+            }
+        ],
+    }
+    (engagements_root / ".mitmproxy-routes.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    main_module.main(["--root", str(install_root), "mitmproxy", "routes"])
+    out = capsys.readouterr().out
+    assert "eng-1" in out
+    assert "app.example.com" in out
+    main_module.main(["--root", str(install_root), "mitmproxy", "routes", "--json"])
+    out_json = capsys.readouterr().out
+    assert json.loads(out_json) == snapshot
 
 
 def test_backup_create_and_list_uses_sqlite_backup(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1674,6 +1752,7 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: name == "security-research")
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
+    monkeypatch.setattr(up_module, "start_proxy", lambda *args, **kwargs: calls.append("mitmproxy"))
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
     monkeypatch.setattr(
         up_module,
@@ -1694,7 +1773,10 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
 
     up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=lambda *args, **kwargs: None)
 
-    assert calls[:3] == ["runtime", "orchestrator", "frp-prompt"]
+    # Mitmproxy now starts unconditionally (it serves every engagement at
+    # once), so the ordered call list includes it between orchestrator and the
+    # oob token prompt.
+    assert calls[:4] == ["runtime", "orchestrator", "mitmproxy", "frp-prompt"]
 
 
 def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3045,6 +3127,12 @@ class _CapturingClient:
     def list_dispatches(self, **filters):
         return list(self.dispatches_by_id.values())
 
+    def get_handoff(self, agent_id: str):
+        return self.handoffs_by_id.get(agent_id)
+
+    def list_handoffs(self, **filters):
+        return list(self.handoffs_by_id.values())
+
     def record_decision(self, payload: dict) -> dict:
         self.decisions_recorded.append(payload)
         return {"id": 99, **payload}
@@ -3071,6 +3159,240 @@ class _CapturingClient:
 
     def close(self) -> None:
         return None
+
+
+def test_resume_brief_cli_requests_targeted_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "resume_brief_command_module",
+        "agent/scripts/assess/commands/resume_brief.py",
+    )
+    calls: list[str] = []
+
+    class _Client:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def get(self, endpoint: str):
+            calls.append(endpoint)
+            return {"engagement": {"key": "eng"}, "recommended_next_actions": []}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+    )
+
+    module.run(SimpleNamespace(engagement_dir="/tmp/eng", q="OIDC state", finding="VA047", agent_id="AG-1", as_json=True))
+
+    assert calls == ["resume-brief?q=OIDC%20state&finding=VA047&agent_id=AG-1"]
+    assert json.loads(capsys.readouterr().out)["engagement"]["key"] == "eng"
+
+
+def test_artifact_cli_registers_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "artifact_command_module",
+        "agent/scripts/assess/commands/artifact.py",
+    )
+    posts: list[tuple[str, dict]] = []
+
+    class _Client:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def post(self, endpoint: str, payload: dict):
+            posts.append((endpoint, payload))
+            return {"id": 7, "present": True, "relative_path": payload["path"], "kind": payload["kind"]}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+    )
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir="/tmp/eng",
+            action="register",
+            extra=["notes/VA-047.md"],
+            kind="note",
+            media_type="text/markdown",
+            finding="VA-047",
+            agent_id="AG-1",
+            agent_role="vulnerability-analyst",
+            command_run_id=12,
+            sensitive=True,
+            limit=50,
+            offset=0,
+            as_json=True,
+        )
+    )
+
+    assert posts == [
+        (
+            "artifacts",
+            {
+                "path": "notes/VA-047.md",
+                "kind": "note",
+                "media_type": "text/markdown",
+                "sensitive": True,
+                "producer_agent_id": "AG-1",
+                "producer_agent_role": "vulnerability-analyst",
+                "producer_command_run_id": 12,
+                "related_finding_slug": "VA-047",
+            },
+        )
+    ]
+    assert json.loads(capsys.readouterr().out)["id"] == 7
+
+
+def test_list_command_runs_cli_sends_fuzzy_search_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "list_command_runs_command_module",
+        "agent/scripts/assess/commands/list_command_runs.py",
+    )
+    calls: list[str] = []
+
+    class _Client:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def get(self, endpoint: str):
+            calls.append(endpoint)
+            return []
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+    )
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir="/tmp/eng",
+            q="VA047",
+            sort="distant",
+            show_matches=True,
+            exact=False,
+            agent_name="",
+            phase="",
+            tool_name="",
+            tool_bin="curl",
+            target_host="example.com",
+            audit_source="",
+            technique="",
+            probe_kind="",
+            intent_q="",
+            success=False,
+            failed=False,
+            destructive=False,
+            not_destructive=False,
+            timed_out=False,
+            include_output=False,
+            limit=10,
+            offset=0,
+            as_json=False,
+        )
+    )
+
+    assert calls == [
+        "command-runs?q=VA047&tool_bin=curl&target_host=example.com&sort=distant&show_matches=true&limit=10&offset=0"
+    ]
+    assert "(no command runs matched)" in capsys.readouterr().out
+
+
+def test_agent_close_uses_ready_handoff_to_complete_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "agent_command_module_close",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    fake = _CapturingClient()
+    fake.dispatches_by_id["AG-READY"] = {"agent_id": "AG-READY", "status": "in-progress"}
+    fake.handoffs_by_id["AG-READY"] = {
+        "agent_id": "AG-READY",
+        "handoff_status": "ready",
+        "handoff_version": 3,
+        "finding_slugs": ["VA-001"],
+    }
+    monkeypatch.setattr(module.dispatch, "_client_for", lambda _args: (fake, SimpleNamespace()))
+
+    module.run(
+        SimpleNamespace(
+            action="close",
+            extra=["AG-READY"],
+            agent_id=None,
+            completed_at="2026-05-19T12:00:00Z",
+            reason="stale closure",
+        )
+    )
+
+    assert fake.patches == [
+        ("AG-READY", {"status": "completed", "completed_at": "2026-05-19T12:00:00Z", "finding_slugs": ["VA-001"]})
+    ]
+    assert fake.decisions_recorded[0]["kind"] == "dispatch_closed_from_handoff"
+    assert json.loads(capsys.readouterr().out)["dispatch"]["status"] == "completed"
+
+
+def test_agent_reconcile_stale_dry_run_groups_handoffs(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "agent_command_module_reconcile",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    fake = _CapturingClient()
+    fake.dispatches_by_id["AG-READY"] = {
+        "agent_id": "AG-READY",
+        "agent_role": "vulnerability-analyst",
+        "status": "in-progress",
+        "dispatched_at": "2026-05-17T12:00:00Z",
+    }
+    fake.dispatches_by_id["AG-GAP"] = {
+        "agent_id": "AG-GAP",
+        "agent_role": "recon-specialist",
+        "status": "in-progress",
+        "dispatched_at": "2026-05-17T12:00:00Z",
+    }
+    fake.handoffs_by_id["AG-READY"] = {"agent_id": "AG-READY", "handoff_status": "ready"}
+    monkeypatch.setattr(module.dispatch, "_client_for", lambda _args: (fake, SimpleNamespace()))
+
+    module.run(
+        SimpleNamespace(
+            action="reconcile-stale",
+            extra=[],
+            agent_id=None,
+            dry_run=True,
+            max_age_hours=1,
+        )
+    )
+
+    rows = {row["agent_id"]: row for row in json.loads(capsys.readouterr().out)}
+    assert rows["AG-READY"]["category"] == "ready_handoff"
+    assert rows["AG-GAP"]["category"] == "no_handoff"
 
 
 def _run_dispatch_verb(monkeypatch, action: str, *, extra=None, **flags):

@@ -264,13 +264,13 @@ Before issuing a probing, scanning, fuzzing, or credential-testing command,
 search for prior work on this surface:
 
 ```bash
-aith assess list-command-runs --q <keyword>
+aith assess list-command-runs --q <keyword> --show-matches
 ```
 
-Default to an unscoped search so you see every agent's and every phase's
-prior work on the target; narrow with `--agent-name` or `--phase` only if the
-broad result is overwhelming. Cross-agent and cross-phase context is usually
-the most valuable coverage signal.
+Default to an unscoped fuzzy search so finding aliases, nearby metadata, every
+agent, and every phase are included; narrow with exact filters only if the broad
+result is overwhelming. Cross-agent and cross-phase context is usually the most
+valuable coverage signal.
 
 Read the results as a coverage map, not a reuse gate. Red-team depth comes
 from variants — different SQLi techniques, different SSRF payload encodings,
@@ -661,10 +661,24 @@ credentials and attack chains in their tables, and the cross-cutting handoff
 open questions / specialty extras) in `assessment_dispatch_handoffs`
 (`aith assess agent handoff --from-json <path>`).
 
-The operator queries those tables directly — `render-handoff <agent-id>`, `fetch
-findings`, `list-intel`, `list-clusters` — to assemble the next dispatch's
-context. The markdown response you return is your *reflection* on the work, not
-the canonical record of it.
+The operator queries those tables through bounded primitives — `resume-brief`,
+`render-handoff <agent-id>`, `artifact search/get`, `fetch findings`,
+`list-intel`, `list-clusters` — to assemble the next dispatch's context. The
+markdown response you return is your *reflection* on the work, not the canonical
+record of it.
+
+When the dispatch prompt includes a `resume-brief` block after Runtime Identity,
+treat it as the compact operating picture. Use its finding, command-run, handoff,
+and artifact IDs for drill-down; do not reconstruct state by reading unindexed
+local notes first.
+
+Write durable state to backend tables and linked artifacts immediately — hidden
+markdown notes break resume, report readiness, and cross-agent handoff because
+future agents cannot query or verify them. Any `.md` file under `notes/` that
+matters after the current command must be registered with `aith assess artifact
+register <path>` and linked through a finding, chain, dispatch/agent, surface,
+request variant, or command run before the dispatch closes. Unlinked markdown
+notes are scratch only and are not valid resume or report input.
 
 ### Mandatory closing sequence (every specialist runs this before returning)
 
@@ -675,12 +689,15 @@ the canonical record of it.
    `agent_id`, `agent_role`, and `phase` values from the **Runtime Identity block**
    the operator placed at the top of your dispatch prompt. The handoff row is keyed
    on `agent_id`; using a different value creates an orphaned row the operator cannot render.
+   Set `handoff_status` to `ready` when the operator can close the dispatch, or
+   `blocked` when the objective could not complete.
 5. `aith assess agent render-handoff <agent_id>` — run after step 4 as a self-check.
    Exit only after the render succeeds. A 404 means the `agent_id` in step 4 did not
    match the registered dispatch.
 
-`agent done` is operator-only — do not call it; the operator marks the dispatch
-complete after your return.
+`agent done` / `agent close` are operator-only — do not call them; the operator
+marks the dispatch complete after your return so checkpointing stays separate
+from lifecycle closure.
 
 `agent handoff` is idempotent — call it as a checkpoint after each major step, not
 only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md` "Checkpointing".

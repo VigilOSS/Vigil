@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..models.engagement import Engagement
 from ..services import activity as activity_service
+from ..services import assessment_memory
+from ..services import artifact_index
 from ..services import state_manager
 from ..services.engagements import get_engagement_or_404
 from ..ws import broadcaster
@@ -187,6 +189,22 @@ class CommandRunFinalize(BaseModel):
     peak_rss_bytes: int | None = Field(default=None, ge=0)
     cpu_user_seconds: float | None = Field(default=None, ge=0)
     cpu_system_seconds: float | None = Field(default=None, ge=0)
+
+
+class ArtifactRegisterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=2048)
+    kind: str = Field(default="", max_length=128)
+    media_type: str = Field(default="", max_length=128)
+    sensitive: bool = False
+    producer_agent_id: str | None = Field(default=None, max_length=256)
+    producer_agent_role: str | None = Field(default=None, max_length=128)
+    producer_command_run_id: int | None = Field(default=None, ge=1)
+    related_finding_slug: str | None = Field(default=None, max_length=256)
+    related_chain_key: str | None = Field(default=None, max_length=256)
+    related_surface_id: int | None = Field(default=None, ge=1)
+    related_request_variant_id: int | None = Field(default=None, ge=1)
 
 
 class JobCreate(BaseModel):
@@ -630,6 +648,9 @@ def get_command_runs(
     probe_kind: str | None = None,
     destructive: bool | None = Query(default=None),
     intent_q: str | None = None,
+    sort: Literal["", "relevance", "recent", "distant"] = "",
+    show_matches: bool = False,
+    exact: bool = False,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     include_output: bool = False,
@@ -650,9 +671,30 @@ def get_command_runs(
         probe_kind=probe_kind or "",
         destructive=destructive,
         intent_q=intent_q or "",
+        sort=sort,
+        exact=exact,
+        show_matches=show_matches,
         limit=limit,
         offset=offset,
         include_output=include_output,
+    )
+
+
+@router.get("/resume-brief")
+def get_resume_brief(
+    engagement_key: str,
+    q: str = "",
+    finding: str = "",
+    agent_id: str = "",
+    max_age_hours: float = Query(default=24.0, gt=0, le=24 * 30),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return assessment_memory.build_resume_brief(
+        engagement.id,
+        q=q,
+        finding=finding,
+        agent_id=agent_id,
+        max_age_hours=max_age_hours,
     )
 
 
@@ -660,6 +702,131 @@ def get_command_runs(
 def get_command_run(engagement_key: str, command_run_id: int) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.get_command_run(engagement.id, command_run_id)
+
+
+@router.post("/artifacts", status_code=status.HTTP_201_CREATED)
+async def register_artifact(engagement_key: str, request: ArtifactRegisterRequest) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = artifact_index.register_artifact(
+        engagement.id,
+        path=request.path,
+        kind=request.kind,
+        media_type=request.media_type,
+        sensitive=request.sensitive,
+        producer_agent_id=request.producer_agent_id,
+        producer_agent_role=request.producer_agent_role,
+        producer_command_run_id=request.producer_command_run_id,
+        related_finding_slug=request.related_finding_slug,
+        related_chain_key=request.related_chain_key,
+        related_surface_id=request.related_surface_id,
+        related_request_variant_id=request.related_request_variant_id,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="artifact register",
+        action=str(record.get("relative_path") or request.path),
+        actor_name=request.producer_agent_role or request.producer_agent_id or "operator",
+        result=record.get("kind", ""),
+        metadata={"artifact_id": record.get("id"), "relative_path": record.get("relative_path")},
+    )
+    await _broadcast(engagement.key, "artifact", record)
+    return record
+
+
+@router.post("/artifacts/sync")
+async def sync_artifacts(engagement_key: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    result = artifact_index.sync_artifacts(engagement.id)
+    _audit_assessment_mutation(
+        engagement.id,
+        title="artifact sync",
+        action="sync engagement artifact index",
+        actor_name="operator",
+        result=f"present={result.get('present', 0)} missing={result.get('missing', 0)}",
+        metadata=result,
+    )
+    await _broadcast(engagement.key, "artifact_sync", result)
+    return result
+
+
+@router.get("/artifacts/search")
+def search_artifacts(
+    engagement_key: str,
+    q: str = "",
+    finding: str = "",
+    limit: int = Query(default=50, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return artifact_index.search_artifacts(
+        engagement.id,
+        query=q,
+        finding=finding,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/artifacts/{artifact_id}")
+def get_indexed_artifact(engagement_key: str, artifact_id: int) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return artifact_index.get_artifact(engagement.id, artifact_id)
+
+
+class ArtifactScratchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str | None = Field(default=None, max_length=2048)
+    scratch: bool = True
+
+
+@router.post("/artifacts/{artifact_id}/scratch")
+async def mark_artifact_scratch(
+    engagement_key: str,
+    artifact_id: int,
+    request: ArtifactScratchRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    row = artifact_index.set_scratch_flag(
+        engagement.id,
+        artifact_id=artifact_id,
+        scratch=request.scratch,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="artifact mark-scratch" if request.scratch else "artifact unmark-scratch",
+        action=str(row.get("relative_path") or ""),
+        actor_name="operator",
+        result="scratch=1" if request.scratch else "scratch=0",
+        metadata={"artifact_id": row.get("id"), "relative_path": row.get("relative_path")},
+    )
+    await _broadcast(engagement.key, "artifact_scratch", row)
+    return row
+
+
+@router.post("/artifacts/scratch-by-path")
+async def mark_artifact_scratch_by_path(
+    engagement_key: str,
+    request: ArtifactScratchRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    if not (request.path or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
+    row = artifact_index.set_scratch_flag(
+        engagement.id,
+        path=request.path or "",
+        scratch=request.scratch,
+    )
+    _audit_assessment_mutation(
+        engagement.id,
+        title="artifact mark-scratch" if request.scratch else "artifact unmark-scratch",
+        action=str(row.get("relative_path") or request.path or ""),
+        actor_name="operator",
+        result="scratch=1" if request.scratch else "scratch=0",
+        metadata={"artifact_id": row.get("id"), "relative_path": row.get("relative_path")},
+    )
+    await _broadcast(engagement.key, "artifact_scratch", row)
+    return row
 
 
 @router.get("/surfaces")
@@ -1285,6 +1452,7 @@ _DISPATCH_MODE = Literal[
 ]
 _REASONING = Literal["low", "medium", "high", "xhigh", "max"]
 _CONFIDENCE = Literal["low", "medium", "high"]
+_HANDOFF_STATUS = Literal["checkpointed", "ready", "blocked", "superseded"]
 
 
 # Roles exempt from declaring `skills` on dispatch. The operator coordinates
@@ -1359,6 +1527,8 @@ class HandoffCreate(BaseModel):
     working_artifacts: list[dict[str, Any]] | None = None
     open_questions: list[str] | None = None
     recommended_next_agent: str | None = Field(default=None, max_length=128)
+    handoff_status: _HANDOFF_STATUS = "checkpointed"
+    closed_dispatch_status: _DISPATCH_STATUS | None = None
     extras: dict[str, Any] | None = None
 
 
@@ -1375,6 +1545,8 @@ class HandoffUpdate(BaseModel):
     working_artifacts: list[dict[str, Any]] | None = None
     open_questions: list[str] | None = None
     recommended_next_agent: str | None = Field(default=None, max_length=128)
+    handoff_status: _HANDOFF_STATUS | None = None
+    closed_dispatch_status: _DISPATCH_STATUS | None = None
     extras: dict[str, Any] | None = None
 
 
@@ -1423,15 +1595,29 @@ class CoverageDeferralPayload(BaseModel):
     hostname: str | None = Field(default=None, min_length=1)
     hosts: list[str] | None = Field(default=None)
     approved_by: str | None = Field(default=None, min_length=1)
+    # Engagement-wide deferrals (e.g., "OSINT is out of scope for this whole
+    # engagement") satisfy the named objectives for EVERY host with signal,
+    # so operators don't have to duplicate the same deferral per host on
+    # wildcard/large engagements. Mutually exclusive with the host fields:
+    # an engagement-wide flag plus a host field is almost always an operator
+    # mistake (which one wins?), so reject the ambiguous shape outright.
+    engagement_wide: bool | None = Field(default=None)
 
     @model_validator(mode="after")
-    def _require_at_least_one_host_field(self) -> "CoverageDeferralPayload":
-        if not any(
+    def _require_host_or_engagement_wide(self) -> "CoverageDeferralPayload":
+        has_host = any(
             [self.host, self.target, self.hostname, self.hosts and any(self.hosts)]
-        ):
+        )
+        if not has_host and not self.engagement_wide:
             raise ValueError(
-                "coverage_deferral payload requires at least one of: "
-                "host, target, hostname, or hosts[] (non-empty)"
+                "coverage_deferral payload requires one of: "
+                "host, target, hostname, hosts[] (non-empty), or "
+                "engagement_wide=true"
+            )
+        if has_host and self.engagement_wide:
+            raise ValueError(
+                "coverage_deferral payload cannot mix host fields with "
+                "engagement_wide=true; pick one or the other"
             )
         if self.hosts is not None:
             for entry in self.hosts:
@@ -1575,6 +1761,8 @@ async def create_handoff(engagement_key: str, request: HandoffCreate) -> dict[st
         working_artifacts=request.working_artifacts,
         open_questions=request.open_questions,
         recommended_next_agent=request.recommended_next_agent,
+        handoff_status=request.handoff_status,
+        closed_dispatch_status=request.closed_dispatch_status,
         extras=request.extras,
     )
     _audit_assessment_mutation(
@@ -1631,6 +1819,8 @@ async def patch_handoff(
         working_artifacts=request.working_artifacts,
         open_questions=request.open_questions,
         recommended_next_agent=request.recommended_next_agent,
+        handoff_status=request.handoff_status,
+        closed_dispatch_status=request.closed_dispatch_status,
         extras=request.extras,
     )
     _audit_assessment_mutation(

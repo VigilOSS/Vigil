@@ -27,6 +27,8 @@ class EngagementView:
     exploit_policy: str
     exploit_review_state: str
     approved_targets: list[str]
+    scope_hosts: list[str]
+    scope_priority: int
     created_at: str
     updated_at: str
     session_count: int
@@ -326,23 +328,74 @@ def maybe_sync_engagements(force: bool = False) -> None:
         _last_sync_signature = signature
 
 
-def _scope_details(engagement_root: Path) -> tuple[str, str, str, list[str]]:
+def _scope_details(
+    engagement_root: Path,
+) -> tuple[str, str, str, list[str], list[str], int]:
     try:
         scope = _migrate_scope_file(engagement_root / "scope.json")
     except RuntimeError as exc:
         _logger.warning("Using persisted engagement identity for invalid scope at %s: %s", engagement_root, exc)
-        return "unknown", "pause", "pending", []
+        return "unknown", "pause", "pending", [], [], 0
     current_phase = str(scope.get("current_phase") or "unknown")
     exploit_policy = str(scope.get("exploit_policy") or "pause")
     exploit_review_state = str(scope.get("exploit_review_state") or "pending")
     approved_targets = scope.get("approved_targets")
     if not isinstance(approved_targets, list):
         approved_targets = []
-    return current_phase, exploit_policy, exploit_review_state, [str(item) for item in approved_targets]
+    scope_hosts = _collect_scope_hosts(scope)
+    raw_priority = scope.get("scope_priority", 0)
+    try:
+        scope_priority = int(raw_priority) if raw_priority is not None else 0
+    except (TypeError, ValueError):
+        scope_priority = 0
+    return (
+        current_phase,
+        exploit_policy,
+        exploit_review_state,
+        [str(item) for item in approved_targets],
+        scope_hosts,
+        scope_priority,
+    )
+
+
+def _collect_scope_hosts(scope: dict[str, Any]) -> list[str]:
+    """Return the deduped, lowercased host-pattern list from scope.json.
+
+    Mirrors the parsing that ``agent/scripts/proxy_addon.py`` does today so the
+    backend is a faithful registry for the multi-engagement mitmproxy router.
+    Reads from ``hosts`` / ``scope_hosts`` / ``scope`` lists plus a top-level
+    ``hostname`` string.
+    """
+    raw: list[str] = []
+    for key in ("hosts", "scope_hosts", "scope"):
+        value = scope.get(key)
+        if isinstance(value, list):
+            raw.extend(value)
+    hostname = scope.get("hostname")
+    if isinstance(hostname, str) and hostname:
+        raw.append(hostname)
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        normalized = item.strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
 
 
 def _view_for(engagement: Engagement) -> EngagementView:
-    current_phase, exploit_policy, exploit_review_state, approved_targets = _scope_details(Path(engagement.engagement_root))
+    (
+        current_phase,
+        exploit_policy,
+        exploit_review_state,
+        approved_targets,
+        scope_hosts,
+        scope_priority,
+    ) = _scope_details(Path(engagement.engagement_root))
     return EngagementView(
         id=engagement.id,
         key=engagement.key,
@@ -353,6 +406,8 @@ def _view_for(engagement: Engagement) -> EngagementView:
         exploit_policy=exploit_policy,
         exploit_review_state=exploit_review_state,
         approved_targets=approved_targets,
+        scope_hosts=scope_hosts,
+        scope_priority=scope_priority,
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
         session_count=len(db.list_engagement_sessions_for_engagement(engagement.id)),

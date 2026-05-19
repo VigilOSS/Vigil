@@ -496,6 +496,80 @@ def test_coverage_deferral_validator_accepts_hosts_list_alias(client, isolate_se
     assert response.status_code == 201, response.text
 
 
+def test_coverage_deferral_validator_accepts_engagement_wide_without_host(client, isolate_settings):
+    """`engagement_wide=true` is the supported shape for engagement-level
+    skips (e.g., OSINT out-of-scope for the whole engagement). Without this,
+    operators would have to duplicate the same deferral per host on wildcard
+    engagements — the CLI guidance recommends the engagement-wide form, so
+    the validator must accept it."""
+    _seed(client, isolate_settings)
+    response = _post_decision_raw(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "engagement_wide": True,
+            "deferred_objectives": ["osint"],
+            "reason": "Engagement brief explicitly excludes OSINT",
+            "approved_by": "operator",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+
+def test_coverage_deferral_validator_rejects_engagement_wide_mixed_with_host(client, isolate_settings):
+    """Mixing engagement_wide=true with a host field is ambiguous (which
+    wins?) and almost always an operator mistake. Reject outright."""
+    _seed(client, isolate_settings)
+    response = _post_decision_raw(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "engagement_wide": True,
+            "host": "api.target.example",
+            "deferred_objectives": ["osint"],
+            "reason": "...",
+        },
+    )
+    assert response.status_code == 422
+    assert "engagement_wide" in response.text.lower()
+
+
+def test_per_host_coverage_engagement_wide_deferral_satisfies_every_host(client, isolate_settings):
+    """An engagement-wide deferral marks the named objectives as deferred
+    on EVERY host with signal — that's the whole point of the engagement-
+    wide shape. Without this fold, operators on wildcard/large engagements
+    have to record duplicate per-host deferrals for objectives that are
+    fundamentally engagement-level (OSINT scope decisions, etc.).
+    """
+    _seed(client, isolate_settings)
+    _create_service(client, endpoint="api.target.example")
+    _create_service(client, endpoint="edge.target.example")
+    _record_decision(
+        client,
+        kind="coverage_deferral",
+        payload={
+            "engagement_wide": True,
+            "deferred_objectives": ["osint"],
+            "reason": "Engagement brief excludes OSINT",
+            "approved_by": "operator",
+        },
+    )
+
+    body = client.get(f"{ASSESSMENT_BASE}/coverage-readiness/by-host").json()
+    rows = {row["host"]: row for row in body["hosts"]}
+
+    # Both hosts inherit the deferral, even though neither was named.
+    for host in ("api.target.example", "edge.target.example"):
+        assert host in rows
+        assert rows[host]["outcomes"]["osint"]["deferred"] is True
+        assert "osint" not in rows[host]["unmet_objectives"]
+        assert "osint" in rows[host]["deferred_objectives"]
+        # The engagement-wide row surfaces in the per-host audit list too so
+        # operators can see WHY it was marked deferred.
+        deferral_payloads = [d["payload"] for d in rows[host]["deferrals"]]
+        assert any(p.get("engagement_wide") is True for p in deferral_payloads)
+
+
 def test_coverage_deferral_validator_does_not_constrain_other_kinds(client, isolate_settings):
     """Unknown kinds keep the free-form payload contract — only `coverage_deferral` is gated."""
     _seed(client, isolate_settings)

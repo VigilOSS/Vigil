@@ -48,8 +48,8 @@ and runs land in `assessment_command_runs`. Treat that history as a coverage
 map — a record of what harnesses/corpora/sanitizer configs have already been
 run so your next campaign picks a variant that hasn't been tried. Search with
 an unscoped query first so you see every agent's and every phase's prior work
-— `aith assess list-command-runs --q <keyword>` — and narrow with
-`--agent-name` or `--phase` only if the broad result is overwhelming.
+— `aith assess list-command-runs --q <keyword> --show-matches` — and narrow
+with `--agent-name` or `--phase` only if the broad result is overwhelming.
 The only campaign to skip is the identical binary + corpus + flags combination
 already run to completion; any variant (new sanitizer, new dictionary, new
 seed corpus, harness change) is new coverage. Before citing a prior run,
@@ -327,6 +327,19 @@ medium 4.0–6.9, low 0.1–3.9, info 0.0).
 
 ## 11. Mandatory Closing Sequence
 
+When the dispatch prompt includes a `resume-brief` block after Runtime Identity,
+treat it as the compact operating picture. Use its finding, command-run, handoff,
+and artifact IDs for drill-down instead of reconstructing state from unindexed
+local notes.
+
+Write durable state to backend tables and linked artifacts immediately because
+hidden markdown notes break resume, report readiness, and cross-agent handoff.
+Any `.md` file under `notes/` that matters after the current command must be
+registered with `aith assess artifact register <path>` and linked through a
+finding, chain, dispatch/agent, surface, request variant, or command run before
+the dispatch closes. Unlinked markdown notes are scratch only and are not valid
+resume or report input.
+
 Before your dispatch returns, run in this order:
 
 1. `aith assess record-finding <agent-name> <finding-json>` for each confirmed finding.
@@ -336,10 +349,12 @@ Before your dispatch returns, run in this order:
    `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the
    operator placed at the top of your dispatch prompt. The handoff row is keyed on
    `agent_id`; using a different value creates an orphaned row the operator cannot render.
+   Set `handoff_status` to `ready` when the operator can close the dispatch, or
+   `blocked` when the objective could not complete.
 4. `aith assess agent render-handoff <agent_id>` — self-check before exiting.
    A 404 means the `agent_id` did not match the registered dispatch.
 
-`update-status` is operator-only — do not call it.
+`agent done` / `agent close` are operator-only — do not call them.
 
 `aith assess agent handoff` is idempotent; checkpoint after each major phase of work, not only at the end.
 Schema: `agent/references/runtime-guides/handoff-schema.md`.

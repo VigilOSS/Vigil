@@ -659,9 +659,16 @@ function ActiveDeferralsList({ perHost }: { perHost: PerHostCoverage | undefined
       <p className="meta-text">
         Record new deferrals via{" "}
         <code>
-          aith assess agent decision --kind coverage_deferral --host &lt;host&gt; --reason &lt;why&gt;
+          aith assess agent decision --kind coverage_deferral --payload-json
+          '&#123;...&#125;'
         </code>
-        . Resolve via{" "}
+        . The payload requires <code>deferred_objectives</code> (one or more
+        of <code>waf_tier</code>, <code>service_inventory</code>,{" "}
+        <code>directory_fuzz</code>, <code>nikto_trigger</code>,{" "}
+        <code>osint</code>), <code>reason</code>, and either a host field
+        (<code>host</code> / <code>target</code> / <code>hostname</code> /{" "}
+        <code>hosts[]</code>) or <code>engagement_wide: true</code> for an
+        engagement-level skip. Resolve via{" "}
         <code>
           PATCH /engagements/&lt;key&gt;/assessment/dispatch-decisions/&lt;id&gt;
         </code>{" "}
