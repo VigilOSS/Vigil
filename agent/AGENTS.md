@@ -71,7 +71,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 1. **ASSESS STATE**
    - Read `scope.json`.
    - For resumed engagements, run `aith assess resume-brief` (see `agent/rules/resume.md`) before planning.
-   - Narrow the brief with `--finding`, `--q`, or `--agent-id` when continuing a specific thread.
+   - Narrow the brief with `--finding`, `--q`, `--agent-id`, `--since <iso>` (what's new since the last brief), or `--max-age-hours <N>` (override the per-role stale threshold; default 24h, 48h for exploit-developer/report-writer/code-*, 72h for code-fuzz-engineer).
    - Drill down only with the commands the brief points to: `get-command-run`, `artifact search/get`, `agent render-handoff`, `list-findings`, `list-intel`.
    - Findings live in the backend; `aith assess export-findings` writes a local export on demand for archival.
    - `report.md` is a report-writer deliverable, not a backend-synchronized state file.

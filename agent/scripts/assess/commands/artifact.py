@@ -123,7 +123,13 @@ def run(args) -> None:
                     print(json.dumps(result, indent=2, ensure_ascii=False))
                 else:
                     matched = result.get("matched", 0)
-                    print(f"matched={matched} prefix={result.get('prefix') or '(all)'}")
+                    prefix_display = result.get("prefix") or under
+                    print(f"matched={matched} prefix={prefix_display}")
+                    if matched == 0:
+                        print(
+                            f"  (no indexed artifacts under {prefix_display!r}; "
+                            "run `artifact sync` first or check with `artifact search`)"
+                        )
                     for path in (result.get("updated") or [])[:20]:
                         print(f"  - {path}")
                     if matched > 20:

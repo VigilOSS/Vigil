@@ -6,6 +6,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from fastapi import HTTPException, status
+
 from ..db import get_connection
 from . import artifact_index, state_manager
 from .events import _engagement_or_404
@@ -222,6 +224,17 @@ def build_resume_brief(
     max_age_hours: float | None = None,
     since: str = "",
 ) -> dict[str, Any]:
+    if since and _parse_iso(since) is None:
+        # Silent fallback would hide the bug — the operator types
+        # `--since today` and gets the full brief back, then assumes
+        # nothing has changed. Refuse loudly.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"--since={since!r} is not a valid ISO datetime. "
+                "Use a form like 2026-05-19T10:00:00Z or 2026-05-19."
+            ),
+        )
     engagement = _engagement_or_404(engagement_id)
     root = Path(engagement.engagement_root)
     scope = _read_scope(root)

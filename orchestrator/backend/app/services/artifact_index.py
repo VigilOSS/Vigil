@@ -46,6 +46,15 @@ def _utcnow_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _escape_like(value: str) -> str:
+    """Escape SQL LIKE metacharacters with a backslash.
+
+    Callers must pair the resulting pattern with ``LIKE ? ESCAPE '\\'`` so
+    SQLite treats ``\\%`` / ``\\_`` / ``\\\\`` as literal characters.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _engagement_root(engagement_id: int) -> tuple[Any, Path]:
     engagement = _engagement_or_404(engagement_id)
     return engagement, Path(engagement.engagement_root).resolve()
@@ -309,6 +318,9 @@ def _iter_default_files(root: Path, walk_errors: list[str] | None = None) -> set
     return paths
 
 
+_WALK_ERRORS_CAP = 50
+
+
 def _walk_tracked(base: Path, *, root: Path | None = None, walk_errors: list[str] | None = None):
     """Yield files under ``base`` while pruning version-control and build dirs.
 
@@ -316,7 +328,9 @@ def _walk_tracked(base: Path, *, root: Path | None = None, walk_errors: list[str
     thousands of irrelevant files on every sync. OSError/PermissionError on a
     subdirectory becomes a structured entry on ``walk_errors`` so the sync
     caller can surface "permission denied at notes/private/" instead of
-    quietly missing files.
+    quietly missing files. The error list is capped to keep the sync
+    response from ballooning when a denied directory has many siblings; the
+    last slot is reserved for a "... and N more" sentinel.
     """
     stack = [base]
     while stack:
@@ -324,12 +338,14 @@ def _walk_tracked(base: Path, *, root: Path | None = None, walk_errors: list[str
         try:
             entries = list(current.iterdir())
         except (OSError, PermissionError) as exc:
-            if walk_errors is not None:
+            if walk_errors is not None and len(walk_errors) < _WALK_ERRORS_CAP - 1:
                 try:
                     rel = current.relative_to(root) if root else current
                 except ValueError:
                     rel = current
                 walk_errors.append(f"{rel}: {exc.__class__.__name__}: {exc}")
+            elif walk_errors is not None and len(walk_errors) == _WALK_ERRORS_CAP - 1:
+                walk_errors.append(f"... walk error cap ({_WALK_ERRORS_CAP - 1}) reached; further entries suppressed")
             continue
         for entry in entries:
             if entry.is_symlink():
@@ -520,8 +536,15 @@ def search_artifacts(
         where.append("assessment_artifacts_fts MATCH ?")
         params.append(fts_expr)
     if canonical_finding:
-        where.append("(a.related_finding_slug = ? OR a.indexed_text LIKE ? OR a.relative_path LIKE ?)")
-        params.extend([canonical_finding, f"%{canonical_finding}%", f"%{canonical_finding}%"])
+        # Slugs are validated to canonical `<PREFIX>-NNN` and won't contain
+        # LIKE wildcards today; escape defensively in case the validator
+        # ever relaxes.
+        escaped_slug = _escape_like(canonical_finding)
+        where.append(
+            "(a.related_finding_slug = ? OR a.indexed_text LIKE ? ESCAPE '\\' "
+            "OR a.relative_path LIKE ? ESCAPE '\\')"
+        )
+        params.extend([canonical_finding, f"%{escaped_slug}%", f"%{escaped_slug}%"])
     params.extend([int(limit), int(offset)])
     rank_select = ""
     if canonical_finding:
@@ -595,11 +618,17 @@ def set_scratch_under_prefix(
     # matches "notes/foobar".
     if not normalized.endswith("/"):
         normalized = normalized + "/"
+    # SQL LIKE treats `%` and `_` as wildcards. Engagement paths can legally
+    # contain `_` ("notes/my_scratch/") and could theoretically contain `%`
+    # (URL-encoded artifacts). Escape both with a backslash and tell SQLite
+    # to use that as the escape character so the prefix matches as a literal
+    # path segment.
+    escaped_prefix = _escape_like(normalized)
+    like_pattern = f"{escaped_prefix}%"
     with get_connection() as connection:
-        like_pattern = f"{normalized}%"
         rows = connection.execute(
             "SELECT id, relative_path FROM assessment_artifacts "
-            "WHERE engagement_id = ? AND relative_path LIKE ?",
+            "WHERE engagement_id = ? AND relative_path LIKE ? ESCAPE '\\'",
             (engagement_id, like_pattern),
         ).fetchall()
         if not rows:
@@ -671,11 +700,20 @@ def set_scratch_flag(
     if row is None:
         # Path-based mark on a file that exists on disk but has not been
         # indexed yet — register inline so the operator does not have to
-        # chase a sync before scratching a brand-new note.
-        try:
-            row_dict = register_artifact(engagement_id, path=path)
-        except HTTPException:
-            raise
+        # chase a sync before scratching a brand-new note. Refuse the
+        # convenience path when the file does not exist on disk: scratching
+        # a ghost path would leave a row with present=False that future
+        # consumers can't act on, and the operator probably mistyped.
+        on_disk = (root / _normalize_relative_path(root, path)).is_file()
+        if not on_disk:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"artifact not found for path={path!r} and the file does not exist on disk. "
+                    "Run `aith assess artifact sync` first or check the path."
+                ),
+            )
+        row_dict = register_artifact(engagement_id, path=path)
         artifact_id_value = int(row_dict["id"])
     else:
         artifact_id_value = int(row["id"])
