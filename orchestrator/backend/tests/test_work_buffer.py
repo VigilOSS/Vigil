@@ -275,6 +275,8 @@ def test_schema_migration_adds_priority_columns(tmp_path: Path) -> None:
             "selected_by",
             "triage_rationale",
             "live_status",
+            "request_body_truncated",
+            "response_truncated",
         ):
             assert name in columns, f"missing migrated column {name}"
 
@@ -633,10 +635,12 @@ def test_proxy_insert_uses_shared_inline_classification(tmp_path: Path) -> None:
         body=None,
         content_type="",
         content_length=0,
+        request_body_truncated=False,
         response_status=200,
         response_headers="{}",
         response_size=0,
         response_snippet=None,
+        response_truncated=False,
         case_type=case_type,
         params_key_sig="",
     )
@@ -688,15 +692,99 @@ def test_proxy_insert_reuses_open_db_connection(tmp_path: Path, monkeypatch) -> 
         body=None,
         content_type="",
         content_length=0,
+        request_body_truncated=False,
         response_status=200,
         response_headers="{}",
         response_size=0,
         response_snippet=None,
+        response_truncated=False,
         case_type="unknown",
         params_key_sig="",
     )
 
     assert seen["connection"] is cached_connection
+
+
+def test_apply_body_policy_flags_truncation() -> None:
+    """`_apply_body_policy` must surface truncation explicitly so cases.db
+    rows never silently misrepresent a partial body as complete. The
+    response_snippet path lives directly in `CaseCollector.response` and
+    is exercised in the proxy_addon routing tests; this nails the
+    request side.
+    """
+    module = _load_proxy_addon_module()
+    collector = module.CaseCollector()
+    big = b"x" * (module.BODY_TRUNCATE + 100)
+    body, truncated = collector._apply_body_policy(big, "application/json")
+    assert truncated is True
+    assert body is not None and len(body) == module.BODY_TRUNCATE
+
+    small = b'{"ok":true}'
+    body, truncated = collector._apply_body_policy(small, "application/json")
+    assert truncated is False
+    assert body == small.decode()
+
+    # Binary types and unsaveable content types return (None, False) so
+    # the proxy doesn't accidentally label a "we never tried" body as
+    # "truncated".
+    body, truncated = collector._apply_body_policy(b"\x89PNG", "image/png")
+    assert (body, truncated) == (None, False)
+    body, truncated = collector._apply_body_policy(b"some bytes", "application/zip")
+    assert (body, truncated) == (None, False)
+
+
+def test_proxy_insert_persists_truncation_flags(tmp_path: Path) -> None:
+    """End-to-end through `_insert_case` → `db_insert_work_item` →
+    `work_items`. Catches a regression where the flags are accepted as
+    kwargs but never written to the row.
+    """
+    module = _load_proxy_addon_module()
+    engagements_root = tmp_path / "engagements"
+    engagements_root.mkdir()
+    collector, entry = _make_collector_with_engagement(module, engagements_root)
+
+    collector._insert_case(
+        entry,
+        queue_key="variant:1:unknown",
+        request_variant_id=1,
+        service_id=None,
+        auth_context="anonymous",
+        method="POST",
+        url="https://target.example/api/large",
+        url_path="/api/large",
+        params={
+            "query_params": "{}",
+            "body_params": "{}",
+            "path_params": "{}",
+            "cookie_params": "{}",
+        },
+        headers="{}",
+        body="x" * module.BODY_TRUNCATE,
+        content_type="application/json",
+        content_length=module.BODY_TRUNCATE + 5000,
+        request_body_truncated=True,
+        response_status=200,
+        response_headers="{}",
+        response_size=module.RESPONSE_SNIPPET_BYTES * 4,
+        response_snippet="y" * module.RESPONSE_SNIPPET_BYTES,
+        response_truncated=True,
+        case_type="unknown",
+        params_key_sig="",
+    )
+
+    import sqlite3 as _sqlite
+    conn = _sqlite.connect(str(entry.root / "cases.db"))
+    try:
+        row = conn.execute(
+            "SELECT request_body_truncated, response_truncated, "
+            "content_length, response_size "
+            "FROM work_items WHERE queue_key = ?",
+            ("variant:1:unknown",),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row == (1, 1, module.BODY_TRUNCATE + 5000, module.RESPONSE_SNIPPET_BYTES * 4)
 
 
 def test_fetch_by_priority_vuln_agent_routes_scored_unknown_only(
