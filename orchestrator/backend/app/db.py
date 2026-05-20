@@ -1750,6 +1750,7 @@ def init_db() -> None:
             "evidence_type": "TEXT",
             "merged_into_finding_id": "INTEGER",
             "last_seen_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+            "evidence_artifact_id": "INTEGER REFERENCES assessment_artifacts(id) ON DELETE SET NULL",
         }
         for column_name, definition in finding_column_defaults.items():
             if column_name not in finding_columns:
@@ -1793,6 +1794,13 @@ def init_db() -> None:
                 END
                 WHERE status = 'confirmed'
                 """
+            )
+
+        chain_columns = _table_columns(connection, "assessment_attack_chains")
+        if chain_columns and "evidence_artifact_id" not in chain_columns:
+            connection.execute(
+                "ALTER TABLE assessment_attack_chains ADD COLUMN "
+                "evidence_artifact_id INTEGER REFERENCES assessment_artifacts(id) ON DELETE SET NULL"
             )
 
         # Migrate code_repos: add lsp_config_json if missing

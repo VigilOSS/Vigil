@@ -156,8 +156,8 @@ def _file_payload_if_changed(
 
     Compares the on-disk (size, mtime) against the stored row's
     (size_bytes, last_indexed_at). When both match and the row already has a
-    sha256, return the cached payload — saves a full re-read for files that
-    haven't changed since the last sync.
+    sha256, return the cached payload — saves a full re-read on
+    re-registration of files that haven't changed since the last index.
     """
     path = root / relative_path
     if not path.is_file():
@@ -291,20 +291,27 @@ def register_artifact(
 
 
 def _path_ref(value: Any) -> str | None:
-    """Minimal validator used by ``register_reference_if_local`` so a
-    finding/transition write with ``evidence_ref`` set automatically lands an
-    artifact row when the value looks vaguely path-like.
+    """Return *value* when it looks like a plausible engagement-local path.
 
-    Permissive on purpose — the strict path-shape filter was removed when
-    auto-walk sync was deleted. Sentence-text in ``evidence_ref`` still
-    creates a missing artifact row here; ``check-report-readiness``
-    surfaces it as ``finding_evidence_unindexed`` so the operator can
-    re-register explicitly.
+    Used by ``register_reference_if_local`` so a finding/transition/chain
+    write with ``evidence_ref`` set automatically lands an artifact row when
+    the value is a file path.  Rejects obvious sentence-text so callers don't
+    silently create ghost artifact rows for prose descriptions.
+
+    Heuristics (any match → reject):
+    - contains ``://`` (URL)
+    - empty or whitespace-only
+    - no ``/`` or ``.`` (real paths have at least an extension or a directory)
+    - two or more consecutive spaces (natural language, not a path)
     """
     if not isinstance(value, str):
         return None
     stripped = value.strip()
     if not stripped or "://" in stripped:
+        return None
+    if "/" not in stripped and "." not in stripped:
+        return None
+    if "  " in stripped:
         return None
     return stripped
 
@@ -480,9 +487,9 @@ def set_scratch_flag(
     A scratch artifact stays in the FTS index — search and resume-brief still
     surface it — but report-readiness ignores it. When called by path against
     an engagement-local file that has not yet been indexed (e.g., a freshly
-    written `notes/triage.md` before the next `artifact sync`), this registers
-    the row inline so the operator does not need to run sync first. Called by
-    id requires the row to exist.
+    written `notes/triage.md` that hasn't been explicitly registered yet),
+    this registers the row inline so the caller doesn't need a separate
+    register step. Called by id requires the row to exist.
     """
     _engagement, root = _engagement_root(engagement_id)
     with get_connection() as connection:
@@ -515,7 +522,7 @@ def set_scratch_flag(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=(
                     f"artifact not found for path={path!r} and the file does not exist on disk. "
-                    "Run `aith assess artifact sync` first or check the path."
+                    "Register the file with `aith assess artifact register <path>` first, or check the path."
                 ),
             )
         row_dict = register_artifact(engagement_id, path=path)
