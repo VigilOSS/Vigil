@@ -579,6 +579,9 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagements_root(tmp_path: Pat
         "ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000\n",
         encoding="utf-8",
     )
+    dockerfile = install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM python:3.12-slim\n", encoding="utf-8")
     commands: list[list[str]] = []
 
     def runner(argv: list[str], **_: object) -> DockerResult:
@@ -602,6 +605,7 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagements_root(tmp_path: Pat
         ),
         runner=runner,
         verify_port=False,
+        verify_running=False,
     )
 
     build_command = next(command for command in commands if command[:3] == ["docker", "build", "-t"])
@@ -657,6 +661,7 @@ def test_mitmproxy_start_uses_install_orchestrator_url_not_engagement_override(
         MitmproxyOptions(install_root=install_root, engagements_root=engagements_root),
         runner=runner,
         verify_port=False,
+        verify_running=False,
     )
 
     run_command = next(command for command in commands if command[:3] == ["docker", "run", "-d"])
@@ -701,6 +706,7 @@ def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pyt
             install_root=install_root, engagements_root=engagements_root, port=9090
         ),
         runner=runner,
+        verify_running=False,
     )
 
     assert attempts == [("127.0.0.1", 9090)] * 3
@@ -720,7 +726,7 @@ def test_mitmproxy_start_uses_install_engagements_root(tmp_path: Path, monkeypat
     (engagement / "scope.json").write_text("{}", encoding="utf-8")
     captured: dict[str, object] = {}
 
-    def fake_start_proxy(options: object) -> None:
+    def fake_start_proxy(options: object, **_: object) -> None:
         captured["engagements_root"] = options.engagements_root  # type: ignore[attr-defined]
 
     monkeypatch.setattr(main_module, "start_proxy", fake_start_proxy)
@@ -1715,7 +1721,7 @@ def test_mitmproxy_start_legacy_engagement_arg_is_ignored(
     (engagement / "scope.json").write_text("{}", encoding="utf-8")
     captured: dict[str, object] = {}
 
-    def fake_start_proxy(options: object) -> None:
+    def fake_start_proxy(options: object, **_: object) -> None:
         captured["engagements_root"] = options.engagements_root  # type: ignore[attr-defined]
 
     monkeypatch.setattr(main_module, "start_proxy", fake_start_proxy)

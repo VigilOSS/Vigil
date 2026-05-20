@@ -30,6 +30,8 @@ from .engagements import (
 from .install import InstallOptions, InstallResult, install_from_source
 from .mitmproxy import (
     MitmproxyOptions,
+    build_image as build_proxy_image,
+    proxy_status_payload,
     read_proxy_routes,
     request_proxy_reload,
     start_proxy,
@@ -230,19 +232,42 @@ def main(argv: list[str] | None = None) -> None:
     runtime_resources_p = runtime_sub.add_parser("resources", help="Print configured runtime resource tier and live cgroup state")
     runtime_resources_p.add_argument("--json", action="store_true")
 
-    mitm_p = sub.add_parser("mitmproxy")
+    mitm_p = sub.add_parser(
+        "mitmproxy",
+        help="Manage the engagement-wide intercepting proxy (Docker container security-research-proxy on :8080).",
+    )
     mitm_sub = mitm_p.add_subparsers(dest="mitmproxy_command", required=True)
-    mitm_start = mitm_sub.add_parser("start")
+    mitm_start = mitm_sub.add_parser(
+        "start",
+        help="Start (or restart) the proxy container; builds the image first if missing.",
+    )
     # Positional kept as a deprecated shim — one or two release cycles of grace
     # so existing operator habits don't error out.
     mitm_start.add_argument("engagement", nargs="?", help=argparse.SUPPRESS)
     mitm_start.add_argument("--select", action="store_true", help=argparse.SUPPRESS)
-    mitm_start.add_argument("--port", type=int, default=8080)
-    mitm_sub.add_parser("stop")
-    mitm_sub.add_parser("status")
-    mitm_sub.add_parser("cert")
-    mitm_sub.add_parser("reload", help="Force the proxy to refresh its engagement registry")
-    mitm_routes = mitm_sub.add_parser("routes", help="Print the proxy's loaded engagement→scope mapping")
+    mitm_start.add_argument("--port", type=int, default=8080, help="Host port to bind (default 8080).")
+    mitm_start.add_argument(
+        "--build",
+        action="store_true",
+        help="Force-rebuild the proxy image before starting (use after Dockerfile or addon changes).",
+    )
+    mitm_sub.add_parser("stop", help="Stop and remove the proxy container.")
+    mitm_status = mitm_sub.add_parser(
+        "status",
+        help="Show container state, port reachability, cert volume, loaded routes, and last log lines on crash.",
+    )
+    mitm_status.add_argument("--json", action="store_true")
+    mitm_sub.add_parser(
+        "cert",
+        help="Print docker-cp + keychain-trust commands for the proxy's CA certificate.",
+    )
+    mitm_build = mitm_sub.add_parser(
+        "build",
+        help="Build the proxy Docker image without starting a container.",
+    )
+    mitm_build.add_argument("--force", action="store_true", help="Rebuild with --no-cache even if the tag exists.")
+    mitm_sub.add_parser("reload", help="Force the proxy to refresh its engagement registry.")
+    mitm_routes = mitm_sub.add_parser("routes", help="Print the proxy's loaded engagement→scope mapping.")
     mitm_routes.add_argument("--json", action="store_true")
 
     # `aith mcp` retired in the typed-CLI cutover. Keep the parser so calls fail with a clear message
@@ -660,12 +685,19 @@ def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
                 install_root=install_root,
                 engagements_root=engagements_root,
                 port=args.port,
-            )
+            ),
+            force_rebuild=args.build,
         )
     elif args.mitmproxy_command == "stop":
         stop_proxy()
+    elif args.mitmproxy_command == "build":
+        build_proxy_image(install_root, force=args.force)
     elif args.mitmproxy_command == "status":
-        subprocess.run(["docker", "ps", "--filter", "name=security-research-proxy"], check=False)
+        payload = proxy_status_payload(install_root, engagements_root)
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            _print_mitmproxy_status(payload)
     elif args.mitmproxy_command == "cert":
         print("docker cp security-research-proxy:/root/.mitmproxy/mitmproxy-ca-cert.pem ~/Desktop/mitmproxy-ca-cert.pem")
         print("sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Desktop/mitmproxy-ca-cert.pem")
@@ -689,6 +721,43 @@ def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
                 f"  {entry.get('key', '-'):30s}  priority={entry.get('scope_priority', 0):>3}  "
                 f"updated={entry.get('updated_at', '-'):>20}  scope=[{patterns}]"
             )
+
+
+def _print_mitmproxy_status(payload: dict) -> None:
+    state = payload.get("state", "?")
+    print(
+        f"mitmproxy\t{state}\tcontainer={payload.get('container', '-')}"
+        f"\tport={payload.get('port', '-')}\tport_reachable={payload.get('port_reachable')}"
+    )
+    pid_or_id = payload.get("container_id") or "-"
+    print(
+        f"image\t{payload.get('image', '-')}\tpresent={payload.get('image_present')}"
+        f"\tcontainer_id={pid_or_id}"
+    )
+    print(
+        f"cert\tvolume={payload.get('cert_volume', '-')}"
+        f"\tpresent={payload.get('cert_volume_present')}"
+    )
+    print(
+        f"upstream\t{payload.get('upstream_url', '-')}"
+        f"\tengagements_root={payload.get('engagements_root', '-')}"
+    )
+    routes_loaded = payload.get("routes_loaded") or 0
+    print(
+        f"routes\tloaded={routes_loaded}"
+        f"\tgenerated_at={payload.get('routes_generated_at') or '-'}"
+    )
+    if payload.get("exit_code") is not None and not payload.get("running"):
+        print(
+            f"last_exit\tcode={payload['exit_code']}"
+            f"\tstarted_at={payload.get('started_at') or '-'}"
+            f"\tfinished_at={payload.get('finished_at') or '-'}"
+        )
+    log_tail = payload.get("log_tail")
+    if log_tail:
+        print("recent_logs:")
+        for line in log_tail.splitlines()[-12:]:
+            print(f"  {line}")
 
 
 def _mcp(args: argparse.Namespace) -> None:
