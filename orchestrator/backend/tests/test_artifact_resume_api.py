@@ -40,6 +40,21 @@ def _write_engagement(engagements_dir: Path) -> Path:
     return eng
 
 
+def _register_note(client, path: str, **kwargs) -> dict:
+    """POST /artifacts to register a note explicitly.
+
+    The auto-walking ``artifacts/sync`` endpoint was removed; tests that
+    previously relied on sync to bulk-index ``notes/``-style files now
+    register each file with this helper to mirror what specialists do via
+    ``aith assess artifact register``.
+    """
+    payload = {"path": path, "kind": "note"}
+    payload.update(kwargs)
+    response = client.post(f"{BASE}/artifacts", json=payload)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 def _seed_finding(client, eng: Path, slug: str = "VA-047") -> None:
     (eng / "notes").mkdir(parents=True, exist_ok=True)
     (eng / "notes" / "VA-047-note.md").write_text(
@@ -72,14 +87,20 @@ def _seed_finding(client, eng: Path, slug: str = "VA-047") -> None:
     assert response.status_code == 201, response.text
 
 
-def test_artifact_sync_search_get_and_missing_state(client, isolate_settings) -> None:
+def test_artifact_register_search_and_get(client, isolate_settings) -> None:
+    """Registering a note explicitly indexes its preview for FTS and a
+    finding-scoped search ranks the linked artifact first.
+
+    Replaces the prior sync-driven version: with auto-walk gone, callers
+    register each note via POST /artifacts (or via the implicit
+    register-on-finding-write that fires when ``evidence_ref`` is set).
+    """
     eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _seed_finding(client, eng)
-
-    sync = client.post(f"{BASE}/artifacts/sync")
-    assert sync.status_code == 200, sync.text
-    assert sync.json()["present"] >= 1
+    # _seed_finding posts a finding with evidence_ref=notes/VA-047-note.md,
+    # which triggers register_reference_if_local — no explicit register call
+    # needed for the linked evidence file.
 
     search = client.get(f"{BASE}/artifacts/search", params={"q": "VA047"})
     assert search.status_code == 200, search.text
@@ -91,22 +112,18 @@ def test_artifact_sync_search_get_and_missing_state(client, isolate_settings) ->
     assert detail.status_code == 200, detail.text
     assert "OIDC static state" in detail.json()["content"]
 
+    # A note that mentions the finding slug but is not the linked evidence:
+    # register it without --finding so it stays unlinked from VA-047.
     (eng / "notes" / "incidental-VA-047.md").write_text(
         "Incidental VA-047 mention that should not outrank the linked evidence artifact.",
         encoding="utf-8",
     )
-    sync = client.post(f"{BASE}/artifacts/sync")
-    assert sync.status_code == 200, sync.text
+    _register_note(client, "notes/incidental-VA-047.md")
     by_finding = client.get(f"{BASE}/artifacts/search", params={"finding": "VA047"})
     assert by_finding.status_code == 200, by_finding.text
+    # The explicitly finding-linked artifact must rank ahead of the incidental
+    # name-only match.
     assert by_finding.json()[0]["relative_path"] == "notes/VA-047-note.md"
-
-    (eng / "notes" / "VA-047-note.md").unlink()
-    sync = client.post(f"{BASE}/artifacts/sync")
-    assert sync.status_code == 200, sync.text
-    missing = client.get(f"{BASE}/artifacts/{artifact_id}")
-    assert missing.status_code == 200, missing.text
-    assert missing.json()["present"] is False
 
 
 def test_artifact_sync_discovers_blue_ir_artifact_roots(client, isolate_settings) -> None:
@@ -251,9 +268,7 @@ def test_report_readiness_blocks_unlinked_markdown_notes(client, isolate_setting
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _seed_finding(client, eng)
     (eng / "notes" / "scratch.md").write_text("Durable state that is not linked anywhere", encoding="utf-8")
-
-    sync = client.post(f"{BASE}/artifacts/sync")
-    assert sync.status_code == 200, sync.text
+    _register_note(client, "notes/scratch.md")
 
     readiness = client.get(f"{BASE}/report-readiness")
     assert readiness.status_code == 200, readiness.text
@@ -294,8 +309,8 @@ def test_report_readiness_normalizes_absolute_evidence_ref(client, isolate_setti
         },
     )
     assert created.status_code == 201, created.text
-    sync = client.post(f"{BASE}/artifacts/sync")
-    assert sync.status_code == 200, sync.text
+    # The POST /findings call above triggers register_reference_if_local on the
+    # absolute evidence_ref, which normalizes the path and indexes the note.
 
     readiness = client.get(f"{BASE}/report-readiness")
     assert readiness.status_code == 200, readiness.text
@@ -311,8 +326,7 @@ def test_mark_scratch_clears_unlinked_markdown_blocker(client, isolate_settings)
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _seed_finding(client, eng)
     (eng / "notes" / "scratch.md").write_text("operator scratch", encoding="utf-8")
-    sync = client.post(f"{BASE}/artifacts/sync")
-    assert sync.status_code == 200, sync.text
+    _register_note(client, "notes/scratch.md")
 
     readiness_before = client.get(f"{BASE}/report-readiness")
     blockers_before = readiness_before.json()["blockers"]
@@ -349,8 +363,7 @@ def test_mark_scratch_under_prefix_clears_many_blockers(client, isolate_settings
     scratch_dir.mkdir(parents=True, exist_ok=True)
     for name in ("a.md", "b.md", "c.md"):
         (scratch_dir / name).write_text("scratch", encoding="utf-8")
-    sync = client.post(f"{BASE}/artifacts/sync")
-    assert sync.status_code == 200, sync.text
+        _register_note(client, f"notes/scratch/{name}")
 
     bulk = client.post(
         f"{BASE}/artifacts/scratch-under",
@@ -416,8 +429,8 @@ def test_mark_scratch_under_escapes_like_metacharacters(client, isolate_settings
     other.mkdir(parents=True, exist_ok=True)
     (keep / "a.md").write_text("under _keep", encoding="utf-8")
     (other / "b.md").write_text("under Xkeep", encoding="utf-8")
-    sync = client.post(f"{BASE}/artifacts/sync")
-    assert sync.status_code == 200, sync.text
+    _register_note(client, "notes/_keep/a.md")
+    _register_note(client, "notes/Xkeep/b.md")
     # Mark only the `_keep` prefix — must NOT match `Xkeep` even though `_` is a LIKE wildcard.
     bulk = client.post(
         f"{BASE}/artifacts/scratch-under",
@@ -484,3 +497,5 @@ def test_recommended_actions_keep_lifecycle_items_before_inspect_cap() -> None:
     assert len(actions) == 8
     assert "aith assess agent render-handoff va-memory" in commands
     assert "aith assess agent reconcile-stale --dry-run" in commands
+
+

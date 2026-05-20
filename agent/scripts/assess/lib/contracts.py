@@ -527,10 +527,9 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "artifact": CommandContract(
         name="artifact",
-        summary="Sync, register, search, fetch, or scratch-mark indexed engagement-local artifact metadata.",
+        summary="Register, search, fetch, or scratch-mark indexed engagement-local artifact metadata.",
         schema_name="assessment_artifacts table + /assessment/artifacts endpoints",
         preferred_invocations=(
-            "aith assess artifact sync",
             "aith assess artifact search VA-047",
             "aith assess artifact search --finding VA-047",
             "aith assess artifact get <id>",
@@ -539,7 +538,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "aith assess artifact unmark-scratch notes/triage.md",
         ),
         author_supplied_fields=(
-            "<action> sync|search|get|register|mark-scratch|unmark-scratch",
+            "<action> search|get|register|mark-scratch|unmark-scratch",
             "register path",
             "--finding / --kind / --agent-id / --command-run-id",
         ),

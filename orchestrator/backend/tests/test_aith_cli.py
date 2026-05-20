@@ -750,6 +750,7 @@ def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeyp
         raise RuntimeError("exec blocked")
 
     monkeypatch.setattr(orchestrator_module.os, "execvpe", fake_execvpe)
+    monkeypatch.setattr(orchestrator_module, "_check_port_available", lambda *_, **__: None)
 
     with pytest.raises(RuntimeError, match="exec blocked"):
         orchestrator_module.start_orchestrator(
@@ -858,6 +859,7 @@ def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Pat
 
     monkeypatch.setattr(orchestrator_module.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(orchestrator_module.os, "killpg", fake_killpg)
+    monkeypatch.setattr(orchestrator_module, "_check_port_available", lambda *_, **__: None)
     monkeypatch.setattr(orchestrator_module, "_wait_for_health", lambda *_, **__: False)
 
     with pytest.raises(SystemExit, match="did not become healthy"):
@@ -899,6 +901,7 @@ def test_orchestrator_start_terminates_child_when_readiness_times_out(tmp_path: 
 
     monkeypatch.setattr(orchestrator_module.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(orchestrator_module.os, "killpg", fake_killpg)
+    monkeypatch.setattr(orchestrator_module, "_check_port_available", lambda *_, **__: None)
     monkeypatch.setattr(orchestrator_module, "_wait_for_health", lambda *_, **__: True)
     monkeypatch.setattr(orchestrator_module, "_wait_for_readiness", lambda *_, **__: False)
 
@@ -907,6 +910,150 @@ def test_orchestrator_start_terminates_child_when_readiness_times_out(tmp_path: 
 
     assert signals_sent == [(4322, signal.SIGTERM)]
     assert not pid_file.exists()
+
+
+def test_orchestrator_start_refuses_when_port_already_in_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+
+    install_root = tmp_path / "install"
+    frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
+    frontend_dist.mkdir(parents=True)
+    (frontend_dist / "index.html").write_text("ok", encoding="utf-8")
+
+    popen_called = False
+
+    def fake_popen(*_: object, **__: object) -> object:
+        nonlocal popen_called
+        popen_called = True
+        raise AssertionError("Popen must not be called when port is already in use")
+
+    monkeypatch.setattr(orchestrator_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(orchestrator_module, "_port_in_use", lambda *_, **__: True)
+    monkeypatch.setattr(orchestrator_module, "_port_listener_pid", lambda *_, **__: 99999)
+
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator_module.start_orchestrator(orchestrator_module.OrchestratorOptions(install_root=install_root))
+
+    message = str(excinfo.value)
+    assert "127.0.0.1:18000 is already in use" in message
+    assert "PID 99999" in message
+    assert "aith orchestrator stop" in message
+    assert popen_called is False
+
+
+def test_stop_orchestrator_escalates_to_sigkill_when_sigterm_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+
+    install_root = tmp_path / "install"
+    pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
+    pid_file.parent.mkdir(parents=True)
+    pid_file.write_text("4242\n", encoding="utf-8")
+
+    # Simulate a process that ignores SIGTERM but dies on SIGKILL.
+    alive_flag = {"alive": True}
+    signals_sent: list[tuple[int, signal.Signals]] = []
+
+    def fake_kill(pid: int, sig: signal.Signals) -> None:
+        if sig == 0:
+            # liveness probe
+            if not alive_flag["alive"]:
+                raise OSError("no such process")
+            return
+        signals_sent.append((pid, sig))
+        if sig == signal.SIGKILL:
+            alive_flag["alive"] = False
+
+    def fake_killpg(pid: int, sig: signal.Signals) -> None:
+        fake_kill(pid, sig)
+
+    monkeypatch.setattr(orchestrator_module.os, "kill", fake_kill)
+    monkeypatch.setattr(orchestrator_module.os, "killpg", fake_killpg)
+    monkeypatch.setattr(orchestrator_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(orchestrator_module, "_wait_for_port_release", lambda *_, **__: True)
+
+    orchestrator_module.stop_orchestrator(install_root)
+
+    assert (4242, signal.SIGTERM) in signals_sent
+    assert (4242, signal.SIGKILL) in signals_sent
+    assert not pid_file.exists()
+
+
+def test_stop_orchestrator_warns_when_port_stays_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+
+    install_root = tmp_path / "install"
+    pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
+    pid_file.parent.mkdir(parents=True)
+    pid_file.write_text("5050\n", encoding="utf-8")
+
+    # Process dies immediately on SIGTERM, but the port stays held by an
+    # unrelated process. Stop must not block forever; it should warn and
+    # leave the diagnosis to start.
+    alive_flag = {"alive": True}
+
+    def fake_kill(pid: int, sig: signal.Signals) -> None:
+        if sig == 0:
+            if not alive_flag["alive"]:
+                raise OSError("no such process")
+            return
+        alive_flag["alive"] = False
+
+    monkeypatch.setattr(orchestrator_module.os, "kill", fake_kill)
+    monkeypatch.setattr(orchestrator_module.os, "killpg", fake_kill)
+    monkeypatch.setattr(orchestrator_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(orchestrator_module, "_wait_for_port_release", lambda *_, **__: False)
+    monkeypatch.setattr(orchestrator_module, "_port_listener_pid", lambda *_, **__: 7777)
+
+    orchestrator_module.stop_orchestrator(install_root)
+
+    out = capsys.readouterr().out
+    assert "127.0.0.1:18000 still held (PID 7777)" in out
+    assert not pid_file.exists()
+
+
+def test_orchestrator_status_payload_reports_stopped_when_pid_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+
+    install_root = tmp_path / "install"
+    pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
+    pid_file.parent.mkdir(parents=True)
+    pid_file.write_text("99999999\n", encoding="utf-8")
+
+    monkeypatch.setattr(orchestrator_module, "_pid_alive", lambda _: False)
+    monkeypatch.setattr(orchestrator_module, "_port_in_use", lambda *_, **__: False)
+
+    payload = orchestrator_module.orchestrator_status_payload(install_root)
+    assert payload["state"] == "stopped"
+    assert payload["pid"] is None
+    assert payload["url"] == "http://127.0.0.1:18000"
+    assert payload["port_in_use"] is False
+
+
+def test_orchestrator_status_payload_reports_running_with_live_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+
+    install_root = tmp_path / "install"
+    pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
+    pid_file.parent.mkdir(parents=True)
+    pid_file.write_text("8235\n", encoding="utf-8")
+
+    monkeypatch.setattr(orchestrator_module, "_pid_alive", lambda _: True)
+    monkeypatch.setattr(orchestrator_module, "_port_in_use", lambda *_, **__: True)
+
+    payload = orchestrator_module.orchestrator_status_payload(install_root)
+    assert payload["state"] == "running"
+    assert payload["pid"] == 8235
+    assert payload["port_in_use"] is True
 
 
 def test_assess_kali_help_lists_every_typed_verb(capsys: pytest.CaptureFixture[str]) -> None:
@@ -1770,6 +1917,7 @@ def test_oob_start_renders_config_and_starts_idempotent_sessions(tmp_path: Path)
             oob_domain="oob.example.test",
         ),
         runner=runner,
+        frpc_ready_timeout=0,
     )
 
     rendered = "\n".join(" ".join(command) for command in commands)
@@ -1777,6 +1925,92 @@ def test_oob_start_renders_config_and_starts_idempotent_sessions(tmp_path: Path)
     assert "oob.example.test" in rendered
     assert "tmux new-session -d -s oob-server" in rendered
     assert "tmux new-session -d -s frpc" in rendered
+
+
+def test_oob_start_post_flight_detects_frpc_conflict(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.oob import OobOptions, start_oob
+
+    commands: list[list[str]] = []
+    kill_commands: list[str] = []
+    conflict_log = (
+        "2026-05-19 10:00:00 [I] [proxy_manager.go:144] [abc] proxy added: [host-oob]\n"
+        "2026-05-19 10:00:01 [W] [control.go:148] [abc] [host-oob] start error: "
+        "port already used: listen udp :53: bind: address already in use\n"
+    )
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        cmd = argv[-1] if len(argv) >= 5 else ""
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if "tmux has-session -t oob-server" in cmd and "tmux new-session" not in cmd:
+            return DockerResult(1, "", "")
+        if "tmux has-session -t frpc" in cmd and "tmux new-session" not in cmd:
+            return DockerResult(1, "", "")
+        if "tail -n 200 /data/oob/frpc.log" in cmd:
+            return DockerResult(0, conflict_log, "")
+        if "tmux kill-session" in cmd:
+            kill_commands.append(cmd)
+            return DockerResult(0, "", "")
+        return DockerResult(0, "", "")
+
+    with pytest.raises(SystemExit) as excinfo:
+        start_oob(
+            OobOptions(
+                install_root=tmp_path,
+                frp_host="cal.example.test",
+                frp_port=7000,
+                frp_token="secret",
+                oob_domain="oob.example.test",
+            ),
+            runner=runner,
+            frpc_ready_timeout=1.0,
+        )
+
+    message = str(excinfo.value)
+    assert "OOB resources are already held" in message
+    assert "port already used" in message
+    assert any("tmux kill-session -t frpc" in c for c in kill_commands)
+    assert any("tmux kill-session -t oob-server" in c for c in kill_commands)
+
+
+def test_oob_start_post_flight_returns_on_success(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.oob import OobOptions, start_oob
+
+    success_log = (
+        "2026-05-19 10:00:00 [I] [proxy_manager.go:144] [xyz] proxy added: [host-oob host-oob-dns]\n"
+        "2026-05-19 10:00:01 [I] [control.go:172] [xyz] [host-oob] start proxy success\n"
+    )
+    tail_calls = 0
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        nonlocal tail_calls
+        cmd = argv[-1] if len(argv) >= 5 else ""
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if "tmux has-session" in cmd and "tmux new-session" not in cmd:
+            return DockerResult(1, "", "")
+        if "tail -n 200 /data/oob/frpc.log" in cmd:
+            tail_calls += 1
+            return DockerResult(0, success_log, "")
+        return DockerResult(0, "", "")
+
+    start_oob(
+        OobOptions(
+            install_root=tmp_path,
+            frp_host="cal.example.test",
+            frp_port=7000,
+            frp_token="secret",
+            oob_domain="oob.example.test",
+        ),
+        runner=runner,
+        frpc_ready_timeout=5.0,
+    )
+    # Reaching here without hitting the 5s timeout means the scan saw the
+    # success line on the first poll and returned immediately.
+    assert tail_calls == 1
 
 
 def test_oob_client_start_uses_session_file_for_domain_resume(tmp_path: Path) -> None:

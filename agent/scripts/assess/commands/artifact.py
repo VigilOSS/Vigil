@@ -12,9 +12,9 @@ from assess.lib.config import load_config
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "artifact",
-        help="Sync, search, get, and register indexed engagement artifacts.",
+        help="Search, get, and register indexed engagement artifacts.",
     )
-    p.add_argument("action", choices=("sync", "search", "get", "register", "mark-scratch", "unmark-scratch"))
+    p.add_argument("action", choices=("search", "get", "register", "mark-scratch", "unmark-scratch"))
     p.add_argument("extra", nargs="*", help="search query, artifact id, or path depending on action")
     p.add_argument("--kind", default="")
     p.add_argument("--media-type", default="")
@@ -68,10 +68,6 @@ def _render_rows(rows: list[dict]) -> str:
 def run(args) -> None:
     client = _client(args)
     try:
-        if args.action == "sync":
-            result = client.post("artifacts/sync", {})
-            print(json.dumps(result, indent=2, ensure_ascii=False) if args.as_json else _sync_text(result))
-            return
         if args.action == "search":
             query = " ".join(args.extra).strip()
             params: list[tuple[str, str]] = []
@@ -130,7 +126,7 @@ def run(args) -> None:
                     if matched == 0:
                         print(
                             f"  (no indexed artifacts under {prefix_display!r}; "
-                            "run `artifact sync` first or check with `artifact search`)"
+                            "check with `artifact search` or register them first)"
                         )
                     for path in (result.get("updated") or [])[:20]:
                         print(f"  - {path}")
@@ -156,22 +152,6 @@ def run(args) -> None:
     finally:
         client.close()
     raise SystemExit(f"unknown artifact action: {args.action}")
-
-
-def _sync_text(result: dict) -> str:
-    base = (
-        f"registered={result.get('registered', 0)} "
-        f"present={result.get('present', 0)} "
-        f"missing={result.get('missing', 0)}"
-    )
-    walk_errors = result.get("walk_errors") or []
-    if walk_errors:
-        base += f"\nwalk_errors ({len(walk_errors)}):"
-        for err in walk_errors[:10]:
-            base += f"\n  - {err}"
-        if len(walk_errors) > 10:
-            base += f"\n  - … and {len(walk_errors) - 10} more"
-    return base
 
 
 def _artifact_text(row: dict) -> str:

@@ -742,22 +742,6 @@ async def register_artifact(engagement_key: str, request: ArtifactRegisterReques
     return record
 
 
-@router.post("/artifacts/sync")
-async def sync_artifacts(engagement_key: str) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    result = artifact_index.sync_artifacts(engagement.id)
-    _audit_assessment_mutation(
-        engagement.id,
-        title="artifact sync",
-        action="sync engagement artifact index",
-        actor_name="operator",
-        result=f"present={result.get('present', 0)} missing={result.get('missing', 0)}",
-        metadata=result,
-    )
-    await _broadcast(engagement.key, "artifact_sync", result)
-    return result
-
-
 @router.get("/artifacts/search")
 def search_artifacts(
     engagement_key: str,
