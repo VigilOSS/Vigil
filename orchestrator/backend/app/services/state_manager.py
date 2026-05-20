@@ -3372,9 +3372,8 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "detail": (
                             f"markdown note '{artifact_path}' is indexed but not linked to a finding, chain, "
                             "surface, request_variant, command_run, or producing agent. Fix with one of: "
-                            f"`aith assess artifact register {artifact_path} --finding <slug>` to link, "
-                            f"`aith assess artifact mark-scratch {artifact_path}` to dismiss as scratch, "
-                            f"or delete the file and re-run `aith assess artifact sync`."
+                            f"`aith assess artifact register {artifact_path} --finding <slug>` to link, or "
+                            f"`aith assess artifact mark-scratch {artifact_path}` to dismiss as scratch."
                         ),
                     }
                 )
@@ -3405,8 +3404,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "title": row.get("title", ""),
                         "detail": (
                             f"finding {slug} evidence_ref={evidence_ref!r} is not in the artifact index. "
-                            f"Fix with `aith assess artifact register {indexed_evidence_ref} --finding {slug}` "
-                            "or `aith assess artifact sync` if the path is under a default sync root."
+                            f"Fix with `aith assess artifact register {indexed_evidence_ref} --finding {slug}`."
                         ),
                     }
                 )
@@ -3418,8 +3416,9 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "title": row.get("title", ""),
                         "detail": (
                             f"finding {slug} evidence_ref={evidence_ref!r} is indexed but the file is "
-                            "missing on disk. Restore the file and run `aith assess artifact sync`, or "
-                            f"update the finding to point at a present artifact with "
+                            f"missing on disk. Restore the file and re-register with "
+                            f"`aith assess artifact register {indexed_evidence_ref} --finding {slug}`, "
+                            f"or repoint the finding via "
                             f"`aith assess update-finding {slug} --evidence-ref <relative-path>`."
                         ),
                     }

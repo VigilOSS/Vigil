@@ -285,11 +285,13 @@ transcript pasting:
   — bounded JSON+markdown operating picture (finding queues, recent decisions, stale
   dispatches, handoff gaps, top command-history matches, indexed artifacts, and
   one-shot drill-down commands keyed by id).
-- `aith assess artifact sync|search|get|register|mark-scratch`
-  — engagement-local file index. `sync` scans the default roots (`notes/`,
-  `findings_payloads/`, `tools/exploit-state/`, `scans/reports/`, `downloads/`) and
-  marks missing files. `search` is FTS over previews + paths + linked finding slugs.
-  `mark-scratch <path-or-id>` dismisses a markdown note as scratch so
+- `aith assess artifact search|get|register|mark-scratch`
+  — engagement-local file index. Agents/operators register heavy raw files
+  explicitly with `register <path> [--finding <slug>] [--agent-id <id>]
+  [--command-run-id <n>]`; the backend computes SHA-256, indexes preview text
+  for FTS, and links to a finding/chain/surface/request-variant/command-run.
+  `search` is FTS over previews + paths + linked finding slugs.
+  `mark-scratch <path-or-id>` dismisses a registered note as scratch so
   `check-report-readiness` no longer blocks on it (the escape valve for operator or
   specialist working notes that are not durable engagement memory).
 - `aith assess agent close <agent-id>`
