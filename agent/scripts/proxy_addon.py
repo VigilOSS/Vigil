@@ -51,7 +51,11 @@ NOISE_DOMAINS = {
 
 NOISE_PATH_RE = re.compile(r"(\.gif\?|pixel|beacon)", re.IGNORECASE)
 
-BODY_TRUNCATE = 100 * 1024  # 100 KB
+BODY_TRUNCATE = 100 * 1024  # 100 KB — request body cap
+RESPONSE_SNIPPET_BYTES = 16 * 1024  # 16 KB — response preview cap. Matches
+# `INDEXED_TEXT_BYTES` for assessment_artifacts so an engagement can grep
+# both data sources at the same depth. The cap exists so cases.db rows stay
+# small; truncation is surfaced explicitly via `response_truncated`.
 
 BINARY_PREFIXES = ("image/", "video/", "audio/", "font/")
 
@@ -606,13 +610,17 @@ class CaseCollector:
 
     # -- body save policy ---------------------------------------------------
 
-    def _apply_body_policy(self, body: bytes | None, content_type: str) -> str | None:
+    def _apply_body_policy(self, body: bytes | None, content_type: str) -> tuple[str | None, bool]:
+        """Return (saved_text, truncated). The flag is True only when the
+        body was saveable AND larger than BODY_TRUNCATE — so callers can
+        flag the cases.db row, never silently dropping bytes.
+        """
         if not body:
-            return None
+            return None, False
         ct = (content_type or "").lower()
         # Skip binary types entirely
         if any(ct.startswith(p) for p in BINARY_PREFIXES):
-            return None
+            return None, False
         # Only save text-ish bodies
         saveable = (
             "json" in ct
@@ -622,9 +630,10 @@ class CaseCollector:
             or "text/" in ct
         )
         if not saveable:
-            return None
+            return None, False
+        truncated = len(body) > BODY_TRUNCATE
         text = body[:BODY_TRUNCATE].decode("utf-8", errors="replace")
-        return text
+        return text, truncated
 
     def _backend_configured(self) -> bool:
         return bool(self.orchestrator_base_url)
@@ -960,10 +969,12 @@ class CaseCollector:
         body: str | None,
         content_type: str,
         content_length: int,
+        request_body_truncated: bool,
         response_status: int,
         response_headers: str,
         response_size: int,
         response_snippet: str | None,
+        response_truncated: bool,
         case_type: str,
         params_key_sig: str,
     ):
@@ -989,10 +1000,12 @@ class CaseCollector:
                 body=body,
                 content_type=content_type,
                 content_length=content_length,
+                request_body_truncated=request_body_truncated,
                 response_status=response_status,
                 response_headers=response_headers,
                 response_size=response_size,
                 response_snippet=response_snippet,
+                response_truncated=response_truncated,
                 case_type=case_type,
                 source="proxy",
                 params_key_sig=params_key_sig,
@@ -1048,7 +1061,7 @@ class CaseCollector:
         case_type = self._classify_type(req.method, path, content_type, req_headers_dict)
 
         # Body save policy
-        saved_body = self._apply_body_policy(raw_req_body, content_type)
+        saved_body, request_body_truncated = self._apply_body_policy(raw_req_body, content_type)
 
         # Response info
         response_status = resp.status_code
@@ -1056,11 +1069,16 @@ class CaseCollector:
         resp_body = self._safe_content(resp)
         response_size = len(resp_body)
 
-        # Response snippet: first 512 bytes of text responses
+        # Response snippet: first RESPONSE_SNIPPET_BYTES of text responses.
+        # `response_truncated` is True when the on-the-wire body was larger
+        # than the cap — callers see explicit truncation instead of having to
+        # compare response_size vs len(response_snippet).
         response_snippet = None
+        response_truncated = False
         resp_ct = (resp.headers.get("content-type", "") or "").lower()
         if resp_body and not any(resp_ct.startswith(p) for p in BINARY_PREFIXES):
-            response_snippet = resp_body[:512].decode("utf-8", errors="replace")
+            response_snippet = resp_body[:RESPONSE_SNIPPET_BYTES].decode("utf-8", errors="replace")
+            response_truncated = len(resp_body) > RESPONSE_SNIPPET_BYTES
 
         # Dedup signature
         params_key_sig = self._generate_sig(
@@ -1104,10 +1122,12 @@ class CaseCollector:
             body=saved_body,
             content_type=content_type,
             content_length=content_length,
+            request_body_truncated=request_body_truncated,
             response_status=response_status,
             response_headers=resp_headers_json,
             response_size=response_size,
             response_snippet=response_snippet,
+            response_truncated=response_truncated,
             case_type=case_type,
             params_key_sig=params_key_sig,
         )
