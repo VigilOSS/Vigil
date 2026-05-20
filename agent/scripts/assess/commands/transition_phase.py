@@ -549,12 +549,23 @@ def _blue_list_activity_entries(client: AssessmentClient) -> list[dict]:
     The endpoint lives under /engagements/{key}/activity-entries (NOT
     /assessment/...), so we use client.get_engagement().
     """
-    result = client.get_engagement("activity-entries", query="limit=1000")
-    if isinstance(result, dict):
+    page_size = 1000
+    offset = 0
+    rows: list[dict] = []
+    while True:
+        result = client.get_engagement(
+            "activity-entries",
+            query=f"limit={page_size}&offset={offset}",
+        )
+        if not isinstance(result, dict):
+            return rows
         items = result.get("items") or []
-        if isinstance(items, list):
-            return [item for item in items if isinstance(item, dict)]
-    return []
+        if not isinstance(items, list):
+            return rows
+        rows.extend(item for item in items if isinstance(item, dict))
+        if len(items) < page_size:
+            return rows
+        offset += page_size
 
 
 def _blue_list_findings(client: AssessmentClient) -> list[dict]:
@@ -629,6 +640,25 @@ def _blue_count_completed_dispatches(client: AssessmentClient, tier: str, role: 
     )
 
 
+def _blue_list_artifacts(client: AssessmentClient, *, finding: str = "") -> list[dict]:
+    from urllib.parse import quote
+
+    page_size = 1000
+    offset = 0
+    rows: list[dict] = []
+    finding_query = f"finding={quote(finding, safe='')}&" if finding else ""
+    while True:
+        page = client.get(
+            f"artifacts/search?{finding_query}limit={page_size}&offset={offset}"
+        )
+        if not isinstance(page, list):
+            return rows
+        rows.extend(row for row in page if isinstance(row, dict))
+        if len(page) < page_size:
+            return rows
+        offset += page_size
+
+
 def _blue_artifacts_for_finding(client: AssessmentClient, slug: str) -> list[dict]:
     """Artifacts whose related_finding_slug == slug.
 
@@ -636,10 +666,7 @@ def _blue_artifacts_for_finding(client: AssessmentClient, slug: str) -> list[dic
     and orders by finding link. Defensive: filter client-side as well in
     case the FTS expansion widens the match.
     """
-    from urllib.parse import quote
-    rows = client.get(f"artifacts/search?finding={quote(slug, safe='')}&limit=200")
-    if not isinstance(rows, list):
-        return []
+    rows = _blue_list_artifacts(client, finding=slug)
     direct: list[dict] = []
     for row in rows:
         if not isinstance(row, dict):
@@ -1061,9 +1088,7 @@ def _blue_check_report_to_complete(
     try:
         # Use the search endpoint to fetch artifacts; filter by kind
         # client-side since the search verb only filters by finding + text.
-        artifacts = client.get("artifacts/search?limit=1000")
-        if not isinstance(artifacts, list):
-            artifacts = []
+        artifacts = _blue_list_artifacts(client)
     except Exception as exc:  # noqa: BLE001
         blockers.append(_blue_backend_failure("artifacts", exc))
         artifacts = None  # signal: skip the report-artifact check
