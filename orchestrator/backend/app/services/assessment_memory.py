@@ -378,7 +378,7 @@ def _recommended_actions(
             f"aith assess agent reconcile-stale --dry-run{threshold_arg}",
         )
     if not artifacts:
-        add("refresh artifact index", "aith assess artifact sync")
+        add("refresh artifact index", "aith assess artifact register <path> --finding <slug>")
     for row in command_matches[:3]:
         run_id = row.get("id")
         if run_id is not None:
