@@ -56,8 +56,8 @@ are off-limits — those are L2 verbs.
   window, platform.
 - `aith assess kill-finding <slug>` — only on a mechanical-FP match against
   the tenant ref's known-benign register; never on operator hunch.
-- `aith assess artifact register` — register the raw alert paste as a
-  `kind=alert_paste` artifact so the chain of custody survives audit.
+- `aith assess artifact search --kind alert_intake` — confirm the operator
+  registered the raw alert intake artifact so the chain of custody survives audit.
 - `aith assess log` — record the triage decision (dispatched or
   auto-closed) in `activity_entries` with the actor/target/platform fields
   pulled out so FTS can find them later.
@@ -68,7 +68,7 @@ are off-limits — those are L2 verbs.
 
 Forbidden from L1: `aith assess host-exec` (that is L2 territory),
 `aith assess kali` (red-only), any direct platform CLI invocation, any
-`record-proposal` / containment proposal.
+`aith blue propose-contain` / containment proposal.
 
 ## Methodology
 
@@ -203,7 +203,7 @@ If all five hold, auto-close as `false_positive`:
 aith assess kill-finding <draft-slug> \
   --kill-reason "Mechanical FP — matches tenant-ref pattern <pattern-id>" \
   --kill-check 0 \
-  --inline '{"evidence_refs": [<alert-paste-artifact-id>], "tenant_ref_path": "<path>", "tenant_ref_section": "Known benign patterns / <pattern-id>", "matched_fields": {"actor": "...", "action_verb": "...", "time_pattern": "...", "source_signal": "..."}}'
+  --inline '{"evidence_refs": [<alert-intake-artifact-id>], "tenant_ref_path": "<path>", "tenant_ref_section": "Known benign patterns / <pattern-id>", "matched_fields": {"actor": "...", "action_verb": "...", "time_pattern": "...", "source_signal": "..."}}'
 ```
 
 `kill_check=0` is reserved for L1 mechanical FPs (five-check uses 1-5).
@@ -257,7 +257,7 @@ entry (Step 7).
 
 Confidence at L1 is almost always `low` — L1 has not pulled audit data,
 has not corroborated cross-source, and has not reproduced the alert. The
-exceptions are: (a) the alert paste itself contains corroboration (e.g., the
+exceptions are: (a) the alert payload itself contains corroboration (e.g., the
 SIEM bundled two independent rule fires), in which case `medium` is
 defensible; (b) the alert's actor or target is already named in a prior
 `verified` finding on this engagement, in which case `medium` is again
@@ -292,24 +292,16 @@ before re-dispatching.
 
 Run all four in order:
 
-1. **Write the raw alert paste to disk and register it:**
+1. **Confirm the raw alert intake artifact exists:**
 
    ```bash
-   mkdir -p "$ENGAGEMENT_DIR/ir/alerts"
-   printf '%s\n' "<raw alert body>" > "$ENGAGEMENT_DIR/ir/alerts/<alert_external_id>.txt"
-
-   aith assess artifact register \
-     "$ENGAGEMENT_DIR/ir/alerts/<alert_external_id>.txt" \
-     --kind alert_paste \
-     --finding <draft-slug> \
-     --agent-id <runtime-agent-id> \
-     --sensitive
+   aith assess artifact search --kind alert_intake --limit 10
    ```
 
-   `--sensitive` is mandatory — alert pastes routinely carry PII (subject
-   lines, recipient lists, IP addresses tied to identities). The flag
-   suppresses the FTS preview but preserves the hash and linkage for
-   audit.
+   Raw alert recording is operator-owned and happens before L1 dispatch via
+   `aith blue alert record --body-file <path>`. If no `alert_intake` artifact
+   exists, return a `blocked` handoff naming the missing intake record instead
+   of re-registering the raw alert yourself.
 
 2. **Record the triage activity entry:**
 
@@ -357,7 +349,7 @@ must hold:
 - [ ] Alert severity hint has not escalated since register entry's
       `last_updated_utc`
 
-Any unchecked box → escalate to L2 with the alert paste registered and the
+Any unchecked box → escalate to L2 with the alert intake artifact registered and the
 finding draft recorded `unreviewed`. The operator can promote the alert to
 the register later, after the verifier confirms the benign pattern.
 
@@ -397,7 +389,7 @@ verifier rejects it on intake and reopens the finding.
   "tenant_ref_paths_consulted": [
     "agent/references/tenants/acme-workspace.md"
   ],
-  "evidence_refs": [<artifact-id-of-alert-paste>],
+  "evidence_refs": [<artifact-id-of-alert-intake>],
   "next_specialist": "investigator",
   "next_steps": [
     "Pull Admin Reports login feed for actor over time_window_utc ± 30d",
@@ -481,9 +473,9 @@ already at the top of the dispatch prompt; re-emitting it wastes context.
   auto-close on.
 - **`mitre_techniques: []`** on the draft finding. Empty is forbidden by
   `triage.md` rule 11. Use `T1078` as the unclassified fallback.
-- **Skipping the alert-paste artifact register.** Without the registered
+- **Skipping the alert-intake artifact check.** Without the registered
   artifact, the L2 verifier cannot cite "the alert as originally pasted"
-  in its five-check. Always register, always `--sensitive`.
+  in its five-check. Block and ask the operator to record intake before L1 proceeds.
 - **Echoing the runtime identity banner in the response.** Forbidden by
   `shared-constraints-blue.md`. The handoff JSON carries identity; the
   markdown response is reflection.

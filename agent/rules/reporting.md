@@ -130,7 +130,7 @@ In addition to Rule 1 hedge phrases, these patterns are banned:
 - `It is worth noting that` · `It should be noted that`
 - `As demonstrated above` · `As mentioned earlier`
 - `During the course of our assessment` · `Upon further investigation`
-- `In conclusion` · `To summarize` . `with a one-minute proof-of-concept`
+- `In conclusion` · `To summarize` · `with a one-minute proof-of-concept`
 
 Preferred alternatives:
 - Start with the proof or outcome sentence immediately

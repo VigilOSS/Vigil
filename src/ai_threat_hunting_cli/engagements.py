@@ -226,7 +226,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
             "platforms": list(options.platforms),
             "tenant_reference_paths": list(options.tenant_reference_paths),
             "alert_metadata": {
-                "source": options.alert_source or "paste",
+                "source": options.alert_source or "operator_chat",
                 "external_id": None,
                 "received_at": None,
                 "severity_hint": options.severity_hint,

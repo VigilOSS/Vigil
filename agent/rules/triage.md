@@ -281,7 +281,7 @@ incident report verbatim.
 
 ## 18. Containment proposals are specific — target, action, rollback
 
-Every containment proposal (recorded via `aith assess record-proposal` from L4
+Every containment proposal (recorded via `aith blue propose-contain` from L4
 `ir-lead`) must specify:
 
 - **Target** — the exact account / host / IOC affected (e.g.,

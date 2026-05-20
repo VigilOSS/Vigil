@@ -126,9 +126,18 @@ def run(args) -> None:
             if not args.force:
                 sys.exit(1)
 
-    blockers = _check_preconditions(
-        target_phase, track, engagement_dir, args, cfg,
-    )
+    blockers: list[dict[str, str]] = []
+    for phase_to_check in _precondition_targets_for_transition(
+        current_phase=current_phase,
+        target_phase=target_phase,
+        track=track,
+        order=order,
+    ):
+        blockers.extend(
+            _check_preconditions(
+                phase_to_check, track, engagement_dir, args, cfg,
+            )
+        )
 
     if blockers and not args.force:
         print(f"transition-phase: {len(blockers)} blocker(s) for '{target_phase}':", file=sys.stderr)
@@ -142,6 +151,8 @@ def run(args) -> None:
             print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
 
     scope[phase_key] = target_phase
+    if track == "blue" and target_phase == "complete":
+        scope["status"] = "completed"
     tmp_path = scope_path + ".tmp"
     with open(tmp_path, "w") as f:
         json.dump(scope, f, indent=2, ensure_ascii=False)
@@ -149,6 +160,32 @@ def run(args) -> None:
     os.replace(tmp_path, scope_path)
 
     print(f"Phase transitioned ({track}): {current_phase or '(none)'} -> {target_phase}")
+
+
+def _precondition_targets_for_transition(
+    *,
+    current_phase: str,
+    target_phase: str,
+    track: str,
+    order: dict[str, int],
+) -> list[str]:
+    """Return every phase gate that must pass for this transition.
+
+    Blue incident work is frequently non-linear in operator conversation, but
+    durable state cannot skip intake, triage, verification, or closeout gates.
+    A direct jump such as intake -> report therefore checks every intermediate
+    blue target phase in order.
+    """
+    if track != "blue":
+        return [target_phase]
+    if not current_phase or current_phase not in order:
+        return [target_phase]
+    start = order[current_phase]
+    end = order[target_phase]
+    if end <= start:
+        return [target_phase]
+    ordered_phases = sorted(order, key=order.get)
+    return ordered_phases[start + 1 : end + 1]
 
 
 def _phase_track(engagement_type: str, target_phase: str, requested_track: str) -> str:
@@ -456,9 +493,10 @@ def _check_blue_preconditions(
     """Blue-track phase-exit gates.
 
     Blue IR has no host-coverage table, no work-buffer, no scope_host —
-    gates check IR primitives instead: alert pasted, findings drafted by
+    gates check IR primitives instead: alert recorded, findings drafted by
     L1, telemetry pulled + artifact-linked by L2, verifier dispositions
-    present, containment closure on verified-high findings.
+    present, containment closure on verified-high findings, and a final
+    report or closeout artifact.
 
     All backend failures degrade gracefully — a single
     ``backend_query_failed`` blocker is emitted per failed query so the
@@ -533,6 +571,47 @@ def _blue_active_findings(findings: list[dict]) -> list[dict]:
     ]
 
 
+def _blue_finding_is_false_positive(finding: dict) -> bool:
+    return (
+        str(finding.get("workflow_status") or "") == "false_positive"
+        or str(finding.get("verification_disposition") or "") == "false_positive"
+    )
+
+
+def _blue_finding_has_kill_reason(finding: dict) -> bool:
+    details = finding.get("details_json")
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except (TypeError, ValueError):
+            details = {}
+    if not isinstance(details, dict):
+        return False
+    return bool(str(details.get("kill_reason") or "").strip())
+
+
+def _blue_all_findings_auto_closed(findings: list[dict]) -> bool:
+    return bool(findings) and all(
+        _blue_finding_is_false_positive(finding)
+        and _blue_finding_has_kill_reason(finding)
+        for finding in findings
+    )
+
+
+def _blue_list_completed_dispatches(client: AssessmentClient) -> list[dict]:
+    page_size = 1000
+    offset = 0
+    rows: list[dict] = []
+    while True:
+        page = client.get(f"dispatches?status=completed&limit={page_size}&offset={offset}")
+        if not isinstance(page, list):
+            return []
+        rows.extend(row for row in page if isinstance(row, dict))
+        if len(page) < page_size:
+            return rows
+        offset += page_size
+
+
 def _blue_count_completed_dispatches(client: AssessmentClient, tier: str, role: str) -> int:
     """Count dispatches with the given tier, role, and status='completed'.
 
@@ -540,9 +619,7 @@ def _blue_count_completed_dispatches(client: AssessmentClient, tier: str, role: 
     tier/role together, so we page through completed dispatches and filter
     client-side. Returns 0 on backend error (caller emits the blocker).
     """
-    rows = client.get("dispatches?status=completed&limit=1000")
-    if not isinstance(rows, list):
-        return 0
+    rows = _blue_list_completed_dispatches(client)
     expected_role = role.strip()
     return sum(
         1 for row in rows
@@ -593,8 +670,10 @@ def _blue_check_intake_to_triage(
         blockers.append({
             "kind": "no_alert_intake",
             "detail": (
-                "scope.json:alert_metadata is empty — paste the alert before "
-                "transitioning to triage: aith blue alert paste < alert.txt"
+                "scope.json:alert_metadata is empty — paste the alert into the "
+                "operator chat, save it under ir/alerts/, then record it with "
+                "`aith blue alert record --body-file <path>` before "
+                "transitioning to triage."
             ),
         })
 
@@ -635,8 +714,8 @@ def _blue_check_intake_to_triage(
                 "kind": "no_alert_intake_audit",
                 "detail": (
                     "no activity_entries row with action='alert_intake' — the "
-                    "alert-paste wrapper did not log the intake. Re-run "
-                    "`aith blue alert paste` so the audit row lands."
+                    "alert record wrapper did not log the intake. Re-run "
+                    "`aith blue alert record --body-file <path>` so the audit row lands."
                 ),
             })
 
@@ -667,31 +746,13 @@ def _blue_check_triage_to_investigate(
     # Auto-close-only path: every finding is FP with a kill_reason. The
     # blue verify command stores kill_reason inside details_json; the
     # workflow_status flips to 'false_positive'. Accept either signal.
-    def _is_fp(f: dict) -> bool:
-        return (
-            str(f.get("workflow_status") or "") == "false_positive"
-            or str(f.get("verification_disposition") or "") == "false_positive"
-        )
-
-    def _has_kill_reason(f: dict) -> bool:
-        details = f.get("details_json")
-        if isinstance(details, str):
-            try:
-                details = json.loads(details)
-            except (TypeError, ValueError):
-                details = {}
-        if not isinstance(details, dict):
-            return False
-        return bool(str(details.get("kill_reason") or "").strip())
-
-    all_fp_with_reason = all(_is_fp(f) and _has_kill_reason(f) for f in findings)
-    if all_fp_with_reason:
+    if _blue_all_findings_auto_closed(findings):
         # Auto-close-only path — skip the rest of the gate, operator can
         # transition straight to report.
         return blockers
 
     drafts = [f for f in findings if str(f.get("workflow_status") or "") == "draft"]
-    fps = [f for f in findings if _is_fp(f)]
+    fps = [f for f in findings if _blue_finding_is_false_positive(f)]
     if drafts and not fps:
         # All findings still draft and no FP closures: maybe L1 dispatched
         # them to L2 (draft is fine in that case) — but we still demand a
@@ -729,6 +790,9 @@ def _blue_check_investigate_to_verify(
         return blockers
 
     active = _blue_active_findings(findings)
+
+    if _blue_all_findings_auto_closed(findings):
+        return blockers
 
     skeleton_drafts = [
         f for f in active
@@ -1011,16 +1075,18 @@ def _blue_check_report_to_complete(
                 continue
             kind = str(art.get("kind") or "").lower()
             rel = str(art.get("relative_path") or "").lower()
-            if kind == "ir_evidence" and "report" in rel:
+            if (kind == "ir_evidence" and "report" in rel) or (kind == "ir_closeout" and "closeout" in rel):
                 has_report = True
                 break
         if not has_report:
             blockers.append({
                 "kind": "no_report_artifact",
                 "detail": (
-                    "no artifact with kind='ir_evidence' and relative_path "
-                    "containing 'report' is registered — report was not "
-                    "produced. Run `aith blue report` and register the output."
+                    "no registered final artifact found — expected either "
+                    "kind='ir_evidence' with a report path or kind='ir_closeout' "
+                    "with a closeout path. Run `aith blue report` for incidents "
+                    "or `aith blue closeout` for false-positive/no-incident "
+                    "closure, then register the output."
                 ),
             })
 

@@ -57,7 +57,7 @@ def run(args) -> None:
 
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
-        decisions = client.list_decisions(limit=1000)
+        decisions = client.list_all_decisions(kind="containment_proposal")
         decision = next(
             (row for row in decisions if isinstance(row, dict) and int(row.get("id") or -1) == int(args.decision_id)),
             None,

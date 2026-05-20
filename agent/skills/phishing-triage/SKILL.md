@@ -650,7 +650,7 @@ The specialist returns this JSON from the dispatch:
   "intel_ids": [<intel-id-1>, <intel-id-2>],
   "mitre_techniques": ["T1566.002", "T1078.004"],
   "tenant_ref_paths_consulted": ["agent/references/tenants/<slug>-m365.md"],
-  "next_specialist": "incident-verifier|m365-signin-investigation|incident-containment",
+  "next_specialist": "verifier|m365-signin-investigation|incident-containment",
   "confidence": "high|medium|low",
   "confidence_rationale": "...",
   "rationale": "<one paragraph: what was found, what the recommendation rests on, what the verifier should re-read first>",
@@ -719,13 +719,13 @@ Run these four steps in order before returning the handoff JSON:
 5. **Emit the handoff JSON** via `aith assess agent handoff
    --from-json /tmp/phishing-triage-handoff.json`. Shape per Output
    Contract above. `next_specialist` routes to:
-   - `incident-verifier` for any disposition recommendation with met
+   - `verifier` for any disposition recommendation with met
      evidence rigor
    - `m365-signin-investigation` (P1, parallel build) when AiTM
      signals need a credential-entry pivot before the verifier
    - `google-workspaces` for GWS-tenant phish that surfaced a
      sign-in / token event needing the GWS audit pivot
-   - `incident-containment` (L4) — only via `incident-verifier`'s
+   - `incident-containment` (L4) — only via `verifier`'s
      `verified` disposition; this skill never routes directly to L4
 
 ## Common Failure Modes

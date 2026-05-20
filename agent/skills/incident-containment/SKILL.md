@@ -19,10 +19,10 @@ origin: AI Threat Hunting
 - Eradication (persistence removal) or recovery (clean re-enrollment)
   authoring on a previously contained finding.
 
-L4 is the WRITE-class role. Every proposal becomes a `record-proposal`
-row that the operator individually approves; nothing this skill produces
-runs without operator approval per-action and per-target. The proposal
-record is the audit gate, not a comment field.
+L4 is the WRITE-class role. Every proposal becomes a `containment_proposal`
+dispatch-decision row that the operator individually approves; nothing this
+skill produces runs without operator approval per-action and per-target. The
+proposal record is the audit gate, not a comment field.
 
 ## Always-active references
 
@@ -50,8 +50,8 @@ record is the audit gate, not a comment field.
 
 | Verb | Purpose |
 |------|---------|
-| `aith assess record-proposal` | Author a containment proposal with `target`, `action`, `command`, `rollback`, `blast_radius`, `note` |
-| `aith blue contain <finding-slug> --proposal <id> --proof-artifact <path>` | Records an already-executed proposal: registers the proof artifact (`kind=containment_proof`), logs to `activity_entries`, bumps finding `workflow_status` to `contained`. **Does not** run the platform command itself in v1 — the operator runs `aith assess host-exec ... -- <cmd>` first, then passes the captured stdout/screenshot as `--proof-artifact` |
+| `aith blue propose-contain` | Author a containment proposal with `target`, `action`, `rollback`, `blast_radius`, and `note`; prints the backend `decision_id` for approval |
+| `aith blue contain <finding-slug> --proposal <id> --command-run-id <id>` | Records an already-executed proposal: logs to `activity_entries`, bumps finding `workflow_status` to `contained`, and can also register `--proof-artifact <path>`. **Does not** run the platform command itself in v1 — the operator runs `aith assess host-exec --require-audit ... -- <cmd>` first, then passes the command-run id or captured stdout/screenshot proof. |
 | `aith assess log` | Record the containment decision (proposed, approved, executed, rolled-back) with structured `metadata_json` |
 | `aith assess artifact register` | Register containment-proof artifacts (`kind=containment_proof`) — screenshots, command output, ticket links |
 | `aith assess host-exec` | Out-of-band evidence pulls during eradication / recovery (e.g., post-containment verification that the session is actually revoked) |
@@ -113,7 +113,7 @@ an AWS IAM key abuse touches cloud + identity.
 ## Proposal Contract
 
 Every proposal — regardless of layer — must specify all four fields.
-Vague proposals fail the `record-proposal` schema and the operator's
+Vague proposals fail the containment proposal contract and the operator's
 approval review.
 
 ### (a) Action verb
@@ -179,9 +179,9 @@ One of:
 ## Approval Flow
 
 ```bash
-# 1) Author proposal — does NOT execute. Wraps record-proposal under the
-#    containment_proposal schema AND writes a dispatch-decision row whose
-#    `decision_id` the operator passes to approve-proposal + blue contain.
+# 1) Author proposal — does NOT execute. Writes a containment_proposal
+#    dispatch-decision row whose `decision_id` the operator passes to
+#    approve-proposal + blue contain.
 aith blue propose-contain <finding-slug> \
   --action revoke_session \
   --target user@acme.example \
@@ -191,8 +191,7 @@ aith blue propose-contain <finding-slug> \
   --note "Verified compromise; sign-in from unfamiliar IP corroborated; revoke active sessions before pulling other forensics."
 
 # `aith blue propose-contain` prints JSON like:
-#   {"proposal_path": ".../containment-proposal-<ts>.json",
-#    "decision_id": 42,
+#   {"decision_id": 42,
 #    "approval_hint": "aith assess approve-proposal 42 --approved-by <operator>"}
 
 # 2) Operator approves the proposal (decision-row PATCH; gates step 4)
@@ -215,11 +214,13 @@ aith blue propose-contain <finding-slug> \
 # `aith assess approve-proposal`) before invoking. Example:
 #
 #   aith assess host-exec --tool aws --intent "rotate compromised key" \
-#     --technique T1098 --phase respond --allow-destructive \
+#     --technique T1098 --phase respond --scope-host <customer-slug> \
+#     --require-audit --allow-destructive \
 #     -- aws iam delete-access-key --user-name <user> --access-key-id <id>
 aith assess host-exec \
   --tool gam --intent "revoke active sessions" \
-  --technique T1110 --phase respond \
+  --technique T1110 --phase respond --scope-host <customer-slug> \
+  --require-audit \
   -- gam user <target-email> signout
 # (No --allow-destructive needed here: `signout` is not in the token
 # list. Add the flag only for argv that contains a destructive token.)
@@ -227,8 +228,7 @@ aith assess host-exec \
 # 4) Record the executed containment: registers the proof artifact,
 #    writes the activity_entries row, bumps finding workflow_status to
 #    `contained`. Refuses unless the proposal's decision row is approved.
-aith blue contain <finding-slug> \
-  --proposal <decision-id> \
+aith blue contain <finding-slug> --proposal <decision-id> --command-run-id <host-exec-run-id> \
   --proof-artifact "$ENGAGEMENT_DIR/ir/evidence/containment-<slug>-host-exec-stdout.json"
 
 # 5) Register any out-of-band supplementary evidence (screenshot of the
@@ -295,15 +295,17 @@ Run all four steps in order. Skipping any step breaks the audit chain,
 the report-writer's containment narrative, or the next verifier
 dispatch (if a follow-on finding lands).
 
-1. **Register every containment-proof artifact** with
-   `--kind containment_proof`, `--finding <slug>`. Proofs include:
+1. **Link the audited command-run and register supplementary proof artifacts.**
+   `aith blue contain --command-run-id <id>` links the host-exec audit
+   row automatically — stdout/stderr are already stored there.
+   Supplementary proof (platform admin console screenshot, ITSM ticket
+   link, separately-captured output) is registered additionally:
    - Screenshot of the platform admin console showing the executed
      state (sessions empty, account suspended, key inactive).
-   - The `host-exec` command stdout JSON the operator captured when
-     running the platform command (passed to `aith blue contain
-     --proof-artifact <path>`, which registers it as
-     `kind=containment_proof`).
    - The customer's ITSM ticket link confirming the change.
+   For UI-driven actions without a `host-exec` audit row, fall back to
+   `aith blue contain --proof-artifact <path>` which registers the file
+   as `kind=containment_proof`.
 2. **Record the containment activity entry:**
 
    ```bash
@@ -372,12 +374,13 @@ dispatch (if a follow-on finding lands).
 - **Missing rollback condition.** "No rollback" is acceptable on
   irreversible actions only when accompanied by the standard recovery
   procedure (URL or document reference). "Unknown" is not.
-- **Skipping the proof artifact.** In v1 the operator runs the platform
-  command via `aith assess host-exec` and then passes the captured
-  stdout/screenshot to `aith blue contain --proof-artifact <path>`. UI-
-  driven actions (clicked through the GWS admin console, M365 portal)
-  need a manually-captured screenshot. Without proof, the report cannot
-  show the containment landed.
+- **Skipping the audit linkage.** In v1 the operator runs the platform
+  command through `aith assess host-exec --require-audit` and then records
+  the containment with `aith blue contain --command-run-id <id>` so the
+  audit row and stdout are linked. UI-driven actions (clicked through the
+  GWS admin console, M365 portal) that cannot go through `host-exec` must
+  supply `--proof-artifact <path>` instead. Without one of these, the
+  report cannot show the containment landed.
 - **Deleting evidence in the name of cleanup.** False-positive findings
   retain their artifacts (`triage.md` rule 19). Marking-scratch is the
   cleanup verb, not `rm`. Containment never deletes audit pulls.
@@ -386,7 +389,7 @@ dispatch (if a follow-on finding lands).
 
 - `agent/rules/triage.md` — containment-proposal shape (rule 18),
   never-delete-evidence (rule 19), disposition prerequisites (rule 3).
-- `agent/shared-constraints-blue.md` — WRITE-class-via-record-proposal
+- `agent/shared-constraints-blue.md` — WRITE-class-via-containment-proposal
   (§2), artifact chain of custody (§3), audit pipeline (§6).
 - `agent/skills/exploit-playbook-authoring/SKILL.md` — red-mode analog;
   the proposal contract here mirrors the exploit playbook's manual-step
@@ -401,8 +404,9 @@ dispatch (if a follow-on finding lands).
   documented admin identities authorized for containment execution,
   comms templates, break-glass procedures.
 - `aith blue contain` — recording verb (v1): does NOT run the platform
-  command itself. The operator runs `aith assess host-exec ... -- <cmd>`
-  first, then passes the captured stdout/screenshot as
-  `--proof-artifact`. `aith blue contain` registers the proof artifact,
-  logs to `activity_entries`, and bumps the finding workflow status to
-  `contained`.
+  command itself. The operator runs `aith assess host-exec --require-audit
+  ... -- <cmd>` first, then records the containment via
+  `aith blue contain --command-run-id <id>` (the primary path — links the
+  host-exec audit row) or `--proof-artifact <path>` (for UI-driven actions
+  without a `host-exec` audit row). Logs to `activity_entries` and bumps
+  the finding workflow status to `contained`.

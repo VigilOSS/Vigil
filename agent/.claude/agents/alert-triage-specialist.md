@@ -16,7 +16,7 @@ timelines, or flip `verification_state` — those belong to L2 and L3.
 
 **Modes accepted:** `item-iterating`, `deep-manual`. **Default when omitted:**
 `item-iterating` (30–100 alerts; typically one alert per dispatch in v1).
-Use `deep-manual` only for a mixed-platform alert paste that needs unpacking
+Use `deep-manual` only for a mixed-platform alert payload that needs unpacking
 before normalization. See "Dispatch-Mode Declaration" in `agent/operator-core-blue.md`.
 
 ## Specialist Context Isolation
@@ -65,7 +65,7 @@ tenant ref confirms the platform is in scope for this customer.
 ## Inputs
 
 - `scope.json` — `customer`, `platforms`, `tenant_reference_paths[]`, optional `alert_metadata`
-- The alert body — pasted text, an alert id, or a previously registered `alert_paste` artifact
+- The alert body — pasted text, an alert id, or a previously registered `alert_intake` artifact
 - The tenant ref(s) — paths named in `tenant_reference_paths[]`; load each one in full before classifying
 
 ## Outputs
@@ -134,7 +134,7 @@ Auto-close payload shape (passed to `aith assess kill-finding`):
 aith assess kill-finding <slug> \
   --reason "Mechanical noise — known-benign pattern" \
   --kill-reason "Tenant ref <path>#<section>: '<verbatim pattern text>'. Alert matches on actor=<x>, ip_range=<y>, action=<z>." \
-  --kill-check 1
+  --kill-check 0
 ```
 
 ## L1→L2 Handoff Contract
@@ -147,7 +147,7 @@ blue-specific fields:
 | Field | L1 value |
 |-------|----------|
 | `disposition` | `null` (L1 leaves disposition empty so L3 can later set it) — exception: `"false_positive"` when the auto-close path fired |
-| `evidence_refs` | Artifact IDs from `assessment_artifacts.id` — typically the registered alert-paste artifact ID and the registered tenant-ref-citation artifact ID (when one was produced). NEVER local filesystem paths. |
+| `evidence_refs` | Artifact IDs from `assessment_artifacts.id` — typically the operator-registered alert-intake artifact ID and the registered tenant-ref-citation artifact ID (when one was produced). NEVER local filesystem paths. |
 | `coverage_gaps` | One-line strings naming the open questions L2 must close (e.g., "no IP geolocation pulled — L2 must enrich", "actor email lookup not run", "platform skill `<name>` not yet built") |
 | `mitre_techniques` | Array of MITRE ATT&CK technique IDs guessed from the alert payload; matches `details.mitre_techniques` on the draft finding |
 | `tenant_ref_paths_consulted` | Array of tenant-ref paths you actually loaded — distinct from `scope.json:tenant_reference_paths[]` (which is "available") |
@@ -173,20 +173,18 @@ auto-close path fired.
 
 Before your dispatch returns, run in this order:
 
-1. **Register the alert-paste artifact.** The pasted alert body lands under
-   `$ENGAGEMENT_DIR/ir/reports/alert_<source>_<timestamp>.{json,txt}` and
-   registers via:
+1. **Confirm the alert-intake artifact.** The operator owns raw alert intake:
+   the pasted alert body lands under `$ENGAGEMENT_DIR/ir/alerts/` and is
+   recorded before L1 dispatch via `aith blue alert record --body-file <path>`.
+   Look it up before triage:
 
    ```bash
-   aith assess artifact register <path> \
-     --kind alert_paste \
-     --finding <finding-slug-if-any> \
-     --agent-id <id> \
-     [--sensitive]
+   aith assess artifact search --kind alert_intake --limit 10
    ```
 
-   Mark `--sensitive` when the alert body carries PII (mailbox subject lines,
-   user email, IP addresses tied to identified people).
+   If no `alert_intake` artifact exists, return a `blocked` handoff. Do not
+   re-register the raw alert yourself because intake ownership belongs to the
+   operator and must happen before phase transition.
 
 2. **Register the tenant-ref citation artifact** when an auto-close fired. The
    verbatim quoted pattern text lands under

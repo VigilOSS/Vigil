@@ -130,6 +130,12 @@ def register(subparsers) -> None:
         action="store_true",
         help="Explicit opt-in for destructive operations (rm -r, dd of=/dev/, format, delete, --force).",
     )
+    p.add_argument(
+        "--require-audit",
+        dest="require_audit",
+        action="store_true",
+        help="Exit non-zero if the backend audit row cannot be recorded; use for blue WRITE actions.",
+    )
     p.set_defaults(func=run)
 
 
@@ -187,6 +193,7 @@ def _merge_from_json(args: argparse.Namespace, doc: dict) -> None:
         "timeout": "timeout",
         "audit_source": "audit_source",
         "allow_destructive": "allow_destructive",
+        "require_audit": "require_audit",
     }
     for json_key, attr in field_map.items():
         if json_key in doc and doc[json_key] is not None:
@@ -360,18 +367,21 @@ def run(args) -> None:
     }
 
     record_run_id: int | str = ""
+    audit_record_failed = False
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
         endpoint = f"command-runs/host-exec"
         try:
             response = client.post(endpoint, payload)
         except AssessError as exc:
+            audit_record_failed = True
             print(
                 f"[host-exec] WARN: audit record failed -- {exc}",
                 file=sys.stderr,
             )
             response = None
         except Exception as exc:  # noqa: BLE001 — must never eat the exit code
+            audit_record_failed = True
             print(
                 f"[host-exec] WARN: audit record failed -- {exc}",
                 file=sys.stderr,
@@ -390,5 +400,12 @@ def run(args) -> None:
     if record_run_id:
         audit_line += f" run_id={record_run_id}"
     print(audit_line, file=sys.stderr)
+
+    if getattr(args, "require_audit", False) and (audit_record_failed or not record_run_id):
+        print(
+            "[host-exec] required audit record was not created; refusing success for this invocation",
+            file=sys.stderr,
+        )
+        sys.exit(4)
 
     sys.exit(return_code)

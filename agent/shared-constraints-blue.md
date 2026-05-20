@@ -69,10 +69,11 @@ aith blue propose-contain <finding-slug> \
 
 Approval is per-action per-target — a broad "you can contain this BEC"
 approval is not specific. Execution is two operator steps after approval:
-first run the platform command through `aith assess host-exec`, then record
-the already executed action with `aith blue contain <finding-slug> --proposal
-<id>`, which logs structured metadata to `activity_entries` and bumps the
-finding's workflow status.
+first run the platform command through `aith assess host-exec --require-audit`,
+then record the already executed action with `aith blue contain <finding-slug> --proposal <id> --command-run-id <id>`
+or `aith blue contain <finding-slug> --proposal <id> --proof-artifact <path>`,
+which logs structured metadata to `activity_entries` and bumps the finding's
+workflow status.
 
 Do not run a WRITE-class platform command directly even when you "know" it
 will be approved — the proposal record is the audit gate.
@@ -99,7 +100,7 @@ dispatch closes:
 
 ```bash
 aith assess artifact register <path> \
-  --kind <log|evidence|note|ioc_dump|timeline|containment_proof> \
+  --kind <ir_log|ir_evidence|timeline|ioc_dump|containment_proof|ir_closeout> \
   --finding <finding-slug> \
   --agent-id <id> \
   --command-run-id <id> \
@@ -183,6 +184,7 @@ aith assess host-exec \
   --technique <MITRE-technique-id-or-IR-tag> \
   --phase <triage|investigate|verify|respond|report> \
   --scope-host <customer-slug> \
+  [--require-audit for WRITE/respond actions] \
   [--target-host <when applicable: user@tenant, host-id, principal-arn>] \
   -- <command argv>
 ```
@@ -190,6 +192,11 @@ aith assess host-exec \
 `scope-host` is the tenant / customer slug for blue (not an IP or hostname —
 that vocabulary belongs to red). `target-host` is set when narrowed to a
 specific identity, principal, or device.
+
+Use `--require-audit` on every WRITE/respond command because containment must
+not be recorded as complete unless the backend command-run row exists. If the
+backend cannot create that row, the wrapper exits non-zero after printing the
+command output so the operator can preserve evidence and retry recording.
 
 Forbidden — bypasses audit pipeline: raw host Bash hitting tenant APIs,
 ad-hoc `curl` against admin REST endpoints, `gcloud` / `gam` invocations
@@ -365,7 +372,7 @@ agents cannot query unindexed local files.
 
    ```bash
    aith assess artifact register <path> \
-     --kind <log|evidence|note|ioc_dump|timeline|containment_proof> \
+     --kind <ir_log|ir_evidence|timeline|ioc_dump|containment_proof|ir_closeout> \
      --finding <finding-slug> \
      --agent-id <id> \
      --command-run-id <id> \

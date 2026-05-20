@@ -16,7 +16,7 @@ intel, runs vendor-specific FP gates, and hands off to L3 / L4.
 
 - L1 `alert-triage` dispatched with `platform=edr-mde`, `platform=edr-cs`,
   or `platform=edr-s1`. The dispatch handoff names this skill and carries
-  the alert paste artifact + initial MITRE technique seed.
+  the alert-intake artifact + initial MITRE technique seed.
 - An L2 platform investigation in flight needs host-side process tree
   context before disposition (e.g., an `aws-cloudtrail` finding surfaces a
   workstation IP that triggered EDR alerts in the same window).

@@ -630,7 +630,7 @@ citable across dispatches).
   "containment_proposed": [
     {"action": "revoke|disable|reset|remove", "target": "<specific principal/grant/rule>", "rollback": "<reverse action>"}
   ],
-  "next_skill": "alert-fp-verification"
+  "next_specialist": "verifier"
 }
 ```
 

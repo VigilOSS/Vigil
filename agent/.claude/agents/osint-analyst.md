@@ -46,14 +46,18 @@ constraint set:
 
 Use blue IOC enrichment and backend intel/link helpers. Do not apply red
 attacker-outcome proof language to defender-side IOC context.
+For blue dispatches, treat CVE/exploit-developer routing below as red-only
+unless the operator explicitly asks for product-vulnerability context. Your
+normal blue outputs are IOC intel rows, `link-finding --intel` attachments,
+and a handoff naming confidence, source reputation, and remaining enrichment
+gaps.
 
 ## Pre-Work Checkpoint
 
 Before starting any work, verify:
 
 - [ ] You loaded `agent/shared-constraints.md` for red OSINT work or `agent/shared-constraints-blue.md` for blue IOC enrichment
-- [ ] You loaded the osint-recon skill (`agent/skills/osint-recon/SKILL.md`)
-- [ ] You read the skill's `## Extended Resources` section and loaded the listed reference files
+- [ ] For red OSINT, you loaded the osint-recon skill (`agent/skills/osint-recon/SKILL.md`) and its `## Extended Resources`; for blue IOC enrichment, you loaded `agent/skills/ioc-enrichment/SKILL.md` instead
 - [ ] You have the dispatch context (target domain, tech stack, phase, task objective, prior intel)
 - [ ] You checked command history as a coverage map — `aith assess list-command-runs --q <keyword> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what OSINT has already been pulled on this domain/stack so your next queries pick angles that haven't been covered — different data source (whois vs cert.sh vs shodan vs github dorking), different CVE year range, different product/version pivot, different subsidiary/acquired-domain relationship. The only query to skip is an identical lookup against identical input; any variant is new intelligence coverage. If you cite a prior run instead of re-running, fetch its preview with `aith assess get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output contains what you need. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 

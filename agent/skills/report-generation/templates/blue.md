@@ -411,7 +411,7 @@ sha + link but suppress the FTS preview; body lives in Appendix B.
 
 | Artifact ID | Relative path | Producer (agent / cmd-run) | SHA-256 | Size | Kind | Linked finding |
 |-------------|---------------|----------------------------|---------|------|------|----------------|
-| `<art_id>` | `ir/reports/<feed>_<target>_<window>.json` | `<role>` / `<cmd-run-id>` | `<sha256>` | `<bytes>` | `<ir_log | ir_evidence | timeline | ioc_dump | containment_proof | alert_paste>` | `<finding-slug>` |
+| `<art_id>` | `ir/reports/<feed>_<target>_<window>.json` | `<role>` / `<cmd-run-id>` | `<sha256>` | `<bytes>` | `<alert_intake | ir_log | ir_evidence | timeline | ioc_dump | containment_proof | ir_closeout>` | `<finding-slug>` |
 | `<art_id>` | `ir/evidence/<topic>.md` | `<role>` / `<cmd-run-id>` | `<sha256>` | `<bytes>` | `<kind>` | `<finding-slug>` |
 | `<art_id>` | `ir/reports/<sensitive_export>.csv` | `<role>` | `<sha256>` | `<bytes>` | `<kind>` `--sensitive` | `<finding-slug>` — preview suppressed (see Appendix B) |
 
@@ -464,11 +464,19 @@ CLOSING SEQUENCE (blue)
 ================================================================================
 
 After QA pass (`agent/skills/report-generation/SKILL.md` § Post-Generation
-Self-Review), register the report and publish:
+Self-Review), register the rendered file and publish.
+
+False-positive, benign, no-impact, or inconclusive outcomes (closeout path):
+
+    aith assess artifact register closeout.md --kind ir_closeout \
+      --agent-id <report-writer-agent-id>
+
+Verified incident outcomes (full report path):
 
     aith assess artifact register report.md --kind ir_evidence \
       --finding <slug-list-or-engagement-ref> --agent-id <report-writer-agent-id>
 
-Then run § "Publish After QA Pass" — emit `report.generated`, mark findings
-`reported`, transition the engagement to `complete`.
+Then run § "Publish After QA Pass" — emit `closeout.generated` (closeout path)
+or `report.generated` (report path), mark findings `reported`, transition the
+engagement to `complete`.
 -->

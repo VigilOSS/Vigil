@@ -178,10 +178,12 @@ maps to roughly the same regime.
 
   ```bash
   aith assess host-exec --tool rita --intent "show human-readable beacon candidates" \
-    --technique T1071 --phase investigate -- rita show-beacons <db-name> --human
+    --technique T1071 --phase investigate --scope-host <customer-slug> \
+    -- rita show-beacons <db-name> --human
   # writes top beacons by score; save the full machine-readable form:
   aith assess host-exec --tool rita --intent "export beacon candidates" \
-    --technique T1071 --phase investigate -- rita show-beacons <db-name> --no-header > \
+    --technique T1071 --phase investigate --scope-host <customer-slug> \
+    -- rita show-beacons <db-name> --no-header > \
       "$ENGAGEMENT_DIR/ir/evidence/network/beacons_<db>.tsv"
   ```
 
@@ -232,7 +234,7 @@ exfiltration via TXT records.
 
    ```bash
 aith assess host-exec --tool python3 --intent "score DNS label entropy" \
-  --technique T1568.002 --phase investigate -- python3 - <<'PY'
+  --technique T1568.002 --phase investigate --scope-host <customer-slug> -- python3 - <<'PY'
    import math, collections, sys
    for line in sys.stdin:
        fqdn = line.strip().lower()
@@ -294,7 +296,7 @@ from saved pcap:
 
 ```bash
 aith assess host-exec --tool tshark --intent "extract JA3 client fingerprints" \
-  --technique T1573 --phase investigate -- tshark -r capture.pcap \
+  --technique T1573 --phase investigate --scope-host <customer-slug> -- tshark -r capture.pcap \
   -Y "tls.handshake.type==1" \
   -T fields -e ip.src -e ip.dst -e tls.handshake.ja3 \
   > ja3_extract.tsv
@@ -376,7 +378,7 @@ recently-registered domains, downloads from unusual TLDs.
   ```
 
 - WHOIS age on every destination not in the tenant allowlist —
-  `aith assess host-exec --tool whois --intent "lookup domain age" --technique T1583 --phase investigate -- whois <domain>`
+  `aith assess host-exec --tool whois --intent "lookup domain age" --technique T1583 --phase investigate --scope-host <customer-slug> -- whois <domain>`
   and extract creation date.
   Domains < 30 days old warrant investigation independent of other
   signal.
