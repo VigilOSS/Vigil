@@ -3169,6 +3169,7 @@ def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
 
 def report_readiness(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    is_blue = str(getattr(engagement, "engagement_type", "") or "").lower() == "blue"
     engagement_root = Path(engagement.engagement_root).expanduser().resolve()
     coverage = coverage_readiness(engagement_id)
     blockers: list[dict[str, Any]] = []
@@ -3181,7 +3182,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             }
         )
 
-    reportable_statuses = {"active", "blocked", "exploited", "reported"}
+    reportable_statuses = {"active", "blocked", "exploited", "contained", "eradicated", "recovered", "reported"}
     candidates = [
         row
         for row in _report_candidate_records(engagement_id)
@@ -3236,14 +3237,19 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         title = row.get("title", "")
         details = _json_object(row.get("details_json", "{}"))
         missing_fields: list[str] = []
-        if not details.get("cvss_score") and details.get("cvss_score") != 0:
-            missing_fields.append("cvss_score")
-        if not details.get("cvss_vector"):
-            missing_fields.append("cvss_vector")
-        if not details.get("steps_to_reproduce"):
-            missing_fields.append("steps_to_reproduce")
-        if not details.get("remediation"):
-            missing_fields.append("remediation")
+        if is_blue:
+            mitre = details.get("mitre_techniques")
+            if not isinstance(mitre, list) or not mitre:
+                missing_fields.append("mitre_techniques")
+        else:
+            if not details.get("cvss_score") and details.get("cvss_score") != 0:
+                missing_fields.append("cvss_score")
+            if not details.get("cvss_vector"):
+                missing_fields.append("cvss_vector")
+            if not details.get("steps_to_reproduce"):
+                missing_fields.append("steps_to_reproduce")
+            if not details.get("remediation"):
+                missing_fields.append("remediation")
         if not details.get("impact"):
             missing_fields.append("impact")
         if not details.get("evidence"):
@@ -3259,7 +3265,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             )
         cvss_score = details.get("cvss_score")
         severity = str(row.get("severity", "")).lower()
-        if cvss_score is not None and severity:
+        if not is_blue and cvss_score is not None and severity:
             try:
                 score = float(cvss_score)
             except (TypeError, ValueError):
@@ -3549,7 +3555,7 @@ def _report_finding_records(engagement_id: int, *, mode: str = "draft") -> list[
         rows = [
             row
             for row in rows
-            if row.get("workflow_status") in {"active", "blocked", "exploited", "reported"}
+            if row.get("workflow_status") in {"active", "blocked", "exploited", "contained", "eradicated", "recovered", "reported"}
             and row.get("verification_state") == "verified"
             and row.get("verification_disposition") in {"confirmed", "downgraded"}
         ]
@@ -3567,10 +3573,13 @@ def _report_finding_records(engagement_id: int, *, mode: str = "draft") -> list[
             }.get(str(row.get("severity", "")), 5),
             {
                 "exploited": 0,
-                "active": 1,
-                "reported": 2,
-                "blocked": 3,
-                "draft": 4,
+                "contained": 1,
+                "eradicated": 2,
+                "recovered": 3,
+                "active": 4,
+                "reported": 5,
+                "blocked": 6,
+                "draft": 7,
             }.get(str(row.get("workflow_status", "")), 5),
             -int(row.get("id", 0)),
         )
@@ -6375,6 +6384,7 @@ def list_dispatches(
     since: str = "",
     task_q: str = "",
     limit: int = 100,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     where = ["engagement_id = ?"]
@@ -6392,9 +6402,10 @@ def list_dispatches(
         where.append("task LIKE ?")
         params.append(f"%{task_q}%")
     params.append(int(limit))
+    params.append(max(int(offset), 0))
     query = (
         f"SELECT * FROM assessment_dispatches WHERE {' AND '.join(where)} "
-        "ORDER BY dispatched_at DESC, id DESC LIMIT ?"
+        "ORDER BY dispatched_at DESC, id DESC LIMIT ? OFFSET ?"
     )
     with get_connection() as connection:
         rows = connection.execute(query, tuple(params)).fetchall()

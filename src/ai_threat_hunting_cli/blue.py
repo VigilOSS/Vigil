@@ -122,16 +122,23 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
         help="Comma-separated platforms: gws,m365,aws,okta,edr,network,generic",
     )
     engage_p.add_argument("--severity", default=None, help="Alert severity hint (low|medium|high|critical|info)")
-    engage_p.add_argument("--source", default="paste", help="Alert source (default: paste)")
+    engage_p.add_argument("--source", default="operator_chat", help="Alert source (default: operator_chat)")
     engage_p.add_argument("--skip-permissions", action="store_true")
+
+    customers_p = blue_sub.add_parser("customers", help="List customers with tenant references available for blue engagements")
+    customers_p.add_argument("--platform", default=None, help="Filter to a platform: gws,m365,aws,okta,edr,network,generic")
+    customers_p.add_argument("--json", action="store_true")
 
     alert_p = blue_sub.add_parser("alert", help="Manage alert intake on a blue engagement")
     alert_sub = alert_p.add_subparsers(dest="alert_command", required=True)
-    alert_paste_p = alert_sub.add_parser("paste", help="Read alert body from stdin and stage it into scope.json + artifact index")
-    alert_paste_p.add_argument("-k", "--engagement-key", default=None)
-    alert_paste_p.add_argument("--select", action="store_true")
-    alert_paste_p.add_argument("--external-id", default=None)
-    alert_paste_p.add_argument("--severity", default=None)
+    alert_record_p = alert_sub.add_parser("record", help="Record a pasted alert body from a file into scope.json + artifact index")
+    alert_record_p.add_argument("--body-file", required=True, help="Path containing the raw alert text from the operator chat")
+    alert_record_p.add_argument("-k", "--engagement-key", default=None)
+    alert_record_p.add_argument("--select", action="store_true")
+    alert_record_p.add_argument("--external-id", default=None)
+    alert_record_p.add_argument("--severity", default=None)
+    alert_record_p.add_argument("--source", default=None, help="Alert source override (default: operator_chat)")
+    alert_record_p.add_argument("--replace", action="store_true", help="Replace existing alert metadata while preserving prior raw alert files")
 
     list_p = blue_sub.add_parser("list", help="List blue engagements")
     list_p.add_argument("--customer", default=None)
@@ -187,7 +194,7 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
     propose_p.add_argument("finding_slug")
     propose_p.add_argument("--action", required=True, help="Containment verb (revoke_session, reset_cred, disable_account, isolate_host, block_ioc, ...)")
     propose_p.add_argument("--target", required=True, help="Target id (user email, host id, IOC value, ...)")
-    propose_p.add_argument("--platform", required=True)
+    propose_p.add_argument("--platform", choices=tuple(sorted(PLATFORM_TO_TENANT_SUFFIX)), required=True)
     propose_p.add_argument("--rollback", required=True, help="Rollback / undo description")
     propose_p.add_argument(
         "--blast-radius",
@@ -213,6 +220,12 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
         ),
     )
     contain_p.add_argument("--proof-artifact", default=None)
+    contain_p.add_argument(
+        "--command-run-id",
+        type=int,
+        default=None,
+        help="assessment_command_runs id from the audited host-exec execution; required if --proof-artifact is omitted",
+    )
     contain_p.add_argument("--action", default=None, help="(audit) Containment verb echoed into activity_entries metadata")
     contain_p.add_argument("--target", default=None, help="(audit) Containment target echoed into activity_entries metadata")
     contain_p.add_argument("-k", "--engagement-key", default=None)
@@ -222,6 +235,11 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
     report_p.add_argument("-k", "--engagement-key", default=None)
     report_p.add_argument("--select", action="store_true")
     report_p.add_argument("--template", default=None)
+
+    closeout_p = blue_sub.add_parser("closeout", help="Dispatch report-writer to render a customer-facing closeout summary")
+    closeout_p.add_argument("-k", "--engagement-key", default=None)
+    closeout_p.add_argument("--select", action="store_true")
+    closeout_p.add_argument("--agent-id", default=None)
 
     tenant_p = blue_sub.add_parser("tenant", help="Manage tenant reference scaffolds")
     tenant_sub = tenant_p.add_subparsers(dest="tenant_command", required=True)
@@ -240,9 +258,11 @@ def run_blue(args: argparse.Namespace, install_root: Path) -> None:
     command = args.blue_command
     if command == "engage":
         _cmd_engage(args, install_root)
+    elif command == "customers":
+        _cmd_customers(args, install_root)
     elif command == "alert":
-        if args.alert_command == "paste":
-            _cmd_alert_paste(args, install_root)
+        if args.alert_command == "record":
+            _cmd_alert_record(args, install_root)
         else:
             raise SystemExit(f"unknown alert subcommand: {args.alert_command}")
     elif command == "list":
@@ -261,6 +281,8 @@ def run_blue(args: argparse.Namespace, install_root: Path) -> None:
         _cmd_contain(args, install_root)
     elif command == "report":
         _cmd_report(args, install_root)
+    elif command == "closeout":
+        _cmd_closeout(args, install_root)
     elif command == "tenant":
         if args.tenant_command == "init":
             _cmd_tenant_init(args, install_root)
@@ -322,6 +344,7 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
             paths_str = " or ".join(str(p) for p in paths)
             lines.append(f"  - platform={platform}: expected {paths_str}")
         lines.append("")
+        lines.append("Known customers/platforms: aith blue customers")
         for platform, _paths in missing:
             lines.append(
                 f"Recover by: aith blue tenant init --customer {customer} --platform {platform}"
@@ -340,36 +363,119 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
     )
     created = create_engagement(options)
     print(created.path)
-    print(f"\nnext: aith blue alert paste -k {created.key}", file=sys.stderr)
+    print("\nnext:", file=sys.stderr)
+    print(f"  cd {created.path}", file=sys.stderr)
+    print(f"  aith engagement start {created.key} --client codex", file=sys.stderr)
+    print("  Paste the alert into the operator chat; the operator will record intake.", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
-# alert paste
+# customers
 # ---------------------------------------------------------------------------
 
 
-def _cmd_alert_paste(args: argparse.Namespace, install_root: Path) -> None:
+def _cmd_customers(args: argparse.Namespace, install_root: Path) -> None:
+    requested_platform = (args.platform or "").strip()
+    if requested_platform and requested_platform not in PLATFORM_TO_TENANT_SUFFIX:
+        raise SystemExit(
+            f"--platform must be one of {sorted(PLATFORM_TO_TENANT_SUFFIX.keys())} "
+            f"(got {requested_platform!r})"
+        )
+
+    rows = _discover_blue_customers(install_root)
+    if requested_platform:
+        rows = [
+            row
+            for row in rows
+            if requested_platform in row["platforms"]
+        ]
+        rows = [
+            {
+                "customer": row["customer"],
+                "platforms": [requested_platform],
+                "tenant_reference_paths": [
+                    row["tenant_reference_paths"][row["platforms"].index(requested_platform)]
+                ],
+            }
+            for row in rows
+        ]
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+
+    if not rows:
+        print("(no blue customers found)", file=sys.stderr)
+        return
+
+    print("customer\tplatforms\ttenant_reference_paths")
+    for row in rows:
+        print(
+            f"{row['customer']}\t{','.join(row['platforms'])}\t"
+            f"{','.join(row['tenant_reference_paths'])}"
+        )
+
+
+def _discover_blue_customers(install_root: Path) -> list[dict[str, object]]:
+    tenant_dir = install_root / "agent" / "references" / "tenants"
+    if not tenant_dir.is_dir():
+        return []
+
+    suffix_to_platform = {suffix: platform for platform, suffix in PLATFORM_TO_TENANT_SUFFIX.items()}
+    suffix_to_platform.update({platform: platform for platform in PLATFORM_TO_TENANT_SUFFIX})
+    grouped: dict[str, dict[str, str]] = {}
+    for path in sorted(tenant_dir.glob("*.md")):
+        if path.name.startswith("_template-"):
+            continue
+        stem = path.stem
+        for suffix, platform in sorted(suffix_to_platform.items(), key=lambda item: len(item[0]), reverse=True):
+            marker = f"-{suffix}"
+            if not stem.endswith(marker):
+                continue
+            customer = stem[: -len(marker)]
+            if not customer:
+                continue
+            grouped.setdefault(customer, {})[platform] = str(path)
+            break
+
+    rows: list[dict[str, object]] = []
+    for customer in sorted(grouped):
+        platforms = sorted(grouped[customer])
+        rows.append(
+            {
+                "customer": customer,
+                "platforms": platforms,
+                "tenant_reference_paths": [grouped[customer][platform] for platform in platforms],
+            }
+        )
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# alert record
+# ---------------------------------------------------------------------------
+
+
+def _cmd_alert_record(args: argparse.Namespace, install_root: Path) -> None:
     eng_dir = _resolve_blue_engagement(install_root, args)
     scope_path = eng_dir / "scope.json"
     scope = _read_scope(scope_path, require_blue=True)
+    alert_md = dict(scope.get("alert_metadata") or {})
+    if (alert_md.get("raw_body") or alert_md.get("parsed")) and not getattr(args, "replace", False):
+        raise SystemExit(
+            "alert intake already recorded for this engagement. "
+            "Create a new engagement for a separate alert, or pass --replace to correct the intake record."
+        )
 
-    body = sys.stdin.read()
+    body_file = Path(args.body_file)
+    if not body_file.is_file():
+        raise SystemExit(f"alert record: --body-file not found: {body_file}")
+    body = body_file.read_text(encoding="utf-8")
     if not body.strip():
-        raise SystemExit("alert paste: stdin was empty; pipe the alert body via stdin")
+        raise SystemExit(f"alert record: --body-file was empty: {body_file}")
 
     parsed = _parse_alert_body(body)
     now_iso = _utc_now_iso()
-    alert_md = dict(scope.get("alert_metadata") or {})
-    alert_md["source"] = alert_md.get("source") or "paste"
-    if args.external_id:
-        alert_md["external_id"] = args.external_id
-    alert_md["received_at"] = now_iso
-    if args.severity:
-        alert_md["severity_hint"] = args.severity
-    alert_md["raw_body"] = body
-    alert_md["parsed"] = parsed
-    scope["alert_metadata"] = alert_md
-    _write_json_atomic(scope_path, scope)
 
     alerts_dir = eng_dir / "ir" / "alerts"
     alerts_dir.mkdir(parents=True, exist_ok=True)
@@ -377,7 +483,7 @@ def _cmd_alert_paste(args: argparse.Namespace, install_root: Path) -> None:
     fname = (args.external_id or f"alert-{ts_label}") + ".txt"
     # Defensive: filenames from --external-id may carry slashes / colons.
     fname = re.sub(r"[^A-Za-z0-9_.\-]+", "_", fname)
-    raw_path = alerts_dir / fname
+    raw_path = _unique_path(alerts_dir / fname)
     raw_path.write_text(body, encoding="utf-8")
 
     # Register the alert as an artifact for FTS + chain-of-custody. Failures
@@ -386,22 +492,19 @@ def _cmd_alert_paste(args: argparse.Namespace, install_root: Path) -> None:
     register_rc = _run_assess(
         install_root,
         eng_dir,
-        ["artifact", "register", str(raw_path), "--kind", "alert_paste", "--sensitive"],
+        ["artifact", "register", str(raw_path), "--kind", "alert_intake", "--sensitive"],
         check=False,
     )
     if register_rc != 0:
         print(
-            f"WARN aith blue alert paste: artifact register failed (rc={register_rc}); "
+            f"WARN aith blue alert record: artifact register failed (rc={register_rc}); "
             f"alert body persisted at {raw_path} but is not in the artifact index yet. "
-            f"Retry with: aith assess artifact register {raw_path} --kind alert_paste --sensitive",
+            f"Retry with: aith assess artifact register {raw_path} --kind alert_intake --sensitive",
             file=sys.stderr,
         )
 
     log_title = "alert intake"
-    log_result = (
-        f"alert pasted ({len(body)} bytes; external_id={args.external_id or '-'}; "
-        f"severity={args.severity or scope.get('alert_metadata', {}).get('severity_hint') or '-'})"
-    )
+    log_result = "alert recorded"
     log_rc = _run_assess(
         install_root,
         eng_dir,
@@ -411,17 +514,41 @@ def _cmd_alert_paste(args: argparse.Namespace, install_root: Path) -> None:
     )
     if log_rc != 0:
         print(
-            f"WARN aith blue alert paste: activity log entry failed (rc={log_rc}). "
-            "scope.json and artifact registration succeeded; rerun "
+            f"WARN aith blue alert record: activity log entry failed (rc={log_rc}). "
+            "the raw alert file was written and scope.json will still be updated; rerun "
             "`aith assess log operator 'alert intake' alert_intake '<msg>' --actor-kind operator` manually if you want the audit row.",
             file=sys.stderr,
         )
+
+    alert_md["source"] = args.source or alert_md.get("source") or "operator_chat"
+    if args.external_id:
+        alert_md["external_id"] = args.external_id
+    alert_md["received_at"] = now_iso
+    if args.severity:
+        alert_md["severity_hint"] = args.severity
+    alert_md["raw_body"] = body
+    alert_md["raw_path"] = str(raw_path)
+    alert_md["parsed"] = parsed
+    scope["alert_metadata"] = alert_md
+    _write_json_atomic(scope_path, scope)
 
     print(str(raw_path))
     print(
         "\nnext: aith blue dispatch --role alert-triage-specialist --tier L1 --skills alert-triage",
         file=sys.stderr,
     )
+
+
+def _unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for index in range(2, 1000):
+        candidate = path.with_name(f"{stem}-{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise SystemExit(f"could not allocate unique alert path near {path}")
 
 
 def _parse_alert_body(body: str) -> dict | None:
@@ -762,20 +889,54 @@ def _fetch_containment_decision(
 ) -> dict | None:
     """Return the dispatch-decisions row for ``decision_id`` (kind=containment_proposal).
 
-    Pages through `aith assess agent list --kind containment_proposal` style
-    fetches via the assess CLI's raw `fetch` command. Falls back to None on
-    error so callers can produce a clean operator-facing error.
+    Pages through dispatch-decision fetches via the assess CLI's raw `fetch`
+    command. Falls back to None on error so callers can produce a clean
+    operator-facing error.
     """
-    # The dispatch-decisions endpoint is exposed via the generic `fetch` verb.
-    # `fetch` accepts a query string in-line on the endpoint. We page
-    # conservatively (limit 1000) and filter by kind so the search domain
-    # stays small even on long-running engagements.
+    page_size = 1000
+    offset = 0
+    while True:
+        endpoint = (
+            "dispatch-decisions?kind=containment_proposal"
+            f"&limit={page_size}&offset={offset}"
+        )
+        try:
+            result = subprocess.run(
+                _build_assess_argv(install_root, eng_dir, ["fetch", endpoint]),
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            rows = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if int(row.get("id") or -1) == int(decision_id):
+                return row
+        if len(rows) < page_size:
+            return None
+        offset += page_size
+    return None
+
+
+def _fetch_command_run(install_root: Path, eng_dir: Path, command_run_id: int) -> dict | None:
+    """Return the command-run row for ``command_run_id`` in this engagement."""
     try:
         result = subprocess.run(
             _build_assess_argv(
                 install_root,
                 eng_dir,
-                ["fetch", "dispatch-decisions?kind=containment_proposal&limit=1000"],
+                ["fetch", f"command-runs/{int(command_run_id)}"],
             ),
             capture_output=True,
             text=True,
@@ -787,17 +948,10 @@ def _fetch_containment_decision(
     if result.returncode != 0:
         return None
     try:
-        rows = json.loads(result.stdout)
+        row = json.loads(result.stdout)
     except json.JSONDecodeError:
         return None
-    if not isinstance(rows, list):
-        return None
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        if int(row.get("id") or -1) == int(decision_id):
-            return row
-    return None
+    return row if isinstance(row, dict) else None
 
 
 # ---------------------------------------------------------------------------
@@ -822,30 +976,11 @@ def _cmd_propose_contain(args: argparse.Namespace, install_root: Path) -> None:
     if args.finding_slug:
         payload["finding_slug"] = args.finding_slug
 
-    # 1) Backwards-compat jsonl write — keep so legacy consumers of
-    #    sessions/proposals/proposals.jsonl don't break. Uses the dedicated
-    #    `containment_proposal` schema (see
-    #    agent/schemas/containment-proposal.schema.json + record_proposal.py).
-    proposal = {"type": "containment_proposal", "payload": payload}
-    sessions_dir = eng_dir / "sessions"
-    sessions_dir.mkdir(parents=True, exist_ok=True)
-    proposal_path = sessions_dir / f"containment-proposal-{_ts_label()}.json"
-    proposal_path.write_text(json.dumps(proposal, indent=2), encoding="utf-8")
-
-    rc = _run_assess(
-        install_root,
-        eng_dir,
-        ["record-proposal", str(sessions_dir), str(proposal_path)],
-        check=False,
-    )
-    if rc != 0:
-        raise SystemExit(rc)
-
-    # 2) Authoritative approval ledger row in assessment_dispatch_decisions.
+    # Authoritative approval ledger row in assessment_dispatch_decisions.
     #    `aith blue contain` refuses to execute until this row's `resolved` flag
     #    is 1 (set via `aith assess approve-proposal <decision-id>`). The row's
     #    integer id (printed below) is what the operator passes to
-    #    `aith blue contain --proposal <id>`.
+    #    `aith blue contain --proposal <id> --command-run-id <run-id>`.
     decision_payload = dict(payload)
     decision_payload["finding_slug"] = args.finding_slug
     decision_argv = [
@@ -875,15 +1010,13 @@ def _cmd_propose_contain(args: argparse.Namespace, install_root: Path) -> None:
     except (IndexError, json.JSONDecodeError):
         sys.stderr.write(
             "WARN aith blue propose-contain: could not parse decision row JSON from "
-            "`aith assess agent decision` output. Proposal file still written; "
-            "operator must locate the decision id via "
+            "`aith assess agent decision` output. Operator must locate the decision id via "
             "`aith assess agent list` (kind=containment_proposal) before `aith blue contain`.\n"
         )
 
     decision_id = decision_row.get("id")
     print(json.dumps(
         {
-            "proposal_path": str(proposal_path),
             "decision_id": decision_id,
             "approval_hint": (
                 f"aith assess approve-proposal {decision_id} --approved-by <operator>"
@@ -951,6 +1084,20 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
     action = args.action or proposal_action or "contain"
     target = args.target or proposal_target or "-"
 
+    if not args.proof_artifact and getattr(args, "command_run_id", None) is None:
+        raise SystemExit(
+            "aith blue contain requires --proof-artifact or --command-run-id. "
+            "Execute the approved action through `aith assess host-exec --require-audit ...` "
+            "and pass the command run id, or register the captured stdout/screenshot as proof."
+        )
+    if getattr(args, "command_run_id", None) is not None:
+        command_row = _fetch_command_run(install_root, eng_dir, int(args.command_run_id))
+        if command_row is None:
+            raise SystemExit(
+                f"aith blue contain: command run id {args.command_run_id} not found in this engagement. "
+                "Pass the id printed by `aith assess host-exec --require-audit ...` or use --proof-artifact."
+            )
+
     if args.proof_artifact:
         proof_path = Path(args.proof_artifact)
         # Relative --proof-artifact should resolve against the engagement
@@ -999,10 +1146,11 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
         "platform": proposal_platform,
         "proposal_id": args.proposal,
         "finding_slug": args.finding_slug,
+        "command_run_id": getattr(args, "command_run_id", None),
     }
     log_result = (
         f"recorded approved containment action (action={action}, target={target}, "
-        f"proposal={args.proposal})"
+        f"proposal={args.proposal}, command_run_id={getattr(args, 'command_run_id', None) or '-'})"
     )
     rc = _run_assess(
         install_root,
@@ -1035,7 +1183,13 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
             "--status",
             "contained",
             "--details-inline",
-            json.dumps({"containment_status": "contained", "containment_action": action}),
+            json.dumps(
+                {
+                    "containment_status": "contained",
+                    "containment_action": action,
+                    "containment_command_run_id": getattr(args, "command_run_id", None),
+                }
+            ),
             "--reason",
             f"blue contain executed via proposal {args.proposal}",
         ],
@@ -1054,7 +1208,9 @@ def _cmd_report(args: argparse.Namespace, install_root: Path) -> None:
     eng_dir = _resolve_blue_engagement(install_root, args)
     # Pre-flight: emit the gathered report-findings table so the operator sees
     # the input set before report-writer is dispatched.
-    _run_assess(install_root, eng_dir, ["list-report-findings"], check=False)
+    preflight_rc = _run_assess(install_root, eng_dir, ["list-report-findings", "--mode", "final"], check=False)
+    if preflight_rc != 0:
+        raise SystemExit(preflight_rc)
     template_hint = (
         f" Use template variant: {args.template}." if args.template else ""
     )
@@ -1069,6 +1225,52 @@ def _cmd_report(args: argparse.Namespace, install_root: Path) -> None:
     # dispatch without operator-supplied --agent-id, and so the operator can
     # reference the id later (handoff, done, render-handoff).
     agent_id = getattr(args, "agent_id", None) or f"report-writer-{uuid.uuid4().hex[:8]}"
+    print(f"[aith blue] dispatched with agent-id={agent_id}", file=sys.stderr)
+    rc = _run_assess(
+        install_root,
+        eng_dir,
+        [
+            "agent",
+            "start",
+            "--role",
+            "report-writer",
+            "--skills",
+            "report-generation",
+            "--task",
+            task,
+            "--dispatch-mode",
+            "deep-manual",
+            "--agent-id",
+            agent_id,
+        ],
+        check=False,
+    )
+    if rc != 0:
+        raise SystemExit(rc)
+
+
+# ---------------------------------------------------------------------------
+# closeout
+# ---------------------------------------------------------------------------
+
+
+def _cmd_closeout(args: argparse.Namespace, install_root: Path) -> None:
+    eng_dir = _resolve_blue_engagement(install_root, args)
+    preflight_rc = _run_assess(install_root, eng_dir, ["list-report-findings", "--mode", "final"], check=False)
+    if preflight_rc != 0:
+        raise SystemExit(preflight_rc)
+    task = (
+        "Render customer-facing blue closeout summary to closeout.md from durable "
+        "backend state. This artifact is required even for false positive, benign, "
+        "no-impact, or inconclusive outcomes. Include customer, alert source and "
+        "external id, disposition, short closure description, evidence reviewed, "
+        "reasoning for benign/no-incident or unresolved status, actions taken, "
+        "recommended follow-up, and UTC timestamps. Register closeout.md as "
+        "kind=ir_closeout with `aith assess artifact register closeout.md "
+        "--kind ir_closeout --agent-id <report-writer-agent-id>` when the draft is ready. "
+        "Use active blue-team language and avoid red-team report vocabulary."
+    )
+    agent_id = getattr(args, "agent_id", None) or f"closeout-writer-{uuid.uuid4().hex[:8]}"
     print(f"[aith blue] dispatched with agent-id={agent_id}", file=sys.stderr)
     rc = _run_assess(
         install_root,
@@ -1171,10 +1373,6 @@ def _write_json_atomic(path: Path, payload: object) -> None:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _ts_label() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def _build_assess_argv(install_root: Path, eng_dir: Path, assess_args: list[str]) -> list[str]:

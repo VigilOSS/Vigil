@@ -203,7 +203,7 @@ Only proceed to report generation after validation passes or the operator resolv
 3. **Fix report-local failures before returning to the operator**
 4. **Return the completed checklist and current QA status**
 
-Do not emit `report.generated` or mark findings `reported` during draft generation. Publication belongs after the operator dispatches a fresh report-writer in review-and-fix QA mode and receives `QA PASS`, because lifecycle transitions before QA make an unreviewed report look final.
+Do not emit `report.generated`, `closeout.generated`, or mark findings `reported` during draft generation. Publication belongs after the operator dispatches a fresh report-writer in review-and-fix QA mode and receives `QA PASS`, because lifecycle transitions before QA make an unreviewed report look final.
 
 ## Post-Generation Self-Review
 
@@ -263,7 +263,8 @@ The field name on `update-finding --inline` is `details` (dict), not `details_js
 
 Run these publication steps only after the operator confirms the report QA gate passed:
 
-1. **Emit a runtime event** so the orchestrator and UI know the report exists:
+1. **Emit a runtime event** so the orchestrator and UI know the artifact exists.
+   For red engagements and blue verified-incident reports:
    ```bash
    aith assess emit-event \
        "report.generated" \
@@ -271,6 +272,15 @@ Run these publication steps only after the operator confirms the report QA gate 
        "report.md" \
        "report-writer" \
        "Report generated with N findings"
+   ```
+   For blue closeout artifacts (false-positive, benign, no-impact, or inconclusive):
+   ```bash
+   aith assess emit-event \
+       "closeout.generated" \
+       "report" \
+       "closeout.md" \
+       "report-writer" \
+       "Closeout generated"
    ```
 2. **Update finding workflow status to `reported`** for all findings included in the report:
    ```bash
@@ -329,21 +339,30 @@ Differences from red mode:
 - **Forbidden vocabulary** — no "PoC", "exploit chain", "weaponized", "Steps to
   Reproduce" (red framing). Blue uses "evidence reproduction" (artifact-id-cited
   command), "kill-chain stage", "adversary capability".
-- **Closing sequence** — after the rendered report passes the same post-generation
+- **Closeout artifact** — every blue engagement ends with a customer-facing
+  artifact. False-positive, benign, no-impact, or inconclusive outcomes use
+  `closeout.md`; verified incidents use `report.md`.
+- **Closing sequence** — after the rendered closeout/report passes the same post-generation
   self-review checks listed above, register the rendered file as an artifact:
   ```bash
+  aith assess artifact register closeout.md \
+    --kind ir_closeout \
+    --agent-id <report-writer-agent-id>
+
   aith assess artifact register report.md \
     --kind ir_evidence \
     --finding <slug-list-or-engagement-ref> \
     --agent-id <report-writer-agent-id>
   ```
-  Then run the existing `Publish After QA Pass` steps (`emit-event report.generated`,
-  mark included findings `reported`, transition phase to `complete`).
+  Then run the existing `Publish After QA Pass` steps. Emit `closeout.generated`
+  for `closeout.md` or `report.generated` for `report.md`, mark findings terminal,
+  and transition phase to `complete`.
 
 Dispatch invocation (worked example):
 
 ```bash
 aith blue report --engagement-key <key>
+aith blue closeout --engagement-key <key>
 # internally dispatches:
 # aith assess agent start \
 #   --role report-writer \

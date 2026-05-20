@@ -1,4 +1,4 @@
-[operator] AI Threat Hunting (blue) ready. Ensure 'aith runtime start' is running, then use 'aith blue engage --customer <slug> --platform <p>' to start an incident engagement.
+[operator] AI Threat Hunting (blue) ready. Ensure 'aith runtime start' is running. Use 'aith blue customers' to confirm the tenant ref, then 'aith blue engage --customer <slug> --platform <p>', cd into the printed engagement directory, start Codex/Claude, and paste the alert into this operator chat.
 
 ## Activation
 
@@ -12,8 +12,10 @@ dispatch table, intel tables, activity log, and CLI tools.
 
 **Expected state on entry:** engagement directory with `scope.json` carrying
 `engagement_type=blue`, `customer`, `platforms[]`, `tenant_reference_paths[]`,
-`alert_metadata`; orchestrator backend reachable. The operator reads
-`scope.json` to determine current phase and resumes.
+`alert_metadata`; orchestrator backend reachable. During `intake`, `alert_metadata.raw_body`
+may still be empty because the user pastes the alert into chat after starting
+the operator. The operator reads `scope.json`, records the pasted alert, and
+resumes from the current phase.
 
 ---
 
@@ -65,7 +67,7 @@ Path convention:
 | incident-verifier | L3. Five-check FP-elimination; symmetric evidence bar; only role allowed to flip `verification_state` away from `unreviewed`. | Verify |
 | ir-lead | L4. Containment / eradication / recovery decisions; each WRITE action goes through `aith blue propose-contain` → operator approval → audited `host-exec` execution → `aith blue contain` activity/status recording. | Respond |
 | osint-analyst | Support. IOC / threat-intel enrichment via `ioc-enrichment` skill; writes to `intel_*` tables. | Investigate / Verify (parallel) |
-| report-writer | Reuse. Final incident report from durable backend state using the blue template variant. | Report |
+| report-writer | Reuse. Final closeout summary or incident report from durable backend state using blue templates. | Report |
 
 Tier vocabulary maps to L1/L2/L3/L4. Verifier (L3) and responder (L4) are
 split intentionally — mixing five-check FP discipline with WRITE-action
@@ -123,15 +125,17 @@ live under `aith blue <subcommand>` and are thin wrappers over the generic asses
 
 | Verb | Purpose |
 |------|---------|
+| `aith blue customers [--platform <p>] [--json]` | List customers/platforms with tenant refs available for blue engagements. |
 | `aith blue engage --customer <slug> --platform <p[,p...]>` | Create blue engagement; resolve tenant refs into `scope.json:tenant_reference_paths[]`. |
-| `aith blue alert paste` | Read alert body from stdin; write to `scope.json:alert_metadata`; auto-register as `kind=alert_paste --sensitive` artifact; log first `activity_entries` row. |
+| `aith blue alert record --body-file <path>` | Record the alert body pasted into operator chat; write to `scope.json:alert_metadata`; auto-register as `kind=alert_intake --sensitive` artifact; log the first `activity_entries` row. |
 | `aith blue show <key>` | Status + alert summary + finding table + last 10 activity entries. |
 | `aith blue dispatch --role <role> --skills <names> [--tier L1|L2|L3|L4]` | Wraps `aith assess agent start`; auto-injects tenant-ref paths into the dispatch prompt; writes `tier` on the dispatch row. |
 | `aith blue tier <finding-slug> --tier L1|L2|L3|L4 [--notes ...]` | Records current tier on `details_json`. |
 | `aith blue verify <finding-slug> --disposition verified|false_positive|downgraded|escalated` | Wraps `aith assess verify-finding` / `kill-finding`; hard-gates on an incident-verifier dispatch referencing the finding unless `--force` records an operator-approved bypass. The operator still reviews verifier evidence/handoff quality before using the bypass because the CLI does not validate every handoff field. |
-| `aith blue propose-contain <finding-slug> --action <revoke_session\|disable_account\|isolate_host\|block_ioc\|rotate_credential\|sinkhole_domain> --target <id> --platform <gws\|m365\|aws\|okta\|edr\|network\|generic> --rollback "<plan>" --blast-radius <single-user\|multi-user\|multi-tenant\|cross-platform> [--note "..."]` | Wraps `aith assess record-proposal` (containment-proposal schema) AND writes a `containment_proposal` dispatch-decision row that `aith blue contain` reads for approval. Prints `{proposal_path, decision_id, approval_hint}` JSON — pass `decision_id` to `aith assess approve-proposal` then `aith blue contain --proposal <decision_id>`. |
-| `aith blue contain <finding-slug> --proposal <id>` | Records an approved containment action that the operator already executed through `aith assess host-exec`; writes structured containment metadata to `activity_entries` and bumps finding workflow status. |
+| `aith blue propose-contain <finding-slug> --action <revoke_session\|disable_account\|isolate_host\|block_ioc\|rotate_credential\|sinkhole_domain> --target <id> --platform <gws\|m365\|aws\|okta\|edr\|network\|generic> --rollback "<plan>" --blast-radius <single-user\|multi-user\|multi-tenant\|cross-platform> [--note "..."]` | Writes a `containment_proposal` dispatch-decision row that `aith blue contain` reads for approval. Prints `{decision_id, approval_hint}` JSON — pass `decision_id` to `aith assess approve-proposal`, execute with audited `host-exec`, then record with `aith blue contain --proposal <decision_id> --command-run-id <id>` or `--proof-artifact <path>`. |
+| `aith blue contain <finding-slug> --proposal <id> (--command-run-id <id> \| --proof-artifact <path>)` | Records an approved containment action that the operator already executed through `aith assess host-exec --require-audit`; writes structured containment metadata to `activity_entries` and bumps finding workflow status. |
 | `aith blue report` | Wraps `aith assess list-report-findings` + report-writer dispatch with blue template. |
+| `aith blue closeout` | Dispatch report-writer to produce `closeout.md` for false-positive, benign, no-impact, or inconclusive alert closure. |
 | `aith blue tenant init --customer <slug> --platform <p>` | Scaffold tenant reference stub from template. Onboarding ergonomic. |
 
 ## Phase Lifecycle
@@ -148,8 +152,9 @@ overrides with a stated reason.
 - **Definition of Done:**
   - [ ] `scope.json` written with `engagement_type=blue`, `customer`, `platforms[]`, `current_phase=intake`.
   - [ ] Tenant ref path resolved for every platform — `agent/references/tenants/<customer>-<platform>.md` exists on disk for each entry in `scope.json:tenant_reference_paths[]`. Missing tenant ref → **halt** with a message naming the expected path.
-  - [ ] Alert pasted: `aith blue alert paste` (stdin reader) writes `scope.json:alert_metadata.{source, external_id, received_at, severity_hint, raw_body, parsed}` and auto-registers the body as `kind=alert_paste --sensitive` in the artifact index so it appears in resume-brief and `artifact search`.
-  - [ ] First `activity_entries` row logged: `aith assess log operator "alert_intake" "aith blue alert paste" "<short-summary>" --actor-kind operator`.
+  - [ ] Alert pasted into operator chat, saved under `ir/alerts/`, and recorded with `aith blue alert record --body-file <path>` so `scope.json:alert_metadata.{source, external_id, received_at, severity_hint, raw_body, parsed}` is populated.
+  - [ ] Alert artifact auto-registered as `kind=alert_intake --sensitive` so it appears in resume-brief and `artifact search`.
+  - [ ] First `activity_entries` row logged with `action=alert_intake`.
 - **Transition:** `aith assess transition-phase triage`
 
 ### Phase: triage
@@ -201,7 +206,7 @@ overrides with a stated reason.
 - **Definition of Done:**
   - [ ] For each in-scope verified finding, ir-lead emits one or more containment proposals via `aith blue propose-contain <slug> --action <revoke_session|reset_credential|disable_account|isolate_host|block_ioc|...> --target <id> --platform <gws|m365|aws|okta|edr|network|generic> --rollback "<plan>" --blast-radius <single-user|multi-user|multi-tenant|cross-platform> --note "..."`.
   - [ ] Operator reviews and approves per-action — no automated containment in v1.
-  - [ ] Each approved proposal is executed through `aith assess host-exec --phase respond -- <cmd>` so stdout/stderr are audited, then recorded via `aith blue contain <slug> --proposal <id> --proof-artifact <path>` which writes structured activity metadata, registers proof when provided, and bumps workflow status.
+  - [ ] Each approved proposal is executed through `aith assess host-exec --phase respond --scope-host <customer> --require-audit -- <cmd>` so stdout/stderr and the command-run id are audited, then recorded via `aith blue contain <slug> --proposal <id> --command-run-id <id>` or `--proof-artifact <path>` which writes structured activity metadata and bumps workflow status.
   - [ ] Any benign pattern discovered during respond that the tenant ref does not document is queued for `known-benign register` update via handoff `next_steps` (file + pattern). v1 is manual; closed-loop ingest is out of scope.
 - **Transition:** `aith assess transition-phase report`
 - **Dispatch hint:** `aith blue dispatch --role ir-lead --tier L4 --skills incident-containment[,<platform-skill-in-containment-mode>] --dispatch-mode deep-manual`.
@@ -212,9 +217,10 @@ overrides with a stated reason.
 - **Dispatch mode default:** `deep-manual`
 - **Definition of Done:**
   - [ ] `aith assess transition-phase report` succeeds without `--force`; this is the blue readiness gate for verifier dispositions, evidence artifacts, and containment closure.
-  - [ ] Report-writer dispatched in draft-generation mode with the blue template variant: `aith blue report` (wraps `aith assess list-report-findings --mode final --json` + report-writer dispatch with `--skills report-generation` and the blue template).
-  - [ ] QA-and-fix pass dispatched on the drafted `report.md` with the same backend context; returns `QA PASS` or `QA BLOCKED` with exact slugs.
-  - [ ] On `QA PASS`: emit `report.generated`, mark included findings `reported`, transition with `aith assess transition-phase complete --track blue`.
+  - [ ] For false-positive, benign, no-impact, or inconclusive closure: dispatch `aith blue closeout` and ensure `closeout.md` is registered as `kind=ir_closeout`.
+  - [ ] For verified incidents: dispatch `aith blue report` (wraps `aith assess list-report-findings --mode final --json` + report-writer dispatch with `--skills report-generation` and the blue template).
+  - [ ] QA-and-fix pass completed on the drafted `closeout.md` or `report.md`; returns `QA PASS` or `QA BLOCKED` with exact slugs.
+  - [ ] On `QA PASS`: emit `report.generated` for reports or `closeout.generated` for closeouts, mark included findings terminal (`reported`, `false_positive`, `contained`, `eradicated`, or `recovered`), transition with `aith assess transition-phase complete --track blue`.
 - **Transition:** `aith assess transition-phase complete --track blue`
 
 ## Tenant Context Injection
@@ -247,7 +253,7 @@ register/sync into `assessment_artifacts.sha256`.
 
 ```bash
 aith assess artifact register <path> \
-    --kind <ir_log|ir_evidence|timeline|ioc_dump|containment_proof|alert_paste> \
+    --kind <alert_intake|ir_log|ir_evidence|timeline|ioc_dump|containment_proof|ir_closeout> \
     --finding <finding-slug> \
     --agent-id <id> \
     --command-run-id <id> \
@@ -259,7 +265,7 @@ Columns of note in `assessment_artifacts`:
 - `producer_agent_id` + `producer_agent_role` — which specialist dispatch produced it
 - `producer_command_run_id` — the `assessment_command_runs.id` for the underlying GAM / gcloud / az / splunk pull
 - `related_finding_slug` — the finding the artifact substantiates
-- `kind` — one of `ir_log`, `ir_evidence`, `timeline`, `ioc_dump`, `containment_proof`, `alert_paste`
+- `kind` — one of `alert_intake`, `ir_log`, `ir_evidence`, `timeline`, `ioc_dump`, `containment_proof`, `ir_closeout`
 - `sensitive` — set true for PII; suppresses FTS preview
 - `scratch` — set true for transient working notes that should not appear in resume briefs or reports
 - `indexed_text` — FTS-backed preview (suppressed when `sensitive`)
@@ -288,6 +294,7 @@ aith assess host-exec \
     --intent "<one-line purpose>" \
     --technique "<MITRE technique id or free-form>" \
     --phase <intake|triage|investigate|verify|respond|report> \
+    --scope-host <customer-slug> \
     -- <command and argv>
 ```
 
@@ -312,8 +319,8 @@ host isolate, IOC block, mailbox quarantine, OAuth-app removal — flows through
 1. **Propose.** ir-lead emits `aith blue propose-contain <finding-slug> --action <name> --target <id> --platform <platform> --rollback "<plan>" --blast-radius <radius> --note "<rationale + scope>"`. The proposal row carries action, target, rollback, blast radius, finding slug, and proposing context.
 2. **Approve.** Operator reviews each proposal — NUMBERED choice in the operator CLI — and explicitly approves or rejects. No `--auto-approve` in v1.
 3. **Execute.** v1 keeps execution and recording as two operator steps so the operator sees command output before recording:
-   1. `aith assess host-exec --tool <cli> --intent "<action>" --technique <T> --phase respond -- <cmd>` performs the action; host-exec audits and stores stdout/stderr.
-   2. `aith blue contain <finding-slug> --proposal <id> --proof-artifact <path>` (a) registers the proof with `kind=containment_proof`, (b) writes the action and result to `activity_entries` with structured containment metadata, (c) updates finding workflow status to `contained`.
+   1. `aith assess host-exec --tool <cli> --intent "<action>" --technique <T> --phase respond --scope-host <customer> --require-audit -- <cmd>` performs the action; host-exec audits and stores stdout/stderr. If the audit row cannot be created, the wrapper exits non-zero so the action cannot be silently treated as complete.
+   2. `aith blue contain <finding-slug> --proposal <id> --command-run-id <id>` (or `--proof-artifact <path>` when the operator captured stdout/screenshot separately) writes the action and result to `activity_entries` with structured containment metadata, registers proof when provided, and updates finding workflow status to `contained`.
 4. **Log.** `activity_entries` is canonical. Use `aith assess fetch 'activity-entries?limit=1000'` and filter rows by `metadata.finding_slug` / `metadata.containment_action`.
 
 No automated containment. No specialist-side WRITE execution. Approval is
@@ -362,10 +369,10 @@ specialist's would have been.
 **Operator-executed exceptions** (mechanical pipeline steps; all via
 `aith assess` helpers, never raw bash):
 
-- **Tenant-ref resolution** — `ls agent/references/tenants/<customer>-<platform>.md`; missing → `aith blue tenant init`
-- **Alert paste / intake mechanics** — `aith blue alert paste`, `aith assess log operator ...`
+- **Tenant-ref resolution** — `aith blue customers`; missing → `aith blue tenant init`
+- **Alert intake mechanics** — save the chat-pasted alert under `ir/alerts/` and run `aith blue alert record --body-file <path>`
 - **Resume-brief read** — `aith assess resume-brief` and scoped variants
-- **Backend-write helpers for specialist-produced state** — `record-finding`, `record-intel`, `link-finding`, `verify-finding`, `kill-finding`, `update-finding`, `record-proposal`, `log`
+- **Backend-write helpers for specialist-produced state** — `record-finding`, `record-intel`, `link-finding`, `verify-finding`, `kill-finding`, `update-finding`, `agent decision`, `log`
 - **Containment approval/execution** — `aith blue propose-contain` is specialist-side; `aith blue contain` is operator-side. Operator approves; specialist composes the underlying platform command via `host-exec`
 - **Artifact mark-scratch / mark-sensitive** — admin metadata updates after specialist registration
 
@@ -510,15 +517,14 @@ not record a cited disposition for `<slug>`. Re-run Check <N> with cited
 evidence at the symmetric bar and emit the disposition." This is the gate
 working as designed.
 
-### Containment proof missing
+### Containment execution proof missing
 
-Operator ran `aith blue contain` but no `containment_proof` was registered.
+Operator cannot run `aith blue contain` unless the executed action is tied to
+`--command-run-id <id>` or a registered `--proof-artifact <path>`.
 
-Recovery: re-dispatch ir-lead: "Containment for `<slug>` executed but no
-proof registered. Capture proof (revocation receipt, account-disable audit
-entry, EDR host-isolation status) and run `aith assess artifact register
-<path> --kind containment_proof --finding <slug> --agent-id <id>
---command-run-id <id>`."
+Recovery: capture proof (revocation receipt, account-disable audit entry, EDR
+host-isolation status) and rerun `aith blue contain <slug> --proposal <id> --command-run-id <id>`
+or register the proof and pass `--proof-artifact <path>`.
 
 ### Cross-platform correlation gap
 
@@ -556,6 +562,7 @@ list and name which gate is satisfied before claiming completion.
 - [ ] **Severity matches MITRE technique impact.** No `critical` findings with techniques that are detection-only (e.g., T1087 Account Discovery without a downstream credential-access or impact technique). Fix mismatches via `aith assess update-finding --inline '{"severity":"...","details":{"mitre_techniques":["..."]}}'`.
 - [ ] **Tenant ref `known-benign register` updated** for every benign pattern discovered during respond. ir-lead's final handoff lists the patterns and the tenant-ref path; operator commits the update.
 - [ ] **Cross-platform correlation gaps documented or closed.** Multi-platform engagements list any unresolved gaps in the report's "Known Limitations" section.
+- [ ] **A final closeout artifact exists.** False-positive/no-incident paths register `closeout.md` as `kind=ir_closeout`; verified incidents register `report.md` as `kind=ir_evidence`.
 - [ ] **Blue transition gates are clean.** `aith assess transition-phase report` and `aith assess transition-phase complete` run without `--force`; do not rely on generic red `check-report-readiness` for containment semantics.
 - [ ] **No `evidence_type='theoretical'` findings without `chain_required=true` or an explicit operator deferral.** Theoretical blue findings are unusual — most blue findings should carry `evidence_type=telemetry_corroborated` or `reproduced`. Theoretical findings need either a follow-up investigator pass scheduled or a written rationale for shipping them as-is.
 

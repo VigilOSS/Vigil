@@ -50,6 +50,7 @@ Before writing anything, verify:
 
 - [ ] You loaded `agent/shared-constraints.md` for red reports or `agent/shared-constraints-blue.md` for blue reports
 - [ ] You loaded the report-generation skill (`agent/skills/report-generation/SKILL.md`)
+- [ ] For blue reports, you loaded `agent/skills/report-generation/templates/blue.md` and are writing an incident closeout/report, not a vulnerability disclosure
 - [ ] You reviewed the Proof Standard by Finding Class table below — every finding must meet its class-specific evidence bar before inclusion
 - [ ] You have the dispatch context (engagement directory, phase, any operator instructions on report scope)
 

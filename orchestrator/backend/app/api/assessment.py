@@ -1845,6 +1845,7 @@ def get_dispatches(
     since: str = "",
     task_q: str = "",
     limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.list_dispatches(
@@ -1854,6 +1855,7 @@ def get_dispatches(
         since=since,
         task_q=task_q,
         limit=limit,
+        offset=offset,
     )
 
 

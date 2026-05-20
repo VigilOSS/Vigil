@@ -87,7 +87,7 @@ boundary.
 Forbidden from L2 AWS dispatches: `aith assess kali` (red-only),
 direct WRITE-class IAM (`iam:CreateAccessKey`, `iam:DetachUserPolicy`,
 role deletion, `iam:DeleteAccessKey`) — those surface as
-`record-proposal` entries for L4 `ir-lead`. Even an "obvious"
+`aith blue propose-contain` entries for L4 `ir-lead`. Even an "obvious"
 stolen-key rotation goes through the proposal queue.
 
 ## Methodology
@@ -386,7 +386,7 @@ WHERE <Step 2 predicates>
 ```
 
 `ScheduleKeyDeletion` on a production-data key is T1485 with a 7-30
-day fuse — L4 may want a `record-proposal` to cancel before the fuse
+day fuse — L4 may want a containment proposal to cancel before the fuse
 elapses.
 
 **(c) Lambda / ECS task-role abuse.** Cross-reference Step 4's
@@ -781,7 +781,7 @@ does not address it.
 - `agent/skills/ioc-enrichment/SKILL.md` — ASN / GeoIP /
   threat-intel enrichment for `sourceipaddress`.
 - `agent/skills/incident-containment/SKILL.md` — owns key rotation,
-  role-policy detach, session revoke; consumes `record-proposal`
+  role-policy detach, session revoke; consumes containment proposal
   entries.
 - `agent/skills/alert-fp-verification/SKILL.md` — L3 verifier owns
   the final disposition write.

@@ -36,7 +36,7 @@ coverage-gaps list, and a handoff JSON the verifier consumes.
 
 Read-only by default. Every Okta API call uses a service-app token with
 read-only scopes; suspend/clear-sessions/reset-factors live in
-`incident-containment` and require a `record-proposal` approval gate.
+`incident-containment` and require an `aith blue propose-contain` approval gate.
 
 Always-active references — load before the first API call:
 

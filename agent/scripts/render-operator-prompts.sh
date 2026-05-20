@@ -156,7 +156,7 @@ agent_description() {
     alert-triage-specialist) printf '%s\n' "L1 alert triage. Normalize, classify, auto-close mechanical noise with cited tenant-ref pattern, dispatch to L2 with platform skill named." ;;
     investigator) printf '%s\n' "L2 platform investigator. Pulls telemetry, builds evidence ladder, drafts findings with timeline + IOCs + MITRE techniques. Loads one platform skill per dispatch." ;;
     incident-verifier) printf '%s\n' "L3 false-positive verifier. Five-check protocol with symmetric evidence bar. Only role that flips verification_state away from unreviewed." ;;
-    ir-lead) printf '%s\n' "L4 incident response lead. Containment / eradication / recovery proposals via record-proposal → operator approval → contain. No automated WRITE actions." ;;
+    ir-lead) printf '%s\n' "L4 incident response lead. Containment / eradication / recovery proposals via propose-contain → operator approval → host-exec → contain. No automated WRITE actions." ;;
   esac
 }
 

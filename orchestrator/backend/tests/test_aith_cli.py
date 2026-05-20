@@ -2518,6 +2518,8 @@ def test_blue_verify_requires_verifier_dispatch_unless_forced(
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
+    proof_path = tmp_path / "proof.json"
+    proof_path.write_text('{"revoked":true}\n', encoding="utf-8")
     calls: list[list[str]] = []
 
     monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
@@ -2555,6 +2557,8 @@ def test_blue_verify_force_bypasses_missing_verifier_dispatch(
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
+    proof_path = tmp_path / "proof.json"
+    proof_path.write_text('{"revoked":true}\n', encoding="utf-8")
     calls: list[list[str]] = []
 
     monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
@@ -2642,6 +2646,8 @@ def test_blue_contain_logs_structured_activity_metadata(
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
+    proof_path = tmp_path / "proof.json"
+    proof_path.write_text('{"revoked":true}\n', encoding="utf-8")
     calls: list[list[str]] = []
 
     monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
@@ -2668,7 +2674,8 @@ def test_blue_contain_logs_structured_activity_metadata(
         SimpleNamespace(
             finding_slug="FIND-001",
             proposal="7",
-            proof_artifact=None,
+            proof_artifact=str(proof_path),
+            command_run_id=None,
             action=None,
             target=None,
             engagement_key=None,
@@ -2686,7 +2693,249 @@ def test_blue_contain_logs_structured_activity_metadata(
         "platform": "gws",
         "proposal_id": "7",
         "finding_slug": "FIND-001",
+        "command_run_id": None,
     }
+
+
+def test_blue_contain_requires_proof_artifact_or_command_run_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(
+        blue_module,
+        "_fetch_containment_decision",
+        lambda *_args, **_kwargs: {
+            "id": 7,
+            "resolved": True,
+            "payload": {
+                "finding_slug": "FIND-001",
+                "action": "revoke_session",
+                "target": "alex@example.com",
+                "platform": "gws",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        blue_module,
+        "_run_assess",
+        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
+    )
+
+    with pytest.raises(SystemExit, match="requires --proof-artifact or --command-run-id"):
+        blue_module._cmd_contain(
+            SimpleNamespace(
+                finding_slug="FIND-001",
+                proposal="7",
+                proof_artifact=None,
+                command_run_id=None,
+                action=None,
+                target=None,
+                engagement_key=None,
+                select=False,
+            ),
+            tmp_path,
+        )
+
+    assert calls == []
+
+
+def test_blue_contain_accepts_command_run_id_as_execution_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(
+        blue_module,
+        "_fetch_containment_decision",
+        lambda *_args, **_kwargs: {
+            "id": 7,
+            "resolved": True,
+            "payload": {
+                "finding_slug": "FIND-001",
+                "action": "revoke_session",
+                "target": "alex@example.com",
+                "platform": "gws",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        blue_module,
+        "_fetch_command_run",
+        lambda *_args, **_kwargs: {"id": 42, "route": "host_exec"},
+    )
+    monkeypatch.setattr(
+        blue_module,
+        "_run_assess",
+        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
+    )
+
+    blue_module._cmd_contain(
+        SimpleNamespace(
+            finding_slug="FIND-001",
+            proposal="7",
+            proof_artifact=None,
+            command_run_id=42,
+            action=None,
+            target=None,
+            engagement_key=None,
+            select=False,
+        ),
+        tmp_path,
+    )
+
+    assert not any(call[:2] == ["artifact", "register"] for call in calls)
+    log_call = next(call for call in calls if call[0] == "log")
+    metadata = json.loads(log_call[log_call.index("--metadata-inline") + 1])
+    assert metadata["command_run_id"] == 42
+
+
+def test_blue_contain_rejects_unknown_command_run_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(
+        blue_module,
+        "_fetch_containment_decision",
+        lambda *_args, **_kwargs: {
+            "id": 7,
+            "resolved": True,
+            "payload": {
+                "finding_slug": "FIND-001",
+                "action": "revoke_session",
+                "target": "alex@example.com",
+                "platform": "gws",
+            },
+        },
+    )
+    monkeypatch.setattr(blue_module, "_fetch_command_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        blue_module,
+        "_run_assess",
+        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
+    )
+
+    with pytest.raises(SystemExit, match="command run id 999999 not found"):
+        blue_module._cmd_contain(
+            SimpleNamespace(
+                finding_slug="FIND-001",
+                proposal="7",
+                proof_artifact=None,
+                command_run_id=999999,
+                action=None,
+                target=None,
+                engagement_key=None,
+                select=False,
+            ),
+            tmp_path,
+        )
+
+    assert calls == []
+
+
+def test_blue_fetch_containment_decision_pages_until_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        endpoint = argv[-1]
+        if "offset=0" in endpoint:
+            stdout = json.dumps([{"id": index, "kind": "containment_proposal"} for index in range(1, 1001)])
+        elif "offset=1000" in endpoint:
+            stdout = json.dumps([
+                {
+                    "id": 1001,
+                    "kind": "containment_proposal",
+                    "payload": {"finding_slug": "FIND-001"},
+                }
+            ])
+        else:
+            stdout = "[]"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(blue_module.subprocess, "run", fake_run)
+
+    row = blue_module._fetch_containment_decision(tmp_path, tmp_path / "eng", 1001)
+
+    assert row is not None
+    assert row["id"] == 1001
+    endpoints = [call[-1] for call in calls]
+    assert endpoints == [
+        "dispatch-decisions?kind=containment_proposal&limit=1000&offset=0",
+        "dispatch-decisions?kind=containment_proposal&limit=1000&offset=1000",
+    ]
+
+
+def test_blue_propose_contain_writes_only_dispatch_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    assess_calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(
+        blue_module,
+        "_run_assess",
+        lambda _install_root, _eng_dir, assess_args, **_kwargs: assess_calls.append(assess_args) or 0,
+    )
+    monkeypatch.setattr(
+        blue_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout='{"id":7,"kind":"containment_proposal","resolved":false}\n',
+            stderr="",
+        ),
+    )
+
+    blue_module._cmd_propose_contain(
+        SimpleNamespace(
+            finding_slug="FIND-001",
+            action="revoke_session",
+            target="alex@example.com",
+            platform="gws",
+            rollback="User signs in again",
+            blast_radius="single-user",
+            note="verified compromise",
+            engagement_key=None,
+            select=False,
+        ),
+        tmp_path,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "decision_id": 7,
+        "approval_hint": "aith assess approve-proposal 7 --approved-by <operator>",
+    }
+    assert assess_calls == []
+    assert not list((eng_dir / "sessions").glob("containment-proposal-*.json"))
 
 
 def test_blue_contain_rejects_proposal_for_different_finding(
@@ -2725,6 +2974,7 @@ def test_blue_contain_rejects_proposal_for_different_finding(
                 finding_slug="FIND-B",
                 proposal="7",
                 proof_artifact=None,
+                command_run_id=42,
                 action=None,
                 target=None,
                 engagement_key=None,
@@ -2825,6 +3075,296 @@ def test_blue_tenant_init_generic_platform_has_template(
     created = tenant_root / "acme-generic.md"
     assert created.is_file()
     assert "acme-generic.md" in capsys.readouterr().out
+
+
+def test_blue_customers_lists_known_tenant_refs_grouped(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    tenant_root = tmp_path / "agent" / "references" / "tenants"
+    tenant_root.mkdir(parents=True)
+    (tenant_root / "_template-gws.md").write_text("template\n", encoding="utf-8")
+    (tenant_root / "acme-workspace.md").write_text("gws\n", encoding="utf-8")
+    (tenant_root / "acme-m365.md").write_text("m365\n", encoding="utf-8")
+    (tenant_root / "acme-aws.md").write_text("aws\n", encoding="utf-8")
+
+    blue_module._cmd_customers(SimpleNamespace(platform=None, json=False), tmp_path)
+
+    output = capsys.readouterr().out
+    assert "customer\tplatforms\ttenant_reference_paths" in output
+    assert "acme\taws\t" in output
+    assert "acme\tgws,m365\t" in output
+    assert "_template" not in output
+
+
+def test_blue_customers_json_filters_by_platform(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    tenant_root = tmp_path / "agent" / "references" / "tenants"
+    tenant_root.mkdir(parents=True)
+    (tenant_root / "acme-workspace.md").write_text("gws\n", encoding="utf-8")
+    (tenant_root / "acme-m365.md").write_text("m365\n", encoding="utf-8")
+
+    blue_module._cmd_customers(SimpleNamespace(platform="gws", json=True), tmp_path)
+
+    rows = json.loads(capsys.readouterr().out)
+    assert rows == [
+        {
+            "customer": "acme",
+            "platforms": ["gws"],
+            "tenant_reference_paths": [str(tenant_root / "acme-workspace.md")],
+        }
+    ]
+
+
+def test_blue_engage_guides_operator_to_start_session_and_paste_alert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    tenant_root = tmp_path / "agent" / "references" / "tenants"
+    tenant_root.mkdir(parents=True)
+    (tenant_root / "acme-workspace.md").write_text("tenant\n", encoding="utf-8")
+    created_path = tmp_path / "agent" / "engagements" / "eng-1"
+
+    monkeypatch.setattr(
+        blue_module,
+        "create_engagement",
+        lambda _options: SimpleNamespace(path=created_path, key="eng-1"),
+    )
+
+    blue_module._cmd_engage(
+        SimpleNamespace(
+            customer="acme",
+            platform="gws",
+            severity="high",
+            source=None,
+            skip_permissions=True,
+        ),
+        tmp_path,
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == str(created_path)
+    assert "aith blue alert paste" not in captured.err
+    assert f"cd {created_path}" in captured.err
+    assert "aith engagement start eng-1 --client codex" in captured.err
+    assert "Paste the alert into the operator chat" in captured.err
+
+
+def test_blue_alert_record_body_file_updates_scope_and_registers_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    body_path = tmp_path / "alert.json"
+    body_path.write_text('{"alert_id":"AL-1","actor":"alex@example.com"}\n', encoding="utf-8")
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(
+        blue_module,
+        "_run_assess",
+        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
+    )
+
+    blue_module._cmd_alert_record(
+        SimpleNamespace(
+            body_file=str(body_path),
+            external_id="AL-1",
+            severity="high",
+            source=None,
+            engagement_key=None,
+            select=False,
+        ),
+        tmp_path,
+    )
+
+    scope = json.loads((eng_dir / "scope.json").read_text(encoding="utf-8"))
+    alert_md = scope["alert_metadata"]
+    assert alert_md["source"] == "operator_chat"
+    assert alert_md["external_id"] == "AL-1"
+    assert alert_md["severity_hint"] == "high"
+    assert alert_md["raw_body"].startswith('{"alert_id"')
+    assert alert_md["parsed"]["format"] == "json"
+
+    raw_path = eng_dir / "ir" / "alerts" / "AL-1.txt"
+    assert raw_path.read_text(encoding="utf-8") == body_path.read_text(encoding="utf-8")
+    assert ["artifact", "register", str(raw_path), "--kind", "alert_intake", "--sensitive"] in calls
+    assert any(call[:5] == ["log", "operator", "alert intake", "alert_intake", "alert recorded"] for call in calls)
+    assert "aith blue dispatch --role alert-triage-specialist" in capsys.readouterr().err
+
+
+def test_blue_alert_record_rejects_second_intake_without_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    first_body = tmp_path / "first.txt"
+    second_body = tmp_path / "second.txt"
+    first_body.write_text("first alert\n", encoding="utf-8")
+    second_body.write_text("second alert\n", encoding="utf-8")
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(blue_module, "_run_assess", lambda *_args, **_kwargs: 0)
+
+    blue_module._cmd_alert_record(
+        SimpleNamespace(
+            body_file=str(first_body),
+            external_id="AL-1",
+            severity="high",
+            source=None,
+            replace=False,
+            engagement_key=None,
+            select=False,
+        ),
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit, match="alert intake already recorded"):
+        blue_module._cmd_alert_record(
+            SimpleNamespace(
+                body_file=str(second_body),
+                external_id="AL-1",
+                severity="high",
+                source=None,
+                replace=False,
+                engagement_key=None,
+                select=False,
+            ),
+            tmp_path,
+        )
+
+    assert (eng_dir / "ir" / "alerts" / "AL-1.txt").read_text(encoding="utf-8") == "first alert\n"
+    scope = json.loads((eng_dir / "scope.json").read_text(encoding="utf-8"))
+    assert scope["alert_metadata"]["raw_body"] == "first alert\n"
+
+
+def test_blue_alert_record_replace_keeps_prior_raw_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    first_body = tmp_path / "first.txt"
+    second_body = tmp_path / "second.txt"
+    first_body.write_text("first alert\n", encoding="utf-8")
+    second_body.write_text("second alert\n", encoding="utf-8")
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(blue_module, "_run_assess", lambda *_args, **_kwargs: 0)
+
+    base_args = {
+        "external_id": "AL-1",
+        "severity": "high",
+        "source": None,
+        "engagement_key": None,
+        "select": False,
+    }
+    blue_module._cmd_alert_record(SimpleNamespace(body_file=str(first_body), replace=False, **base_args), tmp_path)
+    blue_module._cmd_alert_record(SimpleNamespace(body_file=str(second_body), replace=True, **base_args), tmp_path)
+
+    alerts_dir = eng_dir / "ir" / "alerts"
+    assert (alerts_dir / "AL-1.txt").read_text(encoding="utf-8") == "first alert\n"
+    assert (alerts_dir / "AL-1-2.txt").read_text(encoding="utf-8") == "second alert\n"
+    scope = json.loads((eng_dir / "scope.json").read_text(encoding="utf-8"))
+    assert scope["alert_metadata"]["raw_body"] == "second alert\n"
+
+
+def test_blue_closeout_dispatches_report_writer_for_closure_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(
+        blue_module,
+        "_run_assess",
+        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
+    )
+
+    blue_module._cmd_closeout(
+        SimpleNamespace(engagement_key=None, select=False, agent_id=None),
+        tmp_path,
+    )
+
+    assert calls[0] == ["list-report-findings", "--mode", "final"]
+    dispatch = calls[1]
+    assert dispatch[:2] == ["agent", "start"]
+    assert dispatch[dispatch.index("--role") + 1] == "report-writer"
+    assert "closeout.md" in dispatch[dispatch.index("--task") + 1]
+    assert "false positive" in dispatch[dispatch.index("--task") + 1]
+    assert "[aith blue] dispatched with agent-id=closeout-writer-" in capsys.readouterr().err
+
+
+def test_blue_report_aborts_when_final_readiness_preflight_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+
+    def fake_run(_install_root: Path, _eng_dir: Path, assess_args: list[str], **_kwargs: object) -> int:
+        calls.append(assess_args)
+        return 1 if assess_args[:2] == ["list-report-findings", "--mode"] else 0
+
+    monkeypatch.setattr(blue_module, "_run_assess", fake_run)
+
+    with pytest.raises(SystemExit):
+        blue_module._cmd_report(SimpleNamespace(engagement_key=None, select=False, template=None), tmp_path)
+
+    assert calls == [["list-report-findings", "--mode", "final"]]
+
+
+def test_blue_closeout_aborts_when_final_readiness_preflight_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+
+    def fake_run(_install_root: Path, _eng_dir: Path, assess_args: list[str], **_kwargs: object) -> int:
+        calls.append(assess_args)
+        return 1 if assess_args[:2] == ["list-report-findings", "--mode"] else 0
+
+    monkeypatch.setattr(blue_module, "_run_assess", fake_run)
+
+    with pytest.raises(SystemExit):
+        blue_module._cmd_closeout(SimpleNamespace(engagement_key=None, select=False, agent_id=None), tmp_path)
+
+    assert calls == [["list-report-findings", "--mode", "final"]]
 
 
 def test_link_finding_intel_preserves_details_json_related_intel_ids(
@@ -2946,6 +3486,65 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
     assert posts[0][1]["agent_name"] == "investigator"
 
 
+def test_host_exec_require_audit_fails_when_audit_record_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_require_audit",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            raise RuntimeError("backend down")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="ok\n", stderr=""),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="test required audit",
+                technique="T0000",
+                phase="respond",
+                target_host="",
+                agent_name=None,
+                scope_host="acme",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+            )
+        )
+
+    assert exc_info.value.code == 4
+
+
 def test_approve_proposal_rejects_non_containment_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2960,6 +3559,9 @@ def test_approve_proposal_rejects_non_containment_decision(
             pass
 
         def list_decisions(self, **_filters: object) -> list[dict]:
+            return [{"id": 7, "kind": "scope_decision", "resolved": False}]
+
+        def list_all_decisions(self, **_filters: object) -> list[dict]:
             return [{"id": 7, "kind": "scope_decision", "resolved": False}]
 
         def update_decision(self, decision_id: int, patch: dict) -> dict:
@@ -2989,6 +3591,54 @@ def test_approve_proposal_rejects_non_containment_decision(
     assert updates == []
 
 
+def test_approve_proposal_searches_all_decision_pages(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "approve_proposal_command_module_all_pages",
+        "agent/scripts/assess/commands/approve_proposal.py",
+    )
+    updates: list[tuple[int, dict]] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def list_decisions(self, **_filters: object) -> list[dict]:
+            raise AssertionError("single-page lookup must not be used for approval")
+
+        def list_all_decisions(self, **_filters: object) -> list[dict]:
+            return [{"id": 1001, "kind": "containment_proposal", "resolved": False}]
+
+        def update_decision(self, decision_id: int, patch: dict) -> dict:
+            updates.append((decision_id, patch))
+            return {"id": decision_id, "kind": "containment_proposal", **patch}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+    )
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir="/tmp/eng",
+            decision_id=1001,
+            approved_by="operator",
+            note="approved in chat",
+        )
+    )
+
+    assert updates
+    assert updates[0][0] == 1001
+    assert json.loads(capsys.readouterr().out)["resolved"] is True
+
+
 def test_blue_phase_gate_requires_expected_role_for_completed_tier() -> None:
     module = _load_assess_module(
         "transition_phase_command_module_blue_roles",
@@ -2999,13 +3649,74 @@ def test_blue_phase_gate_requires_expected_role_for_completed_tier() -> None:
         def get(self, endpoint: str):
             if endpoint == "findings":
                 return [{"slug": "FIND-001", "workflow_status": "draft"}]
-            if endpoint == "dispatches?status=completed&limit=1000":
+            if endpoint == "dispatches?status=completed&limit=1000&offset=0":
                 return [{"agent_role": "investigator", "tier": "L1", "status": "completed"}]
             return []
 
     blockers = module._blue_check_triage_to_investigate(_Client())
 
     assert any(blocker["kind"] == "no_completed_l1_dispatch" for blocker in blockers)
+
+
+def test_blue_phase_gate_pages_completed_dispatches() -> None:
+    module = _load_assess_module(
+        "transition_phase_command_module_blue_dispatch_paging",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    calls: list[str] = []
+
+    class _Client:
+        def get(self, endpoint: str):
+            calls.append(endpoint)
+            if endpoint == "dispatches?status=completed&limit=1000&offset=0":
+                return [
+                    {"agent_role": "investigator", "tier": "L1", "status": "completed"}
+                    for _index in range(1000)
+                ]
+            if endpoint == "dispatches?status=completed&limit=1000&offset=1000":
+                return [
+                    {
+                        "agent_role": "alert-triage-specialist",
+                        "tier": "L1",
+                        "status": "completed",
+                    }
+                ]
+            return []
+
+    count = module._blue_count_completed_dispatches(_Client(), "L1", "alert-triage-specialist")
+
+    assert count == 1
+    assert calls == [
+        "dispatches?status=completed&limit=1000&offset=0",
+        "dispatches?status=completed&limit=1000&offset=1000",
+    ]
+
+
+def test_blue_investigate_gate_skips_l2_dispatch_for_auto_closed_findings() -> None:
+    module = _load_assess_module(
+        "transition_phase_command_module_blue_autoclosed_investigate_gate",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    calls: list[str] = []
+
+    class _Client:
+        def get(self, endpoint: str):
+            calls.append(endpoint)
+            if endpoint == "findings":
+                return [
+                    {
+                        "slug": "FIND-001",
+                        "workflow_status": "false_positive",
+                        "verification_disposition": "false_positive",
+                        "details_json": {"kill_reason": "Benign admin activity"},
+                    }
+                ]
+            return []
+
+    blockers = module._blue_check_investigate_to_verify(_Client())
+
+    assert blockers == []
+    assert calls == ["findings"]
 
 
 def test_blue_respond_gate_does_not_treat_approval_as_containment() -> None:
@@ -3046,6 +3757,120 @@ def test_blue_respond_gate_does_not_treat_approval_as_containment() -> None:
     blockers = module._blue_check_respond_to_report(_Client())
 
     assert any(blocker["kind"] == "missing_containment_closure" for blocker in blockers)
+
+
+def test_blue_complete_gate_accepts_closeout_artifact() -> None:
+    module = _load_assess_module(
+        "transition_phase_command_module_closeout_gate",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+
+    class _Client:
+        def get(self, endpoint: str):
+            if endpoint == "artifacts/search?limit=1000":
+                return [{"kind": "ir_closeout", "relative_path": "closeout.md"}]
+            if endpoint == "findings":
+                return [{"slug": "FIND-001", "workflow_status": "false_positive"}]
+            return []
+
+    blockers = module._blue_check_report_to_complete(_Client())
+
+    assert blockers == []
+
+
+def test_blue_direct_phase_jump_runs_intermediate_gates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "transition_phase_command_module_blue_intermediate_gates",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    scope_path = eng_dir / "scope.json"
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope["current_phase"] = "intake"
+    scope["alert_metadata"] = {"raw_body": None, "parsed": None}
+    scope_path.write_text(json.dumps(scope), encoding="utf-8")
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def get(self, _endpoint: str):
+            return []
+
+        def get_engagement(self, endpoint: str, query: str = ""):
+            assert endpoint == "activity-entries"
+            return {"items": []}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(eng_dir),
+        ),
+    )
+
+    with pytest.raises(SystemExit):
+        module.run(SimpleNamespace(engagement_dir=str(eng_dir), target_phase="report", force=False, track="auto"))
+
+    assert json.loads(scope_path.read_text(encoding="utf-8"))["current_phase"] == "intake"
+
+
+def test_transition_phase_complete_marks_blue_scope_completed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "transition_phase_command_module_blue_complete_status",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    scope_path = eng_dir / "scope.json"
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope["current_phase"] = "report"
+    scope["status"] = "in_progress"
+    scope_path.write_text(json.dumps(scope), encoding="utf-8")
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def get(self, endpoint: str):
+            if endpoint == "artifacts/search?limit=1000":
+                return [{"kind": "ir_closeout", "relative_path": "closeout.md"}]
+            if endpoint == "findings":
+                return [{"slug": "FIND-001", "workflow_status": "false_positive"}]
+            return []
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(eng_dir),
+        ),
+    )
+
+    module.run(SimpleNamespace(engagement_dir=str(eng_dir), target_phase="complete", force=False, track="auto"))
+
+    updated = json.loads(scope_path.read_text(encoding="utf-8"))
+    assert updated["current_phase"] == "complete"
+    assert updated["status"] == "completed"
 
 
 def _run_dispatch_action(db_path: Path, action: str, extra: list[str] | None = None, reason: str = "") -> None:
